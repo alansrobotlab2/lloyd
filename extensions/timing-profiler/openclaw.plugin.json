@@ -1,0 +1,10 @@
+{
+  "id": "timing-profiler",
+  "name": "Interaction Timing Profiler",
+  "description": "Records per-tool and per-run timing to ~/.openclaw/logs/timing.jsonl for latency analysis",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

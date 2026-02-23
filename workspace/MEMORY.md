@@ -1,0 +1,1 @@
+/home/alansrobotlab/obsidian/lloyd/memory.md
