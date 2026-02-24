@@ -3,7 +3,9 @@ import { join, dirname } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
 const LOG_FILE = join(process.env.HOME ?? "/root", ".openclaw", "logs", "timing.jsonl");
-const PREFETCH_TIMEOUT_MS = 2000;
+const PREFETCH_TIMEOUT_MS = 1200;
+const CACHE_TTL_MS = 60_000;
+const GLM_SHORT_QUERY_THRESHOLD = 40;
 const MAX_RESULT_CHARS = 8000;
 const MIN_QUERY_LENGTH = 12;
 const GATEWAY_URL = "http://127.0.0.1:18789/tools/invoke";
@@ -142,6 +144,9 @@ function formatContext(
     : full;
 }
 
+// Simple LRU cache for recent prefetch results
+const prefetchCache = new Map<string, { ts: number; result: string }>();
+
 export default function register(api: OpenClawPluginApi) {
   api.logger.info?.("memory-prefetch: active (gateway + GLM mode)");
 
@@ -155,16 +160,33 @@ export default function register(api: OpenClawPluginApi) {
     // Simplify conversational question to dense keyword phrase for vector search
     const searchQuery = simplifyQuery(userQuery);
     const effectiveQuery = searchQuery.length >= 4 ? searchQuery : userQuery.slice(0, 80);
+
+    // Skip prefetch when too few content words survive filler removal
+    const wordCount = effectiveQuery.split(/\s+/).filter((w) => w.length > 0).length;
+    if (wordCount < 2) {
+      api.logger.warn?.("memory-prefetch: skipped — too few content words");
+      return;
+    }
+
     api.logger.warn?.(`memory-prefetch: hook fired, query=${JSON.stringify(effectiveQuery)}`);
+
+    // Check cache before doing any network calls
+    const cached = prefetchCache.get(effectiveQuery);
+    if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+      api.logger.warn?.("memory-prefetch: returning cached result");
+      return { prependContext: cached.result };
+    }
 
     const abortCtrl = new AbortController();
     const timer = setTimeout(() => abortCtrl.abort(), PREFETCH_TIMEOUT_MS);
 
     try {
       // 2. PARALLEL: initial memory_search (simplified query) + GLM keyword extraction
+      //    Skip GLM for short queries — the simplified string is sufficient
+      const skipGlm = userQuery.length < GLM_SHORT_QUERY_THRESHOLD;
       const [initialSearchResult, refinedQueries] = await Promise.allSettled([
         gatewayInvoke("memory_search", { query: effectiveQuery, maxResults: 5 }, abortCtrl.signal),
-        extractKeywordsViaGLM(userQuery, abortCtrl.signal),
+        skipGlm ? Promise.resolve([]) : extractKeywordsViaGLM(userQuery, abortCtrl.signal),
       ]);
 
       const searchGroups: Array<{ query: string; results: any[] }> = [];
@@ -231,6 +253,13 @@ export default function register(api: OpenClawPluginApi) {
         // 5. Format and inject as prependContext
         const context = formatContext(searchGroups, fileContents);
         if (context) {
+          // Cache the result
+          prefetchCache.set(effectiveQuery, { ts: Date.now(), result: context });
+          // Evict stale entries (keep cache small)
+          for (const [k, v] of prefetchCache) {
+            if (Date.now() - v.ts > CACHE_TTL_MS) prefetchCache.delete(k);
+          }
+
           log({
             ts: new Date().toISOString(),
             event: "memory_prefetch",
@@ -241,7 +270,7 @@ export default function register(api: OpenClawPluginApi) {
             searchCount: searchGroups.length,
             topPaths,
             contextChars: context.length,
-            glm: refinedQueries.status === "fulfilled" && (refinedQueries.value as string[]).length > 0,
+            glm: !skipGlm && refinedQueries.status === "fulfilled" && (refinedQueries.value as string[]).length > 0,
           });
           return { prependContext: context };
         }

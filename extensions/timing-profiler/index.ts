@@ -18,15 +18,16 @@ function writeRecord(record: object) {
   }
 }
 
-// Per-run state
+// Per-run state — keyed by ctx.sessionKey (the only ID available across all hooks)
 interface RunState {
-  runId: string;
-  sessionId: string;
+  sessionKey: string;
+  runId: string | null;
+  sessionId: string | null;
   startMs: number;
-  llmStartMs: number | null;
-  llmRoundTrips: Array<{ durationMs: number; usage?: unknown }>;
+  lastBoundaryMs: number; // tracks time boundaries between LLM/tool phases
+  llmSegments: number[];  // LLM thinking durations (gaps between tool calls)
   toolCallsLog: Array<{ toolName: string; durationMs: number }>;
-  pendingTool: { toolName: string; toolCallId: string; startMs: number } | null;
+  pendingTools: Map<string, number>; // toolName:timestamp -> startMs
 }
 
 const runs = new Map<string, RunState>();
@@ -35,112 +36,108 @@ export default function register(api: OpenClawPluginApi) {
   api.logger.info?.("timing-profiler: active — writing to " + LOG_FILE);
 
   // LLM run started — fires once per full agent run
-  api.on("llm_input", (event: any) => {
-    const { runId, sessionId } = event ?? {};
-    if (!runId) return;
-    runs.set(runId, {
-      runId,
-      sessionId: sessionId ?? "unknown",
+  api.on("llm_input", (event: any, ctx: any) => {
+    const key = ctx?.sessionKey;
+    if (!key) return;
+    runs.set(key, {
+      sessionKey: key,
+      runId: event?.runId ?? null,
+      sessionId: event?.sessionId ?? ctx?.sessionId ?? null,
       startMs: Date.now(),
-      llmStartMs: Date.now(),
-      llmRoundTrips: [],
+      lastBoundaryMs: Date.now(),
+      llmSegments: [],
       toolCallsLog: [],
-      pendingTool: null,
+      pendingTools: new Map(),
     });
   });
 
-  // LLM run finished — fires once after all round trips complete
-  api.on("llm_output", (event: any) => {
-    const { runId, usage } = event ?? {};
-    if (!runId) return;
-    const run = runs.get(runId);
-    if (!run || run.llmStartMs === null) return;
-    // Record this as covering the full model time (we break it down via session JSONL)
-    run.llmRoundTrips.push({
-      durationMs: Date.now() - run.llmStartMs,
-      usage,
-    });
-    run.llmStartMs = null;
+  // LLM run finished — record final LLM segment
+  api.on("llm_output", (event: any, ctx: any) => {
+    const key = ctx?.sessionKey;
+    if (!key) return;
+    const run = runs.get(key);
+    if (!run) return;
+    const llmMs = Date.now() - run.lastBoundaryMs;
+    if (llmMs > 10) run.llmSegments.push(llmMs);
+    run.lastBoundaryMs = Date.now();
   });
 
-  // Tool call about to execute — before_tool_call is modifying; returning undefined = pass through
-  api.on("before_tool_call", (event: any) => {
-    const { toolName, toolCallId, runId } = event ?? {};
-    if (!toolName) return;
-    const run = runId ? runs.get(runId) : null;
+  // Tool call about to execute — LLM just finished thinking, record that segment
+  api.on("before_tool_call", (event: any, ctx: any) => {
+    const key = ctx?.sessionKey;
+    if (!key) return;
+    const run = runs.get(key);
     if (run) {
-      run.pendingTool = { toolName, toolCallId: toolCallId ?? "?", startMs: Date.now() };
-    } else {
-      // No runId on before_tool_call in some versions — track globally via stack
-      (register as any)._pendingTool = { toolName, toolCallId: toolCallId ?? "?", startMs: Date.now() };
+      const llmMs = Date.now() - run.lastBoundaryMs;
+      if (llmMs > 10) run.llmSegments.push(llmMs);
+      run.pendingTools.set(event?.toolName + ":" + Date.now(), Date.now());
     }
   });
 
   // Tool call completed
-  api.on("after_tool_call", (event: any) => {
-    const { toolName, runId } = event ?? {};
-    const run = runId ? runs.get(runId) : null;
-    const pending = run?.pendingTool ?? (register as any)._pendingTool;
-    if (!pending) return;
+  api.on("after_tool_call", (event: any, ctx: any) => {
+    const key = ctx?.sessionKey;
+    const toolName = event?.toolName ?? ctx?.toolName ?? "unknown";
+    const durationMs = event?.durationMs ?? 0;
 
-    const durationMs = Date.now() - pending.startMs;
+    const run = key ? runs.get(key) : null;
 
     writeRecord({
       ts: new Date().toISOString(),
       event: "tool_call",
-      runId: runId ?? null,
+      runId: run?.runId ?? null,
       sessionId: run?.sessionId ?? null,
-      toolName: toolName ?? pending.toolName,
-      toolCallId: pending.toolCallId,
+      toolName,
       durationMs,
     });
 
     if (run) {
-      run.toolCallsLog.push({ toolName: toolName ?? pending.toolName, durationMs });
-      run.pendingTool = null;
-    } else {
-      (register as any)._pendingTool = null;
+      run.toolCallsLog.push({ toolName, durationMs });
+      run.lastBoundaryMs = Date.now();
+      // Clean up oldest matching pending tool
+      for (const [k] of run.pendingTools) {
+        if (k.startsWith(toolName + ":")) {
+          run.pendingTools.delete(k);
+          break;
+        }
+      }
     }
   });
 
-  // Agent run ended
-  api.on("agent_end", (event: any) => {
-    const { runId, durationMs: hookDurationMs, success, error } = event ?? {};
+  // Agent run ended — compute final breakdown
+  api.on("agent_end", (event: any, ctx: any) => {
+    const key = ctx?.sessionKey;
+    const run = key ? runs.get(key) : null;
 
-    // Find the run state — agent_end may not have runId; fall back to most recent run
-    let run: RunState | undefined;
-    if (runId) {
-      run = runs.get(runId);
-    } else if (runs.size > 0) {
-      // Take the last started run
-      for (const r of runs.values()) run = r;
-    }
-
-    const totalMs = run ? Date.now() - run.startMs : (hookDurationMs ?? null);
-    const llmMs = run?.llmRoundTrips.reduce((sum, r) => sum + r.durationMs, 0) ?? null;
-    const toolMs = run?.toolCallsLog.reduce((sum, t) => sum + t.durationMs, 0) ?? null;
+    const totalMs = run
+      ? Date.now() - run.startMs
+      : (event?.durationMs ?? null);
+    const llmMs = run
+      ? run.llmSegments.reduce((s, v) => s + v, 0)
+      : null;
+    const toolMs = run
+      ? run.toolCallsLog.reduce((s, t) => s + t.durationMs, 0)
+      : null;
 
     writeRecord({
       ts: new Date().toISOString(),
       event: "run_end",
-      runId: runId ?? run?.runId ?? null,
+      runId: run?.runId ?? null,
       sessionId: run?.sessionId ?? null,
       totalMs,
       llmMs,
       toolMs,
-      overheadMs: (totalMs !== null && llmMs !== null && toolMs !== null)
-        ? Math.max(0, totalMs - llmMs - toolMs)
-        : null,
-      roundTrips: run?.llmRoundTrips.length ?? null,
+      overheadMs:
+        totalMs != null && llmMs != null && toolMs != null
+          ? Math.max(0, totalMs - llmMs - toolMs)
+          : null,
+      roundTrips: run ? run.llmSegments.length : null,
       toolCallCount: run?.toolCallsLog.length ?? null,
       toolCalls: run?.toolCallsLog ?? [],
-      success: success ?? null,
-      error: error ?? null,
+      success: event?.success ?? null,
+      error: event?.error ?? null,
     });
 
-    if (run) runs.delete(run.runId);
+    if (key) runs.delete(key);
   });
 }
-
-// Initialize fallback pending tool slot
-(register as any)._pendingTool = null;
