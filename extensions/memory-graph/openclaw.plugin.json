@@ -1,0 +1,12 @@
+{
+  "id": "memory-graph",
+  "name": "Memory Graph",
+  "description": "Graph-aware memory augmentation using Obsidian wiki-links. Parses [[wikilinks]] into a traversable knowledge graph with PageRank authority scoring, neighbor traversal, and path discovery.",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
