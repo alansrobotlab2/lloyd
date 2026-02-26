@@ -12,16 +12,18 @@
 """
 OpenClaw MCP Server
 
-Exposes seven tools via the MCP stdio protocol. Fully standalone —
+Exposes tools via the MCP stdio protocol. Fully standalone —
 no dependency on the OpenClaw gateway or any external service.
 
-  - tag_search    : frontmatter tag-based document search (in-process index)
-  - tag_explore   : tag co-occurrence discovery (in-process index)
-  - vault_overview: vault statistics and hub pages (in-process index)
-  - memory_search : BM25 full-text search via qmd CLI (~/.bun/bin/qmd)
-  - memory_get    : direct filesystem read from ~/obsidian/
-  - web_search    : DuckDuckGo search via ddgs
-  - web_fetch     : HTTP GET + readability-lxml + html2text content extraction
+  - tag_search      : frontmatter tag-based document search (in-process index)
+  - tag_explore     : tag co-occurrence discovery (in-process index)
+  - vault_overview  : vault statistics and hub pages (in-process index)
+  - memory_search   : BM25 full-text search via qmd CLI (~/.bun/bin/qmd)
+  - memory_get      : direct filesystem read from ~/obsidian/
+  - prefill_context : full memory prefill pipeline (tag match + BM25 + GLM)
+  - web_search      : DuckDuckGo search via ddgs
+  - web_fetch       : HTTP GET + readability-lxml + html2text content extraction
+  - file_read/write/edit/glob/grep : filesystem tools sandboxed to $HOME
 
 Run with:
   uv run server.py
@@ -31,13 +33,17 @@ Nothing is written to stdout except MCP JSON-RPC frames.
 
 from __future__ import annotations
 
+import asyncio
+import datetime
 import json
 import math
 import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +73,43 @@ WEB_ACCEPT_LANG = "en-US,en;q=0.9"
 WEB_TIMEOUT_S = 15.0
 WEB_MAX_RESPONSE_BYTES = 2_000_000
 WEB_DEFAULT_MAX_CHARS = 50_000
+
+# ── Prefill pipeline constants ─────────────────────────────────────────────────
+
+GLM_URL = "http://127.0.0.1:8091/v1/chat/completions"
+GLM_MODEL = "Qwen3-30B-A3B-Instruct-2507"
+
+PREFILL_TIMEOUT_S      = 2.0
+PREFILL_CACHE_TTL_S    = 60.0
+PREFILL_REFRESH_S      = 10 * 60  # 10 minutes
+MIN_QUERY_LENGTH       = 12
+GLM_MIN_QUERY_LEN      = 40
+MAX_CONTEXT_CHARS      = 8_000
+MAX_TOPICS             = 3
+MAX_DOCS_PER_TAG       = 4
+TIER1_THRESHOLD        = 0.6
+TIER2_THRESHOLD        = 0.3
+TIER1_MAX              = 3
+TIER2_MAX              = 5
+CONTENT_PER_DOC        = 1_500
+W_VECTOR               = 0.55
+W_TAG                  = 0.35
+W_CROSS                = 0.10
+SYNTHETIC_VECTOR_SCORE = 0.5
+
+FILLER_WORDS = {
+    "hey", "hi", "what", "do", "you", "know", "about", "my", "work", "with",
+    "the", "a", "an", "is", "are", "was", "were", "can", "could", "would",
+    "should", "tell", "me", "i", "want", "to", "how", "when", "where", "why",
+    "who", "which", "that", "this", "these", "those", "it", "be", "been",
+    "being", "have", "has", "had", "does", "did", "will", "shall", "may",
+    "might", "some", "any", "all", "more", "very", "just", "your", "our",
+    "their", "its", "there", "give", "get", "let", "make", "see", "look",
+    "show", "find", "help", "think", "say", "please", "thanks", "ok", "so",
+    "and", "or", "but", "in", "on", "at", "of", "for", "from", "up", "out",
+    "if", "no", "not", "as", "into", "through", "during", "before", "after",
+    "use", "using", "search", "memory", "related", "connected", "tag", "tags",
+}
 
 _PRIVATE_IP_PATTERNS = [
     re.compile(r"^127\."),
@@ -480,9 +523,339 @@ print(
     file=sys.stderr,
 )
 
+# ── Prefill: cache ────────────────────────────────────────────────────────────
+
+_prefill_cache: dict[str, tuple[float, str]] = {}  # key -> (monotonic_ts, result)
+
+
+def _get_prefill_cached(key: str) -> str | None:
+    entry = _prefill_cache.get(key)
+    if entry and (time.monotonic() - entry[0]) < PREFILL_CACHE_TTL_S:
+        return entry[1]
+    return None
+
+
+def _set_prefill_cache(key: str, result: str) -> None:
+    now = time.monotonic()
+    _prefill_cache[key] = (now, result)
+    stale = [k for k, (ts, _) in _prefill_cache.items() if now - ts > PREFILL_CACHE_TTL_S]
+    for k in stale:
+        del _prefill_cache[k]
+
+
+# ── Prefill: query helpers (ported from query.ts) ──────────────────────────────
+
+_PROMPT_ENVELOPE = re.compile(
+    r"\[\w{3}\s+\d{4}-\d{2}-\d{2}\s+[\d:]+\s+\w+\]\s+([\s\S]+)$"
+)
+_JSON_BLOCK = re.compile(r"```json[\s\S]*?```")
+_PUNCT_SIMPLE = re.compile(r"[?!.,;:'\"]")
+_PUNCT_FULL = re.compile(r"[?!.,;:'\"()\[\]{}#]")
+
+
+def _extract_user_query(prompt: str) -> str | None:
+    m = _PROMPT_ENVELOPE.search(prompt)
+    if m:
+        return m.group(1).strip()
+    stripped = _JSON_BLOCK.sub("", prompt)
+    stripped = " ".join(stripped.split())
+    return stripped[-500:] if len(stripped) >= MIN_QUERY_LENGTH else None
+
+
+def _simplify_query(query: str) -> str:
+    words = [
+        w for w in _PUNCT_SIMPLE.sub("", query.lower()).split()
+        if len(w) > 1 and w not in FILLER_WORDS
+    ]
+    return " ".join(words[:6])
+
+
+def _extract_topic_keywords(prompt: str) -> list[str]:
+    m = _PROMPT_ENVELOPE.search(prompt)
+    text = m.group(1).strip() if m else prompt.strip()
+
+    words = [
+        w for w in _PUNCT_FULL.sub(" ", text).lower().split()
+        if len(w) > 2 and w not in FILLER_WORDS
+    ]
+
+    raw_words = [w for w in _PUNCT_FULL.sub(" ", text).split() if len(w) > 2]
+    phrases: list[str] = []
+    for i in range(len(raw_words) - 1):
+        a, b = raw_words[i].lower(), raw_words[i + 1].lower()
+        if a not in FILLER_WORDS and b not in FILLER_WORDS:
+            phrases.append(f"{a} {b}")
+
+    return phrases + words
+
+
+def _match_keyword_to_tag(keyword: str, index: TagIndex) -> str | None:
+    kw = keyword.lower()
+    if kw in index.tag_to_docs:
+        return kw
+    kw_nodash = kw.replace("-", "")
+    for tag in index.tag_to_docs:
+        if tag.replace("-", "") == kw_nodash:
+            return tag
+    return None
+
+
+# ── Prefill: async GLM keyword extractor ──────────────────────────────────────
+
+async def _extract_keywords_via_glm(user_text: str) -> list[str]:
+    """Call local Qwen GLM to extract 2-3 search keywords. Returns [] on any failure."""
+    if len(user_text) < GLM_MIN_QUERY_LEN:
+        return []
+    try:
+        async with _httpx.AsyncClient(timeout=1.5, verify=False) as client:
+            resp = await client.post(
+                GLM_URL,
+                json={
+                    "model": GLM_MODEL,
+                    "max_tokens": 40,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a search keyword extractor. Always respond with "
+                                "ONLY a valid JSON array of 2-3 short keyword strings. "
+                                "No markdown, no explanation."
+                            ),
+                        },
+                        {"role": "user", "content": f"Message: {user_text[:300]}"},
+                    ],
+                },
+            )
+        if resp.status_code != 200:
+            return []
+        text = resp.json()["choices"][0]["message"]["content"]
+        m = re.search(r"\[[\s\S]*?\]", text)
+        return json.loads(m.group(0)) if m else []
+    except Exception:
+        return []
+
+
+# ── Prefill: candidate dataclass + tag match + merge/rank ─────────────────────
+
+@dataclass
+class _Candidate:
+    path: str
+    doc: DocMeta | None
+    vector_score: float
+    tag_score: float
+    snippet: str | None
+    sources: set  # "vector" | "tag"
+    final_score: float = 0.0
+    content: str | None = None
+
+
+def _run_tag_match(
+    topic_keywords: list[str],
+    index: TagIndex,
+) -> tuple[list[dict[str, Any]], dict[str, tuple[DocMeta, float]]]:
+    """Returns (matches_list, tag_docs map: path -> (DocMeta, tagScore))."""
+    matched_tags: set[str] = set()
+    matches: list[dict[str, Any]] = []
+
+    for kw in topic_keywords:
+        tag = _match_keyword_to_tag(kw, index)
+        if not tag or tag in matched_tags:
+            continue
+        matched_tags.add(tag)
+
+        paths = index.tag_to_docs.get(tag, [])
+        if not paths:
+            continue
+
+        docs = sorted(
+            [index.doc_index[p] for p in paths if p in index.doc_index],
+            key=lambda d: d.importance,
+            reverse=True,
+        )[:MAX_DOCS_PER_TAG]
+
+        matches.append({"tag": tag, "tagDocCount": len(paths), "docs": docs})
+        if len(matches) >= MAX_TOPICS:
+            break
+
+    all_tag_docs = [d for m in matches for d in m["docs"]]
+    max_idf = max((index.tag_idf.get(m["tag"], 0.0) for m in matches), default=1.0) or 1.0
+    max_importance = max((d.importance for d in all_tag_docs), default=1.0) or 1.0
+
+    tag_docs: dict[str, tuple[DocMeta, float]] = {}
+    for m in matches:
+        tag_idf = index.tag_idf.get(m["tag"], 0.0)
+        for doc in m["docs"]:
+            if doc.path in tag_docs:
+                continue
+            tag_score = 0.5 * (tag_idf / max_idf) + 0.5 * (doc.importance / max_importance)
+            tag_docs[doc.path] = (doc, tag_score)
+
+    return matches, tag_docs
+
+
+def _merge_and_rank(
+    tag_docs: dict[str, tuple[DocMeta, float]],
+    vector_results: list[dict[str, Any]],
+) -> list[_Candidate]:
+    candidates: dict[str, _Candidate] = {}
+
+    for vr in vector_results:
+        path = vr["path"]
+        existing = candidates.get(path)
+        if existing:
+            existing.vector_score = max(existing.vector_score, vr.get("score", 0))
+            existing.sources.add("vector")
+            if vr.get("snippet") and not existing.snippet:
+                existing.snippet = vr["snippet"]
+        else:
+            candidates[path] = _Candidate(
+                path=path,
+                doc=None,
+                vector_score=vr.get("score", 0),
+                tag_score=0.0,
+                snippet=vr.get("snippet"),
+                sources={"vector"},
+            )
+
+    for path, (doc, tag_score) in tag_docs.items():
+        existing = candidates.get(path)
+        if existing:
+            existing.doc = doc
+            existing.tag_score = tag_score
+            existing.sources.add("tag")
+        else:
+            candidates[path] = _Candidate(
+                path=path,
+                doc=doc,
+                vector_score=SYNTHETIC_VECTOR_SCORE,
+                tag_score=tag_score,
+                snippet=None,
+                sources={"tag"},
+            )
+
+    for c in candidates.values():
+        cross = W_CROSS if len(c.sources) > 1 else 0.0
+        c.final_score = W_VECTOR * c.vector_score + W_TAG * c.tag_score + cross
+
+    return sorted(candidates.values(), key=lambda c: c.final_score, reverse=True)
+
+
+# ── Prefill: context formatter (ported from format.ts) ───────────────────────
+
+def _format_unified_context(
+    tier1: list[_Candidate],
+    tier2: list[_Candidate],
+    budget: int,
+) -> str:
+    if not tier1 and not tier2:
+        return ""
+
+    lines: list[str] = [
+        "<memory_context>",
+        "Pre-fetched memory context. Use this to answer directly if sufficient"
+        " — use memory_search or tag_search only if you need more.\n",
+    ]
+
+    for c in tier1:
+        badge = "|".join(p for p in [c.doc.type if c.doc else "", c.doc.status if c.doc else ""] if p)
+        badge_str = f" [{badge}]" if badge else ""
+        if c.doc and c.doc.title:
+            title = c.doc.title
+        else:
+            stem = c.path.split("/")[-1]
+            title = stem[:-3] if stem.endswith(".md") else stem
+
+        src_parts: list[str] = []
+        if "vector" in c.sources or "glm" in c.sources:
+            src_parts.append("vector")
+        if "tag" in c.sources:
+            src_parts.append("tag")
+        via = "+".join(src_parts)
+
+        lines.append(f"--- {c.path}{badge_str} (score: {c.final_score:.2f}, via: {via}) ---")
+        lines.append(f'"{title}"')
+        if c.doc and c.doc.tags:
+            lines.append(f"Tags: {', '.join(c.doc.tags)}")
+        if c.content:
+            lines.append(c.content)
+        elif c.snippet:
+            lines.append(c.snippet)
+        elif c.doc and c.doc.summary:
+            lines.append(c.doc.summary)
+        lines.append("")
+
+    if tier2:
+        lines.append("**Also relevant** (use memory_get for full content):")
+        for c in tier2:
+            badge = "|".join(p for p in [c.doc.type if c.doc else "", c.doc.status if c.doc else ""] if p)
+            badge_str = f" [{badge}]" if badge else ""
+            if c.doc and c.doc.title:
+                title = c.doc.title
+            else:
+                stem = c.path.split("/")[-1]
+                title = stem[:-3] if stem.endswith(".md") else stem
+            if c.doc and c.doc.summary:
+                detail = f" — {c.doc.summary[:100]}"
+            elif c.snippet:
+                detail = f" — {c.snippet[:100]}"
+            elif c.doc and c.doc.tags:
+                detail = f" — Tags: {', '.join(c.doc.tags)}"
+            else:
+                detail = ""
+            lines.append(f'- {c.path}{badge_str} "{title}" ({c.final_score:.2f}){detail}')
+        lines.append("")
+
+    lines.append("</memory_context>")
+
+    full = "\n".join(lines)
+    if len(full) <= budget:
+        return full
+    return full[: budget - 40] + "\n[... truncated]\n</memory_context>"
+
+
+# ── Prefill: timing log ───────────────────────────────────────────────────────
+
+_PREFILL_LOG = Path.home() / ".openclaw" / "logs" / "timing.jsonl"
+
+
+def _log_prefill(**kwargs: Any) -> None:
+    try:
+        _PREFILL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        record = {"ts": datetime.datetime.now().isoformat(), "event": "memory_prefill", **kwargs}
+        with _PREFILL_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
+# ── Background TagIndex refresh ───────────────────────────────────────────────
+
+async def _refresh_index_loop() -> None:
+    """Rescan vault every PREFILL_REFRESH_S seconds and atomically swap _index."""
+    global _index
+    while True:
+        await asyncio.sleep(PREFILL_REFRESH_S)
+        try:
+            new_docs = _scan_vault(VAULT)
+            _index = TagIndex(new_docs)
+            print(
+                f"openclaw-mcp: refreshed index: {_index.doc_count} docs, {_index.tag_count} tags",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            print(f"openclaw-mcp: index refresh failed: {exc}", file=sys.stderr)
+
+
+@asynccontextmanager
+async def _lifespan(_server: Any):
+    task = asyncio.create_task(_refresh_index_loop())
+    yield
+    task.cancel()
+
+
 # ── MCP server ────────────────────────────────────────────────────────────────
 
-mcp = FastMCP("openclaw")
+mcp = FastMCP("openclaw", lifespan=_lifespan)
 
 
 @mcp.tool()
@@ -632,6 +1005,133 @@ def memory_get(path: str, start_line: int = 0, end_line: int = 0) -> str:
         return text or "(empty file)"
     except OSError as exc:
         return f"Error reading file: {exc}"
+
+
+# ── Prefill context tool ──────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def prefill_context(prompt: str, session_id: str = "") -> str:
+    """Run the memory prefill pipeline for a user prompt.
+
+    Executes tag matching (in-memory, instant) and BM25 vector search in
+    parallel, then optionally runs a GLM keyword extraction pass for extra
+    searches. Merges and ranks results, fetches content for top hits, and
+    returns a formatted <memory_context> block.
+
+    Returns empty string if no relevant context is found or pipeline times out.
+    Called by the before_prompt_build hook; not intended for direct LLM use.
+    """
+    t0 = time.monotonic()
+
+    # Phase 0: query extraction + cache check
+    user_query = _extract_user_query(prompt)
+    if not user_query or len(user_query) < MIN_QUERY_LENGTH:
+        return ""
+
+    vector_query = _simplify_query(user_query)
+    effective_query = vector_query if len(vector_query.split()) >= 2 else user_query[:80]
+    if len(effective_query.split()) < 2:
+        return ""
+
+    cached = _get_prefill_cached(effective_query)
+    if cached:
+        return cached
+
+    try:
+        async with asyncio.timeout(PREFILL_TIMEOUT_S):
+            # Phase 1-2: keyword extraction + tag match (sync, instant)
+            topic_keywords = _extract_topic_keywords(prompt)
+            if _index.doc_count > 0:
+                tag_matches, tag_docs = _run_tag_match(topic_keywords, _index)
+            else:
+                tag_matches, tag_docs = [], {}
+            matched_tag_names = {m["tag"].lower() for m in tag_matches}
+
+            # Phase 3+4: parallel BM25 search + GLM (pipelined)
+            # GLM extra searches chain directly off the GLM promise so they
+            # start as soon as GLM resolves — same pattern as the TS prefill.
+
+            async def _initial_search() -> list[dict[str, Any]]:
+                raw = await asyncio.to_thread(memory_search, effective_query, 8, True)
+                try:
+                    return json.loads(raw).get("results", [])
+                except Exception:
+                    return []
+
+            async def _glm_and_extra() -> tuple[list[str], list[dict[str, Any]]]:
+                kws = await _extract_keywords_via_glm(user_query)
+                glm_keywords = [k for k in kws if k and len(k) > 2][:2]
+                extra_queries = [k for k in glm_keywords if k.lower() not in matched_tag_names]
+                extra_results: list[dict[str, Any]] = []
+                if extra_queries:
+                    searches = await asyncio.gather(
+                        *[asyncio.to_thread(memory_search, q, 3, True) for q in extra_queries],
+                        return_exceptions=True,
+                    )
+                    for r in searches:
+                        if isinstance(r, str):
+                            try:
+                                extra_results.extend(json.loads(r).get("results", []))
+                            except Exception:
+                                pass
+                return glm_keywords, extra_results
+
+            (init_results, (glm_keywords, extra_results)) = await asyncio.gather(
+                _initial_search(),
+                _glm_and_extra(),
+            )
+            all_vector = init_results + extra_results
+
+            # Phase 5: merge & rank
+            ranked = _merge_and_rank(tag_docs, all_vector)
+            if not ranked:
+                return ""
+
+            # Phase 6: tier classification
+            tier1 = [c for c in ranked if c.final_score >= TIER1_THRESHOLD][:TIER1_MAX]
+            if not tier1 and tag_docs:
+                tier1 = ranked[: min(2, len(ranked))]
+            tier2 = [
+                c for c in ranked
+                if c.final_score >= TIER2_THRESHOLD and c not in tier1
+            ][:TIER2_MAX]
+
+            # Phase 7: fetch tier-1 content
+            if tier1:
+                fetched = await asyncio.gather(
+                    *[asyncio.to_thread(memory_get, c.path) for c in tier1],
+                    return_exceptions=True,
+                )
+                for i, r in enumerate(fetched):
+                    if isinstance(r, str) and r and not r.startswith("File not found"):
+                        tier1[i].content = r[:CONTENT_PER_DOC]
+
+            # Phase 8: format
+            context = _format_unified_context(tier1, tier2, MAX_CONTEXT_CHARS)
+            if not context:
+                return ""
+
+            _set_prefill_cache(effective_query, context)
+            _log_prefill(
+                session_id=session_id,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                effective_query=effective_query,
+                query_length=len(user_query),
+                tag_topics=len(tag_matches),
+                tag_docs=len(tag_docs),
+                vector_results=len(all_vector),
+                glm_keywords=len(glm_keywords),
+                tier1_count=len(tier1),
+                tier2_count=len(tier2),
+                context_chars=len(context),
+            )
+            return context
+
+    except asyncio.TimeoutError:
+        return ""
+    except Exception:
+        return ""
 
 
 # ── Web tools ─────────────────────────────────────────────────────────────────

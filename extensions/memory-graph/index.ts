@@ -1,69 +1,19 @@
 /**
- * index.ts — memory-graph OpenClaw plugin (v3 — unified context prefill).
+ * index.ts — memory-graph OpenClaw plugin (v4 — Python-delegated prefill).
  *
  * Provides:
- *  1. Unified before_prompt_build hook — runs tag matching (instant,
- *     in-memory) and vector search (async) in parallel, merges and
- *     deduplicates results, returns a single <memory_context> block.
- *  2. Explicit tools — tag_search, tag_explore, vault_overview — proxied
- *     through the openclaw MCP server subprocess via McpStdioClient.
+ *  1. Thin before_prompt_build hook — calls the Python MCP server's
+ *     prefill_context tool; all pipeline logic lives in server.py.
+ *  2. Explicit tools — tag_search, tag_explore, vault_overview,
+ *     memory_search, memory_get — proxied through the openclaw MCP
+ *     server subprocess via McpStdioClient.
  */
 
-import { existsSync } from "node:fs";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { scanVault } from "./scanner.js";
-import { TagIndex } from "./tag-index.js";
 import { createPrefillHook } from "./prefill.js";
 import { McpStdioClient } from "./mcp-client.js";
 
-// ── Configuration ─────────────────────────────────────────────────────
-
-const VAULT_PATH = process.env.HOME
-  ? `${process.env.HOME}/obsidian`
-  : "/home/alansrobotlab/obsidian";
-const REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
-
-// ── State ─────────────────────────────────────────────────────────────
-
-let tagIndex: TagIndex = new TagIndex();
-let refreshLock = false;
-
-// ── Index Build ───────────────────────────────────────────────────────
-
-function buildIndex(logger?: { info?: (...args: any[]) => void; warn?: (...args: any[]) => void }): TagIndex {
-  if (!existsSync(VAULT_PATH)) {
-    logger?.warn?.(`memory-graph: vault not found at ${VAULT_PATH}`);
-    return new TagIndex();
-  }
-  const scan = scanVault(VAULT_PATH);
-  const idx = TagIndex.fromScan(scan);
-  logger?.info?.(
-    `memory-graph: indexed ${idx.docCount} docs, ${idx.tagCount} tags`,
-  );
-  return idx;
-}
-
-async function refreshIndex(logger?: any): Promise<void> {
-  if (refreshLock) return;
-  refreshLock = true;
-  try {
-    const newIndex = buildIndex(logger);
-    tagIndex = newIndex; // atomic swap
-  } finally {
-    refreshLock = false;
-  }
-}
-
-// ── Plugin Registration ───────────────────────────────────────────────
-
 export default function register(api: OpenClawPluginApi) {
-  // Build index on load
-  tagIndex = buildIndex(api.logger);
-
-  // Periodic refresh
-  const timer = setInterval(() => refreshIndex(api.logger), REFRESH_INTERVAL_MS);
-  if (timer.unref) timer.unref();
-
   // ── MCP client (shared by prefill hook and tool proxies) ──────────
   //
   // Spawns the MCP server subprocess on first use (lazy). Shared so that
@@ -72,16 +22,14 @@ export default function register(api: OpenClawPluginApi) {
   const mcpClient = new McpStdioClient();
   process.on("exit", () => mcpClient.destroy());
 
-  // ── Unified prefill hook ───────────────────────────────────────────
+  // ── Unified prefill hook — delegates to Python MCP server ─────────
 
-  const prefillHandler = createPrefillHook(() => tagIndex, api.logger, mcpClient);
+  const prefillHandler = createPrefillHook(mcpClient, api.logger);
   api.on("before_prompt_build", prefillHandler);
 
   // ── Tool proxy via MCP server ──────────────────────────────────────
   //
   // All 5 memory tools are served by the openclaw MCP server subprocess.
-  // The client spawns the server on the first tool call and proxies
-  // subsequent calls over JSON-RPC 2.0 stdio.
 
   function proxyTool(
     name: string,
@@ -206,5 +154,5 @@ export default function register(api: OpenClawPluginApi) {
     },
   );
 
-  api.logger.info?.("memory-graph v3: registered (unified prefill hook + 5 tools via MCP)");
+  api.logger.info?.("memory-graph v4: registered (Python-delegated prefill + 5 tools via MCP)");
 }

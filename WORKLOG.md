@@ -1,5 +1,19 @@
 # OpenClaw Work Log
 
+## 2026-02-26 — Phase 7: Prefill Pipeline Migrated to Python MCP Tool
+
+**Type:** Refactor / Feature
+**Files modified:** `extensions/mcp-server/server.py`, `extensions/memory-graph/prefill.ts`, `extensions/memory-graph/index.ts`
+**Files deleted:** `extensions/memory-graph/tag-index.ts`, `extensions/memory-graph/scanner.ts`, `extensions/memory-graph/query.ts`, `extensions/memory-graph/format.ts`
+
+Moved the full context-prefetch pipeline from TypeScript into a dedicated `prefill_context` MCP tool in `server.py`:
+
+- **`server.py`**: Added constants, LRU cache (60s), query helpers, async GLM extractor (`httpx.AsyncClient`), `_Candidate` dataclass, `_run_tag_match`, `_merge_and_rank`, `_format_unified_context`, timing log, background 10-min index refresh loop (via FastMCP `lifespan`), and the `prefill_context` async MCP tool. Parallelism preserved via `asyncio.gather` + `asyncio.to_thread`; 2s hard timeout via `asyncio.timeout`.
+- **`prefill.ts`**: Reduced from 410 lines to 35 — now a thin wrapper that calls `prefill_context` via McpStdioClient and returns `{ prependContext }`.
+- **`index.ts`**: Removed TagIndex, scanVault, refreshLock, setInterval, buildIndex/refreshIndex, getTagIndex. Simplified to MCP client + hook registration + 5 proxyTool calls.
+- **Deleted**: 4 TypeScript files (~850 lines total) that are now dead code: `tag-index.ts`, `scanner.ts`, `query.ts`, `format.ts`.
+- **Verified**: Gateway starts cleanly with `memory-graph v4: registered (Python-delegated prefill + 5 tools via MCP)`. Python now the single source of truth for all search logic.
+
 ## 2026-02-26 — MCP Server Phase 4: All 5 Tools via MCP in OpenClaw
 
 **Type:** Feature
