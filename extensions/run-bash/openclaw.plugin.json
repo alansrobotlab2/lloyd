@@ -1,0 +1,12 @@
+{
+  "id": "run-bash",
+  "name": "Run Bash",
+  "description": "Shell command execution proxied through the MCP server. Sandboxed to $HOME, max 120s per command.",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

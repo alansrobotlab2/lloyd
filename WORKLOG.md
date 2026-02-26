@@ -1,5 +1,21 @@
 # OpenClaw Work Log
 
+## 2026-02-26 — Base Tool Set Expansion (run_bash, http_request, memory_write)
+
+**Type:** Feature
+**Files modified:** `extensions/mcp-server/server.py`, `extensions/memory-graph/index.ts`, `extensions/memory-graph/mcp-client.ts`
+**Files created:** `extensions/run-bash/index.ts`, `extensions/run-bash/openclaw.plugin.json`
+
+Added three new tools to complete the base MCP tool set accessible from any agent:
+- `run_bash` — shell command execution sandboxed to $HOME, max 120s; unlocks git, tests, builds, package managers
+- `http_request` — full HTTP client (GET/POST/PUT/PATCH/DELETE/HEAD) with raw response; loopback allowed for local services; blocks other private IPs
+- `memory_write` — CRUD completion for Obsidian vault (create/overwrite by vault-relative path)
+- Fixed `mcp-client.ts:callTool()` to accept optional `timeoutMs` parameter (was hardcoded 10s); `run-bash` plugin passes 120s
+- New `run-bash` plugin auto-discovered from `extensions/run-bash/`; gateway logs show clean load
+- Server tool count: 13 → 16; memory-graph proxies: 5 → 6
+
+---
+
 ## 2026-02-26 — Phase 7: Prefill Pipeline Migrated to Python MCP Tool
 
 **Type:** Refactor / Feature

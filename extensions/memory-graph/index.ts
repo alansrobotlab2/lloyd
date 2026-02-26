@@ -154,5 +154,19 @@ export default function register(api: OpenClawPluginApi) {
     },
   );
 
-  api.logger.info?.("memory-graph v4: registered (Python-delegated prefill + 5 tools via MCP)");
+  proxyTool(
+    "memory_write",
+    "Create or overwrite a file in the Obsidian vault. " +
+      "path: vault-relative path, e.g. 'projects/alfie/notes.md'. Creates parent directories automatically.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Vault-relative file path, e.g. 'projects/alfie/notes.md'" },
+        content: { type: "string", description: "Text content to write" },
+      },
+      required: ["path", "content"],
+    },
+  );
+
+  api.logger.info?.("memory-graph v4: registered (Python-delegated prefill + 6 tools via MCP)");
 }

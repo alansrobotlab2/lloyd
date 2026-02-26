@@ -24,6 +24,9 @@ no dependency on the OpenClaw gateway or any external service.
   - web_search      : DuckDuckGo search via ddgs
   - web_fetch       : HTTP GET + readability-lxml + html2text content extraction
   - file_read/write/edit/glob/grep : filesystem tools sandboxed to $HOME
+  - run_bash      : shell command execution (sandboxed to $HOME, max 120s)
+  - http_request  : full HTTP client (GET/POST/PUT/PATCH/DELETE/HEAD; loopback allowed)
+  - memory_write  : create/overwrite a file in the Obsidian vault
 
 Run with:
   uv run server.py
@@ -1444,6 +1447,131 @@ def file_grep(pattern: str, path: str = "~", file_glob: str = "**/*", max_result
     if len(results) >= max_results:
         output += f"\n... (limit of {max_results} results reached)"
     return output
+
+
+# ── run_bash ──────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def run_bash(command: str, cwd: str = "~", timeout: int = 30) -> str:
+    """Execute a shell command and return combined stdout+stderr with exit code.
+
+    command: bash command string (passed to bash -c)
+    cwd: working directory (default: $HOME; must be within $HOME)
+    timeout: max seconds to wait (default 30, max 120)
+
+    Returns: "exit 0\\n<stdout>" or "exit N\\n<stderr>" or error string.
+    """
+    timeout = min(max(timeout, 1), 120)
+    cwd_result = _safe_path(cwd)
+    if isinstance(cwd_result, str):
+        return cwd_result
+
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", command],
+            cwd=str(cwd_result),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"Error: command timed out after {timeout}s"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    output = proc.stdout
+    if proc.stderr:
+        output += ("\n" if output else "") + proc.stderr
+    return f"exit {proc.returncode}\n{output}" if output else f"exit {proc.returncode}"
+
+
+# ── http_request ───────────────────────────────────────────────────────────────
+
+_HTTP_ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}
+
+
+@mcp.tool()
+def http_request(
+    method: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    body: str = "",
+    timeout: int = 30,
+) -> str:
+    """Make an HTTP request and return status + response body.
+
+    method: GET, POST, PUT, PATCH, DELETE, HEAD
+    url: full URL (http or https only)
+    headers: optional request headers dict
+    body: optional request body string (set Content-Type header yourself for JSON)
+    timeout: seconds (default 30, max 120)
+
+    Returns: "HTTP <status>\\n<body>" or error string.
+    Note: 127.0.0.1 (loopback) is allowed for local container services.
+    Other private/internal IPs are blocked.
+    """
+    import urllib.parse as _urlparse
+
+    method = method.upper()
+    if method not in _HTTP_ALLOWED_METHODS:
+        return f"Error: unsupported method {method!r}. Allowed: {', '.join(sorted(_HTTP_ALLOWED_METHODS))}"
+
+    timeout = min(max(timeout, 1), 120)
+
+    try:
+        parsed = _urlparse.urlparse(url)
+    except Exception as exc:
+        return f"Error: invalid URL: {exc}"
+
+    if parsed.scheme not in ("http", "https"):
+        return f"Error: only http/https supported, got {parsed.scheme!r}"
+
+    hostname = parsed.hostname or ""
+    # Allow loopback (127.*) for local services; block all other private IPs
+    if _is_private_host(hostname) and not hostname.startswith("127."):
+        return f'Error: blocked — private/internal hostname "{hostname}"'
+
+    try:
+        resp = _httpx.request(
+            method,
+            url,
+            headers=headers or {},
+            content=body.encode() if body else b"",
+            timeout=timeout,
+            verify=False,
+            follow_redirects=True,
+        )
+        return f"HTTP {resp.status_code}\n{resp.text}"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+# ── memory_write ───────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def memory_write(path: str, content: str) -> str:
+    """Create or overwrite a file in the Obsidian vault.
+
+    path: vault-relative path, e.g. "projects/alfie/notes.md"
+    content: text content to write
+
+    Creates parent directories automatically.
+    """
+    target = VAULT / path
+    try:
+        if not target.resolve().is_relative_to(VAULT.resolve()):
+            return "Error: path escapes vault root"
+    except Exception as exc:
+        return f"Error: invalid path: {exc}"
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return f"Written {len(content)} chars to {path}"
+    except Exception as exc:
+        return f"Error: {exc}"
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

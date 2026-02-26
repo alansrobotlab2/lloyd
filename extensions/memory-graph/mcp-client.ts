@@ -115,6 +115,7 @@ export class McpStdioClient {
   async callTool(
     name: string,
     args: Record<string, unknown>,
+    timeoutMs: number = 10_000,
   ): Promise<Array<{ type: string; text: string }>> {
     if (!this.proc) this.start();
     await this.ready;
@@ -124,7 +125,7 @@ export class McpStdioClient {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`MCP tool call "${name}" timed out`));
-      }, 10_000);
+      }, timeoutMs);
 
       this.pending.set(id, { resolve, reject, timer });
       this.sendRaw({
