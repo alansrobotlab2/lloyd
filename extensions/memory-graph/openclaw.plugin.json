@@ -1,8 +1,8 @@
 {
   "id": "memory-graph",
   "name": "Memory Graph",
-  "description": "Graph-aware memory augmentation using Obsidian wiki-links. Parses [[wikilinks]] into a traversable knowledge graph with PageRank authority scoring, neighbor traversal, and path discovery.",
-  "version": "1.0.0",
+  "description": "Unified memory context prefill. Runs tag matching and vector search in parallel before the first LLM call, merges and deduplicates results into a single context block. Also provides tag_search, tag_explore, and vault_overview tools.",
+  "version": "3.0.0",
   "main": "index.ts",
   "configSchema": {
     "type": "object",

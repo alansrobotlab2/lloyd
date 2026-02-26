@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
 const LOG_FILE = join(process.env.HOME ?? "/root", ".openclaw", "logs", "timing.jsonl");
-const PREFETCH_TIMEOUT_MS = 1200;
+const PREFETCH_TIMEOUT_MS = 2000;
 const CACHE_TTL_MS = 60_000;
 const GLM_SHORT_QUERY_THRESHOLD = 40;
 const MAX_RESULT_CHARS = 8000;

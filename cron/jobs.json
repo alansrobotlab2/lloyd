@@ -1,4 +1,37 @@
 {
   "version": 1,
-  "jobs": []
+  "jobs": [
+    {
+      "id": "f53ad621-31b8-4ba6-83bb-cf86961b59e2",
+      "name": "nightly-memory-consolidation",
+      "description": "Read recent daily notes, distill new learnings into MEMORY.md, prune stale entries. Keep MEMORY.md under 200 lines.",
+      "enabled": true,
+      "createdAtMs": 1772075683512,
+      "updatedAtMs": 1772100113416,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 2 * * *",
+        "tz": "America/Los_Angeles"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "You are Lloyd, Alan's AI assistant. Your workspace is at ~/.openclaw/workspace. Run a memory consolidation pass:\n\n0. First, commit any pending changes in the vault: run `cd ~/obsidian && git add -A && git diff --cached --quiet || git commit -m 'pre-consolidation snapshot'`. This preserves the vault state before any edits.\n1. Read MEMORY.md (it's a symlink to ~/obsidian/lloyd/memory.md — read that file directly)\n2. Read memory/2026-*.md daily notes for the past 7 days (read any that exist)\n3. Identify new insights, decisions, project updates, or lessons in the daily notes not yet captured in MEMORY.md — add them under the appropriate section\n4. Review MEMORY.md for entries that are outdated, resolved, or too project-specific to be universal baseline context. For each:\n   a. If the info belongs in a project doc (e.g. ~/obsidian/projects/alfie/...), write it there instead\n   b. If it belongs in a knowledge doc (e.g. ~/obsidian/lloyd/knowledge/...), write it there instead\n   c. Then remove it from MEMORY.md\n5. Remove or update entries that are simply wrong or contradicted by newer info\n6. Keep MEMORY.md focused on universal, always-relevant context (who Alan is, key people, persistent preferences, high-level project phase) — not detailed status or resolved items\n7. Keep MEMORY.md under 200 lines total\n8. Reply with a brief summary: what was added, what was moved and where, what was pruned, current line count",
+        "timeoutSeconds": 180
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "last"
+      },
+      "state": {
+        "nextRunAtMs": 1772186400000,
+        "lastRunAtMs": 1772100000003,
+        "lastStatus": "error",
+        "lastDurationMs": 113413,
+        "lastError": "Unsupported channel: whatsapp",
+        "consecutiveErrors": 1
+      }
+    }
+  ]
 }
