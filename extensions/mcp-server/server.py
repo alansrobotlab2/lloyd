@@ -2,44 +2,46 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #   "mcp[cli]",
-#   "httpx",
 #   "pyyaml",
 # ]
 # ///
 """
-OpenClaw Memory MCP Server
+OpenClaw MCP Server
 
-Exposes all five OpenClaw memory tools via the MCP stdio protocol:
-  - tag_search    : frontmatter tag-based document search
-  - tag_explore   : tag co-occurrence discovery
-  - vault_overview: vault statistics and hub pages
-  - memory_search : semantic vector search (proxied to OpenClaw gateway)
-  - memory_get    : vault file reader (proxied to OpenClaw gateway)
+Exposes five memory tools via the MCP stdio protocol. Fully standalone —
+no dependency on the OpenClaw gateway or any external service.
 
-Run inside the lloyd distrobox container for gateway access:
-  python3 server.py
+  - tag_search    : frontmatter tag-based document search (in-process index)
+  - tag_explore   : tag co-occurrence discovery (in-process index)
+  - vault_overview: vault statistics and hub pages (in-process index)
+  - memory_search : BM25 full-text search via qmd CLI (~/.bun/bin/qmd)
+  - memory_get    : direct filesystem read from ~/obsidian/
+
+Run with:
+  uv run server.py
 
 Nothing is written to stdout except MCP JSON-RPC frames.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
+import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
 import yaml
 from mcp.server.fastmcp import FastMCP
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 VAULT = Path(os.environ.get("HOME", "/home/alansrobotlab")) / "obsidian"
-GATEWAY_URL = "http://127.0.0.1:18789/tools/invoke"
+QMD = Path.home() / ".bun/bin/qmd"
 
 EXCLUDE_DIRS = {"templates", "images"}
 EXCLUDE_FILES = {"tags.md"}
@@ -425,22 +427,6 @@ def _format_vault_overview(stats: dict[str, Any], detail: str) -> str:
     return "\n".join(lines)
 
 
-# ── Gateway proxy ─────────────────────────────────────────────────────────────
-
-
-def _gateway_invoke(tool: str, args: dict[str, Any]) -> Any:
-    resp = httpx.post(
-        GATEWAY_URL,
-        json={"tool": tool, "args": args},
-        timeout=10.0,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get("ok"):
-        raise RuntimeError(data.get("error", "unknown gateway error"))
-    return data.get("result")
-
-
 # ── Build index ───────────────────────────────────────────────────────────────
 
 print(f"openclaw-mcp: scanning vault at {VAULT}", file=sys.stderr)
@@ -540,24 +526,45 @@ def vault_overview(detail: str = "summary") -> str:
 
 
 @mcp.tool()
-def memory_search(query: str, max_results: int = 10) -> str:
-    """Semantic and hybrid vector search across the Obsidian vault.
+def memory_search(query: str, max_results: int = 10, json_output: bool = False) -> str:
+    """BM25 full-text search across the Obsidian vault.
 
-    Requires the OpenClaw gateway to be running at 127.0.0.1:18789.
+    Uses the qmd CLI (~/.bun/bin/qmd) for keyword-based search.
     Returns matching document paths, relevance scores, and snippets.
+    Standalone — does not require the OpenClaw gateway.
+
+    json_output: if True, return structured JSON {"results": [{path, score, snippet}]}
+                 instead of human-readable text (used internally by the prefill hook).
     """
     try:
-        result = _gateway_invoke("memory_search", {"query": query, "maxResults": max_results})
-        results: list[dict] = (result or {}).get("details", {}).get("results", [])
+        proc = subprocess.run(
+            [str(QMD), "search", query, "-c", "obsidian", "-n", str(max_results), "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            return '{"results": []}' if json_output else f"qmd search error: {proc.stderr.strip()}"
+        results: list[dict] = json.loads(proc.stdout)
         if not results:
-            return "No results found."
-        lines = [
-            f"- {r.get('path', '?')} (score: {r.get('score', 0):.2f})\n  {r.get('snippet', '').strip()}"
-            for r in results
-        ]
+            return '{"results": []}' if json_output else "No results found."
+
+        parsed = []
+        for r in results:
+            path = r.get("file", "").removeprefix("qmd://obsidian/")
+            score = r.get("score", 0)
+            # Strip qmd's diff-style context markers (@@...@@) from snippets
+            snippet = re.sub(r"@@[^@]*@@\s*", "", r.get("snippet", "")).strip()
+            parsed.append({"path": path, "score": score, "snippet": snippet[:200]})
+
+        if json_output:
+            return json.dumps({"results": parsed})
+
+        lines = [f"- {r['path']} (score: {r['score']:.2f})\n  {r['snippet']}" for r in parsed]
         return "\n".join(lines)
+
+    except subprocess.TimeoutExpired:
+        return '{"results": []}' if json_output else "Error: qmd search timed out"
     except Exception as exc:
-        return f"Error calling memory_search: {exc}"
+        return '{"results": []}' if json_output else f"Error: {exc}"
 
 
 @mcp.tool()
@@ -565,22 +572,23 @@ def memory_get(path: str, start_line: int = 0, end_line: int = 0) -> str:
     """Read a specific file from the Obsidian vault by relative path.
 
     path: relative path from vault root, e.g. "projects/alfie/alfie.md"
-
-    Requires the OpenClaw gateway to be running at 127.0.0.1:18789.
+    Standalone — reads directly from ~/obsidian/, no gateway required.
     """
-    args: dict[str, Any] = {"path": path}
-    if start_line > 0:
-        args["startLine"] = start_line
-    if end_line > 0:
-        args["endLine"] = end_line
-
+    target = VAULT / path
+    if not target.exists():
+        return f"File not found: {path}"
+    if not target.is_relative_to(VAULT):
+        return "Error: path escapes vault root"
     try:
-        result = _gateway_invoke("memory_get", args)
-        blocks = (result or {}).get("content", [])
-        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        text = target.read_text(encoding="utf-8", errors="replace")
+        if start_line > 0 or end_line > 0:
+            file_lines = text.splitlines()
+            start = max(0, start_line - 1)
+            end = end_line if end_line > 0 else len(file_lines)
+            text = "\n".join(file_lines[start:end])
         return text or "(empty file)"
-    except Exception as exc:
-        return f"Error calling memory_get: {exc}"
+    except OSError as exc:
+        return f"Error reading file: {exc}"
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

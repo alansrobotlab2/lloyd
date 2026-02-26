@@ -1,5 +1,29 @@
 # OpenClaw Work Log
 
+## 2026-02-26 — MCP Server Phase 4: All 5 Tools via MCP in OpenClaw
+
+**Type:** Feature
+**Files modified:** `extensions/memory-graph/index.ts`, `extensions/mcp-server/server.py`, `extensions/memory-graph/prefill.ts`
+
+Completed tool unification — all 5 memory tools now route through the MCP server subprocess in OpenClaw:
+
+- **`index.ts`**: added `proxyTool()` calls for `memory_search` and `memory_get`; plugin registration silently overrides the built-in `memory-core` tools (no collision errors); startup log now reads "5 tools via MCP"
+- **`server.py`**: added `json_output: bool = False` to `memory_search`; when `True`, returns `{"results": [{path, score, snippet}]}` JSON instead of human-readable text
+- **`prefill.ts`**: both `memory_search` calls now pass `json_output: true`; result parsing handles both built-in QMD format (`details.results`) and MCP plugin format (`content[].text` parsed as JSON) for graceful fallback compatibility
+- **Verified**: gateway HTTP test confirms both tools return MCP-backed results; prefill vector search preserved via `json_output` JSON path
+
+## 2026-02-26 — MCP Server Phase 3: Fully Standalone Tools
+
+**Type:** Feature / Refactor
+**Files modified:** `extensions/mcp-server/server.py`, `extensions/mcp-server/requirements.txt`
+
+Decoupled the MCP server from the OpenClaw gateway entirely:
+
+- **memory_search**: replaced httpx proxy with `subprocess.run([qmd, "search", ..., "--json"])` — BM25 search via `~/.bun/bin/qmd`; strips `qmd://obsidian/` prefix from paths and `@@...@@` diff markers from snippets
+- **memory_get**: replaced httpx proxy with direct `(VAULT / path).read_text()` — includes path traversal check and optional line range slicing
+- **Removed**: `httpx` from deps/imports, `GATEWAY_URL` constant, `_gateway_invoke()` function
+- **Verified**: both tools return correct results with gateway explicitly stopped
+
 ## 2026-02-26 — MCP Server Phase 2: OpenClaw Plugin Proxy
 
 **Type:** Feature

@@ -71,9 +71,9 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── Tool proxy via MCP server ──────────────────────────────────────
   //
-  // tag_search, tag_explore, and vault_overview are now served by the
-  // openclaw MCP server subprocess. The client spawns the server on the
-  // first tool call and proxies subsequent calls over JSON-RPC 2.0 stdio.
+  // All 5 memory tools are served by the openclaw MCP server subprocess.
+  // The client spawns the server on the first tool call and proxies
+  // subsequent calls over JSON-RPC 2.0 stdio.
 
   const mcpClient = new McpStdioClient();
   process.on("exit", () => mcpClient.destroy());
@@ -172,5 +172,34 @@ export default function register(api: OpenClawPluginApi) {
     },
   );
 
-  api.logger.info?.("memory-graph v3: registered (unified prefill hook + 3 tools via MCP)");
+  proxyTool(
+    "memory_search",
+    "BM25 full-text search across the Obsidian vault. Returns matching documents with paths, " +
+      "scores, and snippets. Standalone — no gateway required.",
+    {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        max_results: { type: "integer", description: "Max results to return (default: 10)" },
+      },
+      required: ["query"],
+    },
+  );
+
+  proxyTool(
+    "memory_get",
+    "Read a specific file from the Obsidian vault by relative path. " +
+      "path: relative from vault root, e.g. 'projects/alfie/alfie.md'. Supports optional line range.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Vault-relative file path" },
+        start_line: { type: "integer", description: "First line to return (1-indexed, 0 = beginning)" },
+        end_line: { type: "integer", description: "Last line to return (0 = end)" },
+      },
+      required: ["path"],
+    },
+  );
+
+  api.logger.info?.("memory-graph v3: registered (unified prefill hook + 5 tools via MCP)");
 }

@@ -245,7 +245,7 @@ export function createPrefillHook(
 
       // ── Phase 3: Parallel async ────────────────────────────────
       const [vectorResult, glmResult] = await Promise.allSettled([
-        gatewayInvoke("memory_search", { query: effectiveQuery, maxResults: 8 }, abortCtrl.signal),
+        gatewayInvoke("memory_search", { query: effectiveQuery, maxResults: 8, json_output: true }, abortCtrl.signal),
         extractKeywordsViaGLM(userQuery, abortCtrl.signal),
       ]);
 
@@ -253,9 +253,22 @@ export function createPrefillHook(
       const allVectorResults: Array<{ path: string; score: number; snippet?: string }> = [];
 
       if (vectorResult.status === "fulfilled") {
-        const results: any[] = Array.isArray(vectorResult.value?.details?.results)
-          ? vectorResult.value.details.results
-          : [];
+        const val = vectorResult.value;
+        let results: any[] = [];
+        if (Array.isArray(val?.details?.results)) {
+          // Built-in memory-core format (QMD gateway) — fallback compatibility
+          results = val.details.results;
+        } else {
+          // Plugin/MCP format: { content: [{type:"text", text:'{"results":[...]}'}] }
+          const text = (val?.content ?? [])
+            .filter((b: any) => b.type === "text")
+            .map((b: any) => b.text)
+            .join("");
+          try {
+            const parsed = JSON.parse(text);
+            if (Array.isArray(parsed?.results)) results = parsed.results;
+          } catch { /* ignore parse errors, results stays [] */ }
+        }
         logger?.warn?.(`memory-prefill: vector search returned ${results.length} results`);
         for (const r of results) {
           allVectorResults.push({
@@ -284,14 +297,25 @@ export function createPrefillHook(
         logger?.warn?.(`memory-prefill: GLM extra queries: ${JSON.stringify(extraQueries)}`);
         const extraResults = await Promise.allSettled(
           extraQueries.map((q) =>
-            gatewayInvoke("memory_search", { query: q, maxResults: 3 }, abortCtrl.signal),
+            gatewayInvoke("memory_search", { query: q, maxResults: 3, json_output: true }, abortCtrl.signal),
           ),
         );
         for (const r of extraResults) {
           if (r.status === "fulfilled") {
-            const results: any[] = Array.isArray(r.value?.details?.results)
-              ? r.value.details.results
-              : [];
+            const val = r.value;
+            let results: any[] = [];
+            if (Array.isArray(val?.details?.results)) {
+              results = val.details.results;
+            } else {
+              const text = (val?.content ?? [])
+                .filter((b: any) => b.type === "text")
+                .map((b: any) => b.text)
+                .join("");
+              try {
+                const parsed = JSON.parse(text);
+                if (Array.isArray(parsed?.results)) results = parsed.results;
+              } catch { /* ignore */ }
+            }
             for (const vr of results) {
               allVectorResults.push({
                 path: vr.path,
