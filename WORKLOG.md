@@ -84,3 +84,21 @@ Merged memory-prefetch and memory-graph into a single unified `before_prompt_bui
 - **Single `<memory_context>` block** under shared 8000-char budget replaces separate `<memory_prefetch>` + `<vault_context>`
 - **Shared keyword extraction** in query.ts eliminates duplicate filler removal
 - Tag tools (tag_search, tag_explore, vault_overview) unchanged
+
+## 2026-02-26 — MCP Server Phase 6: File Tools + Prefill Hook Gateway Removal
+
+**Type:** Feature / Refactor
+**Files modified:** `extensions/mcp-server/server.py`, `extensions/file-tools/index.ts` (new), `extensions/file-tools/openclaw.plugin.json` (new), `extensions/memory-graph/prefill.ts`, `extensions/memory-graph/index.ts`
+**Files deleted:** `extensions/memory-graph/gateway.ts`
+**Docs:** `docs/mcp-server.md`
+
+Phase 6a — Added 5 file system tools to `server.py` (12 total), all stdlib/no new deps:
+- `file_read`, `file_write`, `file_edit`, `file_glob`, `file_grep` — all sandboxed to `$HOME` via `resolve()` check
+- New `extensions/file-tools/` plugin (index.ts + openclaw.plugin.json) proxies all 5 via McpStdioClient
+
+Phase 6b — Fully removed gateway dependency from the memory-graph prefill hook:
+- `prefill.ts`: replaced all `gatewayInvoke` HTTP calls (→ `:18789`) with direct `McpStdioClient.callTool()`
+- Added `callToolWithAbort` helper so the 2s abort signal properly cancels MCP calls in `Promise.allSettled`
+- Fixed `maxResults` → `max_results` (snake_case for Python MCP server)
+- `index.ts`: `McpStdioClient` now created before the prefill hook; shared by prefill + tool proxies (one subprocess)
+- `gateway.ts` deleted — no longer referenced anywhere

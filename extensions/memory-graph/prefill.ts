@@ -10,7 +10,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { TagIndex } from "./tag-index.js";
 import type { DocMeta } from "./scanner.js";
-import { gatewayInvoke } from "./gateway.js";
+import type { McpStdioClient } from "./mcp-client.js";
 import {
   extractUserQuery,
   simplifyQuery,
@@ -200,11 +200,34 @@ function mergeAndRank(
   return Array.from(candidates.values()).sort((a, b) => b.finalScore - a.finalScore);
 }
 
+// ── MCP helper ────────────────────────────────────────────────────────
+
+/** Call an MCP tool, rejecting if the AbortSignal fires first. */
+async function callToolWithAbort(
+  client: McpStdioClient,
+  name: string,
+  args: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<Array<{ type: string; text: string }>> {
+  if (signal.aborted) throw Object.assign(new Error("Aborted"), { name: "AbortError" });
+  return Promise.race([
+    client.callTool(name, args),
+    new Promise<never>((_, reject) =>
+      signal.addEventListener(
+        "abort",
+        () => reject(Object.assign(new Error("Aborted"), { name: "AbortError" })),
+        { once: true },
+      )
+    ),
+  ]);
+}
+
 // ── Hook Factory ──────────────────────────────────────────────────────
 
 export function createPrefillHook(
   getTagIndex: () => TagIndex,
-  logger?: { info?: (...args: any[]) => void; warn?: (...args: any[]) => void },
+  logger: { info?: (...args: any[]) => void; warn?: (...args: any[]) => void } | undefined,
+  mcpClient: McpStdioClient,
 ) {
   return async (event: any, ctx: any) => {
     const t0 = Date.now();
@@ -243,86 +266,77 @@ export function createPrefillHook(
 
       logger?.warn?.(`memory-prefill: tag match found ${tagDocs.size} docs from ${tagMatches.length} topics`);
 
-      // ── Phase 3: Parallel async ────────────────────────────────
-      const [vectorResult, glmResult] = await Promise.allSettled([
-        gatewayInvoke("memory_search", { query: effectiveQuery, maxResults: 8, json_output: true }, abortCtrl.signal),
-        extractKeywordsViaGLM(userQuery, abortCtrl.signal),
+      // ── Phase 3+4: Pipelined parallel async ───────────────────
+      //
+      // Initial memory_search and GLM run in parallel.
+      // Extra GLM searches are chained off the GLM promise directly,
+      // so they start as soon as GLM resolves — not after memory_search
+      // also finishes. Total wall time ≈ max(search, glm + extra_searches).
+
+      const matchedTagNames = new Set(tagMatches.map((m) => m.tag.toLowerCase()));
+
+      const initialSearchPromise = callToolWithAbort(
+        mcpClient, "memory_search",
+        { query: effectiveQuery, max_results: 8, json_output: true },
+        abortCtrl.signal,
+      );
+
+      const extraPhasePromise = extractKeywordsViaGLM(userQuery, abortCtrl.signal).then(
+        async (keywords: string[]) => {
+          const glmKeywords = keywords.filter((q) => q && q.length > 2).slice(0, 2);
+          const extraQueries = glmKeywords.filter((kw) => !matchedTagNames.has(kw.toLowerCase()));
+          if (extraQueries.length > 0) {
+            logger?.warn?.(`memory-prefill: GLM extra queries: ${JSON.stringify(extraQueries)}`);
+          }
+          const extraResults = extraQueries.length > 0
+            ? await Promise.allSettled(
+                extraQueries.map((q) =>
+                  callToolWithAbort(mcpClient, "memory_search", { query: q, max_results: 3, json_output: true }, abortCtrl.signal),
+                ),
+              )
+            : [];
+          return { glmKeywords, extraResults };
+        },
+        () => ({ glmKeywords: [] as string[], extraResults: [] as PromiseSettledResult<Array<{ type: string; text: string }>>[] }),
+      );
+
+      const [vectorResult, extraPhaseResult] = await Promise.allSettled([
+        initialSearchPromise,
+        extraPhasePromise,
       ]);
 
-      // Collect vector results
+      // Collect all vector results
       const allVectorResults: Array<{ path: string; score: number; snippet?: string }> = [];
 
       if (vectorResult.status === "fulfilled") {
-        const val = vectorResult.value;
+        const text = vectorResult.value.filter((b) => b.type === "text").map((b) => b.text).join("");
         let results: any[] = [];
-        if (Array.isArray(val?.details?.results)) {
-          // Built-in memory-core format (QMD gateway) — fallback compatibility
-          results = val.details.results;
-        } else {
-          // Plugin/MCP format: { content: [{type:"text", text:'{"results":[...]}'}] }
-          const text = (val?.content ?? [])
-            .filter((b: any) => b.type === "text")
-            .map((b: any) => b.text)
-            .join("");
-          try {
-            const parsed = JSON.parse(text);
-            if (Array.isArray(parsed?.results)) results = parsed.results;
-          } catch { /* ignore parse errors, results stays [] */ }
-        }
+        try {
+          const parsed = JSON.parse(text);
+          if (Array.isArray(parsed?.results)) results = parsed.results;
+        } catch { /* ignore parse errors */ }
         logger?.warn?.(`memory-prefill: vector search returned ${results.length} results`);
         for (const r of results) {
-          allVectorResults.push({
-            path: r.path,
-            score: r.score ?? 0,
-            snippet: r.snippet,
-          });
+          allVectorResults.push({ path: r.path, score: r.score ?? 0, snippet: r.snippet });
         }
       } else {
         logger?.warn?.(`memory-prefill: vector search failed: ${(vectorResult.reason as any)?.message}`);
       }
 
-      // ── Phase 4: Cross-pollination ─────────────────────────────
-      const glmKeywords =
-        glmResult.status === "fulfilled"
-          ? (glmResult.value as string[]).filter((q) => q && q.length > 2).slice(0, 2)
-          : [];
+      const { glmKeywords, extraResults } = extraPhaseResult.status === "fulfilled"
+        ? extraPhaseResult.value
+        : { glmKeywords: [] as string[], extraResults: [] as PromiseSettledResult<Array<{ type: string; text: string }>>[] };
 
-      // Only run extra searches for GLM keywords that don't already match a tag
-      const matchedTagNames = new Set(tagMatches.map((m) => m.tag.toLowerCase()));
-      const extraQueries = glmKeywords.filter(
-        (kw) => !matchedTagNames.has(kw.toLowerCase()),
-      );
-
-      if (extraQueries.length > 0) {
-        logger?.warn?.(`memory-prefill: GLM extra queries: ${JSON.stringify(extraQueries)}`);
-        const extraResults = await Promise.allSettled(
-          extraQueries.map((q) =>
-            gatewayInvoke("memory_search", { query: q, maxResults: 3, json_output: true }, abortCtrl.signal),
-          ),
-        );
-        for (const r of extraResults) {
-          if (r.status === "fulfilled") {
-            const val = r.value;
-            let results: any[] = [];
-            if (Array.isArray(val?.details?.results)) {
-              results = val.details.results;
-            } else {
-              const text = (val?.content ?? [])
-                .filter((b: any) => b.type === "text")
-                .map((b: any) => b.text)
-                .join("");
-              try {
-                const parsed = JSON.parse(text);
-                if (Array.isArray(parsed?.results)) results = parsed.results;
-              } catch { /* ignore */ }
-            }
-            for (const vr of results) {
-              allVectorResults.push({
-                path: vr.path,
-                score: vr.score ?? 0,
-                snippet: vr.snippet,
-              });
-            }
+      for (const r of extraResults) {
+        if (r.status === "fulfilled") {
+          const text = r.value.filter((b) => b.type === "text").map((b) => b.text).join("");
+          let results: any[] = [];
+          try {
+            const parsed = JSON.parse(text);
+            if (Array.isArray(parsed?.results)) results = parsed.results;
+          } catch { /* ignore */ }
+          for (const vr of results) {
+            allVectorResults.push({ path: vr.path, score: vr.score ?? 0, snippet: vr.snippet });
           }
         }
       }
@@ -349,17 +363,14 @@ export function createPrefillHook(
       if (tier1.length > 0) {
         const getResults = await Promise.allSettled(
           tier1.map((c) =>
-            gatewayInvoke("memory_get", { path: c.path }, abortCtrl.signal),
+            callToolWithAbort(mcpClient, "memory_get", { path: c.path }, abortCtrl.signal),
           ),
         );
         for (let i = 0; i < tier1.length; i++) {
           const c = tier1[i] as Tier1Doc;
           const r = getResults[i];
           if (r.status === "fulfilled") {
-            const text = (r.value?.content ?? [])
-              .filter((block: any) => block.type === "text")
-              .map((block: any) => block.text)
-              .join("");
+            const text = r.value.filter((b) => b.type === "text").map((b) => b.text).join("");
             if (text) c.content = text.slice(0, CONTENT_PER_DOC);
           }
           tier1WithContent.push(c);

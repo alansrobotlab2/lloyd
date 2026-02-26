@@ -739,6 +739,213 @@ def web_fetch(
     return truncated
 
 
+# ── File system tools ─────────────────────────────────────────────────────────
+
+HOME = Path.home()
+FILE_MAX_READ_BYTES = 2_000_000  # 2 MB
+
+
+def _safe_path(raw: str) -> Path | str:
+    """Expand ~ and verify the path stays within HOME. Returns Path or error string."""
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = HOME / p
+    try:
+        resolved = p.resolve()
+    except OSError as exc:
+        return f"Error resolving path: {exc}"
+    if not str(resolved).startswith(str(HOME)):
+        return f"Error: path escapes home directory: {raw!r}"
+    return p
+
+
+@mcp.tool()
+def file_read(path: str, start_line: int = 0, end_line: int = 0) -> str:
+    """Read a file from the filesystem.
+
+    path: absolute path or ~/relative path (must be within $HOME)
+    start_line: first line to return (1-indexed; 0 = beginning)
+    end_line: last line to return (0 = end of file)
+
+    Returns the file contents as text, optionally sliced to a line range.
+    """
+    result = _safe_path(path)
+    if isinstance(result, str):
+        return result
+    p = result
+    if not p.exists():
+        return f"File not found: {path}"
+    if not p.is_file():
+        return f"Not a file: {path}"
+    size = p.stat().st_size
+    if size > FILE_MAX_READ_BYTES:
+        return f"Error: file too large ({size} bytes, max {FILE_MAX_READ_BYTES})"
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"Error reading file: {exc}"
+    if start_line > 0 or end_line > 0:
+        lines = text.splitlines()
+        start = max(0, start_line - 1)
+        end = end_line if end_line > 0 else len(lines)
+        text = "\n".join(lines[start:end])
+    return text or "(empty file)"
+
+
+@mcp.tool()
+def file_write(path: str, content: str) -> str:
+    """Write (create or overwrite) a file.
+
+    path: absolute path or ~/relative path (must be within $HOME)
+    content: text content to write
+
+    Creates parent directories if they don't exist.
+    Returns a confirmation message.
+    """
+    result = _safe_path(path)
+    if isinstance(result, str):
+        return result
+    p = result
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        return f"Error writing file: {exc}"
+    return f"Written {len(content)} chars to {p}"
+
+
+@mcp.tool()
+def file_edit(path: str, old_text: str, new_text: str) -> str:
+    """Replace an exact string in a file (first occurrence only).
+
+    path: absolute path or ~/relative path (must be within $HOME)
+    old_text: exact text to find (must appear exactly once)
+    new_text: replacement text
+
+    Fails if old_text appears 0 or more than 1 time.
+    """
+    result = _safe_path(path)
+    if isinstance(result, str):
+        return result
+    p = result
+    if not p.exists():
+        return f"File not found: {path}"
+    try:
+        original = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"Error reading file: {exc}"
+    count = original.count(old_text)
+    if count == 0:
+        return "Error: old_text not found in file"
+    if count > 1:
+        return f"Error: old_text appears {count} times — provide more context to make it unique"
+    updated = original.replace(old_text, new_text, 1)
+    try:
+        p.write_text(updated, encoding="utf-8")
+    except OSError as exc:
+        return f"Error writing file: {exc}"
+    return f"Replaced 1 occurrence in {p}"
+
+
+@mcp.tool()
+def file_glob(pattern: str, root: str = "~") -> str:
+    """Find files matching a glob pattern.
+
+    pattern: glob pattern, e.g. "**/*.py", "*.md", "src/**/*.ts"
+    root: directory to search from (default: $HOME); must be within $HOME
+
+    Returns a sorted list of matching paths (up to 200), relative to root.
+    """
+    root_result = _safe_path(root)
+    if isinstance(root_result, str):
+        return root_result
+    root_path = root_result.expanduser() if hasattr(root_result, "expanduser") else root_result
+
+    if not root_path.exists():
+        return f"Root directory not found: {root}"
+    if not root_path.is_dir():
+        return f"Not a directory: {root}"
+
+    try:
+        matches = sorted(root_path.glob(pattern))
+    except Exception as exc:
+        return f"Error globbing: {exc}"
+
+    if not matches:
+        return f'No files matching "{pattern}" under {root_path}'
+
+    MAX = 200
+    lines = [str(m.relative_to(root_path)) for m in matches[:MAX]]
+    result = "\n".join(lines)
+    if len(matches) > MAX:
+        result += f"\n... and {len(matches) - MAX} more (pattern matched {len(matches)} total)"
+    return result
+
+
+@mcp.tool()
+def file_grep(pattern: str, path: str = "~", file_glob: str = "**/*", max_results: int = 50) -> str:
+    """Search file contents with a regular expression.
+
+    pattern: Python regex pattern to search for
+    path: directory or file to search (default: $HOME); must be within $HOME
+    file_glob: glob pattern to filter which files are searched (default "**/*")
+    max_results: maximum matching lines to return (default 50, max 200)
+
+    Returns matching lines with filename and line number.
+    """
+    max_results = min(max(max_results, 1), 200)
+
+    path_result = _safe_path(path)
+    if isinstance(path_result, str):
+        return path_result
+    search_path = path_result
+
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        return f"Error: invalid regex: {exc}"
+
+    results: list[str] = []
+
+    def _search_file(fp: Path) -> None:
+        if len(results) >= max_results:
+            return
+        try:
+            size = fp.stat().st_size
+            if size > FILE_MAX_READ_BYTES:
+                return
+            text = fp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if len(results) >= max_results:
+                break
+            if compiled.search(line):
+                results.append(f"{fp}:{lineno}: {line.rstrip()}")
+
+    if search_path.is_file():
+        _search_file(search_path)
+    elif search_path.is_dir():
+        try:
+            for fp in sorted(search_path.glob(file_glob)):
+                if len(results) >= max_results:
+                    break
+                if fp.is_file():
+                    _search_file(fp)
+        except Exception as exc:
+            return f"Error searching: {exc}"
+    else:
+        return f"Path not found: {path}"
+
+    if not results:
+        return f'No matches for "{pattern}" in {search_path}'
+
+    output = "\n".join(results)
+    if len(results) >= max_results:
+        output += f"\n... (limit of {max_results} results reached)"
+    return output
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

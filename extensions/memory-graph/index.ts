@@ -64,9 +64,17 @@ export default function register(api: OpenClawPluginApi) {
   const timer = setInterval(() => refreshIndex(api.logger), REFRESH_INTERVAL_MS);
   if (timer.unref) timer.unref();
 
+  // ── MCP client (shared by prefill hook and tool proxies) ──────────
+  //
+  // Spawns the MCP server subprocess on first use (lazy). Shared so that
+  // the prefill hook and the tool proxies use the same running server.py process.
+
+  const mcpClient = new McpStdioClient();
+  process.on("exit", () => mcpClient.destroy());
+
   // ── Unified prefill hook ───────────────────────────────────────────
 
-  const prefillHandler = createPrefillHook(() => tagIndex, api.logger);
+  const prefillHandler = createPrefillHook(() => tagIndex, api.logger, mcpClient);
   api.on("before_prompt_build", prefillHandler);
 
   // ── Tool proxy via MCP server ──────────────────────────────────────
@@ -74,9 +82,6 @@ export default function register(api: OpenClawPluginApi) {
   // All 5 memory tools are served by the openclaw MCP server subprocess.
   // The client spawns the server on the first tool call and proxies
   // subsequent calls over JSON-RPC 2.0 stdio.
-
-  const mcpClient = new McpStdioClient();
-  process.on("exit", () => mcpClient.destroy());
 
   function proxyTool(
     name: string,

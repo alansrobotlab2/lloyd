@@ -1,0 +1,12 @@
+{
+  "id": "file-tools",
+  "name": "File Tools",
+  "description": "Filesystem tools proxied through the MCP server: file_read, file_write, file_edit, file_glob, file_grep. All paths are sandboxed to $HOME.",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
