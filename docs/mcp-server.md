@@ -18,11 +18,11 @@ Memory tools (tag_search, tag_explore, vault_overview, memory_search, memory_get
 
 ---
 
-## Architecture (Phase 4 — current)
+## Architecture (Phase 5 — current)
 
 ```
 extensions/mcp-server/
-    server.py          ← FastMCP server, 5 tools — fully standalone
+    server.py          ← FastMCP server, 7 tools — fully standalone
     requirements.txt   ← mcp[cli], pyyaml
 
     tag_search / tag_explore / vault_overview:
@@ -39,24 +39,35 @@ extensions/mcp-server/
         Optional line range (start_line, end_line)
         Path traversal guard (is_relative_to check)
 
+    web_search(query, count=5):
+        ddgs (DuckDuckGo) → search results (title, URL, snippet)
+
+    web_fetch(url, extract_mode="markdown", max_chars=50000):
+        httpx GET → readability-lxml article extraction → html2text markdown conversion
+        Private IP blocking, 2MB body cap, 15s timeout
+
 extensions/memory-graph/
     mcp-client.ts      ← Zero-dep JSON-RPC 2.0 stdio client
-    index.ts           ← OpenClaw plugin; proxyTool() for ALL 5 tools via McpStdioClient
+    index.ts           ← OpenClaw plugin; proxyTool() for all 5 memory tools via McpStdioClient
     prefill.ts         ← Unified before_prompt_build hook; uses json_output=true for
                          structured memory_search results; dual-format parser for compatibility
+
+extensions/web-local/
+    index.ts           ← OpenClaw plugin; proxies web_search + web_fetch via McpStdioClient
 
 ~/.claude/mcp.json     ← Claude Code config (distrobox-enter lloyd -- uv run server.py)
 ```
 
-Both Claude Code and the OpenClaw agent share the same MCP server subprocess. All 5 tools have a single canonical implementation.
+Both Claude Code and the OpenClaw agent share the same MCP server. All 7 tools have a single canonical Python implementation.
 
 ```
 OpenClaw agent:
-  all 5 tools → McpStdioClient → server.py (MCP, standalone)
-  prefill hook → gatewayInvoke → plugin tool → McpStdioClient → server.py
+  memory tools (5) → memory-graph plugin → McpStdioClient → server.py
+  web tools (2)    → web-local plugin    → McpStdioClient → server.py (separate subprocess)
+  prefill hook     → memory-graph plugin → McpStdioClient → server.py
 
 Claude Code:
-  all 5 tools → ~/.claude/mcp.json → distrobox-enter → uv run server.py (same server)
+  all 7 tools → ~/.claude/mcp.json → distrobox-enter → uv run server.py (same server)
 ```
 
 ---
@@ -65,11 +76,12 @@ Claude Code:
 
 | File | Action |
 |------|--------|
-| `extensions/mcp-server/server.py` | Created (Phase 1), updated (Phase 3, 4) |
+| `extensions/mcp-server/server.py` | Created (Phase 1), updated (Phase 3, 4, 5) |
 | `extensions/mcp-server/requirements.txt` | Created (Phase 1), updated (Phase 3) |
 | `extensions/memory-graph/mcp-client.ts` | Created (Phase 2) |
 | `extensions/memory-graph/index.ts` | Modified (Phase 2, 4) |
 | `extensions/memory-graph/prefill.ts` | Modified (Phase 4) |
+| `extensions/web-local/index.ts` | Modified (Phase 5) |
 | `~/.claude/mcp.json` | Created (Phase 1) |
 
 ---
@@ -87,6 +99,11 @@ Claude Code:
 - **Plugin overrides built-in**: registering `memory_search`/`memory_get` via `api.registerTool()` silently overrides the built-in `memory-core` tools — no collision errors, last-registration-wins
 - **`json_output` param**: `memory_search` accepts `json_output=True` to return structured `{"results":[...]}` JSON; the prefill hook uses this to get parseable data while the LLM sees human-readable output
 - **Dual-format parser in prefill**: `prefill.ts` handles both the old QMD gateway format (`details.results`) and the new MCP plugin format (`content[].text` parsed as JSON) for graceful fallback compatibility
+- **web_search via ddgs (DuckDuckGo)**: `googlesearch-python` scrapes Google HTML which is actively blocked; `ddgs` uses DuckDuckGo's API which works reliably without API keys; note: the old TypeScript `execFile` path was also broken (the lloyd venv had no `googlesearch` installed)
+- **web_fetch via httpx + readability-lxml + html2text**: `httpx.Client` (synchronous — avoids async conflicts with FastMCP); `readability-lxml` for article extraction; `html2text` with `body_width=0` prevents hard line-wrapping that would corrupt URLs
+- **Private IP blocking**: string-pattern regex, no DNS resolution — mirrors TypeScript patterns exactly (localhost, 127.x, 10.x, 172.16–31.x, 192.168.x, 169.254.x, IPv6 loopback/ULA/link-local)
+- **`extractMode` → `extract_mode` translation**: TypeScript plugin keeps camelCase LLM-facing param; translates to snake_case before MCP call
+- **Second subprocess**: web-local spawns its own `McpStdioClient` instance; two `server.py` subprocesses run concurrently (one from memory-graph, one from web-local) — acceptable, both are stateless
 
 ---
 
@@ -120,12 +137,22 @@ Removed httpx, `GATEWAY_URL`, and `_gateway_invoke()`. `memory_search` replaced 
 ### Phase 4 — All 5 tools via MCP in OpenClaw
 Added `memory_search` and `memory_get` to `proxyTool()` in `index.ts` — plugin registration silently overrides the built-in `memory-core` tools. Added `json_output` param to `memory_search` in `server.py`. Updated `prefill.ts` to pass `json_output=true` and parse the MCP plugin response format. All 5 tools now share a single canonical implementation for both Claude Code and OpenClaw. Gateway startup log: "5 tools via MCP".
 
+### Phase 5 — Web tools migrated to MCP
+Added `web_search` and `web_fetch` to `server.py` (7 tools total). New uv dependencies: `ddgs`, `httpx`, `readability-lxml`, `html2text`. Switched from `googlesearch-python` (blocked by Google, was also broken in old TypeScript path) to `ddgs` (DuckDuckGo). Replaced `web-local/index.ts` inline implementation (324 lines using `execFile` + `linkedom` + `@mozilla/readability`) with a 90-line `McpStdioClient` proxy. Both web tools now share a single canonical Python implementation available to Claude Code (via `~/.claude/mcp.json`) and the OpenClaw agent (via web-local plugin proxy).
+
 ---
 
 ## Testing
 
 ```bash
-# Verify standalone — stop gateway first
+# Verify all 7 tools listed
+distrobox-enter lloyd -- bash -c "
+  printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n' | \
+    uv run /home/alansrobotlab/.openclaw/extensions/mcp-server/server.py 2>/dev/null | tail -1 | python3 -c 'import json,sys; [print(t[\"name\"]) for t in json.load(sys.stdin)[\"result\"][\"tools\"]]'
+"
+# Expect: tag_search tag_explore vault_overview memory_search memory_get web_search web_fetch
+
+# Test memory_search (standalone — no gateway)
 distrobox-enter lloyd -- bash -c "
   systemctl --user stop openclaw-gateway.service
   printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_search\",\"arguments\":{\"query\":\"alfie arm\"}}}\n' | \
@@ -133,6 +160,29 @@ distrobox-enter lloyd -- bash -c "
 "
 # Expect: BM25 results, no gateway error
 
-# Restart gateway
+# Test web_search
+distrobox-enter lloyd -- bash -c "
+  printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"web_search\",\"arguments\":{\"query\":\"python fastmcp\",\"count\":3}}}\n' | \
+    uv run /home/alansrobotlab/.openclaw/extensions/mcp-server/server.py 2>/dev/null | tail -1
+"
+# Expect: JSON with numbered search results
+
+# Test web_fetch
+distrobox-enter lloyd -- bash -c "
+  printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"web_fetch\",\"arguments\":{\"url\":\"https://example.com\",\"max_chars\":2000}}}\n' | \
+    uv run /home/alansrobotlab/.openclaw/extensions/mcp-server/server.py 2>/dev/null | tail -1 | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"result\"][\"content\"][0][\"text\"][:300])'
+"
+# Expect: markdown content of example.com
+
+# Test private IP blocking
+distrobox-enter lloyd -- bash -c "
+  printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"web_fetch\",\"arguments\":{\"url\":\"http://192.168.1.1/\"}}}\n' | \
+    uv run /home/alansrobotlab/.openclaw/extensions/mcp-server/server.py 2>/dev/null | tail -1 | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"result\"][\"content\"][0][\"text\"])'
+"
+# Expect: web_fetch error: Blocked — private/internal hostname "192.168.1.1"
+
+# Restart gateway and verify web-local startup log
 distrobox-enter lloyd -- systemctl --user start openclaw-gateway.service
+distrobox-enter lloyd -- journalctl --user -u openclaw-gateway.service -n 30 --no-pager -o cat | grep web-local
+# Expect: web-local: registering web_search + web_fetch (proxied through MCP server)
 ```

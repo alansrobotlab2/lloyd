@@ -3,12 +3,16 @@
 # dependencies = [
 #   "mcp[cli]",
 #   "pyyaml",
+#   "ddgs",
+#   "httpx",
+#   "readability-lxml",
+#   "html2text",
 # ]
 # ///
 """
 OpenClaw MCP Server
 
-Exposes five memory tools via the MCP stdio protocol. Fully standalone —
+Exposes seven tools via the MCP stdio protocol. Fully standalone —
 no dependency on the OpenClaw gateway or any external service.
 
   - tag_search    : frontmatter tag-based document search (in-process index)
@@ -16,6 +20,8 @@ no dependency on the OpenClaw gateway or any external service.
   - vault_overview: vault statistics and hub pages (in-process index)
   - memory_search : BM25 full-text search via qmd CLI (~/.bun/bin/qmd)
   - memory_get    : direct filesystem read from ~/obsidian/
+  - web_search    : DuckDuckGo search via ddgs
+  - web_fetch     : HTTP GET + readability-lxml + html2text content extraction
 
 Run with:
   uv run server.py
@@ -35,8 +41,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import html2text as _html2text
+import httpx as _httpx
 import yaml
+from ddgs import DDGS as _DDGS
 from mcp.server.fastmcp import FastMCP
+from readability import Document as _ReadabilityDocument
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -46,6 +56,39 @@ QMD = Path.home() / ".bun/bin/qmd"
 EXCLUDE_DIRS = {"templates", "images"}
 EXCLUDE_FILES = {"tags.md"}
 MAX_FILE_SIZE = 512 * 1024  # 500 KB
+
+# ── Web tool constants ─────────────────────────────────────────────────────────
+
+WEB_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+WEB_ACCEPT_LANG = "en-US,en;q=0.9"
+WEB_TIMEOUT_S = 15.0
+WEB_MAX_RESPONSE_BYTES = 2_000_000
+WEB_DEFAULT_MAX_CHARS = 50_000
+
+_PRIVATE_IP_PATTERNS = [
+    re.compile(r"^127\."),
+    re.compile(r"^10\."),
+    re.compile(r"^172\.(1[6-9]|2\d|3[01])\."),
+    re.compile(r"^192\.168\."),
+    re.compile(r"^0\."),
+    re.compile(r"^169\.254\."),
+    re.compile(r"^::1$"),
+    re.compile(r"^fc00:", re.IGNORECASE),
+    re.compile(r"^fd", re.IGNORECASE),
+    re.compile(r"^fe80:", re.IGNORECASE),
+]
+
+
+def _is_private_host(hostname: str) -> bool:
+    if hostname.lower() == "localhost":
+        return True
+    return any(p.match(hostname) for p in _PRIVATE_IP_PATTERNS)
+
+
+# ── Memory/tag constants ───────────────────────────────────────────────────────
 
 TYPE_BOOST = {
     "hub": 2.0,
@@ -589,6 +632,111 @@ def memory_get(path: str, start_line: int = 0, end_line: int = 0) -> str:
         return text or "(empty file)"
     except OSError as exc:
         return f"Error reading file: {exc}"
+
+
+# ── Web tools ─────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def web_search(query: str, count: int = 5) -> str:
+    """Search the web using DuckDuckGo. Returns a numbered list of results with title, URL, and snippet.
+
+    query: search terms
+    count: number of results to return (1–10, default 5)
+    """
+    count = min(max(count, 1), 10)
+    try:
+        raw = list(_DDGS().text(query, max_results=count))
+    except Exception as exc:
+        return f"web_search error: {exc}"
+    if not raw:
+        return f'No results found for "{query}".'
+    lines: list[str] = []
+    for i, r in enumerate(raw, 1):
+        title = r.get("title", "") or ""
+        url = r.get("href", "") or ""
+        snippet = r.get("body", "") or ""
+        lines.append(f"[{i}] {title}\n    {url}\n    {snippet}")
+    return "\n\n".join(lines)
+
+
+@mcp.tool()
+def web_fetch(
+    url: str,
+    extract_mode: str = "markdown",
+    max_chars: int = WEB_DEFAULT_MAX_CHARS,
+) -> str:
+    """Fetch a URL and extract its readable content via readability-lxml + html2text.
+
+    url: the URL to fetch (http or https only)
+    extract_mode: "markdown" or "text" (default "markdown")
+    max_chars: maximum characters to return (default 50000, max 200000)
+    """
+    from urllib.parse import urlparse
+
+    max_chars = min(max(max_chars, 1_000), 200_000)
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return f"web_fetch error: Invalid URL: {url}"
+
+    if parsed.scheme not in ("http", "https"):
+        return f"web_fetch error: Only http/https URLs are supported, got {parsed.scheme!r}"
+
+    hostname = parsed.hostname or ""
+    if _is_private_host(hostname):
+        return f'web_fetch error: Blocked — private/internal hostname "{hostname}"'
+
+    headers = {
+        "User-Agent": WEB_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": WEB_ACCEPT_LANG,
+    }
+    try:
+        # verify=False: lloyd container SSL chain is incomplete; tool already blocks private IPs
+        with _httpx.Client(follow_redirects=True, timeout=WEB_TIMEOUT_S, verify=False) as client:
+            response = client.get(url, headers=headers)
+    except _httpx.TimeoutException:
+        return f"web_fetch error: Request timed out after {WEB_TIMEOUT_S}s"
+    except Exception as exc:
+        return f"web_fetch error: {exc}"
+
+    if response.status_code >= 400:
+        return f"web_fetch error: HTTP {response.status_code}"
+
+    content_type = response.headers.get("content-type", "")
+
+    # Non-HTML: return raw text
+    if "html" not in content_type and "xml" not in content_type:
+        text = response.text
+        truncated = text[:max_chars]
+        if len(truncated) < len(text):
+            return truncated + f"\n\n[Truncated — {len(text)} chars total]"
+        return truncated
+
+    raw_bytes = response.content[:WEB_MAX_RESPONSE_BYTES]
+    html_text = raw_bytes.decode("utf-8", errors="replace")
+
+    try:
+        doc = _ReadabilityDocument(html_text)
+        title = doc.title() or ""
+        summary_html = doc.summary()
+    except Exception as exc:
+        return f"web_fetch error: readability failed: {exc}"
+
+    converter = _html2text.HTML2Text()
+    converter.ignore_links = extract_mode == "text"
+    converter.ignore_images = True
+    converter.body_width = 0  # no line wrapping
+
+    body = converter.handle(summary_html).strip()
+    full = f"# {title}\n\n{body}" if title else body
+
+    truncated = full[:max_chars]
+    if len(truncated) < len(full):
+        return truncated + f"\n\n[Truncated — {len(full)} chars total]"
+    return truncated
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
