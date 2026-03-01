@@ -1,1 +1,2 @@
-/home/alansrobotlab/obsidian/lloyd/user.md
+# Alan
+Timezone: America/Los_Angeles. Prefers concise, conversational responses.

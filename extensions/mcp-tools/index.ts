@@ -1,0 +1,463 @@
+/**
+ * index.ts — mcp-tools: unified OpenClaw plugin for all MCP tools.
+ *
+ * Connects to the standalone MCP tool server (tool_services.py) over SSE
+ * transport at http://127.0.0.1:8093. The server runs as a systemd service
+ * (lloyd-tool-mcp.service).
+ *
+ * Tools (16): tag_search, tag_explore, vault_overview, memory_search,
+ *   memory_get, memory_write, prefill_context, web_search, web_fetch,
+ *   http_request, file_read, file_write, file_edit, file_glob, file_grep,
+ *   run_bash
+ */
+
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { McpSseClient } from "./mcp-sse-client.js";
+
+const TOOL_MCP_URL = "http://127.0.0.1:8093";
+
+const PREFILL_HOOK_TIMEOUT_MS = 5_000;
+const PREFILL_MAX_FAILURES = 3; // skip prefill after this many consecutive errors
+const PREFILL_SKIP_COOLDOWN_MS = 120_000; // 2 min before retrying prefill
+const RUN_BASH_TIMEOUT_MS = 120_000;
+const WEB_TIMEOUT_MS = 20_000;
+const MIN_QUERY_LENGTH = 12;
+
+export default function register(api: OpenClawPluginApi) {
+  const mcpClient = new McpSseClient(TOOL_MCP_URL);
+  process.on("exit", () => mcpClient.destroy());
+
+  // ── Helper: register a simple proxy tool ──────────────────────────────
+
+  function proxyTool(
+    name: string,
+    label: string,
+    description: string,
+    parameters: object,
+    timeoutMs?: number,
+  ): void {
+    api.registerTool({
+      name,
+      label,
+      description,
+      parameters,
+      async execute(_id: string, params: any) {
+        try {
+          const content = await mcpClient.callTool(name, params, timeoutMs);
+          const text =
+            content.length > 0
+              ? content.map((c: any) => c.text).join("")
+              : "(no result)";
+          return { content: [{ type: "text" as const, text }] };
+        } catch (err: any) {
+          return {
+            content: [{ type: "text" as const, text: `${name} error: ${err.message}` }],
+          };
+        }
+      },
+    });
+  }
+
+  // ── Prefill hook (before_prompt_build) ────────────────────────────────
+
+  let prefillConsecutiveFailures = 0;
+  let prefillSkipUntil = 0;
+
+  api.on("before_prompt_build", async (event: any, ctx: any) => {
+    const prompt: string = event.prompt ?? "";
+    if (!prompt || prompt.length < MIN_QUERY_LENGTH) return;
+
+    // Skip prefill if we've hit too many consecutive failures
+    const now = Date.now();
+    if (prefillSkipUntil > now) return;
+    if (prefillSkipUntil > 0 && prefillSkipUntil <= now) {
+      // Cooldown expired — reset and retry
+      prefillSkipUntil = 0;
+      prefillConsecutiveFailures = 0;
+    }
+
+    try {
+      const content = await mcpClient.callTool(
+        "prefill_context",
+        { prompt, session_id: ctx?.sessionId ?? "" },
+        PREFILL_HOOK_TIMEOUT_MS,
+      );
+
+      prefillConsecutiveFailures = 0; // success — reset counter
+
+      const text = content
+        .filter((b: any) => b.type === "text")
+        .map((b: any) => b.text)
+        .join("")
+        .trim();
+      if (text) return { prependContext: text };
+    } catch (err: any) {
+      prefillConsecutiveFailures++;
+      if (prefillConsecutiveFailures >= PREFILL_MAX_FAILURES) {
+        prefillSkipUntil = Date.now() + PREFILL_SKIP_COOLDOWN_MS;
+        api.logger.warn?.(
+          `mcp-tools prefill: ${prefillConsecutiveFailures} consecutive failures, skipping for ${PREFILL_SKIP_COOLDOWN_MS / 1000}s`,
+        );
+      } else {
+        api.logger.warn?.(`mcp-tools prefill: ${err?.message}`);
+      }
+    }
+  });
+
+  // ── Memory & vault tools ──────────────────────────────────────────────
+
+  proxyTool(
+    "tag_search",
+    "Tag Search",
+    "Search the Obsidian knowledge vault by tags. Returns documents matching the specified tag(s) " +
+      "with their title, summary, tags, type, and status. Use AND mode to find documents at the " +
+      "intersection of multiple topics, OR mode for broader searches. " +
+      "Examples: tag_search([\"alfie\"]), tag_search([\"ai\", \"rag\"], \"and\"), tag_search([\"robotics\"], type=\"hub\").",
+    {
+      type: "object",
+      properties: {
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "One or more tags to search for (without # prefix)",
+        },
+        mode: {
+          type: "string",
+          enum: ["and", "or"],
+          description: "Match mode: 'and' = docs must have ALL tags, 'or' = docs with ANY tag (default: 'or')",
+        },
+        type: {
+          type: "string",
+          description: "Filter by document type: hub, notes, project-notes, work-notes, talk, or 'any' (default: 'any')",
+        },
+        limit: {
+          type: "integer",
+          description: "Max results to return (default: 10, max: 25)",
+        },
+      },
+      required: ["tags"],
+    },
+  );
+
+  proxyTool(
+    "tag_explore",
+    "Tag Explore",
+    "Explore tag relationships in the vault. Given a tag, shows co-occurring tags ranked by " +
+      "frequency. Optionally provide bridge_to to find documents that have BOTH tags. " +
+      "Use this to discover connections between topics and navigate the vault's knowledge structure.",
+    {
+      type: "object",
+      properties: {
+        tag: {
+          type: "string",
+          description: "A tag to explore relationships for (without # prefix)",
+        },
+        bridge_to: {
+          type: "string",
+          description: "Optional second tag — shows documents that have BOTH tags (bridging documents)",
+        },
+        limit: {
+          type: "integer",
+          description: "Max related tags to show (default: 15)",
+        },
+      },
+      required: ["tag"],
+    },
+  );
+
+  proxyTool(
+    "vault_overview",
+    "Vault Overview",
+    "Show vault statistics and structure: document counts by type, tags with frequencies, " +
+      "hub pages (index pages), and type distribution. Use this to understand what's in " +
+      "the vault before searching.",
+    {
+      type: "object",
+      properties: {
+        detail: {
+          type: "string",
+          enum: ["summary", "tags", "hubs", "types"],
+          description: "What to show: 'summary' = overview, 'tags' = all tags with frequencies, 'hubs' = hub pages, 'types' = type breakdown (default: 'summary')",
+        },
+      },
+    },
+  );
+
+  proxyTool(
+    "memory_search",
+    "Memory Search",
+    "Mandatory recall step: search the Obsidian knowledge vault before answering questions " +
+      "about prior work, decisions, dates, people, preferences, or todos. Uses BM25 full-text " +
+      "search across the indexed vault. Returns JSON with matching document paths, relevance " +
+      "scores, line ranges, and snippets.",
+    {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        max_results: { type: "integer", description: "Max results to return (default: 10)" },
+        min_score: { type: "number", description: "Minimum relevance score threshold (default: 0.0)" },
+      },
+      required: ["query"],
+    },
+  );
+
+  proxyTool(
+    "memory_get",
+    "Memory Get",
+    "Read a specific file from the Obsidian vault by relative path. " +
+      "Use after memory_search to pull only the needed lines and keep context small. " +
+      "path: relative from vault root, e.g. 'projects/alfie/alfie.md'.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Vault-relative file path" },
+        start_line: { type: "integer", description: "First line to return (1-indexed, 0 = beginning)" },
+        num_lines: { type: "integer", description: "Number of lines to read (0 = all remaining)" },
+      },
+      required: ["path"],
+    },
+  );
+
+  proxyTool(
+    "memory_write",
+    "Memory Write",
+    "Create or overwrite a file in the Obsidian vault. " +
+      "path: vault-relative path, e.g. 'projects/alfie/notes.md'. Creates parent directories automatically.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Vault-relative file path, e.g. 'projects/alfie/notes.md'" },
+        content: { type: "string", description: "Text content to write" },
+      },
+      required: ["path", "content"],
+    },
+  );
+
+  // ── Web tools ─────────────────────────────────────────────────────────
+
+  proxyTool(
+    "web_search",
+    "Web Search",
+    "Search the web using DuckDuckGo. Returns a list of results with title, URL, and snippet.",
+    {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        count: {
+          type: "integer",
+          description: "Number of results to return (1-10, default 5)",
+          minimum: 1,
+          maximum: 10,
+        },
+      },
+      required: ["query"],
+    },
+    WEB_TIMEOUT_MS,
+  );
+
+  api.registerTool({
+    name: "web_fetch",
+    label: "Fetch Web Page",
+    description:
+      "Fetch a public web page and extract its readable content as clean markdown or text. " +
+      "Uses readability to strip boilerplate and returns the article/main body — ideal for reading " +
+      "documentation, blog posts, and news articles. GET only; public URLs only (no 127.0.0.1). " +
+      "For REST APIs, POST requests, auth headers, or local services, use http_request instead.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        url: {
+          type: "string" as const,
+          description: "The URL to fetch (http or https)",
+        },
+        extractMode: {
+          type: "string" as const,
+          enum: ["markdown", "text"],
+          description: 'Extraction mode: "markdown" or "text" (default "markdown")',
+        },
+        maxChars: {
+          type: "integer" as const,
+          description: "Maximum characters to return (default 50000)",
+          minimum: 1000,
+          maximum: 200000,
+        },
+      },
+      required: ["url"] as string[],
+    },
+    async execute(
+      _id: string,
+      params: { url: string; extractMode?: "markdown" | "text"; maxChars?: number },
+    ) {
+      // Translate camelCase LLM params → snake_case Python params
+      const mcpArgs: Record<string, unknown> = { url: params.url };
+      if (params.extractMode !== undefined) mcpArgs.extract_mode = params.extractMode;
+      if (params.maxChars !== undefined) mcpArgs.max_chars = params.maxChars;
+
+      try {
+        const content = await mcpClient.callTool("web_fetch", mcpArgs, WEB_TIMEOUT_MS);
+        const text = content.map((c: any) => c.text).join("") || "(no result)";
+        return { content: [{ type: "text" as const, text }] };
+      } catch (err: any) {
+        return { content: [{ type: "text" as const, text: `web_fetch error: ${err.message}` }] };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "http_request",
+    label: "HTTP Request",
+    description:
+      "Make a raw HTTP request (GET, POST, PUT, PATCH, DELETE, HEAD) and return the status code " +
+      "and response body unprocessed. Use this for REST APIs, local services, and any endpoint " +
+      "that needs custom headers, a request body, or non-GET methods. " +
+      "127.0.0.1 (loopback) is allowed for local container services. " +
+      "Other private/internal IPs are blocked. " +
+      "For reading public web pages as readable text, use web_fetch instead.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        method: {
+          type: "string" as const,
+          enum: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
+          description: "HTTP method",
+        },
+        url: {
+          type: "string" as const,
+          description: "Full URL (http or https)",
+        },
+        headers: {
+          type: "object" as const,
+          description: "Optional request headers",
+          additionalProperties: { type: "string" as const },
+        },
+        body: {
+          type: "string" as const,
+          description: "Optional request body string",
+        },
+        timeout: {
+          type: "integer" as const,
+          description: "Max seconds to wait (default 30, max 120)",
+          minimum: 1,
+          maximum: 120,
+        },
+      },
+      required: ["method", "url"] as string[],
+    },
+    async execute(
+      _id: string,
+      params: { method: string; url: string; headers?: Record<string, string>; body?: string; timeout?: number },
+    ) {
+      try {
+        const content = await mcpClient.callTool("http_request", params as Record<string, unknown>, WEB_TIMEOUT_MS);
+        const text = content.map((c: any) => c.text).join("") || "(no result)";
+        return { content: [{ type: "text" as const, text }] };
+      } catch (err: any) {
+        return { content: [{ type: "text" as const, text: `http_request error: ${err.message}` }] };
+      }
+    },
+  });
+
+  // ── File system tools ─────────────────────────────────────────────────
+
+  proxyTool(
+    "file_read",
+    "Read File",
+    "Read a file from the filesystem. path must be absolute or ~/relative (sandboxed to $HOME). " +
+      "Supports optional line range via start_line / end_line (1-indexed).",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Absolute or ~/relative file path" },
+        start_line: { type: "integer", description: "First line to return (1-indexed, 0 = beginning)" },
+        end_line: { type: "integer", description: "Last line to return (0 = end of file)" },
+      },
+      required: ["path"],
+    },
+  );
+
+  proxyTool(
+    "file_write",
+    "Write File",
+    "Create or overwrite a file. path must be absolute or ~/relative (sandboxed to $HOME). " +
+      "Creates parent directories automatically.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Absolute or ~/relative file path" },
+        content: { type: "string", description: "Text content to write" },
+      },
+      required: ["path", "content"],
+    },
+  );
+
+  proxyTool(
+    "file_edit",
+    "Edit File",
+    "Replace an exact string in a file (first occurrence only). " +
+      "old_text must appear exactly once — provide more surrounding context if it appears multiple times. " +
+      "path must be absolute or ~/relative (sandboxed to $HOME).",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Absolute or ~/relative file path" },
+        old_text: { type: "string", description: "Exact text to find (must appear exactly once)" },
+        new_text: { type: "string", description: "Replacement text" },
+      },
+      required: ["path", "old_text", "new_text"],
+    },
+  );
+
+  proxyTool(
+    "file_glob",
+    "Glob Files",
+    "Find files matching a glob pattern. Returns up to 200 matching paths relative to root. " +
+      'Examples: file_glob("**/*.py"), file_glob("*.md", "~/obsidian")',
+    {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: 'Glob pattern, e.g. "**/*.py", "*.md"' },
+        root: { type: "string", description: "Directory to search from (default: $HOME); must be within $HOME" },
+      },
+      required: ["pattern"],
+    },
+  );
+
+  proxyTool(
+    "file_grep",
+    "Grep Files",
+    "Search file contents with a regular expression. Returns matching lines with filename and line number. " +
+      "path can be a directory (searched recursively) or a single file.",
+    {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "Python regex pattern to search for" },
+        path: { type: "string", description: "File or directory to search (default: $HOME); must be within $HOME" },
+        file_glob: { type: "string", description: 'Glob pattern to filter files (default "**/*")' },
+        max_results: { type: "integer", description: "Maximum matching lines to return (default 50, max 200)" },
+      },
+      required: ["pattern"],
+    },
+  );
+
+  // ── System tools ──────────────────────────────────────────────────────
+
+  proxyTool(
+    "run_bash",
+    "Run Shell Command",
+    "Execute a bash command and return combined stdout+stderr with exit code. " +
+      "command is passed to bash -c. cwd must be within $HOME (default: $HOME). " +
+      "timeout is max seconds to wait (default 30, max 120).",
+    {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Bash command string (passed to bash -c)" },
+        cwd: { type: "string", description: "Working directory (absolute or ~/relative, must be within $HOME; default: $HOME)" },
+        timeout: { type: "integer", description: "Max seconds to wait (default 30, max 120)" },
+      },
+      required: ["command"],
+    },
+    RUN_BASH_TIMEOUT_MS,
+  );
+
+  api.logger.info?.("mcp-tools: registered 16 tools + prefill hook via single MCP server");
+}

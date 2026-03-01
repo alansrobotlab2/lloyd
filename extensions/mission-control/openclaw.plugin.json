@@ -1,0 +1,12 @@
+{
+  "id": "mission-control",
+  "name": "Mission Control Dashboard",
+  "description": "React-based dashboard with token usage stats, API call monitoring, and chat interface",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

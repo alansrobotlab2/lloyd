@@ -1,5 +1,45 @@
 # OpenClaw Work Log
 
+## 2026-03-01 — Migrate Memory Tools to MCP-Owned
+
+**Type:** Feature / Migration
+**Files modified:** `~/Projects/lloyd-services/tool_services.py`, `extensions/mcp-tools/index.ts`, `openclaw.json`
+
+- **Goal:** Take ownership of `memory_search` and `memory_get` tools — move from built-in memory-core (QMD) to MCP-owned versions in tool_services.py
+- **memory_search:** Now returns structured JSON `{results: [{path, score, snippet, startLine, endLine, source, citation}], mode}`. Switched from `qmd query` (CUDA, 2.5min cold start) to `qmd search` (BM25, 0.3s). Added `min_score` param
+- **memory_get:** Now returns JSON `{path, text}` instead of raw text. Changed `end_line` to `num_lines` (count-based, matching built-in's `from`/`lines` pattern)
+- **Disabled built-in:** Removed `memory` section from openclaw.json entirely (prevents memory-core from registering duplicate tools)
+- **Tested:** Both tools work through MCP SSE proxy, gateway has no tool conflicts, agent successfully calls MCP versions
+
+---
+
+## 2026-02-28 — Fix Workspace Bootstrap File Loading
+
+**Type:** Bugfix
+**Files modified:** `~/obsidian/lloyd/{soul,agents,tools,identity,user,heartbeat,memory,workflow_auto}.md` (replaced with symlinks)
+
+- **Root cause:** OpenClaw's `openVerifiedFileSync` rejects files with `nlink > 1` (hardlink security check, `rejectHardlinks: true` default in `openBoundaryFileSync`). Workspace bootstrap files were hardlinked between `~/.openclaw/workspace/` and `~/obsidian/lloyd/`, causing all 7 files to be silently marked `missing: true` with `rawChars: 0`
+- **Fix:** Replaced obsidian-side hardlinks with symlinks pointing to workspace files (`ln -s ~/.openclaw/workspace/SOUL.md ~/obsidian/lloyd/soul.md` etc). Workspace files now have `nlink=1` (pass security check), Obsidian accesses content via symlinks
+- **Verified:** After gateway restart, `systemPromptReport.injectedWorkspaceFiles` shows all 7 files with `missing: false` and correct `rawChars`. System prompt grew from ~19k chars to ~43k chars (24k of workspace context restored)
+- **Key code:** `agent-scope-DZ5jocOf.js` lines 498/512 (`nlink > 1` check), line 578 (`rejectHardlinks ?? true` default)
+
+---
+
+## 2026-02-28 — MCP Tool Migration: 5 Subprocesses → 1
+
+**Type:** Bugfix / Refactor
+**Files created:** `~/Projects/lloyd-services/openclaw_mcp_server.py`, `extensions/mcp-tools/index.ts`, `extensions/mcp-tools/mcp-client.ts`, `extensions/mcp-tools/openclaw.plugin.json`, `docs/mcp-tool-migration.md`
+**Files modified:** `~/Projects/lloyd-services/pyproject.toml`, `extensions/voice-tools/index.ts`
+**Files disabled:** `extensions/file-tools.disabled/`, `extensions/run-bash.disabled/`, `extensions/web-local.disabled/`, `extensions/memory-graph.disabled/`, `extensions/mcp-server.disabled/`
+
+- **Root cause:** Chat window stuck permanently due to cascading `anyio.ClosedResourceError` crashes — 5 plugins each spawning independent `server.py` subprocesses with racing `process.on("exit")` handlers
+- **Fix:** Consolidated all 16 MCP tools into single `openclaw_mcp_server.py` in lloyd-services, proxied via one `mcp-tools` plugin instead of five separate plugins
+- **Mitigations added:** Exponential restart backoff (500ms→30s) in McpStdioClient, EPIPE handling in `sendRaw()`, hard 5s timeout on prefill hook
+- **Also fixed:** voice-tools import path (was pointing to disabled memory-graph) and server path (`lloyd` → `lloyd-services`)
+- **Verified:** Gateway starts clean — 16 tools + 3 voice tools + prefill hook, no tool name conflict warnings
+
+---
+
 ## 2026-02-26 — Base Tool Set Expansion (run_bash, http_request, memory_write)
 
 **Type:** Feature

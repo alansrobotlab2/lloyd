@@ -1,0 +1,12 @@
+{
+  "id": "voice-tools",
+  "name": "Voice Tools",
+  "description": "Voice assistant tools: get last utterance, enroll speakers, list speaker profiles. Proxied through a dedicated voice MCP server.",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

@@ -7,7 +7,7 @@
       "description": "Read recent daily notes, distill new learnings into MEMORY.md, prune stale entries. Keep MEMORY.md under 200 lines.",
       "enabled": true,
       "createdAtMs": 1772075683512,
-      "updatedAtMs": 1772100113416,
+      "updatedAtMs": 1772359277174,
       "schedule": {
         "kind": "cron",
         "expr": "0 2 * * *",
@@ -25,12 +25,14 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1772186400000,
-        "lastRunAtMs": 1772100000003,
+        "nextRunAtMs": 1772445600000,
+        "lastRunAtMs": 1772359200002,
         "lastStatus": "error",
-        "lastDurationMs": 113413,
-        "lastError": "Unsupported channel: whatsapp",
-        "consecutiveErrors": 1
+        "lastDurationMs": 77172,
+        "consecutiveErrors": 4,
+        "lastRunStatus": "error",
+        "lastDeliveryStatus": "unknown",
+        "lastError": "Channel is required (no configured channels detected). Set delivery.channel explicitly or use a main session with a previous channel."
       }
     }
   ]

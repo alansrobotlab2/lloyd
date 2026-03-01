@@ -1,0 +1,10 @@
+{
+  "id": "model-router",
+  "name": "Model Router",
+  "description": "Hybrid 4-tier model router: local Qwen → Haiku → Sonnet → Opus via feature scoring + LLM classifier fallback + session context",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
