@@ -495,13 +495,29 @@ export default function register(api: OpenClawPluginApi) {
     const match = files.find((f) => f.startsWith(sessionId) && f.endsWith(".jsonl"));
     if (!match) return null;
     const lines = parseJsonl<SessionMessage>(join(sessionsDir, match));
-    const first = lines.find((l) => l.type === "message" && l.message?.role === "user");
-    if (!first?.message?.content) return null;
-    const text = first.message.content
-      .filter((c: any) => c.type === "text" && c.text)
-      .map((c: any) => c.text)
-      .join("\n");
-    return text || null;
+    const userMsgs = lines.filter((l) => l.type === "message" && l.message?.role === "user");
+
+    for (const msg of userMsgs) {
+      if (!msg.message?.content) continue;
+      let text = msg.message.content
+        .filter((c: any) => c.type === "text" && c.text)
+        .map((c: any) => c.text)
+        .join("\n");
+      if (!text) continue;
+
+      // Skip system-generated messages that aren't real user interactions
+      if (text.startsWith("A new session was started via")) continue;
+      if (text.startsWith("<memory_context>")) continue;
+
+      // Strip cron hook wrapper: "[cron:... Hook] actual text\nCurrent time: ..."
+      const cronMatch = text.match(/^\[cron:[^\]]+\]\s*/);
+      if (cronMatch) text = text.slice(cronMatch[0].length);
+      // Strip trailing "Current time: ..." injected by hooks
+      text = text.replace(/\nCurrent time:[\s\S]*$/, "").trim();
+
+      return text || null;
+    }
+    return null;
   }
 
   async function generateSummary(sessionId: string): Promise<string | null> {
@@ -736,7 +752,9 @@ export default function register(api: OpenClawPluginApi) {
             (l) =>
               l.type === "message" &&
               l.message &&
-              (l.message.role === "user" || l.message.role === "assistant"),
+              (l.message.role === "user" ||
+                (l.message.role === "assistant" &&
+                  l.message.content?.some((c: any) => c.type === "text" && c.text))),
           )
           .map((l) => ({
             id: l.id,
@@ -828,13 +846,31 @@ export default function register(api: OpenClawPluginApi) {
         return;
       }
       try {
+        // 1. Reset the session to get the new sessionId
         const result = await gwWsSend("sessions.reset", {
           key: "agent:main:main",
           reason: "new",
         });
-        // Bust the sessions cache so the next /sessions poll returns the new session
         cache.delete("token-usage");
-        jsonResponse(res, { ok: true, sessionId: result?.entry?.sessionId ?? null, data: result });
+        const sessionId = result?.entry?.sessionId ?? null;
+
+        // 2. Send the startup greeting prompt (same as the built-in openclaw dashboard
+        //    sends after /new). Fire-and-forget — the agent will process it async.
+        const greetingPrompt =
+          "A new session was started via /new or /reset. Execute your Session Startup " +
+          "sequence now - read the required files before responding to the user. Then " +
+          "greet the user in your configured persona, if one is provided. Be yourself " +
+          "- use your defined voice, mannerisms, and mood. Keep it to 1-3 sentences " +
+          "and ask what they want to do. If the runtime model differs from default_model " +
+          "in the system prompt, mention the default model. Do not mention internal " +
+          "steps, files, tools, or reasoning.";
+        gwWsSend("chat.send", {
+          sessionKey: "agent:main:main",
+          message: greetingPrompt,
+          idempotencyKey: randomUUID(),
+        }).catch(() => {});
+
+        jsonResponse(res, { ok: true, sessionId, data: result });
       } catch (err: any) {
         api.logger.error?.(`mission-control: sessions.reset failed: ${err.message}`);
         jsonResponse(res, { error: err.message }, 502);

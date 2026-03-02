@@ -17,7 +17,12 @@ function timeStr(ts: string): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export default function ChatPanel() {
+interface ChatPanelProps {
+  requestedSessionId?: string | null;
+  onSessionLoaded?: () => void;
+}
+
+export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatPanelProps = {}) {
   const [messages, setMessages] = useState<MessageEntry[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -32,6 +37,17 @@ export default function ChatPanel() {
   const initialLoadDone = useRef(false);
   // Track the timestamp of the last user-sent message so we can detect new replies
   const lastUserSendTs = useRef(0);
+
+  // Switch to a session requested by another page (e.g. Sessions table)
+  useEffect(() => {
+    if (requestedSessionId && requestedSessionId !== sessionId) {
+      initialLoadDone.current = true; // prevent initial-load from overriding
+      setSessionId(requestedSessionId);
+      setThinking(false);
+      setAwaitingReset(false);
+      onSessionLoaded?.();
+    }
+  }, [requestedSessionId]);
 
   const refreshSessions = useCallback(() => {
     return api.sessions().then((d) => {
@@ -73,12 +89,22 @@ export default function ChatPanel() {
             refreshSessions();
           }
 
-          // Clear thinking indicator once we see an assistant message
-          // that arrived after the user's last send
+          // Clear thinking indicator once the agent is idle AND we have
+          // a new assistant message. This keeps the bubble visible during
+          // multi-response processing (tool calls between text replies).
           if (thinking && lastUserSendTs.current > 0) {
-            const lastAssistant = [...d.messages].reverse().find((m) => m.role === "assistant");
-            if (lastAssistant && new Date(lastAssistant.timestamp).getTime() > lastUserSendTs.current) {
-              setThinking(false);
+            const hasNewAssistant = d.messages.some(
+              (m) => m.role === "assistant" && new Date(m.timestamp).getTime() > lastUserSendTs.current,
+            );
+            if (hasNewAssistant) {
+              api.agentStatus().then((status) => {
+                if (status.mainAgent.state === "idle") {
+                  setThinking(false);
+                }
+              }).catch(() => {
+                // Can't reach agent-status — fall back to clearing immediately
+                setThinking(false);
+              });
             }
           }
         })
@@ -155,6 +181,9 @@ export default function ChatPanel() {
           { sessionId: result.sessionId!, lastActivity: new Date().toISOString(), model: "", summary: "New session" },
           ...prev,
         ]);
+        // Show thinking bubble while waiting for the greeting response
+        lastUserSendTs.current = Date.now();
+        setThinking(true);
       }
     } catch (err) {
       console.error("New chat failed:", err);

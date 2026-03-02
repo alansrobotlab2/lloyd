@@ -16,7 +16,11 @@ function timeAgo(ts: string): string {
   return Math.floor(diff / 86400_000) + "d ago";
 }
 
-export default function SessionsPage() {
+interface SessionsPageProps {
+  onOpenSession?: (sessionId: string) => void;
+}
+
+export default function SessionsPage({ onOpenSession }: SessionsPageProps = {}) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
 
   useEffect(() => {
@@ -35,7 +39,7 @@ export default function SessionsPage() {
         <table className="w-full text-xs">
           <thead>
             <tr className="text-slate-500 border-b border-surface-3/50 bg-surface-2/50">
-              <th className="text-left px-4 py-3 font-medium">Session ID</th>
+              <th className="text-left px-4 py-3 font-medium">Session</th>
               <th className="text-left px-4 py-3 font-medium">Model</th>
               <th className="text-right px-4 py-3 font-medium">Messages</th>
               <th className="text-right px-4 py-3 font-medium">Input</th>
@@ -48,10 +52,18 @@ export default function SessionsPage() {
             {sessions.map((s) => (
               <tr
                 key={s.sessionId}
+                onClick={() => onOpenSession?.(s.sessionId)}
                 className="border-b border-surface-3/30 hover:bg-surface-2/50 transition-colors cursor-pointer"
               >
-                <td className="px-4 py-3 font-mono text-slate-300">
-                  {s.sessionId.slice(0, 12)}...
+                <td className="px-4 py-3">
+                  {s.summary ? (
+                    <div>
+                      <span className="text-slate-200">{s.summary}</span>
+                      <div className="text-[10px] font-mono text-slate-500 mt-0.5">{s.sessionId.slice(0, 12)}</div>
+                    </div>
+                  ) : (
+                    <span className="font-mono text-slate-300">{s.sessionId.slice(0, 12)}...</span>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-brand-600/15 text-brand-400">

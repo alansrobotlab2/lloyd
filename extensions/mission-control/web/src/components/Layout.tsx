@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import Sidebar, { type Page } from "./Sidebar";
 import ChatPanel from "./ChatPanel";
 import ServicesPage from "./pages/ServicesPage";
@@ -13,14 +13,12 @@ import ToolsPage from "./pages/ToolsPage";
 import AgentsPage from "./pages/AgentsPage";
 import SettingsPage from "./pages/SettingsPage";
 
-const PAGES: Record<Page, React.ComponentType> = {
-  chat: ChatPanel,
+const PAGES: Record<string, React.ComponentType> = {
   services: ServicesPage,
   dashboard: DashboardPage,
   clawdeck: ClawDeckPage,
   memory: MemoryPage,
   skills: SkillsPage,
-  sessions: SessionsPage,
   agents: AgentsPage,
   models: ModelsPage,
   cron: CronPage,
@@ -31,6 +29,17 @@ const PAGES: Record<Page, React.ComponentType> = {
 export default function Layout() {
   const [page, setPage] = useState<Page>("chat");
   const [collapsed, setCollapsed] = useState(false);
+  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+
+  const handleOpenSession = useCallback((sessionId: string) => {
+    setChatSessionId(sessionId);
+    setPage("chat");
+  }, []);
+
+  const handleSessionLoaded = useCallback(() => {
+    setChatSessionId(null);
+  }, []);
+
   const PageComponent = PAGES[page];
 
   return (
@@ -43,7 +52,13 @@ export default function Layout() {
       />
       <main className="flex-1 flex min-h-0 overflow-hidden">
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          <PageComponent />
+          {page === "chat" && (
+            <ChatPanel requestedSessionId={chatSessionId} onSessionLoaded={handleSessionLoaded} />
+          )}
+          {page === "sessions" && (
+            <SessionsPage onOpenSession={handleOpenSession} />
+          )}
+          {PageComponent && <PageComponent />}
         </div>
       </main>
     </div>
