@@ -297,3 +297,53 @@ After each phase, restart gateway and test:
 5. **Deferred skills** (Phase 1): "run vault maintenance" → agent reads skill file first
 6. **Sub-agent hygiene** (Phase 2): coder logs show no vault prefill, no `<summary>` tags in output
 7. **Tool list**: Mission Control `/mc/` shows correct tools per session
+
+---
+
+## Implementation Results (2026-03-02)
+
+All 3 phases implemented and verified.
+
+### Phase 1 Results
+- 7 skills disabled (6 deferred + 1 heartbeat extracted from AGENTS.md)
+- 5 built-in tools disabled (canvas, nodes, image, gateway, session_status)
+- MEMORY.md cleaned: removed stale entries, moved HF tokens to vault
+- TOOLS.md updated with on-demand skills reference list
+- **Verified**: 38 enabled tools (down from ~46)
+
+### Phase 2 Results
+- 20 additional tools disabled in tools.json → **18 enabled tools** for Lloyd
+- AGENTS.md compressed from 345 lines (~3,200 tokens) to ~105 lines (~1,200 tokens)
+- Heartbeat section extracted to `skills/heartbeat/SKILL.md` (disabled)
+- All 8 sub-agent SOUL.md files replaced with lean version (no TTS `<summary>` tags)
+- All 8 sub-agent AGENTS.md files updated with correct MCP tool names
+- Prefill gating added: agent-aware skip + conversational pattern skip
+- **Verified**: Gateway restart clean, 18 tools confirmed via Mission Control API
+
+### Phase 3 Results
+- Context-profile router implemented directly in mcp-tools `before_prompt_build` hook
+- 7 profiles: chat, memory, code, research, ops, voice, default
+- Prefill skipped for: chat, code, ops, voice (no vault search needed)
+- Prefill runs for: memory, research, default (vault context valuable)
+- **Design note**: Placed in mcp-tools (not model-router) because `before_prompt_build` fires before `before_agent_start`
+- **Verified**: Gateway restart clean, no compile errors
+
+### Final State
+- **Tools**: 18 enabled (was ~46) — 61% reduction
+- **System prompt tokens**: ~11-12k estimated (was ~20-23k) — ~45% reduction
+- **Prefill latency**: Eliminated for ~60% of turns (chat/code/ops/voice profiles + sub-agents)
+- **AGENTS.md**: ~1,200 tokens (was ~3,200) — 63% reduction
+
+### Files Modified
+| File | Change |
+|------|--------|
+| `openclaw.json` | 7 skills disabled |
+| `agents/main/agent/tools.json` | 35 tools disabled (15 prior + 20 new) |
+| `~/obsidian/agents/lloyd/AGENTS.md` | Compressed, heartbeat extracted |
+| `~/obsidian/agents/lloyd/TOOLS.md` | Added on-demand skills reference |
+| `~/obsidian/agents/lloyd/MEMORY.md` | Cleaned stale entries |
+| `~/obsidian/agents/lloyd/skills/heartbeat/SKILL.md` | New — extracted from AGENTS.md |
+| `~/obsidian/lloyd/knowledge/software/huggingface-tokens.md` | New — moved tokens out of system prompt |
+| `~/obsidian/agents/{8 sub-agents}/SOUL.md` | Lean version without TTS tags |
+| `~/obsidian/agents/{8 sub-agents}/AGENTS.md` | Updated to correct MCP tool names |
+| `extensions/mcp-tools/index.ts` | Agent-aware + profile-based prefill gating |

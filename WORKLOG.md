@@ -198,3 +198,14 @@ Phase 6b — Fully removed gateway dependency from the memory-graph prefill hook
 - Fixed `maxResults` → `max_results` (snake_case for Python MCP server)
 - `index.ts`: `McpStdioClient` now created before the prefill hook; shared by prefill + tool proxies (one subprocess)
 - `gateway.ts` deleted — no longer referenced anywhere
+
+## 2026-03-02 — Context Optimization: All 3 Phases
+
+**Type:** Refactor / Optimization
+**Files modified:** `openclaw.json`, `agents/main/agent/tools.json`, `extensions/mcp-tools/index.ts`, `~/obsidian/agents/lloyd/{AGENTS,TOOLS,MEMORY}.md`, `~/obsidian/agents/{8 sub-agents}/{SOUL,AGENTS}.md`, `~/obsidian/agents/lloyd/skills/heartbeat/SKILL.md` (new)
+**Doc:** `docs/context-optimization-gameplan.md`
+
+- **Phase 1 — Skill & config pruning:** Disabled 7 skills, 5 built-in tools, cleaned MEMORY.md (removed stale entries, moved HF tokens to vault), added on-demand skill reference to TOOLS.md
+- **Phase 2 — Orchestrator architecture:** Trimmed Lloyd from ~46 to 18 tools, compressed AGENTS.md from 345 to ~105 lines (~3,200→~1,200 tokens), extracted heartbeat to disabled skill, created lean sub-agent SOUL.md (no TTS tags), fixed all 8 sub-agent AGENTS.md files with correct MCP tool names, added agent-aware prefill gating
+- **Phase 3 — Context-profile router:** Implemented 7-profile classifier (chat/memory/code/research/ops/voice/default) in mcp-tools prefill hook; skips vault search for chat/code/ops/voice profiles (~60% of turns)
+- **Result:** 18 tools (was ~46), ~11-12k system prompt tokens (was ~20-23k), prefill eliminated for ~60% of turns

@@ -63,9 +63,50 @@ export default function register(api: OpenClawPluginApi) {
   let prefillConsecutiveFailures = 0;
   let prefillSkipUntil = 0;
 
+  // Agents that don't need vault recall in their prefill
+  const SKIP_PREFILL_AGENTS = new Set([
+    "coder", "tester", "reviewer", "auditor", "operator",
+  ]);
+
+  // ── Context profile classification (lightweight, regex-only) ──────────
+  type ContextProfile = "chat" | "memory" | "code" | "research" | "ops" | "voice" | "default";
+
+  const CHAT_RE = /^(hey|hi|hello|yo|sup|thanks|thank you|ok|sure|yes|no|yep|nah|nope|got it|cool|nice|great|perfect|sounds good|go ahead|do it|lol|haha|hmm|good morning|good night|gm|gn|👍|❤️|😂|💀)[\.\!\?]?$/i;
+  const MEMORY_RE = /\b(remember|what did (?:we|i)|recall|last (?:time|session|week)|diary|journal|daily note|MEMORY\.md|vault (?:search|notes?))\b/i;
+  const CODE_RE = /\b(implement|debug|refactor|fix (?:the |this )?(?:bug|error|code)|write (?:a |the )?(?:function|class|method|test|script)|add (?:a |the )?(?:feature|endpoint|method)|create (?:a |the )?(?:file|component|module))\b/i;
+  const CODE_BLOCK_RE = /```/;
+  const RESEARCH_RE = /\b(search for|look up|what is|what are|who is|find (?:out|info)|latest on|news about|how does .{3,} work)\b/i;
+  const OPS_RE = /\b(restart|deploy|service|systemctl|docker|git (?:push|pull|merge|rebase)|clawdeck|task (?:board|backlog)|CI\/CD|build|release)\b/i;
+  const VOICE_RE = /\b(say |speak |voice |read (?:this |it )?(?:aloud|out loud)|tts|text.to.speech|narrate)\b/i;
+
+  // Profiles where prefill should be skipped entirely (no vault search needed)
+  const SKIP_PREFILL_PROFILES = new Set<ContextProfile>(["chat", "code", "ops", "voice"]);
+
+  function classifyProfile(prompt: string): ContextProfile {
+    const trimmed = prompt.trim();
+    const lower = trimmed.toLowerCase();
+
+    if (trimmed.length < 50 && CHAT_RE.test(trimmed)) return "chat";
+    if (VOICE_RE.test(lower)) return "voice";
+    if (CODE_BLOCK_RE.test(prompt) || CODE_RE.test(lower)) return "code";
+    if (MEMORY_RE.test(lower)) return "memory";
+    if (OPS_RE.test(lower)) return "ops";
+    if (RESEARCH_RE.test(lower)) return "research";
+
+    return "default";
+  }
+
   api.on("before_prompt_build", async (event: any, ctx: any) => {
     const prompt: string = event.prompt ?? "";
     if (!prompt || prompt.length < MIN_QUERY_LENGTH) return;
+
+    // Skip prefill for sub-agents that don't need vault context
+    const agentId = ctx?.agentId;
+    if (agentId && SKIP_PREFILL_AGENTS.has(agentId)) return;
+
+    // Profile-based prefill gating
+    const profile = classifyProfile(prompt);
+    if (SKIP_PREFILL_PROFILES.has(profile)) return;
 
     // Skip prefill if we've hit too many consecutive failures
     const now = Date.now();
