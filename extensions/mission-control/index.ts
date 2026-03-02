@@ -725,7 +725,8 @@ export default function register(api: OpenClawPluginApi) {
           (f) => f.startsWith(sessionId) && f.endsWith(".jsonl"),
         );
         if (!match) {
-          jsonResponse(res, { error: "Session not found" }, 404);
+          // No transcript file yet — session was just created but has no messages
+          jsonResponse(res, { sessionId, messages: [] });
           return;
         }
 
@@ -1056,7 +1057,17 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/skills ──────────────────────────────────────────────
 
   const YAML = require("/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/yaml");
-  const workspaceSkillsDir = join(homedir(), ".openclaw/workspaces/lloyd/skills");
+  // Resolve main agent workspace from config (supports relocated workspaces)
+  const mainAgentWorkspace = (() => {
+    try {
+      const cfg = JSON.parse(readFileSync(configFile, "utf-8"));
+      const mainAgent = cfg.agents?.list?.find((a: any) => a.id === "main") || cfg.agents?.list?.[0];
+      return mainAgent?.workspace?.replace(/^~/, homedir()) ?? null;
+    } catch { return null; }
+  })();
+  const workspaceSkillsDir = mainAgentWorkspace
+    ? join(mainAgentWorkspace, "skills")
+    : join(homedir(), ".openclaw/workspaces/lloyd/skills");
   const bundledSkillsDir = join(homedir(), ".npm-global/lib/node_modules/openclaw/skills");
 
   interface SkillInfo {
@@ -1239,7 +1250,7 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── API: /api/mc/agents ──────────────────────────────────────────────
 
-  const workspaceDir = join(rootDir, "workspaces/lloyd");
+  const workspaceDir = mainAgentWorkspace || join(rootDir, "workspaces/lloyd");
 
   function readFileOpt(p: string): string | null {
     try { return existsSync(p) ? readFileSync(p, "utf-8") : null; } catch { return null; }

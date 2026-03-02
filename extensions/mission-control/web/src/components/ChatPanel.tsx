@@ -83,7 +83,9 @@ export default function ChatPanel() {
           }
         })
         .catch(() => {
-          // 404 is expected while the session file doesn't exist yet (after /new)
+          // 404 is expected while the session file doesn't exist yet (after /new).
+          // Clear stale messages so old session content doesn't linger.
+          setMessages([]);
         });
     load();
     const interval = setInterval(load, thinking || awaitingReset ? 1_500 : 3_000);
@@ -139,17 +141,21 @@ export default function ChatPanel() {
     if (sending || awaitingReset) return;
 
     setMessages([]);
+    setSessionId(null);        // halt polling for old session immediately
     setAwaitingReset(true);
     setThinking(false);
     setSending(true);
 
     try {
       const result = await api.sessionReset();
-      // The gateway returns the new session ID directly — switch to it
       if (result.sessionId) {
         setSessionId(result.sessionId);
+        // Optimistic dropdown entry — replaced by real data once messages appear
+        setSessions((prev) => [
+          { sessionId: result.sessionId!, lastActivity: new Date().toISOString(), model: "", summary: "New session" },
+          ...prev,
+        ]);
       }
-      await refreshSessions();
     } catch (err) {
       console.error("New chat failed:", err);
       if (sessions.length > 0) {
