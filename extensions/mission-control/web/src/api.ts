@@ -141,14 +141,19 @@ export interface SkillsData {
 
 export interface AgentInfo {
   id: string;
+  name: string;
   avatar: string | null;
   primaryModel: string | null;
+  modelFallbacks: string[];
   sessions: { total: number; active: number };
   modelCount: number;
   enabledModels: number;
   disabledTools: number;
+  toolsAllow: string[] | null;
   maxConcurrent: number | null;
   subagentMaxConcurrent: number | null;
+  workspace: Record<string, string | null>;
+  workspacePath: string;
 }
 
 export interface AgentsData {

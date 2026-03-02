@@ -1,0 +1,1 @@
+/home/alansrobotlab/.openclaw/workspaces/lloyd/SOUL.md

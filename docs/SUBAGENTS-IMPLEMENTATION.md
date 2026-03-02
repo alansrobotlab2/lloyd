@@ -1,36 +1,32 @@
-# Multi-Agent Roster Implementation
+# Multi-Agent Roster
 
-**Status:** Planning
+**Status:** Implemented
 **Last updated:** 2026-03-01
 
 ---
 
 ## Overview
 
-OpenClaw gains a two-tier multi-agent architecture where **Lloyd** remains the main orchestrator and dispatches to specialist agents for parallel work, isolated tasks, and quality-loop patterns (review, audit, test). Specialists are defined as `agents.list` entries and spawned via `sessions_spawn`.
+OpenClaw runs a two-tier multi-agent architecture where **Lloyd** is the main orchestrator and dispatches to specialist agents for parallel work, isolated tasks, and quality-loop patterns. Specialists are defined as `agents.list` entries and spawned via `sessions_spawn`.
 
-- **Tier 1 (Roster)** — 4 specialist agents scoped to tool domains. Spawned with `mode: "session"` for persistent context across tasks.
-- **Tier 2 (Slim)** — 4 lightweight task agents. Spawned with `mode: "run"`, `cleanup: "delete"` for fire-and-forget execution.
+- **Tier 1 (Roster)** — 4 specialist agents scoped to tool domains. Persistent sessions.
+- **Tier 2 (Slim)** — 4 lightweight task agents. Fire-and-forget.
 
-Lloyd retains ALL current tools. He doesn't lose capabilities — he gains the ability to delegate.
+Lloyd retains ALL tools. He gains the ability to delegate, not lose capabilities.
 
 ---
 
 ## Agent Roster
 
-### Lloyd — Orchestrator (`id: "main"`)
+### Lloyd — Orchestrator (`id: "main"`, `name: "Lloyd"`)
 
-Lloyd stays as the fully-capable main agent. He owns all orchestration, communication, and scheduling tools:
+| | |
+|---|---|
+| **Model** | `anthropic/claude-sonnet-4-6` (via model-router: local/sonnet/opus) |
+| **Workspace** | `~/.openclaw/workspaces/lloyd` |
+| **Tools** | All tools (unrestricted) |
 
-| Category | Tools |
-|----------|-------|
-| Agent management | `agents_list`, `sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`, `subagents`, `session_status` |
-| Communication | `message`, `tts`, `voice_last_utterance`, `voice_enroll_speaker`, `voice_list_speakers` |
-| Scheduling | `cron`, `gateway` |
-| UI / Media | `browser`, `canvas`, `image`, `nodes` |
-| Everything else | All base coding tools, MCP tools, ClawDeck tools (unchanged) |
-
-Lloyd decides which specialist handles a request based on dispatch heuristics (see [Dispatch Rules](#dispatch-rules)).
+Routes requests to specialists, handles direct conversation, communication, scheduling, voice, and multi-domain tasks.
 
 ---
 
@@ -38,59 +34,55 @@ Lloyd decides which specialist handles a request based on dispatch heuristics (s
 
 #### Memory (`id: "memory"`)
 
-Vault and knowledge operations — search, retrieve, create, organize notes.
-
 | | |
 |---|---|
+| **Model** | `local-llm/Qwen3.5-35B-A3B` (primary), Sonnet (fallback) |
+| **Workspace** | `~/.openclaw/workspaces/memory` |
 | **Tools** | `tag_search`, `tag_explore`, `vault_overview`, `memory_search`, `memory_get`, `memory_write`, `read` |
-| **Model** | `local-llm/Qwen3.5-35B-A3B` (primary), `anthropic/claude-sonnet-4-6` (fallback) |
 | **Spawn mode** | `session` (persistent) |
 
-**Dispatch triggers**: "search the vault for...", "find notes about...", "create a knowledge doc for...", "update the note on...", bulk vault maintenance.
+**Why local**: Eval showed local Qwen scores 4.8/5 on tool selection (outperforms Sonnet) and is 3x faster. Vault lookups are its sweet spot.
 
-**Why local model**: Eval showed local Qwen scores 4.8/5 on tool selection (outperforms Sonnet) and is 3× faster. Vault lookups are its sweet spot.
+**Dispatch triggers**: vault search, note creation, knowledge management, bulk vault ops.
 
 ---
 
 #### Coder (`id: "coder"`)
 
-Code generation, editing, debugging, refactoring, execution.
-
 | | |
 |---|---|
+| **Model** | `anthropic/claude-opus-4-6` |
+| **Workspace** | `~/.openclaw/workspaces/coder` |
 | **Tools** | `read`, `edit`, `write`, `exec`, `process`, `apply_patch`, `file_read`, `file_write`, `file_edit`, `file_glob`, `file_grep`, `run_bash` |
-| **Model** | `anthropic/claude-sonnet-4-6` (default); Lloyd can escalate to Opus via spawn `model` param |
 | **Spawn mode** | `session` (persistent) |
 
-**Dispatch triggers**: "implement this feature", "fix this bug", "refactor this module", multi-file code changes, build/compile tasks.
+**Dispatch triggers**: multi-file code changes, feature implementation, refactoring, debugging, builds.
 
 ---
 
 #### Researcher (`id: "researcher"`)
 
-Web research, documentation lookup, information synthesis.
-
 | | |
 |---|---|
+| **Model** | `anthropic/claude-opus-4-6` |
+| **Workspace** | `~/.openclaw/workspaces/researcher` |
 | **Tools** | `web_search`, `web_fetch`, `http_request`, `browser`, `memory_search`, `memory_get`, `read` |
-| **Model** | `anthropic/claude-sonnet-4-6` |
 | **Spawn mode** | `session` (persistent) |
 
-**Dispatch triggers**: "look up docs for...", "research how to...", "find examples of...", "what's the latest on...", web-heavy info gathering.
+**Dispatch triggers**: web research, doc lookup, info gathering, "what's the latest on..."
 
 ---
 
 #### Operator (`id: "operator"`)
 
-System administration, DevOps, git, process management, project tracking.
-
 | | |
 |---|---|
-| **Tools** | `exec`, `run_bash`, `process`, `read`, `file_read`, `file_glob`, `file_grep`, `file_write`, `file_edit`, `clawdeck_boards`, `clawdeck_tasks`, `clawdeck_next_task`, `clawdeck_get_task`, `clawdeck_update_task`, `clawdeck_create_task` |
 | **Model** | `anthropic/claude-sonnet-4-6` |
+| **Workspace** | `~/.openclaw/workspaces/operator` |
+| **Tools** | `exec`, `run_bash`, `process`, `read`, `file_read`, `file_glob`, `file_grep`, `file_write`, `file_edit`, `clawdeck_boards`, `clawdeck_tasks`, `clawdeck_next_task`, `clawdeck_get_task`, `clawdeck_update_task`, `clawdeck_create_task` |
 | **Spawn mode** | `session` (persistent) |
 
-**Dispatch triggers**: "check git status", "deploy this", "restart the service", "check CI", "what's my next task", "update the board".
+**Dispatch triggers**: git, services, CI/CD, deployments, task board, process management.
 
 ---
 
@@ -100,515 +92,185 @@ All slim agents: `mode: "run"`, `cleanup: "delete"`, single task, auto-terminate
 
 #### Tester (`id: "tester"`)
 
-Write and run tests, validate functionality.
-
 | | |
 |---|---|
-| **Tools** | `read`, `write`, `edit`, `exec`, `run_bash`, `file_read`, `file_glob`, `file_grep` |
 | **Model** | `anthropic/claude-sonnet-4-6` |
+| **Workspace** | `~/.openclaw/workspaces/tester` |
+| **Tools** | `read`, `write`, `edit`, `exec`, `run_bash`, `file_read`, `file_glob`, `file_grep` |
 | **Tags** | `testing`, `debugging` |
 
-**Spawned when**: After code changes — "write tests for this", "run the test suite", "validate this works".
+**Spawned when**: after code changes — write tests, run suites, validate.
 
 ---
 
 #### Reviewer (`id: "reviewer"`)
 
-Code review — find bugs, style issues, security problems. **Read-only** — no write or exec.
-
 | | |
 |---|---|
-| **Tools** | `read`, `file_read`, `file_glob`, `file_grep` |
 | **Model** | `anthropic/claude-sonnet-4-6` |
+| **Workspace** | `~/.openclaw/workspaces/reviewer` |
+| **Tools** | `read`, `file_read`, `file_glob`, `file_grep` (read-only) |
 | **Tags** | `code_review`, `security` |
 
-**Spawned when**: After code is written — "review this PR", "check for bugs", adversarial review loops.
+**Spawned when**: after code is written — review, check for bugs, adversarial loops.
 
 ---
 
 #### Planner (`id: "planner"`)
 
-Break down tasks, create implementation plans, coordinate work.
-
 | | |
 |---|---|
-| **Tools** | `read`, `file_read`, `file_glob`, `file_grep`, `memory_search`, `memory_get` |
 | **Model** | `anthropic/claude-sonnet-4-6` |
+| **Workspace** | `~/.openclaw/workspaces/planner` |
+| **Tools** | `read`, `file_read`, `file_glob`, `file_grep`, `memory_search`, `memory_get` |
 | **Tags** | `planning`, `natural_language` |
 
-**Spawned when**: "Plan how to implement...", "break this down into tasks", complex multi-step work.
+**Spawned when**: "plan how to implement...", task breakdown, complex multi-step work.
 
 ---
 
 #### Auditor (`id: "auditor"`)
 
-Security scanning — find vulnerabilities in code and configs. **Read-only**.
-
 | | |
 |---|---|
-| **Tools** | `read`, `file_read`, `file_glob`, `file_grep` |
 | **Model** | `anthropic/claude-sonnet-4-6` |
+| **Workspace** | `~/.openclaw/workspaces/auditor` |
+| **Tools** | `read`, `file_read`, `file_glob`, `file_grep` (read-only) |
 | **Tags** | `code_review`, `security` |
 
-**Spawned when**: "Audit for security issues", "check for vulnerabilities", red-team reviews.
+**Spawned when**: security scanning, vulnerability assessment, red-team reviews.
+
+---
+
+## Model Summary
+
+| Agent | Model | Rationale |
+|-------|-------|-----------|
+| **Lloyd** | Sonnet (model-router) | Orchestrator uses routing: local for simple, sonnet default, opus for deep |
+| **Memory** | Local Qwen (primary) | 3x faster, 4.8/5 tool selection accuracy, free |
+| **Coder** | Opus | Code quality benefits most from strongest model |
+| **Researcher** | Opus | Deep research and synthesis needs strongest reasoning |
+| **Operator** | Sonnet | System ops are mostly tool dispatch, sonnet is sufficient |
+| **Tester** | Sonnet | Test writing is structured, sonnet handles well |
+| **Reviewer** | Sonnet | Code review is pattern matching, sonnet is capable |
+| **Planner** | Sonnet | Planning is reasoning-heavy but not code-generation |
+| **Auditor** | Sonnet | Security scanning is checklist-driven |
 
 ---
 
 ## Dispatch Rules
-
-Lloyd uses these heuristics to decide when to dispatch vs handle directly:
 
 ### Handle Directly (no dispatch)
 
 - Simple questions, greetings, conversation
 - Quick one-liner code edits
 - Tasks requiring Lloyd's full context (voice, scheduling, multi-domain)
-- Anything that needs orchestration tools (cron, message, sessions)
+- Back-and-forth conversation
 
 ### Dispatch to Specialist
 
-| Signal in User Request | Agent | Mode |
-|------------------------|-------|------|
-| Vault/memory search, note creation, knowledge management | **memory** | session |
-| Multi-file code implementation, refactoring, debugging | **coder** | session |
-| Web research, doc lookup, "what's the latest on" | **researcher** | session |
-| Git, deploy, CI/CD, service management, task board | **operator** | session |
-| "Write tests for...", "run the test suite" | **tester** | run |
+| Signal | Agent | Mode |
+|--------|-------|------|
+| Vault/memory search, note management | **memory** | session |
+| Multi-file code implementation, refactoring | **coder** | session |
+| Web research, doc lookup | **researcher** | session |
+| Git, deploy, CI/CD, task board | **operator** | session |
+| "Write tests for...", "run the suite" | **tester** | run |
 | "Review this code", "check for bugs" | **reviewer** | run |
 | "Plan how to...", "break this down" | **planner** | run |
 | "Audit for security", "scan for vulnerabilities" | **auditor** | run |
-
-### Escalation
-
-Lloyd can override any specialist's model at spawn time:
-
-```
-sessions_spawn({ agentId: "coder", model: "claude-opus-4-6", task: "..." })
-```
-
-Use Opus escalation for: architecture decisions, complex reasoning, deep analysis.
 
 ---
 
 ## Coordination Patterns
 
-These are orchestration strategies Lloyd follows. No new code — just dispatch logic.
-
 ### Sequential
-
-Agents run one after another, each building on prior output.
-
 ```
 Lloyd → spawn Planner("design the auth system")
-       ← Planner returns plan
-Lloyd → spawn Coder("implement based on this plan: {plan}")
-       ← Coder returns implementation
+       ← plan
+Lloyd → spawn Coder("implement: {plan}")
+       ← code
 ```
 
 ### Parallel
-
-Multiple agents work simultaneously on independent subtasks.
-
 ```
-Lloyd → spawn Researcher("find best practices for auth")
-      + spawn Coder("scaffold the auth module skeleton")
-      ← both return results
-Lloyd → synthesize and respond
+Lloyd → spawn Researcher("find best practices for X")
+      + spawn Coder("scaffold the X module")
+      ← both return results → synthesize
 ```
 
 ### Adversarial
-
-One agent generates, another critiques. Loop until quality threshold met.
-
 ```
-Lloyd → spawn Coder("implement feature X")
-       ← Coder returns code
-Lloyd → spawn Reviewer("review this code for bugs and issues: {code}")
-       ← Reviewer returns issues
-Lloyd → spawn Coder("fix these issues: {issues}")
-       ← ... iterate until clean
-```
-
-### Debate
-
-Two agents argue positions. Lloyd synthesizes.
-
-```
-Lloyd → spawn Planner("argue for approach A: microservices")
-      + spawn Planner("argue for approach B: monolith")
-      ← both return arguments
-Lloyd → synthesize best approach
+spawn Coder("implement X") → spawn Reviewer("review: {code}") → loop until clean
 ```
 
 ### Pipeline
-
-Chain of agents where output flows through stages.
-
 ```
 Planner → Coder → Tester → Reviewer
-   plan  →  code  → tests  → review
+  plan  →  code  → tests  → review
 ```
-
-Each stage spawned sequentially, output forwarded to the next.
 
 ---
 
-## Implementation: Config Changes
+## Critical: Subagent Deny List Override
 
-### `openclaw.json` — Agent List
-
-Add 8 agents to `agents.list` alongside the existing `main` entry:
+OpenClaw hardcodes `memory_search` and `memory_get` in `SUBAGENT_TOOL_DENY_ALWAYS`. Without the override, Memory, Researcher, and Planner agents silently fail to use vault tools.
 
 ```json
-{
-  "agents": {
-    "defaults": {
-      "model": { "primary": "anthropic/claude-sonnet-4-6" },
-      "bootstrapMaxChars": 20000,
-      "bootstrapTotalMaxChars": 150000,
-      "compaction": { "mode": "safeguard" },
-      "maxConcurrent": 4,
-      "subagents": {
-        "maxConcurrent": 8,
-        "maxSpawnDepth": 2,
-        "maxChildrenPerAgent": 5,
-        "archiveAfterMinutes": 60,
-        "runTimeoutSeconds": 300
-      }
-    },
-    "list": [
-      {
-        "id": "main",
-        "identity": { "avatar": "avatars/lloyd_003.jpg" },
-        "subagents": {
-          "allowAgents": ["memory", "coder", "researcher", "operator", "tester", "reviewer", "planner", "auditor"]
-        }
-      },
-      {
-        "id": "memory",
-        "name": "Memory",
-        "model": { "primary": "local-llm/Qwen3.5-35B-A3B", "fallbacks": ["anthropic/claude-sonnet-4-6"] },
-        "tools": {
-          "allow": ["tag_search", "tag_explore", "vault_overview", "memory_search", "memory_get", "memory_write", "read"]
-        }
-      },
-      {
-        "id": "coder",
-        "name": "Coder",
-        "model": "anthropic/claude-sonnet-4-6",
-        "tools": {
-          "allow": ["read", "edit", "write", "exec", "process", "apply_patch", "file_read", "file_write", "file_edit", "file_glob", "file_grep", "run_bash"]
-        }
-      },
-      {
-        "id": "researcher",
-        "name": "Researcher",
-        "model": "anthropic/claude-sonnet-4-6",
-        "tools": {
-          "allow": ["web_search", "web_fetch", "http_request", "browser", "memory_search", "memory_get", "read"]
-        }
-      },
-      {
-        "id": "operator",
-        "name": "Operator",
-        "model": "anthropic/claude-sonnet-4-6",
-        "tools": {
-          "allow": ["exec", "run_bash", "process", "read", "file_read", "file_glob", "file_grep", "file_write", "file_edit",
-                     "clawdeck_boards", "clawdeck_tasks", "clawdeck_next_task", "clawdeck_get_task", "clawdeck_update_task", "clawdeck_create_task"]
-        }
-      },
-      {
-        "id": "tester",
-        "name": "Tester",
-        "model": "anthropic/claude-sonnet-4-6",
-        "tools": {
-          "allow": ["read", "write", "edit", "exec", "run_bash", "file_read", "file_glob", "file_grep"]
-        }
-      },
-      {
-        "id": "reviewer",
-        "name": "Reviewer",
-        "model": "anthropic/claude-sonnet-4-6",
-        "tools": {
-          "allow": ["read", "file_read", "file_glob", "file_grep"]
-        }
-      },
-      {
-        "id": "planner",
-        "name": "Planner",
-        "model": "anthropic/claude-sonnet-4-6",
-        "tools": {
-          "allow": ["read", "file_read", "file_glob", "file_grep", "memory_search", "memory_get"]
-        }
-      },
-      {
-        "id": "auditor",
-        "name": "Auditor",
-        "model": "anthropic/claude-sonnet-4-6",
-        "tools": {
-          "allow": ["read", "file_read", "file_glob", "file_grep"]
-        }
-      }
-    ]
-  }
-}
-```
-
-### `openclaw.json` — Subagent Tool Overrides
-
-OpenClaw hardcodes `memory_search` and `memory_get` in `SUBAGENT_TOOL_DENY_ALWAYS`. Override this for agents that need vault access:
-
-```json
-{
-  "tools": {
-    "web": { "search": { "enabled": false }, "fetch": { "enabled": false } },
-    "subagents": {
-      "tools": {
-        "alsoAllow": ["memory_search", "memory_get"]
-      }
+"tools": {
+  "subagents": {
+    "tools": {
+      "alsoAllow": ["memory_search", "memory_get"]
     }
   }
 }
 ```
 
-Without this, the Memory, Researcher, and Planner agents will silently fail to use vault tools.
-
 ---
 
-## Implementation: File Structure
-
-### New directories
+## File Structure
 
 ```
-agents/memory/agent/
-agents/coder/agent/
-agents/researcher/agent/
-agents/operator/agent/
-agents/tester/agent/
-agents/reviewer/agent/
-agents/planner/agent/
-agents/auditor/agent/
+~/.openclaw/
+├── openclaw.json                    # Agent definitions, tool overrides, subagent defaults
+├── workspaces/
+│   ├── lloyd/                       # Full workspace (AGENTS.md, SOUL.md, MEMORY.md, HEARTBEAT.md, skills/, memory/)
+│   ├── memory/                      # AGENTS.md (role prompt) + SOUL.md → lloyd + USER.md → lloyd
+│   ├── coder/                       # Same pattern
+│   ├── researcher/
+│   ├── operator/
+│   ├── tester/
+│   ├── reviewer/
+│   ├── planner/
+│   └── auditor/
+├── workspace → workspaces/lloyd/    # Backward-compat symlink
+├── agents/
+│   ├── lloyd/agent/                 # Runtime: sessions, auth, models, tools.json
+│   ├── memory/agent/
+│   ├── coder/agent/
+│   ├── researcher/agent/
+│   ├── operator/agent/
+│   ├── tester/agent/
+│   ├── reviewer/agent/
+│   ├── planner/agent/
+│   └── auditor/agent/
+└── docs/
+    ├── SUBAGENTS-IMPLEMENTATION.md  # This file
+    └── TOOL-ARCHITECTURE.md         # Tool assembly pipeline reference
 ```
 
-### Per-agent files (in each `agents/{id}/agent/`)
+### Per-agent workspace contents
 
-**`tools.json`** — Disable built-in tools that collide with MCP equivalents:
-```json
-{ "memory_search": false, "memory_get": false, "web_search": false, "web_fetch": false }
-```
+**Lloyd (full)**: AGENTS.md, SOUL.md, USER.md, TOOLS.md, IDENTITY.md, HEARTBEAT.md, MEMORY.md, skills/ → obsidian, memory/ → obsidian, avatars/
 
-**`models.json`** — Copy from `agents/main/agent/models.json` (shared provider config).
+**Specialists (minimal)**: AGENTS.md (role-specific system prompt), SOUL.md → lloyd's, USER.md → lloyd's
 
-**`auth-profiles.json`** — Copy from `agents/main/agent/auth-profiles.json` (shared API keys).
+### Per-agent runtime files (`agents/{id}/agent/`)
 
-### Per-agent system prompts
-
-Create `agents/{id}/system-prompt.md` for each agent defining role, constraints, and output format.
-
-**`agents/memory/system-prompt.md`**:
-```markdown
-# Memory Agent
-
-You are a vault and knowledge specialist. You search, retrieve, create, and organize
-notes in the Obsidian vault.
-
-## Constraints
-- Only operate on vault content — do not edit code, run commands, or browse the web
-- Use tag_search for structured lookups, memory_search for content search
-- When creating notes, follow the vault frontmatter conventions (type, tags, source, date, summary)
-
-## Output
-- Return concise results with file paths and relevant excerpts
-- For write operations, confirm what was created/updated
-```
-
-**`agents/coder/system-prompt.md`**:
-```markdown
-# Coder Agent
-
-You are a specialist code agent. Write, edit, debug, and refactor code.
-
-## Constraints
-- Only modify files relevant to your assigned task
-- Run tests after changes when possible
-- Do not make architectural decisions — flag them for the orchestrator
-- Do not search the web or access memory — you only work with code
-
-## Output
-- Concise summary of what you changed and why
-- List of all files modified
-- Any issues or follow-up work needed
-```
-
-**`agents/researcher/system-prompt.md`**:
-```markdown
-# Researcher Agent
-
-You are a web research and information specialist. Find, analyze, and synthesize information.
-
-## Constraints
-- Focus on finding accurate, current information
-- Cross-reference multiple sources when possible
-- Use memory_search to check if relevant notes already exist before creating new ones
-- Do not modify code or run system commands
-
-## Output
-- Structured findings with sources cited
-- Key takeaways and recommendations
-- Links to primary sources
-```
-
-**`agents/operator/system-prompt.md`**:
-```markdown
-# Operator Agent
-
-You are a system operations specialist. Handle git, shell, services, CI/CD, and project tracking.
-
-## Constraints
-- Prefer non-destructive operations (check status before modifying)
-- For destructive commands (rm, reset, force-push), flag for orchestrator approval
-- Use ClawDeck tools for project/task management
-
-## Output
-- Command outputs and their interpretation
-- Status summaries
-- Any warnings or required follow-up actions
-```
-
-**`agents/tester/system-prompt.md`**:
-```markdown
-# Tester Agent
-
-You are a testing specialist. Write tests, run test suites, validate functionality.
-
-## Constraints
-- Focus exclusively on testing — do not refactor production code
-- Report all failures with clear reproduction steps
-- Write tests that are deterministic and isolated
-
-## Output
-- Test results (pass/fail counts)
-- Details on any failures
-- Coverage gaps identified
-```
-
-**`agents/reviewer/system-prompt.md`**:
-```markdown
-# Reviewer Agent
-
-You are a code review specialist. Find bugs, style issues, and potential problems.
-You have READ-ONLY access — you cannot modify files.
-
-## Constraints
-- Review only the files/changes specified in your task
-- Categorize issues by severity: critical, warning, suggestion
-- Be specific — include file paths, line numbers, and concrete fixes
-
-## Output
-- Itemized list of issues found, ordered by severity
-- Suggested fixes for each issue
-- Overall assessment (approve / request changes)
-```
-
-**`agents/planner/system-prompt.md`**:
-```markdown
-# Planner Agent
-
-You are a planning and task breakdown specialist. Analyze requirements, design approaches,
-and create actionable implementation plans.
-
-## Constraints
-- Explore the codebase before planning (read relevant files, search for patterns)
-- Identify risks and dependencies
-- Break work into concrete, independently-testable steps
-
-## Output
-- Step-by-step implementation plan
-- Files that will need modification
-- Dependencies and risks
-- Estimated complexity per step
-```
-
-**`agents/auditor/system-prompt.md`**:
-```markdown
-# Auditor Agent
-
-You are a security auditor. Scan code and configs for vulnerabilities.
-You have READ-ONLY access — you cannot modify files.
-
-## Constraints
-- Check for OWASP Top 10 vulnerabilities
-- Scan for hardcoded secrets, insecure defaults, injection vectors
-- Review dependency versions for known CVEs where visible
-- Be specific — include file paths, line numbers, and CWE IDs where applicable
-
-## Output
-- Itemized vulnerability report, ordered by severity (critical → low)
-- Concrete remediation steps for each finding
-- Overall security posture assessment
-```
-
----
-
-## Implementation: Lloyd's Dispatch Heuristics
-
-Add the following to `workspace/AGENTS.md` so Lloyd knows when and how to use his roster:
-
-```markdown
-## Agent Dispatch
-
-You have 8 specialist agents available. Use them for parallel work, isolated tasks,
-or quality loops. You can always handle things directly for simple tasks.
-
-### When to Dispatch
-
-| If the task involves... | Dispatch to | Spawn mode |
-|-------------------------|-------------|------------|
-| Vault search, note management, knowledge organization | `memory` | session |
-| Multi-file code changes, feature implementation, debugging | `coder` | session |
-| Web research, doc lookup, information gathering | `researcher` | session |
-| Git, services, CI/CD, deployments, task board | `operator` | session |
-| Writing/running tests after code changes | `tester` | run |
-| Code review, bug hunting | `reviewer` | run |
-| Task breakdown, implementation planning | `planner` | run |
-| Security scanning, vulnerability assessment | `auditor` | run |
-
-### When NOT to Dispatch
-
-- Simple questions, greetings, conversation (just answer)
-- Quick one-liner edits (faster to do directly)
-- Tasks requiring your full context (voice, scheduling, multi-domain)
-- When the user is having a back-and-forth conversation (stay present)
-
-### Coordination Patterns
-
-**Parallel** — For independent subtasks:
-  Spawn researcher + coder simultaneously when tasks don't depend on each other.
-
-**Pipeline** — For end-to-end feature work:
-  planner → coder → tester → reviewer (each stage feeds the next).
-
-**Adversarial** — For quality assurance:
-  Spawn coder, then reviewer/auditor to critique. Loop until clean.
-
-### Escalation
-
-Override any agent's model at spawn time for hard problems:
-  sessions_spawn({ agentId: "coder", model: "claude-opus-4-6", task: "..." })
-```
-
----
-
-## Verification Checklist
-
-1. **Config validation** — Restart gateway, check logs for parse errors
-2. **Agent listing** — `agents_list` should show all 9 agents (main + 8 specialists)
-3. **Basic spawn** — "search the vault for notes about X" → spawns `memory` agent
-4. **Tool isolation** — Coder can't call `web_search`; Reviewer can't call `exec`
-5. **Memory override** — Memory/Researcher/Planner can use `memory_search`/`memory_get` (not blocked by deny list) thanks to `alsoAllow`
-6. **Parallel spawn** — "research X and write code for Y at the same time" → spawns researcher + coder simultaneously
-7. **Pipeline test** — "plan, implement, test, and review feature Z" → chains planner → coder → tester → reviewer
-8. **Adversarial test** — "write code for X and review it" → spawns coder then reviewer with critique loop
+- `models.json` — shared provider config (copied from lloyd)
+- `auth-profiles.json` — shared API keys (copied from lloyd)
+- `tools.json` — disables built-in tool collisions: `{ "memory_search": false, "memory_get": false, "web_search": false, "web_fetch": false }`
+- `system-prompt.md` — detailed role definition (also copied into workspace AGENTS.md)
 
 ---
 
@@ -618,7 +280,7 @@ Override any agent's model at spawn time for hard problems:
                         ┌──────────────┐
                         │    Lloyd     │
                         │ (orchestrator│
-                        │   id: main)  │
+                        │  id: main)   │
                         └──────┬───────┘
                                │ sessions_spawn
               ┌────────────────┼────────────────┐
@@ -628,11 +290,12 @@ Override any agent's model at spawn time for hard problems:
      │  Roster       │  │  Roster      │  │  Roster      │
      │               │  │              │  │              │
      │  memory       │  │  coder       │  │  researcher  │
-     │  operator     │  │              │  │              │
-     │               │  │  (session)   │  │  (session)   │
-     │  (session)    │  └──────────────┘  └──────────────┘
+     │  (local)      │  │  (opus)      │  │  (opus)      │
+     │               │  │              │  │              │
+     │  operator     │  │  (session)   │  │  (session)   │
+     │  (sonnet)     │  └──────────────┘  └──────────────┘
+     │  (session)    │
      └──────────────┘
-
               ┌────────────────┼────────────────┐
               │                │                │
      ┌────────┴─────┐  ┌──────┴──────┐  ┌──────┴──────┐
@@ -641,25 +304,23 @@ Override any agent's model at spawn time for hard problems:
      │               │  │              │  │              │
      │  tester       │  │  reviewer    │  │  planner     │
      │  auditor      │  │              │  │              │
-     │               │  │  (run)       │  │  (run)       │
-     │  (run)        │  └──────────────┘  └──────────────┘
-     └──────────────┘
+     │  (sonnet)     │  │  (sonnet)    │  │  (sonnet)    │
+     │  (run)        │  │  (run)       │  │  (run)       │
+     └──────────────┘  └──────────────┘  └──────────────┘
 
-  Tier 1: persistent sessions, domain-scoped tools, full models
+  Tier 1: persistent sessions, domain-scoped tools
   Tier 2: fire-and-forget runs, narrow tools, auto-cleanup
 ```
 
 ---
 
-## Files Reference
+## Verification Checklist
 
-| File | Purpose |
-|------|---------|
-| `openclaw.json` | Agent definitions, tool overrides, subagent defaults |
-| `workspace/AGENTS.md` | Lloyd's dispatch heuristics and coordination patterns |
-| `agents/{id}/agent/tools.json` | Per-agent built-in tool collision disabling |
-| `agents/{id}/agent/models.json` | Per-agent provider config (copied from main) |
-| `agents/{id}/agent/auth-profiles.json` | Per-agent API keys (copied from main) |
-| `agents/{id}/system-prompt.md` | Per-agent role definition and constraints |
-| `docs/TOOL-ARCHITECTURE.md` | Reference: tool assembly pipeline and policy filtering |
-| `docs/multi-tier-model-routing.md` | Reference: model routing strategy (local/sonnet/opus) |
+1. **Config validation** — Restart gateway, check logs for parse errors
+2. **Agent listing** — `agents_list` shows all 9 agents (lloyd + 8 specialists)
+3. **Basic spawn** — "search the vault for notes about X" → spawns `memory` agent
+4. **Tool isolation** — Coder can't call `web_search`; Reviewer can't call `exec`
+5. **Memory override** — Memory/Researcher/Planner can use `memory_search`/`memory_get` (alsoAllow)
+6. **Model assignment** — Coder and Researcher use Opus; Memory uses local Qwen
+7. **Parallel spawn** — "research X and write code for Y" → spawns researcher + coder simultaneously
+8. **Pipeline test** — "plan, implement, test, and review feature Z" → chains planner → coder → tester → reviewer

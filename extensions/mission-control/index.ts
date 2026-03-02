@@ -1056,7 +1056,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/skills ──────────────────────────────────────────────
 
   const YAML = require("/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/yaml");
-  const workspaceSkillsDir = join(homedir(), ".openclaw/workspace/skills");
+  const workspaceSkillsDir = join(homedir(), ".openclaw/workspaces/lloyd/skills");
   const bundledSkillsDir = join(homedir(), ".npm-global/lib/node_modules/openclaw/skills");
 
   interface SkillInfo {
@@ -1239,7 +1239,7 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── API: /api/mc/agents ──────────────────────────────────────────────
 
-  const workspaceDir = join(rootDir, "workspace");
+  const workspaceDir = join(rootDir, "workspaces/lloyd");
 
   function readFileOpt(p: string): string | null {
     try { return existsSync(p) ? readFileSync(p, "utf-8") : null; } catch { return null; }
@@ -1267,6 +1267,12 @@ export default function register(api: OpenClawPluginApi) {
           const sessions = countSessions(id);
           const agentDir = join(rootDir, `agents/${id}/agent`);
 
+          // Resolve per-agent model (per-agent field > global default)
+          let primaryModel = defaults.model?.primary ?? null;
+          if (a.model) {
+            primaryModel = typeof a.model === "string" ? a.model : (a.model.primary ?? primaryModel);
+          }
+
           // Read models for this agent
           const modelsPath = join(agentDir, "models.json");
           let modelCount = 0;
@@ -1293,20 +1299,40 @@ export default function register(api: OpenClawPluginApi) {
             } catch {}
           }
 
+          // Resolve per-agent workspace
+          const agentWorkspaceDir = a.workspace
+            ? a.workspace.replace(/^~/, homedir())
+            : (a.default || id === agentList[0]?.id)
+              ? join(rootDir, "workspaces/lloyd")
+              : join(rootDir, `workspaces/${id}`);
+
+          // Read per-agent workspace files
+          const agentWorkspace: Record<string, string | null> = {
+            agents: readFileOpt(join(agentWorkspaceDir, "AGENTS.md")),
+            soul: readFileOpt(join(agentWorkspaceDir, "SOUL.md")),
+            identity: readFileOpt(join(agentWorkspaceDir, "IDENTITY.md")),
+            memory: readFileOpt(join(agentWorkspaceDir, "MEMORY.md")),
+          };
+
           return {
             id,
+            name: a.name ?? id,
             avatar: a.identity?.avatar ?? null,
-            primaryModel: defaults.model?.primary ?? null,
+            primaryModel,
+            modelFallbacks: (typeof a.model === "object" && a.model?.fallbacks) || null,
             sessions,
             modelCount,
             enabledModels,
             disabledTools,
+            toolsAllow: a.tools?.allow ?? null,
             maxConcurrent: defaults.maxConcurrent ?? null,
             subagentMaxConcurrent: defaults.subagents?.maxConcurrent ?? null,
+            workspace: agentWorkspace,
+            workspacePath: agentWorkspaceDir,
           };
         });
 
-        // Read workspace identity files
+        // Lloyd's workspace for backward compat
         const workspace: Record<string, string | null> = {
           soul: readFileOpt(join(workspaceDir, "SOUL.md")),
           identity: readFileOpt(join(workspaceDir, "IDENTITY.md")),

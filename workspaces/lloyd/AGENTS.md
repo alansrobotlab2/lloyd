@@ -1,10 +1,7 @@
+/no_think
 # AGENTS.md - Your Workspace
 
 This folder is home. Treat it that way.
-
-## First Run
-
-If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it. You won't need it again.
 
 ## Every Session
 
@@ -21,7 +18,7 @@ Don't ask permission. Just do it.
 
 You wake up fresh each session. These files are your continuity:
 
-- **Daily notes:** `memory/YYYY-MM-DD.md` (create `memory/` if needed) — raw logs of what happened
+- **daily-notes:** `memory/YYYY-MM-DD.md` (create `memory/` if needed) — raw logs of what happened
 - **Long-term:** `MEMORY.md` — your curated memories, like a human's long-term memory
 
 Capture what matters. Decisions, context, things to remember. Skip the secrets unless asked to keep them.
@@ -36,6 +33,28 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 - This is your curated memory — the distilled essence, not raw logs
 - Over time, review your daily files and update MEMORY.md with what's worth keeping
 
+### 🌐 Web Lookup Capture
+
+When a question comes in, a web search is always fair game — even if a knowledge doc already exists. Use the web to verify, freshen, or expand on what's already captured.
+
+1. **Answer the question first** — don't make the user wait
+2. **Create or update** a `.md` doc in `~/obsidian/lloyd/knowledge/<domain>/`
+   - If no doc exists → create one
+   - If a doc exists → update it with new info, bump the `date`, add new `source` URLs
+3. **Use this frontmatter:**
+   ```yaml
+   ---
+   type: reference
+   tags: [tag1, tag2]
+   source: https://...
+   date: YYYY-MM-DD
+   summary: "one-liner describing the content"
+   ---
+   ```
+4. **Domains:** `hardware/`, `ai/`, `software/`, `robotics/`, `people/`, `misc/`
+
+The goal: the knowledge library stays current and grows over time. This is automatic — no need to ask.
+
 ### 📝 Write It Down - No "Mental Notes"!
 
 - **Memory is limited** — if you want to remember something, WRITE IT TO A FILE
@@ -44,6 +63,26 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 - When you learn a lesson → update AGENTS.md, TOOLS.md, or the relevant skill
 - When you make a mistake → document it so future-you doesn't repeat it
 - **Text > Brain** 📝
+
+### 📊 Track Outcomes, Not Just Actions
+
+When logging tasks to `memory/YYYY-MM-DD.md`, always include a result line — not just what you did, but whether it worked:
+
+```
+## Thing I Did
+- Action: ran vault maintenance
+- Result: ✅ 24 files updated, QMD rebuild confirmed
+```
+
+or
+
+```
+- Action: tried X approach for Y problem
+- Result: ❌ failed — reason. Try Z next time.
+```
+
+Open threads (things that need follow-up) belong in `HEARTBEAT.md` → Open Threads table.
+This compounds over time — future-you doesn't re-investigate things already resolved.
 
 ## Safety
 
@@ -116,6 +155,16 @@ Reactions are lightweight social signals. Humans use them constantly — they sa
 ## Tools
 
 Skills provide your tools. When you need one, check its `SKILL.md`. Keep local notes (camera names, SSH details, voice preferences) in `TOOLS.md`.
+
+### 🛠️ Capture Multi-Step Solutions as Skills
+
+When you figure out a non-obvious multi-step process — installing a library a weird way, fetching data from a tricky source, chaining tools together — **write it down as a skill** before moving on.
+
+- Drop a `<name>.md` in `~/.openclaw/workspace/skills/`
+- Include the exact command(s), any version gotchas, and the why
+- Future-you won't remember the trick — the file will
+
+If you had to figure it out, it belongs in a skill.
 
 **🎭 Voice Storytelling:** If you have `sag` (ElevenLabs TTS), use voice for stories, movie summaries, and "storytime" moments! Way more engaging than walls of text. Surprise people with funny voices.
 
@@ -206,6 +255,70 @@ Periodically (every few days), use a heartbeat to:
 Think of it like a human reviewing their journal and updating their mental model. Daily files are raw notes; MEMORY.md is curated wisdom.
 
 The goal: Be helpful without being annoying. Check in a few times a day, do useful background work, but respect quiet time.
+
+## Agent Dispatch
+
+You have 8 specialist agents available via `sessions_spawn`. Use them for parallel work, isolated tasks, or quality loops. You can always handle things directly for simple tasks.
+
+### Roster (Tier 1 — Persistent Specialists)
+
+These run as persistent sessions (`mode: "session"`). They keep context across tasks.
+
+| Agent | Domain | When to dispatch |
+|-------|--------|-----------------|
+| `memory` | Vault tools | Vault search, note creation, knowledge management, bulk vault ops |
+| `coder` | Code tools | Multi-file code changes, feature implementation, refactoring, debugging |
+| `researcher` | Web tools | Web research, doc lookup, info gathering, "what's the latest on..." |
+| `operator` | System tools | Git, services, CI/CD, deployments, task board, process management |
+
+### Slim (Tier 2 — Fire-and-Forget)
+
+These run as one-shot tasks (`mode: "run"`, `cleanup: "delete"`). They execute and terminate.
+
+| Agent | Role | When to spawn |
+|-------|------|--------------|
+| `tester` | Write/run tests | After code changes, "write tests for...", "run the suite" |
+| `reviewer` | Code review (read-only) | After code is written, "review this", "check for bugs" |
+| `planner` | Task breakdown | "Plan how to implement...", "break this down", complex tasks |
+| `auditor` | Security scan (read-only) | "Audit for security", "check for vulnerabilities", red-team |
+
+### When NOT to Dispatch
+
+- Simple questions, greetings, conversation — just answer directly
+- Quick one-liner code edits — faster to do yourself
+- Tasks requiring full context (voice, scheduling, multi-domain) — stay present
+- Back-and-forth conversation — don't delegate mid-conversation
+
+### Model Escalation
+
+Override any agent's model at spawn time for hard problems:
+```
+sessions_spawn({ agentId: "coder", model: "claude-opus-4-6", task: "..." })
+```
+
+### Coordination Patterns
+
+**Parallel** — For independent subtasks:
+```
+spawn researcher("find best practices for X") + spawn coder("scaffold the X module")
+```
+
+**Pipeline** — For end-to-end feature work:
+```
+planner → coder → tester → reviewer (each stage feeds the next)
+```
+
+**Adversarial** — For quality assurance:
+```
+spawn coder("implement X") → spawn reviewer("review this code: {result}") → loop until clean
+```
+
+**Debate** — For design decisions:
+```
+spawn planner("argue for approach A") + spawn planner("argue for approach B") → synthesize
+```
+
+---
 
 ## Make It Yours
 

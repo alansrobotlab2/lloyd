@@ -245,7 +245,7 @@ function AgentCard({
         )}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold text-slate-200">{agent.id}</span>
+            <span className="text-sm font-semibold text-slate-200">{agent.name ?? agent.id}</span>
             {agentState && agentState !== "idle" && (
               <div className={`w-2 h-2 rounded-full flex-shrink-0 ${STATE_COLORS[agentState]}`} />
             )}
@@ -335,7 +335,7 @@ function AgentDetail({
         ) : (
           <Bot className="w-5 h-5 text-brand-400" />
         )}
-        <h2 className="text-lg font-semibold">{agent.id}</h2>
+        <h2 className="text-lg font-semibold">{agent.name ?? agent.id}</h2>
         <span className="text-xs text-slate-500 font-mono">{agent.primaryModel}</span>
       </div>
 
@@ -370,11 +370,15 @@ function AgentDetail({
           Configuration
         </div>
         <div className="bg-surface-1 rounded-xl p-4 border border-surface-3/50 space-y-2 text-xs">
-          <Row label="Primary Model" value={defaults.model?.primary ?? "not set"} />
+          <Row label="Primary Model" value={agent.primaryModel ?? defaults.model?.primary ?? "not set"} />
+          {agent.modelFallbacks?.length > 0 && (
+            <Row label="Fallback Models" value={agent.modelFallbacks.join(", ")} />
+          )}
+          {agent.toolsAllow && (
+            <Row label="Allowed Tools" value={`${agent.toolsAllow.length} tools`} />
+          )}
           <Row label="Bootstrap Max Chars" value={defaults.bootstrapMaxChars?.toLocaleString() ?? "-"} />
-          <Row label="Bootstrap Total Max" value={defaults.bootstrapTotalMaxChars?.toLocaleString() ?? "-"} />
           <Row label="Compaction Mode" value={defaults.compaction?.mode ?? "-"} />
-          <Row label="Memory Search" value={defaults.memorySearch?.query?.hybrid?.enabled ? "hybrid (vector + text)" : "default"} />
         </div>
       </div>
 
@@ -473,7 +477,7 @@ export default function AgentsPage() {
     return (
       <AgentDetail
         agent={selectedAgent}
-        workspace={data.workspace}
+        workspace={selectedAgent.workspace ?? data.workspace}
         defaults={data.defaults}
         onBack={() => setSelected(null)}
       />
