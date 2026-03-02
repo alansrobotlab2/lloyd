@@ -139,6 +139,17 @@ export interface SkillsData {
 
 // ── Agents types ──────────────────────────────────────────────────────────
 
+export interface WorkspaceFile {
+  name: string;
+  key: string;
+  content: string | null;
+}
+
+export interface ToolGroupInfo {
+  source: string;
+  tools: string[];
+}
+
 export interface AgentInfo {
   id: string;
   name: string;
@@ -150,9 +161,11 @@ export interface AgentInfo {
   enabledModels: number;
   disabledTools: number;
   toolsAllow: string[] | null;
+  skills: string[] | null;
   maxConcurrent: number | null;
   subagentMaxConcurrent: number | null;
   workspace: Record<string, string | null>;
+  workspaceFiles: WorkspaceFile[];
   workspacePath: string;
 }
 
@@ -160,6 +173,8 @@ export interface AgentsData {
   agents: AgentInfo[];
   workspace: Record<string, string | null>;
   defaults: Record<string, any>;
+  allToolGroups: ToolGroupInfo[];
+  allSkillNames: string[];
 }
 
 // ── Agent Status types ────────────────────────────────────────────────────
@@ -332,6 +347,30 @@ export const api = {
   // Agents
   agents: () => fetchJson<AgentsData>("/agents"),
   agentStatus: () => fetchJson<AgentStatusData>("/agent-status"),
+  agentToolsUpdate: async (agentId: string, tools: string[] | null) => {
+    const res = await fetch(`${BASE}/agent-tools-update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId, tools }),
+    });
+    return res.json();
+  },
+  agentSkillsUpdate: async (agentId: string, skills: string[] | null) => {
+    const res = await fetch(`${BASE}/agent-skills-update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId, skills }),
+    });
+    return res.json();
+  },
+  agentFileSave: async (agentId: string, fileName: string, content: string) => {
+    const res = await fetch(`${BASE}/agent-file-save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId, fileName, content }),
+    });
+    return res.json();
+  },
 
   // Memory / Vault
   memoryStats: () => fetchJson<MemoryStats>("/memory/stats"),

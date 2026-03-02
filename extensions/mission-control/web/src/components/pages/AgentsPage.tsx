@@ -1,14 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
-import { Bot, ChevronLeft, Cpu, Wrench, Users, Layers, FileText } from "lucide-react";
+import { Bot, ChevronLeft, ChevronDown, ChevronRight, Cpu, Wrench, Sparkles, Users, Layers, FileText, Pencil, X, Save } from "lucide-react";
 import { marked } from "marked";
-import { api, AgentInfo, AgentsData, AgentStatusData, SubagentRunInfo } from "../../api";
-
-const WORKSPACE_FILES: { key: string; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { key: "soul", label: "SOUL.md", icon: FileText },
-  { key: "identity", label: "IDENTITY.md", icon: FileText },
-  { key: "agents", label: "AGENTS.md", icon: FileText },
-  { key: "memory", label: "MEMORY.md", icon: FileText },
-];
+import { api, AgentInfo, AgentsData, AgentStatusData, SubagentRunInfo, ToolGroupInfo, WorkspaceFile } from "../../api";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -45,6 +38,33 @@ function outcomeBadgeClass(outcome?: string): string {
   }
 }
 
+// ── Toggle Switch (reusable) ────────────────────────────────────────────
+
+function Toggle({
+  checked,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <button
+      onClick={disabled ? undefined : onChange}
+      className={`relative w-8 h-[18px] rounded-full transition-colors flex-shrink-0 ${
+        disabled ? "opacity-40 cursor-default" : "cursor-pointer"
+      } ${checked ? "bg-brand-600" : "bg-surface-3"}`}
+    >
+      <span
+        className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-transform ${
+          checked ? "left-[14px]" : "left-[2px]"
+        }`}
+      />
+    </button>
+  );
+}
+
 // ── Agent Live Status Banner ────────────────────────────────────────────
 
 function AgentLiveStatus({ status }: { status: AgentStatusData | null }) {
@@ -63,43 +83,32 @@ function AgentLiveStatus({ status }: { status: AgentStatusData | null }) {
   return (
     <div className="bg-surface-1 rounded-xl p-4 border border-surface-3/50">
       <div className="flex items-center gap-3">
-        {/* Pulsing status dot */}
         <div className="relative flex-shrink-0">
           <div className={`w-3 h-3 rounded-full ${stateColor}`} />
           {mainAgent.state === "processing" && (
             <div className="absolute inset-0 w-3 h-3 rounded-full bg-emerald-400 animate-ping opacity-40" />
           )}
         </div>
-
-        {/* State badge */}
         <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono border ${stateBadge}`}>
           {mainAgent.state}
         </span>
-
-        {/* Activity description */}
         <div className="flex-1 text-xs text-slate-400">
           {activity.label}
           {activity.detail && (
             <span className="text-slate-500 font-mono ml-1.5">{activity.detail}</span>
           )}
         </div>
-
-        {/* Elapsed time for non-idle */}
         {activity.type !== "idle" && (
           <span className="text-[10px] text-slate-600 font-mono">
             {formatElapsed(activity.elapsedMs)}
           </span>
         )}
-
-        {/* Queue depth */}
         {mainAgent.queueDepth > 0 && (
           <span className="text-[10px] text-amber-400 font-mono">
             {mainAgent.queueDepth} queued
           </span>
         )}
       </div>
-
-      {/* Heartbeat summary */}
       {status.heartbeat && (status.heartbeat.active > 0 || status.heartbeat.waiting > 0 || status.heartbeat.queued > 0) && (
         <div className="flex gap-4 mt-2 text-[10px] text-slate-500 font-mono">
           <span>{status.heartbeat.active} active</span>
@@ -125,7 +134,6 @@ function SubagentRunCard({ run, isActive }: { run: SubagentRunInfo; isActive: bo
       }`}
     >
       <div className="flex items-start gap-3">
-        {/* Status indicator */}
         <div className="mt-1 flex-shrink-0">
           {isActive ? (
             <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]" />
@@ -137,8 +145,6 @@ function SubagentRunCard({ run, isActive }: { run: SubagentRunInfo; isActive: bo
             />
           )}
         </div>
-
-        {/* Task info */}
         <div className="flex-1 min-w-0">
           <div className="text-xs text-slate-300 line-clamp-2">{run.task}</div>
           <div className="flex items-center gap-2 mt-1 flex-wrap">
@@ -153,8 +159,6 @@ function SubagentRunCard({ run, isActive }: { run: SubagentRunInfo; isActive: bo
             )}
           </div>
         </div>
-
-        {/* Duration and outcome */}
         <div className="text-right flex-shrink-0">
           {elapsed != null && (
             <div className="text-[10px] text-slate-500 font-mono">
@@ -291,21 +295,440 @@ function Stat({
   );
 }
 
+// ── Agent Tools Editor ──────────────────────────────────────────────────
+
+function AgentToolsEditor({
+  agent,
+  allToolGroups,
+  onUpdated,
+}: {
+  agent: AgentInfo;
+  allToolGroups: ToolGroupInfo[];
+  onUpdated: () => void;
+}) {
+  const [toolsAllow, setToolsAllow] = useState<string[] | null>(agent.toolsAllow);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  // Reset when agent changes
+  useEffect(() => {
+    setToolsAllow(agent.toolsAllow);
+    setDirty(false);
+  }, [agent.id, agent.toolsAllow]);
+
+  const isInherited = toolsAllow === null;
+  const allowSet = new Set(toolsAllow ?? []);
+  const allTools = [...new Set(allToolGroups.flatMap((g) => g.tools))];
+  const allowCount = isInherited ? allTools.length : toolsAllow!.length;
+
+  // Track which tool names appear in multiple groups
+  const toolSourceCount = new Map<string, number>();
+  for (const g of allToolGroups) {
+    for (const t of g.tools) {
+      toolSourceCount.set(t, (toolSourceCount.get(t) ?? 0) + 1);
+    }
+  }
+
+  const handleToggle = (toolName: string) => {
+    if (isInherited) {
+      // Switch from inherited to explicit: start with all, remove this one
+      setToolsAllow(allTools.filter((t) => t !== toolName));
+    } else {
+      if (allowSet.has(toolName)) {
+        setToolsAllow(toolsAllow!.filter((t) => t !== toolName));
+      } else {
+        setToolsAllow([...toolsAllow!, toolName]);
+      }
+    }
+    setDirty(true);
+  };
+
+  const handleInheritToggle = () => {
+    if (isInherited) {
+      setToolsAllow([...allTools]);
+    } else {
+      setToolsAllow(null);
+    }
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await api.agentToolsUpdate(agent.id, toolsAllow);
+      setDirty(false);
+      onUpdated();
+    } catch (err) {
+      console.error("Failed to save tools:", err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setToolsAllow(agent.toolsAllow);
+    setDirty(false);
+  };
+
+  return (
+    <div className="space-y-1">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 w-full text-left"
+      >
+        {expanded ? (
+          <ChevronDown className="w-3 h-3 text-slate-500" />
+        ) : (
+          <ChevronRight className="w-3 h-3 text-slate-500" />
+        )}
+        <Wrench className="w-3.5 h-3.5 text-slate-500" />
+        <span className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
+          Allowed Tools
+        </span>
+        <span className="text-[10px] text-slate-600">
+          {isInherited ? "all (inherited)" : `${allowCount} / ${allTools.length}`}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="bg-surface-1 rounded-xl p-4 border border-surface-3/50 space-y-4">
+          {/* Inherit toggle */}
+          <div className="flex items-center gap-3 pb-3 border-b border-surface-3/30">
+            <Toggle checked={isInherited} onChange={handleInheritToggle} />
+            <span className="text-xs text-slate-300">Inherit all tools</span>
+            {isInherited && (
+              <span className="text-[10px] text-slate-500 italic">
+                Agent has access to all available tools
+              </span>
+            )}
+          </div>
+
+          {/* Tool groups */}
+          <div className="space-y-4">
+            {allToolGroups.map((group) => (
+              <div key={group.source} className="space-y-2">
+                <div className="text-[10px] text-slate-500 font-medium">{group.source}</div>
+                <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
+                  {group.tools.map((tool) => {
+                    const checked = isInherited || allowSet.has(tool);
+                    const isShared = (toolSourceCount.get(tool) ?? 1) > 1;
+                    return (
+                      <div
+                        key={tool}
+                        className={`bg-surface-0 rounded-lg px-3 py-2 border transition-colors flex items-center gap-3 ${
+                          checked ? "border-surface-3/50" : "border-surface-3/30 opacity-50"
+                        }`}
+                      >
+                        <Toggle
+                          checked={checked}
+                          disabled={isInherited}
+                          onChange={() => handleToggle(tool)}
+                        />
+                        <span className="text-xs font-mono text-slate-300 truncate">{tool}</span>
+                        {isShared && (
+                          <span className="text-[9px] text-amber-500/70 flex-shrink-0" title="This tool name exists in multiple sources — toggling affects all instances">
+                            shared
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Save / Cancel */}
+          {dirty && (
+            <div className="flex gap-2 justify-end pt-3 border-t border-surface-3/30">
+              <button
+                onClick={handleCancel}
+                className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 bg-surface-2 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-3 py-1.5 text-xs text-white bg-brand-600 hover:bg-brand-500 rounded-lg disabled:opacity-50 transition-colors"
+              >
+                {saving ? "Saving..." : "Save"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Agent Skills Editor ─────────────────────────────────────────────────
+
+function AgentSkillsEditor({
+  agent,
+  allSkillNames,
+  onUpdated,
+}: {
+  agent: AgentInfo;
+  allSkillNames: string[];
+  onUpdated: () => void;
+}) {
+  const [skills, setSkills] = useState<string[] | null>(agent.skills);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    setSkills(agent.skills);
+    setDirty(false);
+  }, [agent.id, agent.skills]);
+
+  const isInherited = skills === null;
+  const skillSet = new Set(skills ?? []);
+  const allowCount = isInherited ? allSkillNames.length : skills!.length;
+
+  const handleToggle = (skillName: string) => {
+    if (isInherited) {
+      setSkills(allSkillNames.filter((s) => s !== skillName));
+    } else {
+      if (skillSet.has(skillName)) {
+        setSkills(skills!.filter((s) => s !== skillName));
+      } else {
+        setSkills([...skills!, skillName]);
+      }
+    }
+    setDirty(true);
+  };
+
+  const handleInheritToggle = () => {
+    if (isInherited) {
+      setSkills([...allSkillNames]);
+    } else {
+      setSkills(null);
+    }
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await api.agentSkillsUpdate(agent.id, skills);
+      setDirty(false);
+      onUpdated();
+    } catch (err) {
+      console.error("Failed to save skills:", err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setSkills(agent.skills);
+    setDirty(false);
+  };
+
+  if (allSkillNames.length === 0) return null;
+
+  return (
+    <div className="space-y-1">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 w-full text-left"
+      >
+        {expanded ? (
+          <ChevronDown className="w-3 h-3 text-slate-500" />
+        ) : (
+          <ChevronRight className="w-3 h-3 text-slate-500" />
+        )}
+        <Sparkles className="w-3.5 h-3.5 text-slate-500" />
+        <span className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
+          Skills
+        </span>
+        <span className="text-[10px] text-slate-600">
+          {isInherited ? "all (inherited)" : `${allowCount} / ${allSkillNames.length}`}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="bg-surface-1 rounded-xl p-4 border border-surface-3/50 space-y-4">
+          {/* Inherit toggle */}
+          <div className="flex items-center gap-3 pb-3 border-b border-surface-3/30">
+            <Toggle checked={isInherited} onChange={handleInheritToggle} />
+            <span className="text-xs text-slate-300">Inherit all skills</span>
+            {isInherited && (
+              <span className="text-[10px] text-slate-500 italic">
+                Agent has access to all available skills
+              </span>
+            )}
+          </div>
+
+          {/* Skills list */}
+          <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
+            {allSkillNames.map((skill) => {
+              const checked = isInherited || skillSet.has(skill);
+              return (
+                <div
+                  key={skill}
+                  className={`bg-surface-0 rounded-lg px-3 py-2 border transition-colors flex items-center gap-3 ${
+                    checked ? "border-surface-3/50" : "border-surface-3/30 opacity-50"
+                  }`}
+                >
+                  <Toggle
+                    checked={checked}
+                    disabled={isInherited}
+                    onChange={() => handleToggle(skill)}
+                  />
+                  <span className="text-xs font-mono text-slate-300 truncate">{skill}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Save / Cancel */}
+          {dirty && (
+            <div className="flex gap-2 justify-end pt-3 border-t border-surface-3/30">
+              <button
+                onClick={handleCancel}
+                className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 bg-surface-2 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-3 py-1.5 text-xs text-white bg-brand-600 hover:bg-brand-500 rounded-lg disabled:opacity-50 transition-colors"
+              >
+                {saving ? "Saving..." : "Save"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Workspace File Editor ───────────────────────────────────────────────
+
+function WorkspaceFileEditor({
+  agentId,
+  file,
+  onSaved,
+}: {
+  agentId: string;
+  file: WorkspaceFile;
+  onSaved: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editContent, setEditContent] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const handleEdit = () => {
+    setEditContent(file.content ?? "");
+    setEditing(true);
+  };
+
+  const handleCancel = () => {
+    setEditing(false);
+    setEditContent("");
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await api.agentFileSave(agentId, file.name, editContent);
+      setEditing(false);
+      onSaved();
+    } catch (err) {
+      console.error("Failed to save file:", err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-surface-1 rounded-xl border border-surface-3/50 overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-surface-2/50 transition-colors"
+      >
+        <FileText className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+        <span className="text-xs font-medium text-slate-300">{file.name}</span>
+        {file.content != null ? (
+          <span className="ml-auto text-[10px] text-slate-600">
+            {file.content.split("\n").length} lines
+          </span>
+        ) : (
+          <span className="ml-auto text-[10px] text-slate-600 italic">not found</span>
+        )}
+      </button>
+
+      {expanded && file.content != null && (
+        <div className="border-t border-surface-3/30">
+          {editing ? (
+            <div className="p-3 space-y-2">
+              <textarea
+                value={editContent}
+                onChange={(e) => setEditContent(e.target.value)}
+                className="w-full h-64 bg-surface-0 text-slate-200 text-xs font-mono rounded-lg p-3 border border-surface-3/50 resize-y focus:outline-none focus:border-brand-500/50"
+                spellCheck={false}
+              />
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={handleCancel}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 bg-surface-2 rounded-lg transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-white bg-brand-600 hover:bg-brand-500 rounded-lg disabled:opacity-50 transition-colors"
+                >
+                  <Save className="w-3 h-3" />
+                  {saving ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="px-4 py-3 max-h-80 overflow-auto relative group">
+              <button
+                onClick={(e) => { e.stopPropagation(); handleEdit(); }}
+                className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 text-[10px] text-slate-400 hover:text-slate-200 bg-surface-2 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <Pencil className="w-2.5 h-2.5" />
+                Edit
+              </button>
+              <div
+                className="prose-chat text-[12px]"
+                dangerouslySetInnerHTML={{ __html: marked.parse(file.content) as string }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Agent Detail View ───────────────────────────────────────────────────
 
 function AgentDetail({
   agent,
-  workspace,
-  defaults,
+  agentsData,
   onBack,
+  onAgentUpdated,
 }: {
   agent: AgentInfo;
-  workspace: Record<string, string | null>;
-  defaults: Record<string, any>;
+  agentsData: AgentsData;
   onBack: () => void;
+  onAgentUpdated: () => void;
 }) {
-  const [expandedFile, setExpandedFile] = useState<string | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentStatusData | null>(null);
+  const defaults = agentsData.defaults;
 
   useEffect(() => {
     const refresh = () => {
@@ -315,6 +738,8 @@ function AgentDetail({
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, []);
+
+  const workspaceFiles = agent.workspaceFiles ?? [];
 
   return (
     <div className="p-6 space-y-6 overflow-auto">
@@ -382,42 +807,40 @@ function AgentDetail({
         </div>
       </div>
 
+      {/* Allowed Tools */}
+      <AgentToolsEditor
+        agent={agent}
+        allToolGroups={agentsData.allToolGroups}
+        onUpdated={onAgentUpdated}
+      />
+
+      {/* Skills */}
+      <AgentSkillsEditor
+        agent={agent}
+        allSkillNames={agentsData.allSkillNames}
+        onUpdated={onAgentUpdated}
+      />
+
       {/* Workspace files */}
       <div className="space-y-1">
         <div className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
           Workspace Files
         </div>
         <div className="space-y-2">
-          {WORKSPACE_FILES.map(({ key, label, icon: Icon }) => {
-            const content = workspace[key];
-            const isExpanded = expandedFile === key;
-            return (
-              <div key={key} className="bg-surface-1 rounded-xl border border-surface-3/50 overflow-hidden">
-                <button
-                  onClick={() => setExpandedFile(isExpanded ? null : key)}
-                  className="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-surface-2/50 transition-colors"
-                >
-                  <Icon className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
-                  <span className="text-xs font-medium text-slate-300">{label}</span>
-                  {content ? (
-                    <span className="ml-auto text-[10px] text-slate-600">
-                      {content.split("\n").length} lines
-                    </span>
-                  ) : (
-                    <span className="ml-auto text-[10px] text-slate-600 italic">not found</span>
-                  )}
-                </button>
-                {isExpanded && content && (
-                  <div className="border-t border-surface-3/30 px-4 py-3 max-h-80 overflow-auto">
-                    <div
-                      className="prose-chat text-[12px]"
-                      dangerouslySetInnerHTML={{ __html: marked.parse(content) as string }}
-                    />
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {workspaceFiles.length > 0 ? (
+            workspaceFiles.map((file) => (
+              <WorkspaceFileEditor
+                key={file.key}
+                agentId={agent.id}
+                file={file}
+                onSaved={onAgentUpdated}
+              />
+            ))
+          ) : (
+            <div className="text-xs text-slate-500 italic py-4 text-center">
+              No workspace files found
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -477,9 +900,9 @@ export default function AgentsPage() {
     return (
       <AgentDetail
         agent={selectedAgent}
-        workspace={selectedAgent.workspace ?? data.workspace}
-        defaults={data.defaults}
+        agentsData={data}
         onBack={() => setSelected(null)}
+        onAgentUpdated={load}
       />
     );
   }

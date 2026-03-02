@@ -1353,13 +1353,21 @@ export default function register(api: OpenClawPluginApi) {
               ? join(rootDir, "workspaces/lloyd")
               : join(rootDir, `workspaces/${id}`);
 
-          // Read per-agent workspace files
-          const agentWorkspace: Record<string, string | null> = {
-            agents: readFileOpt(join(agentWorkspaceDir, "AGENTS.md")),
-            soul: readFileOpt(join(agentWorkspaceDir, "SOUL.md")),
-            identity: readFileOpt(join(agentWorkspaceDir, "IDENTITY.md")),
-            memory: readFileOpt(join(agentWorkspaceDir, "MEMORY.md")),
-          };
+          // Read per-agent workspace files (dynamic discovery)
+          const agentWorkspace: Record<string, string | null> = {};
+          const workspaceFiles: { name: string; key: string; content: string | null }[] = [];
+          if (existsSync(agentWorkspaceDir)) {
+            for (const entry of readdirSync(agentWorkspaceDir)) {
+              if (!entry.endsWith(".md") || entry.startsWith(".")) continue;
+              const fullPath = join(agentWorkspaceDir, entry);
+              try { if (!statSync(fullPath).isFile()) continue; } catch { continue; }
+              const key = entry.replace(/\.md$/, "").toLowerCase();
+              const content = readFileOpt(fullPath);
+              agentWorkspace[key] = content;
+              workspaceFiles.push({ name: entry, key, content });
+            }
+            workspaceFiles.sort((a, b) => a.name.localeCompare(b.name));
+          }
 
           return {
             id,
@@ -1372,9 +1380,11 @@ export default function register(api: OpenClawPluginApi) {
             enabledModels,
             disabledTools,
             toolsAllow: a.tools?.allow ?? null,
+            skills: a.skills ?? null,
             maxConcurrent: defaults.maxConcurrent ?? null,
             subagentMaxConcurrent: defaults.subagents?.maxConcurrent ?? null,
             workspace: agentWorkspace,
+            workspaceFiles,
             workspacePath: agentWorkspaceDir,
           };
         });
@@ -1387,7 +1397,114 @@ export default function register(api: OpenClawPluginApi) {
           memory: readFileOpt(join(workspaceDir, "MEMORY.md")),
         };
 
-        jsonResponse(res, { agents, workspace, defaults });
+        // Collect all available tool names and skill names for the UI
+        const allToolGroups = TOOL_GROUPS.map((g) => ({ source: g.source, tools: g.tools }));
+        const wsSkills = parseSkillDir(workspaceSkillsDir);
+        const bdSkills = parseSkillDir(bundledSkillsDir);
+        const allSkillNames = [...wsSkills, ...bdSkills].map((s) => s.name);
+
+        jsonResponse(res, { agents, workspace, defaults, allToolGroups, allSkillNames });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/agent-tools-update ───────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/agent-tools-update",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { jsonResponse(res, { error: "POST only" }, 405); return; }
+      try {
+        const body = JSON.parse(await readBody(req));
+        const { agentId, tools } = body;
+        if (!agentId || typeof agentId !== "string") { jsonResponse(res, { error: "Missing agentId" }, 400); return; }
+        if (tools !== null && !Array.isArray(tools)) { jsonResponse(res, { error: "tools must be string[] or null" }, 400); return; }
+
+        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        const agentList: any[] = config.agents?.list || [];
+        const agent = agentList.find((a: any) => a.id === agentId);
+        if (!agent) { jsonResponse(res, { error: `Agent '${agentId}' not found` }, 404); return; }
+
+        if (tools === null) {
+          if (agent.tools) { delete agent.tools.allow; if (Object.keys(agent.tools).length === 0) delete agent.tools; }
+        } else {
+          if (!agent.tools) agent.tools = {};
+          agent.tools.allow = tools;
+        }
+
+        writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n");
+        jsonResponse(res, { ok: true, agentId, tools });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/agent-skills-update ────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/agent-skills-update",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { jsonResponse(res, { error: "POST only" }, 405); return; }
+      try {
+        const body = JSON.parse(await readBody(req));
+        const { agentId, skills } = body;
+        if (!agentId || typeof agentId !== "string") { jsonResponse(res, { error: "Missing agentId" }, 400); return; }
+        if (skills !== null && !Array.isArray(skills)) { jsonResponse(res, { error: "skills must be string[] or null" }, 400); return; }
+
+        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        const agentList: any[] = config.agents?.list || [];
+        const agent = agentList.find((a: any) => a.id === agentId);
+        if (!agent) { jsonResponse(res, { error: `Agent '${agentId}' not found` }, 404); return; }
+
+        if (skills === null) {
+          delete agent.skills;
+        } else {
+          agent.skills = skills;
+        }
+
+        writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n");
+        jsonResponse(res, { ok: true, agentId, skills });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/agent-file-save ────────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/agent-file-save",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { jsonResponse(res, { error: "POST only" }, 405); return; }
+      try {
+        const body = JSON.parse(await readBody(req));
+        const { agentId, fileName, content } = body;
+        if (!agentId || !fileName || typeof content !== "string") {
+          jsonResponse(res, { error: "Missing agentId, fileName, or content" }, 400); return;
+        }
+        if (!fileName.endsWith(".md") || fileName.includes("/") || fileName.includes("\\") || fileName.includes("..")) {
+          jsonResponse(res, { error: "Invalid fileName — must be a simple .md filename" }, 400); return;
+        }
+
+        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        const agentList: any[] = config.agents?.list || [];
+        const agent = agentList.find((a: any) => a.id === agentId);
+        if (!agent) { jsonResponse(res, { error: `Agent '${agentId}' not found` }, 404); return; }
+
+        const agentWorkspaceDir = agent.workspace
+          ? agent.workspace.replace(/^~/, homedir())
+          : join(rootDir, `workspaces/${agentId}`);
+
+        const filePath = join(agentWorkspaceDir, fileName);
+        if (!filePath.startsWith(agentWorkspaceDir)) {
+          jsonResponse(res, { error: "Path traversal detected" }, 403); return;
+        }
+
+        writeFileSync(filePath, content);
+        jsonResponse(res, { ok: true, agentId, fileName });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
