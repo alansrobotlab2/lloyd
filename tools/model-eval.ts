@@ -118,7 +118,7 @@ const TOOLS_OPENAI = [
   {
     type: "function" as const,
     function: {
-      name: "memory_search",
+      name: "qmd_search",
       description: "Search the user's memory/notes vault for relevant content",
       parameters: {
         type: "object",
@@ -133,7 +133,7 @@ const TOOLS_OPENAI = [
   {
     type: "function" as const,
     function: {
-      name: "web_search",
+      name: "http_search",
       description: "Search the web for current information",
       parameters: {
         type: "object",

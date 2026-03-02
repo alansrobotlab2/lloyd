@@ -1,7 +1,7 @@
 /**
  * index.ts — web-local OpenClaw plugin (Phase 5 — MCP proxy)
  *
- * Proxies web_search, web_fetch, and http_request through the shared MCP server
+ * Proxies http_search, http_fetch, and http_request through the shared MCP server
  * subprocess (extensions/mcp-server/server.py) via McpStdioClient (JSON-RPC 2.0 stdio).
  *
  * Previously: inline implementation using execFile + linkedom + @mozilla/readability.
@@ -13,16 +13,16 @@ import { McpStdioClient } from "../memory-graph/mcp-client.js";
 
 export default function register(api: OpenClawPluginApi) {
   api.logger.info?.(
-    "web-local: registering web_search + web_fetch + http_request (proxied through MCP server)",
+    "web-local: registering http_search + http_fetch + http_request (proxied through MCP server)",
   );
 
   const mcpClient = new McpStdioClient();
   process.on("exit", () => mcpClient.destroy());
 
-  // ── web_search ─────────────────────────────────────────────────────────────
+  // ── http_search ────────────────────────────────────────────────────────────
 
   api.registerTool({
-    name: "web_search",
+    name: "http_search",
     label: "Web Search",
     description:
       "Search the web using Google. Returns a list of results with title, URL, and snippet.",
@@ -41,19 +41,19 @@ export default function register(api: OpenClawPluginApi) {
     },
     async execute(_id: string, params: { query: string; count?: number }) {
       try {
-        const content = await mcpClient.callTool("web_search", params as Record<string, unknown>);
+        const content = await mcpClient.callTool("http_search", params as Record<string, unknown>);
         const text = content.map((c) => c.text).join("") || "(no result)";
         return { content: [{ type: "text" as const, text }] };
       } catch (err: any) {
-        return { content: [{ type: "text" as const, text: `web_search error: ${err.message}` }] };
+        return { content: [{ type: "text" as const, text: `http_search error: ${err.message}` }] };
       }
     },
   });
 
-  // ── web_fetch ──────────────────────────────────────────────────────────────
+  // ── http_fetch ─────────────────────────────────────────────────────────────
 
   api.registerTool({
-    name: "web_fetch",
+    name: "http_fetch",
     label: "Fetch Web Page",
     description:
       "Fetch a public web page and extract its readable content as clean markdown or text. " +
@@ -91,11 +91,11 @@ export default function register(api: OpenClawPluginApi) {
       if (params.maxChars !== undefined) mcpArgs.max_chars = params.maxChars;
 
       try {
-        const content = await mcpClient.callTool("web_fetch", mcpArgs);
+        const content = await mcpClient.callTool("http_fetch", mcpArgs);
         const text = content.map((c) => c.text).join("") || "(no result)";
         return { content: [{ type: "text" as const, text }] };
       } catch (err: any) {
-        return { content: [{ type: "text" as const, text: `web_fetch error: ${err.message}` }] };
+        return { content: [{ type: "text" as const, text: `http_fetch error: ${err.message}` }] };
       }
     },
   });
@@ -111,7 +111,7 @@ export default function register(api: OpenClawPluginApi) {
       "that needs custom headers, a request body, or non-GET methods. " +
       "127.0.0.1 (loopback) is allowed for local container services. " +
       "Other private/internal IPs are blocked. " +
-      "For reading public web pages as readable text, use web_fetch instead.",
+      "For reading public web pages as readable text, use http_fetch instead.",
     parameters: {
       type: "object" as const,
       properties: {

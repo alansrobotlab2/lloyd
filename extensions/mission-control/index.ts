@@ -982,7 +982,7 @@ export default function register(api: OpenClawPluginApi) {
     },
     {
       source: "mcp-tools",
-      tools: ["memory_search", "memory_get", "memory_write", "tag_search", "tag_explore", "vault_overview", "prefill_context", "web_search", "web_fetch", "http_request", "file_read", "file_write", "file_edit", "file_glob", "file_grep", "run_bash"],
+      tools: ["qmd_search", "qmd_get", "memory_write", "tag_search", "tag_explore", "vault_overview", "prefill_context", "http_search", "http_fetch", "http_request", "file_read", "file_write", "file_edit", "file_patch", "file_glob", "file_grep", "run_bash", "bg_exec", "bg_process"],
     },
     {
       source: "clawdeck",

@@ -166,7 +166,7 @@ function extractToolResultSummary(msg) {
   const text = (msg.content || []).find(c => c.type === 'text')?.text || '';
   const details = msg.details || {};
 
-  if (toolName === 'memory_search') {
+  if (toolName === 'qmd_search') {
     try {
       const parsed = JSON.parse(text);
       const n = parsed.results?.length ?? 0;
@@ -176,7 +176,7 @@ function extractToolResultSummary(msg) {
     } catch {}
   }
 
-  if (toolName === 'memory_get') {
+  if (toolName === 'qmd_get') {
     try {
       const parsed = JSON.parse(text);
       if (!parsed.text) return { ok: false, text: 'empty' };
@@ -206,7 +206,7 @@ function extractToolResultSummary(msg) {
     return { ok: true, text: firstLine || `${text.length} bytes` };
   }
 
-  if (toolName === 'web_fetch' || toolName === 'web_search') {
+  if (toolName === 'http_fetch' || toolName === 'http_search') {
     if (msg.isError) return { ok: false, text: text.slice(0, 80).replace(/\n/g, ' ') };
     const lines = text.split('\n').filter(Boolean);
     return { ok: true, text: (lines[0] || '').slice(0, 70) + (lines.length > 1 ? ` (+${lines.length - 1})` : '') };

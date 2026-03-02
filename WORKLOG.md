@@ -1,13 +1,39 @@
 # OpenClaw Work Log
 
+## 2026-03-02 — Add file_patch, bg_exec, bg_process MCP Tools
+
+**Type:** Feature
+**Files modified:** `~/Projects/lloyd-services/tool_services.py`, `extensions/mcp-tools/index.ts`, `openclaw.json`, `extensions/mission-control/index.ts`
+
+- **file_patch:** Unified diff applicator — parses `diff -u`/`git diff` format, supports create/modify/delete operations, multi-hunk context matching with +/-5 line fuzzy tolerance, atomic validation, 500KB limit
+- **bg_exec:** Background process launcher — starts shell commands via `subprocess.Popen`, returns session ID, daemon reader thread for output buffering, auto-kill watchdog, max 20 concurrent sessions
+- **bg_process:** Session manager — list/poll/log/write/kill actions, ring buffer (5000 lines), auto-expire completed sessions after 1h, cleanup loop in `_lifespan`
+- **Config:** Added to coder, operator, tester agent allowlists; TOOL_GROUPS updated to 19 tools
+- **Tested:** 17/17 tests pass (create/modify/delete/multi-hunk patches, bg start/list/log/kill/stdin-write)
+
+---
+
+## 2026-03-02 — Rename MCP Tools to Avoid Name Collisions + Mission Control Agent Editor
+
+**Type:** Feature / Refactor
+**Files modified:** `~/Projects/lloyd-services/tool_services.py`, `extensions/mcp-tools/index.ts`, `openclaw.json`, `extensions/mission-control/index.ts`, `extensions/mission-control/web/src/components/pages/AgentsPage.tsx`, `extensions/mission-control/web/src/api.ts`, 3 agent system prompts, 8 agent tools.json files, 16 docs/testing/tooling files
+
+- **Agent management UI:** Added per-agent tool allow list editing, skills editing, and editable workspace .md files (save/cancel) to Mission Control's AgentsPage
+- **Backend:** 3 new POST endpoints (`agent-tools-update`, `agent-skills-update`, `agent-file-save`), dynamic workspace file discovery, full tool group + skill metadata in API
+- **Tool name collision fix:** Renamed 4 MCP tools to avoid duplicating built-in OpenClaw names — `memory_search→qmd_search`, `memory_get→qmd_get`, `web_search→http_search`, `web_fetch→http_fetch`
+- **Scope:** Updated tool definitions, proxy registrations, config allowlists, TOOL_GROUPS, agent system prompts, docs, eval tools, disabled extensions, and vault workspace files
+- **Verified:** No duplicate tool names across groups; per-agent toggles work independently for MCP vs built-in versions
+
+---
+
 ## 2026-03-01 — Migrate Memory Tools to MCP-Owned
 
 **Type:** Feature / Migration
 **Files modified:** `~/Projects/lloyd-services/tool_services.py`, `extensions/mcp-tools/index.ts`, `openclaw.json`
 
-- **Goal:** Take ownership of `memory_search` and `memory_get` tools — move from built-in memory-core (QMD) to MCP-owned versions in tool_services.py
-- **memory_search:** Now returns structured JSON `{results: [{path, score, snippet, startLine, endLine, source, citation}], mode}`. Switched from `qmd query` (CUDA, 2.5min cold start) to `qmd search` (BM25, 0.3s). Added `min_score` param
-- **memory_get:** Now returns JSON `{path, text}` instead of raw text. Changed `end_line` to `num_lines` (count-based, matching built-in's `from`/`lines` pattern)
+- **Goal:** Take ownership of `qmd_search` and `qmd_get` tools — move from built-in memory-core (QMD) to MCP-owned versions in tool_services.py
+- **qmd_search:** Now returns structured JSON `{results: [{path, score, snippet, startLine, endLine, source, citation}], mode}`. Switched from `qmd query` (CUDA, 2.5min cold start) to `qmd search` (BM25, 0.3s). Added `min_score` param
+- **qmd_get:** Now returns JSON `{path, text}` instead of raw text. Changed `end_line` to `num_lines` (count-based, matching built-in's `from`/`lines` pattern)
 - **Disabled built-in:** Removed `memory` section from openclaw.json entirely (prevents memory-core from registering duplicate tools)
 - **Tested:** Both tools work through MCP SSE proxy, gateway has no tool conflicts, agent successfully calls MCP versions
 
@@ -77,9 +103,9 @@ Moved the full context-prefetch pipeline from TypeScript into a dedicated `prefi
 
 Completed tool unification — all 5 memory tools now route through the MCP server subprocess in OpenClaw:
 
-- **`index.ts`**: added `proxyTool()` calls for `memory_search` and `memory_get`; plugin registration silently overrides the built-in `memory-core` tools (no collision errors); startup log now reads "5 tools via MCP"
-- **`server.py`**: added `json_output: bool = False` to `memory_search`; when `True`, returns `{"results": [{path, score, snippet}]}` JSON instead of human-readable text
-- **`prefill.ts`**: both `memory_search` calls now pass `json_output: true`; result parsing handles both built-in QMD format (`details.results`) and MCP plugin format (`content[].text` parsed as JSON) for graceful fallback compatibility
+- **`index.ts`**: added `proxyTool()` calls for `qmd_search` and `qmd_get`; plugin registration silently overrides the built-in `memory-core` tools (no collision errors); startup log now reads "5 tools via MCP"
+- **`server.py`**: added `json_output: bool = False` to `qmd_search`; when `True`, returns `{"results": [{path, score, snippet}]}` JSON instead of human-readable text
+- **`prefill.ts`**: both `qmd_search` calls now pass `json_output: true`; result parsing handles both built-in QMD format (`details.results`) and MCP plugin format (`content[].text` parsed as JSON) for graceful fallback compatibility
 - **Verified**: gateway HTTP test confirms both tools return MCP-backed results; prefill vector search preserved via `json_output` JSON path
 
 ## 2026-02-26 — MCP Server Phase 3: Fully Standalone Tools
@@ -89,8 +115,8 @@ Completed tool unification — all 5 memory tools now route through the MCP serv
 
 Decoupled the MCP server from the OpenClaw gateway entirely:
 
-- **memory_search**: replaced httpx proxy with `subprocess.run([qmd, "search", ..., "--json"])` — BM25 search via `~/.bun/bin/qmd`; strips `qmd://obsidian/` prefix from paths and `@@...@@` diff markers from snippets
-- **memory_get**: replaced httpx proxy with direct `(VAULT / path).read_text()` — includes path traversal check and optional line range slicing
+- **qmd_search**: replaced httpx proxy with `subprocess.run([qmd, "search", ..., "--json"])` — BM25 search via `~/.bun/bin/qmd`; strips `qmd://obsidian/` prefix from paths and `@@...@@` diff markers from snippets
+- **qmd_get**: replaced httpx proxy with direct `(VAULT / path).read_text()` — includes path traversal check and optional line range slicing
 - **Removed**: `httpx` from deps/imports, `GATEWAY_URL` constant, `_gateway_invoke()` function
 - **Verified**: both tools return correct results with gateway explicitly stopped
 
@@ -117,7 +143,7 @@ Built a standalone Python MCP server exposing all 5 memory tools via the MCP std
 
 - **FastMCP** (`mcp[cli]`) with inline script deps — `uv run server.py` handles all deps automatically
 - **Tag tools** (tag_search, tag_explore, vault_overview): Python vault scanner + in-process tag index; ports TypeScript logic from memory-graph/scanner.ts and tag-index.ts; 286 docs / 144 tags indexed
-- **Gateway proxy tools** (memory_search, memory_get): thin `httpx` wrappers to OpenClaw gateway at `127.0.0.1:18789`
+- **Gateway proxy tools** (qmd_search, qmd_get): thin `httpx` wrappers to OpenClaw gateway at `127.0.0.1:18789`
 - **Claude Code config**: `~/.claude/mcp.json` with `distrobox-enter lloyd -- uv run server.py` so gateway is reachable
 - Phase 2 (OpenClaw plugin proxy via mcp-client.ts) deferred
 
@@ -132,7 +158,7 @@ Mapped the full `before_prompt_build` pipeline where memory-prefetch (priority 0
 - The two plugins are **complementary** (vector search vs tag matching) but produce **overlapping documents** without deduplication
 - memory-graph has **no size cap** — combined injection can exceed 10k+ chars
 - Both plugins perform **duplicate keyword extraction** (same filler removal, same envelope stripping)
-- memory-prefetch uses **HTTP gateway round-trips** to call memory_search/memory_get instead of direct invocation
+- memory-prefetch uses **HTTP gateway round-trips** to call qmd_search/qmd_get instead of direct invocation
 - memory-graph injects **metadata only** (no content), so tag-only matches still require a follow-up tool call
 
 No code changes made. Improvement options documented for future implementation.
@@ -150,7 +176,7 @@ Merged memory-prefetch and memory-graph into a single unified `before_prompt_bui
 - **Single hook** runs tag matching (sync, 0ms) and vector search (async) in parallel within 2s budget
 - **Deduplicated** by path — each document appears once in the output
 - **Unified ranking**: `finalScore = 0.55*vectorScore + 0.35*tagScore + 0.10*crossBonus`
-- **Tiered output**: top 3 get full content via memory_get, next 5 get metadata/snippet only
+- **Tiered output**: top 3 get full content via qmd_get, next 5 get metadata/snippet only
 - **Single `<memory_context>` block** under shared 8000-char budget replaces separate `<memory_prefetch>` + `<vault_context>`
 - **Shared keyword extraction** in query.ts eliminates duplicate filler removal
 - Tag tools (tag_search, tag_explore, vault_overview) unchanged

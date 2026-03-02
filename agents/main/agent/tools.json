@@ -1,1 +1,6 @@
-{}
+{
+  "web_search": false,
+  "memory_get": false,
+  "web_fetch": false,
+  "memory_search": false
+}

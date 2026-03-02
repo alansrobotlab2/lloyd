@@ -5,10 +5,10 @@
  * transport at http://127.0.0.1:8093. The server runs as a systemd service
  * (lloyd-tool-mcp.service).
  *
- * Tools (16): tag_search, tag_explore, vault_overview, memory_search,
- *   memory_get, memory_write, prefill_context, web_search, web_fetch,
- *   http_request, file_read, file_write, file_edit, file_glob, file_grep,
- *   run_bash
+ * Tools (19): tag_search, tag_explore, vault_overview, qmd_search,
+ *   qmd_get, memory_write, prefill_context, http_search, http_fetch,
+ *   http_request, file_read, file_write, file_edit, file_patch, file_glob,
+ *   file_grep, run_bash, bg_exec, bg_process
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -184,8 +184,8 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "memory_search",
-    "Memory Search",
+    "qmd_search",
+    "QMD Search",
     "Mandatory recall step: search the Obsidian knowledge vault before answering questions " +
       "about prior work, decisions, dates, people, preferences, or todos. Uses BM25 full-text " +
       "search across the indexed vault. Returns JSON with matching document paths, relevance " +
@@ -202,10 +202,10 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "memory_get",
-    "Memory Get",
+    "qmd_get",
+    "QMD Get",
     "Read a specific file from the Obsidian vault by relative path. " +
-      "Use after memory_search to pull only the needed lines and keep context small. " +
+      "Use after qmd_search to pull only the needed lines and keep context small. " +
       "path: relative from vault root, e.g. 'projects/alfie/alfie.md'.",
     {
       type: "object",
@@ -236,8 +236,8 @@ export default function register(api: OpenClawPluginApi) {
   // ── Web tools ─────────────────────────────────────────────────────────
 
   proxyTool(
-    "web_search",
-    "Web Search",
+    "http_search",
+    "HTTP Search",
     "Search the web using DuckDuckGo. Returns a list of results with title, URL, and snippet.",
     {
       type: "object",
@@ -256,7 +256,7 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   api.registerTool({
-    name: "web_fetch",
+    name: "http_fetch",
     label: "Fetch Web Page",
     description:
       "Fetch a public web page and extract its readable content as clean markdown or text. " +
@@ -294,11 +294,11 @@ export default function register(api: OpenClawPluginApi) {
       if (params.maxChars !== undefined) mcpArgs.max_chars = params.maxChars;
 
       try {
-        const content = await mcpClient.callTool("web_fetch", mcpArgs, WEB_TIMEOUT_MS);
+        const content = await mcpClient.callTool("http_fetch", mcpArgs, WEB_TIMEOUT_MS);
         const text = content.map((c: any) => c.text).join("") || "(no result)";
         return { content: [{ type: "text" as const, text }] };
       } catch (err: any) {
-        return { content: [{ type: "text" as const, text: `web_fetch error: ${err.message}` }] };
+        return { content: [{ type: "text" as const, text: `http_fetch error: ${err.message}` }] };
       }
     },
   });
@@ -312,7 +312,7 @@ export default function register(api: OpenClawPluginApi) {
       "that needs custom headers, a request body, or non-GET methods. " +
       "127.0.0.1 (loopback) is allowed for local container services. " +
       "Other private/internal IPs are blocked. " +
-      "For reading public web pages as readable text, use web_fetch instead.",
+      "For reading public web pages as readable text, use http_fetch instead.",
     parameters: {
       type: "object" as const,
       properties: {
@@ -408,6 +408,26 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
+    "file_patch",
+    "Apply Patch",
+    "Apply a unified diff patch (like `diff -u` or `git diff` output) to one or more files. " +
+      "Supports creating new files (--- /dev/null), deleting files (+++ /dev/null), and " +
+      "modifying files with multi-hunk context-based matching. All paths must be within $HOME. " +
+      "Returns a summary of operations (A = added, M = modified, D = deleted).",
+    {
+      type: "object",
+      properties: {
+        patch: { type: "string", description: "Unified diff text" },
+        root: {
+          type: "string",
+          description: "Base directory for relative paths in the diff (default: $HOME)",
+        },
+      },
+      required: ["patch"],
+    },
+  );
+
+  proxyTool(
     "file_glob",
     "Glob Files",
     "Find files matching a glob pattern. Returns up to 200 matching paths relative to root. " +
@@ -459,5 +479,48 @@ export default function register(api: OpenClawPluginApi) {
     RUN_BASH_TIMEOUT_MS,
   );
 
-  api.logger.info?.("mcp-tools: registered 16 tools + prefill hook via single MCP server");
+  proxyTool(
+    "bg_exec",
+    "Background Execute",
+    "Start a background shell command and return a session ID. " +
+      "Use bg_process to poll output, read logs, write to stdin, or kill. " +
+      "Ideal for long-running builds, servers, and watch processes.",
+    {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Bash command string (passed to bash -c)" },
+        cwd: { type: "string", description: "Working directory (default: $HOME; must be within $HOME)" },
+        timeout: { type: "integer", description: "Auto-kill timeout in seconds (default 1800, max 7200)" },
+      },
+      required: ["command"],
+    },
+    RUN_BASH_TIMEOUT_MS,
+  );
+
+  proxyTool(
+    "bg_process",
+    "Manage Background Process",
+    "Manage background processes started by bg_exec. " +
+      "Actions: list (show all sessions), poll (wait for new output), " +
+      "log (get output buffer), write (send to stdin), kill (terminate).",
+    {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list", "poll", "log", "write", "kill"],
+          description: "Action to perform",
+        },
+        session_id: { type: "string", description: "Session ID (required for poll/log/write/kill)" },
+        timeout: { type: "integer", description: "Poll timeout in seconds (default 10, max 60)" },
+        text: { type: "string", description: "Text to write to stdin (for write action)" },
+        offset: { type: "integer", description: "Line offset for log action (0 = last N lines)" },
+        limit: { type: "integer", description: "Max lines to return for log (default 100, max 500)" },
+      },
+      required: ["action"],
+    },
+    70_000, // poll can block up to 60s
+  );
+
+  api.logger.info?.("mcp-tools: registered 19 tools + prefill hook via single MCP server");
 }

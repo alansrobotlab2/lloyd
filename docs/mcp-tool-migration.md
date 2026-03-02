@@ -19,16 +19,16 @@ The OpenClaw chat gateway is crashing repeatedly due to a fragile MCP subprocess
 - [x] `tag_search` — search vault by frontmatter tags (AND/OR mode, type filter)
 - [x] `tag_explore` — tag co-occurrence and bridging documents
 - [x] `vault_overview` — vault statistics (doc counts, type distribution, hubs)
-- [x] `memory_search` — BM25 full-text search via qmd subprocess
-- [x] `memory_get` — read vault file by relative path (with line range)
+- [x] `qmd_search` — BM25 full-text search via qmd subprocess
+- [x] `qmd_get` — read vault file by relative path (with line range)
 - [x] `memory_write` — create/overwrite vault file
 
 ### Prefill Pipeline
 - [x] `prefill_context` — full memory prefill pipeline (tag match + BM25 + GLM keywords + merge/rank + format)
 
 ### Web Tools
-- [x] `web_search` — DuckDuckGo search
-- [x] `web_fetch` — fetch URL + readability extraction → markdown/text
+- [x] `http_search` — DuckDuckGo search
+- [x] `http_fetch` — fetch URL + readability extraction → markdown/text
 - [x] `http_request` — raw HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD)
 
 ### File System Tools
@@ -169,8 +169,8 @@ html2text >= 2024.0
 2. **Tool smoke test:** Send JSON-RPC `tools/call` for each tool over stdin
 3. **Integration test:** Restart gateway, send a chat message, verify:
    - Prefill context appears in logs
-   - Memory tools work (tag_search, memory_search, memory_get)
-   - Web tools work (web_search, web_fetch)
+   - Memory tools work (tag_search, qmd_search, qmd_get)
+   - Web tools work (http_search, http_fetch)
    - File tools work (file_read, file_glob)
    - run_bash works
 4. **Crash resilience:** Kill the MCP server process mid-call, verify the gateway session doesn't get stuck

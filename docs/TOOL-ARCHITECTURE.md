@@ -82,11 +82,11 @@ Transport: MCP/SSE proxy to `127.0.0.1:8093` (`tool_services.py`)
 | `tag_search` | Vault | default |
 | `tag_explore` | Vault | default |
 | `vault_overview` | Vault | default |
-| `memory_search` | Memory | default |
-| `memory_get` | Memory | default |
+| `qmd_search` | Memory | default |
+| `qmd_get` | Memory | default |
 | `memory_write` | Memory | default |
-| `web_search` | Web | 20s |
-| `web_fetch` | Web | 20s |
+| `http_search` | Web | 20s |
+| `http_fetch` | Web | 20s |
 | `http_request` | Web | 20s |
 | `file_read` | File | default |
 | `file_write` | File | default |
@@ -147,13 +147,13 @@ Before tools reach the LLM, `applyToolPolicyPipeline()` filters based on:
 
 ## Name Collisions
 
-The MCP plugin registers `memory_search`, `memory_get`, `web_search`, and `web_fetch` — names that also exist as built-in tools. Resolution:
+The MCP plugin previously registered `memory_search`, `memory_get`, `web_search`, and `web_fetch` — names that collided with built-in tools. These have been renamed to avoid collisions:
 
-- Built-in `web_search` / `web_fetch` are **disabled** in config (`tools.web.search.enabled: false`)
+- MCP `qmd_search` / `qmd_get` — no longer shadow built-in `memory_search` / `memory_get`
+- MCP `http_search` / `http_fetch` — no longer collide with built-in `web_search` / `web_fetch`
+- Built-in `web_search` / `web_fetch` remain **disabled** in config (`tools.web.search.enabled: false`)
 - Built-in `memory_search` / `memory_get` are active (QMD backend enabled)
 - `resolvePluginTools()` checks `existingToolNames` and skips plugin tools that collide with already-registered built-ins
-
-This means the MCP-proxied `memory_search`/`memory_get` may be shadowed by the built-in QMD versions. The MCP `web_search`/`web_fetch` register without collision since the built-ins are disabled.
 
 ## Tool Count Summary
 

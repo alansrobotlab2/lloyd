@@ -59,22 +59,22 @@
       "id": "tool-02",
       "category": "tool-selection",
       "prompt": "Search my memory/notes for anything related to 'Alfie' and tell me what you find.",
-      "expectedTools": ["memory_search"],
+      "expectedTools": ["qmd_search"],
       "mockToolResults": {
-        "memory_search": "Found 2 results:\n1. projects/alfie/alfie.md — Project notes for Alfie, a home automation system using Raspberry Pi.\n2. projects/alfie/setup.md — Alfie setup instructions and configuration."
+        "qmd_search": "Found 2 results:\n1. projects/alfie/alfie.md — Project notes for Alfie, a home automation system using Raspberry Pi.\n2. projects/alfie/setup.md — Alfie setup instructions and configuration."
       },
-      "rubric": "Must call memory_search with a query containing 'Alfie' or 'alfie'. Should report findings from mock results.",
+      "rubric": "Must call qmd_search with a query containing 'Alfie' or 'alfie'. Should report findings from mock results.",
       "maxTurns": 2
     },
     {
       "id": "tool-03",
       "category": "tool-selection",
       "prompt": "What is the current weather in San Francisco? Search the web to find out.",
-      "expectedTools": ["web_search"],
+      "expectedTools": ["http_search"],
       "mockToolResults": {
-        "web_search": "San Francisco weather: 58°F, partly cloudy. High of 62°F expected today. Light winds from the west."
+        "http_search": "San Francisco weather: 58°F, partly cloudy. High of 62°F expected today. Light winds from the west."
       },
-      "rubric": "Must call web_search with a query about San Francisco weather. Should report the mock weather data.",
+      "rubric": "Must call http_search with a query about San Francisco weather. Should report the mock weather data.",
       "maxTurns": 2
     },
     {
@@ -92,12 +92,12 @@
       "id": "tool-05",
       "category": "tool-selection",
       "prompt": "I need to know about the memory-graph plugin. First check the file at /home/alansrobotlab/.openclaw/extensions/memory-graph/index.ts, then search memory for any related notes.",
-      "expectedTools": ["file_read", "memory_search"],
+      "expectedTools": ["file_read", "qmd_search"],
       "mockToolResults": {
         "file_read": "import { McpStdioClient } from './mcp-client.js';\n// memory-graph plugin: registers tag search tools\nexport default function register(api) { ... }",
-        "memory_search": "No results found for 'memory-graph plugin'."
+        "qmd_search": "No results found for 'memory-graph plugin'."
       },
-      "rubric": "Should call both file_read AND memory_search (order flexible). Both tools must be called.",
+      "rubric": "Should call both file_read AND qmd_search (order flexible). Both tools must be called.",
       "maxTurns": 3
     },
     {

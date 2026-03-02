@@ -43,11 +43,11 @@ MCP client, these carry over by simply pointing IronClaw at the running server e
 | `tag_search` | Memory |
 | `tag_explore` | Memory |
 | `vault_overview` | Memory |
-| `memory_search` | Memory |
-| `memory_get` | Memory |
+| `qmd_search` | Memory |
+| `qmd_get` | Memory |
 | `memory_write` | Memory |
-| `web_search` | Web |
-| `web_fetch` | Web |
+| `http_search` | Web |
+| `http_fetch` | Web |
 | `http_request` | Web |
 | `file_read` | Files |
 | `file_write` | Files |
