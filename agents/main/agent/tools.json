@@ -2,5 +2,11 @@
   "web_search": false,
   "memory_get": false,
   "web_fetch": false,
-  "memory_search": false
+  "memory_search": false,
+  "read": false,
+  "apply_patch": false,
+  "exec": false,
+  "write": false,
+  "process": false,
+  "edit": false
 }
