@@ -1,58 +1,6 @@
 {
   "version": 2,
   "runs": {
-    "508e5d98-f2a0-4976-9f5b-c2f04bfc6f25": {
-      "runId": "508e5d98-f2a0-4976-9f5b-c2f04bfc6f25",
-      "childSessionKey": "agent:operator:subagent:4a8e8638-523b-49df-9559-06dad8384274",
-      "requesterSessionKey": "agent:main:main",
-      "requesterOrigin": {
-        "channel": "webchat"
-      },
-      "requesterDisplayKey": "agent:main:main",
-      "task": "Create ClawDeck tasks for the following backlog items that are currently only in HEARTBEAT.md and not yet in ClawDeck. Use board_id: 1 (Lloyd board). Create each as a new task with appropriate name, description, and priority.\n\nItems to create:\n1. **Inbox pattern for vault** — Build an async drop zone for links, notes, and ideas in the Obsidian vault. A lightweight inbox that can be quickly captured to and processed later.\n2. **\"How Alan thinks\" notes** — Document Alan's mental models and decision frameworks in the vault. Capture recurring patterns in how he approaches problems and decisions.\n3. **Per-project MD site log** — Agent-maintained progress log inside each project directory. A running log of what's been done, decisions made, and next steps per project.\n4. **AUDIT.md checklist** — On-demand workspace health check file. A checklist Lloyd can run to audit the workspace for stale files, broken links, outdated memory, etc.\n5. **Mistral embeddings for memory** — Evaluate Mistral as a cheaper semantic search layer on top of QMD. OpenClaw supports Mistral embeddings natively.\n6. **QMD memory settings reevaluation** — Review MMR (λ=0.7), temporal decay (halfLifeDays=30), and session memory (retentionDays=30) settings after a few weeks of use. Enabled 2026-02-25.\n7. **daily-notes QMD collection persistence** — The daily-notes-main collection was manually added to index.yml (OpenClaw not generating it from paths[] config — possible bug). After any gateway restart, verify daily notes still surface in memory_search. If not, re-add the collection and run `openclaw memory index`.\n\nAfter creating all tasks, reply with a confirmation listing each task name and the assigned task ID.",
-      "cleanup": "keep",
-      "expectsCompletionMessage": true,
-      "spawnMode": "run",
-      "model": "anthropic/claude-sonnet-4-6",
-      "runTimeoutSeconds": 1200,
-      "createdAt": 1772558482032,
-      "startedAt": 1772558482227,
-      "archiveAtMs": 1772562082032,
-      "cleanupHandled": true,
-      "endedAt": 1772558497476,
-      "outcome": {
-        "status": "ok"
-      },
-      "endedReason": "subagent-complete",
-      "endedHookEmittedAt": 1772558503661,
-      "cleanupCompletedAt": 1772558503661
-    },
-    "e3b2a70d-358f-4ede-9c3b-99aacdf674ac": {
-      "runId": "e3b2a70d-358f-4ede-9c3b-99aacdf674ac",
-      "childSessionKey": "agent:orchestrator:subagent:9afd86ff-6526-4fb8-a33b-c26443acf2de",
-      "requesterSessionKey": "agent:main:main",
-      "requesterOrigin": {
-        "channel": "webchat"
-      },
-      "requesterDisplayKey": "agent:main:main",
-      "task": "Execute the following plan to enable ClawDeck tools for subagents:\n\n1. Edit ~/.openclaw/agents/main/agent/tools.json to set clawdeck_create_task and clawdeck_update_task to true\n\n2. Then spawn the operator subagent with the original task: \"Create ClawDeck tasks for the 7 HEARTBEAT.md backlog items that aren't in ClawDeck yet\"\n\n3. Once tasks are created, update HEARTBEAT.md to remove or mark as complete the items that are now in ClawDeck\n\n4. Report back with: which tools were enabled, which tasks were created (with task IDs), and whether HEARTBEAT.md was updated",
-      "cleanup": "keep",
-      "expectsCompletionMessage": true,
-      "spawnMode": "run",
-      "model": "anthropic/claude-sonnet-4-6",
-      "runTimeoutSeconds": 1200,
-      "createdAt": 1772558876565,
-      "startedAt": 1772558876774,
-      "archiveAtMs": 1772562476565,
-      "cleanupHandled": true,
-      "endedAt": 1772558989271,
-      "outcome": {
-        "status": "ok"
-      },
-      "endedReason": "subagent-complete",
-      "endedHookEmittedAt": 1772559009543,
-      "cleanupCompletedAt": 1772559009544
-    },
     "dff5b163-b272-43d5-b8ab-c36547308fbe": {
       "runId": "dff5b163-b272-43d5-b8ab-c36547308fbe",
       "childSessionKey": "agent:orchestrator:subagent:4d96e5cf-1c2a-44b1-b181-ab8b35af2212",
@@ -96,7 +44,98 @@
       "createdAt": 1772561555516,
       "startedAt": 1772561555690,
       "archiveAtMs": 1772565155516,
-      "cleanupHandled": false
+      "cleanupHandled": true,
+      "cleanupCompletedAt": 1772562236986,
+      "endedAt": 1772562236986,
+      "outcome": {
+        "status": "error",
+        "error": "killed"
+      },
+      "endedReason": "subagent-killed",
+      "suppressAnnounceReason": "killed",
+      "endedHookEmittedAt": 1772562236986
+    },
+    "8698897a-03d3-4253-9943-4e924ee3ff9e": {
+      "runId": "8698897a-03d3-4253-9943-4e924ee3ff9e",
+      "childSessionKey": "agent:orchestrator:subagent:ea4e3fbf-8075-4c66-b09d-e9df901f849f",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "Refine the Lloyd multi-agent workflow so Lloyd always delegates to Orchestrator, and Orchestrator runs the full pipeline. Use the operator subagent to make the file edits.\n\n## What to change\n\n### 1. Update `~/obsidian/agents/lloyd/AGENTS.md` — Task Routing section\n\nReplace the current \"Task Routing\" section (everything under `## Task Routing`) with:\n\n```markdown\n## Task Routing\n\nYou are a **UI + personal assistant**. Handle conversation and quick lookups directly. For any sustained work — code, research, config changes, multi-step tasks — delegate to the **Orchestrator**. Always. No exceptions.\n\n### Handle Directly\n- Conversation, greetings, voice responses\n- Quick file reads (`file_read`, `file_glob`), bash checks (`run_bash`)\n- Memory lookups (`qmd_search`, `qmd_get`, `tag_search`)\n- Daily note updates (`memory_write`)\n- Quick web searches (`http_search` for single-query lookups)\n- Scheduling (`cron`)\n- **Backlog / task queries** (`clawdeck_boards`, `clawdeck_tasks`, `clawdeck_next_task`, `clawdeck_get_task`)\n\n⚠️ **Never answer backlog or task questions from vault/memory — notes may be stale. Always query ClawDeck directly.**\n\n**Rule: if it needs more than a quick answer, delegate to Orchestrator.**\n\n### Always Delegate to Orchestrator\n\nFor everything else, spawn Orchestrator and let it manage the full pipeline:\n\n```\nsessions_spawn({ agentId: \"orchestrator\", task: \"...\", runtime: \"subagent\", mode: \"run\" })\n```\n\n**Orchestrator handles:**\n- Any code changes (new features, refactors, bug fixes, config changes)\n- Research tasks requiring web search + knowledge capture\n- Multi-step operations (read → analyze → plan → execute → test)\n- Anything touching files, services, or external systems\n- \"Implement X\", \"fix Y\", \"research and document Z\", \"audit and fix W\"\n\n**Never spawn coder, operator, researcher, or other subagents directly.** Orchestrator decides which agents to use and in what order.\n\n### What to put in the Orchestrator task prompt\n\nAlways include:\n1. **Goal** — what you want accomplished\n2. **Context** — relevant files, prior decisions, constraints\n3. **Rollback plan** — for config/system changes, note what to preserve\n4. **Expected output** — what you want back (diff, summary, docs written, etc.)\n\nOrchestrator will run: **planner → coder → tester → reviewer** as appropriate for the task.\n```\n\n(End of the Task Routing section replacement — keep everything else in AGENTS.md intact.)\n\n### 2. Write `~/obsidian/agents/lloyd/knowledge/workflows/lloyd-delegation-pattern.md`\n\n```markdown\n---\nsegment: agents\ntags: [workflows, multi-agent, orchestrator, delegation]\ncreated: 2026-03-03\n---\n\n# Workflow: Lloyd Delegation Pattern\n\n## Rule\nLloyd always delegates to Orchestrator. Never directly to coder, operator, researcher, or other subagents.\n\n## Why\n- Orchestrator knows how to sequence agents (planner → coder → tester → reviewer)\n- Direct delegation skips planning and testing steps\n- Orchestrator can adapt the pipeline based on task complexity\n- Keeps Lloyd available for conversation while Orchestrator runs async\n\n## How Lloyd Delegates\n\n```python\nsessions_spawn({\n  agentId: \"orchestrator\",\n  task: \"<full task description with context, constraints, rollback plan, expected output>\",\n  runtime: \"subagent\",\n  mode: \"run\"\n})\n```\n\n## What Orchestrator Does With It\n\nOrchestrator receives the task and spins up the appropriate pipeline:\n\n| Task Type | Pipeline |\n|-----------|----------|\n| Code change | planner → coder → tester → reviewer |\n| Config change | planner → operator → tester |\n| Research | researcher → memory (knowledge capture) |\n| Vault work | memory agent |\n| Service ops | operator |\n| Audit | auditor → reviewer |\n\n## Task Prompt Template (Lloyd → Orchestrator)\n\n```\n## Goal\n[What you want accomplished]\n\n## Context\n[Relevant files, prior decisions, constraints, links to docs]\n\n## Constraints\n[What NOT to change, rollback requirements, sensitivity level]\n\n## Expected Output\n[Diff, docs written, summary, ClawDeck task created, etc.]\n```\n\n## First Use\nThis pattern was established 2026-03-03 after implementing Lloyd's tool restriction (removing write/execute tools from Lloyd's allowlist to enforce delegation).\n```\n\n### 3. Update `~/obsidian/agents/lloyd/knowledge/workflows/README.md`\n\nAdd an entry:\n```\n- [lloyd-delegation-pattern.md](lloyd-delegation-pattern.md) — Lloyd always delegates to Orchestrator; Orchestrator runs planner→coder→tester→reviewer pipeline\n```\n\n## Instructions for Operator\n\nUse operator subagent to make the actual file edits. Pass the full content above and have operator write the files using file_write or run_bash with heredoc.\n\n## Report back with\n- Confirmation that AGENTS.md Task Routing section was updated (show the diff)\n- Confirmation that workflow docs were written\n- Any issues or things that needed adjustment",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-sonnet-4-6",
+      "runTimeoutSeconds": 300,
+      "createdAt": 1772561795606,
+      "startedAt": 1772561795815,
+      "archiveAtMs": 1772565395606,
+      "cleanupHandled": true,
+      "endedAt": 1772561874297,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "endedHookEmittedAt": 1772561880248,
+      "cleanupCompletedAt": 1772561880248
+    },
+    "5a5e2a25-4a3b-48a4-8668-2aed2c866231": {
+      "runId": "5a5e2a25-4a3b-48a4-8668-2aed2c866231",
+      "childSessionKey": "agent:orchestrator:subagent:372d3364-1488-4dad-8121-572b0ee3b865",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "## Goal\nFix the agents page in Mission Control — each agent card is displaying \"---\" instead of the agent's identity/summary line. This is likely a config field that's missing or was recently changed.\n\n## Context\n- OpenClaw config: `~/.openclaw/openclaw.json`\n- Agents list is under `agents.list[]`\n- Each agent likely has a `description` or `summary` or `label` field that the UI renders as the identity line on the agent card\n- A recent change (tool restriction work on 2026-03-03) touched `openclaw.json` — that may have introduced the issue\n- The agents page shows \"---\" for all agents instead of descriptive text\n\n## Steps\n\n### 1. Investigate\n- Read `~/.openclaw/openclaw.json` and look at each agent entry — what fields are present? Is there a `description`, `summary`, `bio`, `tagline`, or similar field?\n- Check the Mission Control UI source for how agent cards are rendered: `~/.npm-global/lib/node_modules/openclaw/dist/control-ui/assets/index-*.js` — grep for \"---\" or the field name used for the agent summary line\n- Check git diff on openclaw.json if it's in a git repo: `cd ~/.openclaw && git log --oneline -5 && git diff HEAD~1 openclaw.json`\n\n### 2. Identify the correct field\n- Find what field the UI expects for the per-agent identity line\n- Check if any agents currently have that field set (look at a working example if possible)\n\n### 3. Fix\n- Add the correct field to each agent in `openclaw.json` with an appropriate one-liner identity summary:\n  - `main` (Lloyd) — \"Voice assistant and personal AI for Alan\"\n  - `orchestrator` — \"Coordinates multi-agent pipelines: planner → coder → tester → reviewer\"\n  - `planner` — \"Breaks down tasks into structured plans and agent assignments\"\n  - `coder` — \"Implements code changes, refactors, and new features\"\n  - `tester` — \"Runs tests and validates changes work as expected\"\n  - `reviewer` — \"Reviews code and changes for quality, correctness, and style\"\n  - `operator` — \"Handles system operations, service management, and ClawDeck updates\"\n  - `researcher` — \"Web research and knowledge capture to the vault\"\n  - `memory` — \"Vault search, note creation, and knowledge management\"\n  - `auditor` — \"Audits workspace health, security, and consistency\"\n  (Adjust names/ids to match what's actually in openclaw.json)\n\n### 4. Restart gateway if needed\n- If the field change requires a gateway restart to take effect, do it:\n  ```bash\n  openclaw gateway restart && sleep 3 && openclaw gateway status\n  ```\n\n## Constraints\n- Back up `openclaw.json` before editing: `cp ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.bak.agent-descriptions`\n- Keep all existing fields intact — only ADD the description field\n- Use operator subagent for the actual file edits if possible\n\n## Expected Output\n- What field the UI uses for the agent summary line\n- Diff of changes to openclaw.json\n- Confirmation gateway was restarted (if needed)",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-sonnet-4-6",
+      "runTimeoutSeconds": 300,
+      "createdAt": 1772561917500,
+      "startedAt": 1772561917629,
+      "archiveAtMs": 1772565517500,
+      "cleanupHandled": true,
+      "cleanupCompletedAt": 1772562418863,
+      "endedAt": 1772562418863,
+      "outcome": {
+        "status": "error",
+        "error": "killed"
+      },
+      "endedReason": "subagent-killed",
+      "suppressAnnounceReason": "killed",
+      "endedHookEmittedAt": 1772562418863
+    },
+    "75423634-3958-446e-91a0-038cfeefb2c1": {
+      "runId": "75423634-3958-446e-91a0-038cfeefb2c1",
+      "childSessionKey": "agent:orchestrator:subagent:a55f14bb-f95e-4567-bf1d-4a1bdcbdeeb2",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "## Goal\nUpdate the Mission Control activity page so that hovering over the \"thought bubble\" icon for each active agent reveals a complete status popup — showing the agent's current task, last activity, model, token usage, or whatever status info is available.\n\n## Context\n- Mission Control UI lives at: `~/.npm-global/lib/node_modules/openclaw/dist/control-ui/`\n- Main UI bundle: `assets/index-*.js` (minified)\n- The activity page lists active agents/sessions with a thought bubble icon per agent\n- Currently hovering shows nothing (or minimal info) — we want a rich tooltip/popup\n\n## Steps\n\n### 1. Investigate the current UI structure\n- Find the activity page component in the UI source — search for \"thought bubble\", bubble icon, or the SVG/emoji used\n- Look for tooltip or hover behavior already in place\n- Check what data is available per agent session (model, task, tokens, status, last message snippet)\n- Check if there's a CSS/config layer that controls tooltip content vs a JS component\n\n### 2. Check if this is configurable\n- Look in `~/.openclaw/openclaw.json` for any `ui.*` or `controlUI.*` settings related to agent cards, tooltips, or activity display\n- Check OpenClaw docs: `~/.npm-global/lib/node_modules/openclaw/docs/` for activity page or agent status display options\n\n### 3. Implement\nOptions in order of preference:\n  a. **Config-only fix** — if there's a config field to enable rich tooltips, set it\n  b. **CSS injection** — if the popup exists but is hidden/unstyled, add CSS via a config or custom style file\n  c. **Report back** — if this requires modifying the minified JS bundle (not advisable), report that and suggest filing a ClawDeck feature request instead\n\n### 4. If config-based fix found\n- Apply the change to `~/.openclaw/openclaw.json`\n- Restart gateway: `openclaw gateway restart && sleep 3 && openclaw gateway status`\n\n## Constraints\n- Do NOT modify minified JS bundles in `dist/` — those get overwritten on updates\n- Back up openclaw.json before any edits\n- Use operator subagent for file edits\n\n## Expected Output\n- What the thought bubble currently shows and what data is available per agent\n- Whether this is achievable via config or requires a UI code change\n- Diff of any config changes made, or a clear explanation of what's needed if it's a feature gap",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-sonnet-4-6",
+      "runTimeoutSeconds": 300,
+      "createdAt": 1772562015597,
+      "startedAt": 1772562015727,
+      "archiveAtMs": 1772565615597,
+      "cleanupHandled": true,
+      "cleanupCompletedAt": 1772562419998,
+      "endedAt": 1772562419998,
+      "outcome": {
+        "status": "error",
+        "error": "killed"
+      },
+      "endedReason": "subagent-killed",
+      "suppressAnnounceReason": "killed",
+      "endedHookEmittedAt": 1772562419998
     }
   }
 }
