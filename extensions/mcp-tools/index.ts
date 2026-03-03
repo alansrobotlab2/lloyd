@@ -13,6 +13,8 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { McpSseClient } from "./mcp-sse-client.js";
+import { readFileSync, writeFileSync } from "fs";
+import { join } from "path";
 
 const TOOL_MCP_URL = "http://127.0.0.1:8093";
 
@@ -26,6 +28,91 @@ const MIN_QUERY_LENGTH = 12;
 export default function register(api: OpenClawPluginApi) {
   const mcpClient = new McpSseClient(TOOL_MCP_URL);
   process.on("exit", () => mcpClient.destroy());
+
+  // ── Work mode state ───────────────────────────────────────────────────
+  //
+  // Three modes: work, personal, general (default).
+  // Mode narrows vault scope for prefill, search, and daily notes path.
+  // Persisted to disk across gateway restarts.
+
+  type WorkMode = "work" | "personal" | "general";
+
+  interface ModeState {
+    currentMode: WorkMode;
+    lastSwitchedAt: string;
+  }
+
+  const MODE_STATE_PATH = join(__dirname, "mode-state.json");
+
+  const MODE_SCOPE: Record<WorkMode, string> = {
+    work:     "work,knowledge,agents",
+    personal: "personal,projects,knowledge,agents",
+    general:  "",
+  };
+
+  const MODE_MEMORY_PREFIX: Record<WorkMode, string> = {
+    work:     "agents/lloyd/memory/work",
+    personal: "agents/lloyd/memory/personal",
+    general:  "agents/lloyd/memory",
+  };
+
+  let modeState: ModeState;
+  try {
+    modeState = JSON.parse(readFileSync(MODE_STATE_PATH, "utf-8"));
+  } catch {
+    modeState = { currentMode: "general", lastSwitchedAt: new Date().toISOString() };
+  }
+
+  function saveMode(mode: WorkMode): void {
+    modeState = { currentMode: mode, lastSwitchedAt: new Date().toISOString() };
+    writeFileSync(MODE_STATE_PATH, JSON.stringify(modeState, null, 2) + "\n");
+  }
+
+  function getCurrentMode(): WorkMode {
+    return modeState.currentMode;
+  }
+
+  // ── Mode switching commands ────────────────────────────────────────────
+
+  api.registerCommand({
+    name: "work",
+    description: "Switch to work mode (work, knowledge, agents vault segments)",
+    handler: () => {
+      saveMode("work");
+      return { text: "Switched to **work mode**. Vault scope: work, knowledge, agents. Daily notes → memory/work/" };
+    },
+  });
+
+  api.registerCommand({
+    name: "personal",
+    description: "Switch to personal mode (personal, projects, knowledge, agents vault segments)",
+    handler: () => {
+      saveMode("personal");
+      return { text: "Switched to **personal mode**. Vault scope: personal, projects, knowledge, agents. Daily notes → memory/personal/" };
+    },
+  });
+
+  api.registerCommand({
+    name: "general",
+    description: "Switch to general mode (all vault segments, no restrictions)",
+    handler: () => {
+      saveMode("general");
+      return { text: "Switched to **general mode**. All vault segments accessible. Daily notes → memory/" };
+    },
+  });
+
+  api.registerCommand({
+    name: "mode",
+    description: "Show current work/personal/general mode",
+    handler: () => {
+      const m = getCurrentMode();
+      const since = new Date(modeState.lastSwitchedAt).toLocaleString("en-US", {
+        timeZone: "America/Los_Angeles",
+        month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
+      });
+      return { text: `Current mode: **${m}** (since ${since} PST)` };
+    },
+  });
 
   // ── Helper: register a simple proxy tool ──────────────────────────────
 
@@ -125,6 +212,7 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   // Fetch yesterday's and today's daily memory files from the vault.
+  // Uses the current mode's memory prefix for path resolution.
   async function fetchDailyNotes(): Promise<string> {
     const now = new Date();
     const toPstDateStr = (d: Date): string => {
@@ -135,6 +223,8 @@ export default function register(api: OpenClawPluginApi) {
       return `${y}-${mo}-${dy}`;
     };
 
+    const memPrefix = MODE_MEMORY_PREFIX[getCurrentMode()];
+
     const entries = [
       { date: toPstDateStr(now), label: "today" },
       { date: toPstDateStr(new Date(now.getTime() - 86_400_000)), label: "yesterday" },
@@ -142,7 +232,7 @@ export default function register(api: OpenClawPluginApi) {
 
     const results = await Promise.allSettled(
       entries.map(({ date }) =>
-        mcpClient.callTool("qmd_get", { path: `agents/lloyd/memory/${date}.md` }, 3_000),
+        mcpClient.callTool("qmd_get", { path: `${memPrefix}/${date}.md` }, 3_000),
       ),
     );
 
@@ -180,14 +270,16 @@ export default function register(api: OpenClawPluginApi) {
 
     const sessionId = ctx?.sessionId ?? "";
 
-    // ── Turn 1: inject daily memory files ─────────────────────────────────
+    // ── Turn 1: inject daily memory files + active mode ──────────────────
     if (!dailyNotesInjected.has(sessionId)) {
       dailyNotesInjected.add(sessionId);
       // Save the first substantive prompt for semantic search on turn 2
       if (profile !== "chat") firstUserPrompt.set(sessionId, prompt);
 
       const dailyContext = await fetchDailyNotes();
-      if (dailyContext) return { prependContext: dailyContext };
+      const mode = getCurrentMode();
+      const modeTag = mode !== "general" ? `\n<active_mode>${mode}</active_mode>` : "";
+      if (dailyContext || modeTag) return { prependContext: (dailyContext + modeTag).trim() };
       return;
     }
 
@@ -205,7 +297,10 @@ export default function register(api: OpenClawPluginApi) {
         prefillConsecutiveFailures = 0;
       }
 
-      const prefillScope = PROFILE_SCOPE[classifyProfile(searchQuery)] ?? "";
+      const modeScope = MODE_SCOPE[getCurrentMode()];
+      const profileScope = PROFILE_SCOPE[classifyProfile(searchQuery)] ?? "";
+      // Mode scope is the primary filter; fall back to profile scope in general mode
+      const prefillScope = modeScope || profileScope;
 
       try {
         const content = await mcpClient.callTool(
@@ -241,8 +336,6 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── Daily memory file (agent_end hook) ─────────────────────────────────
 
-  const DAILY_MEMORY_PATH_PREFIX = "agents/lloyd/memory";
-
   function todayDateStr(): string {
     const now = new Date();
     const pst = new Date(
@@ -276,7 +369,8 @@ export default function register(api: OpenClawPluginApi) {
     if (ctx?.agentId && ctx.agentId !== "main") return;
 
     const dateStr = todayDateStr();
-    const filePath = `${DAILY_MEMORY_PATH_PREFIX}/${dateStr}.md`;
+    const memPrefix = MODE_MEMORY_PREFIX[getCurrentMode()];
+    const filePath = `${memPrefix}/${dateStr}.md`;
     const time = pstTimeStr();
     const msgCount = event?.messageCount ?? 0;
     const durationMin = event?.durationMs
@@ -333,6 +427,25 @@ export default function register(api: OpenClawPluginApi) {
       api.logger.info?.(`mcp-tools daily-memory: wrote ${filePath}`);
     } catch (err: any) {
       api.logger.warn?.(`mcp-tools daily-memory: ${err?.message}`);
+    }
+  });
+
+  // ── Mode-aware scope injection (before_tool_call) ────────────────────
+  //
+  // When in work or personal mode, automatically inject the mode's vault
+  // scope into search tools that don't already have an explicit scope.
+  // This makes mode boundaries transparent — the LLM just calls
+  // qmd_search("query") and gets mode-appropriate results.
+
+  const MODE_SCOPED_TOOLS = new Set(["qmd_search", "tag_search", "prefill_context"]);
+
+  api.on("before_tool_call", (event: any, _ctx: any) => {
+    const mode = getCurrentMode();
+    if (mode === "general") return;
+
+    const { toolName, params } = event;
+    if (MODE_SCOPED_TOOLS.has(toolName) && !params?.scope) {
+      return { params: { ...params, scope: MODE_SCOPE[mode] } };
     }
   });
 
