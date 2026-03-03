@@ -115,3 +115,228 @@ body {
   background: rgba(51, 65, 85, 0.4);
   color: #f1f5f9;
 }
+
+/* ── Agent Desk Room ──────────────────────────────────────────────────── */
+
+.agent-desk-room {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(51, 65, 85, 0.5);
+  background: #0f172a;
+}
+
+/* Background layers */
+.room-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.room-wall {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 65%;
+  background: linear-gradient(
+    180deg,
+    #0f172a 0%,
+    #131d30 30%,
+    #1a2538 60%,
+    #1e293b 100%
+  );
+}
+
+.room-floor {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 40%;
+  background: linear-gradient(
+    180deg,
+    #1e293b 0%,
+    #151e2e 50%,
+    #0c1322 100%
+  );
+}
+
+/* Floating ambient particles */
+.room-particles {
+  position: absolute;
+  inset: 0;
+}
+
+.particle {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  background: rgba(129, 140, 248, 0.3);
+  border-radius: 50%;
+  animation: particle-float 5s ease-in-out infinite;
+}
+
+@keyframes particle-float {
+  0%, 100% { bottom: 20%; opacity: 0; }
+  20% { opacity: 0.6; }
+  80% { opacity: 0.3; }
+  100% { bottom: 80%; opacity: 0; }
+}
+
+/* Header bar */
+.room-header {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(122, 79, 42, 0.2);
+}
+
+.room-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b5e3c;
+}
+
+.room-count {
+  font-size: 10px;
+  font-family: monospace;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.count-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
+  animation: count-pulse 2s ease-in-out infinite;
+}
+
+@keyframes count-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Desk grid */
+.desk-grid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  padding: 12px 12px 16px;
+}
+
+@media (max-width: 500px) {
+  .desk-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Individual desk slot */
+.desk-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 2px 4px;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+  animation: desk-appear 0.4s ease-out both;
+}
+
+@keyframes desk-appear {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.desk-active {
+  background: rgba(99, 102, 241, 0.06);
+}
+
+.desk-empty {
+  opacity: 0.35;
+}
+
+.desk-empty:hover {
+  opacity: 0.5;
+}
+
+.desk-svg {
+  width: 100%;
+  max-width: 80px;
+  height: auto;
+}
+
+/* Monitor states */
+.monitor-on {
+  fill: #0c1929;
+  stroke: #3b82f6;
+  stroke-width: 1;
+}
+
+.monitor-off {
+  fill: #1a1a2e;
+  stroke: #334155;
+  stroke-width: 0.5;
+}
+
+.screen-glow {
+  fill: none;
+  stroke: #3b82f6;
+  stroke-width: 0.5;
+  filter: blur(2px);
+  opacity: 0.4;
+  animation: glow-pulse 3s ease-in-out infinite;
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.6; }
+}
+
+/* Labels */
+.desk-label {
+  margin-top: 2px;
+  font-size: 9px;
+  font-family: monospace;
+  text-align: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 4px;
+}
+
+.desk-label-active {
+  color: #818cf8;
+}
+
+.desk-label-empty {
+  color: #334155;
+}
+
+/* Activity indicator dot */
+.desk-indicator {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #4ade80;
+  margin-top: 3px;
+  box-shadow: 0 0 4px rgba(74, 222, 128, 0.5);
+  animation: indicator-blink 1.5s ease-in-out infinite;
+}
+
+@keyframes indicator-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Activity, X } from "lucide-react";
 import { api, AgentStatusData, SubagentRunInfo } from "../../api";
+import AgentDeskRoom from "../AgentDeskRoom";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -259,6 +260,9 @@ export default function ActivityPage() {
           </span>
         )}
       </div>
+
+      {/* Agent Desk Room */}
+      <AgentDeskRoom activeAgents={active} />
 
       {/* Main Agent Status */}
       <div className="space-y-1">

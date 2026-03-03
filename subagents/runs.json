@@ -1,33 +1,6 @@
 {
   "version": 2,
   "runs": {
-    "f22bd24b-015a-4087-b8ee-fd7f5e91b860": {
-      "runId": "f22bd24b-015a-4087-b8ee-fd7f5e91b860",
-      "childSessionKey": "agent:coder:subagent:cde74e42-b00f-4140-8480-a4687440a7c7",
-      "requesterSessionKey": "agent:main:main",
-      "requesterOrigin": {
-        "channel": "webchat"
-      },
-      "requesterDisplayKey": "agent:main:main",
-      "task": "[Phase: Execute]\n\nTry an OpenCV face detection pipeline on LEGO minifig images in ~/Pictures/minifigs/ to get better headshot crops.\n\n**Goal:** Improve headshot quality over the current heuristic approach. Current headshot_001.jpg–018.jpg are not well-centered — test face detection first, then batch-process if it works.\n\n**Step 1 — Test face detection on a sample:**\n1. Load 3-4 different images from ~/Pictures/minifigs/ (pick a variety — full-body, square, different sizes)\n2. Try OpenCV's Haar cascade face detector (`haarcascade_frontalface_default.xml`)\n3. Also try `haarcascade_frontalface_alt.xml` and `haarcascade_frontalface_alt2.xml`\n4. Try multiple scaleFactor/minNeighbors parameters (LEGO faces are small and simplified)\n5. Report which images got detections and confidence in the results\n\n**Step 2 — Evaluate:**\n- If face detection works reliably on LEGO minifigs: proceed to batch crop all 18 originals using detected face bounding box, add padding (~50% around the face), square crop, resize 256×256\n- If face detection is unreliable: try dlib or a lightweight DNN face detector (`opencv_face_detector.caffemodel`) before giving up\n- Report results before doing the full batch\n\n**Step 3 — Batch crop (if detection works):**\n- Replace or overwrite headshot_001.jpg–018.jpg with the improved crops\n- For any images where detection fails, fall back to the heuristic (top 45% of subject bounding box)\n- Document which images used detection vs fallback\n\n**Reference:** lloyd_003.jpg in the same directory is already a good 146×146 headshot — use it as a quality bar.\n\nAnnounce when done: `openclaw system event --text \"Face detection headshots complete\" --mode now`",
-      "cleanup": "keep",
-      "expectsCompletionMessage": true,
-      "spawnMode": "run",
-      "label": "minifig-face-detection",
-      "model": "anthropic/claude-opus-4-6",
-      "runTimeoutSeconds": 600,
-      "createdAt": 1772498156796,
-      "startedAt": 1772498156925,
-      "archiveAtMs": 1772501756796,
-      "cleanupHandled": true,
-      "endedAt": 1772498239090,
-      "outcome": {
-        "status": "ok"
-      },
-      "endedReason": "subagent-complete",
-      "endedHookEmittedAt": 1772498264145,
-      "cleanupCompletedAt": 1772498264145
-    },
     "e9d4610e-4398-4176-8a17-cc558427f397": {
       "runId": "e9d4610e-4398-4176-8a17-cc558427f397",
       "childSessionKey": "agent:coder:subagent:dbada05b-7005-4e3a-8d4b-4e57cbcc3195",
@@ -55,6 +28,138 @@
       "endedReason": "subagent-killed",
       "suppressAnnounceReason": "killed",
       "endedHookEmittedAt": 1772500041621
+    },
+    "b652b431-1bcf-4439-9cbf-df31fd227804": {
+      "runId": "b652b431-1bcf-4439-9cbf-df31fd227804",
+      "childSessionKey": "agent:coder:subagent:1356bf65-dd27-4d55-b31e-4996b1f23f61",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Execute]\n\n**Task:** Build an animated \"agent desk room\" top section for the OpenClaw canvas activity panel.\n\n**Screenshot for visual reference:** `/home/alansrobotlab/Pictures/screenshot_02032026_172935.jpg`\n- Study this screenshot carefully — match its color palette, mood, background style, and aesthetic for the new UI.\n\n**Target file:** `~/.openclaw/canvas/index.html`\n- This is the OpenClaw canvas panel — it's a custom HTML file you can fully rewrite.\n\n**What to build:**\nDesign and implement an animated room scene at the top of the page showing **8 desks** — one per possible sub-agent slot (OpenClaw supports max 8 sub-agents).\n\nRequirements:\n- Visual style and color palette must closely match the screenshot (study it first)\n- Each desk has an animated character/avatar sitting at it (pixel art or SVG-based — whatever fits the aesthetic from the screenshot)\n- When a desk is \"active\" (agent running), the character should be animated (typing, working, glowing, etc.)\n- When a desk is \"empty\" (no agent), the character is absent or dimmed/ghost\n- 8 desks total arranged in a row or 2 rows (whatever looks better in the space)\n- The background should match the vibe/style of the screenshot (could be an office, sci-fi command center, robot lab — whatever the screenshot suggests)\n- Smooth CSS animations (no janky JS loops if possible)\n- The desks below the scene should remain functional (keep the existing card/log UI below)\n\n**Demo/test mode:**\n- Add a control at the bottom to toggle desks between active/empty states so you can see the animation in action\n- Default: show 3 desks as active, 5 as empty (for visual demo)\n\n**Style notes:**\n- Dark theme (existing canvas is dark)\n- The scene should feel alive and atmospheric, not static/boring\n- Prioritize visual flair — this is a display panel Alan will look at regularly\n\nWhen completely finished, run:\n`openclaw system event --text \"Done: agent desk room animation built in canvas\" --mode now`",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1772501639364,
+      "startedAt": 1772501639477,
+      "archiveAtMs": 1772505239364,
+      "cleanupHandled": true,
+      "endedAt": 1772501896948,
+      "outcome": {
+        "status": "timeout"
+      },
+      "endedReason": "subagent-complete",
+      "cleanupCompletedAt": 1772501896939,
+      "suppressAnnounceReason": "killed",
+      "endedHookEmittedAt": 1772501896939
+    },
+    "67996034-5b0c-4b1c-96ef-2fd0a5994dd7": {
+      "runId": "67996034-5b0c-4b1c-96ef-2fd0a5994dd7",
+      "childSessionKey": "agent:coder:subagent:f05efad5-7cb1-49ce-a6f0-9bf54266d04a",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Execute]\n\n**Task:** Add an animated \"agent desk room\" header to the Activity page in Mission Control.\n\n**Screenshot for visual reference:** `/home/alansrobotlab/Pictures/screenshot_02032026_172935.jpg`\nStudy this screenshot carefully — match its color palette, mood, and aesthetic for the new component.\n\n**Project:** `~/mission-control/`\n- Frontend: Next.js/React/TypeScript in `~/mission-control/frontend/`\n- Activity page: `~/mission-control/frontend/src/app/activity/page.tsx`\n- Explore the codebase to understand component patterns, data structures, and how active sub-agents are fetched/represented before coding.\n\n**What to build:**\n\nCreate a new component (e.g., `AgentDeskRoom` or similar, wherever makes sense given the project structure) and place it at the **top of the activity page**, above any existing content.\n\n**Visual requirements:**\n- Animated room scene showing **8 desks** (max 8 sub-agents in OpenClaw)\n- Each desk has a character/avatar sitting at it\n- **Active agent desk:** character animates (typing, glowing monitor, activity indicators) — show the agent's name/label on or near the desk\n- **Empty desk:** character is absent, desk is dimmed or ghosted\n- Background and color palette must match the screenshot's aesthetic\n- Dark theme consistent with the rest of mission control\n- Smooth CSS/keyframe animations — no janky setInterval loops\n- Responsive layout (row or 2-row arrangement depending on width)\n\n**Data integration:**\n- Wire it up to whatever data source the activity page already uses for sub-agents/sessions\n- If the page polls or subscribes to active sessions, use the same mechanism\n- Each desk slot maps to one active sub-agent; empty slots = no agent\n\n**Style:**\n- Pixel art OR SVG characters — whichever fits the screenshot aesthetic\n- Atmospheric, alive, not static or corporate\n- This is a panel Alan will look at frequently — make it look great\n\nWhen completely finished, run:\n`openclaw system event --text \"Done: animated agent desk room added to mission control activity page\" --mode now`",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1772501990201,
+      "startedAt": 1772501990273,
+      "archiveAtMs": 1772505590201,
+      "cleanupHandled": true,
+      "endedAt": 1772502002277,
+      "outcome": {
+        "status": "timeout"
+      },
+      "endedReason": "subagent-complete",
+      "cleanupCompletedAt": 1772502002266,
+      "suppressAnnounceReason": "killed",
+      "endedHookEmittedAt": 1772502002266
+    },
+    "2538215c-eca1-4e7c-bdfd-85c4cd6b8c35": {
+      "runId": "2538215c-eca1-4e7c-bdfd-85c4cd6b8c35",
+      "childSessionKey": "agent:coder:subagent:5bdd24e3-78cd-4a41-8321-df3df63903dc",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Execute]\n\n**Task:** Add an animated \"agent desk room\" header to the Activity page in Mission Control.\n\n**Screenshot for visual reference:** `/home/alansrobotlab/Pictures/screenshot_02032026_172935.jpg`\nStudy this screenshot carefully — match its color palette, mood, and aesthetic for the new component.\n\n**Project:** `~/.openclaw/extensions/mission-control/`\n- Frontend: Vite/React/TypeScript in `~/.openclaw/extensions/mission-control/web/`\n- Activity page: `~/.openclaw/extensions/mission-control/web/src/components/pages/ActivityPage.tsx`\n- Explore the codebase to understand component patterns, styling approach (CSS modules? Tailwind? styled-components?), and how active sub-agents/sessions are fetched/represented before coding.\n\n**What to build:**\n\nCreate a new component (e.g., `AgentDeskRoom` or similar) and place it at the **top of the activity page**, above any existing content.\n\n**Visual requirements:**\n- Animated room scene showing **8 desks** (max 8 sub-agents in OpenClaw)\n- Each desk has a character/avatar sitting at it\n- **Active agent desk:** character animates (typing, glowing monitor, activity indicators) — show the agent's name/label on or near the desk\n- **Empty desk:** character is absent, desk is dimmed or ghosted\n- Background and color palette must match the screenshot's aesthetic\n- Dark theme consistent with the rest of mission control\n- Smooth CSS/keyframe animations — no janky setInterval loops\n- Responsive layout (row or 2-row arrangement depending on width)\n\n**Data integration:**\n- Wire it up to whatever data source the activity page already uses for sub-agents/sessions\n- If the page polls or subscribes to active sessions, use the same mechanism\n- Each desk slot maps to one active sub-agent; empty slots = no agent\n\n**Style:**\n- Pixel art OR SVG characters — whichever fits the screenshot aesthetic\n- Atmospheric, alive, not static or corporate\n- This is a panel Alan will look at frequently — make it look great\n\nWhen completely finished, run:\n`openclaw system event --text \"Done: animated agent desk room added to mission control activity page\" --mode now`",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1772502007163,
+      "startedAt": 1772502007284,
+      "archiveAtMs": 1772505607163,
+      "cleanupHandled": true,
+      "endedAt": 1772502194830,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "endedHookEmittedAt": 1772502216292,
+      "cleanupCompletedAt": 1772502216292
+    },
+    "c307065e-ce74-4ad1-9332-0c131f37c297": {
+      "runId": "c307065e-ce74-4ad1-9332-0c131f37c297",
+      "childSessionKey": "agent:coder:subagent:17475b2e-29c1-4497-9194-50a87ec1800f",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Execute]\n\n**Task:** Update the background of the AgentDeskRoom scene in Mission Control.\n\n**File:** `~/.openclaw/extensions/mission-control/web/src/components/AgentDeskRoom.tsx`\n\n**Change:** Replace the current warm brown/amber room background with the same lighter gray used by the agent status bar cards in the Activity page. Those cards use `bg-surface-1` with `border border-surface-3/50`. Match that exact color/tone for the room scene background so it blends consistently with the rest of the activity page.\n\nKeep everything else exactly as-is — only the room background changes.\n\nWhen done, run:\n`openclaw system event --text \"Done: AgentDeskRoom background updated to surface-1 gray\" --mode now`",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1772502324191,
+      "startedAt": 1772502324289,
+      "archiveAtMs": 1772505924191,
+      "cleanupHandled": true,
+      "endedAt": 1772502397168,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "endedHookEmittedAt": 1772502416463,
+      "cleanupCompletedAt": 1772502416463
+    },
+    "c0089fe5-e04a-4426-ac63-9e0f674da802": {
+      "runId": "c0089fe5-e04a-4426-ac63-9e0f674da802",
+      "childSessionKey": "agent:coder:subagent:d1a25b44-e2ac-4a0f-8658-566e3c506ecd",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Execute]\n\n**Task:** Update the AgentDeskRoom component to use agent avatar images as the character heads.\n\n**File:** `~/.openclaw/extensions/mission-control/web/src/components/AgentDeskRoom.tsx`\n\n**Change:** Replace the current plain pixel-art head (skin-toned circle) with an actual avatar image from the agent's profile.\n\n**Avatar locations:** `~/obsidian/agents/<agent_name>/avatar/<agent_name>.jpg`\n- e.g., `~/obsidian/agents/coder/avatar/coder.jpg`, `~/obsidian/agents/memory/avatar/memory.jpg`, etc.\n\n**Implementation:**\n- The subagent run info should have a `label` field that tells you which agent type it is (e.g., \"coder\", \"memory\", \"researcher\", etc.)\n- Map that label to the corresponding avatar path\n- Render the avatar image as the character's head, cropped to a rounded square (or circle) and positioned where the head currently is\n- Use CSS `object-fit: cover` and `border-radius` to make it look clean\n- Keep the body and arms the same (indigo shirt, skin-toned arms)\n- Add a subtle shadow or glow around the avatar to make it pop\n\n**Fallback:** If for some reason an avatar isn't found for an agent, fall back to the current pixel-art head.\n\nWhen done, run:\n`openclaw system event --text \"Done: AgentDeskRoom now uses agent avatar images for character heads\" --mode now`",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1772502473769,
+      "startedAt": 1772502473930,
+      "archiveAtMs": 1772506073769,
+      "cleanupHandled": true,
+      "endedAt": 1772502624761,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "endedHookEmittedAt": 1772502629448,
+      "cleanupCompletedAt": 1772502629448
     }
   }
 }

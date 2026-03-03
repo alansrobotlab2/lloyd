@@ -3,88 +3,321 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>OpenClaw Canvas</title>
 <style>
-  html, body { height: 100%; margin: 0; background: #000; color: #fff; font: 16px/1.4 -apple-system, BlinkMacSystemFont, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-  .wrap { min-height: 100%; display: grid; place-items: center; padding: 24px; }
-  .card { width: min(720px, 100%); background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-radius: 16px; padding: 18px 18px 14px; }
+  :root {
+    --bg-deep: #0d0f14;
+    --bg-mid: #1a1e28;
+    --bg-card: rgba(255,255,255,0.06);
+    --border: rgba(255,255,255,0.10);
+    --amber: #c47a2e;
+    --amber-glow: #e8943a;
+    --teal: #4b7796;
+    --teal-glow: #6bb8d4;
+    --warm-brown: #8b5c36;
+    --text: #e0d6cc;
+    --text-dim: rgba(255,255,255,0.5);
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg-deep); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; overflow-x: hidden; }
+
+  .room-scene { width: 100%; max-width: 800px; margin: 0 auto; padding: 16px 16px 0; }
+  .room-container {
+    position: relative; width: 100%; aspect-ratio: 2.4 / 1;
+    background: linear-gradient(180deg, #1c2130 0%, #24283a 40%, #2a1f18 70%, #1a1510 100%);
+    border-radius: 16px 16px 0 0; overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.08); border-bottom: none;
+  }
+  .room-container::before {
+    content: ''; position: absolute; inset: 0;
+    background:
+      radial-gradient(1px 1px at 15% 20%, rgba(232,148,58,0.4), transparent),
+      radial-gradient(1px 1px at 45% 15%, rgba(107,184,212,0.3), transparent),
+      radial-gradient(1px 1px at 72% 25%, rgba(232,148,58,0.3), transparent),
+      radial-gradient(1px 1px at 88% 18%, rgba(107,184,212,0.2), transparent),
+      radial-gradient(1.5px 1.5px at 30% 10%, rgba(255,255,255,0.15), transparent),
+      radial-gradient(1px 1px at 60% 8%, rgba(255,255,255,0.1), transparent);
+    animation: particleDrift 8s ease-in-out infinite alternate;
+    pointer-events: none; z-index: 1;
+  }
+  @keyframes particleDrift { 0% { opacity: 0.6; transform: translateY(0); } 100% { opacity: 1; transform: translateY(-3px); } }
+  .room-container::after {
+    content: ''; position: absolute; top: -20%; left: 25%; width: 50%; height: 70%;
+    background: radial-gradient(ellipse, rgba(196,122,46,0.15) 0%, transparent 70%);
+    pointer-events: none; z-index: 0;
+  }
+  .wall-window {
+    position: absolute; top: 6%; left: 50%; transform: translateX(-50%);
+    width: 30%; height: 35%; border: 2px solid rgba(75,119,150,0.3); border-radius: 4px;
+    background: linear-gradient(180deg, #1a2a3a 0%, #0f1a26 60%, #162030 100%);
+    box-shadow: 0 0 20px rgba(75,119,150,0.1), inset 0 0 15px rgba(75,119,150,0.05); z-index: 0;
+  }
+  .wall-window::after {
+    content: ''; position: absolute; inset: 4px;
+    background:
+      radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,0.6), transparent),
+      radial-gradient(1px 1px at 60% 20%, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1px 1px at 80% 60%, rgba(255,255,255,0.5), transparent),
+      radial-gradient(1px 1px at 40% 70%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(1.5px 1.5px at 70% 40%, rgba(107,184,212,0.6), transparent);
+    animation: starTwinkle 4s ease-in-out infinite alternate;
+  }
+  @keyframes starTwinkle { 0% { opacity: 0.7; } 50% { opacity: 1; } 100% { opacity: 0.8; } }
+  .floor {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 45%;
+    background: linear-gradient(180deg, #2a1f18 0%, #1f1610 50%, #171210 100%); z-index: 0;
+  }
+  .floor::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(139,92,54,0.3), transparent);
+  }
+  .desk-grid {
+    position: absolute; bottom: 8%; left: 4%; right: 4%;
+    display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(2, 1fr);
+    gap: 6px 8px; z-index: 2;
+  }
+  .desk-slot {
+    position: relative; aspect-ratio: 1.1 / 1;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+  }
+  .desk-surface {
+    width: 85%; height: 32%;
+    background: linear-gradient(180deg, #5a3d24, #4a3220);
+    border-radius: 3px 3px 2px 2px; position: relative; z-index: 2;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+  }
+  .desk-surface::after {
+    content: ''; position: absolute; top: 2px; left: 10%; right: 10%; height: 2px;
+    background: rgba(139,92,54,0.4); border-radius: 1px;
+  }
+  .monitor {
+    width: 50%; height: 38%; background: #0a0e14;
+    border: 1.5px solid #2a3040; border-radius: 2px;
+    position: absolute; bottom: 36%; z-index: 3;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden; transition: all 0.6s ease;
+  }
+  .desk-slot.active .monitor {
+    border-color: rgba(75,119,150,0.5);
+    box-shadow: 0 0 8px rgba(75,119,150,0.2), 0 0 20px rgba(75,119,150,0.08);
+  }
+  .screen-content { width: 80%; height: 70%; opacity: 0; transition: opacity 0.6s ease; }
+  .desk-slot.active .screen-content { opacity: 1; }
+  .screen-line {
+    height: 2px; margin: 3px 0; border-radius: 1px;
+    background: rgba(107,184,212,0.4); animation: screenType 2s ease-in-out infinite;
+  }
+  .screen-line:nth-child(1) { width: 80%; }
+  .screen-line:nth-child(2) { width: 60%; animation-delay: 0.3s; }
+  .screen-line:nth-child(3) { width: 90%; animation-delay: 0.6s; }
+  .screen-line:nth-child(4) { width: 45%; animation-delay: 0.9s; }
+  @keyframes screenType { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+  .desk-slot.empty .monitor { background: #080a0e; border-color: #1a1e24; }
+
+  .avatar { position: absolute; bottom: 28%; z-index: 4; width: 30%; transition: all 0.6s ease; }
+  .avatar-body { position: relative; width: 100%; aspect-ratio: 0.7 / 1; }
+  .avatar-head {
+    position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+    width: 45%; aspect-ratio: 1; background: var(--amber); border-radius: 3px;
+    transition: all 0.6s ease;
+  }
+  .desk-slot.active .avatar-head { animation: headBob 3s ease-in-out infinite; }
+  @keyframes headBob { 0%, 100% { transform: translateX(-50%) translateY(0); } 50% { transform: translateX(-50%) translateY(-2px); } }
+  .avatar-head::before {
+    content: ''; position: absolute; top: 40%; left: 22%; width: 16%; height: 16%;
+    background: #fff; border-radius: 50%;
+    box-shadow: calc(100% * 0.4) 0 0 0 #fff; transition: all 0.6s ease;
+  }
+  .desk-slot.active .avatar-head::before {
+    background: #6be0d4; box-shadow: calc(100% * 0.4) 0 0 0 #6be0d4;
+    animation: eyeGlow 2s ease-in-out infinite alternate;
+  }
+  @keyframes eyeGlow { 0% { opacity: 0.7; } 100% { opacity: 1; } }
+  .avatar-torso {
+    position: absolute; top: 55%; left: 50%; transform: translateX(-50%);
+    width: 60%; height: 45%; background: var(--teal); border-radius: 2px 2px 0 0;
+    transition: all 0.6s ease;
+  }
+  .avatar-arm-l, .avatar-arm-r {
+    position: absolute; bottom: 0; width: 18%; height: 20%;
+    background: var(--teal); border-radius: 1px; z-index: 5; transition: all 0.6s ease;
+  }
+  .avatar-arm-l { left: 12%; }
+  .avatar-arm-r { right: 12%; }
+  .desk-slot.active .avatar-arm-l { animation: typeLeft 0.4s ease-in-out infinite alternate; }
+  .desk-slot.active .avatar-arm-r { animation: typeRight 0.4s ease-in-out infinite alternate-reverse; }
+  @keyframes typeLeft { 0% { transform: translateY(-1px); } 100% { transform: translateY(1px); } }
+  @keyframes typeRight { 0% { transform: translateY(1px); } 100% { transform: translateY(-1px); } }
+  .desk-slot.empty .avatar { opacity: 0.12; filter: grayscale(1); }
+  .desk-slot.empty .avatar-head { background: #444; }
+  .desk-slot.empty .avatar-torso, .desk-slot.empty .avatar-arm-l, .desk-slot.empty .avatar-arm-r { background: #333; }
+
+  .desk-glow {
+    position: absolute; bottom: 0; left: 10%; right: 10%; height: 4px;
+    background: transparent; border-radius: 50%; transition: all 0.6s ease; z-index: 1;
+  }
+  .desk-slot.active .desk-glow {
+    background: var(--amber-glow);
+    box-shadow: 0 0 12px rgba(232,148,58,0.4), 0 0 24px rgba(232,148,58,0.15);
+    animation: glowPulse 3s ease-in-out infinite;
+  }
+  @keyframes glowPulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+  .desk-status {
+    position: absolute; top: 4px; right: 4px; width: 6px; height: 6px;
+    border-radius: 50%; background: #333; transition: all 0.6s ease; z-index: 5;
+  }
+  .desk-slot.active .desk-status {
+    background: #24e08a; box-shadow: 0 0 6px rgba(36,224,138,0.5);
+    animation: statusBlink 2s ease-in-out infinite;
+  }
+  @keyframes statusBlink { 0%, 90%, 100% { opacity: 1; } 95% { opacity: 0.3; } }
+  .desk-label {
+    position: absolute; bottom: 2px; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.5px; text-transform: uppercase;
+    color: rgba(255,255,255,0.2); transition: color 0.6s ease; z-index: 5;
+  }
+  .desk-slot.active .desk-label { color: rgba(232,148,58,0.6); }
+  .room-title {
+    position: absolute; top: 8px; left: 12px; font-size: 10px; font-weight: 700;
+    letter-spacing: 1.5px; text-transform: uppercase; color: rgba(255,255,255,0.25); z-index: 10;
+  }
+  .room-title span { color: var(--amber); opacity: 0.6; }
+  .agent-count {
+    position: absolute; top: 8px; right: 12px; font-size: 10px; font-weight: 600;
+    font-family: ui-monospace, monospace; color: rgba(255,255,255,0.3); z-index: 10;
+  }
+  .agent-count .active-num { color: #24e08a; }
+
+  .wrap { display: grid; place-items: center; padding: 0 16px 24px; }
+  .card { width: min(720px, 100%); background: var(--bg-card); border: 1px solid var(--border); border-radius: 0 0 16px 16px; padding: 18px 18px 14px; max-width: 800px; }
   .title { display: flex; align-items: baseline; gap: 10px; }
-  h1 { margin: 0; font-size: 22px; letter-spacing: 0.2px; }
-  .sub { opacity: 0.75; font-size: 13px; }
+  h1 { margin: 0; font-size: 20px; letter-spacing: 0.2px; }
+  .sub { opacity: 0.75; font-size: 12px; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-  button { appearance: none; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.10); color: #fff; padding: 10px 12px; border-radius: 12px; font-weight: 600; cursor: pointer; }
+  button { appearance: none; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.10); color: #fff; padding: 8px 12px; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 12px; transition: all 0.2s; }
+  button:hover { background: rgba(255,255,255,0.16); }
   button:active { transform: translateY(1px); }
   .ok { color: #24e08a; }
   .bad { color: #ff5c5c; }
-  .log { margin-top: 14px; opacity: 0.85; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08); padding: 10px; border-radius: 12px; }
+  .log { margin-top: 14px; opacity: 0.85; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08); padding: 10px; border-radius: 10px; max-height: 120px; overflow-y: auto; }
+  .demo-controls { max-width: 800px; margin: 16px auto 24px; padding: 12px 16px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; }
+  .demo-controls h3 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); }
+  .toggle-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .toggle-btn { width: 36px; height: 28px; font-size: 11px; padding: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
+  .toggle-btn.on { background: rgba(36,224,138,0.2); border-color: rgba(36,224,138,0.4); color: #24e08a; }
+  .scanlines {
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+    pointer-events: none; z-index: 8; border-radius: 16px 16px 0 0;
+  }
 </style>
+
+<div class="room-scene">
+  <div class="room-container">
+    <div class="scanlines"></div>
+    <div class="room-title"><span>&#9670;</span> Agent Command Room</div>
+    <div class="agent-count"><span class="active-num" id="active-count">3</span> / 8</div>
+    <div class="wall-window"></div>
+    <div class="floor"></div>
+    <div class="desk-grid" id="desk-grid"></div>
+  </div>
+</div>
+
 <div class="wrap">
   <div class="card">
     <div class="title">
       <h1>OpenClaw Canvas</h1>
       <div class="sub">Interactive test page (auto-reload enabled)</div>
     </div>
-
     <div class="row">
       <button id="btn-hello">Hello</button>
       <button id="btn-time">Time</button>
       <button id="btn-photo">Photo</button>
       <button id="btn-dalek">Dalek</button>
     </div>
-
     <div id="status" class="sub" style="margin-top: 10px;"></div>
     <div id="log" class="log">Ready.</div>
   </div>
 </div>
+
+<div class="demo-controls">
+  <h3>&#127899; Demo — Toggle Agent Desks</h3>
+  <div class="toggle-row" id="toggle-row"></div>
+</div>
+
 <script>
-(() => {
-  const logEl = document.getElementById("log");
-  const statusEl = document.getElementById("status");
-  const log = (msg) => { logEl.textContent = String(msg); };
+(function() {
+  var deskStates = [true, true, true, false, false, false, false, false];
+  var grid = document.getElementById('desk-grid');
+  var toggleRow = document.getElementById('toggle-row');
+  var activeCountEl = document.getElementById('active-count');
 
-  const hasIOS = () =>
-    !!(
-      window.webkit &&
-      window.webkit.messageHandlers &&
-      window.webkit.messageHandlers.openclawCanvasA2UIAction
-    );
-  const hasAndroid = () =>
-    !!(
-      (window.openclawCanvasA2UIAction &&
-        typeof window.openclawCanvasA2UIAction.postMessage === "function")
-    );
-  const hasHelper = () => typeof window.openclawSendUserAction === "function";
-  statusEl.innerHTML =
-    "Bridge: " +
-    (hasHelper() ? "<span class='ok'>ready</span>" : "<span class='bad'>missing</span>") +
-    " · iOS=" + (hasIOS() ? "yes" : "no") +
-    " · Android=" + (hasAndroid() ? "yes" : "no");
-
-  const onStatus = (ev) => {
-    const d = ev && ev.detail || {};
-    log("Action status: id=" + (d.id || "?") + " ok=" + String(!!d.ok) + (d.error ? (" error=" + d.error) : ""));
-  };
-  window.addEventListener("openclaw:a2ui-action-status", onStatus);
-
-  function send(name, sourceComponentId) {
-    if (!hasHelper()) {
-      log("No action bridge found. Ensure you're viewing this on an iOS/Android OpenClaw node canvas.");
-      return;
+  function buildDesks() {
+    grid.innerHTML = '';
+    for (var i = 0; i < 8; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'desk-slot ' + (deskStates[i] ? 'active' : 'empty');
+      var d = i * 0.15;
+      slot.innerHTML =
+        '<div class="desk-status"></div>' +
+        '<div class="monitor"><div class="screen-content">' +
+          '<div class="screen-line" style="animation-delay:'+d+'s"></div>' +
+          '<div class="screen-line" style="animation-delay:'+(d+0.3)+'s"></div>' +
+          '<div class="screen-line" style="animation-delay:'+(d+0.6)+'s"></div>' +
+          '<div class="screen-line" style="animation-delay:'+(d+0.9)+'s"></div>' +
+        '</div></div>' +
+        '<div class="avatar"><div class="avatar-body">' +
+          '<div class="avatar-head" style="animation-delay:'+d+'s"></div>' +
+          '<div class="avatar-torso"></div>' +
+          '<div class="avatar-arm-l"></div>' +
+          '<div class="avatar-arm-r" style="animation-delay:'+(d*0.5)+'s"></div>' +
+        '</div></div>' +
+        '<div class="desk-surface"></div>' +
+        '<div class="desk-glow"></div>' +
+        '<div class="desk-label">' + (i+1) + '</div>';
+      grid.appendChild(slot);
     }
-    const sendUserAction =
-      typeof window.openclawSendUserAction === "function"
-        ? window.openclawSendUserAction
-        : undefined;
-    const ok = sendUserAction({
-      name,
-      surfaceId: "main",
-      sourceComponentId,
-      context: { t: Date.now() },
-    });
+  }
+
+  function buildToggles() {
+    toggleRow.innerHTML = '';
+    for (var i = 0; i < 8; i++) {
+      var btn = document.createElement('button');
+      btn.className = 'toggle-btn' + (deskStates[i] ? ' on' : '');
+      btn.textContent = i + 1;
+      btn.dataset.idx = i;
+      btn.onclick = function() {
+        var idx = parseInt(this.dataset.idx);
+        deskStates[idx] = !deskStates[idx];
+        buildDesks(); buildToggles();
+        activeCountEl.textContent = deskStates.filter(Boolean).length;
+      };
+      toggleRow.appendChild(btn);
+    }
+  }
+
+  buildDesks(); buildToggles();
+
+  var logEl = document.getElementById("log");
+  var statusEl = document.getElementById("status");
+  var log = function(msg) { logEl.textContent = String(msg); };
+  var hasHelper = function() { return typeof window.openclawSendUserAction === "function"; };
+  var hasIOS = function() { return !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.openclawCanvasA2UIAction); };
+  var hasAndroid = function() { return !!(window.openclawCanvasA2UIAction && typeof window.openclawCanvasA2UIAction.postMessage === "function"); };
+
+  statusEl.innerHTML = "Bridge: " + (hasHelper() ? "<span class='ok'>ready</span>" : "<span class='bad'>missing</span>") + " &middot; iOS=" + (hasIOS() ? "yes" : "no") + " &middot; Android=" + (hasAndroid() ? "yes" : "no");
+
+  window.addEventListener("openclaw:a2ui-action-status", function(ev) {
+    var d = ev && ev.detail || {};
+    log("Action status: id=" + (d.id || "?") + " ok=" + String(!!d.ok) + (d.error ? (" error=" + d.error) : ""));
+  });
+
+  function send(name, src) {
+    if (!hasHelper()) { log("No action bridge found."); return; }
+    var ok = window.openclawSendUserAction({ name: name, surfaceId: "main", sourceComponentId: src, context: { t: Date.now() } });
     log(ok ? ("Sent action: " + name) : ("Failed to send action: " + name));
   }
 
-  document.getElementById("btn-hello").onclick = () => send("hello", "demo.hello");
-  document.getElementById("btn-time").onclick = () => send("time", "demo.time");
-  document.getElementById("btn-photo").onclick = () => send("photo", "demo.photo");
-  document.getElementById("btn-dalek").onclick = () => send("dalek", "demo.dalek");
+  document.getElementById("btn-hello").onclick = function() { send("hello", "demo.hello"); };
+  document.getElementById("btn-time").onclick = function() { send("time", "demo.time"); };
+  document.getElementById("btn-photo").onclick = function() { send("photo", "demo.photo"); };
+  document.getElementById("btn-dalek").onclick = function() { send("dalek", "demo.dalek"); };
 })();
 </script>
