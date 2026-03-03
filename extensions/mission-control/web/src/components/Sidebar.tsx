@@ -1,6 +1,7 @@
 import {
   Activity,
-  Satellite,
+  ChartArea,
+  LayoutList,
   Brain,
   Sparkles,
   Users,
@@ -27,6 +28,7 @@ export type Page =
   | "models"
   | "cron"
   | "tools"
+  | "activity"
   | "settings";
 
 interface NavItem {
@@ -37,8 +39,9 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { id: "chat", label: "Chat", icon: MessageCircle },
-  { id: "services", label: "Services", icon: Activity },
-  { id: "dashboard", label: "Usage", icon: Satellite },
+  { id: "activity", label: "Activity", icon: Activity },
+  { id: "services", label: "Services", icon: LayoutList },
+  { id: "dashboard", label: "Usage", icon: ChartArea },
   { id: "clawdeck", label: "ClawDeck", icon: LayoutGrid },
   { id: "memory", label: "Memory", icon: Brain },
   { id: "skills", label: "Skills Explorer", icon: Sparkles },

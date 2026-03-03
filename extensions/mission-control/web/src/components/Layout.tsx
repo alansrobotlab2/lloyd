@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import Sidebar, { type Page } from "./Sidebar";
 import ChatPanel from "./ChatPanel";
 import ServicesPage from "./pages/ServicesPage";
@@ -11,7 +11,32 @@ import ModelsPage from "./pages/ModelsPage";
 import CronPage from "./pages/CronPage";
 import ToolsPage from "./pages/ToolsPage";
 import AgentsPage from "./pages/AgentsPage";
+import ActivityPage from "./pages/ActivityPage";
 import SettingsPage from "./pages/SettingsPage";
+
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="p-6 text-red-400">
+          <h2 className="font-bold">Page Error</h2>
+          <pre className="text-xs mt-2 whitespace-pre-wrap">{this.state.error.message}</pre>
+          <button onClick={() => this.setState({ error: null })} className="mt-2 text-sm underline">
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const PAGES: Record<string, React.ComponentType> = {
   services: ServicesPage,
@@ -20,6 +45,7 @@ const PAGES: Record<string, React.ComponentType> = {
   memory: MemoryPage,
   skills: SkillsPage,
   agents: AgentsPage,
+  activity: ActivityPage,
   models: ModelsPage,
   cron: CronPage,
   tools: ToolsPage,
@@ -52,13 +78,15 @@ export default function Layout() {
       />
       <main className="flex-1 flex min-h-0 overflow-hidden">
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          {page === "chat" && (
-            <ChatPanel requestedSessionId={chatSessionId} onSessionLoaded={handleSessionLoaded} />
-          )}
-          {page === "sessions" && (
-            <SessionsPage onOpenSession={handleOpenSession} />
-          )}
-          {PageComponent && <PageComponent />}
+          <ErrorBoundary>
+            {page === "chat" && (
+              <ChatPanel requestedSessionId={chatSessionId} onSessionLoaded={handleSessionLoaded} />
+            )}
+            {page === "sessions" && (
+              <SessionsPage onOpenSession={handleOpenSession} />
+            )}
+            {PageComponent && <PageComponent />}
+          </ErrorBoundary>
         </div>
       </main>
     </div>

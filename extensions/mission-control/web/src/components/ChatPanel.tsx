@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Send, User, Plus, Loader2, Brain, MessageCircle } from "lucide-react";
+import { Send, User, Plus, Loader2, Brain, MessageCircle, StopCircle } from "lucide-react";
 import { marked } from "marked";
 import { api, type MessageEntry } from "../api";
 
@@ -160,6 +160,16 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
       setInput(text);
     } finally {
       setSending(false);
+    }
+  };
+
+
+  const handleStop = async () => {
+    try {
+      await api.chatAbort();
+      setThinking(false);
+    } catch (err) {
+      console.error("Stop failed:", err);
     }
   };
 
@@ -324,6 +334,14 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
               className="bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
             >
               <Send className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleStop}
+              disabled={!thinking}
+              title="Stop"
+              className="bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
+            >
+              <StopCircle className="w-4 h-4" />
             </button>
           </div>
         </div>

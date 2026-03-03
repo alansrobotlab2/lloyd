@@ -1,4 +1,88 @@
 {
   "version": 2,
-  "runs": {}
+  "runs": {
+    "3c51b4de-d778-4237-9c5d-8007f91e6637": {
+      "runId": "3c51b4de-d778-4237-9c5d-8007f91e6637",
+      "childSessionKey": "agent:coder:subagent:1c1dba6b-f1bc-4a5a-b010-5da8e9816428",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Review]\n\nAdd an \"Activity\" page/tab to the Mission Control dashboard (~/.openclaw/extensions/mission-control/web/).\n\nRequirements:\n- New sidebar entry \"Activity\" with the `Activity` (pulse/heartbeat) icon from lucide-react\n- Separate from the existing Agents page (which stays as-is for configuration)\n- Shows live agent monitoring: main agent state, current activity (tool call / LLM thinking), active subagent runs with kill capability, recent completed runs\n- Real-time polling (fast poll ~1.5s when active, slower ~3s when idle)\n- Kill button on active subagent runs (calls chat.abort for that subagent's session key — needs a new backend endpoint /api/mc/subagent-abort)\n- Activity feed showing recent events across all agents\n\nThe existing /api/mc/agent-status endpoint already returns mainAgent state, activity, heartbeat, and subagents (active + recentCompleted). Read the existing AgentsPage.tsx and api.ts to understand what's already there before asking questions.\n\nReview the requirements and ask any clarifying questions. Do NOT start implementation yet.",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "activity-tab-review",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 300,
+      "createdAt": 1772495026985,
+      "startedAt": 1772495027293,
+      "archiveAtMs": 1772498626985,
+      "cleanupHandled": true,
+      "endedAt": 1772495057989,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "endedHookEmittedAt": 1772495113450,
+      "cleanupCompletedAt": 1772495113450
+    },
+    "1061c178-7a36-47dd-bd13-60799f1e9691": {
+      "runId": "1061c178-7a36-47dd-bd13-60799f1e9691",
+      "childSessionKey": "agent:coder:subagent:e473fd00-f17b-4c94-adee-442e2a0c0e54",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Execute]\n\nFix the Activity page in Mission Control — it's rendering as a blank/black page with none of the features visible.\n\n**Location:** ~/.openclaw/extensions/mission-control/web/\n\n**Current state:** ActivityPage.tsx exists at src/components/pages/ActivityPage.tsx (306 lines) with all the right components, but the page renders blank. The build output exists at dist-web/. The sidebar entry works and navigates to the page, but nothing renders.\n\n**Debug and fix:**\n1. Check if the page component is actually being rendered (Layout.tsx routing)\n2. Check for runtime errors — missing API types, null reference on first render before data loads, etc.\n3. Verify api.ts has `agentStatus()` and `subagentAbort()` methods that work\n4. Verify the backend `/api/mc/agent-status` and `/api/mc/subagent-abort` endpoints exist in index.ts\n5. Fix whatever is broken so the Activity page actually renders with:\n   - Main agent live status banner\n   - Active subagent runs with kill button\n   - Recent completed runs\n   - Activity feed\n   - Adaptive polling (1.5s active, 3s idle)\n\n**After fixing:** rebuild with `cd ~/.openclaw/extensions/mission-control/web && npm run build`\n\nThen announce: `openclaw system event --text \"Activity page fixed and rebuilt\" --mode now`",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "activity-page-fix",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 300,
+      "createdAt": 1772495586513,
+      "startedAt": 1772495586904,
+      "archiveAtMs": 1772499186513,
+      "cleanupHandled": true,
+      "endedAt": 1772495886926,
+      "outcome": {
+        "status": "timeout"
+      },
+      "endedReason": "subagent-complete",
+      "endedHookEmittedAt": 1772495916956,
+      "cleanupCompletedAt": 1772495916956
+    },
+    "81b03868-178e-4bef-9925-204345482485": {
+      "runId": "81b03868-178e-4bef-9925-204345482485",
+      "childSessionKey": "agent:coder:subagent:b30fa682-64f7-413a-a8f6-69e9d2b71b16",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Execute]\n\nThe Activity page in Mission Control renders as a completely blank/black page. Debug and fix it.\n\n**Location:** ~/.openclaw/extensions/mission-control/web/\n\n**What exists:**\n- ActivityPage.tsx (306 lines) with all components — renders blank\n- Layout.tsx routes \"activity\" → ActivityPage correctly\n- api.ts has agentStatus() and subagentAbort()\n- Backend index.ts has /api/mc/agent-status and /api/mc/subagent-abort\n- Build output at ~/.openclaw/extensions/mission-control/dist-web/\n\n**Likely causes:**\n- Runtime JS error on first render (null ref before data loads, missing type, API call failing)\n- CSS issue (page renders but content invisible)\n- The page's overflow/height not set correctly for the parent container\n\n**Fix it, rebuild, and test:**\n```\ncd ~/.openclaw/extensions/mission-control/web && npm run build\n```\n\nThen: `openclaw system event --text \"Activity page fixed\" --mode now`",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "activity-page-fix-2",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 600,
+      "createdAt": 1772496437217,
+      "startedAt": 1772496437438,
+      "archiveAtMs": 1772500037217,
+      "cleanupHandled": true,
+      "cleanupCompletedAt": 1772497302371,
+      "endedAt": 1772497302371,
+      "outcome": {
+        "status": "error",
+        "error": "killed"
+      },
+      "endedReason": "subagent-killed",
+      "suppressAnnounceReason": "killed",
+      "endedHookEmittedAt": 1772497302371
+    }
+  }
 }

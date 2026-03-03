@@ -382,6 +382,16 @@ export const api = {
   memoryRead: (path: string) =>
     fetchJson<MemoryReadResult>(`/memory/read?path=${encodeURIComponent(path)}`),
 
+  // Abort the currently running agent turn
+  chatAbort: async (): Promise<{ ok: boolean }> => {
+    const res = await fetch(`${BASE}/chat-abort`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    return res.json();
+  },
+
   // Session management
   sessionReset: async (): Promise<{ ok: boolean; sessionId: string | null }> => {
     const res = await fetch(`${BASE}/session-reset`, {
@@ -427,6 +437,16 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
+    });
+    return res.json();
+  },
+
+  // Subagent abort
+  subagentAbort: async (sessionKey: string) => {
+    const res = await fetch(`${BASE}/subagent-abort`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionKey }),
     });
     return res.json();
   },

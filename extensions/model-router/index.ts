@@ -312,6 +312,14 @@ export default function register(api: OpenClawPluginApi) {
     const prompt = event.prompt?.trim() ?? "";
     const lower = prompt.toLowerCase();
 
+    // ── Skip subagents — they have explicit model configs ────────────
+    if (ctx?.agentId && ctx.agentId !== "main") {
+      if (config.verbose) {
+        api.logger.info?.(`model-router: skipping subagent "${ctx.agentId}" (uses agent-configured model)`);
+      }
+      return;
+    }
+
     // ── Skip framework commands ──────────────────────────────────────
     // Let OpenClaw handle its own slash commands without routing interference
     if (/^\/(?:new|reset|sessions?|help|clear|status|version|skills?|config)\b/.test(lower)) {

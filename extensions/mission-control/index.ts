@@ -825,6 +825,67 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // ── API: /api/mc/chat-abort ──────────────────────────────────────────
+  api.registerHttpRoute({
+    path: "/api/mc/chat-abort",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === "OPTIONS") {
+        res.writeHead(200, {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        });
+        res.end();
+        return;
+      }
+      if (req.method !== "POST") {
+        jsonResponse(res, { error: "Method not allowed" }, 405);
+        return;
+      }
+      try {
+        await gwWsSend("chat.abort", { sessionKey: "agent:main:main" });
+        jsonResponse(res, { ok: true });
+      } catch (err: any) {
+        api.logger.error?.(`mission-control: chat.abort failed: ${err.message}`);
+        jsonResponse(res, { error: err.message }, 502);
+      }
+    },
+  });
+
+
+  // ── API: /api/mc/subagent-abort ─────────────────────────────────────
+  api.registerHttpRoute({
+    path: "/api/mc/subagent-abort",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === "OPTIONS") {
+        res.writeHead(200, {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        });
+        res.end();
+        return;
+      }
+      if (req.method !== "POST") {
+        jsonResponse(res, { error: "Method not allowed" }, 405);
+        return;
+      }
+      try {
+        const body = await readBody(req);
+        const { sessionKey } = JSON.parse(body);
+        if (!sessionKey) {
+          jsonResponse(res, { error: "sessionKey required" }, 400);
+          return;
+        }
+        await gwWsSend("chat.abort", { sessionKey });
+        jsonResponse(res, { ok: true });
+      } catch (err: any) {
+        api.logger.error?.(`mission-control: subagent-abort failed: ${err.message}`);
+        jsonResponse(res, { error: err.message }, 502);
+      }
+    },
+  });
+
   // ── API: /api/mc/session-reset ────────────────────────────────────────
   // Calls the gateway's sessions.reset method (same as control UI /new).
   // Returns the new session entry so the frontend can switch to it immediately.
@@ -1549,7 +1610,9 @@ export default function register(api: OpenClawPluginApi) {
           createdAt: record.createdAt,
           startedAt: record.startedAt,
           endedAt: record.endedAt,
-          outcome: record.outcome,
+          outcome: typeof record.outcome === "object" && record.outcome !== null
+            ? record.outcome.status
+            : record.outcome,
           endedReason: record.endedReason,
           durationMs: record.endedAt && record.startedAt
             ? record.endedAt - record.startedAt
