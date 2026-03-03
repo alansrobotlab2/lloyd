@@ -82,6 +82,18 @@ export default function register(api: OpenClawPluginApi) {
   // Profiles where prefill should be skipped entirely (no vault search needed)
   const SKIP_PREFILL_PROFILES = new Set<ContextProfile>(["chat", "code", "ops", "voice"]);
 
+  // Segment scope routing: map profiles to vault segments to restrict prefill search.
+  // Empty string = no scope restriction (search all segments).
+  const PROFILE_SCOPE: Record<ContextProfile, string> = {
+    memory:   "",                          // all segments — explicit memory recall
+    research: "knowledge,projects,work",   // no personal/agent noise in research
+    default:  "",                          // all segments for general turns
+    chat:     "",   // skipped, not reached
+    code:     "",   // skipped, not reached
+    ops:      "",   // skipped, not reached
+    voice:    "",   // skipped, not reached
+  };
+
   function classifyProfile(prompt: string): ContextProfile {
     const trimmed = prompt.trim();
     const lower = trimmed.toLowerCase();
@@ -117,10 +129,12 @@ export default function register(api: OpenClawPluginApi) {
       prefillConsecutiveFailures = 0;
     }
 
+    const prefillScope = PROFILE_SCOPE[profile] ?? "";
+
     try {
       const content = await mcpClient.callTool(
         "prefill_context",
-        { prompt, session_id: ctx?.sessionId ?? "" },
+        { prompt, session_id: ctx?.sessionId ?? "", scope: prefillScope },
         PREFILL_HOOK_TIMEOUT_MS,
       );
 

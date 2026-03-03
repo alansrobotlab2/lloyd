@@ -1,5 +1,27 @@
 # OpenClaw Work Log
 
+## 2026-03-03 — Memory Model Segmentation
+
+**Type:** Feature / Refactor
+**Files modified:**
+- `~/obsidian/` — physical vault reorganization (5-segment structure)
+- `~/Projects/lloyd-services/tool_services.py` — scope param on qmd_search, tag_search, prefill_context
+- `extensions/mcp-tools/index.ts` — PROFILE_SCOPE map + scope passed to prefill_context
+- `obsidian/agents/researcher/AGENTS.md` — updated knowledge paths + segment guide
+- `obsidian/agents/lloyd/AGENTS.md` — added Memory Segments section
+- `obsidian/agents/lloyd/skills/websearch/SKILL.md` — updated knowledge path
+- `obsidian/agents/lloyd/skills/research-agent/SKILL.md` — updated paths + tool names
+- `obsidian/agents/lloyd/skills/autolink/autolink.py` — updated exclusion paths for new structure
+
+**Summary:**
+- **Vault reorganized** into 5 canonical top-level segments: `agents/`, `personal/`, `work/`, `projects/`, `knowledge/`. Moved dreams→personal, aveva+rssc→work, ai+hardware+robot-papers→knowledge, Projects/brayden→projects, lloyd→agents/lloyd-legacy (archive), memory→agents/shared. qmd index re-built (392 docs).
+- **Frontmatter tagging** — added `segment:` field to all 391 vault docs via batch script. Valid values: agents, personal, work, projects, knowledge.
+- **Tool scope filtering** — added `scope` param (comma-separated segment names) to `qmd_search`, `tag_search`, and `prefill_context`. Post-filters results by path prefix. Cache key includes scope.
+- **Profile-based scope routing** — `PROFILE_SCOPE` map in mcp-tools/index.ts: research profile → `knowledge,projects,work`; memory/default → all. Scope passed to prefill_context on each turn.
+- **Agent documentation** — updated AGENTS.md for Lloyd and Researcher with segment table and scope usage examples. Fixed stale `lloyd/knowledge/` paths throughout skills.
+
+---
+
 ## 2026-03-03 — Model Upgrades: Reviewer + Auditor → Opus
 
 **Type:** Config
