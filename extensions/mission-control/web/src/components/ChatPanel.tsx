@@ -252,7 +252,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
         <div ref={messagesContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
           {messages.length === 0 && !thinking && (
             <div className="flex flex-col items-center justify-center h-full text-slate-500">
-              <img src="/mc/lloyd_003.jpg" alt="Lloyd" className="w-12 h-12 rounded-full object-cover mb-3 opacity-50" />
+              <img src="/api/mc/agent-avatar?id=lloyd" alt="Lloyd" className="w-12 h-12 rounded-full object-cover mb-3 opacity-50" />
               {awaitingReset ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin mb-2 text-brand-400" />
@@ -269,7 +269,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
               className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}
             >
               {msg.role === "assistant" && (
-                <img src="/mc/lloyd_003.jpg" alt="Lloyd" className="w-7 h-7 rounded-full object-cover flex-shrink-0 mt-0.5" />
+                <img src="/api/mc/agent-avatar?id=lloyd" alt="Lloyd" className="w-7 h-7 rounded-full object-cover flex-shrink-0 mt-0.5" />
               )}
               <div
                 className={`max-w-[80%] ${
@@ -303,7 +303,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
           {/* Thinking indicator */}
           {thinking && (
             <div className="flex gap-3">
-              <img src="/mc/lloyd_003.jpg" alt="Lloyd" className="w-7 h-7 rounded-full object-cover flex-shrink-0 mt-0.5" />
+              <img src="/api/mc/agent-avatar?id=lloyd" alt="Lloyd" className="w-7 h-7 rounded-full object-cover flex-shrink-0 mt-0.5" />
               <div className="bg-surface-2 border-surface-3/50 rounded-xl px-3.5 py-2.5 border">
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                   <Brain className="w-4 h-4 animate-pulse text-brand-400" />

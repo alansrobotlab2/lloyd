@@ -238,7 +238,7 @@ function AgentCard({
       <div className="flex items-center gap-4">
         {agent.avatar ? (
           <img
-            src={`/mc/${agent.avatar.replace("avatars/", "")}`}
+            src={agent.avatar}
             alt={agent.id}
             className="w-12 h-12 rounded-xl object-cover flex-shrink-0"
           />
@@ -260,6 +260,11 @@ function AgentCard({
             </div>
           )}
         </div>
+        {agent.identity && (
+          <div className="text-xs text-slate-400 italic text-right flex-shrink-0 max-w-[45%] leading-snug">
+            {agent.identity}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-4 gap-3 mt-4">
@@ -753,7 +758,7 @@ function AgentDetail({
         </button>
         {agent.avatar ? (
           <img
-            src={`/mc/${agent.avatar.replace("avatars/", "")}`}
+            src={agent.avatar}
             alt={agent.id}
             className="w-8 h-8 rounded-lg object-cover"
           />

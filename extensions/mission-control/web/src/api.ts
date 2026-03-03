@@ -154,6 +154,7 @@ export interface AgentInfo {
   id: string;
   name: string;
   avatar: string | null;
+  identity: string | null;
   primaryModel: string | null;
   modelFallbacks: string[];
   sessions: { total: number; active: number };

@@ -1,35 +1,6 @@
 {
   "version": 2,
   "runs": {
-    "81b03868-178e-4bef-9925-204345482485": {
-      "runId": "81b03868-178e-4bef-9925-204345482485",
-      "childSessionKey": "agent:coder:subagent:b30fa682-64f7-413a-a8f6-69e9d2b71b16",
-      "requesterSessionKey": "agent:main:main",
-      "requesterOrigin": {
-        "channel": "webchat"
-      },
-      "requesterDisplayKey": "agent:main:main",
-      "task": "[Phase: Execute]\n\nThe Activity page in Mission Control renders as a completely blank/black page. Debug and fix it.\n\n**Location:** ~/.openclaw/extensions/mission-control/web/\n\n**What exists:**\n- ActivityPage.tsx (306 lines) with all components — renders blank\n- Layout.tsx routes \"activity\" → ActivityPage correctly\n- api.ts has agentStatus() and subagentAbort()\n- Backend index.ts has /api/mc/agent-status and /api/mc/subagent-abort\n- Build output at ~/.openclaw/extensions/mission-control/dist-web/\n\n**Likely causes:**\n- Runtime JS error on first render (null ref before data loads, missing type, API call failing)\n- CSS issue (page renders but content invisible)\n- The page's overflow/height not set correctly for the parent container\n\n**Fix it, rebuild, and test:**\n```\ncd ~/.openclaw/extensions/mission-control/web && npm run build\n```\n\nThen: `openclaw system event --text \"Activity page fixed\" --mode now`",
-      "cleanup": "keep",
-      "expectsCompletionMessage": true,
-      "spawnMode": "run",
-      "label": "activity-page-fix-2",
-      "model": "anthropic/claude-opus-4-6",
-      "runTimeoutSeconds": 600,
-      "createdAt": 1772496437217,
-      "startedAt": 1772496437438,
-      "archiveAtMs": 1772500037217,
-      "cleanupHandled": true,
-      "cleanupCompletedAt": 1772497302371,
-      "endedAt": 1772497302371,
-      "outcome": {
-        "status": "error",
-        "error": "killed"
-      },
-      "endedReason": "subagent-killed",
-      "suppressAnnounceReason": "killed",
-      "endedHookEmittedAt": 1772497302371
-    },
     "f22bd24b-015a-4087-b8ee-fd7f5e91b860": {
       "runId": "f22bd24b-015a-4087-b8ee-fd7f5e91b860",
       "childSessionKey": "agent:coder:subagent:cde74e42-b00f-4140-8480-a4687440a7c7",
@@ -74,7 +45,16 @@
       "createdAt": 1772499497233,
       "startedAt": 1772499497374,
       "archiveAtMs": 1772503097233,
-      "cleanupHandled": false
+      "cleanupHandled": true,
+      "cleanupCompletedAt": 1772500041621,
+      "endedAt": 1772500041621,
+      "outcome": {
+        "status": "error",
+        "error": "killed"
+      },
+      "endedReason": "subagent-killed",
+      "suppressAnnounceReason": "killed",
+      "endedHookEmittedAt": 1772500041621
     }
   }
 }

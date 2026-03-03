@@ -90,7 +90,7 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
     <aside className={`${collapsed ? "w-14" : "w-48"} bg-surface-1 border-r border-surface-3/30 flex flex-col py-4 transition-all duration-200`}>
       {/* Brand */}
       <div className={`${collapsed ? "px-2 justify-center" : "px-4"} mb-6 flex items-center gap-2`}>
-        <img src="/mc/lloyd_003.jpg" alt="Lloyd" className="w-7 h-7 rounded-lg object-cover flex-shrink-0" />
+        <img src="/api/mc/agent-avatar?id=lloyd" alt="Lloyd" className="w-7 h-7 rounded-lg object-cover flex-shrink-0" />
         {!collapsed && (
           <div>
             <div className="text-sm font-bold tracking-wide">LLOYD</div>

@@ -1430,10 +1430,20 @@ export default function register(api: OpenClawPluginApi) {
             workspaceFiles.sort((a, b) => a.name.localeCompare(b.name));
           }
 
+          // Extract one-liner from IDENTITY.md (line after the heading)
+          const identityRaw = agentWorkspace.identity;
+          let identity: string | null = null;
+          if (identityRaw) {
+            const lines = identityRaw.split("\n");
+            const oneLiner = lines.find((l: string) => l.trim() && !l.startsWith("#"));
+            if (oneLiner) identity = oneLiner.trim();
+          }
+
           return {
             id,
             name: a.name ?? id,
-            avatar: a.identity?.avatar ?? null,
+            avatar: discoverAvatar(id, a.name) ? `/api/mc/agent-avatar?id=${id}&name=${encodeURIComponent(a.name ?? id)}` : null,
+            identity,
             primaryModel,
             modelFallbacks: (typeof a.model === "object" && a.model?.fallbacks) || null,
             sessions,
@@ -2373,6 +2383,57 @@ export default function register(api: OpenClawPluginApi) {
         jsonResponse(res, result.data, result.status);
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/agent-avatar ───────────────────────────────────────────
+  // Serves avatar images from ~/obsidian/agents/<id>/avatar/
+
+  const AVATAR_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
+  const AVATAR_MIME: Record<string, string> = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".webp": "image/webp",
+  };
+
+  function discoverAvatarInDir(agentId: string): string | null {
+    if (!agentId || /[\/\.]/.test(agentId)) return null;
+    const avatarDir = join(homedir(), "obsidian", "agents", agentId, "avatar");
+    if (!existsSync(avatarDir)) return null;
+    let entries: string[];
+    try { entries = readdirSync(avatarDir); } catch { return null; }
+    for (const ext of AVATAR_EXTENSIONS) {
+      const match = entries.find((e) => e.toLowerCase().endsWith(ext));
+      if (match) return join(avatarDir, match);
+    }
+    return null;
+  }
+
+  /** Try agent ID first, then fall back to display name (lowercased) */
+  function discoverAvatar(agentId: string, agentName?: string): string | null {
+    return discoverAvatarInDir(agentId)
+      || (agentName ? discoverAvatarInDir(agentName.toLowerCase()) : null);
+  }
+
+  api.registerHttpRoute({
+    path: "/api/mc/agent-avatar",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      const url = new URL(req.url || "/", "http://localhost");
+      const id = url.searchParams.get("id");
+      if (!id) { res.writeHead(400); res.end("Missing id"); return; }
+      const name = url.searchParams.get("name") || undefined;
+      const filePath = discoverAvatar(id, name);
+      if (!filePath) { res.writeHead(404); res.end("No avatar found"); return; }
+      try {
+        const content = readFileSync(filePath);
+        const ext = extname(filePath).toLowerCase();
+        res.writeHead(200, {
+          "Content-Type": AVATAR_MIME[ext] || "application/octet-stream",
+          "Cache-Control": "public, max-age=3600",
+        });
+        res.end(content);
+      } catch {
+        res.writeHead(500); res.end("Error reading avatar");
       }
     },
   });
