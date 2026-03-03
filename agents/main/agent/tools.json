@@ -27,10 +27,6 @@
   "vault_overview": false,
   "voice_enroll_speaker": false,
   "voice_list_speakers": false,
-  "clawdeck_boards": false,
-  "clawdeck_tasks": false,
-  "clawdeck_next_task": false,
-  "clawdeck_get_task": false,
   "clawdeck_update_task": false,
   "clawdeck_create_task": false
 }

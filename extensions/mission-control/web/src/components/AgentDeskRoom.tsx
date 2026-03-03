@@ -173,12 +173,12 @@ function DeskSlot({ agent, index }: { agent?: SubagentRunInfo; index: number }) 
             <circle cx={avatarX + avatarSize + 10} cy={avatarCenterY - 8} r={9} fill="white" opacity="0.7">
               <animate attributeName="opacity" values="0.7;0.4;0.7" dur="2s" begin="0.3s" repeatCount="indefinite" />
             </circle>
-            <rect x={bx} y={by} width={bw} height={bh} rx={33} fill="white" stroke="#cbd5e1" strokeWidth="2" opacity="0.92" />
-            <text x={bx + bw / 2} y={by + (line2 ? 45 : bh * 0.65)} textAnchor="middle" fontSize="22" fontFamily="monospace" fill="#1e293b" opacity="0.85">
+            <rect x={bx} y={by} width={bw} height={bh} rx={33} fill="#334155" stroke="#475569" strokeWidth="2" opacity="0.92" />
+            <text x={bx + bw / 2} y={by + (line2 ? 45 : bh * 0.65)} textAnchor="middle" fontSize="22" fontFamily="monospace" fill="white" opacity="0.85">
               {line1}
             </text>
             {line2 && (
-              <text x={bx + bw / 2} y={by + 85} textAnchor="middle" fontSize="22" fontFamily="monospace" fill="#1e293b" opacity="0.85">
+              <text x={bx + bw / 2} y={by + 85} textAnchor="middle" fontSize="22" fontFamily="monospace" fill="white" opacity="0.85">
                 {line2}
               </text>
             )}
@@ -250,12 +250,30 @@ function DeskSlot({ agent, index }: { agent?: SubagentRunInfo; index: number }) 
             </rect>
           </g>
         )}
+
+        {/* Agent name label — bottom right */}
+        {agentId && (
+          <text x={512} y={194} textAnchor="end" fontSize="27" fontFamily="monospace" fill="white" opacity="0.7">
+            {agentId}
+          </text>
+        )}
       </svg>
     </div>
   );
 }
 
 // DEBUG: all 8 slots active for animation testing
+const DEBUG_AGENT_TASKS: Record<string, string> = {
+  coder:      "refactoring auth module",
+  planner:    "scoping user stories",
+  researcher: "fetching web results",
+  reviewer:   "auditing PR diff",
+  tester:     "running test suite",
+  auditor:    "scanning for vulns",
+  operator:   "restarting gateway",
+  memory:     "indexing vault docs",
+};
+
 const DEBUG_AGENTS: SubagentRunInfo[] = [
   "coder", "planner", "researcher", "reviewer",
   "tester", "auditor", "operator", "memory",
@@ -263,7 +281,7 @@ const DEBUG_AGENTS: SubagentRunInfo[] = [
   runId: `debug-${id}`,
   childSessionKey: `agent:${id}:debug`,
   requesterSessionKey: "agent:main:debug",
-  task: "working on something great",
+  task: DEBUG_AGENT_TASKS[id] ?? "working...",
   label: `${id}:debug`,
   createdAt: Date.now(),
 }));
