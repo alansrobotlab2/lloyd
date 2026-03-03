@@ -59,9 +59,23 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   // ── Prefill hook (before_prompt_build) ────────────────────────────────
+  //
+  // Two-phase per-session prefill strategy:
+  //   Turn 1: inject yesterday's + today's daily memory files (temporal grounding)
+  //   Turn 2: inject semantic vault recall using the turn-1 query as search input
+  //   Turn 3+: no prefill — history carries sufficient accumulated context
+  //
+  // Rationale: per-turn semantic prefill adds ~549 chars / ~285ms per turn.
+  // By turn 5+ the conversation history already embeds the relevant vault docs
+  // from earlier turns, so additional prefill produces diminishing returns.
 
   let prefillConsecutiveFailures = 0;
   let prefillSkipUntil = 0;
+
+  // Per-session prefill state (in-process, cleared on session_end)
+  const dailyNotesInjected = new Set<string>(); // sessions where turn-1 daily notes ran
+  const semanticPrefillDone = new Set<string>(); // sessions where turn-2 semantic prefill ran
+  const firstUserPrompt = new Map<string, string>(); // turn-1 prompt → used as turn-2 search query
 
   // Agents that don't need vault recall in their prefill
   const SKIP_PREFILL_AGENTS = new Set([
@@ -69,7 +83,7 @@ export default function register(api: OpenClawPluginApi) {
   ]);
 
   // ── Context profile classification (lightweight, regex-only) ──────────
-  type ContextProfile = "chat" | "memory" | "code" | "research" | "ops" | "voice" | "default";
+  type ContextProfile = "chat" | "memory" | "code" | "research" | "ops" | "voice" | "heartbeat" | "default";
 
   const CHAT_RE = /^(hey|hi|hello|yo|sup|thanks|thank you|ok|sure|yes|no|yep|nah|nope|got it|cool|nice|great|perfect|sounds good|go ahead|do it|lol|haha|hmm|good morning|good night|gm|gn|👍|❤️|😂|💀)[\.\!\?]?$/i;
   const MEMORY_RE = /\b(remember|what did (?:we|i)|recall|last (?:time|session|week)|diary|journal|daily note|MEMORY\.md|vault (?:search|notes?))\b/i;
@@ -78,26 +92,28 @@ export default function register(api: OpenClawPluginApi) {
   const RESEARCH_RE = /\b(search for|look up|what is|what are|who is|find (?:out|info)|latest on|news about|how does .{3,} work)\b/i;
   const OPS_RE = /\b(restart|deploy|service|systemctl|docker|git (?:push|pull|merge|rebase)|clawdeck|task (?:board|backlog)|CI\/CD|build|release)\b/i;
   const VOICE_RE = /\b(say |speak |voice |read (?:this |it )?(?:aloud|out loud)|tts|text.to.speech|narrate)\b/i;
+  // Cron-injected automation prompts and session-management instructions — vault
+  // recall produces false positives from incidental keyword matches in boilerplate.
+  const HEARTBEAT_RE = /\bHEARTBEAT(?:_OK|\.md)?\b|\bPost-Compaction Audit\b|\bWorkflow Recovery\b|\bExecute your Session Startup\b|\bnew session was started via\b/i;
 
-  // Profiles where prefill should be skipped entirely (no vault search needed)
-  const SKIP_PREFILL_PROFILES = new Set<ContextProfile>(["chat", "code", "ops", "voice"]);
-
-  // Segment scope routing: map profiles to vault segments to restrict prefill search.
+  // Segment scope routing for semantic prefill.
   // Empty string = no scope restriction (search all segments).
   const PROFILE_SCOPE: Record<ContextProfile, string> = {
-    memory:   "",                          // all segments — explicit memory recall
-    research: "knowledge,projects,work",   // no personal/agent noise in research
-    default:  "",                          // all segments for general turns
-    chat:     "",   // skipped, not reached
-    code:     "",   // skipped, not reached
-    ops:      "",   // skipped, not reached
-    voice:    "",   // skipped, not reached
+    memory:    "",
+    research:  "knowledge,projects,work",
+    default:   "",
+    chat:      "",
+    code:      "",
+    ops:       "",
+    voice:     "",
+    heartbeat: "",
   };
 
   function classifyProfile(prompt: string): ContextProfile {
     const trimmed = prompt.trim();
     const lower = trimmed.toLowerCase();
 
+    if (HEARTBEAT_RE.test(trimmed)) return "heartbeat";
     if (trimmed.length < 50 && CHAT_RE.test(trimmed)) return "chat";
     if (VOICE_RE.test(lower)) return "voice";
     if (CODE_BLOCK_RE.test(prompt) || CODE_RE.test(lower)) return "code";
@@ -108,54 +124,215 @@ export default function register(api: OpenClawPluginApi) {
     return "default";
   }
 
-  api.on("before_prompt_build", async (event: any, ctx: any) => {
-    const prompt: string = event.prompt ?? "";
-    if (!prompt || prompt.length < MIN_QUERY_LENGTH) return;
+  // Fetch yesterday's and today's daily memory files from the vault.
+  async function fetchDailyNotes(): Promise<string> {
+    const now = new Date();
+    const toPstDateStr = (d: Date): string => {
+      const pst = new Date(d.toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+      const y = pst.getFullYear();
+      const mo = String(pst.getMonth() + 1).padStart(2, "0");
+      const dy = String(pst.getDate()).padStart(2, "0");
+      return `${y}-${mo}-${dy}`;
+    };
 
-    // Skip prefill for sub-agents that don't need vault context
-    const agentId = ctx?.agentId;
-    if (agentId && SKIP_PREFILL_AGENTS.has(agentId)) return;
+    const entries = [
+      { date: toPstDateStr(now), label: "today" },
+      { date: toPstDateStr(new Date(now.getTime() - 86_400_000)), label: "yesterday" },
+    ];
 
-    // Profile-based prefill gating
-    const profile = classifyProfile(prompt);
-    if (SKIP_PREFILL_PROFILES.has(profile)) return;
+    const results = await Promise.allSettled(
+      entries.map(({ date }) =>
+        mcpClient.callTool("qmd_get", { path: `agents/lloyd/memory/${date}.md` }, 3_000),
+      ),
+    );
 
-    // Skip prefill if we've hit too many consecutive failures
-    const now = Date.now();
-    if (prefillSkipUntil > now) return;
-    if (prefillSkipUntil > 0 && prefillSkipUntil <= now) {
-      // Cooldown expired — reset and retry
-      prefillSkipUntil = 0;
-      prefillConsecutiveFailures = 0;
-    }
-
-    const prefillScope = PROFILE_SCOPE[profile] ?? "";
-
-    try {
-      const content = await mcpClient.callTool(
-        "prefill_context",
-        { prompt, session_id: ctx?.sessionId ?? "", scope: prefillScope },
-        PREFILL_HOOK_TIMEOUT_MS,
-      );
-
-      prefillConsecutiveFailures = 0; // success — reset counter
-
-      const text = content
+    const sections: string[] = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const { date, label } = entries[i];
+      if (r.status !== "fulfilled") continue;
+      const raw = r.value
         .filter((b: any) => b.type === "text")
         .map((b: any) => b.text)
         .join("")
         .trim();
-      if (text) return { prependContext: text };
-    } catch (err: any) {
-      prefillConsecutiveFailures++;
-      if (prefillConsecutiveFailures >= PREFILL_MAX_FAILURES) {
-        prefillSkipUntil = Date.now() + PREFILL_SKIP_COOLDOWN_MS;
-        api.logger.warn?.(
-          `mcp-tools prefill: ${prefillConsecutiveFailures} consecutive failures, skipping for ${PREFILL_SKIP_COOLDOWN_MS / 1000}s`,
-        );
-      } else {
-        api.logger.warn?.(`mcp-tools prefill: ${err?.message}`);
+      // qmd_get returns JSON: {path, text} — unwrap if needed
+      let text = raw;
+      try { text = JSON.parse(raw)?.text ?? raw; } catch { /* use raw */ }
+      if (text && !text.startsWith("File not found")) {
+        sections.push(`--- ${date} (${label}) ---\n${text.trim()}`);
       }
+    }
+
+    if (sections.length === 0) return "";
+    return `<daily_notes>\n${sections.join("\n\n")}\n</daily_notes>`;
+  }
+
+  api.on("before_prompt_build", async (event: any, ctx: any) => {
+    const prompt: string = event.prompt ?? "";
+    if (!prompt || prompt.length < MIN_QUERY_LENGTH) return;
+
+    const agentId = ctx?.agentId;
+    if (agentId && SKIP_PREFILL_AGENTS.has(agentId)) return;
+
+    const profile = classifyProfile(prompt);
+    if (profile === "heartbeat") return; // automated prompts never get prefill
+
+    const sessionId = ctx?.sessionId ?? "";
+
+    // ── Turn 1: inject daily memory files ─────────────────────────────────
+    if (!dailyNotesInjected.has(sessionId)) {
+      dailyNotesInjected.add(sessionId);
+      // Save the first substantive prompt for semantic search on turn 2
+      if (profile !== "chat") firstUserPrompt.set(sessionId, prompt);
+
+      const dailyContext = await fetchDailyNotes();
+      if (dailyContext) return { prependContext: dailyContext };
+      return;
+    }
+
+    // ── Turn 2: semantic prefill using the turn-1 query ───────────────────
+    if (!semanticPrefillDone.has(sessionId)) {
+      semanticPrefillDone.add(sessionId);
+
+      const searchQuery = firstUserPrompt.get(sessionId);
+      if (!searchQuery) return; // turn-1 was chat/too-short — skip semantic prefill
+
+      const now = Date.now();
+      if (prefillSkipUntil > now) return;
+      if (prefillSkipUntil > 0 && prefillSkipUntil <= now) {
+        prefillSkipUntil = 0;
+        prefillConsecutiveFailures = 0;
+      }
+
+      const prefillScope = PROFILE_SCOPE[classifyProfile(searchQuery)] ?? "";
+
+      try {
+        const content = await mcpClient.callTool(
+          "prefill_context",
+          { prompt: searchQuery, session_id: sessionId, scope: prefillScope },
+          PREFILL_HOOK_TIMEOUT_MS,
+        );
+
+        prefillConsecutiveFailures = 0;
+
+        const text = content
+          .filter((b: any) => b.type === "text")
+          .map((b: any) => b.text)
+          .join("")
+          .trim();
+        if (text) return { prependContext: text };
+      } catch (err: any) {
+        prefillConsecutiveFailures++;
+        if (prefillConsecutiveFailures >= PREFILL_MAX_FAILURES) {
+          prefillSkipUntil = Date.now() + PREFILL_SKIP_COOLDOWN_MS;
+          api.logger.warn?.(
+            `mcp-tools prefill: ${prefillConsecutiveFailures} consecutive failures, skipping for ${PREFILL_SKIP_COOLDOWN_MS / 1000}s`,
+          );
+        } else {
+          api.logger.warn?.(`mcp-tools prefill: ${err?.message}`);
+        }
+      }
+      return;
+    }
+
+    // Turn 3+: no prefill — conversation history carries sufficient context
+  });
+
+  // ── Daily memory file (agent_end hook) ─────────────────────────────────
+
+  const DAILY_MEMORY_PATH_PREFIX = "agents/lloyd/memory";
+
+  function todayDateStr(): string {
+    const now = new Date();
+    const pst = new Date(
+      now.toLocaleString("en-US", { timeZone: "America/Los_Angeles" }),
+    );
+    const y = pst.getFullYear();
+    const m = String(pst.getMonth() + 1).padStart(2, "0");
+    const d = String(pst.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  function pstTimeStr(): string {
+    return new Date().toLocaleString("en-US", {
+      timeZone: "America/Los_Angeles",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  }
+
+  api.on("session_end", async (event: any, ctx: any) => {
+    // Clean up per-session prefill state
+    const sid = event?.sessionId ?? ctx?.sessionId ?? "";
+    if (sid) {
+      dailyNotesInjected.delete(sid);
+      semanticPrefillDone.delete(sid);
+      firstUserPrompt.delete(sid);
+    }
+
+    // Only create daily files for the main agent
+    if (ctx?.agentId && ctx.agentId !== "main") return;
+
+    const dateStr = todayDateStr();
+    const filePath = `${DAILY_MEMORY_PATH_PREFIX}/${dateStr}.md`;
+    const time = pstTimeStr();
+    const msgCount = event?.messageCount ?? 0;
+    const durationMin = event?.durationMs
+      ? Math.round(event.durationMs / 60_000)
+      : null;
+
+    const entry = [
+      `\n### Session ${time} PST`,
+      `- Messages: ${msgCount}${durationMin != null ? `, Duration: ~${durationMin}min` : ""}`,
+      `- Session: ${event?.sessionId ?? ctx?.sessionId ?? "unknown"}`,
+    ].join("\n");
+
+    try {
+      // Try to read existing file
+      let existing = "";
+      try {
+        const content = await mcpClient.callTool(
+          "qmd_get",
+          { path: filePath },
+          3000,
+        );
+        const raw = content.map((b: any) => b.text).join("");
+        try {
+          existing = JSON.parse(raw)?.text ?? "";
+        } catch {
+          existing = raw;
+        }
+      } catch {
+        // File doesn't exist yet — that's fine
+      }
+
+      let fileContent: string;
+      if (existing && existing.trim().length > 0) {
+        fileContent = existing.trimEnd() + "\n" + entry + "\n";
+      } else {
+        fileContent = [
+          "---",
+          "segment: agents",
+          "---",
+          "",
+          `# ${dateStr} Daily Notes`,
+          "",
+          "## Sessions",
+          entry,
+          "",
+        ].join("\n");
+      }
+
+      await mcpClient.callTool(
+        "memory_write",
+        { path: filePath, content: fileContent },
+        5000,
+      );
+      api.logger.info?.(`mcp-tools daily-memory: wrote ${filePath}`);
+    } catch (err: any) {
+      api.logger.warn?.(`mcp-tools daily-memory: ${err?.message}`);
     }
   });
 

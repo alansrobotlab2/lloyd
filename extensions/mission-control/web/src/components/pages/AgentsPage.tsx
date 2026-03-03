@@ -764,7 +764,7 @@ function AgentCallLog({ agentId }: { agentId: string }) {
 
   if (entries.length === 0) {
     return (
-      <div className="text-xs text-slate-500 italic py-4 text-center">No tool calls yet</div>
+      <div className="text-xs text-slate-500 italic py-4 text-center">No activity yet</div>
     );
   }
 
@@ -772,22 +772,47 @@ function AgentCallLog({ agentId }: { agentId: string }) {
     <div className="bg-surface-1 rounded-xl p-3 border border-surface-3/50 space-y-0">
       {[...entries].reverse().map((entry, i) => (
         <div key={i} className="flex items-start gap-2.5 py-1.5 border-b border-surface-3/15 last:border-0">
-          <div className={`mt-1.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${entry.isError ? "bg-red-400" : "bg-emerald-400/70"}`} />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="text-[10px] font-mono bg-surface-0 px-1.5 py-0.5 rounded border border-surface-3/50 text-brand-300">
-                {entry.toolName}
-              </span>
-              {formatArgs(entry.args) && (
-                <span className="text-[10px] text-slate-500 font-mono truncate max-w-[160px]">
-                  {formatArgs(entry.args)}
-                </span>
-              )}
-            </div>
-            {entry.resultPreview && (
-              <div className="text-[10px] text-slate-600 mt-0.5 truncate">{entry.resultPreview}</div>
-            )}
-          </div>
+          {entry.type === "llm" ? (
+            <>
+              <div className="mt-1.5 w-1.5 h-1.5 rounded-full flex-shrink-0 bg-indigo-400/70" />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-baseline gap-2 flex-wrap">
+                  <span className="text-[10px] font-mono bg-surface-0 px-1.5 py-0.5 rounded border border-surface-3/50 text-indigo-300">
+                    {entry.model ?? "llm"}
+                  </span>
+                  {entry.inputTokens !== undefined && (
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      {entry.inputTokens}→{entry.outputTokens}tok
+                    </span>
+                  )}
+                  {entry.cost !== undefined && (
+                    <span className="text-[10px] text-slate-600 font-mono">
+                      ${entry.cost.toFixed(4)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className={`mt-1.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${entry.isError ? "bg-red-400" : "bg-emerald-400/70"}`} />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-baseline gap-2 flex-wrap">
+                  <span className="text-[10px] font-mono bg-surface-0 px-1.5 py-0.5 rounded border border-surface-3/50 text-brand-300">
+                    {entry.toolName}
+                  </span>
+                  {formatArgs(entry.args ?? {}) && (
+                    <span className="text-[10px] text-slate-500 font-mono truncate max-w-[160px]">
+                      {formatArgs(entry.args ?? {})}
+                    </span>
+                  )}
+                </div>
+                {entry.resultPreview && (
+                  <div className="text-[10px] text-slate-600 mt-0.5 truncate">{entry.resultPreview}</div>
+                )}
+              </div>
+            </>
+          )}
           <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">{formatRelTs(entry.ts)}</span>
         </div>
       ))}

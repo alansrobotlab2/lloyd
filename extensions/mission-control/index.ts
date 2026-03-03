@@ -1591,10 +1591,19 @@ export default function register(api: OpenClawPluginApi) {
 
   interface AgentCallLogEntry {
     ts: string;
-    toolName: string;
-    args: Record<string, unknown>;
-    isError: boolean;
-    resultPreview: string;
+    type: "tool" | "llm";
+    // Tool-specific
+    toolName?: string;
+    args?: Record<string, unknown>;
+    isError?: boolean;
+    resultPreview?: string;
+    // LLM-specific
+    model?: string;
+    provider?: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    cost?: number;
+    hasToolCalls?: boolean;
   }
 
   api.registerHttpRoute({
@@ -1636,15 +1645,34 @@ export default function register(api: OpenClawPluginApi) {
           resultMap.set(id, { isError: msg.isError ?? false, preview: text });
         }
 
-        // Extract tool calls from assistant messages
+        // Extract LLM calls and tool calls from assistant messages
         const entries: AgentCallLogEntry[] = [];
         for (const line of lines) {
           if (line.type !== "message" || line.message?.role !== "assistant") continue;
-          for (const item of line.message?.content ?? []) {
-            if ((item as any).type !== "toolCall") continue;
+          const msg = line.message as any;
+          const ts = line.timestamp ?? new Date().toISOString();
+          const toolCallsInMsg = (msg.content ?? []).filter((c: any) => c.type === "toolCall");
+
+          // Add LLM entry if usage data is present
+          if (msg.usage) {
+            entries.push({
+              ts,
+              type: "llm",
+              model: msg.model ?? undefined,
+              provider: msg.provider ?? undefined,
+              inputTokens: msg.usage.input,
+              outputTokens: msg.usage.output,
+              cost: msg.usage.cost?.total ?? undefined,
+              hasToolCalls: toolCallsInMsg.length > 0,
+            });
+          }
+
+          // Add tool call entries
+          for (const item of toolCallsInMsg) {
             const result = resultMap.get((item as any).id);
             entries.push({
-              ts: line.timestamp ?? new Date().toISOString(),
+              ts,
+              type: "tool",
               toolName: (item as any).name,
               args: (item as any).arguments ?? {},
               isError: result?.isError ?? false,

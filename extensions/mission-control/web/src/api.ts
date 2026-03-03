@@ -221,10 +221,19 @@ export interface AgentStatusData {
 
 export interface CallLogEntry {
   ts: string;
-  toolName: string;
-  args: Record<string, unknown>;
-  isError: boolean;
-  resultPreview: string;
+  type: "tool" | "llm";
+  // Tool-specific
+  toolName?: string;
+  args?: Record<string, unknown>;
+  isError?: boolean;
+  resultPreview?: string;
+  // LLM-specific
+  model?: string;
+  provider?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cost?: number;
+  hasToolCalls?: boolean;
 }
 
 export interface ClawDeckBoard {
