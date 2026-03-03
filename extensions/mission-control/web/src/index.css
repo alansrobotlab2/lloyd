@@ -232,14 +232,14 @@ body {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 4px;
   padding: 12px 12px 16px;
 }
 
 @media (max-width: 500px) {
   .desk-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: 1fr;
   }
 }
 
@@ -273,7 +273,7 @@ body {
 
 .desk-svg {
   width: 100%;
-  max-width: 80px;
+  max-width: 260px;
   height: auto;
 }
 

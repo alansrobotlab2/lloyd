@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 520 200"
+   width="520"
+   height="200"
+   version="1.1"
+   id="svg7"
+   sodipodi:docname="agent-desk-template.svg"
+   inkscape:version="1.4.3 (0d15f75042, 2025-12-25)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs7" />
+  <sodipodi:namedview
+     id="namedview7"
+     pagecolor="#505050"
+     bordercolor="#eeeeee"
+     borderopacity="1"
+     inkscape:showpageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#505050"
+     inkscape:zoom="1.7903846"
+     inkscape:cx="260"
+     inkscape:cy="99.978518"
+     inkscape:window-width="1852"
+     inkscape:window-height="1179"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg7" />
+  <!-- Background (matches room theme) -->
+  <rect
+     x="0"
+     y="0"
+     width="520"
+     height="200"
+     fill="#0f172a"
+     id="rect1" />
+  <!-- ============================================ -->
+  <!-- THOUGHT BUBBLE (group id="thought-bubble")   -->
+  <!-- Trail dots lead from avatar to bubble        -->
+  <!-- ============================================ -->
+  <g
+     id="thought-bubble"
+     transform="matrix(1.0003523,0,0,0.81909953,-0.11201992,21.869887)">
+    <!-- Trail dot 1 (near avatar) -->
+    <circle
+       cx="133"
+       cy="69"
+       r="6"
+       fill="#ffffff"
+       opacity="0.6"
+       id="circle1" />
+    <!-- Trail dot 2 (between avatar and bubble) -->
+    <circle
+       cx="140"
+       cy="61"
+       r="9"
+       fill="#ffffff"
+       opacity="0.7"
+       id="circle2" />
+    <!-- Bubble background -->
+    <rect
+       id="bubble-rect"
+       x="144"
+       y="11"
+       width="364"
+       height="116"
+       rx="33.032364"
+       fill="#ffffff"
+       stroke="#cbd5e1"
+       stroke-width="2"
+       opacity="0.92" />
+    <!-- Line 1 text -->
+    <text
+       id="bubble-line1"
+       x="326"
+       y="56"
+       text-anchor="middle"
+       font-size="22px"
+       font-family="monospace"
+       fill="#1e293b"
+       opacity="0.85">working on</text>
+    <!-- Line 2 text -->
+    <text
+       id="bubble-line2"
+       x="326"
+       y="96"
+       text-anchor="middle"
+       font-size="22px"
+       font-family="monospace"
+       fill="#1e293b"
+       opacity="0.85">something great</text>
+  </g>
+  <!-- ============================================ -->
+  <!-- DESK (group id="desk")                       -->
+  <!-- Brown desk with perspective skew              -->
+  <!-- ============================================ -->
+  <g
+     id="desk"
+     transform="matrix(1,0,0,1.0916577,0,-19.679914)">
+    <!-- Desk top face (parallelogram) -->
+    <polygon
+       id="desk-top"
+       points="8.5,150 173.5,150 167.5,162 2.5,162 "
+       fill="#6b4226" />
+    <!-- Desk top highlight line -->
+    <line
+       x1="8.5"
+       y1="150"
+       x2="173.5"
+       y2="150"
+       stroke="#8b5e3c"
+       stroke-width="1.5"
+       opacity="0.8"
+       id="line2" />
+    <!-- Desk front face -->
+    <polygon
+       id="desk-front"
+       points="2.5,162 167.5,162 167.5,178 2.5,178 "
+       fill="#5a3720" />
+    <!-- Desk bottom edge -->
+    <line
+       x1="2.5"
+       y1="178"
+       x2="167.5"
+       y2="178"
+       stroke="#3d2416"
+       stroke-width="0.8"
+       opacity="0.6"
+       id="line3" />
+    <!-- Left leg -->
+    <rect
+       id="desk-leg-left"
+       x="6.5"
+       y="178"
+       width="6"
+       height="20"
+       fill="#4a2e1a"
+       opacity="0.8" />
+    <!-- Right leg -->
+    <rect
+       id="desk-leg-right"
+       x="157.5"
+       y="178"
+       width="6"
+       height="20"
+       fill="#4a2e1a"
+       opacity="0.8" />
+    <!-- Crossbar -->
+  </g>
+  <!-- ============================================ -->
+  <!-- LAPTOP (group id="laptop")                   -->
+  <!-- On desk, centered on character                -->
+  <!-- ============================================ -->
+  <!-- ============================================ -->
+  <!-- CHARACTER (group id="character")              -->
+  <!-- Avatar, torso, hands                          -->
+  <!-- ============================================ -->
+  <g
+     id="character">
+    <!-- Torso (indigo) -->
+    <rect
+       id="torso"
+       x="67"
+       y="102"
+       width="36"
+       height="24"
+       rx="5"
+       fill="#6366f1" />
+    <!-- Avatar head placeholder (tan square with face) -->
+    <!-- In the app this is replaced by agent avatar image -->
+    <g
+       id="avatar-head">
+      <!-- Head shape -->
+      <rect
+         id="avatar-rect"
+         x="40"
+         y="24"
+         width="90"
+         height="90"
+         rx="20"
+         fill="#e8b88a" />
+      <!-- Left eye -->
+      <rect
+         x="59.8"
+         y="53.7"
+         width="15.3"
+         height="15.3"
+         rx="5.4"
+         fill="#1e293b"
+         id="rect3" />
+      <!-- Right eye -->
+      <rect
+         x="94.9"
+         y="53.7"
+         width="15.3"
+         height="15.3"
+         rx="5.4"
+         fill="#1e293b"
+         id="rect4" />
+      <!-- Mouth -->
+      <rect
+         x="69.7"
+         y="84.3"
+         width="29.7"
+         height="7.2"
+         rx="3.6"
+         fill="#1e293b"
+         opacity="0.5"
+         id="rect5" />
+    </g>
+    <!-- Avatar glow ring (shown when image is loaded) -->
+    <rect
+       id="avatar-glow"
+       x="39"
+       y="23"
+       width="92"
+       height="92"
+       rx="25.2"
+       fill="rgba(99,102,241,0.3)"
+       opacity="0.4" />
+    <!-- Left hand -->
+    <rect
+       id="hand-left"
+       x="54.765842"
+       y="130"
+       width="16"
+       height="6"
+       rx="3"
+       fill="#e8b88a" />
+    <!-- Right hand -->
+    <rect
+       id="hand-right"
+       x="101"
+       y="130"
+       width="16"
+       height="6"
+       rx="3"
+       fill="#e8b88a"
+       inkscape:transform-center-x="10.053706"
+       inkscape:transform-center-y="-1.6756176" />
+  </g>
+  <g
+     id="laptop"
+     transform="translate(-2,-6)">
+    <!-- Keyboard base -->
+    <polygon
+       id="laptop-keyboard"
+       points="70,152 106,152 102.8,160 70.8,160 "
+       fill="#1e293b"
+       stroke="#334155"
+       stroke-width="0.8" />
+    <!-- Screen -->
+    <polygon
+       id="laptop-screen"
+       points="71.6,124 105.6,124 106,152 70,152 "
+       fill="#1a2332"
+       stroke="#3b82f6"
+       stroke-width="1" />
+    <!-- Screen glow (above) -->
+    <ellipse
+       id="laptop-glow-top"
+       cx="86.800003"
+       cy="120"
+       rx="24"
+       ry="12"
+       fill="#3b82f6"
+       opacity="0.06" />
+    <!-- Screen glow (below) -->
+    <ellipse
+       id="laptop-glow-bottom"
+       cx="87.400002"
+       cy="154"
+       rx="20"
+       ry="5"
+       fill="#3b82f6"
+       opacity="0.08" />
+  </g>
+  <!-- ============================================ -->
+  <!-- REFERENCE GUIDES (delete before saving)      -->
+  <!-- ============================================ -->
+  <g
+     id="guides"
+     opacity="0.15">
+    <!-- ViewBox boundary -->
+    <rect
+       x="0"
+       y="0"
+       width="520"
+       height="200"
+       fill="none"
+       stroke="red"
+       stroke-width="1"
+       stroke-dasharray="4"
+       id="rect6" />
+    <!-- Character center line -->
+    <line
+       x1="85"
+       y1="0"
+       x2="85"
+       y2="200"
+       stroke="cyan"
+       stroke-width="0.5"
+       stroke-dasharray="2"
+       id="line6" />
+    <!-- Avatar center Y -->
+    <line
+       x1="0"
+       y1="69"
+       x2="520"
+       y2="69"
+       stroke="cyan"
+       stroke-width="0.5"
+       stroke-dasharray="2"
+       id="line7" />
+  </g>
+</svg>
