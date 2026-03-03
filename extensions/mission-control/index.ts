@@ -1434,7 +1434,12 @@ export default function register(api: OpenClawPluginApi) {
           const identityRaw = agentWorkspace.identity;
           let identity: string | null = null;
           if (identityRaw) {
-            const lines = identityRaw.split("\n");
+            let lines = identityRaw.split("\n");
+            // Strip YAML frontmatter (--- ... ---) if present
+            if (lines[0]?.trim() === "---") {
+              const end = lines.findIndex((l: string, i: number) => i > 0 && l.trim() === "---");
+              if (end !== -1) lines = lines.slice(end + 1);
+            }
             const oneLiner = lines.find((l: string) => l.trim() && !l.startsWith("#"));
             if (oneLiner) identity = oneLiner.trim();
           }
@@ -1576,6 +1581,79 @@ export default function register(api: OpenClawPluginApi) {
 
         writeFileSync(filePath, content);
         jsonResponse(res, { ok: true, agentId, fileName });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/agent-call-log ─────────────────────────────────────────
+
+  interface AgentCallLogEntry {
+    ts: string;
+    toolName: string;
+    args: Record<string, unknown>;
+    isError: boolean;
+    resultPreview: string;
+  }
+
+  api.registerHttpRoute({
+    path: "/api/mc/agent-call-log",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const url = new URL(req.url || "/", "http://localhost");
+        const agentId = url.searchParams.get("agentId");
+        const limit = Math.min(100, parseInt(url.searchParams.get("limit") ?? "30", 10));
+
+        if (!agentId) { jsonResponse(res, { error: "Missing agentId" }, 400); return; }
+        if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) { jsonResponse(res, { error: "Invalid agentId" }, 400); return; }
+
+        const agentSessionsDir = join(rootDir, "agents", agentId, "sessions");
+        if (!existsSync(agentSessionsDir)) { jsonResponse(res, { entries: [] }); return; }
+
+        // Find the most recent session JSONL
+        const sessionFiles = readdirSync(agentSessionsDir)
+          .filter((f: string) => f.endsWith(".jsonl"))
+          .map((f: string) => ({ name: f, mtime: statSync(join(agentSessionsDir, f)).mtimeMs }))
+          .sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime);
+
+        if (sessionFiles.length === 0) { jsonResponse(res, { entries: [] }); return; }
+
+        const lines = parseJsonl<SessionMessage>(join(agentSessionsDir, sessionFiles[0].name));
+
+        // Build toolCallId → result map for correlation
+        const resultMap = new Map<string, { isError: boolean; preview: string }>();
+        for (const line of lines) {
+          if (line.type !== "message" || (line.message as any)?.role !== "toolResult") continue;
+          const msg = line.message as any;
+          const id = msg.toolCallId as string | undefined;
+          if (!id) continue;
+          const text = (msg.content ?? [])
+            .filter((c: any) => c.type === "text")
+            .map((c: any) => String(c.text))
+            .join("")
+            .slice(0, 120);
+          resultMap.set(id, { isError: msg.isError ?? false, preview: text });
+        }
+
+        // Extract tool calls from assistant messages
+        const entries: AgentCallLogEntry[] = [];
+        for (const line of lines) {
+          if (line.type !== "message" || line.message?.role !== "assistant") continue;
+          for (const item of line.message?.content ?? []) {
+            if ((item as any).type !== "toolCall") continue;
+            const result = resultMap.get((item as any).id);
+            entries.push({
+              ts: line.timestamp ?? new Date().toISOString(),
+              toolName: (item as any).name,
+              args: (item as any).arguments ?? {},
+              isError: result?.isError ?? false,
+              resultPreview: result?.preview ?? "",
+            });
+          }
+        }
+
+        jsonResponse(res, { entries: entries.slice(-limit) });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }

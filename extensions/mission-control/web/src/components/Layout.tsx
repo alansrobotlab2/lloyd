@@ -44,8 +44,6 @@ const PAGES: Record<string, React.ComponentType> = {
   clawdeck: ClawDeckPage,
   memory: MemoryPage,
   skills: SkillsPage,
-  agents: AgentsPage,
-  activity: ActivityPage,
   models: ModelsPage,
   cron: CronPage,
   tools: ToolsPage,
@@ -56,10 +54,16 @@ export default function Layout() {
   const [page, setPage] = useState<Page>("chat");
   const [collapsed, setCollapsed] = useState(false);
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
 
   const handleOpenSession = useCallback((sessionId: string) => {
     setChatSessionId(sessionId);
     setPage("chat");
+  }, []);
+
+  const handleNavigateToAgent = useCallback((agentId: string) => {
+    setPendingAgentId(agentId);
+    setPage("agents");
   }, []);
 
   const handleSessionLoaded = useCallback(() => {
@@ -84,6 +88,15 @@ export default function Layout() {
             )}
             {page === "sessions" && (
               <SessionsPage onOpenSession={handleOpenSession} />
+            )}
+            {page === "agents" && (
+              <AgentsPage
+                initialAgentId={pendingAgentId}
+                onAgentIdConsumed={() => setPendingAgentId(null)}
+              />
+            )}
+            {page === "activity" && (
+              <ActivityPage onNavigateToAgent={handleNavigateToAgent} />
             )}
             {PageComponent && <PageComponent />}
           </ErrorBoundary>

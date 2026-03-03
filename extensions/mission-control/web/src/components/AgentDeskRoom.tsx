@@ -5,6 +5,7 @@ const MAX_DESKS = 8;
 
 interface Props {
   activeAgents: SubagentRunInfo[];
+  onAgentClick?: (agentId: string) => void;
 }
 
 /** Extract agent id from label or childSessionKey — e.g. "coder", "memory" */
@@ -124,7 +125,7 @@ function ThoughtBubble({ text, x, y }: { text: string; x: number; y: number }) {
   );
 }
 
-function DeskSlot({ agent, index }: { agent?: SubagentRunInfo; index: number }) {
+function DeskSlot({ agent, index, onAgentClick }: { agent?: SubagentRunInfo; index: number; onAgentClick?: (agentId: string) => void }) {
   const active = !!agent;
   const agentId = agentIdFrom(agent);
   const statusText = truncateStatus(agent?.task, 24);
@@ -158,10 +159,14 @@ function DeskSlot({ agent, index }: { agent?: SubagentRunInfo; index: number }) 
   const bh = line2 ? 116 : 68;
   const by = avatarCenterY - bh / 2;
 
+  const clickable = active && !!agentId && !!onAgentClick;
+
   return (
     <div
-      className={"desk-slot " + (active ? "desk-active" : "desk-empty")}
+      className={"desk-slot " + (active ? "desk-active" : "desk-empty") + (clickable ? " cursor-pointer" : "")}
       style={{ animationDelay: index * 0.12 + "s" }}
+      onClick={clickable ? () => onAgentClick!(agentId!) : undefined}
+      title={clickable ? `View ${agentId} agent` : undefined}
     >
       <svg viewBox="0 0 520 200" className="desk-svg" xmlns="http://www.w3.org/2000/svg">
         {/* Thought bubble — right of head, vertically centered, 2x size */}
@@ -286,7 +291,7 @@ const DEBUG_AGENTS: SubagentRunInfo[] = [
   createdAt: Date.now(),
 }));
 
-export default function AgentDeskRoom({ activeAgents }: Props) {
+export default function AgentDeskRoom({ activeAgents, onAgentClick }: Props) {
   const slots: (SubagentRunInfo | undefined)[] = activeAgents.slice(0, MAX_DESKS);
   const activeCount = activeAgents.length;
 
@@ -317,7 +322,7 @@ export default function AgentDeskRoom({ activeAgents }: Props) {
       </div>
       <div className="desk-grid">
         {slots.map((agent, i) => (
-          <DeskSlot key={i} agent={agent} index={i} />
+          <DeskSlot key={i} agent={agent} index={i} onAgentClick={onAgentClick} />
         ))}
       </div>
     </div>

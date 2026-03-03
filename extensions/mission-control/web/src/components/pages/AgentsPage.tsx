@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Bot, ChevronLeft, ChevronDown, ChevronRight, Cpu, Wrench, Sparkles, Users, Layers, FileText, Pencil, X, Save } from "lucide-react";
 import { marked } from "marked";
-import { api, AgentInfo, AgentsData, AgentStatusData, SubagentRunInfo, ToolGroupInfo, WorkspaceFile } from "../../api";
+import { api, AgentInfo, AgentsData, AgentStatusData, SubagentRunInfo, ToolGroupInfo, WorkspaceFile, CallLogEntry } from "../../api";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -719,6 +719,82 @@ function WorkspaceFileEditor({
   );
 }
 
+// ── Agent Call Log ──────────────────────────────────────────────────────
+
+function formatRelTs(ts: string): string {
+  const diffMs = Date.now() - new Date(ts).getTime();
+  if (diffMs < 1000) return "just now";
+  const s = Math.floor(diffMs / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
+}
+
+function formatArgs(args: Record<string, unknown>): string {
+  const keys = Object.keys(args);
+  if (keys.length === 0) return "";
+  const first = keys[0];
+  const val = String(args[first] ?? "").slice(0, 40);
+  return keys.length === 1 ? val : `${val} +${keys.length - 1}`;
+}
+
+function AgentCallLog({ agentId }: { agentId: string }) {
+  const [entries, setEntries] = useState<CallLogEntry[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetch = () => {
+      api.agentCallLog(agentId, 30)
+        .then((d) => { if (!cancelled) setEntries(d.entries); })
+        .catch(() => { if (!cancelled) setEntries([]); });
+    };
+    fetch();
+    const interval = setInterval(fetch, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [agentId]);
+
+  if (entries === null) {
+    return (
+      <div className="bg-surface-1 rounded-xl p-4 border border-surface-3/50 animate-pulse">
+        <div className="h-4 bg-surface-2 rounded w-32" />
+      </div>
+    );
+  }
+
+  if (entries.length === 0) {
+    return (
+      <div className="text-xs text-slate-500 italic py-4 text-center">No tool calls yet</div>
+    );
+  }
+
+  return (
+    <div className="bg-surface-1 rounded-xl p-3 border border-surface-3/50 space-y-0">
+      {[...entries].reverse().map((entry, i) => (
+        <div key={i} className="flex items-start gap-2.5 py-1.5 border-b border-surface-3/15 last:border-0">
+          <div className={`mt-1.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${entry.isError ? "bg-red-400" : "bg-emerald-400/70"}`} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="text-[10px] font-mono bg-surface-0 px-1.5 py-0.5 rounded border border-surface-3/50 text-brand-300">
+                {entry.toolName}
+              </span>
+              {formatArgs(entry.args) && (
+                <span className="text-[10px] text-slate-500 font-mono truncate max-w-[160px]">
+                  {formatArgs(entry.args)}
+                </span>
+              )}
+            </div>
+            {entry.resultPreview && (
+              <div className="text-[10px] text-slate-600 mt-0.5 truncate">{entry.resultPreview}</div>
+            )}
+          </div>
+          <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">{formatRelTs(entry.ts)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Agent Detail View ───────────────────────────────────────────────────
 
 function AgentDetail({
@@ -778,6 +854,14 @@ function AgentDetail({
         <InfoCard label="Models" value={`${agent.enabledModels} / ${agent.modelCount}`} sub="enabled" />
         <InfoCard label="Disabled Tools" value={String(agent.disabledTools)} />
         <InfoCard label="Concurrency" value={`${agent.maxConcurrent ?? "-"} / ${agent.subagentMaxConcurrent ?? "-"}`} sub="agent / sub" />
+      </div>
+
+      {/* Call Log */}
+      <div className="space-y-1">
+        <div className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
+          Call Log
+        </div>
+        <AgentCallLog agentId={agent.id} />
       </div>
 
       {/* Subagent Runs */}
@@ -875,7 +959,13 @@ function Row({ label, value }: { label: string; value: string }) {
 
 // ── Main Page ───────────────────────────────────────────────────────────
 
-export default function AgentsPage() {
+export default function AgentsPage({
+  initialAgentId,
+  onAgentIdConsumed,
+}: {
+  initialAgentId?: string | null;
+  onAgentIdConsumed?: () => void;
+} = {}) {
   const [data, setData] = useState<AgentsData | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentStatusData | null>(null);
@@ -887,6 +977,14 @@ export default function AgentsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Pre-select agent when navigated from another page (e.g. activity panel click)
+  useEffect(() => {
+    if (!initialAgentId || !data) return;
+    const match = data.agents.find((a) => a.id === initialAgentId);
+    if (match) setSelected(match.id);
+    onAgentIdConsumed?.();
+  }, [initialAgentId, data, onAgentIdConsumed]);
 
   // Poll agent status for live dot on cards
   useEffect(() => {

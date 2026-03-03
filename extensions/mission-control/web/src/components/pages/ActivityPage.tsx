@@ -96,17 +96,33 @@ function AgentLiveStatus({ status }: { status: AgentStatusData | null }) {
   );
 }
 
+/** Extract agent id from label or childSessionKey — mirrors AgentDeskRoom logic */
+function agentIdFrom(run: SubagentRunInfo): string | null {
+  if (run.label) {
+    const id = run.label.split(":")[0].trim().toLowerCase();
+    if (id) return id;
+  }
+  if (run.childSessionKey) {
+    const parts = run.childSessionKey.split(":");
+    if (parts.length >= 2 && parts[0] === "agent") return parts[1];
+  }
+  return null;
+}
+
 // ── Active Subagent Card (with kill button) ──────────────────────────────
 
 function ActiveSubagentCard({
   run,
   onKill,
+  onNavigate,
 }: {
   run: SubagentRunInfo;
   onKill: (sessionKey: string) => void;
+  onNavigate?: (agentId: string) => void;
 }) {
   const [killing, setKilling] = useState(false);
   const elapsed = Date.now() - (run.startedAt ?? run.createdAt);
+  const agentId = agentIdFrom(run);
 
   const handleKill = async () => {
     setKilling(true);
@@ -118,7 +134,10 @@ function ActiveSubagentCard({
   };
 
   return (
-    <div className="bg-surface-1 rounded-xl px-4 py-3 border border-emerald-500/30 transition-colors">
+    <div
+      className={"bg-surface-1 rounded-xl px-4 py-3 border border-emerald-500/30 transition-colors" + (onNavigate && agentId ? " cursor-pointer hover:border-emerald-400/50" : "")}
+      onClick={onNavigate && agentId ? () => onNavigate(agentId) : undefined}
+    >
       <div className="flex items-start gap-3">
         <div className="mt-1 flex-shrink-0">
           <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]" />
@@ -134,7 +153,7 @@ function ActiveSubagentCard({
         <div className="flex items-center gap-2 flex-shrink-0">
           <div className="text-[10px] text-slate-500 font-mono">{formatElapsed(elapsed)}</div>
           <button
-            onClick={handleKill}
+            onClick={(e) => { e.stopPropagation(); handleKill(); }}
             disabled={killing}
             title="Abort subagent"
             className="p-1 rounded-md text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
@@ -215,7 +234,7 @@ function ActivityFeed({ runs }: { runs: SubagentRunInfo[] }) {
 
 // ── Main Page ────────────────────────────────────────────────────────────
 
-export default function ActivityPage() {
+export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?: (agentId: string) => void } = {}) {
   const [status, setStatus] = useState<AgentStatusData | null>(null);
 
   const refresh = useCallback(() => {
@@ -262,7 +281,7 @@ export default function ActivityPage() {
       </div>
 
       {/* Agent Desk Room */}
-      <AgentDeskRoom activeAgents={active} />
+      <AgentDeskRoom activeAgents={active} onAgentClick={onNavigateToAgent} />
 
       {/* Main Agent Status */}
       <div className="space-y-1">
@@ -284,7 +303,7 @@ export default function ActivityPage() {
           <div className="text-xs text-slate-500 italic py-2 text-center">No active subagents</div>
         ) : (
           active.map((run) => (
-            <ActiveSubagentCard key={run.runId} run={run} onKill={handleKill} />
+            <ActiveSubagentCard key={run.runId} run={run} onKill={handleKill} onNavigate={onNavigateToAgent} />
           ))
         )}
       </div>

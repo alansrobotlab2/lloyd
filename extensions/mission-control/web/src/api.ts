@@ -219,6 +219,14 @@ export interface AgentStatusData {
 
 // ── ClawDeck types ──────────────────────────────────────────────────────
 
+export interface CallLogEntry {
+  ts: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  isError: boolean;
+  resultPreview: string;
+}
+
 export interface ClawDeckBoard {
   id: number;
   name: string;
@@ -451,4 +459,7 @@ export const api = {
     });
     return res.json();
   },
+
+  agentCallLog: (agentId: string, limit = 30): Promise<{ entries: CallLogEntry[] }> =>
+    fetchJson(`/agent-call-log?agentId=${encodeURIComponent(agentId)}&limit=${limit}`),
 };
