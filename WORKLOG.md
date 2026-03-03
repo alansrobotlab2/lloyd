@@ -1,5 +1,36 @@
 # OpenClaw Work Log
 
+## 2026-03-03 — Model Upgrades: Reviewer + Auditor → Opus
+
+**Type:** Config
+**Files modified:**
+- `openclaw.json` — Reviewer and Auditor model changed from `claude-sonnet-4-6` to `claude-opus-4-6`
+
+**Summary:**
+- Reviewer upgraded to Opus — it's the quality gate for the Code Pipeline; catches subtle logic errors, security patterns, and edge cases that Sonnet may miss; fire-and-forget on targeted files keeps sessions short
+- Auditor upgraded to Opus — security analysis (injection, secrets, misconfigs) benefits from deeper pattern recognition; low frequency (only runs on auth/API/crypto tasks) keeps cost impact minimal
+- Gateway restarted to pick up changes
+
+---
+
+## 2026-03-03 — Coder Workflow: Orchestration-Aware Rewrite
+
+**Type:** Refactor
+**Files modified:**
+- `obsidian/agents/coder/AGENTS.md` — full rewrite
+- `obsidian/agents/orchestrator/AGENTS.md` — Code Pipeline updated for structured Coder report
+
+**Summary:**
+- **Fixed timing bug**: Removed "report immediately" instruction from Claude Code bg_exec launch; Coder now polls `bg_process` until completion before reporting — prevents Tester/Reviewer running against mid-execution code
+- **Conditional planning**: Coder detects `Plan:` prefix in task prompt; if Planner output present, transcribes it to gameplan file instead of re-exploring codebase (saves Opus tokens)
+- **Removed self-review**: Replaced Step 6 code review with diff artifact collection only (`git diff --stat`); Reviewer agent handles code review; Coder no longer has its own fix loop
+- **Fixed ClawDeck state**: Coder leaves task in `in_progress` with activity note instead of prematurely setting `in_review`; state change happens after Orchestrator confirms clean Reviewer pass
+- **Structured Coder report**: New format includes pre/post commit SHAs and `diff --stat` output; Orchestrator uses this to route Tester + Reviewer with exact changed files and commit range
+- **Fix Phase tightened**: Skips Steps 1–3 (ClawDeck create, pre-commit, gameplan); starts directly at Claude Code launch; accepts Reviewer findings format `file:line — Severity: description`
+- **Orchestrator Code Pipeline**: Updated to handle Coder's structured report; aborts to Lloyd on Claude Code error; passes commit SHAs to Tester/Reviewer; ClawDeck `in_review` transition now owned by Orchestrator post-review
+
+---
+
 ## 2026-03-03 — 10-Agent Framework: Orchestrator + Delegation Architecture
 
 **Type:** Feature / Architecture
