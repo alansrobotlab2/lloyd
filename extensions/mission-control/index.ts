@@ -2544,6 +2544,59 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // ── API: /api/mc/mode (GET) ──────────────────────────────────────────
+
+  const MODE_STATE_PATH = join(rootDir, "extensions/mcp-tools/mode-state.json");
+
+  function readModeState(): { currentMode: string; lastSwitchedAt: string } {
+    try {
+      return JSON.parse(readFileSync(MODE_STATE_PATH, "utf-8"));
+    } catch {
+      return { currentMode: "general", lastSwitchedAt: new Date().toISOString() };
+    }
+  }
+
+  api.registerHttpRoute({
+    path: "/api/mc/mode",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      jsonResponse(res, readModeState());
+    },
+  });
+
+  // ── API: /api/mc/mode-set (POST) ───────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/mode-set",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === "OPTIONS") {
+        res.writeHead(200, {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        });
+        res.end();
+        return;
+      }
+      if (req.method !== "POST") {
+        jsonResponse(res, { error: "Method not allowed" }, 405);
+        return;
+      }
+      try {
+        const body = JSON.parse(await readBody(req));
+        const mode = body.mode;
+        if (!["work", "personal", "general"].includes(mode)) {
+          jsonResponse(res, { error: "Invalid mode" }, 400);
+          return;
+        }
+        const state = { currentMode: mode, lastSwitchedAt: new Date().toISOString() };
+        writeFileSync(MODE_STATE_PATH, JSON.stringify(state, null, 2) + "\n");
+        jsonResponse(res, state);
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
   // ── Static file serving for /mc/* ─────────────────────────────────────
   // Use registerHttpHandler to intercept all /mc paths (prefix-based)
 

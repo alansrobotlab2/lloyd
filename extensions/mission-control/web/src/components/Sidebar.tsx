@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import {
   Activity,
   ChartArea,
@@ -14,7 +15,9 @@ import {
   MessageCircle,
   ChevronsLeft,
   ChevronsRight,
+  Briefcase,
 } from "lucide-react";
+import { api } from "../api";
 
 export type Page =
   | "chat"
@@ -65,6 +68,11 @@ interface SidebarProps {
 
 export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse }: SidebarProps) {
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft;
+  const [workMode, setWorkMode] = useState(false);
+
+  useEffect(() => {
+    api.mode().then((s) => setWorkMode(s.currentMode === "work")).catch(() => {});
+  }, []);
 
   const renderItem = (item: NavItem) => {
     const Icon = item.icon;
@@ -106,6 +114,37 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
 
       {/* Bottom nav */}
       <div className="px-2 pt-2 border-t border-surface-3/30 space-y-0.5">
+        {/* Work Mode toggle */}
+        <button
+          onClick={async () => {
+            const next = !workMode;
+            setWorkMode(next);
+            try {
+              const result = await api.modeSet(next ? "work" : "personal");
+              setWorkMode(result.currentMode === "work");
+            } catch {
+              setWorkMode(!next);
+            }
+          }}
+          title={collapsed ? "Work Mode" : undefined}
+          className={`w-full flex items-center ${collapsed ? "justify-center" : "gap-2.5"} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+            workMode
+              ? "bg-purple-600 text-white hover:bg-purple-500"
+              : "text-slate-400 hover:text-slate-200 hover:bg-surface-2"
+          }`}
+        >
+          <Briefcase className="w-4 h-4 flex-shrink-0" />
+          {!collapsed && (
+            <span className="truncate flex-1 text-left">Work Mode</span>
+          )}
+          {!collapsed && (
+            <span className={`w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center transition-colors ${
+              workMode ? "bg-white border-white" : "border-slate-500"
+            }`}>
+              {workMode && <span className="text-[10px] text-purple-600 font-bold leading-none">✓</span>}
+            </span>
+          )}
+        </button>
         {BOTTOM_ITEMS.map(renderItem)}
         <button
           onClick={onToggleCollapse}

@@ -471,4 +471,15 @@ export const api = {
 
   agentCallLog: (agentId: string, limit = 30): Promise<{ entries: CallLogEntry[] }> =>
     fetchJson(`/agent-call-log?agentId=${encodeURIComponent(agentId)}&limit=${limit}`),
+
+  // Work mode
+  mode: () => fetchJson<{ currentMode: string; lastSwitchedAt: string }>("/mode"),
+  modeSet: async (mode: string) => {
+    const res = await fetch(`${BASE}/mode-set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    return res.json();
+  },
 };
