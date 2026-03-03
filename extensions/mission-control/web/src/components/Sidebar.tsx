@@ -40,16 +40,16 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { id: "chat", label: "Chat", icon: MessageCircle },
   { id: "activity", label: "Activity", icon: Activity },
-  { id: "services", label: "Services", icon: LayoutList },
   { id: "dashboard", label: "Usage", icon: ChartArea },
   { id: "clawdeck", label: "ClawDeck", icon: LayoutGrid },
   { id: "memory", label: "Memory", icon: Brain },
   { id: "skills", label: "Skills Explorer", icon: Sparkles },
+  { id: "tools", label: "Tools", icon: Wrench },
   { id: "sessions", label: "Sessions", icon: Users },
   { id: "agents", label: "Agents", icon: Bot },
   { id: "models", label: "Models", icon: Cpu },
   { id: "cron", label: "Crontab", icon: Clock },
-  { id: "tools", label: "Tools", icon: Wrench },
+  { id: "services", label: "Services", icon: LayoutList },
 ];
 
 const BOTTOM_ITEMS: NavItem[] = [
