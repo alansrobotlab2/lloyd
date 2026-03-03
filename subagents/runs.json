@@ -1,60 +1,6 @@
 {
   "version": 2,
   "runs": {
-    "3c51b4de-d778-4237-9c5d-8007f91e6637": {
-      "runId": "3c51b4de-d778-4237-9c5d-8007f91e6637",
-      "childSessionKey": "agent:coder:subagent:1c1dba6b-f1bc-4a5a-b010-5da8e9816428",
-      "requesterSessionKey": "agent:main:main",
-      "requesterOrigin": {
-        "channel": "webchat"
-      },
-      "requesterDisplayKey": "agent:main:main",
-      "task": "[Phase: Review]\n\nAdd an \"Activity\" page/tab to the Mission Control dashboard (~/.openclaw/extensions/mission-control/web/).\n\nRequirements:\n- New sidebar entry \"Activity\" with the `Activity` (pulse/heartbeat) icon from lucide-react\n- Separate from the existing Agents page (which stays as-is for configuration)\n- Shows live agent monitoring: main agent state, current activity (tool call / LLM thinking), active subagent runs with kill capability, recent completed runs\n- Real-time polling (fast poll ~1.5s when active, slower ~3s when idle)\n- Kill button on active subagent runs (calls chat.abort for that subagent's session key — needs a new backend endpoint /api/mc/subagent-abort)\n- Activity feed showing recent events across all agents\n\nThe existing /api/mc/agent-status endpoint already returns mainAgent state, activity, heartbeat, and subagents (active + recentCompleted). Read the existing AgentsPage.tsx and api.ts to understand what's already there before asking questions.\n\nReview the requirements and ask any clarifying questions. Do NOT start implementation yet.",
-      "cleanup": "keep",
-      "expectsCompletionMessage": true,
-      "spawnMode": "run",
-      "label": "activity-tab-review",
-      "model": "anthropic/claude-opus-4-6",
-      "runTimeoutSeconds": 300,
-      "createdAt": 1772495026985,
-      "startedAt": 1772495027293,
-      "archiveAtMs": 1772498626985,
-      "cleanupHandled": true,
-      "endedAt": 1772495057989,
-      "outcome": {
-        "status": "ok"
-      },
-      "endedReason": "subagent-complete",
-      "endedHookEmittedAt": 1772495113450,
-      "cleanupCompletedAt": 1772495113450
-    },
-    "1061c178-7a36-47dd-bd13-60799f1e9691": {
-      "runId": "1061c178-7a36-47dd-bd13-60799f1e9691",
-      "childSessionKey": "agent:coder:subagent:e473fd00-f17b-4c94-adee-442e2a0c0e54",
-      "requesterSessionKey": "agent:main:main",
-      "requesterOrigin": {
-        "channel": "webchat"
-      },
-      "requesterDisplayKey": "agent:main:main",
-      "task": "[Phase: Execute]\n\nFix the Activity page in Mission Control — it's rendering as a blank/black page with none of the features visible.\n\n**Location:** ~/.openclaw/extensions/mission-control/web/\n\n**Current state:** ActivityPage.tsx exists at src/components/pages/ActivityPage.tsx (306 lines) with all the right components, but the page renders blank. The build output exists at dist-web/. The sidebar entry works and navigates to the page, but nothing renders.\n\n**Debug and fix:**\n1. Check if the page component is actually being rendered (Layout.tsx routing)\n2. Check for runtime errors — missing API types, null reference on first render before data loads, etc.\n3. Verify api.ts has `agentStatus()` and `subagentAbort()` methods that work\n4. Verify the backend `/api/mc/agent-status` and `/api/mc/subagent-abort` endpoints exist in index.ts\n5. Fix whatever is broken so the Activity page actually renders with:\n   - Main agent live status banner\n   - Active subagent runs with kill button\n   - Recent completed runs\n   - Activity feed\n   - Adaptive polling (1.5s active, 3s idle)\n\n**After fixing:** rebuild with `cd ~/.openclaw/extensions/mission-control/web && npm run build`\n\nThen announce: `openclaw system event --text \"Activity page fixed and rebuilt\" --mode now`",
-      "cleanup": "keep",
-      "expectsCompletionMessage": true,
-      "spawnMode": "run",
-      "label": "activity-page-fix",
-      "model": "anthropic/claude-opus-4-6",
-      "runTimeoutSeconds": 300,
-      "createdAt": 1772495586513,
-      "startedAt": 1772495586904,
-      "archiveAtMs": 1772499186513,
-      "cleanupHandled": true,
-      "endedAt": 1772495886926,
-      "outcome": {
-        "status": "timeout"
-      },
-      "endedReason": "subagent-complete",
-      "endedHookEmittedAt": 1772495916956,
-      "cleanupCompletedAt": 1772495916956
-    },
     "81b03868-178e-4bef-9925-204345482485": {
       "runId": "81b03868-178e-4bef-9925-204345482485",
       "childSessionKey": "agent:coder:subagent:b30fa682-64f7-413a-a8f6-69e9d2b71b16",
@@ -83,6 +29,52 @@
       "endedReason": "subagent-killed",
       "suppressAnnounceReason": "killed",
       "endedHookEmittedAt": 1772497302371
+    },
+    "f22bd24b-015a-4087-b8ee-fd7f5e91b860": {
+      "runId": "f22bd24b-015a-4087-b8ee-fd7f5e91b860",
+      "childSessionKey": "agent:coder:subagent:cde74e42-b00f-4140-8480-a4687440a7c7",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Execute]\n\nTry an OpenCV face detection pipeline on LEGO minifig images in ~/Pictures/minifigs/ to get better headshot crops.\n\n**Goal:** Improve headshot quality over the current heuristic approach. Current headshot_001.jpg–018.jpg are not well-centered — test face detection first, then batch-process if it works.\n\n**Step 1 — Test face detection on a sample:**\n1. Load 3-4 different images from ~/Pictures/minifigs/ (pick a variety — full-body, square, different sizes)\n2. Try OpenCV's Haar cascade face detector (`haarcascade_frontalface_default.xml`)\n3. Also try `haarcascade_frontalface_alt.xml` and `haarcascade_frontalface_alt2.xml`\n4. Try multiple scaleFactor/minNeighbors parameters (LEGO faces are small and simplified)\n5. Report which images got detections and confidence in the results\n\n**Step 2 — Evaluate:**\n- If face detection works reliably on LEGO minifigs: proceed to batch crop all 18 originals using detected face bounding box, add padding (~50% around the face), square crop, resize 256×256\n- If face detection is unreliable: try dlib or a lightweight DNN face detector (`opencv_face_detector.caffemodel`) before giving up\n- Report results before doing the full batch\n\n**Step 3 — Batch crop (if detection works):**\n- Replace or overwrite headshot_001.jpg–018.jpg with the improved crops\n- For any images where detection fails, fall back to the heuristic (top 45% of subject bounding box)\n- Document which images used detection vs fallback\n\n**Reference:** lloyd_003.jpg in the same directory is already a good 146×146 headshot — use it as a quality bar.\n\nAnnounce when done: `openclaw system event --text \"Face detection headshots complete\" --mode now`",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "minifig-face-detection",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 600,
+      "createdAt": 1772498156796,
+      "startedAt": 1772498156925,
+      "archiveAtMs": 1772501756796,
+      "cleanupHandled": true,
+      "endedAt": 1772498239090,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "endedHookEmittedAt": 1772498264145,
+      "cleanupCompletedAt": 1772498264145
+    },
+    "e9d4610e-4398-4176-8a17-cc558427f397": {
+      "runId": "e9d4610e-4398-4176-8a17-cc558427f397",
+      "childSessionKey": "agent:coder:subagent:dbada05b-7005-4e3a-8d4b-4e57cbcc3195",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "[Phase: Execute]\n\nWire up agent avatar images in Mission Control to read from ~/obsidian/agents/<agent>/avatar/ directories.\n\n**Changes needed:**\n\n1. **Backend API endpoint** (`~/.openclaw/extensions/mission-control/index.ts`):\n   - Add `/api/mc/agent-avatar` endpoint that accepts `?id=<agent-id>`\n   - Auto-discovers avatar by globbing `~/obsidian/agents/<id>/avatar/` for any image file\n   - If multiple images found, prefer `.jpg`, then `.png`, then `.webp`\n   - If no avatar found, return 404\n   - Serve the image with proper Content-Type and cache headers (`Cache-Control: public, max-age=3600`)\n\n2. **Update `/api/mc/agents` endpoint** to include `avatar` field for each agent (auto-discovered from filesystem, not config)\n   - Field should be the absolute path to the image file\n   - Or return relative path like `avatars/<agent-id>.jpg`\n\n3. **Update ChatPanel.tsx**:\n   - Instead of hardcoding `/mc/lloyd_003.jpg`, fetch the main agent's avatar from the API\n   - Use the avatar URL from the agent status data\n\n4. **Update Sidebar.tsx**:\n   - Same as ChatPanel — use the main agent's avatar from the API\n   - Replace `/mc/lloyd_003.jpg` with dynamic avatar URL\n\n5. **Update AgentsPage.tsx**:\n   - The existing `agent.avatar` field should now come from the auto-discovered path\n   - Make sure the image URL is constructed correctly (either `/api/mc/agent-avatar?id=<id>` or direct filesystem path)\n\n6. **Build**: `cd ~/.openclaw/extensions/mission-control/web && npm run build`\n\n**Testing:**\n- After build, verify that visiting `/api/mc/agent-avatar?id=lloyd` returns the correct avatar image\n- Verify that all agent avatars are discoverable\n- Check that the UI shows the correct avatars in ChatPanel, Sidebar, and AgentsPage\n\n**After completion:** Announce `openclaw system event --text \"Agent avatars wired up\" --mode now`",
+      "cleanup": "delete",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1772499497233,
+      "startedAt": 1772499497374,
+      "archiveAtMs": 1772503097233,
+      "cleanupHandled": false
     }
   }
 }
