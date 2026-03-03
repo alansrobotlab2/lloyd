@@ -1,5 +1,31 @@
 # OpenClaw Work Log
 
+## 2026-03-03 — 10-Agent Framework: Orchestrator + Delegation Architecture
+
+**Type:** Feature / Architecture
+**Files modified:**
+- `openclaw.json` — Orchestrator agent definition, all subagent tool allow lists, Researcher model downgrade, websearch skill disabled
+- `agents/main/agent/tools.json` — Re-enabled http_search for Lloyd
+- `agents/orchestrator/agent/tools.json` (created) — Blocks all built-in tools
+- `agents/*/agent/tools.json` (8 files) — Added blocks for relevant built-in tools
+- `obsidian/agents/orchestrator/SOUL.md` (created) — Coordinator personality
+- `obsidian/agents/orchestrator/AGENTS.md` (created) — Pipeline definitions
+- `obsidian/agents/lloyd/AGENTS.md` — Full rewrite: Orchestrator dispatch pattern
+- `obsidian/agents/{coder,researcher,memory,operator,tester}/AGENTS.md` — MCP tool names + workflows
+- `extensions/mcp-tools/index.ts` — Added orchestrator to SKIP_PREFILL_AGENTS
+- `docs/agent-framework-gameplan.md` (created) — Full architecture doc
+
+**Summary:**
+- Added Orchestrator as 10th agent (depth 1): receives long-horizon tasks from Lloyd, chains specialist pipelines (Code: planner→coder→tester+reviewer; Research: researcher→vault; Security: auditor→coder)
+- Lloyd stays free for conversation; dispatches via `sessions_spawn({ agentId: "orchestrator", ... })` for multi-step work
+- Blocked all built-in tools (`read`, `write`, `exec`, etc.) on every subagent — forces MCP-only tool use
+- Orchestrator behavioral fix: added explicit prohibition on calling content tools (http_search, memory_write, etc.) — must always delegate
+- **Tests passed:** Research Pipeline (Lloyd→Orchestrator→Researcher→vault write RP2040), Code Pipeline (Orchestrator→Planner→Coder→file created), Lloyd direct (http_search quick lookup, qmd_search memory, file_read)
+- Coder remains on Opus per user preference; Researcher downgraded to Sonnet
+
+---
+
+
 ## 2026-03-02 — Add file_patch, bg_exec, bg_process MCP Tools
 
 **Type:** Feature

@@ -1,15 +1,18 @@
 {
-  "memory_search": false,
-  "memory_get": false,
-  "web_search": false,
-  "web_fetch": false,
+  "read": false,
   "write": false,
   "edit": false,
+  "exec": false,
+  "process": false,
   "apply_patch": false,
   "image": false,
   "browser": false,
   "canvas": false,
   "nodes": false,
   "gateway": false,
-  "session_status": false
+  "session_status": false,
+  "memory_search": false,
+  "memory_get": false,
+  "web_search": false,
+  "web_fetch": false
 }

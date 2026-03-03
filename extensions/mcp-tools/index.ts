@@ -65,7 +65,7 @@ export default function register(api: OpenClawPluginApi) {
 
   // Agents that don't need vault recall in their prefill
   const SKIP_PREFILL_AGENTS = new Set([
-    "coder", "tester", "reviewer", "auditor", "operator",
+    "coder", "tester", "reviewer", "auditor", "operator", "orchestrator",
   ]);
 
   // ── Context profile classification (lightweight, regex-only) ──────────

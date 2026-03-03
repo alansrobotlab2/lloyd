@@ -1,4 +1,5 @@
 {
+  "read": false,
   "memory_search": false,
   "memory_get": false,
   "web_search": false,

@@ -7,7 +7,7 @@
       "description": "Read recent daily notes, distill new learnings into MEMORY.md, prune stale entries. Keep MEMORY.md under 200 lines.",
       "enabled": true,
       "createdAtMs": 1772075683512,
-      "updatedAtMs": 1772445668832,
+      "updatedAtMs": 1772532081861,
       "schedule": {
         "kind": "cron",
         "expr": "0 2 * * *",
@@ -25,11 +25,11 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1772532000000,
-        "lastRunAtMs": 1772445600002,
+        "nextRunAtMs": 1772618400000,
+        "lastRunAtMs": 1772532000002,
         "lastStatus": "error",
-        "lastDurationMs": 68830,
-        "consecutiveErrors": 5,
+        "lastDurationMs": 81859,
+        "consecutiveErrors": 6,
         "lastRunStatus": "error",
         "lastDeliveryStatus": "unknown",
         "lastError": "Channel is required (no configured channels detected). Set delivery.channel explicitly or use a main session with a previous channel."

@@ -20,7 +20,6 @@
   "file_grep": false,
   "bg_exec": false,
   "bg_process": false,
-  "http_search": false,
   "http_fetch": false,
   "http_request": false,
   "browser": false,
