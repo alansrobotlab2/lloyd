@@ -71,7 +71,10 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
   const [workMode, setWorkMode] = useState(false);
 
   useEffect(() => {
-    api.mode().then((s) => setWorkMode(s.currentMode === "work")).catch(() => {});
+    const poll = () => api.mode().then((s) => setWorkMode(s.currentMode === "work")).catch(() => {});
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
   }, []);
 
   const renderItem = (item: NavItem) => {

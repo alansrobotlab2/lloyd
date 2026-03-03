@@ -56,20 +56,21 @@ export default function register(api: OpenClawPluginApi) {
     general:  "agents/lloyd/memory",
   };
 
-  let modeState: ModeState;
-  try {
-    modeState = JSON.parse(readFileSync(MODE_STATE_PATH, "utf-8"));
-  } catch {
-    modeState = { currentMode: "general", lastSwitchedAt: new Date().toISOString() };
+  function readModeState(): ModeState {
+    try {
+      return JSON.parse(readFileSync(MODE_STATE_PATH, "utf-8"));
+    } catch {
+      return { currentMode: "general", lastSwitchedAt: new Date().toISOString() };
+    }
   }
 
   function saveMode(mode: WorkMode): void {
-    modeState = { currentMode: mode, lastSwitchedAt: new Date().toISOString() };
-    writeFileSync(MODE_STATE_PATH, JSON.stringify(modeState, null, 2) + "\n");
+    const state: ModeState = { currentMode: mode, lastSwitchedAt: new Date().toISOString() };
+    writeFileSync(MODE_STATE_PATH, JSON.stringify(state, null, 2) + "\n");
   }
 
   function getCurrentMode(): WorkMode {
-    return modeState.currentMode;
+    return readModeState().currentMode;
   }
 
   // ── Mode switching commands ────────────────────────────────────────────
@@ -105,12 +106,12 @@ export default function register(api: OpenClawPluginApi) {
     name: "mode",
     description: "Show current work/personal/general mode",
     handler: () => {
-      const m = getCurrentMode();
-      const since = new Date(modeState.lastSwitchedAt).toLocaleString("en-US", {
+      const state = readModeState();
+      const since = new Date(state.lastSwitchedAt).toLocaleString("en-US", {
         timeZone: "America/Los_Angeles",
         month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
       });
-      return { text: `Current mode: **${m}** (since ${since} PST)` };
+      return { text: `Current mode: **${state.currentMode}** (since ${since} PST)` };
     },
   });
 
@@ -447,6 +448,39 @@ export default function register(api: OpenClawPluginApi) {
     if (MODE_SCOPED_TOOLS.has(toolName) && !params?.scope) {
       return { params: { ...params, scope: MODE_SCOPE[mode] } };
     }
+  });
+
+  // ── Work mode tool ──────────────────────────────────────────────────
+
+  api.registerTool({
+    name: "work_mode",
+    label: "Work Mode",
+    description:
+      "Get or set the current work mode. Modes control vault scope and daily notes path. " +
+      "Call with no arguments to check current mode. Pass mode to switch: 'work', 'personal', or 'general'.",
+    parameters: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["work", "personal", "general"],
+          description: "Mode to switch to. Omit to just check current mode.",
+        },
+      },
+    },
+    async execute(_id: string, params: any) {
+      if (params.mode) {
+        const valid = ["work", "personal", "general"] as const;
+        if (!valid.includes(params.mode)) {
+          return { text: `Invalid mode: ${params.mode}. Use: work, personal, or general.` };
+        }
+        saveMode(params.mode as WorkMode);
+        const scope = MODE_SCOPE[params.mode as WorkMode] || "all segments";
+        return { text: `Switched to **${params.mode}** mode. Vault scope: ${scope || "all segments"}. Daily notes: ${MODE_MEMORY_PREFIX[params.mode as WorkMode]}/` };
+      }
+      const state = readModeState();
+      return { text: `Current mode: **${state.currentMode}**. Vault scope: ${MODE_SCOPE[state.currentMode] || "all segments"}.` };
+    },
   });
 
   // ── Memory & vault tools ──────────────────────────────────────────────
