@@ -53,7 +53,7 @@ export default function register(api: OpenClawPluginApi) {
   const MODE_MEMORY_PREFIX: Record<WorkMode, string> = {
     work:     "agents/lloyd/memory/work",
     personal: "agents/lloyd/memory/personal",
-    general:  "agents/lloyd/memory",
+    general:  "agents/lloyd/memory/personal",
   };
 
   function readModeState(): ModeState {
