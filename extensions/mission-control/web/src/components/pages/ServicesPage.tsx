@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Activity, Play, Square, RotateCcw, ChevronDown, Terminal, Cpu, HardDrive, Clock } from "lucide-react";
+import { Activity, Play, Square, RotateCcw, ChevronDown, Terminal, Cpu, HardDrive, Clock, AlertTriangle } from "lucide-react";
 import { api, type ServiceStatus, type ServiceDetail } from "../../api";
 
 export default function ServicesPage() {
@@ -10,6 +10,8 @@ export default function ServicesPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ServiceDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [gatewayRestarting, setGatewayRestarting] = useState(false);
+  const [countdown, setCountdown] = useState(8);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(async () => {
@@ -71,6 +73,35 @@ export default function ServicesPage() {
     action: "start" | "stop" | "restart",
   ) => {
     e.stopPropagation();
+
+    // Gateway restart: fire-and-forget, show overlay, reload after 8s
+    if (serviceId === "gateway" && action === "restart") {
+      setGatewayRestarting(true);
+      setCountdown(8);
+      api.serviceAction(serviceId, action).catch(() => {});
+      const tick = setInterval(() => {
+        setCountdown((c) => {
+          if (c <= 1) {
+            clearInterval(tick);
+            window.location.reload();
+            return 0;
+          }
+          return c - 1;
+        });
+      }, 1000);
+      return;
+    }
+
+    // Gateway stop: confirm first
+    if (serviceId === "gateway" && action === "stop") {
+      const ok = window.confirm(
+        "Stopping the gateway will disconnect Mission Control and all services will become unreachable. Continue?",
+      );
+      if (!ok) return;
+      api.serviceAction(serviceId, action).catch(() => {});
+      return;
+    }
+
     setActionLoading(`${serviceId}-${action}`);
     try {
       await api.serviceAction(serviceId, action);
@@ -131,6 +162,25 @@ export default function ServicesPage() {
           )}
         </div>
       </div>
+
+      {/* Gateway restart overlay */}
+      {gatewayRestarting && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-surface-1 border border-surface-3/50 rounded-2xl px-10 py-8 text-center space-y-4 max-w-sm">
+            <RotateCcw className="w-8 h-8 text-brand-400 animate-spin mx-auto" />
+            <div className="text-base font-medium text-slate-200">Gateway Restarting</div>
+            <div className="text-sm text-slate-400">
+              Refreshing in <span className="font-mono text-brand-400">{countdown}s</span>
+            </div>
+            <div className="w-full bg-surface-3/30 rounded-full h-1.5 overflow-hidden">
+              <div
+                className="bg-brand-400 h-full rounded-full transition-all duration-1000 ease-linear"
+                style={{ width: `${((8 - countdown) / 8) * 100}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Loading state */}
       {loading && (
