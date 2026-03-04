@@ -335,6 +335,19 @@ export default function register(api: OpenClawPluginApi) {
     // Turn 3+: no prefill — conversation history carries sufficient context
   });
 
+  // ── Subagent delivery: suppress channel forwarding ─────────────────────
+
+  api.on("subagent_delivery_target", async (event: any, _ctx: any) => {
+    // Keep subagent completions session-only — don't forward to Discord/etc.
+    if (event.requesterOrigin?.channel) {
+      api.logger.info?.(
+        `mcp-tools: suppressing channel delivery for subagent completion ` +
+        `(child=${event.childSessionKey}, channel=${event.requesterOrigin.channel})`,
+      );
+      return { origin: {} };
+    }
+  });
+
   // ── Daily memory file (agent_end hook) ─────────────────────────────────
 
   function todayDateStr(): string {
