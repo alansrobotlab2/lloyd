@@ -302,6 +302,44 @@ export interface MemoryReadResult {
   lineCount: number;
 }
 
+// ── Vault Graph types ────────────────────────────────────────────────
+
+export interface VaultGraphNode {
+  id: string;
+  label: string;
+  type: string;
+  tags: string[];
+  folder: string;
+}
+
+export interface VaultGraphEdge {
+  source: string;
+  target: string;
+  kind: string;
+}
+
+export interface VaultGraphData {
+  nodes: VaultGraphNode[];
+  edges: VaultGraphEdge[];
+}
+
+export interface TagGraphNode {
+  id: string;
+  label: string;
+  count: number;
+}
+
+export interface TagGraphEdge {
+  source: string;
+  target: string;
+  weight: number;
+}
+
+export interface TagGraphData {
+  nodes: TagGraphNode[];
+  edges: TagGraphEdge[];
+}
+
 export const api = {
   // Services
   services: () => fetchJson<ServicesData>("/services"),
@@ -471,6 +509,10 @@ export const api = {
 
   agentCallLog: (agentId: string, limit = 30): Promise<{ entries: CallLogEntry[] }> =>
     fetchJson(`/agent-call-log?agentId=${encodeURIComponent(agentId)}&limit=${limit}`),
+
+  // Vault graph
+  vaultGraph: () => fetchJson<VaultGraphData>("/vault-graph"),
+  tagGraph: () => fetchJson<TagGraphData>("/tag-graph"),
 
   // Work mode
   mode: () => fetchJson<{ currentMode: string; lastSwitchedAt: string }>("/mode"),

@@ -9,10 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@types/d3-force": "^3.0.10",
+    "d3-force": "^3.0.0",
     "lucide-react": "^0.468.0",
     "marked": "^17.0.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-force-graph-2d": "^1.29.1",
     "recharts": "^2.15.0"
   },
   "devDependencies": {

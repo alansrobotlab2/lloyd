@@ -13,6 +13,7 @@ import ToolsPage from "./pages/ToolsPage";
 import AgentsPage from "./pages/AgentsPage";
 import ActivityPage from "./pages/ActivityPage";
 import SettingsPage from "./pages/SettingsPage";
+import GraphPage from "./pages/GraphPage";
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -43,6 +44,7 @@ const PAGES: Record<string, React.ComponentType> = {
   dashboard: DashboardPage,
   backlog: BacklogPage,
   memory: MemoryPage,
+  graph: GraphPage,
   skills: SkillsPage,
   models: ModelsPage,
   cron: CronPage,

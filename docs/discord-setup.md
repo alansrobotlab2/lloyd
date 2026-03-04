@@ -39,7 +39,7 @@ Lloyd needs a shared server with users to enable DMs — Discord doesn't allow D
 3. Open the invite URL from step 2 in your browser
 4. Select your new server and authorize
 
-Lloyd won't respond in server channels (they're disabled). The server exists solely as a bridge for DMs.
+Lloyd responds in server channels when @mentioned. The server also serves as a bridge for DMs.
 
 ### 4. Configure OpenClaw
 

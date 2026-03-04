@@ -2158,6 +2158,121 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // ── API: /api/mc/vault-graph ───────────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/vault-graph",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const docs = getVaultIndex();
+
+        // Build node list
+        const nodes = docs.map((doc) => ({
+          id: doc.path,
+          label: doc.title,
+          type: doc.type,
+          tags: doc.tags,
+          folder: doc.folder,
+        }));
+
+        // Build edges from wikilinks by reading file contents
+        const edges: { source: string; target: string; kind: string }[] = [];
+        const pathSet = new Set(docs.map((d) => d.path));
+        const pathByBasename = new Map<string, string>();
+        for (const doc of docs) {
+          const base = doc.path.replace(/\.md$/, "").split("/").pop()!.toLowerCase();
+          pathByBasename.set(base, doc.path);
+        }
+
+        for (const doc of docs) {
+          const fullPath = join(vaultRoot, doc.path);
+          let raw: string;
+          try { raw = readFileSync(fullPath, "utf-8"); } catch { continue; }
+
+          // Extract [[wikilinks]]
+          const wikilinkRe = /\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]/g;
+          let m: RegExpExecArray | null;
+          while ((m = wikilinkRe.exec(raw)) !== null) {
+            const target = m[1].trim().toLowerCase();
+            // Try exact path first, then basename lookup
+            let targetPath: string | undefined;
+            if (pathSet.has(target + ".md")) {
+              targetPath = target + ".md";
+            } else {
+              targetPath = pathByBasename.get(target);
+            }
+            if (targetPath && targetPath !== doc.path) {
+              edges.push({ source: doc.path, target: targetPath, kind: "wikilink" });
+            }
+          }
+        }
+
+        // Deduplicate edges
+        const edgeKeys = new Set<string>();
+        const uniqueEdges = edges.filter((e) => {
+          const key = [e.source, e.target].sort().join("→");
+          if (edgeKeys.has(key)) return false;
+          edgeKeys.add(key);
+          return true;
+        });
+
+        jsonResponse(res, { nodes, edges: uniqueEdges });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/tag-graph ────────────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/tag-graph",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const docs = getVaultIndex();
+
+        // Count tag occurrences and collect docs per tag
+        const tagDocs = new Map<string, string[]>(); // tag → doc paths
+        for (const doc of docs) {
+          for (const tag of doc.tags) {
+            let arr = tagDocs.get(tag);
+            if (!arr) { arr = []; tagDocs.set(tag, arr); }
+            arr.push(doc.path);
+          }
+        }
+
+        // Build tag nodes
+        const nodes = Array.from(tagDocs.entries()).map(([tag, docPaths]) => ({
+          id: tag,
+          label: tag,
+          count: docPaths.length,
+        }));
+
+        // Build co-occurrence edges: two tags share an edge if they appear on the same doc
+        const edges: { source: string; target: string; weight: number }[] = [];
+        const edgeWeights = new Map<string, number>();
+        for (const doc of docs) {
+          const tags = doc.tags;
+          for (let i = 0; i < tags.length; i++) {
+            for (let j = i + 1; j < tags.length; j++) {
+              const key = [tags[i], tags[j]].sort().join("→");
+              edgeWeights.set(key, (edgeWeights.get(key) || 0) + 1);
+            }
+          }
+        }
+
+        for (const [key, weight] of edgeWeights) {
+          const [source, target] = key.split("→");
+          edges.push({ source, target, weight });
+        }
+
+        jsonResponse(res, { nodes, edges });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
   // ── API: /api/mc/memory/search ──────────────────────────────────────────
 
   api.registerHttpRoute({

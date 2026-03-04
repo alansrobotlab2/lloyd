@@ -1,31 +1,4 @@
 {
   "version": 2,
-  "runs": {
-    "d64712ed-8132-49c0-b87a-78ef4bb95de4": {
-      "runId": "d64712ed-8132-49c0-b87a-78ef4bb95de4",
-      "childSessionKey": "agent:orchestrator:subagent:cfcb0f0f-fa11-4960-87db-1fd8c5baf1f1",
-      "requesterSessionKey": "agent:main:main",
-      "requesterOrigin": {
-        "channel": "webchat"
-      },
-      "requesterDisplayKey": "agent:main:main",
-      "task": "Archive migration: Review all contents in ~/obsidian/agents/lloyd-archive/, identify where each document belongs in the current vault structure (agents/, personal/, work/, projects/, knowledge/), and move files to their appropriate locations. The goal is to empty lloyd-archive completely.\n\nContext:\n- lloyd-archive contains historical/reference docs that should be integrated into the active vault\n- Current vault segments: agents/, personal/, work/, projects/, knowledge/\n- Daily notes path is mode-specific (work: memory/work/, personal: memory/personal/)\n- Preserve all content, metadata, tags, and sources during migration\n- Create a summary report of what was moved where\n\nSteps:\n1. List all files in lloyd-archive recursively\n2. For each file, determine its correct destination based on content type and topic\n3. Move files to appropriate locations (work/ for AVEVA docs, projects/ for Alfie/Stompy, knowledge/ for research, etc.)\n4. Update any internal links if needed\n5. Delete empty lloyd-archive directory\n6. Report back with migration summary\n\nExpected output: lloyd-archive empty, all content properly organized in active vault segments.",
-      "cleanup": "keep",
-      "expectsCompletionMessage": true,
-      "spawnMode": "run",
-      "model": "anthropic/claude-sonnet-4-6",
-      "runTimeoutSeconds": 1200,
-      "createdAt": 1772586239942,
-      "startedAt": 1772586240148,
-      "archiveAtMs": 1772589839942,
-      "cleanupHandled": true,
-      "endedAt": 1772586403468,
-      "outcome": {
-        "status": "ok"
-      },
-      "endedReason": "subagent-complete",
-      "endedHookEmittedAt": 1772586404356,
-      "cleanupCompletedAt": 1772586404356
-    }
-  }
+  "runs": {}
 }
