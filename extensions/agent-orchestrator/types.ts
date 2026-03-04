@@ -11,6 +11,8 @@ export interface CcInstance {
   task: string;
   pipeline?: string;
   agent?: string;
+  /** Plan-only mode — orchestrator returns plan without executing */
+  planOnly?: boolean;
   startedAt: number;
   endedAt?: number;
   sessionId?: string;

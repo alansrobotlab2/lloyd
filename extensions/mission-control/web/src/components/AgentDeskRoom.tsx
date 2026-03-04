@@ -1,16 +1,24 @@
 import { useState } from "react";
-import { SubagentRunInfo } from "../api";
+import { SubagentRunInfo, CcInstanceInfo } from "../api";
 
 const MAX_DESKS = 8;
 
+/** Unified desk occupant — from either legacy subagents or CC instances */
+interface DeskOccupant {
+  id: string;
+  agentId: string;
+  task: string;
+  source: "subagent" | "cc";
+}
+
 interface Props {
   activeAgents: SubagentRunInfo[];
+  ccInstances?: CcInstanceInfo[];
   onAgentClick?: (agentId: string) => void;
 }
 
-/** Extract agent id from label or childSessionKey — e.g. "coder", "memory" */
-function agentIdFrom(agent?: SubagentRunInfo): string | null {
-  if (!agent) return null;
+/** Extract agent id from legacy subagent label or childSessionKey */
+function agentIdFromSubagent(agent: SubagentRunInfo): string | null {
   if (agent.label) {
     const id = agent.label.split(":")[0].trim().toLowerCase();
     if (id) return id;
@@ -22,8 +30,30 @@ function agentIdFrom(agent?: SubagentRunInfo): string | null {
   return null;
 }
 
+/** Convert active subagents + CC running instances into unified desk occupants */
+function buildOccupants(active: SubagentRunInfo[], ccInstances: CcInstanceInfo[]): DeskOccupant[] {
+  const occupants: DeskOccupant[] = [];
+
+  // Legacy subagents
+  for (const run of active) {
+    const agentId = agentIdFromSubagent(run);
+    if (agentId) {
+      occupants.push({ id: run.runId, agentId, task: run.task, source: "subagent" });
+    }
+  }
+
+  // CC instances — running only
+  for (const inst of ccInstances) {
+    if (inst.status !== "running") continue;
+    const agentId = inst.type === "orchestrate" ? "orchestrator" : (inst.agent || "unknown");
+    occupants.push({ id: inst.id, agentId, task: inst.activity || inst.task, source: "cc" });
+  }
+
+  return occupants.slice(0, MAX_DESKS);
+}
+
 /** Truncate text for thought bubble */
-function truncateStatus(text: string | undefined, max = 20): string {
+function truncateStatus(text: string | undefined, max = 24): string {
   if (!text) return "";
   return text.length > max ? text.slice(0, max) + "\u2026" : text;
 }
@@ -84,51 +114,10 @@ function AvatarHead({ agentId, x, y, size = 36 }: { agentId: string | null; x: n
   );
 }
 
-function ThoughtBubble({ text, x, y }: { text: string; x: number; y: number }) {
-  const displayText = text || "...";
-  const textWidth = Math.max(28, displayText.length * 5.2 + 12);
-  const bubbleHeight = 16;
-
-  const clampedY = Math.max(2, y);
-
-  return (
-    <g className="thought-bubble">
-      <circle cx={x} cy={clampedY + 14} r="1.5" fill="white" opacity="0.7">
-        <animate attributeName="opacity" values="0.7;0.3;0.7" dur="2s" repeatCount="indefinite" />
-      </circle>
-      <circle cx={x + 4} cy={clampedY + 9} r="2.5" fill="white" opacity="0.8">
-        <animate attributeName="opacity" values="0.8;0.4;0.8" dur="2s" begin="0.3s" repeatCount="indefinite" />
-      </circle>
-      <rect
-        x={x + 6}
-        y={clampedY - 4}
-        width={textWidth}
-        height={bubbleHeight}
-        rx="8"
-        fill="white"
-        stroke="#cbd5e1"
-        strokeWidth="0.5"
-        opacity="0.95"
-      />
-      <text
-        x={x + 6 + textWidth / 2}
-        y={clampedY + 7}
-        textAnchor="middle"
-        fontSize="7"
-        fontFamily="monospace"
-        fill="#1e293b"
-        opacity="0.9"
-      >
-        {displayText}
-      </text>
-    </g>
-  );
-}
-
-function DeskSlot({ agent, index, onAgentClick }: { agent?: SubagentRunInfo; index: number; onAgentClick?: (agentId: string) => void }) {
-  const active = !!agent;
-  const agentId = agentIdFrom(agent);
-  const statusText = truncateStatus(agent?.task, 24);
+function DeskSlot({ occupant, index, onAgentClick }: { occupant?: DeskOccupant; index: number; onAgentClick?: (agentId: string) => void }) {
+  const active = !!occupant;
+  const agentId = occupant?.agentId ?? null;
+  const statusText = truncateStatus(occupant?.task, 24);
   const [line1, line2] = wrapLines(statusText);
   const maxLineLen = Math.max(line1.length, line2?.length ?? 0);
 
@@ -138,23 +127,23 @@ function DeskSlot({ agent, index, onAgentClick }: { agent?: SubagentRunInfo; ind
   const deskHeight = 16;
   const skew = 6;
   const cx = 85;
-  const deskW = 165; // 110 * 1.5
-  const dL = cx - deskW / 2; // 2.5
-  const dR = cx + deskW / 2; // 167.5
+  const deskW = 165;
+  const dL = cx - deskW / 2;
+  const dR = cx + deskW / 2;
 
   // Character
   const avatarSize = 90;
-  const avatarX = cx - avatarSize / 2; // 40
+  const avatarX = cx - avatarSize / 2;
   const avatarY = 24;
-  const avatarCenterY = avatarY + avatarSize / 2; // 69
+  const avatarCenterY = avatarY + avatarSize / 2;
   const bodyW = 36, bodyH = 24;
-  const bodyX = cx - bodyW / 2; // 67
-  const bodyY = deskTopY - 48; // 102
+  const bodyX = cx - bodyW / 2;
+  const bodyY = deskTopY - 48;
   const handW = 16, handH = 6;
   const handY = 130;
 
-  // Thought bubble — 2x wider, 2x taller, fontSize +25%
-  const bx = avatarX + avatarSize + 14; // 144
+  // Thought bubble
+  const bx = avatarX + avatarSize + 14;
   const bw = maxLineLen ? Math.max(280, maxLineLen * 22 + 56) : 0;
   const bh = line2 ? 116 : 68;
   const by = avatarCenterY - bh / 2;
@@ -169,7 +158,7 @@ function DeskSlot({ agent, index, onAgentClick }: { agent?: SubagentRunInfo; ind
       title={clickable ? `View ${agentId} agent` : undefined}
     >
       <svg viewBox="0 0 520 200" className="desk-svg" xmlns="http://www.w3.org/2000/svg">
-        {/* Thought bubble — right of head, vertically centered, 2x size */}
+        {/* Thought bubble */}
         {active && statusText && (
           <g className="thought-bubble" transform="matrix(1.0003523,0,0,0.81909953,-0.11201992,21.869887)">
             <circle cx={avatarX + avatarSize + 3} cy={avatarCenterY} r={6} fill="white" opacity="0.6">
@@ -191,7 +180,7 @@ function DeskSlot({ agent, index, onAgentClick }: { agent?: SubagentRunInfo; ind
         )}
 
         <g transform="matrix(1,0,0,1.0916577,0,-19.679914)">
-        {/* Desk top face — parallelogram (brown) */}
+        {/* Desk top face */}
         <polygon
           points={`${dL+skew},${deskTopY} ${dR+skew},${deskTopY} ${dR},${deskFrontY} ${dL},${deskFrontY}`}
           fill={active ? "#6b4226" : "#5a3720"}
@@ -213,7 +202,7 @@ function DeskSlot({ agent, index, onAgentClick }: { agent?: SubagentRunInfo; ind
         <rect x={dL+4} y={deskFrontY+deskHeight+17} width={dR-dL-8} height="3" rx="1.5" fill="#3d2416" opacity={active ? 0.5 : 0.3} />
         </g>
 
-        {/* Laptop on desk — centered on character */}
+        {/* Laptop on desk */}
         {active ? (
           <g className="laptop" transform="translate(-2,-6)">
             <polygon
@@ -256,7 +245,7 @@ function DeskSlot({ agent, index, onAgentClick }: { agent?: SubagentRunInfo; ind
           </g>
         )}
 
-        {/* Agent name label — bottom right */}
+        {/* Agent name label */}
         {agentId && (
           <text x={512} y={194} textAnchor="end" fontSize="27" fontFamily="monospace" fill="white" opacity="0.7">
             {agentId}
@@ -267,33 +256,9 @@ function DeskSlot({ agent, index, onAgentClick }: { agent?: SubagentRunInfo; ind
   );
 }
 
-// DEBUG: all 8 slots active for animation testing
-const DEBUG_AGENT_TASKS: Record<string, string> = {
-  coder:      "refactoring auth module",
-  planner:    "scoping user stories",
-  researcher: "fetching web results",
-  reviewer:   "auditing PR diff",
-  tester:     "running test suite",
-  auditor:    "scanning for vulns",
-  operator:   "restarting gateway",
-  memory:     "indexing vault docs",
-};
-
-const DEBUG_AGENTS: SubagentRunInfo[] = [
-  "coder", "planner", "researcher", "reviewer",
-  "tester", "auditor", "operator", "memory",
-].map((id) => ({
-  runId: `debug-${id}`,
-  childSessionKey: `agent:${id}:debug`,
-  requesterSessionKey: "agent:main:debug",
-  task: DEBUG_AGENT_TASKS[id] ?? "working...",
-  label: `${id}:debug`,
-  createdAt: Date.now(),
-}));
-
-export default function AgentDeskRoom({ activeAgents, onAgentClick }: Props) {
-  const slots: (SubagentRunInfo | undefined)[] = activeAgents.slice(0, MAX_DESKS);
-  const activeCount = activeAgents.length;
+export default function AgentDeskRoom({ activeAgents, ccInstances, onAgentClick }: Props) {
+  const occupants = buildOccupants(activeAgents, ccInstances || []);
+  const activeCount = occupants.length;
 
   return (
     <div className="agent-desk-room">
@@ -321,8 +286,12 @@ export default function AgentDeskRoom({ activeAgents, onAgentClick }: Props) {
         </span>
       </div>
       <div className="desk-grid">
-        {slots.map((agent, i) => (
-          <DeskSlot key={i} agent={agent} index={i} onAgentClick={onAgentClick} />
+        {occupants.map((occ, i) => (
+          <DeskSlot key={occ.id} occupant={occ} index={i} onAgentClick={onAgentClick} />
+        ))}
+        {/* Fill remaining empty desks */}
+        {Array.from({ length: Math.max(0, MAX_DESKS - occupants.length) }).map((_, i) => (
+          <DeskSlot key={`empty-${i}`} index={occupants.length + i} />
         ))}
       </div>
     </div>

@@ -2,12 +2,22 @@
  * query-consumer.ts — Consumes Agent SDK query() async generators in the background.
  *
  * Tracks status, cost, messages, and fires completion notifications.
+ * Persists a JSONL log per instance to logs/cc-instances/ and writes a
+ * summary JSON on completion for post-mortem review.
  */
 
 import type { CcInstance, InstanceMessage } from "./types.js";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 /** Max recent messages to keep per instance (ring buffer for Mission Control) */
 const MAX_RECENT_MESSAGES = 100;
+
+/** Directory for persistent instance logs */
+const LOG_DIR = join(process.env.HOME || "/home/alansrobotlab", ".openclaw/logs/cc-instances");
+
+// Ensure log directory exists at module load
+try { mkdirSync(LOG_DIR, { recursive: true }); } catch {}
 
 /** Logger interface (passed from plugin api) */
 interface Logger {
@@ -19,6 +29,45 @@ interface Logger {
 type NotifyFn = (instanceId: string, summary: string) => void;
 
 /**
+ * Append a line to the instance's JSONL log file.
+ */
+function logToFile(instance: CcInstance, entry: Record<string, any>): void {
+  try {
+    const line = JSON.stringify({ ts: new Date().toISOString(), instanceId: instance.id, ...entry }) + "\n";
+    appendFileSync(join(LOG_DIR, `${instance.id}.jsonl`), line);
+  } catch {
+    // Best-effort logging — don't crash the pipeline
+  }
+}
+
+/**
+ * Write a completion summary JSON for the instance.
+ */
+function writeSummary(instance: CcInstance): void {
+  try {
+    const summary = {
+      id: instance.id,
+      type: instance.type,
+      status: instance.status,
+      task: instance.task,
+      pipeline: instance.pipeline,
+      agent: instance.agent,
+      startedAt: new Date(instance.startedAt).toISOString(),
+      endedAt: instance.endedAt ? new Date(instance.endedAt).toISOString() : null,
+      elapsedMs: (instance.endedAt || Date.now()) - instance.startedAt,
+      costUsd: Math.round(instance.costUsd * 10000) / 10000,
+      turns: instance.turns,
+      budgetUsd: instance.budgetUsd,
+      error: instance.error || null,
+      resultPreview: instance.resultText ? instance.resultText.slice(0, 2000) : null,
+    };
+    writeFileSync(join(LOG_DIR, `${instance.id}.summary.json`), JSON.stringify(summary, null, 2) + "\n");
+  } catch {
+    // Best-effort
+  }
+}
+
+/**
  * Consume an Agent SDK query() async generator in the background.
  * Updates the CcInstance in-place as messages arrive.
  */
@@ -28,11 +77,23 @@ export async function consumeQuery(
   logger: Logger,
   notify: NotifyFn,
 ): Promise<void> {
+  // Log instance start
+  logToFile(instance, {
+    event: "start",
+    type: instance.type,
+    task: instance.task,
+    pipeline: instance.pipeline,
+    agent: instance.agent,
+    budgetUsd: instance.budgetUsd,
+    maxTurns: instance.maxTurns,
+  });
+
   try {
     for await (const message of queryIter) {
       // Track session ID from init message
       if (message.type === "system" && message.subtype === "init" && message.session_id) {
         instance.sessionId = message.session_id;
+        logToFile(instance, { event: "session_init", sessionId: message.session_id });
       }
 
       // Process based on message type
@@ -41,11 +102,9 @@ export async function consumeQuery(
       } else if (message.type === "result") {
         processResultMessage(instance, message);
       } else if (message.type === "error") {
-        pushMessage(instance, {
-          ts: Date.now(),
-          type: "error",
-          content: message.error?.message || message.message || "Unknown error",
-        });
+        const errorContent = message.error?.message || message.message || "Unknown error";
+        pushMessage(instance, { ts: Date.now(), type: "error", content: errorContent });
+        logToFile(instance, { event: "error", content: errorContent });
       }
     }
   } catch (err: any) {
@@ -53,18 +112,27 @@ export async function consumeQuery(
     instance.error = err.message || String(err);
     instance.endedAt = Date.now();
     logger.error?.(`agent-orchestrator: instance ${instance.id} error:`, err.message);
-    pushMessage(instance, {
-      ts: Date.now(),
-      type: "error",
-      content: `Fatal error: ${err.message}`,
-    });
+    pushMessage(instance, { ts: Date.now(), type: "error", content: `Fatal error: ${err.message}` });
+    logToFile(instance, { event: "fatal_error", error: err.message });
   }
 
-  // Fire completion notification
+  // Write completion summary
+  writeSummary(instance);
+
+  // Log completion
   const elapsed = Math.round(((instance.endedAt || Date.now()) - instance.startedAt) / 1000);
   const costStr = instance.costUsd > 0 ? ` ($${instance.costUsd.toFixed(2)})` : "";
   const status = instance.status === "complete" ? "completed" : `failed (${instance.error || "unknown"})`;
   const summary = `Pipeline \`${instance.id}\` ${status} in ${elapsed}s${costStr}: ${truncate(instance.task, 80)}`;
+
+  logToFile(instance, {
+    event: "complete",
+    status: instance.status,
+    elapsedMs: (instance.endedAt || Date.now()) - instance.startedAt,
+    costUsd: instance.costUsd,
+    turns: instance.turns,
+    resultPreview: instance.resultText ? instance.resultText.slice(0, 500) : null,
+  });
 
   logger.info?.(`agent-orchestrator: ${summary}`);
   notify(instance.id, summary);
@@ -85,6 +153,7 @@ function processAssistantMessage(instance: CcInstance, message: any): void {
         content: truncate(block.text, 500),
       });
       instance.activity = truncate(block.text, 100);
+      logToFile(instance, { event: "text", content: truncate(block.text, 1000) });
     } else if (block.type === "tool_use") {
       const toolName = block.name || "unknown";
       const isSubagent = toolName === "Task";
@@ -92,18 +161,31 @@ function processAssistantMessage(instance: CcInstance, message: any): void {
 
       if (isSubagent && agentType) {
         instance.activity = `spawning ${agentType} agent`;
+        const promptPreview = truncate(block.input?.prompt || block.input?.description || agentType, 500);
         pushMessage(instance, {
           ts: Date.now(),
           type: "subagent_start",
           agent: agentType,
-          content: truncate(block.input?.prompt || block.input?.description || agentType, 200),
+          content: truncate(promptPreview, 200),
+        });
+        logToFile(instance, {
+          event: "subagent_start",
+          agent: agentType,
+          description: block.input?.description,
+          prompt: truncate(block.input?.prompt || "", 2000),
         });
       } else {
         instance.activity = `using ${toolName}`;
+        const paramSummary = `${toolName}(${summarizeParams(block.input)})`;
         pushMessage(instance, {
           ts: Date.now(),
           type: "tool_use",
-          content: `${toolName}(${summarizeParams(block.input)})`,
+          content: paramSummary,
+        });
+        logToFile(instance, {
+          event: "tool_use",
+          tool: toolName,
+          params: summarizeParams(block.input),
         });
       }
     }
@@ -154,6 +236,16 @@ function processResultMessage(instance: CcInstance, message: any): void {
     ts: Date.now(),
     type: "text",
     content: `Pipeline ${instance.status}: ${truncate(instance.resultText || "", 300)}`,
+  });
+
+  // Log full result text to file (not truncated)
+  logToFile(instance, {
+    event: "result",
+    status: instance.status,
+    costUsd: instance.costUsd,
+    turns: instance.turns,
+    resultText: instance.resultText,
+    error: instance.error,
   });
 }
 

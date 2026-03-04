@@ -537,7 +537,8 @@ export const api = {
     return res.json();
   },
 
-  // Claude Code instances (agent-orchestrator plugin)
+  // Claude Code instances & agents (agent-orchestrator plugin)
+  ccAgents: () => fetchJson<SdkAgentsData>("/cc-agents"),
   ccInstances: () => fetchJson<{ instances: CcInstanceInfo[] }>("/cc-instances"),
   ccInstanceLog: (id: string, limit = 50) =>
     fetchJson<{ id: string; status: string; messages: CcInstanceMessage[] }>(
@@ -578,4 +579,22 @@ export interface CcInstanceMessage {
   type: "text" | "tool_use" | "tool_result" | "subagent_start" | "subagent_end" | "error";
   agent?: string;
   content: string;
+}
+
+// ── SDK Agent Types ────────────────────────────────────────────────────────
+
+export interface SdkAgentInfo {
+  id: string;
+  model: string;
+  description: string;
+  maxTurns: number;
+  tools: string[];
+  mcpTools: string[];
+  hasMcp: boolean;
+  avatarUrl: string;
+}
+
+export interface SdkAgentsData {
+  agents: SdkAgentInfo[];
+  instanceCounts: Record<string, { active: number; recent: number }>;
 }

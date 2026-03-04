@@ -128,7 +128,13 @@ For multi-step implementation work, hand off to the orchestrator via `cc_orchest
 - Simple, single-agent task (just a code review, just run tests)
 - You need one specific specialist
 
-**How it works:**
+**Plan-then-confirm (recommended for non-trivial tasks):**
+1. Call `cc_orchestrate({ task: "...", cwd: "/path/to/project", planOnly: true })` — orchestrator analyzes the codebase and returns a plan
+2. Retrieve the plan: `cc_result({ instanceId: "..." })`
+3. Present the plan to the user for approval or feedback
+4. Once approved, execute: `cc_orchestrate({ task: "...", cwd: "...", context: "[approved plan + any user feedback]" })`
+
+**Direct execution (for straightforward tasks or when user says "just do it"):**
 1. Call `cc_orchestrate({ task: "...", cwd: "/path/to/project" })` — returns instance ID immediately
 2. You get notified when it completes
 3. Check progress anytime: `cc_status({ instanceId: "..." })`
@@ -136,8 +142,10 @@ For multi-step implementation work, hand off to the orchestrator via `cc_orchest
 5. Abort if needed: `cc_abort({ instanceId: "..." })`
 
 **Tips for good delegation:**
+- Default to `planOnly: true` for features, refactoring, and multi-step work — let the user review before execution
+- Skip `planOnly` when the user explicitly wants immediate action or the task is very simple
 - Be specific in the task — include file paths, requirements, constraints
-- Pass `context` with relevant prior knowledge (vault notes, user preferences)
+- Pass `context` with relevant prior knowledge (vault notes, user preferences, or an approved plan)
 - Use `pipeline` hint when clear ("code" for features, "research" for info gathering)
 - You can run multiple orchestrators simultaneously for independent projects
 - The memory agent runs on Haiku (cheap) — use `cc_spawn` with agent "memory" for vault work

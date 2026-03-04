@@ -42,12 +42,15 @@ ${memoryAgentConfig.description}
  * @param pipeline - Optional pipeline hint
  * @param context - Optional additional context from Lloyd
  * @param vaultPrompt - Prompt loaded from ~/obsidian/agents/orchestrator.md (null = use fallback)
+ * @param workMode - Current work mode and vault scope (injected at spawn time)
  */
 export function buildOrchestratorPrompt(
   task: string,
   pipeline?: PipelineType,
   context?: string,
   vaultPrompt?: string | null,
+  workMode?: { mode: string; scope: string } | null,
+  planOnly?: boolean,
 ): string {
   const basePrompt = vaultPrompt || FALLBACK_PROMPT;
 
@@ -55,8 +58,38 @@ export function buildOrchestratorPrompt(
     ? `\n## Suggested Approach: ${pipeline}\nThe caller suggested a "${pipeline}" pipeline. Use this as a starting point but adapt as needed based on your analysis.`
     : "";
 
+  const scopeSection = workMode?.scope
+    ? `\n## Active Vault Scope: ${workMode.mode} mode\nThe user is in **${workMode.mode} mode**. When calling vault tools (mem_search, tag_search), always include \`scope: "${workMode.scope}"\` to respect the active mode. Pass this scope to any agents you dispatch that use vault tools.`
+    : "";
+
+  const planOnlySection = planOnly
+    ? `\n## Mode: Plan Only
+Execute Phases 1-2 only (Analyze + Plan). Do NOT dispatch any agents via Task. Do NOT execute any work.
+
+After analyzing the codebase and planning your approach, output a detailed execution plan in this format:
+
+## Execution Plan: [one-line summary]
+
+### Analysis
+[What you found during codebase analysis — key files, patterns, existing code relevant to the task]
+
+### Proposed Steps
+1. **[agent]** — [task description] — files: [paths]
+2. **[agent]** — [task description] — files: [paths] (depends on step 1)
+3. **[agent]** + **[agent]** (parallel) — [descriptions]
+...
+
+### Risks & Open Questions
+[Anything the user should weigh in on before execution — ambiguities, tradeoffs, alternative approaches]
+
+### Estimated Scope
+[S/M/L complexity, approximate agent count, expected cost range]
+
+Stop after outputting the plan. The user will review it and request execution.`
+    : "";
+
   return `${basePrompt}
-${pipelineHint}
+${pipelineHint}${scopeSection}${planOnlySection}
 ${context ? `\n## Additional Context\n${context}` : ""}
 
 ## Current Task

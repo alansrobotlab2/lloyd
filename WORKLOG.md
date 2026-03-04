@@ -1,5 +1,32 @@
 # OpenClaw Work Log
 
+## 2026-03-04 — Mission Control UI + Agent Traceability + Vault Format Compliance
+
+**Type:** Enhancement
+**Files modified:**
+- `extensions/agent-orchestrator/index.ts` — work mode scope injection, `/api/mc/cc-agents` endpoint
+- `extensions/agent-orchestrator/orchestrator-prompt.ts` — added `workMode` parameter for vault scope
+- `extensions/agent-orchestrator/query-consumer.ts` — persistent JSONL logging + completion summaries
+- `extensions/agent-orchestrator/agents/researcher.ts` — vault format directives, tag_search/tag_explore tools
+- `extensions/agent-orchestrator/agents/memory-agent.ts` — vault format directives
+- `extensions/mission-control/index.ts` — avatar discovery from ~/obsidian/lloyd/avatars/
+- `extensions/mission-control/web/src/api.ts` — SdkAgentInfo types, ccAgents() fetch
+- `extensions/mission-control/web/src/components/AgentDeskRoom.tsx` — unified DeskOccupant for legacy + SDK agents
+- `extensions/mission-control/web/src/components/pages/ActivityPage.tsx` — CC instance avatars with status dots
+- `extensions/mission-control/web/src/components/pages/AgentsPage.tsx` — SDK agents section with SdkAgentCard
+
+**Files created:**
+- `~/obsidian/agents/researcher.md` — vault prompt with full note format spec
+- `~/obsidian/agents/memory.md` — vault prompt with vault format directives
+
+**Summary:**
+- Work mode compliance: Agent SDK instances now read mode-state.json at spawn time and inject vault scope into prompts
+- Researcher + memory agents enforce standard vault note format (title, type, tags, folder, segment frontmatter)
+- Persistent instance logging: JSONL event logs + JSON summaries in `~/.openclaw/logs/cc-instances/`
+- Agents tab shows SDK agents with avatars, model badges, tools, and recent instance activity
+- Activity tab shows CC instances with avatar images and status dot overlays
+- Avatar discovery from `~/obsidian/lloyd/avatars/` (flat directory with agent-name.jpg files)
+
 ## 2026-03-04 — Orchestrator Evolution: Autonomous Project Coordinator
 
 **Type:** Enhancement

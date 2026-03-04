@@ -2798,14 +2798,27 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   // ── API: /api/mc/agent-avatar ───────────────────────────────────────────
-  // Serves avatar images from ~/obsidian/agents/<id>/avatar/
+  // Serves avatar images — checks ~/obsidian/lloyd/avatars/<id>.ext first (flat),
+  // then legacy ~/obsidian/agents/<id>/avatar/ directory.
 
   const AVATAR_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
   const AVATAR_MIME: Record<string, string> = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".png": "image/png", ".webp": "image/webp",
   };
+  const AVATARS_DIR = join(homedir(), "obsidian", "lloyd", "avatars");
 
+  /** Check flat ~/obsidian/lloyd/avatars/<id>.{jpg,jpeg,png,webp} */
+  function discoverAvatarFlat(agentId: string): string | null {
+    if (!agentId || /[\/\.]/.test(agentId)) return null;
+    for (const ext of AVATAR_EXTENSIONS) {
+      const filePath = join(AVATARS_DIR, agentId + ext);
+      if (existsSync(filePath)) return filePath;
+    }
+    return null;
+  }
+
+  /** Legacy: check ~/obsidian/agents/<id>/avatar/ directory */
   function discoverAvatarInDir(agentId: string): string | null {
     if (!agentId || /[\/\.]/.test(agentId)) return null;
     const avatarDir = join(homedir(), "obsidian", "agents", agentId, "avatar");
@@ -2819,9 +2832,11 @@ export default function register(api: OpenClawPluginApi) {
     return null;
   }
 
-  /** Try agent ID first, then fall back to display name (lowercased) */
+  /** Try flat avatars dir first, then legacy dir, then name fallback */
   function discoverAvatar(agentId: string, agentName?: string): string | null {
-    return discoverAvatarInDir(agentId)
+    return discoverAvatarFlat(agentId)
+      || discoverAvatarInDir(agentId)
+      || (agentName ? discoverAvatarFlat(agentName.toLowerCase()) : null)
       || (agentName ? discoverAvatarInDir(agentName.toLowerCase()) : null);
   }
 

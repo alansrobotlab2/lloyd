@@ -264,20 +264,28 @@ function CcInstanceCard({
     try { await onAbort(instance.id); } finally { setAborting(false); }
   };
 
+  const agentId = instance.type === "orchestrate" ? "orchestrator" : (instance.agent || "unknown");
+
   return (
     <div className="bg-surface-1 rounded-xl px-4 py-3 border border-cyan-500/30">
       <div className="flex items-start gap-3">
-        <div className="mt-1 flex-shrink-0 relative">
-          <div className={`w-2.5 h-2.5 rounded-full ${statusColor}`} />
+        <div className="mt-0.5 flex-shrink-0 relative">
+          <img
+            src={`/api/mc/agent-avatar?id=${agentId}`}
+            alt={agentId}
+            className="w-8 h-8 rounded-lg object-cover"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+          />
+          <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border border-surface-1 ${statusColor}`} />
           {instance.status === "running" && (
-            <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-cyan-400 animate-ping opacity-30" />
+            <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-cyan-400 animate-ping opacity-30" />
           )}
         </div>
         <div className="flex-1 min-w-0">
           <div className="text-xs text-slate-300 line-clamp-2">{instance.task}</div>
           <div className="flex items-center gap-2 mt-1 flex-wrap">
             <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono border ${statusBadge}`}>
-              {instance.type === "orchestrate" ? `pipeline:${instance.pipeline || "custom"}` : instance.agent || "agent"}
+              {instance.type === "orchestrate" ? `pipeline:${instance.pipeline || "custom"}` : agentId}
             </span>
             <span className="text-[10px] text-slate-500 font-mono">
               {instance.turns} turns
@@ -382,8 +390,8 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
         )}
       </div>
 
-      {/* Agent Desk Room */}
-      <AgentDeskRoom activeAgents={active} onAgentClick={onNavigateToAgent} />
+      {/* Agent Desk Room — shows both legacy subagents and CC instances */}
+      <AgentDeskRoom activeAgents={active} ccInstances={ccInstances} onAgentClick={onNavigateToAgent} />
 
       {/* Main Agent Status */}
       <div className="space-y-1">

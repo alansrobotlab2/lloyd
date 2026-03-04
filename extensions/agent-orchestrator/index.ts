@@ -41,6 +41,31 @@ const DEFAULT_BUDGET_USD = 5.0;
 const DEFAULT_MAX_TURNS = 30;
 const CLAUDE_CODE_PATH = "/home/alansrobotlab/.npm-global/bin/claude";
 const VAULT_AGENTS_DIR = join(process.env.HOME || "/home/alansrobotlab", "obsidian/agents");
+const MODE_STATE_PATH = join(__dirname, "../mcp-tools/mode-state.json");
+
+// ── Work Mode ────────────────────────────────────────────────────────────
+
+type WorkMode = "work" | "personal" | "general";
+
+const MODE_SCOPE: Record<WorkMode, string> = {
+  work:     "work,knowledge,agents",
+  personal: "personal,projects,knowledge,agents",
+  general:  "",
+};
+
+/**
+ * Read the current work mode from mcp-tools' persisted state.
+ * Returns the vault scope string (e.g. "work,knowledge,agents") or "" for general.
+ */
+function getWorkModeScope(): { mode: WorkMode; scope: string } {
+  try {
+    const state = JSON.parse(readFileSync(MODE_STATE_PATH, "utf-8"));
+    const mode = (state.currentMode || "general") as WorkMode;
+    return { mode, scope: MODE_SCOPE[mode] || "" };
+  } catch {
+    return { mode: "general", scope: "" };
+  }
+}
 
 // ── Vault Prompt Loading ──────────────────────────────────────────────────
 
@@ -78,17 +103,27 @@ const AGENT_CONFIGS: Record<string, any> = {
   operator: operatorAgent,
 };
 
+/** Agents that use vault MCP tools and need scope injection */
+const VAULT_USING_AGENTS = new Set(["memory", "researcher", "planner", "coder", "operator"]);
+
 /**
  * Build fresh agent definitions by merging static configs with vault prompts.
  * Called at spawn time so edits in Obsidian take effect immediately.
+ * If a vault scope is active, appends scope instructions to agents that use vault tools.
  */
-function buildAgentDefs(logger: any): Record<string, any> {
+function buildAgentDefs(logger: any, vaultScope?: { mode: string; scope: string }): Record<string, any> {
   const agents: Record<string, any> = {};
+  const scopeSuffix = vaultScope?.scope
+    ? `\n\n## Vault Scope\nThe user is in **${vaultScope.mode} mode**. When calling vault tools (mem_search, tag_search, tag_explore), always include the parameter \`scope: "${vaultScope.scope}"\`.`
+    : "";
+
   for (const [name, config] of Object.entries(AGENT_CONFIGS)) {
     const vaultPrompt = loadVaultPrompt(name);
+    const basePrompt = vaultPrompt || config.prompt;
+    const needsScope = scopeSuffix && VAULT_USING_AGENTS.has(name);
     agents[name] = {
       ...config,
-      prompt: vaultPrompt || config.prompt,
+      prompt: needsScope ? basePrompt + scopeSuffix : basePrompt,
     };
     if (vaultPrompt) {
       logger.info?.(`agent-orchestrator: loaded ${name} prompt from vault`);
@@ -201,6 +236,13 @@ export default function register(api: OpenClawPluginApi) {
           type: "integer",
           description: `Max orchestrator turns (default ${DEFAULT_MAX_TURNS}).`,
         },
+        planOnly: {
+          type: "boolean",
+          description:
+            "If true, the orchestrator analyzes and plans but does NOT execute. " +
+            "Returns a detailed execution plan for user review. Call cc_result to retrieve the plan, " +
+            "then call cc_orchestrate again with the approved plan in 'context' to execute.",
+        },
       },
       required: ["task"],
     },
@@ -211,16 +253,21 @@ export default function register(api: OpenClawPluginApi) {
         const budget = params.budget ?? DEFAULT_BUDGET_USD;
         const maxTurns = params.maxTurns ?? DEFAULT_MAX_TURNS;
         const pipeline: PipelineType = params.pipeline ?? "custom";
+        const planOnly: boolean = params.planOnly ?? false;
         const cwd = params.cwd || process.env.HOME || "/home/alansrobotlab";
 
         const abort = new AbortController();
 
-        // Build agents fresh from vault prompts at spawn time
-        const agents = buildAgentDefs(api.logger);
+        // Read current work mode for vault scope injection
+        const workMode = getWorkModeScope();
+
+        // Build agents fresh from vault prompts at spawn time (with scope)
+        const agents = buildAgentDefs(api.logger, workMode.scope ? workMode : undefined);
 
         // Load orchestrator prompt from vault (falls back to built-in)
         const orchestratorPrompt = buildOrchestratorPrompt(
           params.task, pipeline, params.context, loadVaultPrompt("orchestrator"),
+          workMode.scope ? workMode : null, planOnly,
         );
 
         const q = queryFn({
@@ -229,19 +276,21 @@ export default function register(api: OpenClawPluginApi) {
             systemPrompt: {
               type: "preset" as const,
               preset: "claude_code" as const,
-              append: "\nYou are a project coordinator. Analyze the task using Read/Glob/Grep, then delegate ALL implementation work to specialist agents via the Task tool. You may read files for analysis but NEVER write, edit, or run commands yourself.",
+              append: planOnly
+                ? "\nYou are a project coordinator in PLAN-ONLY mode. Analyze the task using Read/Glob/Grep and output a detailed execution plan. Do NOT dispatch agents or execute any work."
+                : "\nYou are a project coordinator. Analyze the task using Read/Glob/Grep, then delegate ALL implementation work to specialist agents via the Task tool. You may read files for analysis but NEVER write, edit, or run commands yourself.",
             },
             cwd,
             model: "sonnet",
-            maxBudgetUsd: budget,
-            maxTurns,
+            maxBudgetUsd: planOnly ? 1.0 : budget,
+            maxTurns: planOnly ? 15 : maxTurns,
             permissionMode: "bypassPermissions",
             allowDangerouslySkipPermissions: true,
             allowedTools: [
               // Analysis tools — orchestrator reads code to plan intelligently
               "Read", "Glob", "Grep",
-              // Delegation tool — dispatches specialist agents
-              "Task",
+              // Delegation tool — only available in execute mode
+              ...(planOnly ? [] : ["Task"]),
               // Vault tools — context lookup without spawning an agent
               "mcp__openclaw-tools__mem_search",
               "mcp__openclaw-tools__mem_get",
@@ -266,6 +315,7 @@ export default function register(api: OpenClawPluginApi) {
           status: "running",
           task: params.task,
           pipeline,
+          planOnly,
           startedAt: Date.now(),
           costUsd: 0,
           turns: 0,
@@ -292,9 +342,12 @@ export default function register(api: OpenClawPluginApi) {
               status: "started",
               type: "orchestrate",
               pipeline,
-              budget,
-              maxTurns,
-              message: `Pipeline started. Use cc_status("${instanceId}") to check progress.`,
+              planOnly,
+              budget: planOnly ? 1.0 : budget,
+              maxTurns: planOnly ? 15 : maxTurns,
+              message: planOnly
+                ? `Plan-only mode started. Use cc_result("${instanceId}") to retrieve the execution plan once complete.`
+                : `Pipeline started. Use cc_status("${instanceId}") to check progress.`,
             }, null, 2),
           }],
         };
@@ -354,9 +407,14 @@ export default function register(api: OpenClawPluginApi) {
           };
         }
 
-        // Load fresh prompt from vault at spawn time
+        // Load fresh prompt from vault at spawn time, with work mode scope
         const vaultPrompt = loadVaultPrompt(params.agent);
-        const agentDef = { ...agentConfig, prompt: vaultPrompt || agentConfig.prompt };
+        const workMode = getWorkModeScope();
+        let agentPrompt = vaultPrompt || agentConfig.prompt;
+        if (workMode.scope && VAULT_USING_AGENTS.has(params.agent)) {
+          agentPrompt += `\n\n## Vault Scope\nThe user is in **${workMode.mode} mode**. When calling vault tools (mem_search, tag_search, tag_explore), always include the parameter \`scope: "${workMode.scope}"\`.`;
+        }
+        const agentDef = { ...agentConfig, prompt: agentPrompt };
         if (vaultPrompt) {
           api.logger.info?.(`agent-orchestrator: loaded ${params.agent} prompt from vault`);
         }
@@ -608,6 +666,49 @@ export default function register(api: OpenClawPluginApi) {
       req.on("error", reject);
     });
   }
+
+  // GET /api/mc/cc-agents — list SDK agent definitions for Mission Control
+  api.registerHttpRoute({
+    path: "/api/mc/cc-agents",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      const agentList = Object.entries(AGENT_CONFIGS).map(([name, config]) => ({
+        id: name,
+        model: config.model || "sonnet",
+        description: config.description || "",
+        maxTurns: config.maxTurns || 25,
+        tools: (config.tools || []).filter((t: string) => !t.startsWith("mcp__")),
+        mcpTools: (config.tools || []).filter((t: string) => t.startsWith("mcp__")),
+        hasMcp: config.mcpServers?.length > 0,
+        avatarUrl: `/api/mc/agent-avatar?id=${name}`,
+      }));
+
+      // Add orchestrator as a virtual agent
+      agentList.unshift({
+        id: "orchestrator",
+        model: "sonnet",
+        description: "Autonomous project coordinator. Analyzes tasks, plans agent dispatch, manages execution, and delivers structured reports.",
+        maxTurns: DEFAULT_MAX_TURNS,
+        tools: ["Read", "Glob", "Grep", "Task"],
+        mcpTools: ["mem_search", "mem_get", "tag_search", "tag_explore"],
+        hasMcp: true,
+        avatarUrl: "/api/mc/agent-avatar?id=orchestrator",
+      });
+
+      // Augment each agent with active/recent instance counts
+      const instancesByAgent: Record<string, { active: number; recent: number }> = {};
+      for (const inst of instances.values()) {
+        const agentId = inst.type === "orchestrate" ? "orchestrator" : (inst.agent || "unknown");
+        if (!instancesByAgent[agentId]) instancesByAgent[agentId] = { active: 0, recent: 0 };
+        if (inst.status === "running") instancesByAgent[agentId].active++;
+        else instancesByAgent[agentId].recent++;
+      }
+
+      jsonResponse(res, {
+        agents: agentList,
+        instanceCounts: instancesByAgent,
+      });
+    },
+  });
 
   // GET /api/mc/cc-instances — list all instances
   api.registerHttpRoute({
