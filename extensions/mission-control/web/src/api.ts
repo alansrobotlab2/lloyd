@@ -57,10 +57,13 @@ export interface SessionSummary {
 export interface MessageEntry {
   id: string;
   timestamp: string;
-  role: "user" | "assistant";
-  content: Array<{ type: string; text?: string }>;
+  role: "user" | "assistant" | "toolResult";
+  content: Array<{ type: string; text?: string; id?: string; name?: string; arguments?: Record<string, unknown> }>;
   model?: string;
   usage?: { input: number; output: number; cacheRead: number; totalTokens: number };
+  toolCallId?: string;
+  toolName?: string;
+  isError?: boolean;
 }
 
 export interface HealthData {
@@ -357,8 +360,8 @@ export const api = {
   usageChart: (range = "7d") => fetchJson<UsageChartData>(`/usage-chart?range=${range}`),
   apiCalls: () => fetchJson<ApiCallsData>("/api-calls"),
   sessions: () => fetchJson<{ sessions: SessionSummary[] }>("/sessions"),
-  sessionMessages: (id: string) =>
-    fetchJson<{ sessionId: string; messages: MessageEntry[] }>(`/session-messages?id=${id}`),
+  sessionMessages: (id: string, includeTools?: boolean) =>
+    fetchJson<{ sessionId: string; messages: MessageEntry[] }>(`/session-messages?id=${id}${includeTools ? "&tools=1" : ""}`),
   chat: async (message: string, sessionKey?: string) => {
     const res = await fetch(`${BASE}/chat`, {
       method: "POST",

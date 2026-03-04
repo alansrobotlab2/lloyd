@@ -755,24 +755,44 @@ export default function register(api: OpenClawPluginApi) {
           return;
         }
 
+        const includeTools = url.searchParams.get("tools") === "1";
         const lines = parseJsonl<SessionMessage>(join(sessionsDir, match));
         const messages = lines
           .filter(
-            (l) =>
-              l.type === "message" &&
-              l.message &&
-              (l.message.role === "user" ||
-                (l.message.role === "assistant" &&
-                  l.message.content?.some((c: any) => c.type === "text" && c.text))),
+            (l) => {
+              if (l.type !== "message" || !l.message) return false;
+              const role = l.message.role;
+              if (role === "user") return true;
+              if (role === "assistant") {
+                if (includeTools) return true;
+                return l.message.content?.some((c: any) => c.type === "text" && c.text);
+              }
+              if (role === "toolResult" && includeTools) return true;
+              return false;
+            },
           )
-          .map((l) => ({
-            id: l.id,
-            timestamp: l.timestamp,
-            role: l.message!.role,
-            content: l.message!.content,
-            model: l.message!.model,
-            usage: l.message!.usage,
-          }));
+          .map((l) => {
+            const msg: any = l.message!;
+            const entry: Record<string, any> = {
+              id: l.id,
+              timestamp: l.timestamp || msg.timestamp,
+              role: msg.role,
+              content: msg.content,
+              model: msg.model,
+              usage: msg.usage,
+            };
+            if (msg.role === "toolResult") {
+              entry.toolCallId = msg.toolCallId;
+              entry.toolName = msg.toolName;
+              entry.isError = msg.isError || false;
+              // Truncate tool result content to keep payloads small
+              entry.content = (msg.content || []).map((c: any) => ({
+                type: c.type,
+                text: typeof c.text === "string" ? c.text.slice(0, 300) : c.text,
+              }));
+            }
+            return entry;
+          });
 
         jsonResponse(res, { sessionId, messages });
       } catch (err: any) {

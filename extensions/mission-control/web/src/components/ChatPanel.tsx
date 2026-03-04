@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Send, User, Plus, Loader2, Brain, MessageCircle, StopCircle } from "lucide-react";
+import { Send, User, Plus, Loader2, Brain, MessageCircle, StopCircle, Wrench } from "lucide-react";
 import { marked } from "marked";
 import { api, type MessageEntry } from "../api";
 
@@ -13,6 +13,13 @@ function extractText(content: Array<{ type: string; text?: string }>): string {
     .join("\n")
     .replace(/<summary>[\s\S]*?<\/summary>/g, "")
     .trim();
+}
+
+/** Detect system-injected context messages (prefill, cron, session reset) */
+function isContextMessage(msg: MessageEntry): boolean {
+  if (msg.role !== "user") return false;
+  const text = extractText(msg.content);
+  return /^<\w+[\s>]/.test(text) || /^\[cron:/.test(text);
 }
 
 function timeStr(ts: string): string {
@@ -33,6 +40,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
   const [awaitingReset, setAwaitingReset] = useState(false);
   // Show the "Thinking..." bubble while waiting for an assistant reply
   const [thinking, setThinking] = useState(false);
+  const [showToolCalls, setShowToolCalls] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
@@ -75,7 +83,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
   useEffect(() => {
     if (!sessionId) return;
     const load = () =>
-      api.sessionMessages(sessionId)
+      api.sessionMessages(sessionId, showToolCalls)
         .then((d) => {
           // Don't replace local messages with fewer server messages while
           // thinking — protects the optimistic user message from flickering
@@ -118,7 +126,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
     load();
     const interval = setInterval(load, thinking || awaitingReset ? 1_500 : 3_000);
     return () => clearInterval(interval);
-  }, [sessionId, awaitingReset, thinking, refreshSessions]);
+  }, [sessionId, awaitingReset, thinking, refreshSessions, showToolCalls]);
 
   // Track whether user is scrolled near the bottom
   const handleScroll = useCallback(() => {
@@ -238,15 +246,28 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
             ))}
           </select>
         </div>
-        <button
-          onClick={handleNew}
-          disabled={sending || awaitingReset}
-          title="New conversation"
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-brand-400 hover:bg-brand-500/10 transition-colors disabled:opacity-40"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          New
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setShowToolCalls((v) => !v)}
+            title={showToolCalls ? "Hide tool calls" : "Show tool calls"}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              showToolCalls
+                ? "text-brand-400 bg-brand-500/10"
+                : "text-slate-400 hover:text-brand-400 hover:bg-brand-500/10"
+            }`}
+          >
+            <Wrench className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={handleNew}
+            disabled={sending || awaitingReset}
+            title="New conversation"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-brand-400 hover:bg-brand-500/10 transition-colors disabled:opacity-40"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            New
+          </button>
+        </div>
       </div>
 
       {/* Messages card */}
@@ -265,42 +286,105 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
               )}
             </div>
           )}
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}
-            >
-              {msg.role === "assistant" && (
-                <img src="/api/mc/agent-avatar?id=lloyd" alt="Lloyd" className="w-7 h-7 rounded-full object-cover flex-shrink-0 mt-0.5" />
-              )}
-              <div
-                className={`max-w-[80%] ${
-                  msg.role === "user"
-                    ? "bg-brand-600/20 border-brand-500/30"
-                    : "bg-surface-2 border-surface-3/50"
-                } rounded-xl px-3.5 py-2.5 border`}
-              >
+          {messages
+            .filter((msg) => {
+              if (!showToolCalls) {
+                if (msg.role === "toolResult") return false;
+                if (msg.role === "assistant" && !msg.content?.some((c) => c.type === "text" && c.text)) return false;
+                if (isContextMessage(msg)) return false;
+              }
+              return true;
+            })
+            .map((msg) => {
+              // Tool result messages — compact inline row
+              if (msg.role === "toolResult") {
+                const preview = extractText(msg.content);
+                return (
+                  <div key={msg.id} className="flex gap-3">
+                    <div className="w-7 flex-shrink-0" /> {/* spacer to align under assistant */}
+                    <div className={`max-w-[80%] rounded-lg px-3 py-1.5 text-xs font-mono ${msg.isError ? "bg-red-500/10 border border-red-500/20 text-red-400" : "bg-surface-2/50 border border-surface-3/30 text-slate-500"}`}>
+                      <span className="text-slate-400 mr-1.5">&rarr;</span>
+                      <span className={msg.isError ? "text-red-300" : "text-slate-400"}>{msg.toolName}</span>
+                      {preview && <span className="ml-1.5 text-slate-600">{preview.slice(0, 200)}{preview.length > 200 ? "..." : ""}</span>}
+                    </div>
+                  </div>
+                );
+              }
+
+              const text = extractText(msg.content);
+              const isCtx = isContextMessage(msg);
+              const toolCalls = showToolCalls ? msg.content.filter((c) => c.type === "toolCall") : [];
+
+              // Context/prefill messages — muted, compact style
+              if (isCtx) {
+                return (
+                  <div key={msg.id} className="flex gap-3">
+                    <div className="w-7 flex-shrink-0" />
+                    <div className="max-w-[90%] rounded-lg px-3 py-2 bg-surface-2/30 border border-surface-3/20">
+                      <div className="text-[10px] font-mono text-slate-600 uppercase tracking-wide mb-1">context prefill</div>
+                      <div className="text-xs text-slate-500 leading-relaxed max-h-40 overflow-y-auto prose-chat"
+                        dangerouslySetInnerHTML={{ __html: marked.parse(text) as string }}
+                      />
+                      <div className="text-[10px] text-slate-600 mt-1">{timeStr(msg.timestamp)}</div>
+                    </div>
+                  </div>
+                );
+              }
+
+              return (
                 <div
-                  className="text-sm leading-relaxed prose-chat"
-                  dangerouslySetInnerHTML={{ __html: marked.parse(extractText(msg.content)) as string }}
-                />
-                <div className="flex items-center gap-2 mt-1.5 text-[10px] text-slate-500">
-                  <span>{timeStr(msg.timestamp)}</span>
-                  {msg.model && <span>{msg.model}</span>}
-                  {msg.usage && (
-                    <span>
-                      {msg.usage.totalTokens} tok
-                    </span>
+                  key={msg.id}
+                  className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}
+                >
+                  {msg.role === "assistant" && (
+                    <img src="/api/mc/agent-avatar?id=lloyd" alt="Lloyd" className="w-7 h-7 rounded-full object-cover flex-shrink-0 mt-0.5" />
+                  )}
+                  <div
+                    className={`max-w-[80%] ${
+                      msg.role === "user"
+                        ? "bg-brand-600/20 border-brand-500/30"
+                        : "bg-surface-2 border-surface-3/50"
+                    } rounded-xl px-3.5 py-2.5 border`}
+                  >
+                    {text && (
+                      <div
+                        className="text-sm leading-relaxed prose-chat"
+                        dangerouslySetInnerHTML={{ __html: marked.parse(text) as string }}
+                      />
+                    )}
+                    {toolCalls.length > 0 && (
+                      <div className={`space-y-1 ${text ? "mt-2 pt-2 border-t border-surface-3/30" : ""}`}>
+                        {toolCalls.map((tc, i) => {
+                          const argsStr = tc.arguments ? JSON.stringify(tc.arguments) : "";
+                          const truncArgs = argsStr.length > 80 ? argsStr.slice(0, 80) + "..." : argsStr;
+                          return (
+                            <div key={tc.id || i} className="flex items-center gap-1.5 text-xs font-mono text-slate-500">
+                              <Wrench className="w-3 h-3 text-slate-600 flex-shrink-0" />
+                              <span className="text-slate-400">{tc.name}</span>
+                              {truncArgs && <span className="text-slate-600 truncate">{truncArgs}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2 mt-1.5 text-[10px] text-slate-500">
+                      <span>{timeStr(msg.timestamp)}</span>
+                      {msg.model && <span>{msg.model}</span>}
+                      {msg.usage && (
+                        <span>
+                          {msg.usage.totalTokens} tok
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {msg.role === "user" && (
+                    <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5">
+                      <User className="w-3.5 h-3.5 text-slate-300" />
+                    </div>
                   )}
                 </div>
-              </div>
-              {msg.role === "user" && (
-                <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5">
-                  <User className="w-3.5 h-3.5 text-slate-300" />
-                </div>
-              )}
-            </div>
-          ))}
+              );
+            })}
 
           {/* Thinking indicator */}
           {thinking && (
