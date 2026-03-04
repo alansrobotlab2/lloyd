@@ -1,5 +1,48 @@
 # OpenClaw Work Log
 
+## 2026-03-04 — Orchestrator Evolution: Autonomous Project Coordinator
+
+**Type:** Enhancement
+**Files modified:**
+- `extensions/agent-orchestrator/orchestrator-prompt.ts` — complete rewrite from template executor to autonomous coordinator
+- `extensions/agent-orchestrator/index.ts` — added `context` param, `tag_explore` tool, updated tool description
+- `extensions/agent-orchestrator/agents/coder.ts` — enhanced to accept coordinator context (plans, review findings)
+- `extensions/agent-orchestrator/agents/reviewer.ts` — output formatted for coordinator→coder handoff
+- `extensions/agent-orchestrator/agents/planner.ts` — output includes agent assignments and parallelization hints
+- `workspace-claude/AGENTS.md` — added "Project Delegation" section routing Lloyd to cc_orchestrate
+
+**Summary:**
+- Evolved orchestrator from rigid pipeline executor to intelligent project coordinator
+- Orchestrator now analyzes codebase (Phase 1), plans agent dispatch (Phase 2), executes with parallel/sequential awareness (Phase 3), and reports (Phase 4)
+- Decision framework: orchestrator decides which agents to use based on task analysis, not template
+- Agent prompts updated for better coordinator↔agent context passing (plans, findings, fix requests)
+- Planner output structured for coordinator consumption (agent assignments, parallelization marks)
+- Lloyd's AGENTS.md now routes project work through cc_orchestrate with delegation tips
+
+## 2026-03-04 — Agent SDK Migration (Phase 1-3)
+
+**Type:** Feature
+**Files created:**
+- `extensions/agent-orchestrator/` — new plugin (index.ts, types.ts, orchestrator-prompt.ts, query-consumer.ts, agents/*.ts, package.json, openclaw.plugin.json)
+- `docs/agent-sdk-migration.md` — architecture document
+
+**Files modified:**
+- `openclaw.json` — added cc_orchestrate, cc_spawn, cc_status, cc_result, cc_abort to Lloyd's tools.allow
+- `extensions/mission-control/web/src/api.ts` — added CcInstanceInfo types and API methods
+- `extensions/mission-control/web/src/components/pages/ActivityPage.tsx` — added Claude Code Instances section with status cards
+
+**Summary:**
+- Built `agent-orchestrator` plugin using Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`)
+- 5 tools registered: cc_orchestrate (multi-agent pipeline), cc_spawn (single agent), cc_status, cc_result, cc_abort
+- 7 agent definitions: coder (Opus), reviewer (Opus), auditor (Opus), tester (Sonnet), planner (Sonnet), researcher (Sonnet), operator (Sonnet)
+- Memory agent stays on local Qwen via existing sessions_spawn (hybrid strategy)
+- Orchestrator prompt with pipeline templates: code, research, security, full, custom
+- Async fire-and-forget lifecycle: tools return instance ID immediately, query runs in background
+- Mission Control Activity page shows real-time instance cards with status, cost, turns, abort
+- MC API endpoints: /api/mc/cc-instances, cc-instance-log, cc-instance-abort
+- Plugin loads and registers successfully, gateway restart verified
+- Uses OAuth auth (Claude Max subscription) — no API key needed
+
 ## 2026-03-03 — Backlog Migration
 
 **Type:** Feature / Refactor

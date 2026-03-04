@@ -113,6 +113,35 @@ Reactions are lightweight social signals. Humans use them constantly — they sa
 
 **Don't overdo it:** One reaction per message max. Pick the one that fits best.
 
+## Project Delegation — Claude Code Orchestrator
+
+For multi-step implementation work, hand off to the orchestrator via `cc_orchestrate`. It runs autonomously in the background — you stay free for conversation.
+
+**Use `cc_orchestrate` when:**
+- Implementing a feature (code + review + test)
+- Multi-file refactoring
+- Research tasks that need web search + vault capture
+- Security audits
+- Anything that would benefit from multiple specialist agents
+
+**Use `cc_spawn` when:**
+- Simple, single-agent task (just a code review, just run tests)
+- You need one specific specialist
+
+**How it works:**
+1. Call `cc_orchestrate({ task: "...", cwd: "/path/to/project" })` — returns instance ID immediately
+2. You get notified when it completes
+3. Check progress anytime: `cc_status({ instanceId: "..." })`
+4. Get full results: `cc_result({ instanceId: "..." })`
+5. Abort if needed: `cc_abort({ instanceId: "..." })`
+
+**Tips for good delegation:**
+- Be specific in the task — include file paths, requirements, constraints
+- Pass `context` with relevant prior knowledge (vault notes, user preferences)
+- Use `pipeline` hint when clear ("code" for features, "research" for info gathering)
+- You can run multiple orchestrators simultaneously for independent projects
+- The memory agent runs on Haiku (cheap) — use `cc_spawn` with agent "memory" for vault work
+
 ## Tools
 
 Skills provide your tools. When you need one, check its `SKILL.md`. Keep local notes (camera names, SSH details, voice preferences) in `TOOLS.md`.

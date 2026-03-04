@@ -536,4 +536,46 @@ export const api = {
     });
     return res.json();
   },
+
+  // Claude Code instances (agent-orchestrator plugin)
+  ccInstances: () => fetchJson<{ instances: CcInstanceInfo[] }>("/cc-instances"),
+  ccInstanceLog: (id: string, limit = 50) =>
+    fetchJson<{ id: string; status: string; messages: CcInstanceMessage[] }>(
+      `/cc-instance-log?id=${encodeURIComponent(id)}&limit=${limit}`
+    ),
+  ccInstanceAbort: async (id: string) => {
+    const res = await fetch(`${BASE}/cc-instance-abort`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    return res.json();
+  },
 };
+
+// ── Claude Code Instance Types ────────────────────────────────────────────
+
+export interface CcInstanceInfo {
+  id: string;
+  type: "orchestrate" | "spawn";
+  status: "running" | "complete" | "error" | "aborted";
+  task: string;
+  pipeline?: string;
+  agent?: string;
+  startedAt: number;
+  endedAt?: number;
+  elapsedMs: number;
+  costUsd: number;
+  turns: number;
+  budgetUsd: number;
+  activity?: string;
+  resultPreview?: string;
+  error?: string;
+}
+
+export interface CcInstanceMessage {
+  ts: number;
+  type: "text" | "tool_use" | "tool_result" | "subagent_start" | "subagent_end" | "error";
+  agent?: string;
+  content: string;
+}

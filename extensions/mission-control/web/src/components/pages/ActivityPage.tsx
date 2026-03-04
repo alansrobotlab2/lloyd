@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
-import { Activity, X } from "lucide-react";
-import { api, AgentStatusData, SubagentRunInfo } from "../../api";
+import { Activity, X, Cpu, Square } from "lucide-react";
+import { api, AgentStatusData, SubagentRunInfo, CcInstanceInfo } from "../../api";
 import AgentDeskRoom from "../AgentDeskRoom";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -232,13 +232,102 @@ function ActivityFeed({ runs }: { runs: SubagentRunInfo[] }) {
   );
 }
 
+// ── Claude Code Instance Card ────────────────────────────────────────────
+
+const CC_STATUS_COLORS: Record<string, string> = {
+  running: "bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.5)]",
+  complete: "bg-emerald-400",
+  error: "bg-red-400",
+  aborted: "bg-slate-500",
+};
+
+const CC_STATUS_BADGES: Record<string, string> = {
+  running: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
+  complete: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
+  error: "bg-red-500/20 text-red-400 border-red-500/30",
+  aborted: "bg-slate-500/20 text-slate-400 border-slate-500/30",
+};
+
+function CcInstanceCard({
+  instance,
+  onAbort,
+}: {
+  instance: CcInstanceInfo;
+  onAbort: (id: string) => void;
+}) {
+  const [aborting, setAborting] = useState(false);
+  const statusColor = CC_STATUS_COLORS[instance.status] ?? CC_STATUS_COLORS.running;
+  const statusBadge = CC_STATUS_BADGES[instance.status] ?? CC_STATUS_BADGES.running;
+
+  const handleAbort = async () => {
+    setAborting(true);
+    try { await onAbort(instance.id); } finally { setAborting(false); }
+  };
+
+  return (
+    <div className="bg-surface-1 rounded-xl px-4 py-3 border border-cyan-500/30">
+      <div className="flex items-start gap-3">
+        <div className="mt-1 flex-shrink-0 relative">
+          <div className={`w-2.5 h-2.5 rounded-full ${statusColor}`} />
+          {instance.status === "running" && (
+            <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-cyan-400 animate-ping opacity-30" />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-slate-300 line-clamp-2">{instance.task}</div>
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono border ${statusBadge}`}>
+              {instance.type === "orchestrate" ? `pipeline:${instance.pipeline || "custom"}` : instance.agent || "agent"}
+            </span>
+            <span className="text-[10px] text-slate-500 font-mono">
+              {instance.turns} turns
+            </span>
+            {instance.costUsd > 0 && (
+              <span className="text-[10px] text-slate-500 font-mono">
+                ${instance.costUsd.toFixed(2)}
+              </span>
+            )}
+          </div>
+          {instance.activity && instance.status === "running" && (
+            <div className="text-[10px] text-cyan-400/70 font-mono mt-1 truncate">
+              {instance.activity}
+            </div>
+          )}
+          {instance.error && (
+            <div className="text-[10px] text-red-400/70 font-mono mt-1 truncate">
+              {instance.error}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="text-[10px] text-slate-500 font-mono">
+            {formatElapsed(instance.elapsedMs)}
+          </div>
+          {instance.status === "running" && (
+            <button
+              onClick={handleAbort}
+              disabled={aborting}
+              title="Abort instance"
+              className="p-1 rounded-md text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+            >
+              <Square className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ────────────────────────────────────────────────────────────
 
 export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?: (agentId: string) => void } = {}) {
   const [status, setStatus] = useState<AgentStatusData | null>(null);
+  const [ccInstances, setCcInstances] = useState<CcInstanceInfo[]>([]);
 
   const refresh = useCallback(() => {
     api.agentStatus().then(setStatus).catch(console.error);
+    api.ccInstances().then((d) => setCcInstances(d.instances)).catch(() => setCcInstances([]));
   }, []);
 
   useEffect(() => {
@@ -247,13 +336,15 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
 
   // Adaptive polling: 1.5s when active, 3s when idle
   useEffect(() => {
+    const hasCcRunning = ccInstances.some((i) => i.status === "running");
     const isActive =
       status?.mainAgent.state !== "idle" ||
-      (status?.subagents.active.length ?? 0) > 0;
+      (status?.subagents.active.length ?? 0) > 0 ||
+      hasCcRunning;
 
     const interval = setInterval(refresh, isActive ? 1500 : 3000);
     return () => clearInterval(interval);
-  }, [status, refresh]);
+  }, [status, ccInstances, refresh]);
 
   const handleKill = useCallback(async (sessionKey: string) => {
     try {
@@ -264,8 +355,19 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
     }
   }, [refresh]);
 
+  const handleCcAbort = useCallback(async (id: string) => {
+    try {
+      await api.ccInstanceAbort(id);
+      setTimeout(refresh, 500);
+    } catch (err) {
+      console.error("Failed to abort CC instance:", err);
+    }
+  }, [refresh]);
+
   const active = status?.subagents.active ?? [];
   const recentCompleted = status?.subagents.recentCompleted ?? [];
+  const ccRunning = ccInstances.filter((i) => i.status === "running");
+  const ccCompleted = ccInstances.filter((i) => i.status !== "running");
 
   return (
     <div className="p-6 space-y-6 overflow-auto">
@@ -307,6 +409,25 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
           ))
         )}
       </div>
+
+      {/* Claude Code Instances */}
+      {ccInstances.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-cyan-400 font-medium flex items-center gap-1.5">
+            {ccRunning.length > 0 && (
+              <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+            )}
+            <Cpu className="w-3 h-3" />
+            Claude Code Instances ({ccRunning.length} running{ccCompleted.length > 0 ? `, ${ccCompleted.length} done` : ""})
+          </div>
+          {ccRunning.map((inst) => (
+            <CcInstanceCard key={inst.id} instance={inst} onAbort={handleCcAbort} />
+          ))}
+          {ccCompleted.slice(0, 5).map((inst) => (
+            <CcInstanceCard key={inst.id} instance={inst} onAbort={handleCcAbort} />
+          ))}
+        </div>
+      )}
 
       {/* Recent Completed */}
       <div className="space-y-2">
