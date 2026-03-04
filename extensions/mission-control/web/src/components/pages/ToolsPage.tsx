@@ -8,7 +8,7 @@ const SOURCE_ICONS: Record<string, React.ComponentType<{ className?: string }>> 
   "openclaw — web & memory": Box,
   "openclaw — system & media": Clock,
   "mcp-tools": Terminal,
-  "clawdeck": LayoutGrid,
+  "mcp-tools — backlog": LayoutGrid,
   "voice-tools": Mic,
 };
 
@@ -18,7 +18,7 @@ const SOURCE_COLORS: Record<string, string> = {
   "openclaw — web & memory": "text-violet-400",
   "openclaw — system & media": "text-orange-400",
   "mcp-tools": "text-indigo-400",
-  "clawdeck": "text-emerald-400",
+  "mcp-tools — backlog": "text-emerald-400",
   "voice-tools": "text-amber-400",
 };
 

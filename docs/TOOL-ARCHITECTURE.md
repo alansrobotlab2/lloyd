@@ -110,21 +110,21 @@ Transport: MCP/SSE proxy to `127.0.0.1:8094` (`voice_services.py`)
 
 Also hooks `message_sending` to extract `<summary>` tags → TTS via `127.0.0.1:8092`.
 
-### clawdeck plugin (6 tools)
+### backlog tools (6 tools, via mcp-tools)
 
-File: `extensions/clawdeck/index.ts`
-Transport: REST API to `localhost:3001`
+Source: `~/Projects/lloyd-services/tool_services.py`
+Data: SQLite at `~/.openclaw/data/backlog.db`
 
 | Tool | Description |
 |------|-------------|
-| `clawdeck_boards` | List kanban boards |
-| `clawdeck_tasks` | List tasks with filters |
-| `clawdeck_next_task` | Next assigned task |
-| `clawdeck_get_task` | Get task by ID |
-| `clawdeck_update_task` | Update status/blocked/activity |
-| `clawdeck_create_task` | Create new task |
+| `backlog_boards` | List kanban boards |
+| `backlog_tasks` | List tasks with filters |
+| `backlog_next_task` | Next assigned task |
+| `backlog_get_task` | Get task by ID |
+| `backlog_update_task` | Update status/blocked/activity |
+| `backlog_create_task` | Create new task |
 
-Also registers webhook at `POST /webhook/clawdeck` for real-time task notifications.
+Registered as MCP tools in tool_services.py, proxied through extensions/mcp-tools/index.ts.
 
 ### Non-tool plugins
 
@@ -164,7 +164,7 @@ The MCP plugin previously registered `memory_search`, `memory_get`, `web_search`
 | OpenClaw built-in (browser, canvas, cron, etc.) | ~15 |
 | mcp-tools plugin | 16 |
 | voice-tools plugin | 3 |
-| clawdeck plugin | 6 |
+| backlog tools (via mcp-tools) | 6 |
 | **Approximate total** | **~45** |
 
 Exact count varies by session depending on which conditional tools are active and policy filtering.
@@ -176,7 +176,7 @@ Exact count varies by session depending on which conditional tools are active an
 | `openclaw.json` | Root config — plugin discovery, tool toggles, memory backend |
 | `extensions/mcp-tools/index.ts` | MCP tool proxy plugin (16 tools) |
 | `extensions/voice-tools/index.ts` | Voice tool proxy plugin (3 tools) |
-| `extensions/clawdeck/index.ts` | ClawDeck REST plugin (6 tools) |
+| `~/Projects/lloyd-services/tool_services.py` | Backlog MCP tools (6 tools, SQLite-backed) |
 | `~/Projects/lloyd-services/tool_services.py` | MCP server implementation (memory, web, file, system) |
 | `~/Projects/lloyd-services/voice_services.py` | Voice MCP server implementation |
 | `~/.npm-global/lib/node_modules/openclaw/dist/plugin-sdk/reply-Duq0R59W.js` | Runtime tool assembly (`createOpenClawCodingTools`, `createOpenClawTools`, `resolvePluginTools`) |

@@ -79,7 +79,7 @@ Routes requests to specialists, handles direct conversation, communication, sche
 |---|---|
 | **Model** | `anthropic/claude-sonnet-4-6` |
 | **Workspace** | `~/.openclaw/workspaces/operator` |
-| **Tools** | `exec`, `run_bash`, `process`, `read`, `file_read`, `file_glob`, `file_grep`, `file_write`, `file_edit`, `clawdeck_boards`, `clawdeck_tasks`, `clawdeck_next_task`, `clawdeck_get_task`, `clawdeck_update_task`, `clawdeck_create_task` |
+| **Tools** | `exec`, `run_bash`, `process`, `read`, `file_read`, `file_glob`, `file_grep`, `file_write`, `file_edit`, `backlog_boards`, `backlog_tasks`, `backlog_next_task`, `backlog_get_task`, `backlog_update_task`, `backlog_create_task` |
 | **Spawn mode** | `session` (persistent) |
 
 **Dispatch triggers**: git, services, CI/CD, deployments, task board, process management.

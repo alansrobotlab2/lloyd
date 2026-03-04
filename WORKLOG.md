@@ -1,5 +1,25 @@
 # OpenClaw Work Log
 
+## 2026-03-03 — Backlog Migration
+
+**Type:** Feature / Refactor
+**Files Modified:**
+- `~/Projects/lloyd-services/tool_services.py` — added backlog SQLite schema + 6 MCP tools
+- `extensions/mcp-tools/index.ts` — added 6 proxyTool() registrations
+- `extensions/mission-control/index.ts` — replaced ClawDeck proxy with SQLite routes
+- `extensions/mission-control/web/` — renamed ClawDeck → Backlog across frontend
+- `openclaw.json` — renamed tool references
+- `extensions/clawdeck/` — deleted entirely
+- 18 obsidian vault files + 10 docs — updated references
+**Summary:**
+- Replaced ClawDeck (Rails + PostgreSQL on :3001) with built-in Backlog system
+- Data layer: SQLite at ~/.openclaw/data/backlog.db, shared by Python (tools) and Node (dashboard)
+- 6 new backlog_* MCP tools in tool_services.py
+- Mission-control Backlog tab reads/writes SQLite directly via node:sqlite
+- Migrated 3 boards + 43 tasks, disabled lloyd-clawdeck.service
+
+---
+
 ## 2026-03-03 — Memory Model Segmentation
 
 **Type:** Feature / Refactor

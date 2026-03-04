@@ -407,24 +407,24 @@ Reactions are lightweight social signals. Humans use them constantly — they sa
 
 Skills provide your tools. When you need one, check its `SKILL.md`. Keep local notes (camera names, SSH details, voice preferences) in `TOOLS.md`.
 
-### 📋 ClawDeck Task Boards
+### 📋 Backlog Task Boards
 
-**Use ClawDeck to query backlog items.** Two boards exist:
+**Use Backlog to query backlog items.** Two boards exist:
 
 1. **Lloyd board** — Lloyd's own backlog (voice mode, memory, context engineering, TTS evaluation, etc.)
 2. **Alfie board** — Robot project backlog (GR00T fine-tuning, ROS2, mecanum wheels, WiFi leaks, etc.)
 
 **Query pattern:**
-- `clawdeck_next_task()` — Get highest-priority assigned `up_next` task
-- `clawdeck_tasks(status="inbox")` — List all inbox tasks
-- `clawdeck_tasks(status="up_next")` — List all up_next tasks
-- `clawdeck_get_task(id)` — Get full details for a single task
-- `clawdeck_update_task(id, status=..., activity_note=...)` — Update task status or add notes
+- `backlog_next_task()` — Get highest-priority assigned `up_next` task
+- `backlog_tasks(status="inbox")` — List all inbox tasks
+- `backlog_tasks(status="up_next")` — List all up_next tasks
+- `backlog_get_task(id)` — Get full details for a single task
+- `backlog_update_task(id, status=..., activity_note=...)` — Update task status or add notes
 
 **When to use:**
-- User asks about backlog → query ClawDeck first
+- User asks about backlog → query Backlog first
 - User mentions a project → check if it has a task board entry
-- Task completion → mark done in ClawDeck with activity notes
+- Task completion → mark done in Backlog with activity notes
 
 ### 🛠️ Capture Multi-Step Solutions as Skills
 
@@ -1182,7 +1182,7 @@ metadata:
 
 Invoke the research agent when:
 - Alan asks me to research a topic, paper, tool, or concept in depth
-- A ClawDeck task is assigned with a research objective
+- A Backlog task is assigned with a research objective
 - I need to fill in background knowledge on something before responding
 - A YouTube/paper summary needs follow-up source verification
 
@@ -1221,9 +1221,9 @@ Spawn with `sessions_spawn`:
 After spawning, tell Alan:
 > "Research agent is running on `<topic>`. I'll let you know when it's done."
 
-### ClawDeck Task
+### Backlog Task
 
-When a ClawDeck task is assigned with a research objective:
+When a Backlog task is assigned with a research objective:
 1. Move task to `in_progress`
 2. Add activity note: "Spawning research agent..."
 3. Spawn as above
@@ -1291,7 +1291,7 @@ Return a brief summary including vault path, number of sources, key findings, an
 When the subagent reports back:
 1. Relay the key findings to Alan in a concise summary
 2. Mention the vault path written
-3. If it was a ClawDeck task, move to `in_review`
+3. If it was a Backlog task, move to `in_review`
 4. If Alan wants to go deeper on anything, spawn again with a more specific query
 ```
 

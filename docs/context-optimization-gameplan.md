@@ -4,7 +4,7 @@
 
 The main agent's system prompt is ~20-23k tokens with ~46 tools on every turn, regardless of task type. This leads to:
 
-1. **Tool confusion** — the LLM sees overlapping tools (3 ways to read files, 2 ways to run bash) and domain-specific tools (voice, ClawDeck) even for simple conversations
+1. **Tool confusion** — the LLM sees overlapping tools (3 ways to read files, 2 ways to run bash) and domain-specific tools (voice, Backlog) even for simple conversations
 2. **Context bloat** — 9 skill files (~8,200 tokens) injected every turn when ~0 are used; AGENTS.md alone is 3,200 tokens of heartbeat/group-chat/coordination docs
 3. **Latency** — more input tokens = slower TTFT; vault prefill runs on every turn including greetings
 4. **Focus drift** — the LLM has so many instructions and tools it can lose track of what actually matters for a given task
@@ -34,7 +34,7 @@ The main agent's system prompt is ~20-23k tokens with ~46 tools on every turn, r
 | Built-in (active) | ~15 | browser, canvas, nodes, cron, message, tts, gateway, agents_list, sessions_list, sessions_history, sessions_send, sessions_spawn, subagents, session_status, image |
 | MCP tools | 18 | tag_search, tag_explore, vault_overview, qmd_search, qmd_get, memory_write, http_search, http_fetch, http_request, file_read, file_write, file_edit, file_patch, file_glob, file_grep, run_bash, bg_exec, bg_process |
 | Voice tools | 3 | voice_last_utterance, voice_enroll_speaker, voice_list_speakers |
-| ClawDeck | 6 | clawdeck_boards/tasks/next_task/get_task/update_task/create_task |
+| Backlog | 6 | backlog_boards/tasks/next_task/get_task/update_task/create_task |
 
 ### Key Architectural Facts
 
@@ -128,7 +128,7 @@ Remove stale, duplicate, and sensitive entries:
 | `http_search`, `http_fetch`, `http_request`, `browser` | researcher |
 | `tag_explore`, `vault_overview` | memory |
 | `voice_enroll_speaker`, `voice_list_speakers` | (keep `voice_last_utterance` only) |
-| `clawdeck_*` (all 6) | operator |
+| `backlog_*` (all 6) | operator |
 
 Implementation: add these as `false` entries in `agents/main/agent/tools.json`.
 
@@ -141,7 +141,7 @@ Current AGENTS.md is ~3,200 tokens with sections that are either redundant, bloa
 | Section | Tokens | Action |
 |---------|--------|--------|
 | Heartbeat procedures (lines 196-276) | ~800 | Extract to `heartbeat/SKILL.md` (disabled by default) |
-| ClawDeck docs (lines 155-177) | ~250 | Remove — tool descriptions are self-documenting; operator handles this |
+| Backlog docs (lines 155-177) | ~250 | Remove — tool descriptions are self-documenting; operator handles this |
 | Reactions guide (lines 138-152) | ~150 | Remove — common sense the model already knows |
 | Coordination pattern examples (lines 319-338) | ~250 | Remove — keep roster table only |
 
@@ -151,7 +151,7 @@ Current AGENTS.md is ~3,200 tokens with sections that are either redundant, bloa
 ## Task Routing
 - Multi-file code changes → spawn coder
 - Web research / "look up" / "search for" → spawn researcher
-- Git, deploys, ClawDeck tasks → spawn operator
+- Git, deploys, Backlog tasks → spawn operator
 - Vault maintenance, bulk knowledge ops → spawn memory
 - Quick reads, simple questions, conversation → handle directly
 - Rule of thumb: if it needs >2 tool calls, delegate it
@@ -210,7 +210,7 @@ if (skipAgents.has(agentId)) return;
 
 | File | Change |
 |------|--------|
-| `agents/main/agent/tools.json` | Disable ~23 more tools (file/web/bg/voice/clawdeck) |
+| `agents/main/agent/tools.json` | Disable ~23 more tools (file/web/bg/voice/backlog) |
 | `~/obsidian/agents/lloyd/AGENTS.md` | Restructure: compress, add routing table, extract heartbeat |
 | `~/obsidian/agents/lloyd/skills/heartbeat/SKILL.md` | New file — extracted heartbeat procedures |
 | `~/obsidian/agents/{coder,memory,researcher,operator,tester,reviewer,planner,auditor}/SOUL.md` | Lean version without TTS tags |
@@ -233,7 +233,7 @@ if (skipAgents.has(agentId)) return;
 | `memory` | "remember", "what did we", vault keywords | Full pipeline (tags + BM25 + GLM) |
 | `code` | Code blocks, "implement", "debug", "fix" | Skip vault |
 | `research` | "search for", "look up", "what is" | BM25 only (skip GLM for speed) |
-| `ops` | "restart", "deploy", ClawDeck keywords | Skip vault |
+| `ops` | "restart", "deploy", Backlog keywords | Skip vault |
 
 ### Implementation
 
@@ -596,7 +596,7 @@ Remove all built-in tool references from coder's AGENTS.md lines 186-192. Replac
 - `bg_exec`, `bg_process` — background process management
 - `file_read`, `file_glob`, `file_grep` — read and search files
 - `file_write`, `file_edit`, `file_patch` — write and modify files
-- `clawdeck_tasks`, `clawdeck_get_task`, `clawdeck_create_task`, `clawdeck_update_task` — task tracking
+- `backlog_tasks`, `backlog_get_task`, `backlog_create_task`, `backlog_update_task` — task tracking
 - `qmd_search`, `qmd_get` — vault search (for context only)
 ```
 
@@ -630,7 +630,7 @@ Given run_bash dominance, reduce the allow list. Remove:
 - `http_search`, `http_fetch`, `http_request` — coder shouldn't do web research (delegate to researcher)
 - `tag_explore`, `vault_overview` — exploratory memory tools, not needed for coding
 - `memory_write` — coder shouldn't write to vault
-- `clawdeck_boards` — unnecessary for task-level operations
+- `backlog_boards` — unnecessary for task-level operations
 
 **Files**: `openclaw.json` (agents.list.coder.tools.allow)
 **Impact**: ~10 fewer tool schemas in system prompt

@@ -23,7 +23,7 @@ export type Page =
   | "chat"
   | "services"
   | "dashboard"
-  | "clawdeck"
+  | "backlog"
   | "memory"
   | "skills"
   | "sessions"
@@ -44,7 +44,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "chat", label: "Chat", icon: MessageCircle },
   { id: "activity", label: "Activity", icon: Activity },
   { id: "dashboard", label: "Usage", icon: ChartArea },
-  { id: "clawdeck", label: "ClawDeck", icon: LayoutGrid },
+  { id: "backlog", label: "Backlog", icon: LayoutGrid },
   { id: "memory", label: "Memory", icon: Brain },
   { id: "skills", label: "Skills Explorer", icon: Sparkles },
   { id: "tools", label: "Tools", icon: Wrench },

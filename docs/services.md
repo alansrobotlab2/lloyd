@@ -92,17 +92,14 @@ Main OpenClaw gateway. Connects to both MCP servers for tool and voice capabilit
 
 ---
 
-### lloyd-clawdeck.service
-**ClawDeck API Server (Rails)**
+### lloyd-clawdeck.service (DISABLED)
+**Replaced by built-in Backlog system**
 
-| | |
-|---|---|
-| Script | `cd ~/Development/clawdeck && bin/rails server -p 3001 -b 127.0.0.1` |
-| Port | 3001 |
-| Restart | on-failure, 5s delay |
-| Depends on | network |
+Previously ran the ClawDeck Rails API on :3001. Now replaced by:
+- **Backlog MCP tools** in `tool_services.py` (6 backlog_* tools, SQLite at `~/.openclaw/data/backlog.db`)
+- **Mission Control Backlog tab** reads/writes SQLite directly via `node:sqlite`
 
-Rails API server for the ClawDeck dashboard. Independent of the voice/LLM stack.
+Service `lloyd-clawdeck.service` is disabled and no longer started.
 
 ---
 
@@ -116,14 +113,14 @@ network
 │               └── lloyd-voice-mcp.service (:8094)
 ├── lloyd-tool-mcp.service (:8093)
 │   └── (both MCP) openclaw-gateway.service (:18789)
-└── lloyd-clawdeck.service (:3001)
+└── lloyd-clawdeck.service (:3001) [DISABLED — replaced by Backlog in tool_services.py]
 ```
 
 ## Port Summary
 
 | Port | Service |
 |------|---------|
-| 3001 | ClawDeck (Rails) |
+| 3001 | ~~ClawDeck (Rails)~~ DISABLED — Backlog now uses SQLite via tool_services.py (:8093) |
 | 8092 | Voice Mode (HTTP) |
 | 8093 | Tool MCP (SSE) |
 | 8094 | Voice MCP (SSE) |

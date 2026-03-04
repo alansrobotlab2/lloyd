@@ -161,7 +161,7 @@ const PROFILE_SCOPE: Record<ContextProfile, string> = {
 2. `voice` — TTS/narrate keywords → skip
 3. `code` — code blocks or implement/debug/refactor → skip
 4. `memory` — "remember", "what did we", "recall", "last session" → prefill, all segments
-5. `ops` — restart/deploy/git push/ClawDeck → skip
+5. `ops` — restart/deploy/git push/Backlog → skip
 6. `research` — "search for", "look up", "what is" → prefill, knowledge+projects+work
 7. `default` — everything else → prefill, all segments
 

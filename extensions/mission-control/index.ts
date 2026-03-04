@@ -383,7 +383,16 @@ export default function register(api: OpenClawPluginApi) {
 
   // Start the gateway WS connection after a brief delay to let the
   // gateway finish starting up (this plugin loads during gateway init).
-  setTimeout(gwWsConnect, 2000);
+  // Guard: only create one WS connection per process (gateway boot).
+  // Subagent spawns re-load all plugins in the same process, which would
+  // create zombie "Mission Control webchat" connections that cause bleed.
+  const GW_WS_KEY = Symbol.for("mission-control-gw-ws-active");
+  if (!(globalThis as any)[GW_WS_KEY]) {
+    (globalThis as any)[GW_WS_KEY] = true;
+    setTimeout(gwWsConnect, 2000);
+  } else {
+    api.logger.info?.("mission-control: skipping gateway WS (already active in this process)");
+  }
 
   // ── Helper: aggregate token usage from session files ──────────────────
 
@@ -1046,8 +1055,8 @@ export default function register(api: OpenClawPluginApi) {
       tools: ["qmd_search", "qmd_get", "memory_write", "tag_search", "tag_explore", "vault_overview", "prefill_context", "http_search", "http_fetch", "http_request", "file_read", "file_write", "file_edit", "file_patch", "file_glob", "file_grep", "run_bash", "bg_exec", "bg_process"],
     },
     {
-      source: "clawdeck",
-      tools: ["clawdeck_boards", "clawdeck_tasks", "clawdeck_next_task", "clawdeck_get_task", "clawdeck_update_task", "clawdeck_create_task"],
+      source: "mcp-tools — backlog",
+      tools: ["backlog_boards", "backlog_tasks", "backlog_next_task", "backlog_get_task", "backlog_update_task", "backlog_create_task"],
     },
     {
       source: "voice-tools",
@@ -1863,7 +1872,6 @@ export default function register(api: OpenClawPluginApi) {
     { id: "voice-mode", name: "Voice Mode", unit: "lloyd-voice-mode.service", port: 8092 },
     { id: "tool-mcp", name: "Tool Services MCP", unit: "lloyd-tool-mcp.service", port: 8093 },
     { id: "voice-mcp", name: "Voice Services MCP", unit: "lloyd-voice-mcp.service", port: 8094 },
-    { id: "clawdeck", name: "ClawDeck API", unit: "lloyd-clawdeck.service", port: 3001 },
   ];
 
   function checkPort(port: number, timeoutMs = 2000): Promise<boolean> {
@@ -2320,173 +2328,203 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
-  // ── ClawDeck proxy ─────────────────────────────────────────────────────
-  // Proxies requests to the ClawDeck REST API so the frontend doesn't need
-  // direct access or the API token.
+  // ── Backlog (SQLite-backed) ───────────────────────────────────────────────
+  // Direct SQLite access for the backlog kanban. Replaces the old ClawDeck
+  // Rails proxy. Both this (Node) and tool_services.py (Python) access the
+  // same SQLite file with WAL mode for safe concurrency.
 
-  function loadClawDeckConfig(): { baseUrl: string; apiToken: string; agentName: string; agentEmoji: string } | null {
-    const cfgPath = join(rootDir, "extensions/clawdeck/config.json");
-    if (!existsSync(cfgPath)) return null;
-    try {
-      return JSON.parse(readFileSync(cfgPath, "utf-8"));
-    } catch {
-      return null;
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  const backlogDbPath = join(homedir(), ".openclaw", "data", "backlog.db");
+  let backlogDb: InstanceType<typeof DatabaseSync> | null = null;
+
+  function getBacklogDb() {
+    if (!backlogDb) {
+      backlogDb = new DatabaseSync(backlogDbPath);
+      (backlogDb as any).exec("PRAGMA journal_mode=WAL");
+      (backlogDb as any).exec("PRAGMA foreign_keys=ON");
     }
+    return backlogDb as any;
   }
 
-  async function clawdeckProxy(
-    method: string,
-    path: string,
-    body?: any,
-  ): Promise<{ ok: boolean; status: number; data: any }> {
-    const cfg = loadClawDeckConfig();
-    if (!cfg) return { ok: false, status: 503, data: { error: "ClawDeck not configured" } };
-
-    const url = `${cfg.baseUrl}/api/v1${path}`;
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${cfg.apiToken}`,
-      "X-Agent-Name": cfg.agentName,
-      "X-Agent-Emoji": cfg.agentEmoji,
-      Accept: "application/json",
+  function backlogTaskRow(row: any): any {
+    return {
+      ...row,
+      blocked: !!row.blocked,
+      completed: !!row.completed,
+      assigned_to_agent: !!row.assigned_to_agent,
+      tags: (() => { try { return JSON.parse(row.tags || "[]"); } catch { return []; } })(),
     };
-    if (body) headers["Content-Type"] = "application/json";
-
-    const resp = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-
-    const text = await resp.text();
-    let data: any;
-    try { data = JSON.parse(text); } catch { data = text; }
-    return { ok: resp.ok, status: resp.status, data };
   }
 
-  // GET /api/mc/clawdeck/boards
+  // GET /api/mc/backlog/boards
   api.registerHttpRoute({
-    path: "/api/mc/clawdeck/boards",
+    path: "/api/mc/backlog/boards",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
-        const result = await clawdeckProxy("GET", "/boards");
-        jsonResponse(res, result.data, result.status);
+        const db = getBacklogDb();
+        const rows = db.prepare(`
+          SELECT b.*, (SELECT COUNT(*) FROM tasks t WHERE t.board_id = b.id) AS tasks_count
+          FROM boards b ORDER BY b.position, b.id
+        `).all();
+        jsonResponse(res, rows);
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
     },
   });
 
-  // GET /api/mc/clawdeck/tasks (query params forwarded)
+  // GET /api/mc/backlog/tasks
   api.registerHttpRoute({
-    path: "/api/mc/clawdeck/tasks",
+    path: "/api/mc/backlog/tasks",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
+        const db = getBacklogDb();
         const url = new URL(req.url || "/", "http://localhost");
-        const qs = url.search || "";
-        const result = await clawdeckProxy("GET", `/tasks${qs}`);
-        jsonResponse(res, result.data, result.status);
+        const clauses: string[] = [];
+        const params: any[] = [];
+
+        const status = url.searchParams.get("status");
+        if (status) { clauses.push("status = ?"); params.push(status); }
+        const assigned = url.searchParams.get("assigned");
+        if (assigned) { clauses.push("assigned_to_agent = ?"); params.push(assigned === "true" ? 1 : 0); }
+        const blocked = url.searchParams.get("blocked");
+        if (blocked) { clauses.push("blocked = ?"); params.push(blocked === "true" ? 1 : 0); }
+        const boardId = url.searchParams.get("board_id");
+        if (boardId) { clauses.push("board_id = ?"); params.push(Number(boardId)); }
+
+        const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+        const rows = db.prepare(`SELECT * FROM tasks ${where} ORDER BY position, id`).all(...params);
+        let tasks = rows.map(backlogTaskRow);
+
+        const tag = url.searchParams.get("tag");
+        if (tag) { tasks = tasks.filter((t: any) => t.tags?.includes(tag)); }
+
+        jsonResponse(res, tasks);
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
     },
   });
 
-  // PATCH /api/mc/clawdeck/task-update (body: { id, status?, blocked?, activity_note? })
+  // POST /api/mc/backlog/task-update (body: { id, status?, blocked?, name?, description?, priority?, tags?, position?, assigned_to_agent?, activity_note? })
   api.registerHttpRoute({
-    path: "/api/mc/clawdeck/task-update",
+    path: "/api/mc/backlog/task-update",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
-        res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        });
+        res.writeHead(200, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
         res.end();
         return;
       }
-      if (req.method !== "POST") {
-        jsonResponse(res, { error: "Method not allowed" }, 405);
-        return;
-      }
+      if (req.method !== "POST") { jsonResponse(res, { error: "Method not allowed" }, 405); return; }
       try {
+        const db = getBacklogDb();
         const body = JSON.parse(await readBody(req));
         const { id, activity_note, ...fields } = body;
         if (!id) { jsonResponse(res, { error: "Missing task id" }, 400); return; }
 
-        const patchBody: Record<string, unknown> = {};
-        const task: Record<string, unknown> = {};
-        const TASK_FIELDS = ["status", "blocked", "name", "description", "priority", "tags", "due_date", "assigned_to_agent", "position"];
-        for (const key of TASK_FIELDS) {
-          if (fields[key] !== undefined) task[key] = fields[key];
-        }
-        if (Object.keys(task).length) patchBody.task = task;
-        if (activity_note) patchBody.activity_note = activity_note;
+        const old = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+        if (!old) { jsonResponse(res, { error: "Task not found" }, 404); return; }
 
-        const result = await clawdeckProxy("PATCH", `/tasks/${id}`, patchBody);
-        jsonResponse(res, result.data, result.status);
+        const TASK_FIELDS = ["status", "blocked", "name", "description", "priority", "tags", "due_date", "assigned_to_agent", "position"];
+        const sets: string[] = [];
+        const params: any[] = [];
+
+        for (const key of TASK_FIELDS) {
+          if (fields[key] !== undefined) {
+            let val = fields[key];
+            if (key === "tags" && Array.isArray(val)) val = JSON.stringify(val);
+            if (key === "blocked" || key === "assigned_to_agent") val = val ? 1 : 0;
+            sets.push(`${key} = ?`);
+            params.push(val);
+
+            // Record activity for status changes
+            if (key === "status" && val !== old.status) {
+              db.prepare("INSERT INTO task_activities (task_id, action, field_name, old_value, new_value, source) VALUES (?, 'moved', 'status', ?, ?, 'web')").run(id, old.status, val);
+            }
+          }
+        }
+
+        // Handle completed sync
+        if (fields.status === "done") {
+          sets.push("completed = 1", "completed_at = ?");
+          params.push(new Date().toISOString());
+        } else if (fields.status && old.status === "done") {
+          sets.push("completed = 0", "completed_at = NULL");
+        }
+
+        if (activity_note) {
+          db.prepare("INSERT INTO task_activities (task_id, action, note, source) VALUES (?, 'updated', ?, 'web')").run(id, activity_note);
+        }
+
+        if (sets.length) {
+          sets.push("updated_at = ?");
+          params.push(new Date().toISOString());
+          params.push(id);
+          db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+        }
+
+        const updated = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+        jsonResponse(res, { task: backlogTaskRow(updated) });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
     },
   });
 
-  // DELETE /api/mc/clawdeck/task-delete (body: { id })
+  // POST /api/mc/backlog/task-delete (body: { id })
   api.registerHttpRoute({
-    path: "/api/mc/clawdeck/task-delete",
+    path: "/api/mc/backlog/task-delete",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
-        res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        });
+        res.writeHead(200, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
         res.end();
         return;
       }
-      if (req.method !== "POST") {
-        jsonResponse(res, { error: "Method not allowed" }, 405);
-        return;
-      }
+      if (req.method !== "POST") { jsonResponse(res, { error: "Method not allowed" }, 405); return; }
       try {
+        const db = getBacklogDb();
         const body = JSON.parse(await readBody(req));
         if (!body.id) { jsonResponse(res, { error: "Missing task id" }, 400); return; }
-        const result = await clawdeckProxy("DELETE", `/tasks/${body.id}`);
-        jsonResponse(res, result.data, result.status);
+        db.prepare("DELETE FROM task_activities WHERE task_id = ?").run(body.id);
+        db.prepare("DELETE FROM tasks WHERE id = ?").run(body.id);
+        jsonResponse(res, { ok: true });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
     },
   });
 
-  // POST /api/mc/clawdeck/task-create (body: { name, description?, board_id?, status?, tags?, priority? })
+  // POST /api/mc/backlog/task-create (body: { name, description?, board_id?, status?, tags?, priority? })
   api.registerHttpRoute({
-    path: "/api/mc/clawdeck/task-create",
+    path: "/api/mc/backlog/task-create",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
-        res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        });
+        res.writeHead(200, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
         res.end();
         return;
       }
-      if (req.method !== "POST") {
-        jsonResponse(res, { error: "Method not allowed" }, 405);
-        return;
-      }
+      if (req.method !== "POST") { jsonResponse(res, { error: "Method not allowed" }, 405); return; }
       try {
+        const db = getBacklogDb();
         const body = JSON.parse(await readBody(req));
         if (!body.name?.trim()) { jsonResponse(res, { error: "Missing task name" }, 400); return; }
 
-        const task: Record<string, unknown> = { name: body.name.trim() };
-        const OPTIONAL = ["description", "board_id", "status", "tags", "priority"];
-        for (const key of OPTIONAL) {
-          if (body[key] !== undefined) task[key] = body[key];
-        }
+        const boardId = body.board_id || db.prepare("SELECT id FROM boards ORDER BY position, id LIMIT 1").get()?.id;
+        if (!boardId) { jsonResponse(res, { error: "No boards exist" }, 400); return; }
 
-        const result = await clawdeckProxy("POST", "/tasks", { task });
-        jsonResponse(res, result.data, result.status);
+        const taskStatus = body.status || "inbox";
+        const maxPos = db.prepare("SELECT COALESCE(MAX(position), 0) as m FROM tasks WHERE board_id = ? AND status = ?").get(boardId, taskStatus)?.m || 0;
+        const tags = Array.isArray(body.tags) ? JSON.stringify(body.tags) : "[]";
+
+        const result = db.prepare(
+          "INSERT INTO tasks (name, description, board_id, status, priority, tags, position) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        ).run(body.name.trim(), body.description || "", boardId, taskStatus, body.priority || "none", tags, maxPos + 1);
+
+        const taskId = Number(result.lastInsertRowid);
+        db.prepare("INSERT INTO task_activities (task_id, action, source) VALUES (?, 'created', 'web')").run(taskId);
+
+        const created = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId);
+        jsonResponse(res, { task: backlogTaskRow(created) });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }

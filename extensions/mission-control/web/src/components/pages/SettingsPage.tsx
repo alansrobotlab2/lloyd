@@ -69,7 +69,7 @@ function ConfigurationTab() {
 function IntegrationsTab() {
   return (
     <div className="space-y-4">
-      {["mcp-tools", "clawdeck", "voice-tools", "model-router", "timing-profiler"].map(
+      {["mcp-tools", "voice-tools", "model-router", "timing-profiler"].map(
         (plugin) => (
           <div
             key={plugin}

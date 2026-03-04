@@ -217,7 +217,7 @@ export interface AgentStatusData {
   timestamp: string;
 }
 
-// ── ClawDeck types ──────────────────────────────────────────────────────
+// ── Backlog types ───────────────────────────────────────────────────────
 
 export interface CallLogEntry {
   ts: string;
@@ -236,7 +236,7 @@ export interface CallLogEntry {
   hasToolCalls?: boolean;
 }
 
-export interface ClawDeckBoard {
+export interface BacklogBoard {
   id: number;
   name: string;
   icon: string;
@@ -244,7 +244,7 @@ export interface ClawDeckBoard {
   tasks_count: number;
 }
 
-export interface ClawDeckTask {
+export interface BacklogTask {
   id: number;
   name: string;
   description: string;
@@ -421,29 +421,29 @@ export const api = {
     return res.json();
   },
 
-  // ClawDeck
-  clawdeckBoards: () => fetchJson<ClawDeckBoard[]>("/clawdeck/boards"),
-  clawdeckTasks: (params?: Record<string, string>) => {
+  // Backlog
+  backlogBoards: () => fetchJson<BacklogBoard[]>("/backlog/boards"),
+  backlogTasks: (params?: Record<string, string>) => {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
-    return fetchJson<ClawDeckTask[]>(`/clawdeck/tasks${qs}`);
+    return fetchJson<BacklogTask[]>(`/backlog/tasks${qs}`);
   },
-  clawdeckUpdateTask: async (id: number, updates: Record<string, any>) => {
-    const res = await fetch(`${BASE}/clawdeck/task-update`, {
+  backlogUpdateTask: async (id: number, updates: Record<string, any>) => {
+    const res = await fetch(`${BASE}/backlog/task-update`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, ...updates }),
     });
     return res.json();
   },
-  clawdeckDeleteTask: async (id: number) => {
-    const res = await fetch(`${BASE}/clawdeck/task-delete`, {
+  backlogDeleteTask: async (id: number) => {
+    const res = await fetch(`${BASE}/backlog/task-delete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
     return res.json();
   },
-  clawdeckCreateTask: async (data: {
+  backlogCreateTask: async (data: {
     name: string;
     description?: string;
     board_id?: number;
@@ -451,7 +451,7 @@ export const api = {
     tags?: string[];
     priority?: string;
   }) => {
-    const res = await fetch(`${BASE}/clawdeck/task-create`, {
+    const res = await fetch(`${BASE}/backlog/task-create`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),

@@ -43,7 +43,7 @@ The OpenClaw chat gateway is crashing repeatedly due to a fragile MCP subprocess
 
 ### NOT migrating (separate concerns)
 - **voice tools** — already in lloyd-services as `voice_mcp_server.py`, separate server
-- **clawdeck tools** — REST API based (not MCP), stays as-is
+- **backlog tools** — now MCP-based (SQLite), part of tool_services.py
 - **timing-profiler** — hook-only plugin, no tools
 - **model-router** — hook-only plugin, no tools
 

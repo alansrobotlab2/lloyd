@@ -178,7 +178,7 @@ export default function register(api: OpenClawPluginApi) {
   const CODE_RE = /\b(implement|debug|refactor|fix (?:the |this )?(?:bug|error|code)|write (?:a |the )?(?:function|class|method|test|script)|add (?:a |the )?(?:feature|endpoint|method)|create (?:a |the )?(?:file|component|module))\b/i;
   const CODE_BLOCK_RE = /```/;
   const RESEARCH_RE = /\b(search for|look up|what is|what are|who is|find (?:out|info)|latest on|news about|how does .{3,} work)\b/i;
-  const OPS_RE = /\b(restart|deploy|service|systemctl|docker|git (?:push|pull|merge|rebase)|clawdeck|task (?:board|backlog)|CI\/CD|build|release)\b/i;
+  const OPS_RE = /\b(restart|deploy|service|systemctl|docker|git (?:push|pull|merge|rebase)|backlog|task (?:board|backlog)|CI\/CD|build|release)\b/i;
   const VOICE_RE = /\b(say |speak |voice |read (?:this |it )?(?:aloud|out loud)|tts|text.to.speech|narrate)\b/i;
   // Cron-injected automation prompts and session-management instructions — vault
   // recall produces false positives from incidental keyword matches in boilerplate.
@@ -914,5 +914,138 @@ export default function register(api: OpenClawPluginApi) {
     70_000, // poll can block up to 60s
   );
 
-  api.logger.info?.("mcp-tools: registered 19 tools + prefill hook via single MCP server");
+  // ── Backlog tools ──────────────────────────────────────────────────────────
+
+  proxyTool(
+    "backlog_boards",
+    "Backlog Boards",
+    "List all boards on the backlog kanban. Returns board names, icons, colors, and task counts.",
+    {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    5_000,
+  );
+
+  proxyTool(
+    "backlog_tasks",
+    "Backlog Tasks",
+    "List tasks from the backlog with optional filters. Use to check the backlog, see assigned work, or find blocked tasks.",
+    {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: ["inbox", "up_next", "in_progress", "in_review", "done"],
+          description: "Filter by task status",
+        },
+        assigned: {
+          type: "string",
+          description: "Filter to assigned tasks (true/false)",
+        },
+        blocked: {
+          type: "string",
+          description: "Filter to blocked tasks (true/false)",
+        },
+        board_id: {
+          type: "integer",
+          description: "Filter by board ID",
+        },
+        tag: {
+          type: "string",
+          description: "Filter by tag name",
+        },
+      },
+      required: [],
+    },
+    5_000,
+  );
+
+  proxyTool(
+    "backlog_next_task",
+    "Backlog Next Task",
+    "Get the next assigned task ready to work on. Returns the highest-priority assigned up_next task, or null if the queue is empty.",
+    {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    5_000,
+  );
+
+  proxyTool(
+    "backlog_get_task",
+    "Backlog Get Task",
+    "Get full details for a single task by ID, including description, status, tags, and assignment state.",
+    {
+      type: "object",
+      properties: {
+        id: { type: "integer", description: "Task ID" },
+      },
+      required: ["id"],
+    },
+    5_000,
+  );
+
+  proxyTool(
+    "backlog_update_task",
+    "Backlog Update Task",
+    "Update a task's status, blocked state, priority, or add an activity note. Use to move tasks through the pipeline (up_next → in_progress → in_review) and communicate progress.",
+    {
+      type: "object",
+      properties: {
+        id: { type: "integer", description: "Task ID to update" },
+        status: {
+          type: "string",
+          enum: ["inbox", "up_next", "in_progress", "in_review", "done"],
+          description: "New status for the task",
+        },
+        blocked: {
+          type: "string",
+          description: "Set blocked state (true/false)",
+        },
+        priority: {
+          type: "string",
+          enum: ["none", "low", "medium", "high"],
+          description: "Set task priority",
+        },
+        activity_note: {
+          type: "string",
+          description: "Activity note to add (visible in task history, attributed to the agent)",
+        },
+      },
+      required: ["id"],
+    },
+    5_000,
+  );
+
+  proxyTool(
+    "backlog_create_task",
+    "Backlog Create Task",
+    "Create a new task on a backlog board. Use when you discover work that should be tracked (tech debt, follow-ups, new ideas).",
+    {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Task title (short, descriptive)" },
+        description: { type: "string", description: "Detailed task description" },
+        board_id: { type: "integer", description: "Board ID to create the task on" },
+        status: {
+          type: "string",
+          enum: ["inbox", "up_next"],
+          description: "Initial status (default: inbox)",
+        },
+        tags: { type: "string", description: "Comma-separated tags (e.g. \"bug,auth\")" },
+        priority: {
+          type: "string",
+          enum: ["none", "low", "medium", "high"],
+          description: "Task priority (default: none)",
+        },
+      },
+      required: ["name"],
+    },
+    5_000,
+  );
+
+  api.logger.info?.("mcp-tools: registered 25 tools + prefill hook via single MCP server");
 }

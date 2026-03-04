@@ -3,7 +3,7 @@ import Sidebar, { type Page } from "./Sidebar";
 import ChatPanel from "./ChatPanel";
 import ServicesPage from "./pages/ServicesPage";
 import DashboardPage from "./pages/DashboardPage";
-import ClawDeckPage from "./pages/ClawDeckPage";
+import BacklogPage from "./pages/BacklogPage";
 import MemoryPage from "./pages/MemoryPage";
 import SkillsPage from "./pages/SkillsPage";
 import SessionsPage from "./pages/SessionsPage";
@@ -41,7 +41,7 @@ class ErrorBoundary extends React.Component<
 const PAGES: Record<string, React.ComponentType> = {
   services: ServicesPage,
   dashboard: DashboardPage,
-  clawdeck: ClawDeckPage,
+  backlog: BacklogPage,
   memory: MemoryPage,
   skills: SkillsPage,
   models: ModelsPage,

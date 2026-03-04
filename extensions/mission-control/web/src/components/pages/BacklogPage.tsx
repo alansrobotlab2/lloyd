@@ -9,7 +9,7 @@ import {
   Save,
   Plus,
 } from "lucide-react";
-import { api, type ClawDeckBoard, type ClawDeckTask } from "../../api";
+import { api, type BacklogBoard, type BacklogTask } from "../../api";
 
 const STATUSES = ["inbox", "up_next", "in_progress", "in_review", "done"] as const;
 
@@ -48,7 +48,7 @@ function TaskModal({
   onCreate,
   defaultBoardId,
 }: {
-  task: ClawDeckTask | null;
+  task: BacklogTask | null;
   onClose: () => void;
   onSave: (id: number, updates: Record<string, any>) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
@@ -276,8 +276,8 @@ function TaskCard({
   onDragOverCard,
   insertIndicator,
 }: {
-  task: ClawDeckTask;
-  onClick: (task: ClawDeckTask) => void;
+  task: BacklogTask;
+  onClick: (task: BacklogTask) => void;
   onDragOverCard: (taskId: number, half: "top" | "bottom") => void;
   insertIndicator: "above" | "below" | null;
 }) {
@@ -370,9 +370,9 @@ function KanbanColumn({
   onClickTask,
 }: {
   status: string;
-  tasks: ClawDeckTask[];
+  tasks: BacklogTask[];
   onDrop: (taskId: number, newStatus: string, insertIndex: number) => void;
-  onClickTask: (task: ClawDeckTask) => void;
+  onClickTask: (task: BacklogTask) => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
   const [insertAt, setInsertAt] = useState<{ taskId: number; half: "top" | "bottom" } | null>(null);
@@ -467,19 +467,19 @@ function KanbanColumn({
 
 // ── Main Page ───────────────────────────────────────────────────────────
 
-export default function ClawDeckPage() {
-  const [boards, setBoards] = useState<ClawDeckBoard[]>([]);
-  const [tasks, setTasks] = useState<ClawDeckTask[]>([]);
+export default function BacklogPage() {
+  const [boards, setBoards] = useState<BacklogBoard[]>([]);
+  const [tasks, setTasks] = useState<BacklogTask[]>([]);
   const [activeBoard, setActiveBoard] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  const [editingTask, setEditingTask] = useState<ClawDeckTask | null>(null);
+  const [editingTask, setEditingTask] = useState<BacklogTask | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
       const [boardsData, tasksData] = await Promise.all([
-        api.clawdeckBoards(),
-        api.clawdeckTasks(activeBoard ? { board_id: String(activeBoard) } : undefined),
+        api.backlogBoards(),
+        api.backlogTasks(activeBoard ? { board_id: String(activeBoard) } : undefined),
       ]);
       setBoards(boardsData);
       setTasks(tasksData);
@@ -487,7 +487,7 @@ export default function ClawDeckPage() {
         setActiveBoard(boardsData[0].id);
       }
     } catch (err) {
-      console.error("ClawDeck load failed:", err);
+      console.error("Backlog load failed:", err);
     } finally {
       setLoading(false);
     }
@@ -548,7 +548,7 @@ export default function ClawDeckPage() {
     try {
       const updates: Record<string, any> = { position: newPosition };
       if (!sameColumn) updates.status = newStatus;
-      await api.clawdeckUpdateTask(taskId, updates);
+      await api.backlogUpdateTask(taskId, updates);
     } catch (err) {
       console.error("Move failed:", err);
       loadData();
@@ -556,7 +556,7 @@ export default function ClawDeckPage() {
   };
 
   const handleSave = async (id: number, updates: Record<string, any>) => {
-    await api.clawdeckUpdateTask(id, updates);
+    await api.backlogUpdateTask(id, updates);
     // Optimistic update
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, ...updates } : t)),
@@ -564,16 +564,16 @@ export default function ClawDeckPage() {
   };
 
   const handleDelete = async (id: number) => {
-    await api.clawdeckDeleteTask(id);
+    await api.backlogDeleteTask(id);
     setTasks((prev) => prev.filter((t) => t.id !== id));
   };
 
   const handleCreate = async (data: Record<string, any>) => {
-    await api.clawdeckCreateTask(data as any);
+    await api.backlogCreateTask(data as any);
     loadData();
   };
 
-  const handleClickTask = (task: ClawDeckTask) => {
+  const handleClickTask = (task: BacklogTask) => {
     setEditingTask(task);
   };
 
@@ -588,7 +588,7 @@ export default function ClawDeckPage() {
         .sort((a, b) => a.position - b.position);
       return acc;
     },
-    {} as Record<string, ClawDeckTask[]>,
+    {} as Record<string, BacklogTask[]>,
   );
 
   return (
@@ -596,7 +596,7 @@ export default function ClawDeckPage() {
       {/* Header */}
       <div className="flex items-center gap-3 mb-4 flex-shrink-0">
         <LayoutGrid className="w-5 h-5 text-brand-400" />
-        <h2 className="text-lg font-semibold">ClawDeck</h2>
+        <h2 className="text-lg font-semibold">Backlog</h2>
 
         {/* Board tabs */}
         <div className="flex gap-1 ml-4">

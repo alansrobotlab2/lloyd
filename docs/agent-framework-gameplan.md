@@ -32,7 +32,7 @@ Lloyd currently operates as a "smart generalist" — 18 tools, handles web looku
 - **Memory** — vault specialist (Qwen/Sonnet)
 - **Coder** — code orchestrator → Claude Code (Opus)
 - **Researcher** — web research + knowledge capture (Sonnet)
-- **Operator** — system ops, git, services, ClawDeck (Sonnet)
+- **Operator** — system ops, git, services, Backlog (Sonnet)
 - **Tester** — write + run tests (Sonnet, fire-and-forget)
 - **Reviewer** — code review, read-only (Sonnet, fire-and-forget)
 - **Planner** — task breakdown, read-only (Sonnet, fire-and-forget)
@@ -137,7 +137,7 @@ Lloyd can spawn agents directly at depth 1 for simple single-agent tasks (no pip
 - Context: `file_read, file_glob, run_bash, qmd_search, qmd_get`
 
 ### Coder: 22 → 14 tools (trim non-coding)
-Remove: `http_search, http_fetch, http_request, tag_explore, vault_overview, memory_write, clawdeck_boards, file_patch`
+Remove: `http_search, http_fetch, http_request, tag_explore, vault_overview, memory_write, backlog_boards, file_patch`
 
 ### Researcher: gain `memory_write`
 Add: `memory_write` (direct knowledge capture to vault)
