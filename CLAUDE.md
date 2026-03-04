@@ -56,13 +56,13 @@ Active plugins (see `plugins.allow` in openclaw.json):
 
 All memory tools operate on the same Obsidian vault at `~/obsidian` via the QMD backend. Paths are relative to the vault root (e.g. `projects/alfie/alfie.md`).
 
-- `qmd_search` — QMD semantic/hybrid vector search across `~/obsidian/**/*.md`
-- `qmd_get` — QMD file reader by relative path (with optional line range)
+- `mem_search` — QMD semantic/hybrid vector search across `~/obsidian/**/*.md`
+- `mem_get` — QMD file reader by relative path (with optional line range)
 - `tag_search` — frontmatter tag index lookup (structured, fast); returns title, summary, all tags
 - `tag_explore` — tag co-occurrence discovery and bridging documents
 - `vault_overview` — vault statistics (doc/tag counts, type distribution, hub pages)
 
-All return the same relative paths. `tag_search` results are retrievable via `qmd_get`.
+All return the same relative paths. `tag_search` results are retrievable via `mem_get`.
 
 ## Work Log
 

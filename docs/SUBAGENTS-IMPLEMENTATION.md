@@ -38,7 +38,7 @@ Routes requests to specialists, handles direct conversation, communication, sche
 |---|---|
 | **Model** | `local-llm/Qwen3.5-35B-A3B` (primary), Sonnet (fallback) |
 | **Workspace** | `~/.openclaw/workspaces/memory` |
-| **Tools** | `tag_search`, `tag_explore`, `vault_overview`, `qmd_search`, `qmd_get`, `memory_write`, `read` |
+| **Tools** | `tag_search`, `tag_explore`, `vault_overview`, `mem_search`, `mem_get`, `mem_write`, `read` |
 | **Spawn mode** | `session` (persistent) |
 
 **Why local**: Eval showed local Qwen scores 4.8/5 on tool selection (outperforms Sonnet) and is 3x faster. Vault lookups are its sweet spot.
@@ -66,7 +66,7 @@ Routes requests to specialists, handles direct conversation, communication, sche
 |---|---|
 | **Model** | `anthropic/claude-opus-4-6` |
 | **Workspace** | `~/.openclaw/workspaces/researcher` |
-| **Tools** | `http_search`, `http_fetch`, `http_request`, `browser`, `qmd_search`, `qmd_get`, `read` |
+| **Tools** | `http_search`, `http_fetch`, `http_request`, `browser`, `mem_search`, `mem_get`, `read` |
 | **Spawn mode** | `session` (persistent) |
 
 **Dispatch triggers**: web research, doc lookup, info gathering, "what's the latest on..."
@@ -122,7 +122,7 @@ All slim agents: `mode: "run"`, `cleanup: "delete"`, single task, auto-terminate
 |---|---|
 | **Model** | `anthropic/claude-sonnet-4-6` |
 | **Workspace** | `~/.openclaw/workspaces/planner` |
-| **Tools** | `read`, `file_read`, `file_glob`, `file_grep`, `qmd_search`, `qmd_get` |
+| **Tools** | `read`, `file_read`, `file_glob`, `file_grep`, `mem_search`, `mem_get` |
 | **Tags** | `planning`, `natural_language` |
 
 **Spawned when**: "plan how to implement...", task breakdown, complex multi-step work.
@@ -214,13 +214,13 @@ Planner → Coder → Tester → Reviewer
 
 ## Critical: Subagent Deny List Override
 
-OpenClaw hardcodes `qmd_search` and `qmd_get` in `SUBAGENT_TOOL_DENY_ALWAYS`. Without the override, Memory, Researcher, and Planner agents silently fail to use vault tools.
+OpenClaw hardcodes `mem_search` and `mem_get` in `SUBAGENT_TOOL_DENY_ALWAYS`. Without the override, Memory, Researcher, and Planner agents silently fail to use vault tools.
 
 ```json
 "tools": {
   "subagents": {
     "tools": {
-      "alsoAllow": ["qmd_search", "qmd_get"]
+      "alsoAllow": ["mem_search", "mem_get"]
     }
   }
 }
@@ -269,7 +269,7 @@ OpenClaw hardcodes `qmd_search` and `qmd_get` in `SUBAGENT_TOOL_DENY_ALWAYS`. Wi
 
 - `models.json` — shared provider config (copied from lloyd)
 - `auth-profiles.json` — shared API keys (copied from lloyd)
-- `tools.json` — disables built-in tool collisions: `{ "qmd_search": false, "qmd_get": false, "http_search": false, "http_fetch": false }`
+- `tools.json` — disables built-in tool collisions: `{ "mem_search": false, "mem_get": false, "http_search": false, "http_fetch": false }`
 - `system-prompt.md` — detailed role definition (also copied into workspace AGENTS.md)
 
 ---
@@ -320,7 +320,7 @@ OpenClaw hardcodes `qmd_search` and `qmd_get` in `SUBAGENT_TOOL_DENY_ALWAYS`. Wi
 2. **Agent listing** — `agents_list` shows all 9 agents (lloyd + 8 specialists)
 3. **Basic spawn** — "search the vault for notes about X" → spawns `memory` agent
 4. **Tool isolation** — Coder can't call `http_search`; Reviewer can't call `exec`
-5. **Memory override** — Memory/Researcher/Planner can use `qmd_search`/`qmd_get` (alsoAllow)
+5. **Memory override** — Memory/Researcher/Planner can use `mem_search`/`mem_get` (alsoAllow)
 6. **Model assignment** — Coder and Researcher use Opus; Memory uses local Qwen
 7. **Parallel spawn** — "research X and write code for Y" → spawns researcher + coder simultaneously
 8. **Pipeline test** — "plan, implement, test, and review feature Z" → chains planner → coder → tester → reviewer

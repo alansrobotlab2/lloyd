@@ -5,7 +5,7 @@
  *  1. Thin before_prompt_build hook — calls the Python MCP server's
  *     prefill_context tool; all pipeline logic lives in server.py.
  *  2. Explicit tools — tag_search, tag_explore, vault_overview,
- *     qmd_search, qmd_get — proxied through the openclaw MCP
+ *     mem_search, mem_get — proxied through the openclaw MCP
  *     server subprocess via McpStdioClient.
  */
 
@@ -126,7 +126,7 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "qmd_search",
+    "mem_search",
     "BM25 full-text search across the Obsidian vault. Returns matching documents with paths, " +
       "scores, and snippets. Standalone — no gateway required.",
     {
@@ -140,7 +140,7 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "qmd_get",
+    "mem_get",
     "Read a specific file from the Obsidian vault by relative path. " +
       "path: relative from vault root, e.g. 'projects/alfie/alfie.md'. Supports optional line range.",
     {
@@ -155,7 +155,7 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "memory_write",
+    "mem_write",
     "Create or overwrite a file in the Obsidian vault. " +
       "path: vault-relative path, e.g. 'projects/alfie/notes.md'. Creates parent directories automatically.",
     {

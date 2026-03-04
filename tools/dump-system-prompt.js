@@ -71,9 +71,9 @@ const toolSummaries = {
   tag_search: "Search the Obsidian knowledge vault by tags",
   tag_explore: "Explore tag relationships in the vault",
   vault_overview: "Show vault statistics and structure",
-  qmd_search: "Mandatory recall step: search the Obsidian knowledge vault",
-  qmd_get: "Read a specific file from the Obsidian vault by relative path",
-  memory_write: "Create or overwrite a file in the Obsidian vault",
+  mem_search: "Mandatory recall step: search the Obsidian knowledge vault",
+  mem_get: "Read a specific file from the Obsidian vault by relative path",
+  mem_write: "Create or overwrite a file in the Obsidian vault",
   http_search: "Search the web using DuckDuckGo",
   http_fetch: "Fetch a public web page and extract its readable content",
   http_request: "Make a raw HTTP request (GET, POST, PUT, PATCH, DELETE, HEAD)",
@@ -369,15 +369,15 @@ const toolSchemas = {
     description: "Show vault statistics and structure: document counts by type, tags with frequencies, hub pages, and type distribution.",
     params: { detail: "'summary'|'tags'|'hubs'|'types' (default: 'summary')" }
   },
-  qmd_search: {
+  mem_search: {
     description: "Mandatory recall step: search the Obsidian knowledge vault. Uses BM25 full-text search.",
     params: { query: "string (required)", max_results: "integer (default: 10)", min_score: "number (default: 0.0)" }
   },
-  qmd_get: {
+  mem_get: {
     description: "Read a specific file from the Obsidian vault by relative path.",
     params: { path: "string (required)", start_line: "integer", num_lines: "integer" }
   },
-  memory_write: {
+  mem_write: {
     description: "Create or overwrite a file in the Obsidian vault.",
     params: { path: "string (required)", content: "string (required)" }
   },

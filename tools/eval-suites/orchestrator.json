@@ -59,11 +59,11 @@
       "id": "tool-02",
       "category": "tool-selection",
       "prompt": "Search my memory/notes for anything related to 'Alfie' and tell me what you find.",
-      "expectedTools": ["qmd_search"],
+      "expectedTools": ["mem_search"],
       "mockToolResults": {
-        "qmd_search": "Found 2 results:\n1. projects/alfie/alfie.md — Project notes for Alfie, a home automation system using Raspberry Pi.\n2. projects/alfie/setup.md — Alfie setup instructions and configuration."
+        "mem_search": "Found 2 results:\n1. projects/alfie/alfie.md — Project notes for Alfie, a home automation system using Raspberry Pi.\n2. projects/alfie/setup.md — Alfie setup instructions and configuration."
       },
-      "rubric": "Must call qmd_search with a query containing 'Alfie' or 'alfie'. Should report findings from mock results.",
+      "rubric": "Must call mem_search with a query containing 'Alfie' or 'alfie'. Should report findings from mock results.",
       "maxTurns": 2
     },
     {
@@ -92,12 +92,12 @@
       "id": "tool-05",
       "category": "tool-selection",
       "prompt": "I need to know about the memory-graph plugin. First check the file at /home/alansrobotlab/.openclaw/extensions/memory-graph/index.ts, then search memory for any related notes.",
-      "expectedTools": ["file_read", "qmd_search"],
+      "expectedTools": ["file_read", "mem_search"],
       "mockToolResults": {
         "file_read": "import { McpStdioClient } from './mcp-client.js';\n// memory-graph plugin: registers tag search tools\nexport default function register(api) { ... }",
-        "qmd_search": "No results found for 'memory-graph plugin'."
+        "mem_search": "No results found for 'memory-graph plugin'."
       },
-      "rubric": "Should call both file_read AND qmd_search (order flexible). Both tools must be called.",
+      "rubric": "Should call both file_read AND mem_search (order flexible). Both tools must be called.",
       "maxTurns": 3
     },
     {

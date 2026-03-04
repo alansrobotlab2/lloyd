@@ -166,7 +166,7 @@ function extractToolResultSummary(msg) {
   const text = (msg.content || []).find(c => c.type === 'text')?.text || '';
   const details = msg.details || {};
 
-  if (toolName === 'qmd_search') {
+  if (toolName === 'mem_search') {
     try {
       const parsed = JSON.parse(text);
       const n = parsed.results?.length ?? 0;
@@ -176,7 +176,7 @@ function extractToolResultSummary(msg) {
     } catch {}
   }
 
-  if (toolName === 'qmd_get') {
+  if (toolName === 'mem_get') {
     try {
       const parsed = JSON.parse(text);
       if (!parsed.text) return { ok: false, text: 'empty' };

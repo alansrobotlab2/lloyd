@@ -14,10 +14,10 @@ User prompt arrives
   │     ├─ Extract user query from envelope
   │     ├─ Simplify to keywords (filler removal, max 6 words)
   │     ├─ PARALLEL:
-  │     │   ├─ qmd_search(keywords, maxResults:5) via HTTP gateway
+  │     │   ├─ mem_search(keywords, maxResults:5) via HTTP gateway
   │     │   └─ GLM keyword extraction (Qwen3, if query ≥40 chars)
-  │     ├─ qmd_get for top 3 results with score ≥ 0.7
-  │     ├─ Extra qmd_search ×2 from GLM keywords (maxResults:3 each)
+  │     ├─ mem_get for top 3 results with score ≥ 0.7
+  │     ├─ Extra mem_search ×2 from GLM keywords (maxResults:3 each)
   │     └─ Returns: <memory_prefetch> block (≤8000 chars)
   │         Contains: file contents (1500 chars each) + snippets
   │
@@ -54,10 +54,10 @@ Both plugins:
 This work happens twice sequentially. memory-graph doesn't see memory-prefetch's results or extracted keywords.
 
 ### 5. HTTP Gateway Round-Trip (Latency)
-memory-prefetch invokes `qmd_search` and `qmd_get` via HTTP POST to `localhost:18789`. These tools are already loaded in the same process via memory-core. The HTTP serialization/deserialization adds unnecessary latency inside a 2-second budget.
+memory-prefetch invokes `mem_search` and `mem_get` via HTTP POST to `localhost:18789`. These tools are already loaded in the same process via memory-core. The HTTP serialization/deserialization adds unnecessary latency inside a 2-second budget.
 
 ### 6. memory-graph Doesn't Provide Content (Gap)
-memory-graph only injects metadata (path, title, summary, tags). If the LLM wants to answer from a tag-matched doc, it still needs to call `qmd_get` or `read`. Meanwhile, prefetch already fetches full content for its matches. If a doc appears only in graph's results (not prefetch's), the LLM has a pointer but no content.
+memory-graph only injects metadata (path, title, summary, tags). If the LLM wants to answer from a tag-matched doc, it still needs to call `mem_get` or `read`. Meanwhile, prefetch already fetches full content for its matches. If a doc appears only in graph's results (not prefetch's), the LLM has a pointer but no content.
 
 ### 7. GLM Call May Be Wasted (Efficiency)
 When GLM keywords happen to match existing vault tags, the tag-based path would have found those docs anyway (faster, from the in-memory index). The GLM extraction is most valuable for semantic variations that tags wouldn't capture.
@@ -79,7 +79,7 @@ Instead of two independent plugins, a coordinator could:
 
 This eliminates duplicate keyword extraction, deduplicates results, and gives a single size budget.
 
-### D. Skip gateway HTTP for qmd_search
+### D. Skip gateway HTTP for mem_search
 If the memory-core tool can be invoked directly (same process), avoid the HTTP round-trip. Would need to check if the plugin API exposes a way to call sibling plugin tools directly.
 
 ### E. Use tag matches to guide vector search

@@ -118,7 +118,7 @@ const TOOLS_OPENAI = [
   {
     type: "function" as const,
     function: {
-      name: "qmd_search",
+      name: "mem_search",
       description: "Search the user's memory/notes vault for relevant content",
       parameters: {
         type: "object",

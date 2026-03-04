@@ -19,9 +19,9 @@ The OpenClaw chat gateway is crashing repeatedly due to a fragile MCP subprocess
 - [x] `tag_search` — search vault by frontmatter tags (AND/OR mode, type filter)
 - [x] `tag_explore` — tag co-occurrence and bridging documents
 - [x] `vault_overview` — vault statistics (doc counts, type distribution, hubs)
-- [x] `qmd_search` — BM25 full-text search via qmd subprocess
-- [x] `qmd_get` — read vault file by relative path (with line range)
-- [x] `memory_write` — create/overwrite vault file
+- [x] `mem_search` — BM25 full-text search via qmd subprocess
+- [x] `mem_get` — read vault file by relative path (with line range)
+- [x] `mem_write` — create/overwrite vault file
 
 ### Prefill Pipeline
 - [x] `prefill_context` — full memory prefill pipeline (tag match + BM25 + GLM keywords + merge/rank + format)
@@ -169,7 +169,7 @@ html2text >= 2024.0
 2. **Tool smoke test:** Send JSON-RPC `tools/call` for each tool over stdin
 3. **Integration test:** Restart gateway, send a chat message, verify:
    - Prefill context appears in logs
-   - Memory tools work (tag_search, qmd_search, qmd_get)
+   - Memory tools work (tag_search, mem_search, mem_get)
    - Web tools work (http_search, http_fetch)
    - File tools work (file_read, file_glob)
    - run_bash works

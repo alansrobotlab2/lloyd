@@ -32,7 +32,7 @@ The main agent's system prompt is ~20-23k tokens with ~46 tools on every turn, r
 |-------|-------|-------|
 | Built-in (already disabled) | 10 | read, write, edit, exec, process, apply_patch, web_search, web_fetch, memory_get, memory_search |
 | Built-in (active) | ~15 | browser, canvas, nodes, cron, message, tts, gateway, agents_list, sessions_list, sessions_history, sessions_send, sessions_spawn, subagents, session_status, image |
-| MCP tools | 18 | tag_search, tag_explore, vault_overview, qmd_search, qmd_get, memory_write, http_search, http_fetch, http_request, file_read, file_write, file_edit, file_patch, file_glob, file_grep, run_bash, bg_exec, bg_process |
+| MCP tools | 18 | tag_search, tag_explore, vault_overview, mem_search, mem_get, mem_write, http_search, http_fetch, http_request, file_read, file_write, file_edit, file_patch, file_glob, file_grep, run_bash, bg_exec, bg_process |
 | Voice tools | 3 | voice_last_utterance, voice_enroll_speaker, voice_list_speakers |
 | Backlog | 6 | backlog_boards/tasks/next_task/get_task/update_task/create_task |
 
@@ -116,7 +116,7 @@ Remove stale, duplicate, and sensitive entries:
 |----------|-------|-----|
 | Conversation | `message`, `cron`, `tts` | Core interaction loop |
 | Orchestration | `sessions_spawn`, `subagents`, `agents_list`, `sessions_list`, `sessions_history`, `sessions_send` | Manage sub-agents |
-| Memory | `qmd_search`, `qmd_get`, `tag_search`, `memory_write` | Context before routing, daily notes |
+| Memory | `mem_search`, `mem_get`, `tag_search`, `mem_write` | Context before routing, daily notes |
 | Quick actions | `file_read`, `file_glob`, `run_bash` | Trivial reads/checks without spawning a sub-agent |
 
 **Delegate to sub-agents:**
@@ -174,7 +174,7 @@ Keep: personality traits, resourcefulness, boundaries, honesty.
 
 **Problem 2: Sub-agent AGENTS.md files reference stale tool names.**
 - Researcher says `web_search`, `web_fetch`, `memory_search`, `memory_get`
-- Actual MCP names: `http_search`, `http_fetch`, `qmd_search`, `qmd_get`
+- Actual MCP names: `http_search`, `http_fetch`, `mem_search`, `mem_get`
 
 **Fix**: Update all 8 sub-agent AGENTS.md files with correct MCP tool names.
 
@@ -490,7 +490,7 @@ Lloyd's current session (72,718 tokens, 36 messages, Sonnet 4.6):
 | Tool | Calls | Status |
 |------|-------|--------|
 | `run_bash` | 5 | All succeeded |
-| `qmd_get` | 3 | Startup memory reads |
+| `mem_get` | 3 | Startup memory reads |
 | `file_read` | 3 | All succeeded |
 | `sessions_spawn` | 1 | Delegated to coder |
 | `read` | 1 | **Failed** (correctly blocked) |
@@ -597,7 +597,7 @@ Remove all built-in tool references from coder's AGENTS.md lines 186-192. Replac
 - `file_read`, `file_glob`, `file_grep` — read and search files
 - `file_write`, `file_edit`, `file_patch` — write and modify files
 - `backlog_tasks`, `backlog_get_task`, `backlog_create_task`, `backlog_update_task` — task tracking
-- `qmd_search`, `qmd_get` — vault search (for context only)
+- `mem_search`, `mem_get` — vault search (for context only)
 ```
 
 Do the same for all other sub-agent AGENTS.md files.
@@ -629,7 +629,7 @@ Given run_bash dominance, reduce the allow list. Remove:
 - `file_patch` — rarely used, `run_bash` + `git apply` preferred
 - `http_search`, `http_fetch`, `http_request` — coder shouldn't do web research (delegate to researcher)
 - `tag_explore`, `vault_overview` — exploratory memory tools, not needed for coding
-- `memory_write` — coder shouldn't write to vault
+- `mem_write` — coder shouldn't write to vault
 - `backlog_boards` — unnecessary for task-level operations
 
 **Files**: `openclaw.json` (agents.list.coder.tools.allow)

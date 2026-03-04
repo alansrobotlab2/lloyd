@@ -929,7 +929,7 @@ export default function register(api: OpenClawPluginApi) {
         const greetingPrompt =
           "A new session was started via /new or /reset. Execute your Session Startup " +
           "sequence now. Your daily notes have already been loaded into context above " +
-          "— do NOT call qmd_get for them. Greet the user in your configured persona, " +
+          "— do NOT call mem_get for them. Greet the user in your configured persona, " +
           "if one is provided. Be yourself - use your defined voice, mannerisms, and " +
           "mood. Keep it to 1-3 sentences and ask what they want to do. If the runtime " +
           "model differs from default_model in the system prompt, mention the default " +
@@ -1052,7 +1052,7 @@ export default function register(api: OpenClawPluginApi) {
     },
     {
       source: "mcp-tools",
-      tools: ["qmd_search", "qmd_get", "memory_write", "tag_search", "tag_explore", "vault_overview", "prefill_context", "http_search", "http_fetch", "http_request", "file_read", "file_write", "file_edit", "file_patch", "file_glob", "file_grep", "run_bash", "bg_exec", "bg_process"],
+      tools: ["mem_search", "mem_get", "mem_write", "tag_search", "tag_explore", "vault_overview", "prefill_context", "http_search", "http_fetch", "http_request", "file_read", "file_write", "file_edit", "file_patch", "file_glob", "file_grep", "run_bash", "bg_exec", "bg_process"],
     },
     {
       source: "mcp-tools — backlog",

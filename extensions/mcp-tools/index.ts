@@ -581,7 +581,7 @@ export default function register(api: OpenClawPluginApi) {
 
   proxyTool(
     "mem_search",
-    "QMD Search",
+    "Mem Search",
     "Mandatory recall step: search the Obsidian knowledge vault before answering questions " +
       "about prior work, decisions, dates, people, preferences, or todos. Uses BM25 full-text " +
       "search across the indexed vault. Returns JSON with matching document paths, relevance " +
@@ -599,7 +599,7 @@ export default function register(api: OpenClawPluginApi) {
 
   proxyTool(
     "mem_get",
-    "QMD Get",
+    "Mem Get",
     "Read a specific file from the Obsidian vault by relative path. " +
       "Use after mem_search to pull only the needed lines and keep context small. " +
       "path: relative from vault root, e.g. 'projects/alfie/alfie.md'.",
@@ -616,7 +616,7 @@ export default function register(api: OpenClawPluginApi) {
 
   proxyTool(
     "mem_write",
-    "Memory Write",
+    "Mem Write",
     "Create or overwrite a file in the Obsidian vault. " +
       "path: vault-relative path, e.g. 'projects/alfie/notes.md'. Creates parent directories automatically.",
     {

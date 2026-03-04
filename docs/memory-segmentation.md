@@ -91,16 +91,16 @@ The field was batch-added to all 391 existing vault documents on 2026-03-03 usin
 
 Three memory tools accept an optional `scope` parameter that restricts results to one or more segments.
 
-### `qmd_search`
+### `mem_search`
 
 ```python
-qmd_search(query: str, max_results: int = 10, min_score: float = 0.0, scope: str = "")
+mem_search(query: str, max_results: int = 10, min_score: float = 0.0, scope: str = "")
 ```
 
 Calls `qmd query` (hybrid BM25 + vector search) against the full vault, then post-filters the JSON results by path prefix. Returns only documents whose vault-relative path starts with one of the resolved segment prefixes.
 
 ```
-qmd_search("alfie robot arm", scope="projects")
+mem_search("alfie robot arm", scope="projects")
 # → only returns results from projects/
 ```
 
@@ -125,7 +125,7 @@ prefill_context(prompt: str, session_id: str = "", scope: str = "")
 
 The full prefill pipeline (tag match → BM25 → GLM keyword extraction → merge → rank → fetch) now threads `scope` through all internal calls:
 - The tag match post-filters `tag_docs` by scope prefix before scoring
-- The `qmd_search` calls (initial + GLM extra) pass `scope` through
+- The `mem_search` calls (initial + GLM extra) pass `scope` through
 - The cache key includes the scope value, so `scope="projects"` and `scope=""` cache independently
 
 ### Scope value format
@@ -178,7 +178,7 @@ The research profile is the most impactful: it prevents agent workspace files (S
 3. `PROFILE_SCOPE["default"]` → `""` (all segments).
 4. `prefill_context(prompt, scope="")` called.
 5. Tag match finds `alfie` in `projects/alfie/alfie.md` and related docs.
-6. `qmd_search("alfie robot arm", scope="")` returns results from across the vault.
+6. `mem_search("alfie robot arm", scope="")` returns results from across the vault.
 7. Results merged, ranked, top-1 fetched (`projects/alfie/alfie.md`).
 8. `<memory_context>` block prepended to system prompt.
 
@@ -188,14 +188,14 @@ The research profile is the most impactful: it prevents agent workspace files (S
 2. `PROFILE_SCOPE["research"]` → `"knowledge,projects,work"`.
 3. `prefill_context(prompt, scope="knowledge,projects,work")` called.
 4. Tag match filtered to docs in `knowledge/`, `projects/`, `work/` only.
-5. `qmd_search("transformer efficiency papers", scope="knowledge,projects,work")` — results post-filtered.
+5. `mem_search("transformer efficiency papers", scope="knowledge,projects,work")` — results post-filtered.
 6. Agent's SOUL.md, daily notes, personal dream logs are never returned.
 
 ### Example: Agent writes research findings
 
 Researcher agent calls:
 ```
-memory_write("knowledge/ai/transformer-efficiency-2026.md", content)
+mem_write("knowledge/ai/transformer-efficiency-2026.md", content)
 ```
 The path starts with `knowledge/` — correct segment. The frontmatter template in the researcher's AGENTS.md includes `segment: knowledge` so the doc is tagged on creation.
 
@@ -224,7 +224,7 @@ These are defaults encoded in agent AGENTS.md files. Agents can override scope p
 
 | File | Role |
 |------|------|
-| `~/Projects/lloyd-services/tool_services.py` | `_resolve_scope_prefixes()`, scope params on `qmd_search`, `tag_search`, `prefill_context`; `TagIndex.search_by_tags()` scope filtering |
+| `~/Projects/lloyd-services/tool_services.py` | `_resolve_scope_prefixes()`, scope params on `mem_search`, `tag_search`, `prefill_context`; `TagIndex.search_by_tags()` scope filtering |
 | `extensions/mcp-tools/index.ts` | `PROFILE_SCOPE` map, scope passed to `prefill_context` in `before_prompt_build` hook |
 | `~/obsidian/agents/lloyd/AGENTS.md` | Memory Segments table for Lloyd |
 | `~/obsidian/agents/researcher/AGENTS.md` | Segment table + scope usage examples, correct `knowledge/` write paths |

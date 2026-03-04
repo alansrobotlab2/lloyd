@@ -67,8 +67,8 @@ Lloyd can spawn agents directly at depth 1 for simple single-agent tasks (no pip
 ### Handle Directly
 - Conversation, greetings, voice responses
 - Quick file reads (`file_read`), bash checks (`run_bash`)
-- Memory lookups (`qmd_search`, `qmd_get`, `tag_search`)
-- Daily note updates (`memory_write`)
+- Memory lookups (`mem_search`, `mem_get`, `tag_search`)
+- Daily note updates (`mem_write`)
 - Quick web searches (`http_search`)
 - Scheduling (`cron`)
 
@@ -127,20 +127,20 @@ Lloyd can spawn agents directly at depth 1 for simple single-agent tasks (no pip
 **Final tools (~18):**
 - Orchestration: `sessions_spawn, subagents, agents_list, sessions_list, sessions_history, sessions_send`
 - Conversation: `message, cron, tts, voice_last_utterance`
-- Memory: `qmd_search, qmd_get, tag_search, memory_write`
+- Memory: `mem_search, mem_get, tag_search, mem_write`
 - Quick actions: `file_read, file_glob, run_bash`
 - Web (quick): `http_search`
 
 ### Orchestrator (NEW): pipeline management tools
 **Tools:**
 - Orchestration: `sessions_spawn, subagents, sessions_list, sessions_history, sessions_send`
-- Context: `file_read, file_glob, run_bash, qmd_search, qmd_get`
+- Context: `file_read, file_glob, run_bash, mem_search, mem_get`
 
 ### Coder: 22 → 14 tools (trim non-coding)
-Remove: `http_search, http_fetch, http_request, tag_explore, vault_overview, memory_write, backlog_boards, file_patch`
+Remove: `http_search, http_fetch, http_request, tag_explore, vault_overview, mem_write, backlog_boards, file_patch`
 
-### Researcher: gain `memory_write`
-Add: `memory_write` (direct knowledge capture to vault)
+### Researcher: gain `mem_write`
+Add: `mem_write` (direct knowledge capture to vault)
 Replace: built-in `read` → MCP `file_read`
 
 ### Memory: gain `file_read`, `file_glob`
@@ -238,9 +238,9 @@ All items in "Files to Modify" were completed. Key additions:
 - Verified by reading deleted session JSONL: Planner completed and announced results; Orchestrator received them; main session showed "Test complete!" with all 10 agent directories listed
 
 **Issue 2: Orchestrator did content work directly (first research test)**
-- Root cause: `tools.allow` in openclaw.json is additive, not a whitelist — globally-enabled MCP tools (`http_search`, `memory_write`) still reach the Orchestrator even if not listed
+- Root cause: `tools.allow` in openclaw.json is additive, not a whitelist — globally-enabled MCP tools (`http_search`, `mem_write`) still reach the Orchestrator even if not listed
 - The original Constraints section said "Do NOT do implementation work yourself" but the model didn't classify research as implementation
-- Fix: Rewrote Constraints section with explicit prohibitions — "NEVER call `http_search`, `memory_write`, etc. — those are for specialist agents. If you need research done, spawn `researcher`."
+- Fix: Rewrote Constraints section with explicit prohibitions — "NEVER call `http_search`, `mem_write`, etc. — those are for specialist agents. If you need research done, spawn `researcher`."
 - After fix: Orchestrator immediately spawned Researcher on next research test (zero web calls of its own)
 
 ### Test Results
@@ -248,7 +248,7 @@ All items in "Files to Modify" were completed. Key additions:
 | Test | Pipeline | Outcome |
 |------|----------|---------|
 | Spawn chain validation | Lloyd → Orchestrator → Planner | ✅ All 3 sessions appeared; Planner listed 10 agent directories |
-| Lloyd direct: memory | `qmd_search` — Alfie vault notes | ✅ 10 results returned, no delegation |
+| Lloyd direct: memory | `mem_search` — Alfie vault notes | ✅ 10 results returned, no delegation |
 | Lloyd direct: file read | `file_read` — orchestrator SOUL.md | ✅ Direct read, no spawn |
 | Lloyd direct: web search | `http_search` — Node.js version | ✅ Answered inline, no Orchestrator |
 | Research Pipeline | Lloyd → Orchestrator → Researcher → vault | ✅ `hardware/rp2040.md` written (8.7 KB, proper frontmatter, 9 sources) |
@@ -261,7 +261,7 @@ All items in "Files to Modify" were completed. Key additions:
 Lloyd:        sessions_spawn({ agentId: "orchestrator", task: "Research Pipeline: RP2040..." })
 Orchestrator: [thinking: "Let me spawn a researcher agent to handle this task."]
 Orchestrator: sessions_spawn({ agentId: "researcher", runtime: "subagent", task: "Research RP2040..." })
-Researcher:   http_search × 3, memory_write → hardware/rp2040.md
+Researcher:   http_search × 3, mem_write → hardware/rp2040.md
 Orchestrator: [receives completion] → formats Pipeline report → announces to Lloyd
 Lloyd:        relays summary to user
 ```
