@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ForceGraph2D from "react-force-graph-2d";
-import { forceCollide } from "d3-force";
+import { forceCollide, forceRadial, forceX, forceY } from "d3-force";
 import { api, type TagGraphNode, type TagGraphEdge } from "../../api";
 import { Search, RotateCcw, Maximize } from "lucide-react";
 
@@ -52,6 +52,7 @@ export default function GraphPage() {
   const containerRef = useRef<HTMLDivElement>(null);
   const initialFitDone = useRef(false);
   const minZoomRef = useRef(0.01);
+  const animFrameRef = useRef<number>(0);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -85,7 +86,7 @@ export default function GraphPage() {
     // Tag nodes
     const tagNodes: GNode[] = rawNodes.map((n) => ({
       id: n.id,
-      label: n.label,
+      label: `#${n.label}`,
       count: n.count,
       isHub: false,
     }));
@@ -116,12 +117,13 @@ export default function GraphPage() {
     const hn = new Set<string>();
     const hl = new Set<string>();
 
-    // Highlight from selection
+    // Highlight from selection (exclude hub — it fades with the background)
     if (selectedNode) {
       hn.add(selectedNode.id);
       for (const l of graphData.links) {
         const src = typeof l.source === "string" ? l.source : (l.source as any).id;
         const tgt = typeof l.target === "string" ? l.target : (l.target as any).id;
+        if (src === HUB_ID || tgt === HUB_ID) continue;
         if (src === selectedNode.id) { hn.add(tgt); hl.add(`${src}→${tgt}`); }
         if (tgt === selectedNode.id) { hn.add(src); hl.add(`${src}→${tgt}`); }
       }
@@ -165,80 +167,132 @@ export default function GraphPage() {
     return () => ro.disconnect();
   }, []);
 
-  // ── Fit to view only on initial load, capture min zoom ────────────────
-
-  const handleEngineStop = useCallback(() => {
-    if (!initialFitDone.current && fgRef.current) {
-      fgRef.current.zoomToFit(400, 50);
-      initialFitDone.current = true;
-      // After the zoomToFit animation completes, capture that as the min zoom
-      setTimeout(() => {
-        if (fgRef.current) {
-          const fitZoom = fgRef.current.zoom();
-          minZoomRef.current = fitZoom;
-          setMinZoom(fitZoom * 0.95);
-        }
-      }, 500);
-    }
-  }, []);
-
   // ── Initial load ──────────────────────────────────────────────────────
 
   useEffect(() => { loadGraph(); }, [loadGraph]);
 
+  // ── Fit to view once after first data load ────────────────────────────
+
+  useEffect(() => {
+    if (!graphData.nodes.length || initialFitDone.current) return;
+    // Wait for warmup ticks to settle, then fit
+    const t = setTimeout(() => {
+      if (fgRef.current) {
+        fgRef.current.zoomToFit(1000, 50);
+        initialFitDone.current = true;
+        // Capture min zoom after animation completes
+        setTimeout(() => {
+          if (fgRef.current) {
+            const fitZoom = fgRef.current.zoom();
+            minZoomRef.current = fitZoom;
+            setMinZoom(fitZoom * 0.95);
+          }
+        }, 1100);
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [graphData]);
+
   // ── Force configuration helper ──────────────────────────────────────
 
-  // When activeIds is provided, background nodes become invisible to forces
-  const configureForces = useCallback((activeIds?: Set<string>) => {
+  // activeIds: set of node IDs participating in the selection cluster
+  // selectedId: the node pinned at center (excluded from radial force)
+  const configureForces = useCallback((activeIds?: Set<string>, selectedId?: string) => {
     const fg = fgRef.current;
     if (!fg) return;
 
     const isActive = (node: any): boolean => {
       if (!activeIds) return true;
       const n = node as GNode;
-      return n.isHub || activeIds.has(n.id);
+      // During selection, hub is NOT active — subgraph is fully isolated
+      return activeIds.has(n.id);
     };
 
+    // ── Collision: prevent overlap ──────────────────────────────────
     fg.d3Force("collide",
       forceCollide()
         .radius((node: any) => {
           if (!isActive(node)) return 0;
           const n = node as GNode;
-          return n.isHub ? 20 : tagRadius(n.count) + 4;
+          return n.isHub ? 20 : tagRadius(n.count) + (activeIds ? 10 : 4);
         })
         .strength(0.5)
         .iterations(1)
     );
 
+    // ── Charge: inverse-square repulsion between all (active) nodes ─
     fg.d3Force("charge")?.strength((node: any) => {
       if (!isActive(node)) return 0;
-      return activeIds ? -30 : -80;
-    }).distanceMax(400);
+      // Stronger repulsion during selection so neighbors spread apart
+      return activeIds ? -200 : -80;
+    }).distanceMax(activeIds ? 200 : 400);
 
+    // ── Links: spring attraction along edges ────────────────────────
     fg.d3Force("link")
       ?.distance((link: any) => {
         const src = typeof link.source === "string" ? link.source : link.source.id;
         const tgt = typeof link.target === "string" ? link.target : link.target.id;
-        if (src === HUB_ID || tgt === HUB_ID) return activeIds ? 80 : 180;
+        if (src === HUB_ID || tgt === HUB_ID) return activeIds ? 60 : 180;
         const w = link.weight || 1;
         return Math.max(20, 60 - w * 8);
       })
       .strength((link: any) => {
         const src = typeof link.source === "string" ? link.source : link.source.id;
         const tgt = typeof link.target === "string" ? link.target : link.target.id;
-        // Zero out links involving background nodes
         if (activeIds) {
           const srcActive = src === HUB_ID || activeIds.has(src);
           const tgtActive = tgt === HUB_ID || activeIds.has(tgt);
           if (!srcActive || !tgtActive) return 0;
         }
-        if (src === HUB_ID || tgt === HUB_ID) return activeIds ? 0.005 : 0.015;
+        if (src === HUB_ID || tgt === HUB_ID) return activeIds ? 0 : 0.015;
         const w = link.weight || 1;
-        // Gentler link forces during selection for slow deliberate movement
-        const base = activeIds ? 0.06 : 0.15;
-        const scale = activeIds ? 0.03 : 0.08;
-        return Math.min(activeIds ? 0.25 : 0.6, base + w * scale);
+        return Math.min(0.6, 0.15 + w * 0.08);
       });
+
+    // ── Center gravity: weak pull toward origin ─────────────────────
+    if (activeIds) {
+      // During selection, pull active neighbors toward center
+      fg.d3Force("centerX", forceX(0).strength((node: any) => {
+        if (!isActive(node) || (node as GNode).isHub) return 0;
+        return node.id === selectedId ? 0 : 0.05;
+      }));
+      fg.d3Force("centerY", forceY(0).strength((node: any) => {
+        if (!isActive(node) || (node as GNode).isHub) return 0;
+        return node.id === selectedId ? 0 : 0.05;
+      }));
+    } else {
+      fg.d3Force("centerX", null);
+      fg.d3Force("centerY", null);
+    }
+
+    // ── Radial force: distribute neighbors evenly around selected ────
+    if (activeIds && selectedId) {
+      const neighborCount = activeIds.size - 1; // exclude selected node
+      const baseRadius = Math.max(40, 15 + neighborCount * 4);
+      fg.d3Force("radial",
+        forceRadial(
+          (node: any) => {
+            const n = node as GNode;
+            // Larger nodes (higher count) orbit closer, smaller ones farther
+            const r = tagRadius(n.count);
+            const factor = 1.4 - 0.8 * (r - 1.5) / (6 - 1.5);
+            return baseRadius * factor;
+          },
+          0, 0
+        )
+          .strength((node: any) => {
+            const n = node as GNode;
+            if (n.isHub || n.id === selectedId) return 0;
+            return activeIds.has(n.id) ? 0.8 : 0;
+          })
+      );
+      // Disable built-in center force — it pulls ALL nodes including background
+      fg.d3Force("center", null);
+    } else {
+      fg.d3Force("radial", null);
+      // Re-enable built-in center force for normal view
+      // (react-force-graph-2d recreates it on graphData change, but be safe)
+    }
   }, []);
 
   // ── Pin hub to center + initial force setup ────────────────────────────
@@ -330,10 +384,10 @@ export default function GraphPage() {
       if (src === HUB_ID || tgt === HUB_ID) {
         return hasDimming && !highlightLinks.has(`${src}→${tgt}`)
           ? "rgba(71,85,105,0.03)"
-          : "rgba(100,116,139,0.12)";
+          : "rgba(100,116,139,0.2)";
       }
-      if (highlightLinks.has(`${src}→${tgt}`)) return "rgba(148,163,184,0.6)";
-      return hasDimming ? "rgba(71,85,105,0.04)" : "rgba(71,85,105,0.15)";
+      if (highlightLinks.has(`${src}→${tgt}`)) return "rgba(168,183,204,0.85)";
+      return hasDimming ? "rgba(71,85,105,0.04)" : "rgba(120,140,165,0.3)";
     },
     [highlightLinks, hasDimming]
   );
@@ -354,7 +408,7 @@ export default function GraphPage() {
   const nodeLabel = useCallback((node: any) => {
     const n = node as GNode;
     if (n.isHub) return "<b>Vault Hub</b>";
-    return `<b>#${n.label}</b><br/><span style="color:#94a3b8;font-size:11px">${n.count} docs</span>`;
+    return `<b>${n.label}</b><br/><span style="color:#94a3b8;font-size:11px">${n.count} docs</span>`;
   }, []);
 
   // ── Render ────────────────────────────────────────────────────────────
@@ -399,11 +453,12 @@ export default function GraphPage() {
               };
 
               if (n.isHub) {
+                cancelAnimationFrame(animFrameRef.current);
                 setSelectedNode(null);
                 releaseAll();
                 if (fgRef.current) {
                   fgRef.current.d3ReheatSimulation();
-                  fgRef.current.zoomToFit(600, 50);
+                  fgRef.current.zoomToFit(1200, 50);
                 }
                 return;
               }
@@ -412,10 +467,11 @@ export default function GraphPage() {
               setSelectedNode(deselecting ? null : n);
 
               if (fgRef.current) {
+                cancelAnimationFrame(animFrameRef.current);
                 if (deselecting) {
                   releaseAll();
                   fgRef.current.d3ReheatSimulation();
-                  fgRef.current.zoomToFit(600, 50);
+                  fgRef.current.zoomToFit(1200, 50);
                 } else {
                   // Build neighbor set (excluding hub)
                   const neighborIds = new Set<string>([n.id]);
@@ -426,40 +482,93 @@ export default function GraphPage() {
                     if (tgt === n.id && src !== HUB_ID) neighborIds.add(src);
                   }
 
-                  // Pin selected node at center, pin background, free neighbors
+                  // Compute circle targets for neighbors
+                  const neighborArr = [...neighborIds].filter(id => id !== n.id);
+                  const neighborCount = neighborArr.length;
+                  const baseRadius = Math.max(40, 15 + neighborCount * 4);
+                  const angleStep = (2 * Math.PI) / Math.max(1, neighborCount);
+
+                  const nodeMap = new Map<string, GNode>();
+                  for (const nd of graphData.nodes) nodeMap.set(nd.id, nd);
+                  neighborArr.sort((a, b) => (nodeMap.get(b)?.count || 0) - (nodeMap.get(a)?.count || 0));
+
+                  // Capture start positions for selected node
+                  const fromX = node.x || 0;
+                  const fromY = node.y || 0;
+                  node.vx = 0;
+                  node.vy = 0;
+
+                  // Capture start positions and compute targets for neighbors
+                  const neighborAnim: Array<{ nd: GNode; sx: number; sy: number; tx: number; ty: number }> = [];
                   for (const nd of graphData.nodes) {
-                    if (nd.isHub) continue;
-                    if (nd.id === n.id) {
-                      // Teleport selected node to origin immediately
-                      (nd as any).x = 0;
-                      (nd as any).y = 0;
-                      (nd as any).fx = 0;
-                      (nd as any).fy = 0;
-                    } else if (neighborIds.has(nd.id)) {
-                      (nd as any).fx = undefined;
-                      (nd as any).fy = undefined;
-                    } else {
-                      // Background → frozen in place
-                      (nd as any).fx = (nd as any).x;
-                      (nd as any).fy = (nd as any).y;
+                    if (nd.isHub || nd.id === n.id) continue;
+                    if (neighborIds.has(nd.id)) {
+                      const r = tagRadius(nd.count);
+                      const factor = 1.4 - 0.8 * (r - 1.5) / (6 - 1.5);
+                      const dist = baseRadius * factor;
+                      const angle = angleStep * neighborArr.indexOf(nd.id);
+                      neighborAnim.push({
+                        nd,
+                        sx: (nd as any).x || 0,
+                        sy: (nd as any).y || 0,
+                        tx: Math.cos(angle) * dist,
+                        ty: Math.sin(angle) * dist,
+                      });
                     }
+                    // Freeze everything via fx/fy (neighbors will be moved by animation)
+                    (nd as any).fx = (nd as any).x;
+                    (nd as any).fy = (nd as any).y;
+                    (nd as any).vx = 0;
+                    (nd as any).vy = 0;
                   }
 
-                  // Forces now ignore background nodes entirely
-                  configureForces(neighborIds);
-                  fgRef.current.d3ReheatSimulation();
-                  // Center view on the selected node immediately, then fit neighbors after they settle
-                  fgRef.current.centerAt(0, 0, 400);
-                  fgRef.current.zoom(2.5, 400);
-                  setTimeout(() => {
-                    if (fgRef.current) {
-                      fgRef.current.zoomToFit(600, 60, (nd: any) => neighborIds.has(nd.id));
+                  const fg = fgRef.current;
+
+                  // Single animation: selected → center AND neighbors → circle, simultaneously
+                  const animStart = performance.now();
+                  const animDur = 1200;
+                  const animTick = () => {
+                    const t = Math.min(1, (performance.now() - animStart) / animDur);
+                    const ease = 1 - (1 - t) * (1 - t); // ease-out quadratic
+
+                    // Move selected node toward origin
+                    node.fx = fromX * (1 - ease);
+                    node.fy = fromY * (1 - ease);
+
+                    // Move neighbors toward their circle targets
+                    for (const { nd, sx, sy, tx, ty } of neighborAnim) {
+                      (nd as any).fx = sx + (tx - sx) * ease;
+                      (nd as any).fy = sy + (ty - sy) * ease;
                     }
-                  }, 500);
+
+                    if (t < 1) {
+                      animFrameRef.current = requestAnimationFrame(animTick);
+                    } else {
+                      // Anchor selected node at center
+                      node.fx = 0;
+                      node.fy = 0;
+
+                      // Unpin neighbors, let forces settle them gently
+                      for (const { nd } of neighborAnim) {
+                        (nd as any).vx = 0;
+                        (nd as any).vy = 0;
+                        (nd as any).fx = undefined;
+                        (nd as any).fy = undefined;
+                      }
+
+                      configureForces(neighborIds, n.id);
+                      if (fg) fg.d3ReheatSimulation();
+                    }
+                  };
+                  animFrameRef.current = requestAnimationFrame(animTick);
+
+                  // Zoom to fit the cluster during the animation
+                  if (fg) fg.zoomToFit(1200, 80, (nd: any) => neighborIds.has(nd.id));
                 }
               }
             }}
             onBackgroundClick={() => {
+              cancelAnimationFrame(animFrameRef.current);
               setSelectedNode(null);
               for (const nd of graphData.nodes) {
                 if (!nd.isHub) { (nd as any).fx = undefined; (nd as any).fy = undefined; }
@@ -467,10 +576,9 @@ export default function GraphPage() {
               configureForces();
               if (fgRef.current) {
                 fgRef.current.d3ReheatSimulation();
-                fgRef.current.zoomToFit(400, 50);
+                fgRef.current.zoomToFit(1200, 50);
               }
             }}
-            onEngineStop={handleEngineStop}
             minZoom={minZoom}
             cooldownTicks={400}
             d3AlphaDecay={0.025}
@@ -516,7 +624,7 @@ export default function GraphPage() {
             onClick={() => {
               setSelectedNode(null);
               setSearch("");
-              if (fgRef.current) fgRef.current.zoomToFit(400, 50);
+              if (fgRef.current) fgRef.current.zoomToFit(1200, 50);
             }}
             title="Reset view"
             className="p-1.5 rounded-md text-slate-400 hover:text-slate-200 hover:bg-surface-2 transition-colors"
@@ -524,7 +632,7 @@ export default function GraphPage() {
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
           <button
-            onClick={() => { if (fgRef.current) fgRef.current.zoomToFit(400, 50); }}
+            onClick={() => { if (fgRef.current) fgRef.current.zoomToFit(1200, 50); }}
             title="Fit all nodes"
             className="p-1.5 rounded-md text-slate-400 hover:text-slate-200 hover:bg-surface-2 transition-colors"
           >

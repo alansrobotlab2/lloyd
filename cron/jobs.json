@@ -7,7 +7,7 @@
       "description": "Read recent daily notes, distill new learnings into MEMORY.md, prune stale entries. Keep MEMORY.md under 200 lines.",
       "enabled": true,
       "createdAtMs": 1772075683512,
-      "updatedAtMs": 1772532081861,
+      "updatedAtMs": 1772618516142,
       "schedule": {
         "kind": "cron",
         "expr": "0 2 * * *",
@@ -26,13 +26,14 @@
         "bestEffort": true
       },
       "state": {
-        "nextRunAtMs": 1772618400000,
-        "lastRunAtMs": 1772532000002,
+        "nextRunAtMs": 1772704800000,
+        "lastRunAtMs": 1772618400002,
         "lastStatus": "ok",
-        "lastDurationMs": 81859,
+        "lastDurationMs": 116140,
         "consecutiveErrors": 0,
         "lastRunStatus": "ok",
-        "lastDeliveryStatus": "unknown"
+        "lastDeliveryStatus": "delivered",
+        "lastDelivered": true
       }
     }
   ]
