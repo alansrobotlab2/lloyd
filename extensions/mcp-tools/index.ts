@@ -5,8 +5,8 @@
  * transport at http://127.0.0.1:8093. The server runs as a systemd service
  * (lloyd-tool-mcp.service).
  *
- * Tools (19): tag_search, tag_explore, vault_overview, qmd_search,
- *   qmd_get, memory_write, prefill_context, http_search, http_fetch,
+ * Tools (19): tag_search, tag_explore, vault_overview, mem_search,
+ *   mem_get, mem_write, prefill_context, http_search, http_fetch,
  *   http_request, file_read, file_write, file_edit, file_patch, file_glob,
  *   file_grep, run_bash, bg_exec, bg_process
  */
@@ -180,9 +180,11 @@ export default function register(api: OpenClawPluginApi) {
   const RESEARCH_RE = /\b(search for|look up|what is|what are|who is|find (?:out|info)|latest on|news about|how does .{3,} work)\b/i;
   const OPS_RE = /\b(restart|deploy|service|systemctl|docker|git (?:push|pull|merge|rebase)|backlog|task (?:board|backlog)|CI\/CD|build|release)\b/i;
   const VOICE_RE = /\b(say |speak |voice |read (?:this |it )?(?:aloud|out loud)|tts|text.to.speech|narrate)\b/i;
-  // Cron-injected automation prompts and session-management instructions — vault
-  // recall produces false positives from incidental keyword matches in boilerplate.
-  const HEARTBEAT_RE = /\bHEARTBEAT(?:_OK|\.md)?\b|\bPost-Compaction Audit\b|\bWorkflow Recovery\b|\bExecute your Session Startup\b|\bnew session was started via\b/i;
+  // Cron-injected automation prompts — vault recall produces false positives
+  // from incidental keyword matches in boilerplate.
+  const HEARTBEAT_RE = /\bHEARTBEAT(?:_OK|\.md)?\b|\bPost-Compaction Audit\b|\bWorkflow Recovery\b/i;
+  // Session startup prompts get daily notes but NOT semantic prefill (boilerplate, not a real query).
+  const STARTUP_RE = /\bExecute your Session Startup\b|\bnew session was started via\b/i;
 
   // Segment scope routing for semantic prefill.
   // Empty string = no scope restriction (search all segments).
@@ -233,7 +235,7 @@ export default function register(api: OpenClawPluginApi) {
 
     const results = await Promise.allSettled(
       entries.map(({ date }) =>
-        mcpClient.callTool("qmd_get", { path: `${memPrefix}/${date}.md` }, 3_000),
+        mcpClient.callTool("mem_get", { path: `${memPrefix}/${date}.md` }, 3_000),
       ),
     );
 
@@ -247,7 +249,7 @@ export default function register(api: OpenClawPluginApi) {
         .map((b: any) => b.text)
         .join("")
         .trim();
-      // qmd_get returns JSON: {path, text} — unwrap if needed
+      // mem_get returns JSON: {path, text} — unwrap if needed
       let text = raw;
       try { text = JSON.parse(raw)?.text ?? raw; } catch { /* use raw */ }
       if (text && !text.startsWith("File not found")) {
@@ -269,13 +271,15 @@ export default function register(api: OpenClawPluginApi) {
     const profile = classifyProfile(prompt);
     if (profile === "heartbeat") return; // automated prompts never get prefill
 
+    const isStartup = STARTUP_RE.test(prompt);
     const sessionId = ctx?.sessionId ?? "";
 
     // ── Turn 1: inject daily memory files + active mode ──────────────────
     if (!dailyNotesInjected.has(sessionId)) {
       dailyNotesInjected.add(sessionId);
-      // Save the first substantive prompt for semantic search on turn 2
-      if (profile !== "chat") firstUserPrompt.set(sessionId, prompt);
+      // Save the first substantive prompt for semantic search on turn 2.
+      // Startup prompts are boilerplate — don't use them as search queries.
+      if (!isStartup && profile !== "chat") firstUserPrompt.set(sessionId, prompt);
 
       const dailyContext = await fetchDailyNotes();
       const mode = getCurrentMode();
@@ -402,7 +406,7 @@ export default function register(api: OpenClawPluginApi) {
       let existing = "";
       try {
         const content = await mcpClient.callTool(
-          "qmd_get",
+          "mem_get",
           { path: filePath },
           3000,
         );
@@ -434,7 +438,7 @@ export default function register(api: OpenClawPluginApi) {
       }
 
       await mcpClient.callTool(
-        "memory_write",
+        "mem_write",
         { path: filePath, content: fileContent },
         5000,
       );
@@ -449,9 +453,9 @@ export default function register(api: OpenClawPluginApi) {
   // When in work or personal mode, automatically inject the mode's vault
   // scope into search tools that don't already have an explicit scope.
   // This makes mode boundaries transparent — the LLM just calls
-  // qmd_search("query") and gets mode-appropriate results.
+  // mem_search("query") and gets mode-appropriate results.
 
-  const MODE_SCOPED_TOOLS = new Set(["qmd_search", "tag_search", "prefill_context"]);
+  const MODE_SCOPED_TOOLS = new Set(["mem_search", "tag_search", "prefill_context"]);
 
   api.on("before_tool_call", (event: any, _ctx: any) => {
     const mode = getCurrentMode();
@@ -576,7 +580,7 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "qmd_search",
+    "mem_search",
     "QMD Search",
     "Mandatory recall step: search the Obsidian knowledge vault before answering questions " +
       "about prior work, decisions, dates, people, preferences, or todos. Uses BM25 full-text " +
@@ -594,10 +598,10 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "qmd_get",
+    "mem_get",
     "QMD Get",
     "Read a specific file from the Obsidian vault by relative path. " +
-      "Use after qmd_search to pull only the needed lines and keep context small. " +
+      "Use after mem_search to pull only the needed lines and keep context small. " +
       "path: relative from vault root, e.g. 'projects/alfie/alfie.md'.",
     {
       type: "object",
@@ -611,7 +615,7 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "memory_write",
+    "mem_write",
     "Memory Write",
     "Create or overwrite a file in the Obsidian vault. " +
       "path: vault-relative path, e.g. 'projects/alfie/notes.md'. Creates parent directories automatically.",

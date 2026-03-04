@@ -928,12 +928,12 @@ export default function register(api: OpenClawPluginApi) {
         //    sends after /new). Fire-and-forget — the agent will process it async.
         const greetingPrompt =
           "A new session was started via /new or /reset. Execute your Session Startup " +
-          "sequence now - read the required files before responding to the user. Then " +
-          "greet the user in your configured persona, if one is provided. Be yourself " +
-          "- use your defined voice, mannerisms, and mood. Keep it to 1-3 sentences " +
-          "and ask what they want to do. If the runtime model differs from default_model " +
-          "in the system prompt, mention the default model. Do not mention internal " +
-          "steps, files, tools, or reasoning.";
+          "sequence now. Your daily notes have already been loaded into context above " +
+          "— do NOT call qmd_get for them. Greet the user in your configured persona, " +
+          "if one is provided. Be yourself - use your defined voice, mannerisms, and " +
+          "mood. Keep it to 1-3 sentences and ask what they want to do. If the runtime " +
+          "model differs from default_model in the system prompt, mention the default " +
+          "model. Do not mention internal steps, files, tools, or reasoning.";
         gwWsSend("chat.send", {
           sessionKey: "agent:main:main",
           message: greetingPrompt,
@@ -2300,12 +2300,24 @@ export default function register(api: OpenClawPluginApi) {
         }
 
         const parsed = JSON.parse(raw);
-        const results = (Array.isArray(parsed) ? parsed : []).map((r: any) => ({
-          path: (r.file || "").replace(/^qmd:\/\/obsidian\//, ""),
-          title: r.title || "",
-          score: r.score || 0,
-          snippet: (r.snippet || "").replace(/@@ -\d+,?\d* @@[^\n]*\n?/g, "").trim().slice(0, 300),
-        }));
+
+        // Build path→summary lookup from vault index
+        const docs = getVaultIndex();
+        const summaryMap = new Map<string, string>();
+        for (const d of docs) {
+          if (d.summary) summaryMap.set(d.path, d.summary);
+        }
+
+        const results = (Array.isArray(parsed) ? parsed : []).map((r: any) => {
+          const path = (r.file || "").replace(/^qmd:\/\/obsidian\//, "");
+          return {
+            path,
+            title: r.title || "",
+            score: r.score || 0,
+            snippet: (r.snippet || "").replace(/@@ -\d+,?\d* @@[^\n]*\n?/g, "").trim().slice(0, 300),
+            summary: summaryMap.get(path) || "",
+          };
+        });
 
         jsonResponse(res, { query, results });
       } catch (err: any) {
@@ -2416,12 +2428,43 @@ export default function register(api: OpenClawPluginApi) {
           return;
         }
 
-        if (!existsSync(fullPath) || statSync(fullPath).isDirectory()) {
-          jsonResponse(res, { error: "File not found" }, 404);
-          return;
+        // Try exact path first; fall back to case-insensitive match on the filename,
+        // then to a vault-wide basename search (handles stale index paths after moves).
+        let resolvedPath = fullPath;
+        if (!existsSync(resolvedPath) || statSync(resolvedPath).isDirectory()) {
+          // Case-insensitive: check siblings in parent dir
+          const dir = join(resolvedPath, "..");
+          const base = resolvedPath.split("/").pop()!.toLowerCase();
+          let found = false;
+          if (existsSync(dir)) {
+            for (const entry of readdirSync(dir)) {
+              if (entry.toLowerCase() === base) {
+                resolvedPath = join(dir, entry);
+                found = true;
+                break;
+              }
+            }
+          }
+          // Basename search across vault (handles moved files)
+          if (!found) {
+            try {
+              const out = execSync(
+                `find ${vaultRoot} -iname "${base}" -type f 2>/dev/null | head -1`,
+                { encoding: "utf-8", timeout: 3000 },
+              ).trim();
+              if (out && out.startsWith(vaultRoot)) {
+                resolvedPath = out;
+                found = true;
+              }
+            } catch {}
+          }
+          if (!found || !existsSync(resolvedPath) || statSync(resolvedPath).isDirectory()) {
+            jsonResponse(res, { error: "File not found" }, 404);
+            return;
+          }
         }
 
-        const raw = readFileSync(fullPath, "utf-8");
+        const raw = readFileSync(resolvedPath, "utf-8");
         const fm = parseFrontmatter(raw);
 
         // Strip frontmatter from content
@@ -2431,12 +2474,100 @@ export default function register(api: OpenClawPluginApi) {
           if (end !== -1) content = raw.slice(end + 4).trimStart();
         }
 
+        const actualPath = resolvedPath.startsWith(vaultRoot)
+          ? resolvedPath.slice(vaultRoot.length + 1)
+          : filePath;
         jsonResponse(res, {
-          path: filePath,
+          path: actualPath,
           frontmatter: fm,
           content,
           lineCount: raw.split("\n").length,
         });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/memory/save ──────────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/memory/save",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") {
+        jsonResponse(res, { error: "Method not allowed" }, 405);
+        return;
+      }
+      try {
+        const body = await readBody(req);
+        const parsed = JSON.parse(body);
+        const { path: filePath, content, frontmatter: fmEdits } = parsed;
+        if (!filePath || typeof content !== "string") {
+          jsonResponse(res, { error: "path and content required" }, 400);
+          return;
+        }
+
+        const cleanPath = filePath.replace(/^\/+/, "");
+        const fullPath = join(vaultRoot, cleanPath);
+
+        // Security: ensure path stays within vault
+        if (!fullPath.startsWith(vaultRoot)) {
+          jsonResponse(res, { error: "Invalid path" }, 400);
+          return;
+        }
+
+        if (!existsSync(fullPath)) {
+          jsonResponse(res, { error: "File not found" }, 404);
+          return;
+        }
+
+        // Read existing file and parse frontmatter
+        const raw = readFileSync(fullPath, "utf-8");
+        let fmBlock = "";
+        if (raw.startsWith("---")) {
+          const end = raw.indexOf("\n---", 3);
+          if (end !== -1) fmBlock = raw.slice(0, end + 4) + "\n";
+        }
+
+        // If frontmatter edits are provided, merge them into the YAML block
+        if (fmEdits && typeof fmEdits === "object" && fmBlock) {
+          const fmContent = fmBlock.slice(4, fmBlock.lastIndexOf("\n---")); // between --- markers
+          const lines = fmContent.split("\n");
+          const updatedLines: string[] = [];
+          const handled = new Set<string>();
+
+          for (const line of lines) {
+            const match = line.match(/^(\w[\w-]*):\s*/);
+            if (match && match[1] in fmEdits) {
+              const key = match[1];
+              handled.add(key);
+              const val = fmEdits[key];
+              if (Array.isArray(val)) {
+                updatedLines.push(`${key}: [${val.map((v: string) => v.includes(" ") || v.includes(",") ? `"${v}"` : v).join(", ")}]`);
+              } else if (val !== undefined && val !== null) {
+                const sv = String(val);
+                updatedLines.push(`${key}: ${sv.includes(":") || sv.includes("#") ? `"${sv}"` : sv}`);
+              }
+              // skip if val is null/undefined (removes the field)
+            } else {
+              updatedLines.push(line);
+            }
+          }
+          // Add new keys not already in frontmatter
+          for (const [key, val] of Object.entries(fmEdits)) {
+            if (handled.has(key) || val === undefined || val === null) continue;
+            if (Array.isArray(val)) {
+              updatedLines.push(`${key}: [${(val as string[]).map((v: string) => v.includes(" ") || v.includes(",") ? `"${v}"` : v).join(", ")}]`);
+            } else {
+              const sv = String(val);
+              updatedLines.push(`${key}: ${sv.includes(":") || sv.includes("#") ? `"${sv}"` : sv}`);
+            }
+          }
+          fmBlock = "---\n" + updatedLines.join("\n") + "\n---\n";
+        }
+
+        writeFileSync(fullPath, fmBlock + content, "utf-8");
+        jsonResponse(res, { ok: true });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }

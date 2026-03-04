@@ -48,7 +48,6 @@ const NAV_ITEMS: NavItem[] = [
   { id: "dashboard", label: "Usage", icon: ChartArea },
   { id: "backlog", label: "Backlog", icon: LayoutGrid },
   { id: "memory", label: "Memory", icon: Brain },
-  { id: "graph", label: "Graph", icon: GitBranch },
   { id: "skills", label: "Skills Explorer", icon: Sparkles },
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "sessions", label: "Sessions", icon: Users },

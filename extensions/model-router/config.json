@@ -5,5 +5,5 @@
   "classifierTimeoutMs": 2500,
   "confidenceThreshold": 0.7,
   "verbose": true,
-  "disabledTiers": []
+  "disabledTiers": ["haiku"]
 }

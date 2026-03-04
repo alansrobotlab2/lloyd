@@ -10,7 +10,9 @@ function extractText(content: Array<{ type: string; text?: string }>): string {
   return content
     .filter((c) => c.type === "text" && c.text)
     .map((c) => c.text!)
-    .join("\n");
+    .join("\n")
+    .replace(/<summary>[\s\S]*?<\/summary>/g, "")
+    .trim();
 }
 
 function timeStr(ts: string): string {

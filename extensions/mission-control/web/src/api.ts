@@ -279,7 +279,7 @@ export interface TagEntry {
 
 export interface MemorySearchResult {
   query: string;
-  results: Array<{ path: string; title: string; score: number; snippet: string }>;
+  results: Array<{ path: string; title: string; score: number; snippet: string; summary: string }>;
 }
 
 export interface MemoryBrowseEntry {
@@ -437,6 +437,15 @@ export const api = {
     fetchJson<MemoryBrowseResult>(`/memory/browse?path=${encodeURIComponent(path)}`),
   memoryRead: (path: string) =>
     fetchJson<MemoryReadResult>(`/memory/read?path=${encodeURIComponent(path)}`),
+  memorySave: async (path: string, content: string, frontmatter?: Record<string, unknown>): Promise<{ ok: boolean }> => {
+    const res = await fetch(`${BASE}/memory/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, content, frontmatter }),
+    });
+    if (!res.ok) throw new Error(`Save failed: ${res.status}`);
+    return res.json();
+  },
 
   // Abort the currently running agent turn
   chatAbort: async (): Promise<{ ok: boolean }> => {

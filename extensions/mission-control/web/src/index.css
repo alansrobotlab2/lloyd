@@ -116,6 +116,114 @@ body {
   color: #f1f5f9;
 }
 
+/* Markdown prose for document viewer modal */
+.prose-doc {
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.prose-doc p {
+  margin: 0.6em 0;
+}
+.prose-doc p:first-child {
+  margin-top: 0;
+}
+.prose-doc p:last-child {
+  margin-bottom: 0;
+}
+.prose-doc strong {
+  color: #e2e8f0;
+  font-weight: 600;
+}
+.prose-doc em {
+  font-style: italic;
+}
+.prose-doc code {
+  background: rgba(51, 65, 85, 0.6);
+  color: #a5b4fc;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+.prose-doc pre {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 0.85em 1em;
+  overflow-x: auto;
+  margin: 0.75em 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.prose-doc pre code {
+  background: none;
+  padding: 0;
+  color: #cbd5e1;
+}
+.prose-doc h1, .prose-doc h2, .prose-doc h3, .prose-doc h4 {
+  color: #e2e8f0;
+  font-weight: 600;
+  margin: 1em 0 0.4em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.4);
+}
+.prose-doc h1 { font-size: 1.25em; }
+.prose-doc h2 { font-size: 1.1em; }
+.prose-doc h3 { font-size: 1em; border-bottom: none; }
+.prose-doc h4 { font-size: 0.95em; border-bottom: none; color: #94a3b8; }
+.prose-doc h1:first-child, .prose-doc h2:first-child, .prose-doc h3:first-child {
+  margin-top: 0;
+}
+.prose-doc a {
+  color: #818cf8;
+  text-decoration: none;
+}
+.prose-doc a:hover {
+  text-decoration: underline;
+}
+.prose-doc ul, .prose-doc ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+.prose-doc li {
+  margin: 0.2em 0;
+}
+.prose-doc li > ul, .prose-doc li > ol {
+  margin: 0.15em 0;
+}
+.prose-doc blockquote {
+  border-left: 3px solid rgba(99, 102, 241, 0.4);
+  margin: 0.75em 0;
+  padding: 0.3em 0.85em;
+  color: #94a3b8;
+}
+.prose-doc hr {
+  border: none;
+  border-top: 1px solid #334155;
+  margin: 1em 0;
+}
+.prose-doc table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  width: 100%;
+  font-size: 11px;
+}
+.prose-doc th, .prose-doc td {
+  border: 1px solid #334155;
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+.prose-doc th {
+  background: rgba(51, 65, 85, 0.4);
+  color: #e2e8f0;
+  font-weight: 600;
+}
+.prose-doc img {
+  max-width: 100%;
+  border-radius: 8px;
+  margin: 0.75em 0;
+}
+
 /* ── Agent Desk Room ──────────────────────────────────────────────────── */
 
 .agent-desk-room {

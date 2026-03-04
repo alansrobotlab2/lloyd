@@ -351,6 +351,23 @@ export default function register(api: OpenClawPluginApi) {
       return TIERS[tier];
     }
 
+    // ── Stage 1.5: Session startup → local (skip classifier) ──────
+
+    const sessionDepth = (event.messages ?? []).length;
+    if (sessionDepth === 0 && /\bSession Startup\b|\bnew session was started via\b/i.test(prompt)) {
+      const tier = fallbackTier("local") ?? config.defaultTier;
+      const decision: RoutingDecision = {
+        tier,
+        reason: "startup-greeting → local (skip classifier)",
+        confidence: 0.95,
+        classifierUsed: false,
+        latencyMs: Date.now() - start,
+      };
+      if (config.verbose) api.logger.info?.(`model-router: → ${tier} (startup greeting)`);
+      logDecision(logPath, decision, prompt.length, 0);
+      return TIERS[tier];
+    }
+
     // ── Stage 2: Feature-based scoring ───────────────────────────────
 
     const features = extractFeatures(prompt, event.messages);
