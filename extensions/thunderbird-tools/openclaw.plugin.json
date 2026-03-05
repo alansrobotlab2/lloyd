@@ -1,0 +1,12 @@
+{
+  "id": "thunderbird-tools",
+  "name": "Thunderbird Tools",
+  "description": "Email, calendar, and contacts via Thunderbird MCP bridge (stdio)",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
