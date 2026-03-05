@@ -15,7 +15,17 @@ import { createInterface } from "node:readline";
 const BRIDGE_PATH =
   "/home/alansrobotlab/Projects/lloyd-services/services/thunderbird-mcp/mcp-bridge.cjs";
 
-const TOOL_PREFIX = "tb_";
+const TOOL_NAMES: Record<string, string> = {
+  listAccounts:      "email_accounts",
+  listFolders:       "email_folders",
+  searchMessages:    "email_search",
+  getMessage:        "email_read",
+  getRecentMessages: "email_recent",
+  searchContacts:    "contacts_search",
+  getContact:        "contacts_get",
+  listCalendars:     "calendar_list",
+  getEvents:         "calendar_events",
+};
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 // ── Stdio MCP client (adapted from mcp-tools/mcp-client.ts) ────────────
@@ -229,7 +239,7 @@ export default function register(api: OpenClawPluginApi) {
     .listTools()
     .then((tools) => {
       for (const tool of tools) {
-        const prefixedName = TOOL_PREFIX + tool.name;
+        const prefixedName = TOOL_NAMES[tool.name] ?? `tb_${tool.name}`;
         const params = tool.inputSchema ?? { type: "object", properties: {} };
 
         api.registerTool({
@@ -256,7 +266,7 @@ export default function register(api: OpenClawPluginApi) {
         });
       }
       api.logger.info?.(
-        `thunderbird-tools: registered ${tools.length} tools (${tools.map((t) => TOOL_PREFIX + t.name).join(", ")})`,
+        `thunderbird-tools: registered ${tools.length} tools (${tools.map((t) => TOOL_NAMES[t.name] ?? `tb_${t.name}`).join(", ")})`,
       );
     })
     .catch((err) => {

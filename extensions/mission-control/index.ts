@@ -1082,6 +1082,10 @@ export default function register(api: OpenClawPluginApi) {
       source: "voice-tools",
       tools: ["voice_last_utterance", "voice_enroll_speaker", "voice_list_speakers"],
     },
+    {
+      source: "thunderbird-tools",
+      tools: ["email_accounts", "email_folders", "email_search", "email_read", "email_recent", "calendar_list", "calendar_events", "contacts_search", "contacts_get"],
+    },
   ];
 
   function loadToolsState(): Record<string, boolean> {

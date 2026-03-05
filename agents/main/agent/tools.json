@@ -8,5 +8,8 @@
   "exec": false,
   "write": false,
   "process": false,
-  "edit": false
+  "edit": false,
+  "email_accounts": false,
+  "email_folders": false,
+  "calendar_list": false
 }
