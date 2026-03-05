@@ -984,6 +984,42 @@ function Row({ label, value }: { label: string; value: string }) {
 
 // ── SDK Agent Card ──────────────────────────────────────────────────────
 
+// ── Coffee Mug SVG ──────────────────────────────────────────────────────
+
+const MUG_COLORS: Record<string, string> = {
+  coder: "#e67e22",
+  researcher: "#3498db",
+  reviewer: "#9b59b6",
+  tester: "#27ae60",
+  planner: "#f39c12",
+  auditor: "#e74c3c",
+  operator: "#1abc9c",
+  orchestrator: "#2c3e50",
+  clawhub: "#e91e63",
+};
+
+function CoffeeMug({ agentId, isWorking }: { agentId: string; isWorking: boolean }) {
+  const color = MUG_COLORS[agentId] || "#7f8c8d";
+  return (
+    <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className="flex-shrink-0">
+      {/* Smoke lines — only visible when working */}
+      {isWorking && (
+        <g>
+          <path className="mug-smoke-line" d="M10 12 Q10 9 11 7" stroke="#94a3b8" strokeWidth="1.2" strokeLinecap="round" fill="none" opacity="0" />
+          <path className="mug-smoke-line" d="M14 11 Q13.5 8 15 6" stroke="#94a3b8" strokeWidth="1.2" strokeLinecap="round" fill="none" opacity="0" />
+          <path className="mug-smoke-line" d="M18 12 Q18.5 9 17.5 7" stroke="#94a3b8" strokeWidth="1.2" strokeLinecap="round" fill="none" opacity="0" />
+        </g>
+      )}
+      {/* Mug body */}
+      <rect x="6" y="13" width="16" height="14" rx="2" fill={color} />
+      {/* Coffee surface */}
+      <rect x="7" y="14" width="14" height="3" rx="1" fill="#3e2723" opacity="0.5" />
+      {/* Handle */}
+      <path d="M22 16 Q27 16 27 21 Q27 26 22 26" stroke={color} strokeWidth="2.5" fill="none" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 const MODEL_COLORS: Record<string, string> = {
   opus: "text-purple-400",
   sonnet: "text-blue-400",
@@ -1013,6 +1049,7 @@ function SdkAgentCard({
         className="w-full p-4 text-left hover:bg-surface-2/50 transition-colors"
       >
         <div className="flex items-center gap-3">
+          <CoffeeMug agentId={agent.id} isWorking={counts.active > 0} />
           <img
             src={agent.avatarUrl}
             alt={agent.id}

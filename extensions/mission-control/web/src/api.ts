@@ -537,6 +537,9 @@ export const api = {
     return res.json();
   },
 
+  // Gateway sessions (subagent visibility)
+  gatewaySessions: () => fetchJson<GatewaySessionsData>("/gateway-sessions"),
+
   // Claude Code instances & agents (agent-orchestrator plugin)
   ccAgents: () => fetchJson<SdkAgentsData>("/cc-agents"),
   ccInstances: () => fetchJson<{ instances: CcInstanceInfo[] }>("/cc-instances"),
@@ -553,6 +556,25 @@ export const api = {
     return res.json();
   },
 };
+
+// ── Gateway Session Types ─────────────────────────────────────────────────
+
+export interface GatewaySessionInfo {
+  sessionKey: string;
+  sessionId?: string;
+  agentId: string;
+  state: "idle" | "processing" | "waiting";
+  source: "gateway";
+  lastUpdated: number;
+  elapsedMs: number;
+}
+
+export interface GatewaySessionsData {
+  sessions: GatewaySessionInfo[];
+  subagentRuns: SubagentRunInfo[];
+  gwSubagents: any[];
+  timestamp: string;
+}
 
 // ── Claude Code Instance Types ────────────────────────────────────────────
 

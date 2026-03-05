@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
-import { Activity, X, Cpu, Square } from "lucide-react";
-import { api, AgentStatusData, SubagentRunInfo, CcInstanceInfo } from "../../api";
+import { Activity, X, Cpu, Square, Radio, Filter } from "lucide-react";
+import { api, AgentStatusData, SubagentRunInfo, CcInstanceInfo, GatewaySessionInfo } from "../../api";
 import AgentDeskRoom from "../AgentDeskRoom";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -327,15 +327,131 @@ function CcInstanceCard({
   );
 }
 
+// ── Gateway Session Card ──────────────────────────────────────────────
+
+const GW_STATE_COLORS: Record<string, string> = {
+  idle: "bg-slate-500",
+  processing: "bg-violet-400 shadow-[0_0_6px_rgba(167,139,250,0.5)]",
+  waiting: "bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]",
+};
+
+const GW_STATE_BADGES: Record<string, string> = {
+  idle: "bg-slate-500/20 text-slate-400 border-slate-500/30",
+  processing: "bg-violet-500/20 text-violet-400 border-violet-500/30",
+  waiting: "bg-amber-500/20 text-amber-400 border-amber-500/30",
+};
+
+function GatewaySessionCard({
+  session,
+  onNavigate,
+}: {
+  session: GatewaySessionInfo;
+  onNavigate?: (agentId: string) => void;
+}) {
+  const stateColor = GW_STATE_COLORS[session.state] ?? GW_STATE_COLORS.idle;
+  const stateBadge = GW_STATE_BADGES[session.state] ?? GW_STATE_BADGES.idle;
+
+  return (
+    <div
+      className={"bg-surface-1 rounded-xl px-4 py-3 border transition-colors" +
+        (session.state !== "idle" ? " border-violet-500/30" : " border-surface-3/50") +
+        (onNavigate ? " cursor-pointer hover:border-violet-400/50" : "")}
+      onClick={onNavigate ? () => onNavigate(session.agentId) : undefined}
+    >
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex-shrink-0 relative">
+          <img
+            src={`/api/mc/agent-avatar?id=${session.agentId}`}
+            alt={session.agentId}
+            className="w-8 h-8 rounded-lg object-cover"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+          />
+          <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border border-surface-1 ${stateColor}`} />
+          {session.state === "processing" && (
+            <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-violet-400 animate-ping opacity-30" />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-300 font-medium">{session.agentId}</span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono border ${stateBadge}`}>
+              {session.state}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
+            <span className="text-[10px] text-slate-500 font-mono">{session.sessionKey}</span>
+          </div>
+        </div>
+        <div className="text-right flex-shrink-0">
+          <div className="text-[10px] text-slate-500 font-mono">{formatElapsed(session.elapsedMs)} ago</div>
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono border bg-violet-500/10 text-violet-400 border-violet-500/20 mt-0.5 inline-block">
+            gateway
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Source Filter Toggle ─────────────────────────────────────────────
+
+type SourceFilter = "all" | "board" | "gateway" | "sdk";
+
+function SourceFilterBar({
+  filter,
+  onChange,
+  counts,
+}: {
+  filter: SourceFilter;
+  onChange: (f: SourceFilter) => void;
+  counts: { board: number; gateway: number; sdk: number };
+}) {
+  const items: { id: SourceFilter; label: string; count: number; color: string }[] = [
+    { id: "all", label: "All", count: counts.board + counts.gateway + counts.sdk, color: "text-slate-400 border-slate-500/30" },
+    { id: "board", label: "Board", count: counts.board, color: "text-emerald-400 border-emerald-500/30" },
+    { id: "gateway", label: "Gateway", count: counts.gateway, color: "text-violet-400 border-violet-500/30" },
+    { id: "sdk", label: "SDK", count: counts.sdk, color: "text-cyan-400 border-cyan-500/30" },
+  ];
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <Filter className="w-3 h-3 text-slate-500" />
+      {items.map((item) => (
+        <button
+          key={item.id}
+          onClick={() => onChange(item.id)}
+          className={`text-[10px] px-2 py-0.5 rounded-full font-mono border transition-colors ${
+            filter === item.id
+              ? `${item.color} bg-white/5`
+              : "text-slate-600 border-surface-3/30 hover:text-slate-400"
+          }`}
+        >
+          {item.label} {item.count > 0 ? `(${item.count})` : ""}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ── Main Page ────────────────────────────────────────────────────────────
 
 export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?: (agentId: string) => void } = {}) {
   const [status, setStatus] = useState<AgentStatusData | null>(null);
   const [ccInstances, setCcInstances] = useState<CcInstanceInfo[]>([]);
+  const [gatewaySessions, setGatewaySessions] = useState<GatewaySessionInfo[]>([]);
+  const [gwSubagentRuns, setGwSubagentRuns] = useState<SubagentRunInfo[]>([]);
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
 
   const refresh = useCallback(() => {
     api.agentStatus().then(setStatus).catch(console.error);
     api.ccInstances().then((d) => setCcInstances(d.instances)).catch(() => setCcInstances([]));
+    api.gatewaySessions().then((d) => {
+      setGatewaySessions(d.sessions);
+      setGwSubagentRuns(d.subagentRuns);
+    }).catch(() => {
+      setGatewaySessions([]);
+      setGwSubagentRuns([]);
+    });
   }, []);
 
   useEffect(() => {
@@ -345,14 +461,16 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
   // Adaptive polling: 1.5s when active, 3s when idle
   useEffect(() => {
     const hasCcRunning = ccInstances.some((i) => i.status === "running");
+    const hasGwActive = gatewaySessions.some((s) => s.state !== "idle");
     const isActive =
       status?.mainAgent.state !== "idle" ||
       (status?.subagents.active.length ?? 0) > 0 ||
-      hasCcRunning;
+      hasCcRunning ||
+      hasGwActive;
 
     const interval = setInterval(refresh, isActive ? 1500 : 3000);
     return () => clearInterval(interval);
-  }, [status, ccInstances, refresh]);
+  }, [status, ccInstances, gatewaySessions, refresh]);
 
   const handleKill = useCallback(async (sessionKey: string) => {
     try {
@@ -376,50 +494,109 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
   const recentCompleted = status?.subagents.recentCompleted ?? [];
   const ccRunning = ccInstances.filter((i) => i.status === "running");
   const ccCompleted = ccInstances.filter((i) => i.status !== "running");
+  const gwActive = gatewaySessions.filter((s) => s.state !== "idle");
+  const gwIdle = gatewaySessions.filter((s) => s.state === "idle");
+
+  // Counts for filter bar
+  const filterCounts = {
+    board: active.length + recentCompleted.length,
+    gateway: gatewaySessions.length + gwSubagentRuns.length,
+    sdk: ccInstances.length,
+  };
+
+  // Total active count across all sources
+  const totalActive = active.length + gwActive.length + ccRunning.length;
 
   return (
     <div className="p-6 space-y-6 overflow-auto">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <Activity className="w-5 h-5 text-brand-400" />
-        <h2 className="text-lg font-semibold">Activity</h2>
-        {active.length > 0 && (
-          <span className="text-xs text-emerald-400 font-mono">
-            {active.length} active
-          </span>
-        )}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Activity className="w-5 h-5 text-brand-400" />
+          <h2 className="text-lg font-semibold">Activity</h2>
+          {totalActive > 0 && (
+            <span className="text-xs text-emerald-400 font-mono">
+              {totalActive} active
+            </span>
+          )}
+        </div>
+        <SourceFilterBar filter={sourceFilter} onChange={setSourceFilter} counts={filterCounts} />
       </div>
 
       {/* Agent Desk Room — shows both legacy subagents and CC instances */}
       <AgentDeskRoom activeAgents={active} ccInstances={ccInstances} onAgentClick={onNavigateToAgent} />
 
       {/* Main Agent Status */}
-      <div className="space-y-1">
-        <div className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
-          Main Agent
+      {(sourceFilter === "all" || sourceFilter === "board") && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
+            Main Agent
+          </div>
+          <AgentLiveStatus status={status} />
         </div>
-        <AgentLiveStatus status={status} />
-      </div>
+      )}
 
-      {/* Active Subagents */}
-      <div className="space-y-2">
-        <div className="text-[10px] uppercase tracking-wider text-emerald-400 font-medium flex items-center gap-1.5">
-          {active.length > 0 && (
-            <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+      {/* Active Subagents (board-level) */}
+      {(sourceFilter === "all" || sourceFilter === "board") && (
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-emerald-400 font-medium flex items-center gap-1.5">
+            {active.length > 0 && (
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            )}
+            Active Subagents ({active.length})
+          </div>
+          {active.length === 0 ? (
+            <div className="text-xs text-slate-500 italic py-2 text-center">No active subagents</div>
+          ) : (
+            active.map((run) => (
+              <ActiveSubagentCard key={run.runId} run={run} onKill={handleKill} onNavigate={onNavigateToAgent} />
+            ))
           )}
-          Active Subagents ({active.length})
         </div>
-        {active.length === 0 ? (
-          <div className="text-xs text-slate-500 italic py-2 text-center">No active subagents</div>
-        ) : (
-          active.map((run) => (
-            <ActiveSubagentCard key={run.runId} run={run} onKill={handleKill} onNavigate={onNavigateToAgent} />
-          ))
-        )}
-      </div>
+      )}
+
+      {/* Gateway Sessions */}
+      {(sourceFilter === "all" || sourceFilter === "gateway") && (
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-violet-400 font-medium flex items-center gap-1.5">
+            {gwActive.length > 0 && (
+              <div className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+            )}
+            <Radio className="w-3 h-3" />
+            Gateway Sessions ({gwActive.length} active{gwIdle.length > 0 ? `, ${gwIdle.length} idle` : ""})
+          </div>
+          {gatewaySessions.length === 0 ? (
+            <div className="text-xs text-slate-500 italic py-2 text-center">No gateway sessions</div>
+          ) : (
+            <>
+              {gwActive.map((session) => (
+                <GatewaySessionCard key={session.sessionKey} session={session} onNavigate={onNavigateToAgent} />
+              ))}
+              {gwIdle.slice(0, 5).map((session) => (
+                <GatewaySessionCard key={session.sessionKey} session={session} onNavigate={onNavigateToAgent} />
+              ))}
+            </>
+          )}
+
+          {/* Gateway subagent runs (lifecycle history) */}
+          {gwSubagentRuns.length > 0 && (
+            <div className="mt-3 space-y-2">
+              <div className="text-[10px] uppercase tracking-wider text-violet-400/60 font-medium">
+                Gateway Run History ({gwSubagentRuns.length})
+              </div>
+              {gwSubagentRuns.filter((r) => !r.endedAt).map((run) => (
+                <ActiveSubagentCard key={run.runId} run={run} onKill={handleKill} onNavigate={onNavigateToAgent} />
+              ))}
+              {gwSubagentRuns.filter((r) => !!r.endedAt).slice(0, 8).map((run) => (
+                <CompletedRunCard key={run.runId} run={run} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Claude Code Instances */}
-      {ccInstances.length > 0 && (
+      {(sourceFilter === "all" || sourceFilter === "sdk") && ccInstances.length > 0 && (
         <div className="space-y-2">
           <div className="text-[10px] uppercase tracking-wider text-cyan-400 font-medium flex items-center gap-1.5">
             {ccRunning.length > 0 && (
@@ -437,19 +614,21 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
         </div>
       )}
 
-      {/* Recent Completed */}
-      <div className="space-y-2">
-        <div className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
-          Recent Completed ({recentCompleted.length})
+      {/* Recent Completed (board-level) */}
+      {(sourceFilter === "all" || sourceFilter === "board") && (
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
+            Recent Completed ({recentCompleted.length})
+          </div>
+          {recentCompleted.length === 0 ? (
+            <div className="text-xs text-slate-500 italic py-2 text-center">None yet</div>
+          ) : (
+            recentCompleted.map((run) => (
+              <CompletedRunCard key={run.runId} run={run} />
+            ))
+          )}
         </div>
-        {recentCompleted.length === 0 ? (
-          <div className="text-xs text-slate-500 italic py-2 text-center">None yet</div>
-        ) : (
-          recentCompleted.map((run) => (
-            <CompletedRunCard key={run.runId} run={run} />
-          ))
-        )}
-      </div>
+      )}
 
       {/* Activity Feed */}
       <div className="space-y-2">
@@ -457,7 +636,7 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
           Activity Feed
         </div>
         <div className="bg-surface-1 rounded-xl p-4 border border-surface-3/50">
-          <ActivityFeed runs={recentCompleted} />
+          <ActivityFeed runs={[...recentCompleted, ...gwSubagentRuns.filter((r) => !!r.endedAt)].sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, 15)} />
         </div>
       </div>
     </div>

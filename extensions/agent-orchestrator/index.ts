@@ -15,7 +15,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createPrivateKey, createPublicKey, sign as cryptoSign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -32,6 +32,7 @@ import {
   auditorAgent,
   operatorAgent,
   memoryAgent,
+  clawhubAgent,
 } from "./agents/index.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -42,6 +43,263 @@ const DEFAULT_MAX_TURNS = 30;
 const CLAUDE_CODE_PATH = "/home/alansrobotlab/.npm-global/bin/claude";
 const VAULT_AGENTS_DIR = join(process.env.HOME || "/home/alansrobotlab", "obsidian/agents");
 const MODE_STATE_PATH = join(__dirname, "../mcp-tools/mode-state.json");
+
+// ── Gateway Notification ─────────────────────────────────────────────────
+
+const GATEWAY_WS_URL = "ws://127.0.0.1:18789";
+const GATEWAY_SESSION_KEY = "agent:main:main";
+const IDENTITY_PATH = join(process.env.HOME || "/home/alansrobotlab", ".openclaw/identity/device.json");
+const DEVICE_AUTH_PATH = join(process.env.HOME || "/home/alansrobotlab", ".openclaw/identity/device-auth.json");
+const PROTOCOL_VERSION = 3;
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+function base64UrlEncode(buf: Buffer): string {
+  return buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
+}
+
+function derivePublicKeyRaw(publicKeyPem: string): Buffer {
+  const spki = createPublicKey(publicKeyPem).export({ type: "spki", format: "der" });
+  if (spki.length === ED25519_SPKI_PREFIX.length + 32 &&
+      spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)) {
+    return spki.subarray(ED25519_SPKI_PREFIX.length);
+  }
+  return spki;
+}
+
+function publicKeyRawBase64Url(publicKeyPem: string): string {
+  return base64UrlEncode(derivePublicKeyRaw(publicKeyPem));
+}
+
+function signPayload(privateKeyPem: string, payload: string): string {
+  const key = createPrivateKey(privateKeyPem);
+  return base64UrlEncode(cryptoSign(null, Buffer.from(payload, "utf8"), key));
+}
+
+interface DeviceIdentity {
+  deviceId: string;
+  publicKeyPem: string;
+  privateKeyPem: string;
+}
+
+function loadDeviceIdentity(): DeviceIdentity | null {
+  try {
+    const raw = JSON.parse(readFileSync(IDENTITY_PATH, "utf-8"));
+    if (raw?.version === 1 && raw.deviceId && raw.publicKeyPem && raw.privateKeyPem) {
+      return { deviceId: raw.deviceId, publicKeyPem: raw.publicKeyPem, privateKeyPem: raw.privateKeyPem };
+    }
+  } catch {}
+  return null;
+}
+
+function loadDeviceToken(): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(DEVICE_AUTH_PATH, "utf-8"));
+    return raw?.tokens?.operator?.token || null;
+  } catch {}
+  return null;
+}
+
+/**
+ * Send a chat.send message to Lloyd's session via the OpenClaw gateway WebSocket.
+ * Connects, authenticates with device identity, sends a user-side message that
+ * triggers the agent pipeline, then disconnects.
+ * Fully non-blocking and error-swallowing — never throws.
+ */
+async function injectGatewayMessage(message: string, logger: any): Promise<void> {
+  const identity = loadDeviceIdentity();
+  if (!identity) {
+    logger.warn?.("agent-orchestrator: cannot inject — device identity not found");
+    return;
+  }
+  const deviceToken = loadDeviceToken();
+
+  // Dynamic import ws from openclaw's node_modules
+  let WebSocket: any;
+  const WS_PATHS = [
+    "ws",
+    "/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/ws/index.js",
+  ];
+  for (const wsPath of WS_PATHS) {
+    try {
+      const mod = await import(wsPath);
+      WebSocket = mod.WebSocket || mod.default?.WebSocket || mod.default;
+      if (WebSocket) break;
+    } catch {}
+  }
+  if (!WebSocket) {
+    logger.warn?.("agent-orchestrator: cannot inject — ws module not found");
+    return;
+  }
+
+  return new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      try { ws?.close(); } catch {}
+      resolve();
+    }, 8000);
+
+    let ws: any;
+    try {
+      ws = new WebSocket(GATEWAY_WS_URL);
+    } catch {
+      clearTimeout(timeout);
+      resolve();
+      return;
+    }
+
+    let reqIdCounter = 0;
+    const pending = new Map<string, (ok: boolean, payload: any) => void>();
+
+    function sendReq(method: string, params: any): Promise<any> {
+      return new Promise((res, rej) => {
+        const id = `orch-notify-${++reqIdCounter}`;
+        pending.set(id, (ok, payload) => {
+          if (ok) res(payload);
+          else rej(new Error(payload?.message || "gateway request failed"));
+        });
+        ws.send(JSON.stringify({ type: "req", id, method, params }));
+      });
+    }
+
+    ws.on("open", () => {
+      // Wait for connect.challenge event
+    });
+
+    ws.on("message", async (raw: any) => {
+      try {
+        const data = JSON.parse(typeof raw === "string" ? raw : raw.toString());
+
+        // Handle connect.challenge event
+        if (data.type === "event" && data.event === "connect.challenge") {
+          const nonce = data.payload?.nonce;
+          if (!nonce) {
+            ws.close();
+            clearTimeout(timeout);
+            resolve();
+            return;
+          }
+
+          const role = "operator";
+          const scopes = ["operator.admin"];
+          const signedAtMs = Date.now();
+          const authToken = deviceToken || undefined;
+
+          // Build v3 signed payload
+          const payloadStr = [
+            "v3",
+            identity.deviceId,
+            "cli",  // clientId
+            "backend",          // clientMode
+            role,
+            scopes.join(","),
+            String(signedAtMs),
+            authToken ?? "",
+            nonce,
+            process.platform,
+            "",                 // deviceFamily
+          ].join("|");
+
+          const signature = signPayload(identity.privateKeyPem, payloadStr);
+
+          const connectParams = {
+            minProtocol: PROTOCOL_VERSION,
+            maxProtocol: PROTOCOL_VERSION,
+            client: {
+              id: "cli",
+              displayName: "agent-orchestrator",
+              version: "0.1.0",
+              platform: process.platform,
+              mode: "backend",
+            },
+            caps: [],
+            auth: authToken ? { token: authToken, deviceToken: authToken } : undefined,
+            role,
+            scopes,
+            device: {
+              id: identity.deviceId,
+              publicKey: publicKeyRawBase64Url(identity.publicKeyPem),
+              signature,
+              signedAt: signedAtMs,
+              nonce,
+            },
+          };
+
+          try {
+            await sendReq("connect", connectParams);
+
+            // Now send the message (triggers agent pipeline)
+            await sendReq("chat.send", {
+              sessionKey: GATEWAY_SESSION_KEY,
+              message: `[System Message] ${message}`,
+              idempotencyKey: randomUUID(),
+            });
+
+            logger.info?.("agent-orchestrator: notification injected into session");
+          } catch (err: any) {
+            logger.warn?.(`agent-orchestrator: gateway inject failed: ${err.message}`);
+          }
+
+          ws.close();
+          clearTimeout(timeout);
+          resolve();
+          return;
+        }
+
+        // Handle response frames
+        if (data.type === "res" && data.id && pending.has(data.id)) {
+          const cb = pending.get(data.id)!;
+          pending.delete(data.id);
+          cb(data.ok !== false, data.payload);
+        }
+      } catch {}
+    });
+
+    ws.on("error", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+
+    ws.on("close", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
+
+/**
+ * Format a completion notification message for injection into Lloyd's session.
+ */
+function formatCompletionNotification(instance: CcInstance): string {
+  const typeLabel = instance.type === "orchestrate"
+    ? `pipeline: ${instance.pipeline || "custom"}`
+    : `agent: ${instance.agent || "unknown"}`;
+  const costStr = `$${instance.costUsd.toFixed(2)}`;
+  const taskStr = instance.task.length > 100
+    ? instance.task.slice(0, 97) + "..."
+    : instance.task;
+
+  if (instance.status === "error") {
+    const errorStr = instance.error || "unknown error";
+    return [
+      `**[Agent Error]** \`${instance.id}\` (${typeLabel})`,
+      `Status: ✗ error | Cost: ${costStr} | Turns: ${instance.turns}`,
+      `Task: ${taskStr}`,
+      `Error: ${errorStr}`,
+    ].join("\n");
+  }
+
+  const resultStr = instance.resultText
+    ? (instance.resultText.length > 300
+        ? instance.resultText.slice(0, 297) + "..."
+        : instance.resultText)
+    : "(no result)";
+
+  return [
+    `**[Agent Complete]** \`${instance.id}\` (${typeLabel})`,
+    `Status: ✓ complete | Cost: ${costStr} | Turns: ${instance.turns}`,
+    `Task: ${taskStr}`,
+    `Result: ${resultStr}`,
+  ].join("\n");
+}
 
 // ── Work Mode ────────────────────────────────────────────────────────────
 
@@ -101,10 +359,11 @@ const AGENT_CONFIGS: Record<string, any> = {
   auditor: auditorAgent,
   memory: memoryAgent,
   operator: operatorAgent,
+  clawhub: clawhubAgent,
 };
 
 /** Agents that use vault MCP tools and need scope injection */
-const VAULT_USING_AGENTS = new Set(["memory", "researcher", "planner", "coder", "operator"]);
+const VAULT_USING_AGENTS = new Set(["memory", "researcher", "planner", "coder", "operator", "clawhub"]);
 
 /**
  * Build fresh agent definitions by merging static configs with vault prompts.
@@ -184,10 +443,16 @@ export default function register(api: OpenClawPluginApi) {
     return sdkQuery;
   }
 
-  /** Notification callback — log completion for now; can be extended to inject messages */
+  /** Notification callback — injects a formatted completion message into Lloyd's session */
   function notifyCompletion(instanceId: string, summary: string): void {
     api.logger.info?.(`agent-orchestrator: ${summary}`);
-    // Future: inject a system message into Lloyd's session via gateway WS
+
+    const instance = instances.get(instanceId);
+    if (!instance) return;
+
+    const message = formatCompletionNotification(instance);
+    // Fire-and-forget — non-blocking, never delays pipeline completion
+    injectGatewayMessage(message, api.logger).catch(() => {});
   }
 
   // ── Tool: cc_orchestrate ───────────────────────────────────────────────

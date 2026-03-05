@@ -1,6 +1,6 @@
 /**
  * Planner agent — task breakdown and implementation planning.
- * Model: Sonnet (good reasoning, cost-effective)
+ * Model: Opus (high-quality architectural reasoning)
  */
 
 export const plannerAgent = {
@@ -41,7 +41,7 @@ Your plan will be passed to a coordinator who dispatches coder, reviewer, tester
 - Mark which steps can run in parallel (e.g., reviewer + tester after coder finishes)
 - Flag any ambiguities that need clarification
 - Keep plans under 15 steps — break larger tasks into multiple plans`,
-  model: "sonnet" as const,
+  model: "opus" as const,
   tools: ["Read", "Glob", "Grep"],
   maxTurns: 10,
 };

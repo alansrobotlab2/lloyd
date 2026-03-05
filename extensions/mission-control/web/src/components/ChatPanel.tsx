@@ -22,6 +22,12 @@ function isContextMessage(msg: MessageEntry): boolean {
   return /^<\w+[\s>]/.test(text) || /^\[cron:/.test(text);
 }
 
+function isSystemMessage(msg: MessageEntry): boolean {
+  if (msg.role !== "user") return false;
+  const text = extractText(msg.content);
+  return /^\[System Message\]/.test(text);
+}
+
 function timeStr(ts: string): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -292,6 +298,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
                 if (msg.role === "toolResult") return false;
                 if (msg.role === "assistant" && !msg.content?.some((c) => c.type === "text" && c.text)) return false;
                 if (isContextMessage(msg)) return false;
+                if (isSystemMessage(msg)) return false;
               }
               return true;
             })

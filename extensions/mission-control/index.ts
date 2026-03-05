@@ -1837,6 +1837,86 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // ── API: /api/mc/gateway-sessions ────────────────────────────────────
+  // Returns all gateway session states (including subagent sessions) for the
+  // Activity tab to show multi-agent pipeline activity in real time.
+
+  api.registerHttpRoute({
+    path: "/api/mc/gateway-sessions",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        // 1. Collect all non-main gateway sessions from diagnostic events
+        const gatewaySessions: Array<{
+          sessionKey: string;
+          sessionId?: string;
+          agentId: string;
+          state: string;
+          source: "gateway";
+          lastUpdated: number;
+          elapsedMs: number;
+        }> = [];
+
+        for (const [key, status] of agentSessionStates) {
+          // Skip main agent sessions — those are already shown
+          if (key.startsWith("agent:main:")) continue;
+
+          // Extract agentId from session key (format: agent:<agentId>:<sessionName>)
+          const parts = key.split(":");
+          const agentId = parts.length >= 2 && parts[0] === "agent" ? parts[1] : key;
+
+          gatewaySessions.push({
+            sessionKey: key,
+            sessionId: status.sessionId,
+            agentId,
+            state: status.state,
+            source: "gateway",
+            lastUpdated: status.lastUpdated,
+            elapsedMs: Date.now() - status.lastUpdated,
+          });
+        }
+
+        // Sort: active first (processing/waiting), then by lastUpdated desc
+        gatewaySessions.sort((a, b) => {
+          const aActive = a.state !== "idle" ? 1 : 0;
+          const bActive = b.state !== "idle" ? 1 : 0;
+          if (aActive !== bActive) return bActive - aActive;
+          return b.lastUpdated - a.lastUpdated;
+        });
+
+        // 2. Also try to fetch live subagent list from gateway via WS
+        let gwSubagents: any[] = [];
+        try {
+          if (gwWsReady) {
+            const result = await Promise.race([
+              gwWsSend("subagents.list", {}),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
+            ]);
+            if (result && Array.isArray((result as any).runs)) {
+              gwSubagents = (result as any).runs;
+            } else if (result && Array.isArray(result)) {
+              gwSubagents = result as any[];
+            }
+          }
+        } catch {
+          // Gateway may not support subagents.list — that's fine, we still have
+          // diagnostic-derived sessions and runs.json data
+        }
+
+        // 3. Merge runs.json data for richer lifecycle info
+        const subagentRuns = loadSubagentRuns();
+
+        jsonResponse(res, {
+          sessions: gatewaySessions,
+          subagentRuns: subagentRuns.slice(0, 30), // last 30 runs
+          gwSubagents,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
   // ── API: /api/mc/health ───────────────────────────────────────────────
 
   api.registerHttpRoute({
