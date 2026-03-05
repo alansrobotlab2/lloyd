@@ -15,14 +15,15 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID, createPrivateKey, createPublicKey, sign as cryptoSign } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import type { CcInstance, InstanceStatusResponse, McInstanceInfo } from "./types.js";
+import type { CcInstance, InstanceStatusResponse, McInstanceInfo, PendingQuestionInfo, QuestionAnswer } from "./types.js";
 import { consumeQuery } from "./query-consumer.js";
-import { buildOrchestratorPrompt, buildDirectPrompt } from "./orchestrator-prompt.js";
+import { buildOrchestratorPrompt, buildDirectPrompt, buildInteractivePlanningPrompt } from "./orchestrator-prompt.js";
 import type { PipelineType } from "./orchestrator-prompt.js";
+import { createQuestion, resolveQuestion, listPendingQuestions, cancelAllForInstance } from "./pending-questions.js";
 import {
   coderAgent,
   researcherAgent,
@@ -44,225 +45,52 @@ const CLAUDE_CODE_PATH = "/home/alansrobotlab/.npm-global/bin/claude";
 const VAULT_AGENTS_DIR = join(process.env.HOME || "/home/alansrobotlab", "obsidian/agents");
 const MODE_STATE_PATH = join(__dirname, "../mcp-tools/mode-state.json");
 
-// ── Gateway Notification ─────────────────────────────────────────────────
+// ── Hook-Based Notification ──────────────────────────────────────────────
+//
+// Push messages into Lloyd's session via the OpenClaw HTTP hooks endpoint.
+// Much simpler than the old gateway WebSocket + Ed25519 auth approach.
+// Same mechanism the voice pipeline uses for ASR transcript injection.
 
-const GATEWAY_WS_URL = "ws://127.0.0.1:18789";
-const GATEWAY_SESSION_KEY = "agent:main:main";
-const IDENTITY_PATH = join(process.env.HOME || "/home/alansrobotlab", ".openclaw/identity/device.json");
-const DEVICE_AUTH_PATH = join(process.env.HOME || "/home/alansrobotlab", ".openclaw/identity/device-auth.json");
-const PROTOCOL_VERSION = 3;
-const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+const HOOKS_URL = "http://127.0.0.1:18789/hooks/agent";
+const HOOKS_SESSION_KEY = "agent:main:main";
+const OPENCLAW_CONFIG_PATH = join(process.env.HOME || "/home/alansrobotlab", ".openclaw/openclaw.json");
 
-function base64UrlEncode(buf: Buffer): string {
-  return buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
-}
+let _hooksToken: string | null = null;
 
-function derivePublicKeyRaw(publicKeyPem: string): Buffer {
-  const spki = createPublicKey(publicKeyPem).export({ type: "spki", format: "der" });
-  if (spki.length === ED25519_SPKI_PREFIX.length + 32 &&
-      spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)) {
-    return spki.subarray(ED25519_SPKI_PREFIX.length);
-  }
-  return spki;
-}
-
-function publicKeyRawBase64Url(publicKeyPem: string): string {
-  return base64UrlEncode(derivePublicKeyRaw(publicKeyPem));
-}
-
-function signPayload(privateKeyPem: string, payload: string): string {
-  const key = createPrivateKey(privateKeyPem);
-  return base64UrlEncode(cryptoSign(null, Buffer.from(payload, "utf8"), key));
-}
-
-interface DeviceIdentity {
-  deviceId: string;
-  publicKeyPem: string;
-  privateKeyPem: string;
-}
-
-function loadDeviceIdentity(): DeviceIdentity | null {
+function loadHooksToken(): string | null {
+  if (_hooksToken) return _hooksToken;
   try {
-    const raw = JSON.parse(readFileSync(IDENTITY_PATH, "utf-8"));
-    if (raw?.version === 1 && raw.deviceId && raw.publicKeyPem && raw.privateKeyPem) {
-      return { deviceId: raw.deviceId, publicKeyPem: raw.publicKeyPem, privateKeyPem: raw.privateKeyPem };
-    }
+    const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, "utf-8"));
+    _hooksToken = config?.hooks?.token || null;
   } catch {}
-  return null;
-}
-
-function loadDeviceToken(): string | null {
-  try {
-    const raw = JSON.parse(readFileSync(DEVICE_AUTH_PATH, "utf-8"));
-    return raw?.tokens?.operator?.token || null;
-  } catch {}
-  return null;
+  return _hooksToken;
 }
 
 /**
- * Send a chat.send message to Lloyd's session via the OpenClaw gateway WebSocket.
- * Connects, authenticates with device identity, sends a user-side message that
- * triggers the agent pipeline, then disconnects.
- * Fully non-blocking and error-swallowing — never throws.
+ * Inject a message into Lloyd's session via the HTTP hooks endpoint.
+ * Non-blocking and error-swallowing — never throws.
  */
-async function injectGatewayMessage(message: string, logger: any): Promise<void> {
-  const identity = loadDeviceIdentity();
-  if (!identity) {
-    logger.warn?.("agent-orchestrator: cannot inject — device identity not found");
+async function injectHookMessage(message: string, logger: any): Promise<void> {
+  const token = loadHooksToken();
+  if (!token) {
+    logger.warn?.("agent-orchestrator: cannot inject — hooks token not found in openclaw.json");
     return;
   }
-  const deviceToken = loadDeviceToken();
-
-  // Dynamic import ws from openclaw's node_modules
-  let WebSocket: any;
-  const WS_PATHS = [
-    "ws",
-    "/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/ws/index.js",
-  ];
-  for (const wsPath of WS_PATHS) {
-    try {
-      const mod = await import(wsPath);
-      WebSocket = mod.WebSocket || mod.default?.WebSocket || mod.default;
-      if (WebSocket) break;
-    } catch {}
+  try {
+    await fetch(HOOKS_URL, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: `[System Message] ${message}`,
+        sessionKey: HOOKS_SESSION_KEY,
+      }),
+    });
+  } catch (err: any) {
+    logger.warn?.(`agent-orchestrator: hook inject failed: ${err.message}`);
   }
-  if (!WebSocket) {
-    logger.warn?.("agent-orchestrator: cannot inject — ws module not found");
-    return;
-  }
-
-  return new Promise<void>((resolve) => {
-    const timeout = setTimeout(() => {
-      try { ws?.close(); } catch {}
-      resolve();
-    }, 8000);
-
-    let ws: any;
-    try {
-      ws = new WebSocket(GATEWAY_WS_URL);
-    } catch {
-      clearTimeout(timeout);
-      resolve();
-      return;
-    }
-
-    let reqIdCounter = 0;
-    const pending = new Map<string, (ok: boolean, payload: any) => void>();
-
-    function sendReq(method: string, params: any): Promise<any> {
-      return new Promise((res, rej) => {
-        const id = `orch-notify-${++reqIdCounter}`;
-        pending.set(id, (ok, payload) => {
-          if (ok) res(payload);
-          else rej(new Error(payload?.message || "gateway request failed"));
-        });
-        ws.send(JSON.stringify({ type: "req", id, method, params }));
-      });
-    }
-
-    ws.on("open", () => {
-      // Wait for connect.challenge event
-    });
-
-    ws.on("message", async (raw: any) => {
-      try {
-        const data = JSON.parse(typeof raw === "string" ? raw : raw.toString());
-
-        // Handle connect.challenge event
-        if (data.type === "event" && data.event === "connect.challenge") {
-          const nonce = data.payload?.nonce;
-          if (!nonce) {
-            ws.close();
-            clearTimeout(timeout);
-            resolve();
-            return;
-          }
-
-          const role = "operator";
-          const scopes = ["operator.admin"];
-          const signedAtMs = Date.now();
-          const authToken = deviceToken || undefined;
-
-          // Build v3 signed payload
-          const payloadStr = [
-            "v3",
-            identity.deviceId,
-            "cli",  // clientId
-            "backend",          // clientMode
-            role,
-            scopes.join(","),
-            String(signedAtMs),
-            authToken ?? "",
-            nonce,
-            process.platform,
-            "",                 // deviceFamily
-          ].join("|");
-
-          const signature = signPayload(identity.privateKeyPem, payloadStr);
-
-          const connectParams = {
-            minProtocol: PROTOCOL_VERSION,
-            maxProtocol: PROTOCOL_VERSION,
-            client: {
-              id: "cli",
-              displayName: "agent-orchestrator",
-              version: "0.1.0",
-              platform: process.platform,
-              mode: "backend",
-            },
-            caps: [],
-            auth: authToken ? { token: authToken, deviceToken: authToken } : undefined,
-            role,
-            scopes,
-            device: {
-              id: identity.deviceId,
-              publicKey: publicKeyRawBase64Url(identity.publicKeyPem),
-              signature,
-              signedAt: signedAtMs,
-              nonce,
-            },
-          };
-
-          try {
-            await sendReq("connect", connectParams);
-
-            // Now send the message (triggers agent pipeline)
-            await sendReq("chat.send", {
-              sessionKey: GATEWAY_SESSION_KEY,
-              message: `[System Message] ${message}`,
-              idempotencyKey: randomUUID(),
-            });
-
-            logger.info?.("agent-orchestrator: notification injected into session");
-          } catch (err: any) {
-            logger.warn?.(`agent-orchestrator: gateway inject failed: ${err.message}`);
-          }
-
-          ws.close();
-          clearTimeout(timeout);
-          resolve();
-          return;
-        }
-
-        // Handle response frames
-        if (data.type === "res" && data.id && pending.has(data.id)) {
-          const cb = pending.get(data.id)!;
-          pending.delete(data.id);
-          cb(data.ok !== false, data.payload);
-        }
-      } catch {}
-    });
-
-    ws.on("error", () => {
-      clearTimeout(timeout);
-      resolve();
-    });
-
-    ws.on("close", () => {
-      clearTimeout(timeout);
-      resolve();
-    });
-  });
 }
 
 /**
@@ -370,19 +198,37 @@ const VAULT_USING_AGENTS = new Set(["memory", "researcher", "planner", "coder", 
  * Called at spawn time so edits in Obsidian take effect immediately.
  * If a vault scope is active, appends scope instructions to agents that use vault tools.
  */
-function buildAgentDefs(logger: any, vaultScope?: { mode: string; scope: string }): Record<string, any> {
+/** Agents that should get AskUserQuestion in interactive mode */
+const INTERACTIVE_AGENTS = new Set(["coder", "planner", "operator", "researcher"]);
+
+function buildAgentDefs(logger: any, vaultScope?: { mode: string; scope: string }, interactive?: boolean): Record<string, any> {
   const agents: Record<string, any> = {};
   const scopeSuffix = vaultScope?.scope
     ? `\n\n## Vault Scope\nThe user is in **${vaultScope.mode} mode**. When calling vault tools (mem_search, tag_search, tag_explore), always include the parameter \`scope: "${vaultScope.scope}"\`.`
     : "";
 
+  const interactiveSuffix = `\n\n## Interactive Mode\nYou are running in interactive mode. You may use AskUserQuestion to ask clarifying questions — your question will be relayed to the user and the answer returned. If AskUserQuestion is denied, the denial message contains the user's response — read and use it.`;
+
   for (const [name, config] of Object.entries(AGENT_CONFIGS)) {
     const vaultPrompt = loadVaultPrompt(name);
     const basePrompt = vaultPrompt || config.prompt;
     const needsScope = scopeSuffix && VAULT_USING_AGENTS.has(name);
+    const needsInteractive = interactive && INTERACTIVE_AGENTS.has(name);
+
+    let prompt = basePrompt;
+    if (needsScope) prompt += scopeSuffix;
+    if (needsInteractive) prompt += interactiveSuffix;
+
+    // Add AskUserQuestion to tools in interactive mode
+    const tools = [...(config.tools || [])];
+    if (needsInteractive && !tools.includes("AskUserQuestion")) {
+      tools.push("AskUserQuestion");
+    }
+
     agents[name] = {
       ...config,
-      prompt: needsScope ? basePrompt + scopeSuffix : basePrompt,
+      prompt,
+      tools,
     };
     if (vaultPrompt) {
       logger.info?.(`agent-orchestrator: loaded ${name} prompt from vault`);
@@ -452,7 +298,149 @@ export default function register(api: OpenClawPluginApi) {
 
     const message = formatCompletionNotification(instance);
     // Fire-and-forget — non-blocking, never delays pipeline completion
-    injectGatewayMessage(message, api.logger).catch(() => {});
+    injectHookMessage(message, api.logger).catch(() => {});
+  }
+
+  /** Progress callback — injects milestone notifications for interactive instances */
+  function notifyProgress(instanceId: string, message: string): void {
+    injectHookMessage(message, api.logger).catch(() => {});
+  }
+
+  /** Push a pending question notification into Lloyd's session */
+  function notifyQuestion(instance: CcInstance, q: { id: string; type: string; agentId?: string; toolName?: string; question: string; options?: string[] }): void {
+    const typeLabel = instance.type === "orchestrate"
+      ? `pipeline: ${instance.pipeline || "custom"}`
+      : `agent: ${instance.agent || "unknown"}`;
+
+    const lines = [
+      `**[Agent Question]** \`${instance.id}\` (${typeLabel})`,
+      `Question ID: \`${q.id}\` | Type: ${q.type}${q.agentId ? ` | Agent: ${q.agentId}` : ""}`,
+    ];
+
+    if (q.type === "permission" && q.toolName) {
+      lines.push(`Tool: \`${q.toolName}\``);
+    }
+
+    lines.push(`Question: ${q.question}`);
+
+    if (q.options?.length) {
+      lines.push(`Options: ${q.options.join(", ")}`);
+    }
+
+    lines.push(`→ Use \`cc_respond("${q.id}", action, text)\` to answer. Actions: "allow", "deny", or "answer".`);
+
+    injectHookMessage(lines.join("\n"), api.logger).catch(() => {});
+  }
+
+  // ── Interactive Mode: canUseTool Callback ───────────────────────────────
+
+  /** Tools that require approval in interactive mode */
+  const GATED_TOOLS = new Set(["Write", "Edit", "Bash", "NotebookEdit"]);
+
+  /** Bash commands that are safe (read-only) and auto-allowed */
+  const SAFE_BASH_PATTERNS = [
+    /^(cat|ls|head|tail|wc|find|grep|rg|git\s+(status|log|diff|show|branch)|pwd|echo|which|type|file|stat)\b/,
+    /^(node|python3?|ruby|go)\s+--version\b/,
+    /^npm\s+(list|ls|outdated|view)\b/,
+  ];
+
+  /**
+   * Build a canUseTool callback for interactive mode.
+   * Intercepts destructive tools and AskUserQuestion, creating pending questions
+   * that block until the user responds via cc_respond.
+   */
+  function buildCanUseTool(instance: CcInstance) {
+    return async (toolName: string, input: Record<string, unknown>, options: any): Promise<any> => {
+      // ── AskUserQuestion interception (Phase 3) ──
+      // Agent is asking a clarification question — proxy it to the user.
+      // We deny the tool with the user's answer in the denial message.
+      if (toolName === "AskUserQuestion") {
+        const questions = input.questions as any[];
+        const questionText = questions?.map((q: any) => {
+          const opts = q.options?.map((o: any) => o.label).join(", ");
+          return opts ? `${q.question} (${opts})` : q.question;
+        }).join("\n") || "Agent has a question";
+
+        const questionOptions = questions?.[0]?.options?.map((o: any) => o.label);
+
+        const { question: q, promise } = createQuestion({
+          instanceId: instance.id,
+          type: "clarification",
+          agentId: options?.agentID,
+          question: questionText,
+          options: questionOptions,
+          timeoutMs: 10 * 60 * 1000, // 10 min for clarifications
+        });
+
+        instance.pendingQuestions.push(q);
+        notifyQuestion(instance, q);
+
+        api.logger.info?.(`agent-orchestrator: clarification question ${q.id} from ${options?.agentID || "orchestrator"}`);
+
+        const answer = await promise;
+
+        if (answer.action === "deny") {
+          return { behavior: "deny", message: answer.text || "User declined to answer" };
+        }
+
+        // Return user's answer as the denial message — agent reads it as tool output
+        return { behavior: "deny", message: `[User Response] ${answer.text || "No answer provided"}` };
+      }
+
+      // ── Permission gating (Phase 2) ──
+      // Auto-allow read-only and safe tools
+      if (!GATED_TOOLS.has(toolName)) {
+        return { behavior: "allow" };
+      }
+
+      // Auto-allow safe Bash patterns
+      if (toolName === "Bash" && typeof input.command === "string") {
+        const cmd = input.command.trim();
+        if (SAFE_BASH_PATTERNS.some((p) => p.test(cmd))) {
+          return { behavior: "allow" };
+        }
+      }
+
+      // Gate destructive tools — create pending question and block
+      const agentLabel = options?.agentID || "orchestrator";
+      let question: string;
+      if (toolName === "Write") {
+        question = `Agent "${agentLabel}" wants to create/overwrite file: ${input.file_path}`;
+      } else if (toolName === "Edit") {
+        question = `Agent "${agentLabel}" wants to edit file: ${input.file_path}`;
+      } else if (toolName === "NotebookEdit") {
+        question = `Agent "${agentLabel}" wants to edit notebook: ${input.notebook_path}`;
+      } else {
+        question = `Agent "${agentLabel}" wants to run: ${String(input.command || "").slice(0, 200)}`;
+      }
+
+      const { question: q, promise } = createQuestion({
+        instanceId: instance.id,
+        type: "permission",
+        agentId: agentLabel,
+        toolName,
+        toolInput: input,
+        question,
+        timeoutMs: 5 * 60 * 1000, // 5 min for permissions
+      });
+
+      instance.pendingQuestions.push(q);
+      notifyQuestion(instance, q);
+
+      api.logger.info?.(`agent-orchestrator: permission gate ${q.id} — ${toolName} from ${agentLabel}`);
+
+      const answer = await promise;
+
+      if (answer.action === "allow") {
+        return { behavior: "allow", updatedInput: answer.updatedInput };
+      }
+
+      return {
+        behavior: "deny",
+        message: answer.text || "User denied this action",
+        interrupt: false, // Don't kill the query, just deny this tool call
+      };
+    };
   }
 
   // ── Tool: cc_orchestrate ───────────────────────────────────────────────
@@ -508,6 +496,13 @@ export default function register(api: OpenClawPluginApi) {
             "Returns a detailed execution plan for user review. Call cc_result to retrieve the plan, " +
             "then call cc_orchestrate again with the approved plan in 'context' to execute.",
         },
+        interactive: {
+          type: "boolean",
+          description:
+            "Enable interactive mode: subagent file writes and commands require user approval, " +
+            "and agents can ask clarifying questions mid-execution. Questions are pushed to your " +
+            "session via hooks — answer them with cc_respond. Default false (fire-and-forget).",
+        },
       },
       required: ["task"],
     },
@@ -519,6 +514,7 @@ export default function register(api: OpenClawPluginApi) {
         const maxTurns = params.maxTurns ?? DEFAULT_MAX_TURNS;
         const pipeline: PipelineType = params.pipeline ?? "custom";
         const planOnly: boolean = params.planOnly ?? false;
+        const interactive: boolean = params.interactive ?? false;
         const cwd = params.cwd || process.env.HOME || "/home/alansrobotlab";
 
         const abort = new AbortController();
@@ -527,13 +523,54 @@ export default function register(api: OpenClawPluginApi) {
         const workMode = getWorkModeScope();
 
         // Build agents fresh from vault prompts at spawn time (with scope)
-        const agents = buildAgentDefs(api.logger, workMode.scope ? workMode : undefined);
+        const agents = buildAgentDefs(api.logger, workMode.scope ? workMode : undefined, interactive);
 
         // Load orchestrator prompt from vault (falls back to built-in)
         const orchestratorPrompt = buildOrchestratorPrompt(
           params.task, pipeline, params.context, loadVaultPrompt("orchestrator"),
           workMode.scope ? workMode : null, planOnly,
         );
+
+        // Build instance early so canUseTool can reference it
+        const instance: CcInstance = {
+          id: instanceId,
+          type: "orchestrate",
+          status: "running",
+          task: params.task,
+          pipeline,
+          planOnly,
+          interactive,
+          startedAt: Date.now(),
+          costUsd: 0,
+          turns: 0,
+          budgetUsd: budget,
+          maxTurns,
+          pendingQuestions: [],
+          recentMessages: [],
+          _abort: abort,
+        };
+
+        // Read-only tools that are always auto-allowed
+        const readOnlyTools = [
+          "Read", "Glob", "Grep",
+          ...(planOnly ? [] : ["Task"]),
+          "mcp__openclaw-tools__mem_search",
+          "mcp__openclaw-tools__mem_get",
+          "mcp__openclaw-tools__tag_search",
+          "mcp__openclaw-tools__tag_explore",
+        ];
+
+        // In interactive mode, also allow AskUserQuestion (it gets intercepted by canUseTool)
+        const allowedTools = interactive
+          ? [...readOnlyTools, "AskUserQuestion"]
+          : [
+              ...readOnlyTools,
+              // Non-interactive: allow all tools directly
+              "Write", "Edit", "Bash", "NotebookEdit",
+              "mcp__openclaw-tools__backlog_tasks",
+              "mcp__openclaw-tools__backlog_get_task",
+              "mcp__openclaw-tools__backlog_update_task",
+            ];
 
         const q = queryFn({
           prompt: orchestratorPrompt,
@@ -549,19 +586,10 @@ export default function register(api: OpenClawPluginApi) {
             model: "sonnet",
             maxBudgetUsd: planOnly ? 1.0 : budget,
             maxTurns: planOnly ? 15 : maxTurns,
-            permissionMode: "bypassPermissions",
-            allowDangerouslySkipPermissions: true,
-            allowedTools: [
-              // Analysis tools — orchestrator reads code to plan intelligently
-              "Read", "Glob", "Grep",
-              // Delegation tool — only available in execute mode
-              ...(planOnly ? [] : ["Task"]),
-              // Vault tools — context lookup without spawning an agent
-              "mcp__openclaw-tools__mem_search",
-              "mcp__openclaw-tools__mem_get",
-              "mcp__openclaw-tools__tag_search",
-              "mcp__openclaw-tools__tag_explore",
-            ],
+            permissionMode: interactive ? "default" : "bypassPermissions",
+            allowDangerouslySkipPermissions: !interactive,
+            canUseTool: interactive ? buildCanUseTool(instance) : undefined,
+            allowedTools,
             mcpServers: {
               "openclaw-tools": {
                 type: "sse" as const,
@@ -574,30 +602,19 @@ export default function register(api: OpenClawPluginApi) {
           },
         });
 
-        const instance: CcInstance = {
-          id: instanceId,
-          type: "orchestrate",
-          status: "running",
-          task: params.task,
-          pipeline,
-          planOnly,
-          startedAt: Date.now(),
-          costUsd: 0,
-          turns: 0,
-          budgetUsd: budget,
-          maxTurns,
-          recentMessages: [],
-          _abort: abort,
-          _query: q,
-        };
+        instance._query = q;
 
         instances.set(instanceId, instance);
         pruneInstances();
 
         // Consume in background — don't await
-        consumeQuery(instance, q, api.logger, notifyCompletion).catch((err) => {
+        consumeQuery(instance, q, api.logger, notifyCompletion, notifyProgress).catch((err) => {
           api.logger.error?.(`agent-orchestrator: consumeQuery error for ${instanceId}:`, err);
         });
+
+        const interactiveNote = interactive
+          ? " Interactive mode ON — questions will be pushed to your session. Answer with cc_respond."
+          : "";
 
         return {
           content: [{
@@ -608,11 +625,12 @@ export default function register(api: OpenClawPluginApi) {
               type: "orchestrate",
               pipeline,
               planOnly,
+              interactive,
               budget: planOnly ? 1.0 : budget,
               maxTurns: planOnly ? 15 : maxTurns,
               message: planOnly
                 ? `Plan-only mode started. Use cc_result("${instanceId}") to retrieve the execution plan once complete.`
-                : `Pipeline started. Use cc_status("${instanceId}") to check progress.`,
+                : `Pipeline started.${interactiveNote} Use cc_status("${instanceId}") to check progress.`,
             }, null, 2),
           }],
         };
@@ -656,6 +674,12 @@ export default function register(api: OpenClawPluginApi) {
           type: "number",
           description: "Max budget in USD (default 2.0 for single agents).",
         },
+        interactive: {
+          type: "boolean",
+          description:
+            "Enable interactive mode: file writes and commands require user approval, " +
+            "and the agent can ask clarifying questions. Default false.",
+        },
       },
       required: ["task", "agent"],
     },
@@ -672,12 +696,17 @@ export default function register(api: OpenClawPluginApi) {
           };
         }
 
+        const interactive: boolean = params.interactive ?? false;
+
         // Load fresh prompt from vault at spawn time, with work mode scope
         const vaultPrompt = loadVaultPrompt(params.agent);
         const workMode = getWorkModeScope();
         let agentPrompt = vaultPrompt || agentConfig.prompt;
         if (workMode.scope && VAULT_USING_AGENTS.has(params.agent)) {
           agentPrompt += `\n\n## Vault Scope\nThe user is in **${workMode.mode} mode**. When calling vault tools (mem_search, tag_search, tag_explore), always include the parameter \`scope: "${workMode.scope}"\`.`;
+        }
+        if (interactive) {
+          agentPrompt += `\n\n## Interactive Mode\nYou are running in interactive mode. You may use AskUserQuestion to ask clarifying questions — your question will be relayed to the user and the answer returned. If AskUserQuestion is denied, the denial message contains the user's response — read and use it.`;
         }
         const agentDef = { ...agentConfig, prompt: agentPrompt };
         if (vaultPrompt) {
@@ -689,6 +718,29 @@ export default function register(api: OpenClawPluginApi) {
         const cwd = params.cwd || process.env.HOME || "/home/alansrobotlab";
         const abort = new AbortController();
 
+        const instance: CcInstance = {
+          id: instanceId,
+          type: "spawn",
+          status: "running",
+          task: params.task,
+          agent: params.agent,
+          interactive,
+          startedAt: Date.now(),
+          costUsd: 0,
+          turns: 0,
+          budgetUsd: budget,
+          maxTurns: agentDef.maxTurns || 25,
+          pendingQuestions: [],
+          recentMessages: [],
+          _abort: abort,
+        };
+
+        // Build tool list: in interactive mode, add AskUserQuestion, canUseTool gates destructive tools
+        const agentTools = [...(agentDef.tools || [])];
+        if (interactive && !agentTools.includes("AskUserQuestion")) {
+          agentTools.push("AskUserQuestion");
+        }
+
         // For single agent spawn, the agent IS the top-level query (no subagents)
         const q = queryFn({
           prompt: buildDirectPrompt(params.task),
@@ -698,9 +750,10 @@ export default function register(api: OpenClawPluginApi) {
             model: agentDef.model || "sonnet",
             maxBudgetUsd: budget,
             maxTurns: agentDef.maxTurns || 25,
-            permissionMode: "bypassPermissions",
-            allowDangerouslySkipPermissions: true,
-            allowedTools: agentDef.tools || [],
+            permissionMode: interactive ? "default" : "bypassPermissions",
+            allowDangerouslySkipPermissions: !interactive,
+            canUseTool: interactive ? buildCanUseTool(instance) : undefined,
+            allowedTools: agentTools,
             mcpServers: agentDef.mcpServers?.includes("openclaw-tools")
               ? { "openclaw-tools": { type: "sse" as const, url: MCP_SSE_URL } }
               : {},
@@ -709,28 +762,18 @@ export default function register(api: OpenClawPluginApi) {
           },
         });
 
-        const instance: CcInstance = {
-          id: instanceId,
-          type: "spawn",
-          status: "running",
-          task: params.task,
-          agent: params.agent,
-          startedAt: Date.now(),
-          costUsd: 0,
-          turns: 0,
-          budgetUsd: budget,
-          maxTurns: agentDef.maxTurns || 25,
-          recentMessages: [],
-          _abort: abort,
-          _query: q,
-        };
+        instance._query = q;
 
         instances.set(instanceId, instance);
         pruneInstances();
 
-        consumeQuery(instance, q, api.logger, notifyCompletion).catch((err) => {
+        consumeQuery(instance, q, api.logger, notifyCompletion, notifyProgress).catch((err) => {
           api.logger.error?.(`agent-orchestrator: consumeQuery error for ${instanceId}:`, err);
         });
+
+        const interactiveNote = interactive
+          ? " Interactive mode ON — questions will be pushed to your session."
+          : "";
 
         return {
           content: [{
@@ -741,8 +784,9 @@ export default function register(api: OpenClawPluginApi) {
               type: "spawn",
               agent: params.agent,
               model: agentDef.model || "sonnet",
+              interactive,
               budget,
-              message: `Agent '${params.agent}' started. Use cc_status("${instanceId}") to check progress.`,
+              message: `Agent '${params.agent}' started.${interactiveNote} Use cc_status("${instanceId}") to check progress.`,
             }, null, 2),
           }],
         };
@@ -888,6 +932,9 @@ export default function register(api: OpenClawPluginApi) {
         };
       }
 
+      // Cancel any pending questions first (unblocks promises)
+      const cancelledQuestions = cancelAllForInstance(params.instanceId);
+
       // Abort via AbortController
       try {
         inst._abort?.abort();
@@ -907,9 +954,193 @@ export default function register(api: OpenClawPluginApi) {
       return {
         content: [{
           type: "text" as const,
-          text: `Instance ${params.instanceId} aborted. Ran for ${Math.round((inst.endedAt - inst.startedAt) / 1000)}s.`,
+          text: `Instance ${params.instanceId} aborted. Ran for ${Math.round((inst.endedAt - inst.startedAt) / 1000)}s.${cancelledQuestions > 0 ? ` Cancelled ${cancelledQuestions} pending question(s).` : ""}`,
         }],
       };
+    },
+  });
+
+  // ── Tool: cc_respond ───────────────────────────────────────────────────
+
+  api.registerTool({
+    name: "cc_respond",
+    label: "Claude Code Respond",
+    description:
+      "Answer a pending question from a running Claude Code instance. " +
+      "When an interactive instance needs clarification or permission approval, " +
+      "a question notification is pushed to your session. Use this tool to answer it. " +
+      "The agent is blocked waiting — respond promptly.",
+    parameters: {
+      type: "object",
+      properties: {
+        questionId: {
+          type: "string",
+          description: "The question ID to respond to (from the [Agent Question] notification or cc_status output).",
+        },
+        action: {
+          type: "string",
+          enum: ["allow", "deny", "answer"],
+          description: "'allow' to approve a permission request, 'deny' to reject, 'answer' for free-text response to a clarification.",
+        },
+        text: {
+          type: "string",
+          description: "Free-text response for 'answer' action, or reason for denial. Required for 'answer', optional for 'allow'/'deny'.",
+        },
+      },
+      required: ["questionId", "action"],
+    },
+    async execute(_id: string, params: any) {
+      const answer: QuestionAnswer = {
+        action: params.action,
+        text: params.text,
+      };
+
+      const resolved = resolveQuestion(params.questionId, answer);
+
+      if (!resolved) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Question "${params.questionId}" not found or already answered. Use cc_status to see current pending questions.`,
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Response delivered to question "${params.questionId}" (action: ${params.action}). Agent will continue.`,
+        }],
+      };
+    },
+  });
+
+  // ── Tool: cc_plan_interactive ─────────────────────────────────────────
+
+  api.registerTool({
+    name: "cc_plan_interactive",
+    label: "Claude Code Interactive Planning",
+    description:
+      "Start an interactive planning session. A planner agent explores the codebase " +
+      "and asks clarifying questions about requirements, scope, and preferences before " +
+      "producing a detailed execution plan. Questions are pushed to your session via hooks — " +
+      "answer them with cc_respond. When complete, use cc_result to retrieve the plan, " +
+      "then execute it with cc_orchestrate.",
+    parameters: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description: "What to plan. Be specific about the goal but leave room for the planner to ask about details.",
+        },
+        context: {
+          type: "string",
+          description: "Additional context: relevant file paths, constraints, prior decisions.",
+        },
+        cwd: {
+          type: "string",
+          description: "Working directory for the project.",
+        },
+      },
+      required: ["task"],
+    },
+    async execute(_id: string, params: any) {
+      try {
+        const queryFn = await getQuery();
+        const instanceId = randomUUID().slice(0, 8);
+        const cwd = params.cwd || process.env.HOME || "/home/alansrobotlab";
+        const abort = new AbortController();
+
+        const workMode = getWorkModeScope();
+        const agents = buildAgentDefs(api.logger, workMode.scope ? workMode : undefined, true);
+
+        const orchestratorPrompt = buildInteractivePlanningPrompt(
+          params.task, params.context, loadVaultPrompt("orchestrator"),
+          workMode.scope ? workMode : null,
+        );
+
+        const instance: CcInstance = {
+          id: instanceId,
+          type: "orchestrate",
+          status: "running",
+          task: params.task,
+          pipeline: "interactive-plan",
+          planOnly: true,
+          interactive: true,
+          startedAt: Date.now(),
+          costUsd: 0,
+          turns: 0,
+          budgetUsd: 2.0,
+          maxTurns: 20,
+          pendingQuestions: [],
+          recentMessages: [],
+          _abort: abort,
+        };
+
+        const q = queryFn({
+          prompt: orchestratorPrompt,
+          options: {
+            systemPrompt: {
+              type: "preset" as const,
+              preset: "claude_code" as const,
+              append: "\nYou are a project coordinator in INTERACTIVE PLANNING mode. " +
+                "Explore the codebase with Read/Glob/Grep, ask clarifying questions with AskUserQuestion, " +
+                "then produce a detailed execution plan. Do NOT modify any files or dispatch agents.",
+            },
+            cwd,
+            model: "opus",
+            maxBudgetUsd: 2.0,
+            maxTurns: 20,
+            permissionMode: "default",
+            allowDangerouslySkipPermissions: false,
+            canUseTool: buildCanUseTool(instance),
+            allowedTools: [
+              "Read", "Glob", "Grep", "AskUserQuestion",
+              "mcp__openclaw-tools__mem_search",
+              "mcp__openclaw-tools__mem_get",
+              "mcp__openclaw-tools__tag_search",
+              "mcp__openclaw-tools__tag_explore",
+            ],
+            mcpServers: {
+              "openclaw-tools": {
+                type: "sse" as const,
+                url: MCP_SSE_URL,
+              },
+            },
+            agents,
+            abortController: abort,
+            pathToClaudeCodeExecutable: CLAUDE_CODE_PATH,
+          },
+        });
+
+        instance._query = q;
+        instances.set(instanceId, instance);
+        pruneInstances();
+
+        // Consume in background — questions are pushed via hooks
+        consumeQuery(instance, q, api.logger, notifyCompletion, notifyProgress).catch((err) => {
+          api.logger.error?.(`agent-orchestrator: consumeQuery error for ${instanceId}:`, err);
+        });
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              instanceId,
+              status: "started",
+              type: "interactive-plan",
+              message: `Interactive planning started. The planner will explore the codebase and push questions to your session. Answer with cc_respond. Use cc_result("${instanceId}") when complete.`,
+            }, null, 2),
+          }],
+        };
+      } catch (err: any) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `cc_plan_interactive error: ${err.message}`,
+          }],
+        };
+      }
     },
   });
 
@@ -989,6 +1220,7 @@ export default function register(api: OpenClawPluginApi) {
           task: inst.task,
           pipeline: inst.pipeline,
           agent: inst.agent,
+          interactive: inst.interactive,
           startedAt: inst.startedAt,
           endedAt: inst.endedAt,
           elapsedMs: (inst.endedAt || Date.now()) - inst.startedAt,
@@ -1060,6 +1292,7 @@ export default function register(api: OpenClawPluginApi) {
           return;
         }
 
+        cancelAllForInstance(id);
         try { inst._abort?.abort(); } catch {}
         try { inst._query?.close?.(); } catch {}
         inst.status = "aborted";
@@ -1075,6 +1308,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── Helpers ────────────────────────────────────────────────────────────
 
   function formatStatus(inst: CcInstance): InstanceStatusResponse {
+    const pending = listPendingQuestions(inst.id);
     return {
       id: inst.id,
       type: inst.type,
@@ -1082,16 +1316,18 @@ export default function register(api: OpenClawPluginApi) {
       task: inst.task,
       pipeline: inst.pipeline,
       agent: inst.agent,
+      interactive: inst.interactive,
       elapsedMs: (inst.endedAt || Date.now()) - inst.startedAt,
       costUsd: Math.round(inst.costUsd * 1000) / 1000,
       turns: inst.turns,
       activity: inst.activity,
       resultPreview: inst.resultText ? inst.resultText.slice(0, 500) : undefined,
       error: inst.error,
+      pendingQuestions: pending.length > 0 ? pending : undefined,
     };
   }
 
   // ── Startup ────────────────────────────────────────────────────────────
 
-  api.logger.info?.("agent-orchestrator: loaded — 5 tools (cc_orchestrate, cc_spawn, cc_status, cc_result, cc_abort)");
+  api.logger.info?.("agent-orchestrator: loaded — 7 tools (cc_orchestrate, cc_spawn, cc_status, cc_result, cc_abort, cc_respond, cc_plan_interactive)");
 }

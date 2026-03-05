@@ -51,9 +51,9 @@ export default function register(api: OpenClawPluginApi) {
   };
 
   const MODE_MEMORY_PREFIX: Record<WorkMode, string> = {
-    work:     "agents/lloyd/memory/work",
-    personal: "agents/lloyd/memory/personal",
-    general:  "agents/lloyd/memory/personal",
+    work:     "lloyd/memory/work",
+    personal: "lloyd/memory/personal",
+    general:  "lloyd/memory/personal",
   };
 
   function readModeState(): ModeState {

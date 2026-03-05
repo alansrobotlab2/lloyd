@@ -28,6 +28,9 @@ interface Logger {
 /** Callback to fire system events when pipelines complete */
 type NotifyFn = (instanceId: string, summary: string) => void;
 
+/** Callback to push progress messages into Lloyd's session (interactive mode) */
+type ProgressNotifyFn = (instanceId: string, message: string) => void;
+
 /**
  * Append a line to the instance's JSONL log file.
  */
@@ -76,6 +79,7 @@ export async function consumeQuery(
   queryIter: AsyncGenerator<any, void>,
   logger: Logger,
   notify: NotifyFn,
+  notifyProgress?: ProgressNotifyFn,
 ): Promise<void> {
   // Log instance start
   logToFile(instance, {
@@ -105,6 +109,9 @@ export async function consumeQuery(
         const errorContent = message.error?.message || message.message || "Unknown error";
         pushMessage(instance, { ts: Date.now(), type: "error", content: errorContent });
         logToFile(instance, { event: "error", content: errorContent });
+      } else if (message.type === "system") {
+        // Task lifecycle messages — subagent progress tracking
+        processSystemMessage(instance, message, logger, notifyProgress);
       }
     }
   } catch (err: any) {
@@ -274,4 +281,72 @@ function summarizeParams(input: any): string {
     if (parts.join(", ").length > 80) break;
   }
   return truncate(parts.join(", "), 80);
+}
+
+/**
+ * Process SDK system messages — task lifecycle events for subagent tracking.
+ * Handles task_started, task_progress, task_notification subtypes.
+ */
+function processSystemMessage(
+  instance: CcInstance,
+  message: any,
+  logger: Logger,
+  notifyProgress?: ProgressNotifyFn,
+): void {
+  const subtype = message.subtype;
+
+  if (subtype === "task_started") {
+    const desc = message.description || "unknown task";
+    const taskType = message.task_type || "";
+    instance.activity = `task: ${desc}`;
+    pushMessage(instance, {
+      ts: Date.now(),
+      type: "task_progress",
+      agent: taskType,
+      content: `Task started: ${desc}`,
+    });
+    logToFile(instance, {
+      event: "task_started",
+      taskId: message.task_id,
+      taskType,
+      description: desc,
+    });
+  } else if (subtype === "task_progress") {
+    const desc = message.description || "";
+    const lastTool = message.last_tool_name || "";
+    instance.activity = desc || `using ${lastTool}`;
+    pushMessage(instance, {
+      ts: Date.now(),
+      type: "task_progress",
+      content: `Progress: ${desc}${lastTool ? ` (${lastTool})` : ""}`,
+    });
+    logToFile(instance, {
+      event: "task_progress",
+      taskId: message.task_id,
+      description: desc,
+      lastTool,
+    });
+  } else if (subtype === "task_notification") {
+    const status = message.status || "unknown";
+    const summary = message.summary || "";
+    const isComplete = status === "completed";
+    pushMessage(instance, {
+      ts: Date.now(),
+      type: isComplete ? "subagent_end" : "error",
+      content: `Task ${status}: ${truncate(summary, 300)}`,
+    });
+    logToFile(instance, {
+      event: "task_notification",
+      taskId: message.task_id,
+      status,
+      summary: truncate(summary, 2000),
+      usage: message.usage,
+    });
+
+    // In interactive mode, push milestone notifications to Lloyd's session
+    if (instance.interactive && notifyProgress) {
+      const progressMsg = `**[Agent Progress]** \`${instance.id}\`: Task ${status} — ${truncate(summary, 200)}`;
+      notifyProgress(instance.id, progressMsg);
+    }
+  }
 }

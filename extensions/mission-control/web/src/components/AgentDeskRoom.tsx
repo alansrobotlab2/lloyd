@@ -117,6 +117,19 @@ function AvatarHead({ agentId, x, y, size = 36 }: { agentId: string | null; x: n
 function DeskSlot({ occupant, index, onAgentClick }: { occupant?: DeskOccupant; index: number; onAgentClick?: (agentId: string) => void }) {
   const active = !!occupant;
   const agentId = occupant?.agentId ?? null;
+  const DESK_MUG_COLORS: Record<string, string> = {
+    coder:       "#7a9e87",  // sage green
+    reviewer:    "#7a7aab",  // slate blue
+    tester:      "#a87a7a",  // dusty rose
+    planner:     "#7a8ea8",  // steel blue
+    auditor:     "#9e7a87",  // dusty mauve
+    operator:    "#7a9e9e",  // muted teal
+    researcher:  "#a8927a",  // muted terracotta
+    orchestrator:"#8a7aab",  // dusty purple
+    clawhub:     "#9ea87a",  // olive green
+    memory:      "#a8a07a",  // warm sand
+  };
+  const mugColor = agentId ? (DESK_MUG_COLORS[agentId] || "#8a8a9e") : "#8a8a9e";
   const statusText = truncateStatus(occupant?.task, 24);
   const [line1, line2] = wrapLines(statusText);
   const maxLineLen = Math.max(line1.length, line2?.length ?? 0);
@@ -200,6 +213,30 @@ function DeskSlot({ occupant, index, onAgentClick }: { occupant?: DeskOccupant; 
         <rect x={dL+4} y={deskFrontY+deskHeight} width="6" height="20" fill="#4a2e1a" opacity={active ? 0.8 : 0.4} />
         <rect x={dR-10} y={deskFrontY+deskHeight} width="6" height="20" fill="#4a2e1a" opacity={active ? 0.8 : 0.4} />
         <rect x={dL+4} y={deskFrontY+deskHeight+17} width={dR-dL-8} height="3" rx="1.5" fill="#3d2416" opacity={active ? 0.5 : 0.3} />
+
+        {/* Coffee cup on left side of desk */}
+        <g opacity={active ? 1 : 0.45}>
+          <polygon points={`14,${deskTopY} 30,${deskTopY} 29,${deskTopY-12} 15,${deskTopY-12}`} fill={mugColor} />
+          <ellipse cx={22} cy={deskTopY-12} rx={8} ry={2.5} fill={mugColor} />
+          <ellipse cx={22} cy={deskTopY-12} rx={6.5} ry={2} fill="#3d1f00" />
+          <path d={`M30,${deskTopY-9} Q36,${deskTopY-9} 36,${deskTopY-5} Q36,${deskTopY-1} 30,${deskTopY-1}`} fill="none" stroke={mugColor} strokeWidth="2" />
+          {active && (
+            <g>
+              <path d={`M19,${deskTopY-15} Q17,${deskTopY-20} 19,${deskTopY-25}`} stroke="rgba(200,200,200,0.6)" strokeWidth="1.5" fill="none" strokeLinecap="round">
+                <animate attributeName="opacity" values="0;0.7;0" dur="2s" begin="0s" repeatCount="indefinite" />
+                <animateTransform attributeName="transform" type="translate" values="0,0;-1,-6;-2,-12" dur="2s" begin="0s" repeatCount="indefinite" />
+              </path>
+              <path d={`M22,${deskTopY-15} Q24,${deskTopY-20} 22,${deskTopY-25}`} stroke="rgba(200,200,200,0.5)" strokeWidth="1.2" fill="none" strokeLinecap="round">
+                <animate attributeName="opacity" values="0;0.6;0" dur="2.2s" begin="0.5s" repeatCount="indefinite" />
+                <animateTransform attributeName="transform" type="translate" values="0,0;1,-7;0,-13" dur="2.2s" begin="0.5s" repeatCount="indefinite" />
+              </path>
+              <path d={`M25,${deskTopY-15} Q23,${deskTopY-20} 25,${deskTopY-25}`} stroke="rgba(200,200,200,0.4)" strokeWidth="1" fill="none" strokeLinecap="round">
+                <animate attributeName="opacity" values="0;0.5;0" dur="1.8s" begin="1s" repeatCount="indefinite" />
+                <animateTransform attributeName="transform" type="translate" values="0,0;0,-5;1,-11" dur="1.8s" begin="1s" repeatCount="indefinite" />
+              </path>
+            </g>
+          )}
+        </g>
         </g>
 
         {/* Laptop on desk */}

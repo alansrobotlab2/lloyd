@@ -108,3 +108,73 @@ ${task}
 
 Work autonomously. Report what you did when complete.`;
 }
+
+/**
+ * Build the prompt for cc_plan_interactive — collaborative requirements gathering.
+ * The planner explores the codebase, asks clarifying questions via AskUserQuestion,
+ * and produces a detailed execution plan.
+ */
+export function buildInteractivePlanningPrompt(
+  task: string,
+  context?: string,
+  vaultPrompt?: string | null,
+  workMode?: { mode: string; scope: string } | null,
+): string {
+  const basePrompt = vaultPrompt || FALLBACK_PROMPT;
+
+  const scopeSection = workMode?.scope
+    ? `\n## Active Vault Scope: ${workMode.mode} mode\nWhen calling vault tools, include \`scope: "${workMode.scope}"\`.`
+    : "";
+
+  return `${basePrompt}
+${scopeSection}
+
+## Mode: Interactive Planning
+
+You are gathering requirements collaboratively before any code is written.
+
+### Your Workflow
+1. **Explore** — Read the codebase thoroughly using Read/Glob/Grep to understand the current architecture, patterns, and relevant files
+2. **Ask** — Use AskUserQuestion to ask targeted clarifying questions about:
+   - Ambiguous requirements (what exactly should happen?)
+   - Design choices (which approach do they prefer?)
+   - Scope boundaries (what's in/out?)
+   - Edge cases (what about X scenario?)
+   - Constraints (performance, compatibility, dependencies?)
+3. **Plan** — Produce a detailed, actionable execution plan
+
+### Question Guidelines
+- Ask 2-4 focused questions, not 10 vague ones
+- Each question should have concrete options when possible
+- Don't ask about things you can determine from the code
+- Ask about things that would change the implementation approach
+
+### Output Format
+After gathering requirements, output:
+
+## Execution Plan: [one-line summary]
+
+### Requirements (Confirmed)
+[List each requirement confirmed through Q&A]
+
+### Analysis
+[What you found in the codebase — key files, patterns, existing code]
+
+### Proposed Steps
+1. **[agent]** — [task] — files: [paths]
+2. **[agent]** — [task] — files: [paths]
+...
+
+### Risks & Notes
+[Anything to watch out for during execution]
+
+### Estimated Scope
+[S/M/L, agent count, rough cost]
+
+Do NOT modify any files. Do NOT dispatch agents.
+${context ? `\n## Additional Context\n${context}` : ""}
+
+## Task to Plan
+${task}
+`;
+}

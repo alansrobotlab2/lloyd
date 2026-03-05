@@ -15,11 +15,14 @@ function extractText(content: Array<{ type: string; text?: string }>): string {
     .trim();
 }
 
-/** Detect system-injected context messages (prefill, cron, session reset) */
+/** Detect pure system-injected messages with no real user text */
 function isContextMessage(msg: MessageEntry): boolean {
   if (msg.role !== "user") return false;
   const text = extractText(msg.content);
-  return /^<\w+[\s>]/.test(text) || /^\[cron:/.test(text);
+  if (/^\[cron:/.test(text)) return true;
+  // Strip all gateway-injected wrappers — if nothing remains, it's pure context
+  const stripped = stripInjectedContext(text);
+  return stripped.length === 0;
 }
 
 function isSystemMessage(msg: MessageEntry): boolean {
@@ -30,6 +33,22 @@ function isSystemMessage(msg: MessageEntry): boolean {
 
 function timeStr(ts: string): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Strip all gateway-injected context wrappers to find the real user text */
+function stripInjectedContext(text: string): string {
+  return text
+    .replace(/<daily_notes>[\s\S]*?<\/daily_notes>\s*/i, "")
+    .replace(/<active_mode>\w*<\/active_mode>\s*/i, "")
+    .replace(/<memory_context>[\s\S]*?<\/memory_context>\s*/i, "")
+    .replace(/\[(?:[A-Z][a-z]{2} )?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?[^\]]*\]\s*/, "")
+    .replace(/A new session was started via\b[\s\S]*/i, "")
+    .trim();
+}
+
+/** Strip injected prefixes from user messages for display */
+function stripDatetimePrefix(text: string): string {
+  return stripInjectedContext(text);
 }
 
 interface ChatPanelProps {
@@ -356,7 +375,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
                     {text && (
                       <div
                         className="text-sm leading-relaxed prose-chat"
-                        dangerouslySetInnerHTML={{ __html: marked.parse(text) as string }}
+                        dangerouslySetInnerHTML={{ __html: marked.parse(msg.role === "user" ? stripDatetimePrefix(text) : text) as string }}
                       />
                     )}
                     {toolCalls.length > 0 && (

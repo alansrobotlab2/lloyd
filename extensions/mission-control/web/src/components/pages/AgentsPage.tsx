@@ -1049,7 +1049,6 @@ function SdkAgentCard({
         className="w-full p-4 text-left hover:bg-surface-2/50 transition-colors"
       >
         <div className="flex items-center gap-3">
-          <CoffeeMug agentId={agent.id} isWorking={counts.active > 0} />
           <img
             src={agent.avatarUrl}
             alt={agent.id}
