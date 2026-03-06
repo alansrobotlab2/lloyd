@@ -1238,6 +1238,7 @@ export default function register(api: OpenClawPluginApi) {
     os?: string[];
     enabled: boolean;
     configured: boolean;
+    location: string;
   }
 
   // Check if a binary exists on $PATH (mirrors SDK hasBinary logic)
@@ -1334,6 +1335,7 @@ export default function register(api: OpenClawPluginApi) {
           os: oc.os,
           enabled,
           configured,
+          location: skillFile,
         });
       } catch {}
     }
@@ -1405,6 +1407,84 @@ export default function register(api: OpenClawPluginApi) {
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
+    },
+  });
+
+  // ── API: /api/mc/skill-content ─────────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/skill-content",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === "GET") {
+        const url = new URL(req.url!, `http://localhost`);
+        const skillName = url.searchParams.get("name");
+        if (!skillName) {
+          jsonResponse(res, { error: "Missing name parameter" }, 400);
+          return;
+        }
+        // Search in workspace first, then bundled
+        const dirs = [workspaceSkillsDir, bundledSkillsDir];
+        for (const dir of dirs) {
+          if (!existsSync(dir)) continue;
+          for (const entry of readdirSync(dir)) {
+            const skillFile = join(dir, entry, "SKILL.md");
+            if (!existsSync(skillFile)) continue;
+            try {
+              const raw = readFileSync(skillFile, "utf-8");
+              const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+              if (!fmMatch) continue;
+              const fm = YAML.parse(fmMatch[1]);
+              const skillKey = fm.name || entry;
+              if (skillKey === skillName || entry === skillName) {
+                jsonResponse(res, { content: raw, location: skillFile });
+                return;
+              }
+            } catch {}
+          }
+        }
+        jsonResponse(res, { error: "Skill not found" }, 404);
+        return;
+      }
+
+      if (req.method === "POST") {
+        try {
+          const body = JSON.parse(await readBody(req));
+          const { skillName, content } = body;
+          if (!skillName || typeof content !== "string") {
+            jsonResponse(res, { error: "Missing skillName or content" }, 400);
+            return;
+          }
+          // Find the skill file location
+          const dirs = [workspaceSkillsDir, bundledSkillsDir];
+          for (const dir of dirs) {
+            if (!existsSync(dir)) continue;
+            for (const entry of readdirSync(dir)) {
+              const skillFile = join(dir, entry, "SKILL.md");
+              if (!existsSync(skillFile)) continue;
+              try {
+                const raw = readFileSync(skillFile, "utf-8");
+                const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+                if (!fmMatch) continue;
+                const fm = YAML.parse(fmMatch[1]);
+                const skillKey = fm.name || entry;
+                if (skillKey === skillName || entry === skillName) {
+                  writeFileSync(skillFile, content, "utf-8");
+                  // Invalidate skills cache
+                  skillsCache = null;
+                  jsonResponse(res, { ok: true });
+                  return;
+                }
+              } catch {}
+            }
+          }
+          jsonResponse(res, { error: "Skill not found" }, 404);
+        } catch (err: any) {
+          jsonResponse(res, { error: err.message }, 500);
+        }
+        return;
+      }
+
+      jsonResponse(res, { error: "GET or POST only" }, 405);
     },
   });
 
@@ -2008,6 +2088,18 @@ export default function register(api: OpenClawPluginApi) {
     { id: "voice-mcp", name: "Voice Services MCP", unit: "lloyd-voice-mcp.service", port: 8094 },
   ];
 
+  // Known port map for lloyd-* services (dynamic discovery)
+  const LLOYD_PORT_MAP: Record<string, number> = {
+    "lloyd-llm.service": 8091,
+    "lloyd-tts.service": 8090,
+    "lloyd-cosyvoice.service": 8090,
+    "lloyd-voice-mode.service": 8092,
+    "lloyd-tool-mcp.service": 8093,
+    "lloyd-voice-mcp.service": 8094,
+    "lloyd-qmd-daemon.service": 8181,
+    "lloyd-clawdeck.service": 3001,
+  };
+
   function checkPort(port: number, timeoutMs = 2000): Promise<boolean> {
     return new Promise((resolve) => {
       const socket = netConnect({ host: "127.0.0.1", port });
@@ -2083,24 +2175,27 @@ export default function register(api: OpenClawPluginApi) {
         const { serviceId, action } = body;
 
         const svc = MANAGED_SERVICES.find((s) => s.id === serviceId);
-        if (!svc) {
+        // Also allow lloyd-* unit names directly (dynamic services)
+        const lloydUnit = !svc && serviceId.startsWith("lloyd-") ? `${serviceId}.service` : null;
+        if (!svc && !lloydUnit) {
           jsonResponse(res, { error: `Unknown service: ${serviceId}` }, 400);
           return;
         }
+        const unitName = svc ? svc.unit : lloydUnit!;
         if (!["start", "stop", "restart"].includes(action)) {
           jsonResponse(res, { error: `Invalid action: ${action}` }, 400);
           return;
         }
 
         // For gateway restart, kill the port first to avoid conflicts
-        if (svc.id === "gateway" && (action === "restart" || action === "start")) {
+        if (svc?.id === "gateway" && (action === "restart" || action === "start")) {
           try {
             execSync(`kill $(lsof -ti :18789) 2>/dev/null`, { timeout: 5000 });
           } catch {} // ok if nothing to kill
           await new Promise((r) => setTimeout(r, 2000));
         }
 
-        execSync(`systemctl --user ${action} ${svc.unit}`, {
+        execSync(`systemctl --user ${action} ${unitName}`, {
           encoding: "utf-8",
           timeout: 15000,
         });
@@ -2174,6 +2269,83 @@ export default function register(api: OpenClawPluginApi) {
           logLines,
           rawStatus: statusOutput,
         });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // GET /api/mc/lloyd-services
+  api.registerHttpRoute({
+    path: "/api/mc/lloyd-services",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        // Get all lloyd-* units from systemctl
+        let units: any[] = [];
+        try {
+          const output = execSync(
+            `systemctl --user list-units 'lloyd-*' --all --output=json 2>/dev/null`,
+            { encoding: "utf-8", timeout: 5000 },
+          );
+          units = JSON.parse(output);
+        } catch (e: any) {
+          jsonResponse(res, { error: "Failed to query systemctl: " + (e.message || String(e)) }, 500);
+          return;
+        }
+
+        // Get uptime/active-since for each unit
+        const services = await Promise.all(
+          units.map(async (u: any) => {
+            const unit: string = u.unit || "";
+            const id = unit.replace(".service", "");
+            const name = u.description || unit;
+            const activeState: string = u.active || "unknown";
+            const subState: string = u.sub || "unknown";
+
+            // Determine port from known map
+            const port: number | null = LLOYD_PORT_MAP[unit] ?? null;
+
+            // Check port health if we know the port
+            let portHealthy: boolean | null = null;
+            if (port !== null) {
+              portHealthy = await checkPort(port);
+            }
+
+            // Get uptime (ActiveEnterTimestamp)
+            let uptime: string | null = null;
+            if (activeState === "active" && subState === "running") {
+              try {
+                const ts = execSync(
+                  `systemctl --user show ${unit} --property=ActiveEnterTimestamp --value 2>/dev/null`,
+                  { encoding: "utf-8", timeout: 2000 },
+                ).trim();
+                if (ts && ts !== "n/a" && ts !== "") {
+                  const since = new Date(ts);
+                  if (!isNaN(since.getTime())) {
+                    const ms = Date.now() - since.getTime();
+                    const s = Math.floor(ms / 1000);
+                    if (s < 60) uptime = `${s}s`;
+                    else if (s < 3600) uptime = `${Math.floor(s / 60)}m`;
+                    else if (s < 86400) uptime = `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+                    else uptime = `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+                  }
+                }
+              } catch {}
+            }
+
+            // Compute health
+            let health: string;
+            if (activeState === "failed") health = "stopped";
+            else if (activeState === "active" && subState === "running") {
+              health = portHealthy === false ? "degraded" : "healthy";
+            } else if (activeState === "active") health = "healthy";
+            else health = "stopped";
+
+            return { id, unit, name, activeState, subState, port, portHealthy, uptime, health };
+          }),
+        );
+
+        jsonResponse(res, { services, timestamp: new Date().toISOString() });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
@@ -2912,7 +3084,7 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   // ── API: /api/mc/agent-avatar ───────────────────────────────────────────
-  // Serves avatar images — checks ~/obsidian/lloyd/avatars/<id>.ext first (flat),
+  // Serves avatar images — checks ~/obsidian/agents/lloyd/avatars/<id>.ext first (flat),
   // then legacy ~/obsidian/agents/<id>/avatar/ directory.
 
   const AVATAR_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
@@ -2920,7 +3092,7 @@ export default function register(api: OpenClawPluginApi) {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".png": "image/png", ".webp": "image/webp",
   };
-  const AVATARS_DIR = join(homedir(), "obsidian", "lloyd", "avatars");
+  const AVATARS_DIR = join(homedir(), "obsidian", "agents", "lloyd", "avatars");
 
   /** Check flat ~/obsidian/lloyd/avatars/<id>.{jpg,jpeg,png,webp} */
   function discoverAvatarFlat(agentId: string): string | null {

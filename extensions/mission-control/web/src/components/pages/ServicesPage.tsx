@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Activity, Play, Square, RotateCcw, RefreshCw, ChevronDown, Terminal, Cpu, HardDrive, Clock, AlertTriangle } from "lucide-react";
-import { api, type ServiceStatus, type ServiceDetail } from "../../api";
+import { api, type ServiceStatus, type ServiceDetail, type LloydServiceUnit } from "../../api";
 
 export default function ServicesPage() {
+  // Existing managed services state
   const [services, setServices] = useState<ServiceStatus[]>([]);
   const [timestamp, setTimestamp] = useState("");
   const [loading, setLoading] = useState(true);
@@ -13,6 +14,12 @@ export default function ServicesPage() {
   const [gatewayRestarting, setGatewayRestarting] = useState(false);
   const [countdown, setCountdown] = useState(8);
   const logEndRef = useRef<HTMLDivElement>(null);
+
+  // Lloyd services state
+  const [lloydServices, setLloydServices] = useState<LloydServiceUnit[]>([]);
+  const [lloydTimestamp, setLloydTimestamp] = useState("");
+  const [lloydLoading, setLloydLoading] = useState(true);
+  const [lloydActionLoading, setLloydActionLoading] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -25,11 +32,28 @@ export default function ServicesPage() {
     setLoading(false);
   }, []);
 
+  const refreshLloyd = useCallback(async () => {
+    try {
+      const data = await api.lloydServices();
+      setLloydServices(data.services);
+      setLloydTimestamp(data.timestamp);
+    } catch {
+      // keep stale data
+    }
+    setLloydLoading(false);
+  }, []);
+
   useEffect(() => {
     refresh();
     const interval = setInterval(refresh, 5000);
     return () => clearInterval(interval);
   }, [refresh]);
+
+  useEffect(() => {
+    refreshLloyd();
+    const interval = setInterval(refreshLloyd, 10000);
+    return () => clearInterval(interval);
+  }, [refreshLloyd]);
 
   // Fetch detail when a service is expanded
   const fetchDetail = useCallback(async (id: string) => {
@@ -74,7 +98,6 @@ export default function ServicesPage() {
   ) => {
     e.stopPropagation();
 
-    // Gateway restart: fire-and-forget, show overlay, reload after 8s
     if (serviceId === "gateway" && action === "restart") {
       setGatewayRestarting(true);
       setCountdown(8);
@@ -92,7 +115,6 @@ export default function ServicesPage() {
       return;
     }
 
-    // Gateway stop: confirm first
     if (serviceId === "gateway" && action === "stop") {
       const ok = window.confirm(
         "Stopping the gateway will disconnect Mission Control and all services will become unreachable. Continue?",
@@ -112,6 +134,23 @@ export default function ServicesPage() {
       await refresh();
     }
     setActionLoading(null);
+  };
+
+  const handleLloydAction = async (
+    e: React.MouseEvent,
+    serviceId: string,
+    action: "start" | "stop" | "restart",
+  ) => {
+    e.stopPropagation();
+    setLloydActionLoading(`${serviceId}-${action}`);
+    try {
+      await api.lloydServiceAction(serviceId, action);
+      await new Promise((r) => setTimeout(r, 1500));
+      await refreshLloyd();
+    } catch {
+      await refreshLloyd();
+    }
+    setLloydActionLoading(null);
   };
 
   const healthDot = (health: string) => {
@@ -140,8 +179,23 @@ export default function ServicesPage() {
     }
   };
 
+  const subStateBadge = (sub: string) => {
+    switch (sub) {
+      case "running":
+        return "text-emerald-400";
+      case "failed":
+        return "text-red-400";
+      case "dead":
+      case "exited":
+        return "text-slate-500";
+      default:
+        return "text-slate-500";
+    }
+  };
+
   const healthyCount = services.filter((s) => s.health === "healthy").length;
   const totalCount = services.length;
+  const lloydHealthy = lloydServices.filter((s) => s.health === "healthy").length;
 
   return (
     <div className="p-6 space-y-6 overflow-auto">
@@ -195,7 +249,6 @@ export default function ServicesPage() {
           const isExpanded = expandedId === svc.id;
           return (
             <div key={svc.id} className="rounded-xl border border-surface-3/50 overflow-hidden">
-              {/* Service row (clickable) */}
               <div
                 onClick={() => toggleExpand(svc.id)}
                 className={`bg-surface-1 px-5 py-4 flex items-center gap-4 cursor-pointer transition-colors ${
@@ -204,111 +257,51 @@ export default function ServicesPage() {
                     : "hover:border-surface-3/80"
                 }`}
               >
-                {/* Health indicator */}
-                <div
-                  className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${healthDot(svc.health)}`}
-                />
-
-                {/* Service info */}
+                <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${healthDot(svc.health)}`} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-slate-200">
-                    {svc.name}
-                  </div>
+                  <div className="text-sm font-medium text-slate-200">{svc.name}</div>
                   <div className="text-[10px] text-slate-500 font-mono mt-0.5">
                     {svc.unit} &middot; :{svc.port}
                   </div>
                 </div>
-
-                {/* Status badge */}
-                <span
-                  className={`text-[10px] px-2 py-0.5 rounded-full font-mono border ${stateBadge(svc.systemdState)}`}
-                >
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono border ${stateBadge(svc.systemdState)}`}>
                   {svc.systemdState}
                 </span>
-
-                {/* Port health */}
                 <span
-                  className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
-                    svc.portHealthy
-                      ? "text-emerald-400"
-                      : "text-slate-600"
-                  }`}
+                  className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}
                   title={svc.portHealthy ? "Port responding" : "Port not responding"}
                 >
                   :{svc.port}
                 </span>
-
-                {/* Action buttons */}
                 <div className="flex gap-1">
-                  <button
-                    onClick={(e) => handleAction(e, svc.id, "start")}
-                    disabled={actionLoading !== null}
-                    title="Start"
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50"
-                  >
+                  <button onClick={(e) => handleAction(e, svc.id, "start")} disabled={actionLoading !== null} title="Start" className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50">
                     <Play className="w-3.5 h-3.5" />
                   </button>
-                  <button
-                    onClick={(e) => handleAction(e, svc.id, "stop")}
-                    disabled={actionLoading !== null}
-                    title="Stop"
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
-                  >
+                  <button onClick={(e) => handleAction(e, svc.id, "stop")} disabled={actionLoading !== null} title="Stop" className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50">
                     <Square className="w-3.5 h-3.5" />
                   </button>
-                  <button
-                    onClick={(e) => handleAction(e, svc.id, "restart")}
-                    disabled={actionLoading !== null}
-                    title="Restart"
-                    className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50 ${
-                      actionLoading === `${svc.id}-restart` ? "animate-spin" : ""
-                    }`}
-                  >
+                  <button onClick={(e) => handleAction(e, svc.id, "restart")} disabled={actionLoading !== null} title="Restart" className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50 ${actionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}>
                     <RotateCcw className="w-3.5 h-3.5" />
                   </button>
                 </div>
-
-                {/* Expand chevron */}
-                <ChevronDown
-                  className={`w-4 h-4 text-slate-500 transition-transform ${
-                    isExpanded ? "rotate-180" : ""
-                  }`}
-                />
+                <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
               </div>
 
-              {/* Expanded detail panel */}
               {isExpanded && (
                 <div className="bg-surface-0 px-5 py-4 space-y-4">
                   {detailLoading && !detail ? (
-                    <div className="text-xs text-slate-500 text-center py-4">
-                      Loading service details...
-                    </div>
+                    <div className="text-xs text-slate-500 text-center py-4">Loading service details...</div>
                   ) : detail ? (
                     <>
-                      {/* Stats row */}
                       <div className="flex flex-wrap gap-4">
-                        {detail.pid && (
-                          <StatChip icon={<Cpu className="w-3.5 h-3.5" />} label="PID" value={String(detail.pid)} />
-                        )}
-                        {detail.memory && (
-                          <StatChip icon={<HardDrive className="w-3.5 h-3.5" />} label="Memory" value={detail.memory} />
-                        )}
-                        {detail.cpu && (
-                          <StatChip icon={<Clock className="w-3.5 h-3.5" />} label="CPU" value={detail.cpu} />
-                        )}
-                        {detail.tasks && (
-                          <StatChip icon={<Activity className="w-3.5 h-3.5" />} label="Tasks" value={detail.tasks} />
-                        )}
+                        {detail.pid && <StatChip icon={<Cpu className="w-3.5 h-3.5" />} label="PID" value={String(detail.pid)} />}
+                        {detail.memory && <StatChip icon={<HardDrive className="w-3.5 h-3.5" />} label="Memory" value={detail.memory} />}
+                        {detail.cpu && <StatChip icon={<Clock className="w-3.5 h-3.5" />} label="CPU" value={detail.cpu} />}
+                        {detail.tasks && <StatChip icon={<Activity className="w-3.5 h-3.5" />} label="Tasks" value={detail.tasks} />}
                       </div>
-
-                      {/* Active since */}
                       {detail.activeSince && (
-                        <div className="text-[11px] text-slate-400 font-mono">
-                          Active: {detail.activeSince}
-                        </div>
+                        <div className="text-[11px] text-slate-400 font-mono">Active: {detail.activeSince}</div>
                       )}
-
-                      {/* Log lines */}
                       <div>
                         <div className="flex items-center gap-2 mb-2">
                           <Terminal className="w-3.5 h-3.5 text-slate-500" />
@@ -317,16 +310,7 @@ export default function ServicesPage() {
                         <div className="bg-black/40 rounded-lg p-3 max-h-72 overflow-y-auto font-mono text-[11px] leading-relaxed border border-surface-3/30">
                           {detail.logLines.length > 0 ? (
                             detail.logLines.map((line, i) => (
-                              <div
-                                key={i}
-                                className={`whitespace-pre-wrap break-all ${
-                                  line.match(/error|fail|panic|critical/i)
-                                    ? "text-red-400"
-                                    : line.match(/warn/i)
-                                      ? "text-amber-400"
-                                      : "text-slate-400"
-                                }`}
-                              >
+                              <div key={i} className={`whitespace-pre-wrap break-all ${line.match(/error|fail|panic|critical/i) ? "text-red-400" : line.match(/warn/i) ? "text-amber-400" : "text-slate-400"}`}>
                                 {line}
                               </div>
                             ))
@@ -338,15 +322,113 @@ export default function ServicesPage() {
                       </div>
                     </>
                   ) : (
-                    <div className="text-xs text-red-400 text-center py-4">
-                      Failed to load service details
-                    </div>
+                    <div className="text-xs text-red-400 text-center py-4">Failed to load service details</div>
                   )}
                 </div>
               )}
             </div>
           );
         })}
+      </div>
+
+      {/* Lloyd Services section */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-slate-500" />
+            <h3 className="text-sm font-medium text-slate-400">Lloyd Systemd Units</h3>
+          </div>
+          <div className="flex items-center gap-3">
+            {!lloydLoading && (
+              <span className="text-xs text-slate-600">
+                {lloydHealthy}/{lloydServices.length} running
+              </span>
+            )}
+            {lloydTimestamp && (
+              <span className="text-[10px] text-slate-700 font-mono">
+                {new Date(lloydTimestamp).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {lloydLoading && (
+          <div className="text-sm text-slate-500 text-center py-4">Loading systemd units...</div>
+        )}
+
+        <div className="space-y-1.5">
+          {lloydServices.map((svc) => (
+            <div key={svc.unit} className="rounded-lg border border-surface-3/40 bg-surface-1 px-4 py-3 flex items-center gap-3">
+              {/* Health dot */}
+              <div className={`w-2 h-2 rounded-full flex-shrink-0 ${healthDot(svc.health)}`} />
+
+              {/* Name + unit */}
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-slate-300 truncate">{svc.name}</div>
+                <div className="text-[10px] text-slate-600 font-mono mt-0.5 truncate">{svc.unit}</div>
+              </div>
+
+              {/* Uptime */}
+              {svc.uptime && (
+                <span className="text-[10px] text-slate-500 font-mono flex-shrink-0">{svc.uptime}</span>
+              )}
+
+              {/* Sub-state */}
+              <span className={`text-[10px] font-mono flex-shrink-0 ${subStateBadge(svc.subState)}`}>
+                {svc.subState}
+              </span>
+
+              {/* Active state badge */}
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono border flex-shrink-0 ${stateBadge(svc.activeState)}`}>
+                {svc.activeState}
+              </span>
+
+              {/* Port indicator */}
+              {svc.port !== null && (
+                <span
+                  className={`text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0 ${svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}
+                  title={svc.portHealthy === true ? "Port responding" : svc.portHealthy === false ? "Port not responding" : "No port check"}
+                >
+                  :{svc.port}
+                </span>
+              )}
+
+              {/* Action buttons */}
+              <div className="flex gap-0.5 flex-shrink-0">
+                <button
+                  onClick={(e) => handleLloydAction(e, svc.id, "start")}
+                  disabled={lloydActionLoading !== null}
+                  title="Start"
+                  className="p-1.5 rounded text-slate-500 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40"
+                >
+                  <Play className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={(e) => handleLloydAction(e, svc.id, "stop")}
+                  disabled={lloydActionLoading !== null}
+                  title="Stop"
+                  className="p-1.5 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
+                >
+                  <Square className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={(e) => handleLloydAction(e, svc.id, "restart")}
+                  disabled={lloydActionLoading !== null}
+                  title="Restart"
+                  className={`p-1.5 rounded text-slate-500 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-40 ${lloydActionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}
+                >
+                  <RotateCcw className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+          ))}
+
+          {!lloydLoading && lloydServices.length === 0 && (
+            <div className="text-sm text-slate-600 text-center py-4 italic">
+              No lloyd-* systemd units found
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

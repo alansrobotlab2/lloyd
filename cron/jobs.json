@@ -41,7 +41,7 @@
       "name": "periodic-memory-capture",
       "enabled": true,
       "createdAtMs": 1772761670846,
-      "updatedAtMs": 1772768487543,
+      "updatedAtMs": 1772818174418,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -51,7 +51,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run a memory capture pass. Execute: python3 scripts/extract-transcript.py. If output is empty, reply with just 'no new content' and stop. Otherwise: 1) Read the existing daily note at lloyd/memory/YYYY-MM-DD.md (today's date) if it exists. 2) From the transcript, extract decisions, facts learned, context shifts, project updates, preferences expressed, and action/result pairs. 3) Format as timestamped entries with session links. 4) Append new entries to the daily note via mem_write. Do not duplicate entries already in the file.",
+        "message": "Run a memory capture pass.\n\nStep 1: Run `python3 ~/obsidian/agents/memory/scripts/extract-transcript.py` via run_bash.\nIf output is empty, reply 'no new content' and stop.\n\nStep 2: Read today's daily note (use PST timezone for the date):\n  mem_get(path=\"agents/lloyd/memory/2026-XX-XX.md\")  ← replace XX-XX with today's MM-DD\n\nStep 3: Extract from the transcript: decisions, facts, context shifts, project updates, preferences, action/result pairs. Format as timestamped entries with session links.\n\nStep 4: Write the daily note:\n  mem_write(path=\"agents/lloyd/memory/2026-XX-XX.md\", content=...)  ← replace XX-XX with today's MM-DD\n\nPATH RULE: Always use \"agents/lloyd/memory/\" as the path prefix. Never use \"lloyd/memory/\" — that resolves to the wrong directory.\n\nDo not duplicate entries already in the file.",
         "timeoutSeconds": 120
       },
       "delivery": {
@@ -59,11 +59,11 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1772769364513,
-        "lastRunAtMs": 1772768464513,
+        "nextRunAtMs": 1772819054778,
+        "lastRunAtMs": 1772818154778,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 23030,
+        "lastDurationMs": 19640,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0,
         "lastDelivered": false
@@ -75,7 +75,7 @@
       "name": "nightly-reflection",
       "enabled": true,
       "createdAtMs": 1772766786499,
-      "updatedAtMs": 1772767293007,
+      "updatedAtMs": 1772816418709,
       "schedule": {
         "kind": "cron",
         "expr": "0 2 * * *",
@@ -85,16 +85,25 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "You are running the nightly reflection pass. You have three tasks. Execute them in order.\n\n---\n\n## Task 1: Self-Improvement Review\n\nRead lloyd/memory/corrections.md and the last 3 days of daily notes (lloyd/memory/YYYY-MM-DD.md for today and the 2 prior days). Look for:\n- Corrections Alan made to Lloyd's behavior\n- Frustrations expressed about how Lloyd responded\n- Explicit preferences stated (\"I want X, not Y\")\n- Patterns of repeated mistakes\n\nIf corrections or behavioral feedback are found:\n1. Append new entries to lloyd/memory/corrections.md (create if missing), format: date, what Lloyd did wrong, what was expected, category (tone/tool-use/memory/formatting/delegation/other)\n2. Read ~/obsidian/lloyd/SOUL.md and ~/obsidian/lloyd/AGENTS.md\n3. Apply changes DIRECTLY to SOUL.md and/or AGENTS.md — incremental refinements only:\n   - Prefer additions and clarifications over removals\n   - Do NOT remove existing content without strong justification\n   - No drastic rewrites — one small improvement at a time\n4. Log every change to lloyd/memory/learnings/YYYY-MM-DD.md (create if missing):\n   - File changed (SOUL.md or AGENTS.md)\n   - What was added/modified/removed (include the exact text)\n   - Why (which correction or pattern triggered it)\n   - Timestamp\n\nIf no corrections found, write \"No corrections found — no SOUL.md/AGENTS.md changes\" to the learnings log and skip the rest of this task.\n\n---\n\n## Task 2: Mental Models\n\nRead last 7 days of daily notes (lloyd/memory/YYYY-MM-DD.md). Identify:\n- Recurring decision patterns (how Alan evaluates options)\n- Reasoning heuristics Alan uses\n- Communication preferences (when he wants detail vs. brevity)\n- Project prioritization patterns\n\nUpdate lloyd/memory/mental-models.md (create if missing, update if exists). Organize by: Decision-Making Patterns, Communication Preferences, Technical Preferences, Project Prioritization. Include concrete examples from recent conversations. Date-stamp the bottom: `_Last updated: YYYY-MM-DD by nightly reflection_`\n\n---\n\n## Task 3: MEMORY.md Consolidation\n\nRead last 7 days of daily notes + current lloyd/MEMORY.md.\n\nGit snapshot BEFORE:\n  cd ~/obsidian && git add -A && git commit -m \"nightly reflection: pre-consolidation snapshot\"\n\n- Add new significant facts/decisions to lloyd/MEMORY.md\n- Prune outdated or incorrect entries\n- Keep lloyd/MEMORY.md under 200 lines\n\nGit snapshot AFTER:\n  cd ~/obsidian && git add -A && git commit -m \"nightly reflection: YYYY-MM-DD\"\n\n---\n\n## Guardrails\n\n- One retry max per task — if a task fails, log the failure to lloyd/memory/corrections.md and move to the next task\n- Budget target: <$1 per run\n- Git snapshot provides rollback safety — don't fear making incremental changes\n- The learnings log is a changelog for Alan's visibility, not a review queue — he does not want to be a bottleneck",
+        "message": "You are running the nightly reflection pass. You have three tasks. Execute them in order.\n\n---\n\n## Task 1: Self-Improvement Review\n\nRead agents/lloyd/memory/corrections.md and the last 3 days of daily notes (agents/lloyd/memory/YYYY-MM-DD.md for today and the 2 prior days).\n\nLook for **negative signals:**\n- Corrections Alan made to Lloyd's behavior\n- Frustrations expressed about how Lloyd responded\n- Explicit preferences stated (\"I want X, not Y\")\n- Patterns of repeated mistakes\n- \"bad lloyd\" entries\n\nLook for **positive signals:**\n- Praise (\"perfect\", \"exactly\", \"that's great\", \"good lloyd\")\n- Implicit approval (Alan built on Lloyd's suggestion without pushback)\n- Patterns of behavior that consistently go well\n- Entries with `Signal: positive` in corrections.md\n\nProcess both signal types:\n1. Read corrections.md — separate positive and negative entries\n2. Append any NEW corrections/reinforcements found in daily notes to agents/lloyd/memory/corrections.md (create if missing). Format: date, what happened, category (tone/tool-use/memory/formatting/delegation/other), Signal: positive or negative\n3. **Negative signals:** Group by category and frequency. If a correction has 3+ occurrences → strong signal, apply incremental fix to AGENTS.md and/or SOUL.md. If fewer than 3 → keep in log but don't change config yet.\n4. **Positive signals:** Identify reinforced behaviors. If 3+ occurrences → codify in AGENTS.md to protect the pattern from accidental removal.\n5. When modifying SOUL.md or AGENTS.md:\n   - Prefer additions and clarifications over removals\n   - Do NOT remove existing content without strong justification\n   - No drastic rewrites — one small improvement at a time\n6. Log every change to agents/lloyd/memory/learnings/YYYY-MM-DD.md (create if missing):\n   - File changed (SOUL.md or AGENTS.md)\n   - What was added/modified/removed (include the exact text)\n   - Why (which correction or pattern triggered it)\n   - Timestamp\n\nIf no corrections or reinforcements found, write \"No corrections found — no SOUL.md/AGENTS.md changes\" to the learnings log and skip the rest of this task.\n\n---\n\n## Task 2: Mental Models\n\nRead last 7 days of daily notes (agents/lloyd/memory/YYYY-MM-DD.md). Identify:\n- Recurring decision patterns (how Alan evaluates options)\n- Reasoning heuristics Alan uses\n- Communication preferences (when he wants detail vs. brevity)\n- Project prioritization patterns\n- Domains where Alan has strong opinions vs. is open\n\nUpdate agents/lloyd/memory/mental-models.md (create if missing, update if exists). Organize by: Decision-Making Patterns, Communication Preferences, Technical Preferences, Project Prioritization. Include concrete examples from recent conversations. Date-stamp the bottom: `_Last updated: YYYY-MM-DD by nightly reflection_`\n\n---\n\n## Task 3: MEMORY.md Consolidation\n\nRead last 7 days of daily notes + current agents/lloyd/MEMORY.md.\n\nGit snapshot BEFORE:\n  cd ~/obsidian && git add -A && git diff --cached --quiet || git commit -m \"nightly reflection: pre-consolidation snapshot\"\n\nSafety net: Check if yesterday's daily note exists at agents/lloyd/memory/YYYY-MM-DD.md (calculate yesterday's date). If missing, create a stub via mem_write with frontmatter (segment: agents), header, and a note: '(No daily note was written for this day.)'\n\nConsolidation rules:\n- Add new significant facts/decisions to agents/lloyd/MEMORY.md\n- For entries that are too project-specific: move them to the appropriate project doc (e.g. projects/alfie/...) or knowledge doc (e.g. knowledge/...) — don't just delete them\n- Remove or update entries that are outdated, resolved, or contradicted by newer info\n- Keep MEMORY.md focused on universal, always-relevant context: who Alan is, key people, persistent preferences, high-level project phases — not detailed status or resolved items\n- Keep agents/lloyd/MEMORY.md under 200 lines\n\nGit snapshot AFTER:\n  cd ~/obsidian && git add -A && git commit -m \"nightly reflection: YYYY-MM-DD\"\n\n---\n\n## Guardrails\n\n- One retry max per task — if a task fails, log the failure to agents/lloyd/memory/corrections.md and move to the next task\n- Budget target: <$20 per run\n- Git snapshot provides rollback safety — don't fear making incremental changes\n- The learnings log is a changelog for Alan's visibility, not a review queue — he does not want to be a bottleneck",
         "model": "anthropic/claude-opus-4-6",
-        "timeoutSeconds": 300
+        "timeoutSeconds": 1800
       },
       "delivery": {
         "mode": "none",
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1772791200000
+        "nextRunAtMs": 1772877600000,
+        "lastRunAtMs": 1772816171611,
+        "lastRunStatus": "error",
+        "lastStatus": "error",
+        "lastDurationMs": 247098,
+        "lastDelivered": false,
+        "lastDeliveryStatus": "not-delivered",
+        "consecutiveErrors": 1,
+        "lastError": "⚠️ ✍️ Write: `to ~/obsidian/agents/lloyd/memory/learnings/2026-03-06.md (881 chars)` failed",
+        "lastDeliveryError": "⚠️ ✍️ Write: `to ~/obsidian/agents/lloyd/memory/learnings/2026-03-06.md (881 chars)` failed"
       }
     }
   ]

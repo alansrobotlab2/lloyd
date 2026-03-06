@@ -114,6 +114,25 @@ export interface ServiceDetail {
   rawStatus: string;
 }
 
+// ── Lloyd Services types ─────────────────────────────────────────────────
+
+export interface LloydServiceUnit {
+  id: string;
+  unit: string;
+  name: string;
+  activeState: "active" | "inactive" | "failed" | "unknown";
+  subState: string;
+  port: number | null;
+  portHealthy: boolean | null;
+  uptime: string | null;
+  health: "healthy" | "degraded" | "stopped" | "unknown";
+}
+
+export interface LloydServicesData {
+  services: LloydServiceUnit[];
+  timestamp: string;
+}
+
 // ── Tools types ──────────────────────────────────────────────────────────
 
 export interface ToolEntry {
@@ -136,6 +155,7 @@ export interface SkillInfo {
   os?: string[];
   enabled: boolean;
   configured: boolean;
+  location: string;
 }
 
 export interface SkillsData {
@@ -369,6 +389,16 @@ export const api = {
     return res.json();
   },
 
+  lloydServices: () => fetchJson<LloydServicesData>("/lloyd-services"),
+  lloydServiceAction: async (serviceId: string, action: "start" | "stop" | "restart") => {
+    const res = await fetch(`${BASE}/services/action`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ serviceId, action }),
+    });
+    return res.json();
+  },
+
   stats: () => fetchJson<Stats>("/stats"),
   usageChart: (range = "7d") => fetchJson<UsageChartData>(`/usage-chart?range=${range}`),
   apiCalls: () => fetchJson<ApiCallsData>("/api-calls"),
@@ -412,6 +442,15 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ skillName, enabled }),
+    });
+    return res.json();
+  },
+  skillContent: (name: string) => fetchJson<{ content: string; location: string }>(`/skill-content?name=${encodeURIComponent(name)}`),
+  skillContentSave: async (name: string, content: string) => {
+    const res = await fetch(`${BASE}/skill-content`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skillName: name, content }),
     });
     return res.json();
   },
