@@ -49,8 +49,13 @@ End with a structured summary:
 - **Files modified**: list with brief description of changes
 - **Files created**: list with purpose
 - **Build/test status**: pass/fail
-- **Issues**: anything unresolved or risky`,
+- **Issues**: anything unresolved or risky
+
+## Memory Updates
+If you discover important codebase patterns, architectural decisions, or gotchas during implementation, include a \`## Memory Updates\` section at the end of your output. These will be persisted by the orchestrator to agent memory files.`,
   model: "opus" as const,
+  thinking: { type: "adaptive" as const },
+  effort: "high" as const,
   tools: [
     "Read", "Write", "Edit", "Bash", "Glob", "Grep",
     ...MCP_TOOLS,

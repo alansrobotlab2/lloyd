@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Activity, Play, Square, RotateCcw, ChevronDown, Terminal, Cpu, HardDrive, Clock, AlertTriangle } from "lucide-react";
+import { Activity, Play, Square, RotateCcw, RefreshCw, ChevronDown, Terminal, Cpu, HardDrive, Clock, AlertTriangle } from "lucide-react";
 import { api, type ServiceStatus, type ServiceDetail } from "../../api";
 
 export default function ServicesPage() {
@@ -167,7 +167,7 @@ export default function ServicesPage() {
       {gatewayRestarting && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="bg-surface-1 border border-surface-3/50 rounded-2xl px-10 py-8 text-center space-y-4 max-w-sm">
-            <RotateCcw className="w-8 h-8 text-brand-400 animate-spin mx-auto" />
+            <RefreshCw className="w-8 h-8 text-brand-400 animate-spin mx-auto" />
             <div className="text-base font-medium text-slate-200">Gateway Restarting</div>
             <div className="text-sm text-slate-400">
               Refreshing in <span className="font-mono text-brand-400">{countdown}s</span>

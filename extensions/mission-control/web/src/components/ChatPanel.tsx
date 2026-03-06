@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Send, User, Plus, Loader2, Brain, MessageCircle, StopCircle, Wrench } from "lucide-react";
 import { marked } from "marked";
-import { api, type MessageEntry } from "../api";
+import { api, type MessageEntry, type CommandInfo } from "../api";
+import SlashCommandPicker from "./SlashCommandPicker";
 
 // Configure marked for safe, sane defaults
 marked.setOptions({ breaks: true, gfm: true });
@@ -65,13 +66,40 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
   const [awaitingReset, setAwaitingReset] = useState(false);
   // Show the "Thinking..." bubble while waiting for an assistant reply
   const [thinking, setThinking] = useState(false);
+  // Granular activity state while thinking: "thinking" (LLM reasoning) vs "working" (tool call)
+  const [activityType, setActivityType] = useState<"thinking" | "working" | null>(null);
+  const [activityDetail, setActivityDetail] = useState<string | null>(null);
   const [showToolCalls, setShowToolCalls] = useState(false);
+  const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({});
+  // Slash command picker state
+  const [commandsList, setCommandsList] = useState<CommandInfo[]>([]);
+  const [showPicker, setShowPicker] = useState(false);
+  const [pickerIndex, setPickerIndex] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
   const initialLoadDone = useRef(false);
   // Track the timestamp of the last user-sent message so we can detect new replies
   const lastUserSendTs = useRef(0);
+  const scrollToBottomOnLoad = useRef(true);
+  const thinkingRestored = useRef(false);
+  const workingStartRef = useRef<number>(0);
+  const workingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isWorkingRef = useRef(false);
+
+  // Derive current model and thinking status from available state
+  const currentModel = useMemo(() => {
+    // Prefer the most recent assistant message's model (most current)
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant" && m.model);
+    if (lastAssistant?.model) return lastAssistant.model;
+    // Fall back to session-level model from sessions list
+    return sessions.find((s) => s.sessionId === sessionId)?.model || null;
+  }, [messages, sessions, sessionId]);
+
+  const thinkingEnabled = useMemo(() => {
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+    return lastAssistant?.hasThinking ?? false;
+  }, [messages]);
 
   // Switch to a session requested by another page (e.g. Sessions table)
   useEffect(() => {
@@ -104,6 +132,28 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
     });
   }, [refreshSessions]);
 
+  // Reset scroll-to-bottom and thinking-restore flags when session changes
+  useEffect(() => {
+    scrollToBottomOnLoad.current = true;
+    thinkingRestored.current = false;
+  }, [sessionId]);
+
+  // Fetch slash commands on mount
+  useEffect(() => {
+    api.commands().then((d) => setCommandsList(d.commands)).catch(() => {});
+  }, []);
+
+  // Compute filter text and filtered command list for picker
+  const slashFilter = showPicker && input.startsWith("/") ? input.slice(1).split(" ")[0] : "";
+  const filteredCommands = useMemo(() => {
+    if (!showPicker) return [];
+    return commandsList.filter((cmd) => {
+      if (!slashFilter) return true;
+      const f = slashFilter.toLowerCase();
+      return cmd.name.toLowerCase().includes(f) || cmd.description.toLowerCase().includes(f);
+    });
+  }, [commandsList, slashFilter, showPicker]);
+
   // Poll messages for the selected session
   useEffect(() => {
     if (!sessionId) return;
@@ -118,6 +168,20 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
             return d.messages;
           });
 
+          // Restore thinking indicator on re-mount if agent is still processing
+          if (!thinking && !thinkingRestored.current && d.messages.length > 0) {
+            thinkingRestored.current = true;
+            const lastMsg = d.messages[d.messages.length - 1];
+            if (lastMsg.role === "user") {
+              api.agentStatus().then((status) => {
+                if (status.mainAgent.state !== "idle") {
+                  lastUserSendTs.current = new Date(lastMsg.timestamp).getTime();
+                  setThinking(true);
+                }
+              }).catch(() => {});
+            }
+          }
+
           // Clear awaitingReset once any messages appear in the new session
           if (d.messages.length > 0 && awaitingReset) {
             setAwaitingReset(false);
@@ -125,21 +189,30 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
           }
 
           // Clear thinking indicator once the agent is idle AND we have
-          // a new assistant message. This keeps the bubble visible during
-          // multi-response processing (tool calls between text replies).
+          // a new assistant message with real text content. This keeps the
+          // bubble visible during multi-response processing (tool calls
+          // between text replies). Only check agent status when the newest
+          // assistant message has text — intermediate messages with only
+          // tool call blocks mean the agent is still mid-turn.
           if (thinking && lastUserSendTs.current > 0) {
-            const hasNewAssistant = d.messages.some(
+            const postSendAssistant = d.messages.filter(
               (m) => m.role === "assistant" && new Date(m.timestamp).getTime() > lastUserSendTs.current,
             );
-            if (hasNewAssistant) {
-              api.agentStatus().then((status) => {
-                if (status.mainAgent.state === "idle") {
+            if (postSendAssistant.length > 0) {
+              const newest = postSendAssistant[postSendAssistant.length - 1];
+              const hasTextContent = newest.content?.some(
+                (c) => c.type === "text" && c.text && c.text.trim().length > 0,
+              );
+              if (hasTextContent) {
+                api.agentStatus().then((status) => {
+                  if (status.mainAgent.state === "idle") {
+                    setThinking(false);
+                  }
+                }).catch(() => {
+                  // Can't reach agent-status — fall back to clearing immediately
                   setThinking(false);
-                }
-              }).catch(() => {
-                // Can't reach agent-status — fall back to clearing immediately
-                setThinking(false);
-              });
+                });
+              }
             }
           }
         })
@@ -163,10 +236,82 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
 
   // Auto-scroll only when user is near the bottom
   useEffect(() => {
-    if (isNearBottom.current) {
+    if (scrollToBottomOnLoad.current && messages.length > 0) {
+      scrollToBottomOnLoad.current = false;
+      const el = messagesContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    } else if (isNearBottom.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages, thinking]);
+
+  // Poll agent activity type while thinking is active
+  useEffect(() => {
+    if (!thinking) {
+      setActivityType(null);
+      setActivityDetail(null);
+      if (workingTimeoutRef.current) {
+        clearTimeout(workingTimeoutRef.current);
+        workingTimeoutRef.current = null;
+      }
+      isWorkingRef.current = false;
+      return;
+    }
+    const poll = () => {
+      api.agentStatus().then((status) => {
+        if (status.activity.type === "tool_call") {
+          if (!isWorkingRef.current) {
+            isWorkingRef.current = true;
+            workingStartRef.current = Date.now();
+          }
+          // Cancel any pending transition away from working
+          if (workingTimeoutRef.current) {
+            clearTimeout(workingTimeoutRef.current);
+            workingTimeoutRef.current = null;
+          }
+          setActivityType("working");
+          setActivityDetail(status.activity.detail);
+        } else {
+          if (isWorkingRef.current) {
+            const elapsed = Date.now() - workingStartRef.current;
+            const remaining = 1000 - elapsed;
+            if (remaining > 0 && !workingTimeoutRef.current) {
+              // Hold the "working" display until 1s minimum is met
+              const capturedType = status.activity.type;
+              const capturedDetail = status.activity.detail;
+              workingTimeoutRef.current = setTimeout(() => {
+                workingTimeoutRef.current = null;
+                isWorkingRef.current = false;
+                if (capturedType === "llm_thinking") {
+                  setActivityType("thinking");
+                  setActivityDetail(capturedDetail);
+                } else {
+                  setActivityType(null);
+                  setActivityDetail(null);
+                }
+              }, remaining);
+              return; // Keep displaying "working" until timeout fires
+            }
+            isWorkingRef.current = false;
+          }
+          if (status.activity.type === "llm_thinking") {
+            setActivityType("thinking");
+            setActivityDetail(status.activity.detail);
+          }
+          // idle case is handled by the existing code that clears `thinking`
+        }
+      }).catch(() => {});
+    };
+    poll();
+    const interval = setInterval(poll, 500);
+    return () => {
+      clearInterval(interval);
+      if (workingTimeoutRef.current) {
+        clearTimeout(workingTimeoutRef.current);
+        workingTimeoutRef.current = null;
+      }
+    };
+  }, [thinking]);
 
   const handleSend = async () => {
     if (!input.trim() || sending) return;
@@ -270,6 +415,25 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
               </option>
             ))}
           </select>
+          {/* Persistent status: model + thinking */}
+          {(currentModel || messages.length > 0) && (
+            <div className="flex items-center gap-2 ml-2 pl-2 border-l border-surface-3/50">
+              {currentModel && (
+                <span className="text-[11px] text-slate-500 font-mono tracking-tight">
+                  {currentModel}
+                </span>
+              )}
+              <span
+                className={`flex items-center gap-1 text-[11px] font-medium ${
+                  thinkingEnabled ? "text-purple-400" : "text-slate-600"
+                }`}
+                title={thinkingEnabled ? "Extended thinking is active" : "Extended thinking is off"}
+              >
+                <Brain className="w-3 h-3" />
+                {thinkingEnabled ? "On" : "Off"}
+              </span>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-1.5">
           <button
@@ -340,6 +504,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
               const text = extractText(msg.content);
               const isCtx = isContextMessage(msg);
               const toolCalls = showToolCalls ? msg.content.filter((c) => c.type === "toolCall") : [];
+              const thinkingBlocks = showToolCalls ? msg.content.filter((c) => c.type === "thinking") : [];
 
               // Context/prefill messages — muted, compact style
               if (isCtx) {
@@ -372,6 +537,31 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
                         : "bg-surface-2 border-surface-3/50"
                     } rounded-xl px-3.5 py-2.5 border`}
                   >
+                    {thinkingBlocks.length > 0 && (
+                      <div className={`space-y-1 ${text || toolCalls.length > 0 ? "mb-2 pb-2 border-b border-purple-500/20" : ""}`}>
+                        {thinkingBlocks.map((tb, i) => {
+                          const key = `${msg.id}-t${i}`;
+                          const isExpanded = expandedThinking[key] ?? false;
+                          return (
+                            <div key={key} className="rounded-md border border-purple-500/20 bg-purple-500/5 overflow-hidden">
+                              <button
+                                onClick={() => setExpandedThinking((prev) => ({ ...prev, [key]: !isExpanded }))}
+                                className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-left text-xs text-purple-400 hover:bg-purple-500/10 transition-colors"
+                              >
+                                <Brain className="w-3 h-3 flex-shrink-0" />
+                                <span className="font-medium">Thinking</span>
+                                <span className="ml-auto text-purple-500/60">{isExpanded ? "\u25B2" : "\u25BC"}</span>
+                              </button>
+                              {isExpanded && (
+                                <div className="px-2.5 pb-2 text-[11px] text-purple-300/70 italic font-mono leading-relaxed whitespace-pre-wrap border-t border-purple-500/15">
+                                  {tb.thinking}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                     {text && (
                       <div
                         className="text-sm leading-relaxed prose-chat"
@@ -396,10 +586,15 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
                     <div className="flex items-center gap-2 mt-1.5 text-[10px] text-slate-500">
                       <span>{timeStr(msg.timestamp)}</span>
                       {msg.model && <span>{msg.model}</span>}
+                      {msg.hasThinking && <Brain className="w-3 h-3 text-purple-400" />}
                       {msg.usage && (
-                        <span>
-                          {msg.usage.totalTokens} tok
-                        </span>
+                        <span>{msg.usage.totalTokens} tok</span>
+                      )}
+                      {msg.toolCallCount != null && msg.toolCallCount > 0 && (
+                        <span>{msg.toolCallCount} calls</span>
+                      )}
+                      {msg.durationMs != null && (
+                        <span>{(msg.durationMs / 1000).toFixed(1)}s</span>
                       )}
                     </div>
                   </div>
@@ -412,14 +607,23 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
               );
             })}
 
-          {/* Thinking indicator */}
+          {/* Thinking / Working indicator */}
           {thinking && (
             <div className="flex gap-3">
               <img src="/api/mc/agent-avatar?id=lloyd" alt="Lloyd" className="w-7 h-7 rounded-full object-cover flex-shrink-0 mt-0.5" />
               <div className="bg-surface-2 border-surface-3/50 rounded-xl px-3.5 py-2.5 border">
                 <div className="flex items-center gap-2 text-sm text-slate-400">
-                  <Brain className="w-4 h-4 animate-pulse text-brand-400" />
-                  <span className="animate-pulse">Thinking...</span>
+                  {activityType === "working" ? (
+                    <>
+                      <Wrench className="w-4 h-4 animate-pulse text-amber-400" />
+                      <span className="animate-pulse">Working{activityDetail ? <span className="text-slate-500 ml-1 text-xs font-mono">· {activityDetail}</span> : ""}...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Brain className="w-4 h-4 animate-pulse text-brand-400" />
+                      <span className="animate-pulse">Thinking...</span>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -430,31 +634,83 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
 
         {/* Input — inside the card at the bottom */}
         <div className="p-3 border-t border-surface-3/50">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-              placeholder="Talk to Lloyd..."
-              disabled={awaitingReset}
-              className="flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3.5 py-2.5 border border-surface-3/50 outline-none focus:border-brand-500/50 placeholder:text-slate-500 transition-colors disabled:opacity-50"
-            />
-            <button
-              onClick={handleSend}
-              disabled={!input.trim() || sending || awaitingReset}
-              className="bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-            <button
-              onClick={handleStop}
-              disabled={!thinking}
-              title="Stop"
-              className="bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
-            >
-              <StopCircle className="w-4 h-4" />
-            </button>
+          <div className="relative">
+            {showPicker && filteredCommands.length > 0 && (
+              <SlashCommandPicker
+                commands={filteredCommands}
+                filter={slashFilter}
+                selectedIndex={pickerIndex}
+                onSelect={(cmd) => {
+                  setShowPicker(false);
+                  setInput(cmd.acceptsArgs ? `/${cmd.name} ` : `/${cmd.name}`);
+                }}
+                onHover={setPickerIndex}
+              />
+            )}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setInput(val);
+                  if (val.startsWith("/") && !val.includes(" ")) {
+                    setShowPicker(true);
+                    setPickerIndex(0);
+                  } else {
+                    setShowPicker(false);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (showPicker && filteredCommands.length > 0) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setPickerIndex((p) => (p + 1) % filteredCommands.length);
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setPickerIndex((p) => (p - 1 + filteredCommands.length) % filteredCommands.length);
+                      return;
+                    }
+                    if (e.key === "Enter" || e.key === "Tab") {
+                      e.preventDefault();
+                      const cmd = filteredCommands[pickerIndex];
+                      setShowPicker(false);
+                      setInput(cmd.acceptsArgs ? `/${cmd.name} ` : `/${cmd.name}`);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setShowPicker(false);
+                      return;
+                    }
+                  }
+                  if (e.key === "Enter" && !e.shiftKey) handleSend();
+                }}
+                onBlur={() => {
+                  setTimeout(() => setShowPicker(false), 150);
+                }}
+                placeholder="Talk to Lloyd... (type / for commands)"
+                disabled={awaitingReset}
+                className="flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3.5 py-2.5 border border-surface-3/50 outline-none focus:border-brand-500/50 placeholder:text-slate-500 transition-colors disabled:opacity-50"
+              />
+              <button
+                onClick={handleSend}
+                disabled={!input.trim() || sending || awaitingReset}
+                className="bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
+              >
+                <Send className="w-4 h-4" />
+              </button>
+              <button
+                onClick={handleStop}
+                disabled={!thinking}
+                title="Stop"
+                className="bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
+              >
+                <StopCircle className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
       </div>

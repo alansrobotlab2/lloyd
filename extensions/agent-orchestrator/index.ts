@@ -16,8 +16,10 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 import type { CcInstance, InstanceStatusResponse, McInstanceInfo, PendingQuestionInfo, QuestionAnswer } from "./types.js";
 import { consumeQuery } from "./query-consumer.js";
@@ -32,7 +34,6 @@ import {
   plannerAgent,
   auditorAgent,
   operatorAgent,
-  memoryAgent,
   clawhubAgent,
 } from "./agents/index.js";
 
@@ -41,9 +42,46 @@ import {
 const MCP_SSE_URL = "http://127.0.0.1:8093/sse";
 const DEFAULT_BUDGET_USD = 5.0;
 const DEFAULT_MAX_TURNS = 30;
-const CLAUDE_CODE_PATH = "/home/alansrobotlab/.npm-global/bin/claude";
+const CLAUDE_CODE_PATH = "/home/alansrobotlab/.local/share/claude/versions/2.1.69";
 const VAULT_AGENTS_DIR = join(process.env.HOME || "/home/alansrobotlab", "obsidian/agents");
 const MODE_STATE_PATH = join(__dirname, "../mcp-tools/mode-state.json");
+const CLI_JS_PATH = join(__dirname, "node_modules/@anthropic-ai/claude-agent-sdk/cli.js");
+
+// Custom spawn function to bypass SDK's default native binary resolution,
+// which fails with ENOENT inside the gateway process.
+function expandTilde(p: string): string {
+  return p.startsWith("~/") ? join(homedir(), p.slice(2)) : p;
+}
+
+function spawnClaudeCode(options: { command: string; args: string[]; cwd?: string; env: Record<string, string | undefined>; signal?: AbortSignal }): ChildProcess {
+  let cmd = options.command;
+  let args = options.args;
+
+  // Expand ~ in command and cwd — Node's spawn doesn't do shell expansion
+  cmd = expandTilde(cmd);
+  const cwd = options.cwd ? expandTilde(options.cwd) : undefined;
+
+  // If native binary not accessible, fall back to bundled cli.js via node
+  if (!existsSync(cmd)) {
+    console.error(`[agent-orchestrator] Native binary not found at ${cmd}, falling back to cli.js`);
+    args = [CLI_JS_PATH, ...args];
+    cmd = process.execPath;
+  }
+
+  // Clean env vars that prevent nested sessions or interfere with spawn
+  const env = { ...options.env };
+  delete env.CLAUDECODE;
+  delete env.NODE_OPTIONS;
+
+  console.error(`[agent-orchestrator] Spawning: ${cmd} (cwd: ${cwd || "inherit"})`);
+
+  return spawn(cmd, args, {
+    cwd,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: env as NodeJS.ProcessEnv,
+    signal: options.signal,
+  });
+}
 
 // ── Hook-Based Notification ──────────────────────────────────────────────
 //
@@ -51,7 +89,7 @@ const MODE_STATE_PATH = join(__dirname, "../mcp-tools/mode-state.json");
 // Much simpler than the old gateway WebSocket + Ed25519 auth approach.
 // Same mechanism the voice pipeline uses for ASR transcript injection.
 
-const HOOKS_URL = "http://127.0.0.1:18789/hooks/agent";
+const HOOKS_URL = "http://127.0.0.1:18789/hooks/wake";
 const HOOKS_SESSION_KEY = "agent:main:main";
 const OPENCLAW_CONFIG_PATH = join(process.env.HOME || "/home/alansrobotlab", ".openclaw/openclaw.json");
 
@@ -70,24 +108,26 @@ function loadHooksToken(): string | null {
  * Inject a message into Lloyd's session via the HTTP hooks endpoint.
  * Non-blocking and error-swallowing — never throws.
  */
-async function injectHookMessage(message: string, logger: any): Promise<void> {
+async function injectHookMessage(message: string, logger: any, sessionKey?: string): Promise<void> {
   const token = loadHooksToken();
   if (!token) {
     logger.warn?.("agent-orchestrator: cannot inject — hooks token not found in openclaw.json");
     return;
   }
   try {
-    await fetch(HOOKS_URL, {
+    console.error(`[agent-orchestrator] injectHookMessage sessionKey=${sessionKey ?? "(none)"} url=${HOOKS_URL}`);
+    const resp = await fetch(HOOKS_URL, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        message: `[System Message] ${message}`,
-        sessionKey: HOOKS_SESSION_KEY,
+        text: `[System Message] ${message}`,
+        mode: "now",
       }),
     });
+    console.error(`[agent-orchestrator] injectHookMessage response status=${resp.status}`);
   } catch (err: any) {
     logger.warn?.(`agent-orchestrator: hook inject failed: ${err.message}`);
   }
@@ -185,13 +225,12 @@ const AGENT_CONFIGS: Record<string, any> = {
   tester: testerAgent,
   planner: plannerAgent,
   auditor: auditorAgent,
-  memory: memoryAgent,
   operator: operatorAgent,
   clawhub: clawhubAgent,
 };
 
 /** Agents that use vault MCP tools and need scope injection */
-const VAULT_USING_AGENTS = new Set(["memory", "researcher", "planner", "coder", "operator", "clawhub"]);
+const VAULT_USING_AGENTS = new Set(["researcher", "planner", "coder", "operator", "clawhub"]);
 
 /**
  * Build fresh agent definitions by merging static configs with vault prompts.
@@ -296,14 +335,15 @@ export default function register(api: OpenClawPluginApi) {
     const instance = instances.get(instanceId);
     if (!instance) return;
 
+    console.error(`[agent-orchestrator] notifyCompletion instance.sessionKey=${instance.sessionKey ?? "(none)"}`);
     const message = formatCompletionNotification(instance);
     // Fire-and-forget — non-blocking, never delays pipeline completion
-    injectHookMessage(message, api.logger).catch(() => {});
+    injectHookMessage(message, api.logger, instance.sessionKey).catch(() => {});
   }
 
   /** Progress callback — injects milestone notifications for interactive instances */
   function notifyProgress(instanceId: string, message: string): void {
-    injectHookMessage(message, api.logger).catch(() => {});
+    injectHookMessage(message, api.logger, instances.get(instanceId)?.sessionKey).catch(() => {});
   }
 
   /** Push a pending question notification into Lloyd's session */
@@ -329,7 +369,7 @@ export default function register(api: OpenClawPluginApi) {
 
     lines.push(`→ Use \`cc_respond("${q.id}", action, text)\` to answer. Actions: "allow", "deny", or "answer".`);
 
-    injectHookMessage(lines.join("\n"), api.logger).catch(() => {});
+    injectHookMessage(lines.join("\n"), api.logger, instance.sessionKey).catch(() => {});
   }
 
   // ── Interactive Mode: canUseTool Callback ───────────────────────────────
@@ -445,7 +485,7 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── Tool: cc_orchestrate ───────────────────────────────────────────────
 
-  api.registerTool({
+  api.registerTool((ctx) => ({
     name: "cc_orchestrate",
     label: "Claude Code Orchestrate",
     description:
@@ -548,7 +588,9 @@ export default function register(api: OpenClawPluginApi) {
           pendingQuestions: [],
           recentMessages: [],
           _abort: abort,
+          sessionKey: ctx.sessionKey,
         };
+        console.error(`[agent-orchestrator] spawn sessionKey: ${ctx.sessionKey ?? "(none)"}`);
 
         // Read-only tools that are always auto-allowed
         const readOnlyTools = [
@@ -582,6 +624,8 @@ export default function register(api: OpenClawPluginApi) {
                 ? "\nYou are a project coordinator in PLAN-ONLY mode. Analyze the task using Read/Glob/Grep and output a detailed execution plan. Do NOT dispatch agents or execute any work."
                 : "\nYou are a project coordinator. Analyze the task using Read/Glob/Grep, then delegate ALL implementation work to specialist agents via the Task tool. You may read files for analysis but NEVER write, edit, or run commands yourself.",
             },
+            thinking: { type: "adaptive" as const },
+            effort: "medium" as const,
             cwd,
             model: "sonnet",
             maxBudgetUsd: planOnly ? 1.0 : budget,
@@ -599,6 +643,7 @@ export default function register(api: OpenClawPluginApi) {
             agents,
             abortController: abort,
             pathToClaudeCodeExecutable: CLAUDE_CODE_PATH,
+            spawnClaudeCodeProcess: spawnClaudeCode,
           },
         });
 
@@ -643,11 +688,11 @@ export default function register(api: OpenClawPluginApi) {
         };
       }
     },
-  });
+  }));
 
   // ── Tool: cc_spawn ─────────────────────────────────────────────────────
 
-  api.registerTool({
+  api.registerTool((ctx) => ({
     name: "cc_spawn",
     label: "Claude Code Spawn",
     description:
@@ -733,7 +778,9 @@ export default function register(api: OpenClawPluginApi) {
           pendingQuestions: [],
           recentMessages: [],
           _abort: abort,
+          sessionKey: ctx.sessionKey,
         };
+        console.error(`[agent-orchestrator] spawn sessionKey: ${ctx.sessionKey ?? "(none)"}`);
 
         // Build tool list: in interactive mode, add AskUserQuestion, canUseTool gates destructive tools
         const agentTools = [...(agentDef.tools || [])];
@@ -746,6 +793,8 @@ export default function register(api: OpenClawPluginApi) {
           prompt: buildDirectPrompt(params.task),
           options: {
             systemPrompt: agentDef.prompt,
+            thinking: agentDef.thinking || { type: "adaptive" as const },
+            effort: agentDef.effort,
             cwd,
             model: agentDef.model || "sonnet",
             maxBudgetUsd: budget,
@@ -759,6 +808,7 @@ export default function register(api: OpenClawPluginApi) {
               : {},
             abortController: abort,
             pathToClaudeCodeExecutable: CLAUDE_CODE_PATH,
+            spawnClaudeCodeProcess: spawnClaudeCode,
           },
         });
 
@@ -799,7 +849,7 @@ export default function register(api: OpenClawPluginApi) {
         };
       }
     },
-  });
+  }));
 
   // ── Tool: cc_status ────────────────────────────────────────────────────
 
@@ -1110,6 +1160,7 @@ export default function register(api: OpenClawPluginApi) {
             agents,
             abortController: abort,
             pathToClaudeCodeExecutable: CLAUDE_CODE_PATH,
+            spawnClaudeCodeProcess: spawnClaudeCode,
           },
         });
 

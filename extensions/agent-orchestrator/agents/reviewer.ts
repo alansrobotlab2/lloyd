@@ -31,6 +31,8 @@ End with a summary: X critical, Y warnings, Z info items. Overall assessment (sh
 - Be honest: if the code is good, say so briefly
 - Focus on what matters: skip nitpicks unless asked for a thorough review`,
   model: "opus" as const,
+  thinking: { type: "adaptive" as const },
+  effort: "high" as const,
   tools: ["Read", "Glob", "Grep"],
   maxTurns: 15,
 };

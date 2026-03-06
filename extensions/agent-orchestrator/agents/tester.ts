@@ -24,12 +24,17 @@ You write and run tests to validate code changes.
 - If tests fail, analyze why — is it a test bug or a code bug?
 - Don't over-test: focus on the changed code, not unrelated areas
 
+## Framework Detection
+Before writing tests, check for existing test config (jest.config.*, pytest.ini, pyproject.toml [tool.pytest], Cargo.toml, .mocharc.*, vitest.config.*). Match the existing framework. If no framework exists, recommend one appropriate for the language. Distinguish between unit tests (isolated, fast) and integration tests (cross-component, may need setup/teardown).
+
 ## Output
 - Tests written (file paths)
 - Test run output (pass/fail counts)
 - Any failures with analysis
 - Coverage assessment (what's tested, what's not)`,
   model: "sonnet" as const,
+  thinking: { type: "adaptive" as const },
+  effort: "medium" as const,
   tools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
   maxTurns: 25,
 };

@@ -32,6 +32,8 @@ End with: summary count by severity, overall security posture assessment.
 - Prioritize exploitable issues over theoretical ones
 - Check for common framework-specific issues (e.g., React XSS, Node prototype pollution)`,
   model: "opus" as const,
+  thinking: { type: "adaptive" as const },
+  effort: "high" as const,
   tools: ["Read", "Glob", "Grep"],
   maxTurns: 15,
 };

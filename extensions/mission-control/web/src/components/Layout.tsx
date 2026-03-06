@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import Sidebar, { type Page } from "./Sidebar";
 import ChatPanel from "./ChatPanel";
 import ServicesPage from "./pages/ServicesPage";
@@ -57,6 +57,16 @@ export default function Layout() {
   const [collapsed, setCollapsed] = useState(false);
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
+
+  // Auto-load session from URL query param ?session=<id>
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get("session");
+    if (sessionId) {
+      setChatSessionId(sessionId);
+      setPage("chat");
+    }
+  }, []);
 
   const handleOpenSession = useCallback((sessionId: string) => {
     setChatSessionId(sessionId);

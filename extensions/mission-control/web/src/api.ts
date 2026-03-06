@@ -58,12 +58,15 @@ export interface MessageEntry {
   id: string;
   timestamp: string;
   role: "user" | "assistant" | "toolResult";
-  content: Array<{ type: string; text?: string; id?: string; name?: string; arguments?: Record<string, unknown> }>;
+  content: Array<{ type: string; text?: string; thinking?: string; id?: string; name?: string; arguments?: Record<string, unknown> }>;
   model?: string;
   usage?: { input: number; output: number; cacheRead: number; totalTokens: number };
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
+  hasThinking?: boolean;
+  toolCallCount?: number;
+  durationMs?: number;
 }
 
 export interface HealthData {
@@ -263,6 +266,16 @@ export interface BacklogTask {
   url: string;
   created_at: string;
   updated_at: string;
+}
+
+// ── Command types ─────────────────────────────────────────────────────
+
+export interface CommandInfo {
+  name: string;
+  description: string;
+  category: string;
+  acceptsArgs: boolean;
+  source: "built-in" | "plugin" | "skill";
 }
 
 // ── Memory types ──────────────────────────────────────────────────────
@@ -525,6 +538,9 @@ export const api = {
   // Vault graph
   vaultGraph: () => fetchJson<VaultGraphData>("/vault-graph"),
   tagGraph: () => fetchJson<TagGraphData>("/tag-graph"),
+
+  // Commands (slash command picker)
+  commands: () => fetchJson<{ commands: CommandInfo[] }>("/commands"),
 
   // Work mode
   mode: () => fetchJson<{ currentMode: string; lastSwitchedAt: string }>("/mode"),

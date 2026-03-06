@@ -42,6 +42,8 @@ Your plan will be passed to a coordinator who dispatches coder, reviewer, tester
 - Flag any ambiguities that need clarification
 - Keep plans under 15 steps — break larger tasks into multiple plans`,
   model: "opus" as const,
+  thinking: { type: "adaptive" as const },
+  effort: "high" as const,
   tools: ["Read", "Glob", "Grep"],
-  maxTurns: 10,
+  maxTurns: 12,
 };

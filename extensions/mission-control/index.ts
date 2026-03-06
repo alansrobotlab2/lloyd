@@ -212,6 +212,7 @@ export default function register(api: OpenClawPluginApi) {
 
   const agentSessionStates = new Map<string, AgentSessionStatus>();
   let currentActivity: AgentActivity = { type: "idle", startedAt: Date.now() };
+  let activityResetTimer: ReturnType<typeof setTimeout> | null = null;
   let lastHeartbeat: { active: number; waiting: number; queued: number } | null = null;
 
   onDiagnosticEvent((evt: DiagnosticEventPayload) => {
@@ -499,6 +500,17 @@ export default function register(api: OpenClawPluginApi) {
     try { writeFileSync(summariesFile, JSON.stringify(summaries, null, 2)); } catch {}
   }
 
+  /** Strip all gateway-injected context wrappers to find the real user text */
+  function stripInjectedContext(text: string): string {
+    return text
+      .replace(/<daily_notes>[\s\S]*?<\/daily_notes>\s*/i, "")
+      .replace(/<active_mode>\w*<\/active_mode>\s*/i, "")
+      .replace(/<memory_context>[\s\S]*?<\/memory_context>\s*/i, "")
+      .replace(/\[(?:[A-Z][a-z]{2} )?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?[^\]]*\]\s*/, "")
+      .replace(/A new session was started via\b[\s\S]*/i, "")
+      .trim();
+  }
+
   function getFirstUserMessage(sessionId: string): string | null {
     const files = readdirSync(sessionsDir);
     const match = files.find((f) => f.startsWith(sessionId) && f.endsWith(".jsonl"));
@@ -514,9 +526,9 @@ export default function register(api: OpenClawPluginApi) {
         .join("\n");
       if (!text) continue;
 
-      // Skip system-generated messages that aren't real user interactions
-      if (text.startsWith("A new session was started via")) continue;
-      if (text.startsWith("<memory_context>")) continue;
+      // Strip all injected gateway context wrappers
+      text = stripInjectedContext(text);
+      if (!text) continue;
 
       // Strip cron hook wrapper: "[cron:... Hook] actual text\nCurrent time: ..."
       const cronMatch = text.match(/^\[cron:[^\]]+\]\s*/);
@@ -719,7 +731,7 @@ export default function register(api: OpenClawPluginApi) {
       try {
         const usage = aggregateTokenUsage();
         const summaries = loadSummaries();
-        const sessions = usage.bySession.slice(0, 20).map((s) => {
+        const sessions = usage.bySession.slice(0, 100).map((s) => {
           const summary = summaries[s.sessionId];
           if (!summary) triggerSummaryGeneration(s.sessionId);
           return { ...s, summary: summary || undefined };
@@ -757,42 +769,55 @@ export default function register(api: OpenClawPluginApi) {
 
         const includeTools = url.searchParams.get("tools") === "1";
         const lines = parseJsonl<SessionMessage>(join(sessionsDir, match));
-        const messages = lines
-          .filter(
-            (l) => {
-              if (l.type !== "message" || !l.message) return false;
-              const role = l.message.role;
-              if (role === "user") return true;
-              if (role === "assistant") {
-                if (includeTools) return true;
-                return l.message.content?.some((c: any) => c.type === "text" && c.text);
-              }
-              if (role === "toolResult" && includeTools) return true;
-              return false;
-            },
-          )
-          .map((l) => {
-            const msg: any = l.message!;
-            const entry: Record<string, any> = {
-              id: l.id,
-              timestamp: l.timestamp || msg.timestamp,
-              role: msg.role,
-              content: msg.content,
-              model: msg.model,
-              usage: msg.usage,
-            };
-            if (msg.role === "toolResult") {
-              entry.toolCallId = msg.toolCallId;
-              entry.toolName = msg.toolName;
-              entry.isError = msg.isError || false;
-              // Truncate tool result content to keep payloads small
-              entry.content = (msg.content || []).map((c: any) => ({
-                type: c.type,
-                text: typeof c.text === "string" ? c.text.slice(0, 300) : c.text,
-              }));
+        let lastUserTs: number | null = null;
+        let turnHadThinking = false;
+        const messages: Record<string, any>[] = [];
+        for (const l of lines) {
+          if (l.type !== "message" || !l.message) continue;
+          const msg: any = l.message!;
+          const role = msg.role;
+          if (role === "user") {
+            const ts = l.timestamp || msg.timestamp;
+            if (ts) lastUserTs = new Date(ts).getTime();
+            turnHadThinking = false;
+          } else if (role === "assistant") {
+            if (msg.content?.some((c: any) => c.type === "thinking")) turnHadThinking = true;
+            if (!includeTools && !msg.content?.some((c: any) => c.type === "text" && c.text)) continue;
+          } else if (role === "toolResult") {
+            if (!includeTools) continue;
+          } else {
+            continue;
+          }
+          const entry: Record<string, any> = {
+            id: l.id,
+            timestamp: l.timestamp || msg.timestamp,
+            role: msg.role,
+            content: msg.content,
+            model: msg.model,
+            usage: msg.usage,
+          };
+          if (msg.role === "assistant") {
+            const content: any[] = msg.content || [];
+            entry.hasThinking = (turnHadThinking || content.some((c: any) => c.type === "thinking")) || undefined;
+            const tcc = content.filter((c: any) => c.type === "toolCall").length;
+            if (tcc > 0) entry.toolCallCount = tcc;
+            if (lastUserTs) {
+              const ts = l.timestamp || msg.timestamp;
+              if (ts) entry.durationMs = new Date(ts).getTime() - lastUserTs;
             }
-            return entry;
-          });
+          }
+          if (msg.role === "toolResult") {
+            entry.toolCallId = msg.toolCallId;
+            entry.toolName = msg.toolName;
+            entry.isError = msg.isError || false;
+            // Truncate tool result content to keep payloads small
+            entry.content = (msg.content || []).map((c: any) => ({
+              type: c.type,
+              text: typeof c.text === "string" ? c.text.slice(0, 300) : c.text,
+            }));
+          }
+          messages.push(entry);
+        }
 
         jsonResponse(res, { sessionId, messages });
       } catch (err: any) {
@@ -1102,6 +1127,8 @@ export default function register(api: OpenClawPluginApi) {
   // ── Hooks: tool blocking + activity tracking ───────────────────────────
 
   api.on("before_tool_call", async (event: any, ctx: any) => {
+    // Clear any pending llm_thinking reset so tool_call state shows immediately
+    if (activityResetTimer) { clearTimeout(activityResetTimer); activityResetTimer = null; }
     // Track activity
     currentActivity = {
       type: "tool_call",
@@ -1117,7 +1144,10 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   api.on("after_tool_call", async () => {
-    currentActivity = { type: "llm_thinking", startedAt: Date.now() };
+    activityResetTimer = setTimeout(() => {
+      currentActivity = { type: "llm_thinking", startedAt: Date.now() };
+      activityResetTimer = null;
+    }, 600);
   });
 
   api.on("llm_input", async (event: any, ctx: any) => {
@@ -2994,6 +3024,101 @@ export default function register(api: OpenClawPluginApi) {
         const state = { currentMode: mode, lastSwitchedAt: new Date().toISOString() };
         writeFileSync(MODE_STATE_PATH, JSON.stringify(state, null, 2) + "\n");
         jsonResponse(res, state);
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/commands ─────────────────────────────────────────────
+  // Returns the full list of slash commands for the command picker UI.
+  // Built-in commands are hardcoded (curated for MC relevance).
+  // Plugin + skill commands are discovered dynamically.
+
+  interface CommandInfo {
+    name: string;
+    description: string;
+    category: string;
+    acceptsArgs: boolean;
+    source: "built-in" | "plugin" | "skill";
+  }
+
+  const BUILTIN_COMMANDS: CommandInfo[] = [
+    { name: "help", description: "Show available commands.", category: "status", acceptsArgs: false, source: "built-in" },
+    { name: "status", description: "Show current status.", category: "status", acceptsArgs: false, source: "built-in" },
+    { name: "whoami", description: "Show your sender id.", category: "status", acceptsArgs: false, source: "built-in" },
+    { name: "context", description: "Explain how context is built and used.", category: "status", acceptsArgs: true, source: "built-in" },
+    { name: "export-session", description: "Export current session to HTML.", category: "status", acceptsArgs: true, source: "built-in" },
+    { name: "new", description: "Start a new session.", category: "session", acceptsArgs: true, source: "built-in" },
+    { name: "reset", description: "Reset the current session.", category: "session", acceptsArgs: true, source: "built-in" },
+    { name: "stop", description: "Stop the current run.", category: "session", acceptsArgs: false, source: "built-in" },
+    { name: "compact", description: "Compact the session context.", category: "session", acceptsArgs: true, source: "built-in" },
+    { name: "session", description: "Manage session-level settings.", category: "session", acceptsArgs: true, source: "built-in" },
+    { name: "model", description: "Show or set the model.", category: "options", acceptsArgs: true, source: "built-in" },
+    { name: "models", description: "List model providers or provider models.", category: "options", acceptsArgs: true, source: "built-in" },
+    { name: "think", description: "Set thinking level.", category: "options", acceptsArgs: true, source: "built-in" },
+    { name: "verbose", description: "Toggle verbose mode.", category: "options", acceptsArgs: true, source: "built-in" },
+    { name: "reasoning", description: "Toggle reasoning visibility.", category: "options", acceptsArgs: true, source: "built-in" },
+    { name: "elevated", description: "Toggle elevated mode.", category: "options", acceptsArgs: true, source: "built-in" },
+    { name: "exec", description: "Set exec defaults for this session.", category: "options", acceptsArgs: true, source: "built-in" },
+    { name: "usage", description: "Usage footer or cost summary.", category: "options", acceptsArgs: true, source: "built-in" },
+    { name: "queue", description: "Adjust queue settings.", category: "options", acceptsArgs: true, source: "built-in" },
+    { name: "tts", description: "Control text-to-speech (TTS).", category: "media", acceptsArgs: true, source: "built-in" },
+    { name: "restart", description: "Restart OpenClaw.", category: "tools", acceptsArgs: false, source: "built-in" },
+    { name: "skill", description: "Run a skill by name.", category: "tools", acceptsArgs: true, source: "built-in" },
+    { name: "config", description: "Show or set config values.", category: "management", acceptsArgs: true, source: "built-in" },
+    { name: "debug", description: "Set runtime debug overrides.", category: "management", acceptsArgs: true, source: "built-in" },
+    { name: "subagents", description: "Manage subagent runs.", category: "management", acceptsArgs: true, source: "built-in" },
+    { name: "agents", description: "List thread-bound agents.", category: "management", acceptsArgs: false, source: "built-in" },
+    { name: "kill", description: "Kill a running subagent (or all).", category: "management", acceptsArgs: true, source: "built-in" },
+    { name: "steer", description: "Send guidance to a running subagent.", category: "management", acceptsArgs: true, source: "built-in" },
+  ];
+
+  let commandsCache: { data: CommandInfo[]; ts: number } | null = null;
+
+  api.registerHttpRoute({
+    path: "/api/mc/commands",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const now = Date.now();
+        if (commandsCache && now - commandsCache.ts < 30_000) {
+          jsonResponse(res, { commands: commandsCache.data });
+          return;
+        }
+
+        const commands: CommandInfo[] = [...BUILTIN_COMMANDS];
+
+        // Plugin commands — hardcoded (mcp-tools registers these via api.registerCommand)
+        for (const cmd of [
+          { name: "work", description: "Switch to work mode." },
+          { name: "personal", description: "Switch to personal mode." },
+          { name: "general", description: "Switch to general mode." },
+          { name: "mode", description: "Show current mode." },
+          { name: "local", description: "Switch to local model." },
+          { name: "haiku", description: "Switch to Claude Haiku." },
+          { name: "sonnet", description: "Switch to Claude Sonnet." },
+          { name: "opus", description: "Switch to Claude Opus." },
+        ] as const) {
+          commands.push({ name: cmd.name, description: cmd.description, category: "plugin", acceptsArgs: false, source: "plugin" });
+        }
+
+        // Skill commands (from workspace skills)
+        try {
+          for (const skill of parseSkillDir(workspaceSkillsDir)) {
+            if (skill.enabled) {
+              commands.push({
+                name: skill.name,
+                description: skill.description || `Run ${skill.name} skill`,
+                category: "skill",
+                acceptsArgs: true,
+                source: "skill",
+              });
+            }
+          }
+        } catch {}
+
+        commandsCache = { data: commands, ts: now };
+        jsonResponse(res, { commands });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }

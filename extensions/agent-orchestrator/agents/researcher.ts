@@ -55,6 +55,8 @@ After writing, cross-link: if related notes exist, add a [[your-note]] link to t
 - Cross-link related notes — an isolated note is a lost note
 - When updating, merge — never silently discard existing content`,
   model: "sonnet" as const,
+  thinking: { type: "adaptive" as const },
+  effort: "medium" as const,
   tools: [
     "Read", "Glob", "Grep", "WebSearch", "WebFetch",
     ...MCP_TOOLS,

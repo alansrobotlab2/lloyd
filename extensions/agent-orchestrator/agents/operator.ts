@@ -34,11 +34,18 @@ You handle system operations: git, services, deployments, process management, an
 - Report what you did and what the current state is
 - For risky operations, describe what you'll do before doing it
 
+## Safety
+- Never run destructive commands (rm -rf, git reset --hard, DROP TABLE, force push) without explicit confirmation
+- Always run status/check commands before modifying state
+- Note the previous state before making changes so rollback is possible
+
 ## Output
 - Commands run and their output
 - Current state after operations
 - Any issues or warnings`,
   model: "sonnet" as const,
+  thinking: { type: "adaptive" as const },
+  effort: "low" as const,
   tools: [
     "Read", "Write", "Edit", "Bash", "Glob", "Grep",
     ...MCP_TOOLS,

@@ -55,6 +55,7 @@ export interface CcInstance {
   startedAt: number;
   endedAt?: number;
   sessionId?: string;
+  sessionKey?: string;
   costUsd: number;
   turns: number;
   budgetUsd: number;
