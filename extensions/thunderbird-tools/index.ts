@@ -11,9 +11,13 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { spawn, ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
-const BRIDGE_PATH =
-  "/home/alansrobotlab/Projects/lloyd-services/services/thunderbird-mcp/mcp-bridge.cjs";
+const BRIDGE_PATH = join(
+  homedir(),
+  "Projects", "lloyd-services", "services", "thunderbird-mcp", "mcp-bridge.cjs"
+);
 
 const TOOL_NAMES: Record<string, string> = {
   listAccounts:      "email_accounts",

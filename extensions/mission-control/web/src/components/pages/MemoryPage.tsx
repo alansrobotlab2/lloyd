@@ -12,7 +12,6 @@ import {
   Pencil,
   Check,
 } from "lucide-react";
-import { marked } from "marked";
 import {
   api,
   type MemoryStats,
@@ -20,6 +19,7 @@ import {
   type MemoryReadResult,
   type TagEntry,
 } from "../../api";
+import { sanitizeHtml } from "../../utils/sanitize";
 import TagGraph from "../TagGraph";
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -34,13 +34,6 @@ const TYPE_COLORS: Record<string, string> = {
   talk: "bg-emerald-400/10 text-emerald-400",
   reference: "bg-purple-400/10 text-purple-400",
 };
-
-// ── Markdown renderer config ─────────────────────────────────────────────
-
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-});
 
 // ── Tag Sidebar ─────────────────────────────────────────────────────────
 
@@ -313,7 +306,7 @@ function DocumentModal({
 
   const renderedContent = useMemo(() => {
     try {
-      return marked.parse(doc.content) as string;
+      return sanitizeHtml(doc.content);
     } catch {
       return doc.content;
     }

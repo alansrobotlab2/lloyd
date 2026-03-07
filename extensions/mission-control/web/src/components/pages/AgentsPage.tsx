@@ -4,8 +4,8 @@
  */
 import { useEffect, useState, useCallback } from "react";
 import { Bot, ChevronLeft, ChevronDown, ChevronRight, Cpu, Wrench, Sparkles, Users, Layers, FileText, Pencil, X, Save } from "lucide-react";
-import { marked } from "marked";
 import { api, AgentInfo, AgentsData, AgentStatusData, SubagentRunInfo, ToolGroupInfo, WorkspaceFile, CallLogEntry, SdkAgentInfo, SdkAgentsData, CcInstanceInfo, CcInstanceMessage } from "../../api";
+import { sanitizeHtml } from "../../utils/sanitize";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -713,7 +713,7 @@ function WorkspaceFileEditor({
               </button>
               <div
                 className="prose-chat text-[12px]"
-                dangerouslySetInnerHTML={{ __html: marked.parse(file.content) as string }}
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(file.content) }}
               />
             </div>
           )}

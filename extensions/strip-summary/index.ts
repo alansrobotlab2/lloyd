@@ -2,7 +2,8 @@ export default function register(api: any) {
   api.logger?.info?.("strip-summary: plugin registered");
 
   api.on("message_sending", (event: any, ctx: any) => {
-    api.logger?.info?.(`strip-summary: hook fired — channel=${ctx.channelId}, contentLen=${event.content?.length}`);
+    if (!event.content) return;
+    api.logger?.info?.(`strip-summary: hook fired — channel=${ctx.channelId}, contentLen=${event.content.length}`);
 
     // skip webchat — voice pipeline needs summary blocks
     if (ctx.channelId === "webchat") {

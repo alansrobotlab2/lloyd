@@ -20,6 +20,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import https from "node:https";
 
 import type { CcInstance, InstanceStatusResponse, McInstanceInfo, PendingQuestionInfo, QuestionAnswer } from "./types.js";
 import { consumeQuery } from "./query-consumer.js";
@@ -36,8 +37,6 @@ import {
   operatorAgent,
   clawhubAgent,
 } from "./agents/index.js";
-
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -118,19 +117,32 @@ async function injectHookMessage(message: string, logger: any, sessionKey?: stri
   }
   try {
     console.error(`[agent-orchestrator] injectHookMessage sessionKey=${sessionKey ?? "(none)"} url=${HOOKS_URL}`);
-    const resp = await fetch(HOOKS_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const agent = new https.Agent({ rejectUnauthorized: false });
+    const url = new URL(HOOKS_URL);
+    await new Promise<void>((resolve) => {
+      const req = https.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        agent,
+      }, (res) => {
+        console.error(`[agent-orchestrator] injectHookMessage response status=${res.statusCode}`);
+        res.resume();
+        res.on("end", resolve);
+      });
+      req.on("error", () => resolve());
+      req.write(JSON.stringify({
         text: `[System Message] ${message}`,
         mode: "now",
         sessionKey: sessionKey ?? HOOKS_SESSION_KEY,
-      }),
+      }));
+      req.end();
     });
-    console.error(`[agent-orchestrator] injectHookMessage response status=${resp.status}`);
   } catch (err: any) {
     logger.warn?.(`agent-orchestrator: hook inject failed: ${err.message}`);
   }
@@ -552,7 +564,7 @@ export default function register(api: OpenClawPluginApi) {
     async execute(_id: string, params: any) {
       try {
         const queryFn = await getQuery();
-        const instanceId = randomUUID().slice(0, 8);
+        const instanceId = randomUUID().slice(0, 12);
         const budget = params.budget ?? DEFAULT_BUDGET_USD;
         const maxTurns = params.maxTurns ?? DEFAULT_MAX_TURNS;
         const pipeline: PipelineType = params.pipeline ?? "custom";
@@ -761,7 +773,7 @@ export default function register(api: OpenClawPluginApi) {
           api.logger.info?.(`agent-orchestrator: loaded ${params.agent} prompt from vault`);
         }
 
-        const instanceId = randomUUID().slice(0, 8);
+        const instanceId = randomUUID().slice(0, 12);
         const budget = params.budget ?? 2.0;
         const cwd = params.cwd || process.env.HOME || "/home/alansrobotlab";
         const abort = new AbortController();
@@ -1100,7 +1112,7 @@ export default function register(api: OpenClawPluginApi) {
     async execute(_id: string, params: any) {
       try {
         const queryFn = await getQuery();
-        const instanceId = randomUUID().slice(0, 8);
+        const instanceId = randomUUID().slice(0, 12);
         const cwd = params.cwd || process.env.HOME || "/home/alansrobotlab";
         const abort = new AbortController();
 
@@ -1205,7 +1217,7 @@ export default function register(api: OpenClawPluginApi) {
   function jsonResponse(res: ServerResponse, data: any, status = 200): void {
     res.writeHead(status, {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": "http://localhost:7778",
     });
     res.end(JSON.stringify(data));
   }

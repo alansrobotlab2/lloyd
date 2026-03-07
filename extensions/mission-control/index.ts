@@ -10,12 +10,12 @@ import { onDiagnosticEvent, type DiagnosticEventPayload } from "openclaw/plugin-
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, writeFileSync, readdirSync, existsSync, statSync, renameSync } from "fs";
 import { join, extname, relative } from "path";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import { connect as netConnect } from "net";
 import { homedir } from "os";
 import { randomUUID, createPrivateKey, createPublicKey, createHash, sign as cryptoSign } from "crypto";
 // Use the ws module bundled with openclaw (can't use bare "ws" from plugin context)
-const WS = require("/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/ws");
+const WS = require(require.resolve("ws", { paths: [require.resolve("openclaw")] }));
 
 // ── Device identity helpers for WebSocket auth ──────────────────────────
 
@@ -41,7 +41,7 @@ function loadDeviceIdentity(): { deviceId: string; publicKeyPem: string; private
     if (parsed?.version === 1 && typeof parsed.deviceId === "string" && typeof parsed.publicKeyPem === "string" && typeof parsed.privateKeyPem === "string") {
       return { deviceId: parsed.deviceId, publicKeyPem: parsed.publicKeyPem, privateKeyPem: parsed.privateKeyPem };
     }
-  } catch {}
+  } catch { /* non-fatal: identity file missing or malformed */ }
   return null;
 }
 
@@ -153,7 +153,7 @@ function parseJsonl<T>(filePath: string, limit?: number): T[] {
   for (let i = start; i < lines.length; i++) {
     try {
       items.push(JSON.parse(lines[i]));
-    } catch {}
+    } catch { /* skip malformed JSONL line */ }
   }
   return items;
 }
@@ -161,16 +161,21 @@ function parseJsonl<T>(filePath: string, limit?: number): T[] {
 function jsonResponse(res: ServerResponse, data: any, status = 200) {
   res.writeHead(status, {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": "http://localhost:5173",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
   });
   res.end(JSON.stringify(data));
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
+    let size = 0;
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size > maxBytes) { req.destroy(); reject(new Error("Body too large")); }
+      else chunks.push(c);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
     req.on("error", reject);
   });
@@ -237,7 +242,7 @@ function voicePipeConnect() {
           } else if (msg.type === "wakeword") {
             broadcastSse("wakeword", JSON.stringify({ detected: msg.detected }));
           }
-        } catch {}
+        } catch { /* skip malformed voice WS message */ }
       }
     });
   } catch {
@@ -497,7 +502,7 @@ export default function register(api: OpenClawPluginApi) {
             startedAt: data.startedAt || "",
             status: data.status || "unknown",
           });
-        } catch {}
+        } catch { /* skip unreadable cc-instance file */ }
       }
       return results;
     }, HEAVY_CACHE_TTL);
@@ -591,12 +596,12 @@ export default function register(api: OpenClawPluginApi) {
   function loadSummaries(): Record<string, string> {
     try {
       if (existsSync(summariesFile)) return JSON.parse(readFileSync(summariesFile, "utf-8"));
-    } catch {}
+    } catch (e) { api.logger.debug?.(`mission-control: loadSummaries: ${(e as Error).message}`); }
     return {};
   }
 
   function saveSummaries(summaries: Record<string, string>) {
-    try { writeFileSync(summariesFile, JSON.stringify(summaries, null, 2)); } catch {}
+    try { writeFileSync(summariesFile, JSON.stringify(summaries, null, 2)); } catch (e) { api.logger.debug?.(`mission-control: saveSummaries: ${(e as Error).message}`); }
   }
 
   /** Strip all gateway-injected context wrappers to find the real user text */
@@ -956,7 +961,7 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": "http://localhost:5173",
           "Access-Control-Allow-Methods": "POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         });
@@ -1005,7 +1010,7 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": "http://localhost:5173",
           "Access-Control-Allow-Methods": "POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         });
@@ -1034,7 +1039,7 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": "http://localhost:5173",
           "Access-Control-Allow-Methods": "POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         });
@@ -1061,6 +1066,15 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  const GREETING_PROMPT =
+    "A new session was started via /new or /reset. Execute your Session Startup " +
+    "sequence now. Your daily notes have already been loaded into context above " +
+    "— do NOT call mem_get for them. Greet the user in your configured persona, " +
+    "if one is provided. Be yourself - use your defined voice, mannerisms, and " +
+    "mood. Keep it to 1-3 sentences and ask what they want to do. If the runtime " +
+    "model differs from default_model in the system prompt, mention the default " +
+    "model. Do not mention internal steps, files, tools, or reasoning.";
+
   // ── API: /api/mc/session-reset ────────────────────────────────────────
   // Calls the gateway's sessions.reset method (same as control UI /new).
   // Returns the new session entry so the frontend can switch to it immediately.
@@ -1070,7 +1084,7 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": "http://localhost:5173",
           "Access-Control-Allow-Methods": "POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         });
@@ -1092,17 +1106,9 @@ export default function register(api: OpenClawPluginApi) {
 
         // 2. Send the startup greeting prompt (same as the built-in openclaw dashboard
         //    sends after /new). Fire-and-forget — the agent will process it async.
-        const greetingPrompt =
-          "A new session was started via /new or /reset. Execute your Session Startup " +
-          "sequence now. Your daily notes have already been loaded into context above " +
-          "— do NOT call mem_get for them. Greet the user in your configured persona, " +
-          "if one is provided. Be yourself - use your defined voice, mannerisms, and " +
-          "mood. Keep it to 1-3 sentences and ask what they want to do. If the runtime " +
-          "model differs from default_model in the system prompt, mention the default " +
-          "model. Do not mention internal steps, files, tools, or reasoning.";
         gwWsSend("chat.send", {
           sessionKey: "agent:main:main",
-          message: greetingPrompt,
+          message: GREETING_PROMPT,
           idempotencyKey: randomUUID(),
         }).catch(() => {});
 
@@ -1123,7 +1129,7 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": "http://localhost:5173",
           "Access-Control-Allow-Methods": "POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         });
@@ -1162,23 +1168,15 @@ export default function register(api: OpenClawPluginApi) {
             if (beforeFiles.has(original)) {
               try {
                 renameSync(join(sessionsDir, f), join(sessionsDir, original));
-              } catch {}
+              } catch (e) { api.logger.debug?.(`mission-control: session un-archive rename: ${(e as Error).message}`); }
             }
           }
         }
 
         // Send the startup greeting prompt
-        const greetingPrompt =
-          "A new session was started via /new or /reset. Execute your Session Startup " +
-          "sequence now. Your daily notes have already been loaded into context above " +
-          "— do NOT call mem_get for them. Greet the user in your configured persona, " +
-          "if one is provided. Be yourself - use your defined voice, mannerisms, and " +
-          "mood. Keep it to 1-3 sentences and ask what they want to do. If the runtime " +
-          "model differs from default_model in the system prompt, mention the default " +
-          "model. Do not mention internal steps, files, tools, or reasoning.";
         gwWsSend("chat.send", {
           sessionKey: "agent:main:main",
-          message: greetingPrompt,
+          message: GREETING_PROMPT,
           idempotencyKey: randomUUID(),
         }).catch(() => {});
 
@@ -1313,7 +1311,7 @@ export default function register(api: OpenClawPluginApi) {
   function loadToolsState(): Record<string, boolean> {
     try {
       if (existsSync(toolsFile)) return JSON.parse(readFileSync(toolsFile, "utf-8"));
-    } catch {}
+    } catch (e) { api.logger.debug?.(`mission-control: loadToolsState: ${(e as Error).message}`); }
     return {};
   }
 
@@ -1413,7 +1411,7 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── API: /api/mc/skills ──────────────────────────────────────────────
 
-  const YAML = require("/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/yaml");
+  const YAML = require(require.resolve("yaml", { paths: [require.resolve("openclaw")] }));
   // Resolve main agent workspace from config (supports relocated workspaces)
   const mainAgentWorkspace = (() => {
     try {
@@ -1449,7 +1447,7 @@ export default function register(api: OpenClawPluginApi) {
         require("fs").accessSync(candidate, require("fs").constants.X_OK);
         binExistsCache.set(bin, true);
         return true;
-      } catch {}
+      } catch { /* non-fatal: binary not at this PATH entry */ }
     }
     binExistsCache.set(bin, false);
     return false;
@@ -1509,7 +1507,7 @@ export default function register(api: OpenClawPluginApi) {
     let config: any = {};
     try {
       config = JSON.parse(readFileSync(configFile, "utf-8"));
-    } catch {}
+    } catch (e) { api.logger.debug?.(`mission-control: parseSkillDir config read: ${(e as Error).message}`); }
     const skillEntries = config?.skills?.entries ?? {};
     for (const entry of readdirSync(dir)) {
       const skillFile = join(dir, entry, "SKILL.md");
@@ -1534,7 +1532,7 @@ export default function register(api: OpenClawPluginApi) {
           configured,
           location: skillFile,
         });
-      } catch {}
+      } catch (e) { api.logger.debug?.(`mission-control: parseSkillDir skill parse: ${(e as Error).message}`); }
     }
     return skills.sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -1636,7 +1634,7 @@ export default function register(api: OpenClawPluginApi) {
                 jsonResponse(res, { content: raw, location: skillFile });
                 return;
               }
-            } catch {}
+            } catch (e) { api.logger.debug?.(`mission-control: skill GET parse: ${(e as Error).message}`); }
           }
         }
         jsonResponse(res, { error: "Skill not found" }, 404);
@@ -1671,7 +1669,7 @@ export default function register(api: OpenClawPluginApi) {
                   jsonResponse(res, { ok: true });
                   return;
                 }
-              } catch {}
+              } catch (e) { api.logger.warn?.(`mission-control: skill POST write: ${(e as Error).message}`); }
             }
           }
           jsonResponse(res, { error: "Skill not found" }, 404);
@@ -1744,7 +1742,7 @@ export default function register(api: OpenClawPluginApi) {
                   if (model.enabled !== false) enabledModels++;
                 }
               }
-            } catch {}
+            } catch { /* non-fatal: models.json parse */ }
           }
 
           // Read tools state
@@ -1754,7 +1752,7 @@ export default function register(api: OpenClawPluginApi) {
             try {
               const t = JSON.parse(readFileSync(toolsPath, "utf-8"));
               disabledTools = Object.values(t).filter((v) => v === false).length;
-            } catch {}
+            } catch { /* non-fatal: tools.json parse */ }
           }
 
           // Resolve per-agent workspace
@@ -2352,7 +2350,7 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": "http://localhost:5173",
           "Access-Control-Allow-Methods": "POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         });
@@ -2384,7 +2382,7 @@ export default function register(api: OpenClawPluginApi) {
         if (svc?.id === "gateway" && (action === "restart" || action === "start")) {
           try {
             execSync(`kill $(lsof -ti :18789) 2>/dev/null`, { timeout: 5000 });
-          } catch {} // ok if nothing to kill
+          } catch { /* non-fatal: nothing to kill */ }
           await new Promise((r) => setTimeout(r, 2000));
           execSync(`systemctl --user ${action} ${unitName}`, {
             encoding: "utf-8",
@@ -2400,7 +2398,7 @@ export default function register(api: OpenClawPluginApi) {
           await new Promise((r) => setTimeout(r, 1000));
           try {
             execSync(`kill $(lsof -ti :${port}) 2>/dev/null`, { timeout: 5000 });
-          } catch {} // ok if nothing to kill
+          } catch { /* non-fatal: nothing to kill */ }
           await new Promise((r) => setTimeout(r, 1000));
           if (action === "restart") {
             execSync(`systemctl --user start ${unitName}`, {
@@ -2608,7 +2606,7 @@ export default function register(api: OpenClawPluginApi) {
                     else uptime = `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
                   }
                 }
-              } catch {}
+              } catch { /* non-fatal: uptime parse */ }
             }
 
             // Compute health
@@ -3032,10 +3030,10 @@ export default function register(api: OpenClawPluginApi) {
           // Basename search across vault (handles moved files)
           if (!found) {
             try {
-              const out = execSync(
-                `find ${vaultRoot} -iname "${base}" -type f 2>/dev/null | head -1`,
-                { encoding: "utf-8", timeout: 3000 },
-              ).trim();
+              const out = execFileSync('find', [vaultRoot, '-iname', base, '-type', 'f'], {
+                encoding: "utf-8",
+                timeout: 3000,
+              }).trim().split('\n')[0] || '';
               if (out && out.startsWith(vaultRoot)) {
                 resolvedPath = out;
                 found = true;
@@ -3241,7 +3239,7 @@ export default function register(api: OpenClawPluginApi) {
     path: "/api/mc/backlog/task-update",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
-        res.writeHead(200, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
+        res.writeHead(200, { "Access-Control-Allow-Origin": "http://localhost:5173", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
         res.end();
         return;
       }
@@ -3306,7 +3304,7 @@ export default function register(api: OpenClawPluginApi) {
     path: "/api/mc/backlog/task-delete",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
-        res.writeHead(200, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
+        res.writeHead(200, { "Access-Control-Allow-Origin": "http://localhost:5173", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
         res.end();
         return;
       }
@@ -3329,7 +3327,7 @@ export default function register(api: OpenClawPluginApi) {
     path: "/api/mc/backlog/task-create",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
-        res.writeHead(200, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
+        res.writeHead(200, { "Access-Control-Allow-Origin": "http://localhost:5173", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
         res.end();
         return;
       }
@@ -3453,7 +3451,7 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": "http://localhost:5173",
           "Access-Control-Allow-Methods": "POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization",
         });
@@ -3638,7 +3636,7 @@ export default function register(api: OpenClawPluginApi) {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
-        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Origin": "http://localhost:5173",
       });
       res.write(":\n\n"); // SSE comment to flush
       voiceSseClients.add(res);

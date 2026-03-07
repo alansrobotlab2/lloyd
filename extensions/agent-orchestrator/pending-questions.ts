@@ -34,7 +34,7 @@ export function createQuestion(opts: {
   options?: string[];
   timeoutMs?: number;
 }): { question: PendingQuestion; promise: Promise<QuestionAnswer> } {
-  const id = randomUUID().slice(0, 8);
+  const id = randomUUID().slice(0, 12);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   let resolve: (answer: QuestionAnswer) => void;

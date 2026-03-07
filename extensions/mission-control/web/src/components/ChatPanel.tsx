@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Send, User, Loader2, Brain, MessageCircle, StopCircle, Wrench, Plus } from "lucide-react";
 import { marked } from "marked";
 import { api, type MessageEntry, type CommandInfo } from "../api";
+import { sanitizeHtml } from "../utils/sanitize";
 import SlashCommandPicker from "./SlashCommandPicker";
 import VoicePanel from "./VoicePanel";
 
@@ -522,7 +523,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded, onVoice
                     <div className="max-w-[90%] rounded-lg px-3 py-2 bg-surface-2/30 border border-surface-3/20">
                       <div className="text-[10px] font-mono text-slate-600 uppercase tracking-wide mb-1">context prefill</div>
                       <div className="text-xs text-slate-500 leading-relaxed max-h-40 overflow-y-auto prose-chat"
-                        dangerouslySetInnerHTML={{ __html: marked.parse(text) as string }}
+                        dangerouslySetInnerHTML={{ __html: sanitizeHtml(text) }}
                       />
                       <div className="text-[10px] text-slate-600 mt-1">{timeStr(msg.timestamp)}</div>
                     </div>
@@ -573,7 +574,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded, onVoice
                     {text && (
                       <div
                         className="text-sm leading-relaxed prose-chat"
-                        dangerouslySetInnerHTML={{ __html: marked.parse(msg.role === "user" ? stripDatetimePrefix(text) : text) as string }}
+                        dangerouslySetInnerHTML={{ __html: sanitizeHtml(msg.role === "user" ? stripDatetimePrefix(text) : text) }}
                       />
                     )}
                     {toolCalls.length > 0 && (

@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "@types/d3-force": "^3.0.10",
+    "@types/dompurify": "^3.0.5",
     "d3-force": "^3.0.0",
+    "dompurify": "^3.3.2",
     "lucide-react": "^0.468.0",
     "marked": "^17.0.3",
     "react": "^19.0.0",

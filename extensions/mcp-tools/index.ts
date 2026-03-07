@@ -67,10 +67,20 @@ export default function register(api: OpenClawPluginApi) {
   function saveMode(mode: WorkMode): void {
     const state: ModeState = { currentMode: mode, lastSwitchedAt: new Date().toISOString() };
     writeFileSync(MODE_STATE_PATH, JSON.stringify(state, null, 2) + "\n");
+    _cachedMode = mode;
+    _cachedModeTs = Date.now();
   }
 
+  let _cachedMode: WorkMode | null = null;
+  let _cachedModeTs = 0;
+  const MODE_CACHE_TTL_MS = 5000;
+
   function getCurrentMode(): WorkMode {
-    return readModeState().currentMode;
+    const now = Date.now();
+    if (_cachedMode !== null && now - _cachedModeTs < MODE_CACHE_TTL_MS) return _cachedMode;
+    _cachedMode = readModeState().currentMode;
+    _cachedModeTs = now;
+    return _cachedMode;
   }
 
   // ── Mode switching commands ────────────────────────────────────────────

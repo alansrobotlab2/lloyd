@@ -1,9 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Sparkles, Package, Pencil, X, Save } from "lucide-react";
-import { marked } from "marked";
 import { api, SkillInfo } from "../../api";
-
-marked.setOptions({ breaks: true, gfm: true });
+import { sanitizeHtml } from "../../utils/sanitize";
 
 function ToggleSwitch({ enabled, onToggle }: { enabled: boolean; onToggle: () => void }) {
   return (
@@ -118,7 +116,7 @@ export default function SkillsPage() {
     bundled.filter((s) => s.enabled).length;
 
   const renderedContent = content
-    ? (marked.parse(content) as string)
+    ? sanitizeHtml(content)
     : "";
 
   return (

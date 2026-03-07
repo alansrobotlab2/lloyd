@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { mkdir, appendFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
@@ -9,10 +9,15 @@ const LOG_FILE = join(
   "timing.jsonl",
 );
 
-function writeRecord(record: object) {
+let dirEnsured = false;
+
+async function writeRecord(record: object) {
   try {
-    mkdirSync(dirname(LOG_FILE), { recursive: true });
-    appendFileSync(LOG_FILE, JSON.stringify(record) + "\n");
+    if (!dirEnsured) {
+      await mkdir(dirname(LOG_FILE), { recursive: true });
+      dirEnsured = true;
+    }
+    await appendFile(LOG_FILE, JSON.stringify(record) + "\n");
   } catch {
     // non-fatal
   }
@@ -31,6 +36,7 @@ interface RunState {
 }
 
 const runs = new Map<string, RunState>();
+let toolCallCounter = 0;
 
 export default function register(api: OpenClawPluginApi) {
   api.logger.info?.("timing-profiler: active — writing to " + LOG_FILE);
@@ -70,7 +76,7 @@ export default function register(api: OpenClawPluginApi) {
     if (run) {
       const llmMs = Date.now() - run.lastBoundaryMs;
       if (llmMs > 10) run.llmSegments.push(llmMs);
-      run.pendingTools.set(event?.toolName + ":" + Date.now(), Date.now());
+      run.pendingTools.set(event?.toolName + ":" + (++toolCallCounter), Date.now());
     }
   });
 
