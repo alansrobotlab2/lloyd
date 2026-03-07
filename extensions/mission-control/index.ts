@@ -8,7 +8,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { onDiagnosticEvent, type DiagnosticEventPayload } from "openclaw/plugin-sdk";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from "fs";
+import { readFileSync, writeFileSync, readdirSync, existsSync, statSync, renameSync } from "fs";
 import { join, extname, relative } from "path";
 import { execSync } from "child_process";
 import { connect as netConnect } from "net";
@@ -988,6 +988,82 @@ export default function register(api: OpenClawPluginApi) {
         jsonResponse(res, { ok: true, sessionId, data: result });
       } catch (err: any) {
         api.logger.error?.(`mission-control: sessions.reset failed: ${err.message}`);
+        jsonResponse(res, { error: err.message }, 502);
+      }
+    },
+  });
+
+  // ── API: /api/mc/session-new ──────────────────────────────────────────
+  // Creates a new session without archiving the previous one.
+  // The old session transcript remains as a normal .jsonl file.
+
+  api.registerHttpRoute({
+    path: "/api/mc/session-new",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === "OPTIONS") {
+        res.writeHead(200, {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        });
+        res.end();
+        return;
+      }
+      if (req.method !== "POST") {
+        jsonResponse(res, { error: "Method not allowed" }, 405);
+        return;
+      }
+      try {
+        // Snapshot the old session files before reset
+        const beforeFiles = new Set(
+          existsSync(sessionsDir)
+            ? readdirSync(sessionsDir).filter((f) => f.endsWith(".jsonl") && !f.includes(".reset."))
+            : [],
+        );
+
+        // Reset creates a new session and archives the old one
+        const result = await gwWsSend("sessions.reset", {
+          key: "agent:main:main",
+          reason: "new",
+        });
+        cache.delete("token-usage");
+        const sessionId = result?.entry?.sessionId ?? null;
+
+        // Un-archive: find any newly archived files and rename them back
+        if (existsSync(sessionsDir)) {
+          const afterFiles = readdirSync(sessionsDir);
+          for (const f of afterFiles) {
+            if (!f.includes(".reset.")) continue;
+            // Extract the original filename (everything before .reset.TIMESTAMP)
+            const resetIdx = f.indexOf(".reset.");
+            const original = f.slice(0, resetIdx);
+            // Only un-archive if this was a file we had before
+            if (beforeFiles.has(original)) {
+              try {
+                renameSync(join(sessionsDir, f), join(sessionsDir, original));
+              } catch {}
+            }
+          }
+        }
+
+        // Send the startup greeting prompt
+        const greetingPrompt =
+          "A new session was started via /new or /reset. Execute your Session Startup " +
+          "sequence now. Your daily notes have already been loaded into context above " +
+          "— do NOT call mem_get for them. Greet the user in your configured persona, " +
+          "if one is provided. Be yourself - use your defined voice, mannerisms, and " +
+          "mood. Keep it to 1-3 sentences and ask what they want to do. If the runtime " +
+          "model differs from default_model in the system prompt, mention the default " +
+          "model. Do not mention internal steps, files, tools, or reasoning.";
+        gwWsSend("chat.send", {
+          sessionKey: "agent:main:main",
+          message: greetingPrompt,
+          idempotencyKey: randomUUID(),
+        }).catch(() => {});
+
+        jsonResponse(res, { ok: true, sessionId, data: result });
+      } catch (err: any) {
+        api.logger.error?.(`mission-control: session-new failed: ${err.message}`);
         jsonResponse(res, { error: err.message }, 502);
       }
     },

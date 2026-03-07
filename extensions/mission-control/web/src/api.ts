@@ -536,6 +536,16 @@ export const api = {
     return res.json();
   },
 
+  sessionNew: async (): Promise<{ ok: boolean; sessionId: string | null }> => {
+    const res = await fetch(`${BASE}/session-new`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!res.ok) throw new Error(`Session new failed: ${res.status}`);
+    return res.json();
+  },
+
   // Backlog
   backlogBoards: () => fetchJson<BacklogBoard[]>("/backlog/boards"),
   backlogTasks: (params?: Record<string, string>) => {

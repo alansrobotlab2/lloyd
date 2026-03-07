@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import { Send, User, Plus, Loader2, Brain, MessageCircle, StopCircle, Wrench } from "lucide-react";
+import { Send, User, Loader2, Brain, MessageCircle, StopCircle, Wrench } from "lucide-react";
 import { marked } from "marked";
 import { api, type MessageEntry, type CommandInfo } from "../api";
 import SlashCommandPicker from "./SlashCommandPicker";
+import SessionTabBar from "./SessionTabBar";
+import { useSessionTabs } from "./hooks/useSessionTabs";
 
 // Configure marked for safe, sane defaults
 marked.setOptions({ breaks: true, gfm: true });
@@ -58,17 +60,15 @@ interface ChatPanelProps {
 }
 
 export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatPanelProps = {}) {
-  const [messages, setMessages] = useState<MessageEntry[]>([]);
-  const [input, setInput] = useState("");
+  // ── Tab state ──────────────────────────────────────────────────────
+  const {
+    tabs, activeTabId, activeTab,
+    addTab, closeTab, setActiveTab, updateTab, findTabBySession,
+  } = useSessionTabs();
+
+  // ── Shared (cross-tab) state ───────────────────────────────────────
   const [sending, setSending] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Array<{ sessionId: string; lastActivity: string; model: string; summary?: string }>>([]);
-  const [awaitingReset, setAwaitingReset] = useState(false);
-  // Show the "Thinking..." bubble while waiting for an assistant reply
-  const [thinking, setThinking] = useState(false);
-  // Granular activity state while thinking: "thinking" (LLM reasoning) vs "working" (tool call)
-  const [activityType, setActivityType] = useState<"thinking" | "working" | null>(null);
-  const [activityDetail, setActivityDetail] = useState<string | null>(null);
   const [showToolCalls, setShowToolCalls] = useState(() => {
     try { return localStorage.getItem("mc-agent-details-visible") === "true"; } catch { return false; }
   });
@@ -77,24 +77,32 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
   const [commandsList, setCommandsList] = useState<CommandInfo[]>([]);
   const [showPicker, setShowPicker] = useState(false);
   const [pickerIndex, setPickerIndex] = useState(0);
+
+  // ── Refs ────────────────────────────────────────────────────────────
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
   const initialLoadDone = useRef(false);
-  // Track the timestamp of the last user-sent message so we can detect new replies
-  const lastUserSendTs = useRef(0);
   const scrollToBottomOnLoad = useRef(true);
   const thinkingRestored = useRef(false);
   const workingStartRef = useRef<number>(0);
   const workingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isWorkingRef = useRef(false);
+  const prevActiveTabIdRef = useRef<string | null>(null);
 
-  // Derive current model and thinking status from available state
+  // ── Convenience aliases from active tab ────────────────────────────
+  const messages = activeTab?.messages ?? [];
+  const input = activeTab?.input ?? "";
+  const thinking = activeTab?.thinking ?? false;
+  const activityType = activeTab?.activityType ?? null;
+  const activityDetail = activeTab?.activityDetail ?? null;
+  const awaitingReset = activeTab?.awaitingReset ?? false;
+  const sessionId = activeTab?.sessionKey ?? null;
+
+  // ── Derived state ──────────────────────────────────────────────────
   const currentModel = useMemo(() => {
-    // Prefer the most recent assistant message's model (most current)
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant" && m.model);
     if (lastAssistant?.model) return lastAssistant.model;
-    // Fall back to session-level model from sessions list
     return sessions.find((s) => s.sessionId === sessionId)?.model || null;
   }, [messages, sessions, sessionId]);
 
@@ -103,13 +111,27 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
     return lastAssistant?.hasThinking ?? false;
   }, [messages]);
 
-  // Switch to a session requested by another page (e.g. Sessions table)
+  // ── Helper: update active tab state ────────────────────────────────
+  const updateActive = useCallback(
+    (updates: Parameters<typeof updateTab>[1]) => {
+      if (activeTabId) updateTab(activeTabId, updates);
+    },
+    [activeTabId, updateTab],
+  );
+
+  // Wrapper for setInput that updates active tab
+  const setInput = useCallback(
+    (val: string) => updateActive({ input: val }),
+    [updateActive],
+  );
+
+  // ── Switch to a session requested by another page ──────────────────
   useEffect(() => {
-    if (requestedSessionId && requestedSessionId !== sessionId) {
-      initialLoadDone.current = true; // prevent initial-load from overriding
-      setSessionId(requestedSessionId);
-      setThinking(false);
-      setAwaitingReset(false);
+    if (requestedSessionId) {
+      initialLoadDone.current = true;
+      const sessionInfo = sessions.find((s) => s.sessionId === requestedSessionId);
+      const label = sessionInfo?.summary || requestedSessionId.slice(0, 8) + "...";
+      addTab(requestedSessionId, label);
       onSessionLoaded?.();
     }
   }, [requestedSessionId]);
@@ -124,21 +146,60 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
     });
   }, []);
 
-  // Initial load — auto-select most recent session
+  // Initial load — auto-open most recent session as first tab
   useEffect(() => {
     refreshSessions().then((list) => {
       if (!initialLoadDone.current && list.length > 0) {
         initialLoadDone.current = true;
-        setSessionId(list[0].sessionId);
+        // If tabs were restored from localStorage, don't auto-open
+        if (tabs.length > 0) return;
+        const s = list[0];
+        addTab(s.sessionId, s.summary || s.sessionId.slice(0, 8) + "...");
       }
     });
   }, [refreshSessions]);
 
-  // Reset scroll-to-bottom and thinking-restore flags when session changes
+  // Update tab labels when sessions list refreshes (e.g., after summary arrives)
   useEffect(() => {
+    if (sessions.length === 0) return;
+    for (const tab of tabs) {
+      const sessionInfo = sessions.find((s) => s.sessionId === tab.sessionKey);
+      if (sessionInfo) {
+        const newLabel = sessionInfo.summary || sessionInfo.sessionId.slice(0, 8) + "...";
+        if (newLabel !== tab.label) {
+          updateTab(tab.id, { label: newLabel });
+        }
+      }
+    }
+  }, [sessions]);
+
+  // Save scroll position when switching tabs, restore on activate
+  useEffect(() => {
+    const prevId = prevActiveTabIdRef.current;
+    if (prevId && prevId !== activeTabId) {
+      // Save scroll position for the tab we're leaving
+      const el = messagesContainerRef.current;
+      if (el) {
+        updateTab(prevId, { scrollPosition: el.scrollTop });
+      }
+    }
+    prevActiveTabIdRef.current = activeTabId;
+
+    // Reset scroll flags for new tab
     scrollToBottomOnLoad.current = true;
     thinkingRestored.current = false;
-  }, [sessionId]);
+
+    // Restore scroll position for the tab we're switching to (next frame)
+    if (activeTab) {
+      requestAnimationFrame(() => {
+        const el = messagesContainerRef.current;
+        if (el && activeTab.scrollPosition > 0) {
+          el.scrollTop = activeTab.scrollPosition;
+          scrollToBottomOnLoad.current = false;
+        }
+      });
+    }
+  }, [activeTabId]);
 
   // Fetch slash commands on mount
   useEffect(() => {
@@ -156,49 +217,50 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
     });
   }, [commandsList, slashFilter, showPicker]);
 
-  // Poll messages for the selected session
+  // Poll messages for the active tab's session
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !activeTabId) return;
+    const tabId = activeTabId; // capture for closure stability
     const load = () =>
       api.sessionMessages(sessionId, showToolCalls)
         .then((d) => {
-          // Don't replace local messages with fewer server messages while
-          // thinking — protects the optimistic user message from flickering
-          // away before the server has written it to disk.
-          setMessages((prev) => {
-            if (thinking && d.messages.length < prev.length) return prev;
-            return d.messages;
+          updateTab(tabId, {
+            messages: (() => {
+              // Use functional access to current tab state for the guard
+              const tab = tabs.find((t) => t.id === tabId);
+              if (tab?.thinking && d.messages.length < tab.messages.length) return tab.messages;
+              return d.messages;
+            })(),
           });
 
           // Restore thinking indicator on re-mount if agent is still processing
-          if (!thinking && !thinkingRestored.current && d.messages.length > 0) {
+          const tab = tabs.find((t) => t.id === tabId);
+          if (!tab?.thinking && !thinkingRestored.current && d.messages.length > 0) {
             thinkingRestored.current = true;
             const lastMsg = d.messages[d.messages.length - 1];
             if (lastMsg.role === "user") {
               api.agentStatus().then((status) => {
                 if (status.mainAgent.state !== "idle") {
-                  lastUserSendTs.current = new Date(lastMsg.timestamp).getTime();
-                  setThinking(true);
+                  updateTab(tabId, {
+                    lastUserSendTs: new Date(lastMsg.timestamp).getTime(),
+                    thinking: true,
+                  });
                 }
               }).catch(() => {});
             }
           }
 
           // Clear awaitingReset once any messages appear in the new session
-          if (d.messages.length > 0 && awaitingReset) {
-            setAwaitingReset(false);
+          if (d.messages.length > 0 && tab?.awaitingReset) {
+            updateTab(tabId, { awaitingReset: false });
             refreshSessions();
           }
 
           // Clear thinking indicator once the agent is idle AND we have
-          // a new assistant message with real text content. This keeps the
-          // bubble visible during multi-response processing (tool calls
-          // between text replies). Only check agent status when the newest
-          // assistant message has text — intermediate messages with only
-          // tool call blocks mean the agent is still mid-turn.
-          if (thinking && lastUserSendTs.current > 0) {
+          // a new assistant message with real text content.
+          if (tab?.thinking && tab.lastUserSendTs > 0) {
             const postSendAssistant = d.messages.filter(
-              (m) => m.role === "assistant" && new Date(m.timestamp).getTime() > lastUserSendTs.current,
+              (m) => m.role === "assistant" && new Date(m.timestamp).getTime() > tab.lastUserSendTs,
             );
             if (postSendAssistant.length > 0) {
               const newest = postSendAssistant[postSendAssistant.length - 1];
@@ -208,25 +270,22 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
               if (hasTextContent) {
                 api.agentStatus().then((status) => {
                   if (status.mainAgent.state === "idle") {
-                    setThinking(false);
+                    updateTab(tabId, { thinking: false });
                   }
                 }).catch(() => {
-                  // Can't reach agent-status — fall back to clearing immediately
-                  setThinking(false);
+                  updateTab(tabId, { thinking: false });
                 });
               }
             }
           }
         })
         .catch(() => {
-          // 404 is expected while the session file doesn't exist yet (after /new).
-          // Clear stale messages so old session content doesn't linger.
-          setMessages([]);
+          updateTab(tabId, { messages: [] });
         });
     load();
     const interval = setInterval(load, thinking || awaitingReset ? 1_500 : 3_000);
     return () => clearInterval(interval);
-  }, [sessionId, awaitingReset, thinking, refreshSessions, showToolCalls]);
+  }, [sessionId, awaitingReset, thinking, refreshSessions, showToolCalls, activeTabId]);
 
   // Track whether user is scrolled near the bottom
   const handleScroll = useCallback(() => {
@@ -249,9 +308,10 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
 
   // Poll agent activity type while thinking is active
   useEffect(() => {
-    if (!thinking) {
-      setActivityType(null);
-      setActivityDetail(null);
+    if (!thinking || !activeTabId) {
+      if (!thinking) {
+        updateActive({ activityType: null, activityDetail: null });
+      }
       if (workingTimeoutRef.current) {
         clearTimeout(workingTimeoutRef.current);
         workingTimeoutRef.current = null;
@@ -259,6 +319,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
       isWorkingRef.current = false;
       return;
     }
+    const tabId = activeTabId;
     const poll = () => {
       api.agentStatus().then((status) => {
         if (status.activity.type === "tool_call") {
@@ -266,41 +327,34 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
             isWorkingRef.current = true;
             workingStartRef.current = Date.now();
           }
-          // Cancel any pending transition away from working
           if (workingTimeoutRef.current) {
             clearTimeout(workingTimeoutRef.current);
             workingTimeoutRef.current = null;
           }
-          setActivityType("working");
-          setActivityDetail(status.activity.detail);
+          updateTab(tabId, { activityType: "working", activityDetail: status.activity.detail });
         } else {
           if (isWorkingRef.current) {
             const elapsed = Date.now() - workingStartRef.current;
             const remaining = 1000 - elapsed;
             if (remaining > 0 && !workingTimeoutRef.current) {
-              // Hold the "working" display until 1s minimum is met
               const capturedType = status.activity.type;
               const capturedDetail = status.activity.detail;
               workingTimeoutRef.current = setTimeout(() => {
                 workingTimeoutRef.current = null;
                 isWorkingRef.current = false;
                 if (capturedType === "llm_thinking") {
-                  setActivityType("thinking");
-                  setActivityDetail(capturedDetail);
+                  updateTab(tabId, { activityType: "thinking", activityDetail: capturedDetail });
                 } else {
-                  setActivityType(null);
-                  setActivityDetail(null);
+                  updateTab(tabId, { activityType: null, activityDetail: null });
                 }
               }, remaining);
-              return; // Keep displaying "working" until timeout fires
+              return;
             }
             isWorkingRef.current = false;
           }
           if (status.activity.type === "llm_thinking") {
-            setActivityType("thinking");
-            setActivityDetail(status.activity.detail);
+            updateTab(tabId, { activityType: "thinking", activityDetail: status.activity.detail });
           }
-          // idle case is handled by the existing code that clears `thinking`
         }
       }).catch(() => {});
     };
@@ -313,14 +367,15 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
         workingTimeoutRef.current = null;
       }
     };
-  }, [thinking]);
+  }, [thinking, activeTabId]);
 
   const handleSend = async () => {
-    if (!input.trim() || sending) return;
+    if (!input.trim() || sending || !activeTabId) return;
     const text = input.trim();
+    const tabId = activeTabId;
 
     setSending(true);
-    setInput("");
+    updateTab(tabId, { input: "" });
 
     // Optimistic user message
     const optimisticMsg: MessageEntry = {
@@ -329,94 +384,91 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
       role: "user",
       content: [{ type: "text", text }],
     };
-    setMessages((prev) => [...prev, optimisticMsg]);
-    lastUserSendTs.current = Date.now();
+    const currentTab = tabs.find((t) => t.id === tabId);
+    updateTab(tabId, {
+      messages: [...(currentTab?.messages ?? []), optimisticMsg],
+      lastUserSendTs: Date.now(),
+    });
 
     try {
       await api.chat(text);
-      // Show thinking indicator while agent processes
-      setThinking(true);
+      updateTab(tabId, { thinking: true });
     } catch (err) {
       console.error("Chat send failed:", err);
-      setMessages((prev) => prev.filter((m) => m.id !== optimisticMsg.id));
-      setInput(text);
+      const tab = tabs.find((t) => t.id === tabId);
+      updateTab(tabId, {
+        messages: (tab?.messages ?? []).filter((m) => m.id !== optimisticMsg.id),
+        input: text,
+      });
     } finally {
       setSending(false);
     }
   };
 
-
   const handleStop = async () => {
+    if (!activeTabId) return;
     try {
       await api.chatAbort();
-      setThinking(false);
+      updateTab(activeTabId, { thinking: false });
     } catch (err) {
       console.error("Stop failed:", err);
     }
   };
 
   const handleNew = async () => {
-    if (sending || awaitingReset) return;
+    if (sending) return;
 
-    setMessages([]);
-    setSessionId(null);        // halt polling for old session immediately
-    setAwaitingReset(true);
-    setThinking(false);
+    // Create a temporary tab immediately
+    const tempKey = `pending-${Date.now()}`;
+    const tabId = addTab(tempKey, "New session...");
+
+    updateTab(tabId, { awaitingReset: true });
     setSending(true);
 
     try {
-      const result = await api.sessionReset();
+      const result = await api.sessionNew();
       if (result.sessionId) {
-        setSessionId(result.sessionId);
-        // Optimistic dropdown entry — replaced by real data once messages appear
+        updateTab(tabId, {
+          sessionKey: result.sessionId,
+          label: "New session",
+          awaitingReset: true,
+          lastUserSendTs: Date.now(),
+          thinking: true,
+        });
         setSessions((prev) => [
           { sessionId: result.sessionId!, lastActivity: new Date().toISOString(), model: "", summary: "New session" },
           ...prev,
         ]);
-        // Show thinking bubble while waiting for the greeting response
-        lastUserSendTs.current = Date.now();
-        setThinking(true);
       }
     } catch (err) {
       console.error("New chat failed:", err);
-      if (sessions.length > 0) {
-        setSessionId(sessions[0].sessionId);
-      }
+      closeTab(tabId);
     } finally {
       setSending(false);
-      setAwaitingReset(false);
     }
   };
 
+  const handleTabSelect = useCallback(
+    (tabId: string) => {
+      // Save scroll position before switching
+      if (activeTabId) {
+        const el = messagesContainerRef.current;
+        if (el) {
+          updateTab(activeTabId, { scrollPosition: el.scrollTop });
+        }
+      }
+      setActiveTab(tabId);
+    },
+    [activeTabId, setActiveTab, updateTab],
+  );
+
   return (
-    <div className="flex flex-col h-full p-6 space-y-4 overflow-hidden">
-      {/* Page header — matches other tabs */}
-      <div className="flex items-center justify-between flex-shrink-0">
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Page header */}
+      <div className="flex items-center justify-between flex-shrink-0 px-6 pt-6 pb-2">
         <div className="flex items-center gap-3">
           <MessageCircle className="w-5 h-5 text-brand-400" />
           <h2 className="text-lg font-semibold">Chat</h2>
-          <select
-            value={sessionId || ""}
-            onChange={(e) => {
-              const val = e.target.value;
-              if (!val) return;
-              setSessionId(val);
-              setAwaitingReset(false);
-              setThinking(false);
-            }}
-            className="text-xs text-slate-400 bg-transparent border-none outline-none cursor-pointer"
-          >
-            {awaitingReset && (
-              <option value={sessionId || ""} className="bg-surface-2">
-                New session...
-              </option>
-            )}
-            {sessions.map((s) => (
-              <option key={s.sessionId} value={s.sessionId} className="bg-surface-2">
-                {s.summary || s.sessionId.slice(0, 8) + "..."} ({s.model || "unknown"})
-              </option>
-            ))}
-          </select>
           {/* Persistent status: model + thinking */}
           {(currentModel || messages.length > 0) && (
             <div className="flex items-center gap-2 ml-2 pl-2 border-l border-surface-3/50">
@@ -454,20 +506,22 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
             <Brain className="w-3.5 h-3.5" />
             Agent Details
           </button>
-          <button
-            onClick={handleNew}
-            disabled={sending || awaitingReset}
-            title="New conversation"
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-brand-400 hover:bg-brand-500/10 transition-colors disabled:opacity-40"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            New
-          </button>
         </div>
       </div>
 
+      {/* Tab bar */}
+      <div className="px-6">
+        <SessionTabBar
+          tabs={tabs}
+          activeTabId={activeTabId}
+          onSelect={handleTabSelect}
+          onClose={closeTab}
+          onNew={handleNew}
+        />
+      </div>
+
       {/* Messages card */}
-      <div className="flex-1 flex flex-col min-h-0 bg-surface-1 rounded-xl border border-surface-3/50 overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0 mx-6 mb-6 bg-surface-1 rounded-b-xl border border-t-0 border-surface-3/50 overflow-hidden">
         <div ref={messagesContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
           {messages.length === 0 && !thinking && (
             <div className="flex flex-col items-center justify-center h-full text-slate-500">
@@ -699,12 +753,12 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
                   setTimeout(() => setShowPicker(false), 150);
                 }}
                 placeholder="Talk to Lloyd... (type / for commands)"
-                disabled={awaitingReset}
+                disabled={awaitingReset || !activeTab}
                 className="flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3.5 py-2.5 border border-surface-3/50 outline-none focus:border-brand-500/50 placeholder:text-slate-500 transition-colors disabled:opacity-50"
               />
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || sending || awaitingReset}
+                disabled={!input.trim() || sending || awaitingReset || !activeTab}
                 className="bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
               >
                 <Send className="w-4 h-4" />
