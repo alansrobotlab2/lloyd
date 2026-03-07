@@ -1500,8 +1500,18 @@ export default function register(api: OpenClawPluginApi) {
     const dir = join(rootDir, `agents/${agentId}/sessions`);
     if (!existsSync(dir)) return { total: 0, active: 0 };
     const files = readdirSync(dir);
-    const active = files.filter((f) => f.endsWith(".jsonl") && !f.includes(".reset.")).length;
+    let active = files.filter((f) => f.endsWith(".jsonl") && !f.includes(".reset.")).length;
     const total = files.filter((f) => f.includes(".jsonl")).length;
+
+    // Check real-time session state for live activity
+    let liveActive = 0;
+    for (const [key, status] of agentSessionStates) {
+      if (key.startsWith(`agent:${agentId}:`) && status.state !== "idle") {
+        liveActive++;
+      }
+    }
+    active = Math.max(active, liveActive);
+
     return { total, active };
   }
 
@@ -2081,18 +2091,22 @@ export default function register(api: OpenClawPluginApi) {
 
   const MANAGED_SERVICES = [
     { id: "gateway", name: "OpenClaw Gateway", unit: "openclaw-gateway.service", port: 18789 },
-    { id: "llm", name: "LLM Service", unit: "lloyd-llm.service", port: 8091 },
-    { id: "tts", name: "TTS Service", unit: "lloyd-tts.service", port: 8090 },
-    { id: "voice-mode", name: "Voice Mode", unit: "lloyd-voice-mode.service", port: 8092 },
-    { id: "tool-mcp", name: "Tool Services MCP", unit: "lloyd-tool-mcp.service", port: 8093 },
-    { id: "voice-mcp", name: "Voice Services MCP", unit: "lloyd-voice-mcp.service", port: 8094 },
   ];
+
+  const LLOYD_DISPLAY_NAMES: Record<string, string> = {
+    "lloyd-llm.service": "LLM Service",
+    "lloyd-tts.service": "TTS Service",
+    "lloyd-voice-mode.service": "Voice Mode",
+    "lloyd-tool-mcp.service": "Tool Services MCP",
+    "lloyd-voice-mcp.service": "Voice Services MCP",
+    "lloyd-qmd-daemon.service": "QMD Daemon",
+    "lloyd-clawdeck.service": "Backlog Server",
+  };
 
   // Known port map for lloyd-* services (dynamic discovery)
   const LLOYD_PORT_MAP: Record<string, number> = {
     "lloyd-llm.service": 8091,
     "lloyd-tts.service": 8090,
-    "lloyd-cosyvoice.service": 8090,
     "lloyd-voice-mode.service": 8092,
     "lloyd-tool-mcp.service": 8093,
     "lloyd-voice-mcp.service": 8094,
@@ -2187,18 +2201,40 @@ export default function register(api: OpenClawPluginApi) {
           return;
         }
 
-        // For gateway restart, kill the port first to avoid conflicts
+        // For gateway restart/start, kill the port first to avoid conflicts
         if (svc?.id === "gateway" && (action === "restart" || action === "start")) {
           try {
             execSync(`kill $(lsof -ti :18789) 2>/dev/null`, { timeout: 5000 });
           } catch {} // ok if nothing to kill
           await new Promise((r) => setTimeout(r, 2000));
+          execSync(`systemctl --user ${action} ${unitName}`, {
+            encoding: "utf-8",
+            timeout: 15000,
+          });
+        } else if ((action === "stop" || action === "restart") && (svc?.port || LLOYD_PORT_MAP[unitName])) {
+          // For any service with a known port: stop unit, kill stale port holder, then optionally restart
+          const port = svc?.port ?? LLOYD_PORT_MAP[unitName];
+          execSync(`systemctl --user stop ${unitName}`, {
+            encoding: "utf-8",
+            timeout: 15000,
+          });
+          await new Promise((r) => setTimeout(r, 1000));
+          try {
+            execSync(`kill $(lsof -ti :${port}) 2>/dev/null`, { timeout: 5000 });
+          } catch {} // ok if nothing to kill
+          await new Promise((r) => setTimeout(r, 1000));
+          if (action === "restart") {
+            execSync(`systemctl --user start ${unitName}`, {
+              encoding: "utf-8",
+              timeout: 15000,
+            });
+          }
+        } else {
+          execSync(`systemctl --user ${action} ${unitName}`, {
+            encoding: "utf-8",
+            timeout: 15000,
+          });
         }
-
-        execSync(`systemctl --user ${action} ${unitName}`, {
-          encoding: "utf-8",
-          timeout: 15000,
-        });
 
         jsonResponse(res, { ok: true, serviceId, action });
       } catch (err: any) {
@@ -2275,6 +2311,69 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // GET /api/mc/lloyd-services/detail?unit=<unit>
+  api.registerHttpRoute({
+    path: "/api/mc/lloyd-services/detail",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const url = new URL(req.url || "", "http://localhost");
+        const unit = url.searchParams.get("unit");
+
+        if (!unit || !unit.startsWith("lloyd-") || !unit.endsWith(".service")) {
+          jsonResponse(res, { error: `Invalid lloyd unit: ${unit}` }, 400);
+          return;
+        }
+
+        const name = LLOYD_DISPLAY_NAMES[unit] ?? unit.replace(/^lloyd-/, "").replace(/\.service$/, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+        let statusOutput = "";
+        try {
+          statusOutput = execSync(
+            `systemctl --user status ${unit} 2>&1`,
+            { encoding: "utf-8", timeout: 5000 },
+          );
+        } catch (e: any) {
+          statusOutput = e.stdout || e.message || "Unable to get status";
+        }
+
+        const pidMatch = statusOutput.match(/Main PID:\s*(\d+)/);
+        const memoryMatch = statusOutput.match(/Memory:\s*(\S+)/);
+        const cpuMatch = statusOutput.match(/CPU:\s*(\S+)/);
+        const activeMatch = statusOutput.match(/Active:\s*(.+)/);
+        const tasksMatch = statusOutput.match(/Tasks:\s*(\S+)/);
+
+        let logs = "";
+        try {
+          logs = execSync(
+            `journalctl --user -u ${unit} -n 40 --no-pager -o short-iso 2>&1`,
+            { encoding: "utf-8", timeout: 5000 },
+          );
+        } catch (e: any) {
+          logs = e.stdout || "Unable to fetch logs";
+        }
+
+        const logLines = logs
+          .split("\n")
+          .filter((l: string) => l.trim() !== "")
+          .slice(-40);
+
+        jsonResponse(res, {
+          unit,
+          name,
+          pid: pidMatch ? parseInt(pidMatch[1], 10) : null,
+          memory: memoryMatch ? memoryMatch[1] : null,
+          cpu: cpuMatch ? cpuMatch[1] : null,
+          tasks: tasksMatch ? tasksMatch[1] : null,
+          activeSince: activeMatch ? activeMatch[1].trim() : null,
+          logLines,
+          rawStatus: statusOutput,
+        });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
   // GET /api/mc/lloyd-services
   api.registerHttpRoute({
     path: "/api/mc/lloyd-services",
@@ -2298,7 +2397,7 @@ export default function register(api: OpenClawPluginApi) {
           units.map(async (u: any) => {
             const unit: string = u.unit || "";
             const id = unit.replace(".service", "");
-            const name = u.description || unit;
+            const name = LLOYD_DISPLAY_NAMES[unit] ?? unit.replace(/^lloyd-/, "").replace(/\.service$/, "").replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
             const activeState: string = u.active || "unknown";
             const subState: string = u.sub || "unknown";
 

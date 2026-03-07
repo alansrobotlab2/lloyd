@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Bot, ChevronLeft, ChevronDown, ChevronRight, Cpu, Wrench, Sparkles, Users, Layers, FileText, Pencil, X, Save } from "lucide-react";
 import { marked } from "marked";
-import { api, AgentInfo, AgentsData, AgentStatusData, SubagentRunInfo, ToolGroupInfo, WorkspaceFile, CallLogEntry, SdkAgentInfo, SdkAgentsData, CcInstanceInfo } from "../../api";
+import { api, AgentInfo, AgentsData, AgentStatusData, SubagentRunInfo, ToolGroupInfo, WorkspaceFile, CallLogEntry, SdkAgentInfo, SdkAgentsData, CcInstanceInfo, CcInstanceMessage } from "../../api";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -1132,6 +1132,180 @@ function SdkAgentCard({
   );
 }
 
+// ── CC Instance Card ─────────────────────────────────────────────────────
+
+const CC_STATUS_COLORS: Record<string, string> = {
+  running: "bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.5)]",
+  complete: "bg-emerald-400",
+  error: "bg-red-400",
+  aborted: "bg-slate-500",
+};
+
+const CC_STATUS_BADGES: Record<string, string> = {
+  running: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
+  complete: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
+  error: "bg-red-500/20 text-red-400 border-red-500/30",
+  aborted: "bg-slate-500/20 text-slate-400 border-slate-500/30",
+};
+
+function CcInstanceCard({ instance, onClick }: { instance: CcInstanceInfo; onClick: () => void }) {
+  const elapsed = formatElapsed(instance.elapsedMs);
+  const taskPreview = instance.task.length > 80 ? instance.task.slice(0, 80) + "\u2026" : instance.task;
+  const statusColor = CC_STATUS_COLORS[instance.status] ?? CC_STATUS_COLORS.aborted;
+  const statusBadge = CC_STATUS_BADGES[instance.status] ?? CC_STATUS_BADGES.aborted;
+
+  return (
+    <button
+      onClick={onClick}
+      className="w-full text-left bg-surface-1 rounded-xl p-4 border border-surface-3/50 hover:border-cyan-500/30 hover:bg-surface-2/30 transition-all"
+    >
+      <div className="flex items-start gap-3">
+        <div className="mt-1 flex-shrink-0 relative">
+          <div className={`w-2 h-2 rounded-full ${statusColor}`} />
+          {instance.status === "running" && (
+            <div className="absolute inset-0 w-2 h-2 rounded-full bg-cyan-400 animate-ping opacity-40" />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono border ${statusBadge}`}>
+              {instance.status}
+            </span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-2 text-slate-400 font-mono border border-surface-3/50">
+              {instance.type}
+            </span>
+            {instance.agent && (
+              <span className="text-[10px] text-slate-500 font-mono">{instance.agent}</span>
+            )}
+          </div>
+          <div className="text-xs text-slate-300 mt-1.5 line-clamp-2">{taskPreview}</div>
+          {instance.activity && instance.status === "running" && (
+            <div className="text-[10px] text-cyan-400 mt-1 truncate font-mono">{instance.activity}</div>
+          )}
+        </div>
+        <div className="text-right flex-shrink-0 text-[10px] text-slate-500 font-mono space-y-0.5">
+          <div>{elapsed}</div>
+          <div>${instance.costUsd.toFixed(3)}</div>
+          <div>{instance.turns}t</div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+// ── CC Instance Log Panel ────────────────────────────────────────────────
+
+function CcInstanceLogPanel({ instance, onBack }: { instance: CcInstanceInfo; onBack: () => void }) {
+  const [messages, setMessages] = useState<CcInstanceMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const loadLog = useCallback(() => {
+    api.ccInstanceLog(instance.id, 200).then((d) => {
+      setMessages(d.messages);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, [instance.id]);
+
+  useEffect(() => {
+    loadLog();
+  }, [loadLog]);
+
+  // Auto-refresh while running
+  useEffect(() => {
+    if (instance.status !== "running") return;
+    const interval = setInterval(loadLog, 3000);
+    return () => clearInterval(interval);
+  }, [instance.status, loadLog]);
+
+  function msgTypeColor(type: string): string {
+    switch (type) {
+      case "tool_use": return "text-blue-400";
+      case "subagent_start": return "text-cyan-400";
+      case "subagent_end": return "text-emerald-400";
+      case "error": return "text-red-400";
+      case "task_progress": return "text-amber-400";
+      default: return "text-slate-300";
+    }
+  }
+
+  function msgTypeLabel(type: string): string {
+    switch (type) {
+      case "tool_use": return "tool";
+      case "subagent_start": return "spawn";
+      case "subagent_end": return "done";
+      case "task_progress": return "task";
+      case "error": return "error";
+      default: return "text";
+    }
+  }
+
+  const statusBadge = CC_STATUS_BADGES[instance.status] ?? CC_STATUS_BADGES.aborted;
+
+  return (
+    <div className="p-6 space-y-4 overflow-auto">
+      <div className="flex items-center gap-3">
+        <button onClick={onBack} className="text-slate-400 hover:text-slate-200 transition-colors">
+          <ChevronLeft className="w-5 h-5" />
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono border ${statusBadge}`}>
+              {instance.status}
+            </span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-2 text-slate-400 font-mono border border-surface-3/50">
+              {instance.type}
+            </span>
+            {instance.agent && <span className="text-[10px] text-slate-500 font-mono">{instance.agent}</span>}
+          </div>
+          <div className="text-sm text-slate-200 mt-1 line-clamp-2">{instance.task}</div>
+        </div>
+        <div className="text-right text-[10px] text-slate-500 font-mono flex-shrink-0">
+          <div>{formatElapsed(instance.elapsedMs)}</div>
+          <div>${instance.costUsd.toFixed(3)}</div>
+          <div>{instance.turns} turns</div>
+        </div>
+      </div>
+
+      <div className="bg-surface-1 rounded-xl border border-surface-3/50 overflow-hidden">
+        <div className="px-4 py-2 border-b border-surface-3/30 flex items-center gap-2">
+          <FileText className="w-3.5 h-3.5 text-slate-500" />
+          <span className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">Work Log</span>
+          <span className="text-[10px] text-slate-600 font-mono ml-auto">{messages.length} events</span>
+          {instance.status === "running" && (
+            <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+          )}
+        </div>
+        <div className="divide-y divide-surface-3/20 max-h-[60vh] overflow-y-auto">
+          {loading ? (
+            <div className="px-4 py-8 text-center text-xs text-slate-500 animate-pulse">Loading log...</div>
+          ) : messages.length === 0 ? (
+            <div className="px-4 py-8 text-center text-xs text-slate-500">No events yet</div>
+          ) : (
+            messages.map((msg, i) => (
+              <div key={i} className="px-4 py-2 flex gap-3 hover:bg-surface-2/30">
+                <span className={`text-[10px] font-mono w-10 flex-shrink-0 mt-0.5 ${msgTypeColor(msg.type)}`}>
+                  {msgTypeLabel(msg.type)}
+                </span>
+                <div className="flex-1 min-w-0">
+                  {msg.agent && (
+                    <span className="text-[10px] text-cyan-500 font-mono mr-2">[{msg.agent}]</span>
+                  )}
+                  <span className={`text-xs break-words whitespace-pre-wrap ${msgTypeColor(msg.type)}`}>
+                    {msg.content}
+                  </span>
+                </div>
+                <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">
+                  {new Date(msg.ts).toLocaleTimeString()}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ───────────────────────────────────────────────────────────
 
 export default function AgentsPage({
@@ -1146,6 +1320,7 @@ export default function AgentsPage({
   const [agentStatus, setAgentStatus] = useState<AgentStatusData | null>(null);
   const [sdkData, setSdkData] = useState<SdkAgentsData | null>(null);
   const [ccInstances, setCcInstances] = useState<CcInstanceInfo[]>([]);
+  const [selectedCcInstance, setSelectedCcInstance] = useState<CcInstanceInfo | null>(null);
 
   const load = useCallback(() => {
     api.agents().then(setData).catch(console.error);
@@ -1193,13 +1368,20 @@ export default function AgentsPage({
     );
   }
 
+  if (selectedCcInstance) {
+    const freshInst = ccInstances.find(i => i.id === selectedCcInstance.id) ?? selectedCcInstance;
+    return (
+      <CcInstanceLogPanel instance={freshInst} onBack={() => setSelectedCcInstance(null)} />
+    );
+  }
+
   return (
     <div className="p-6 space-y-6 overflow-auto">
       <div className="flex items-center gap-3">
         <Bot className="w-5 h-5 text-brand-400" />
         <h2 className="text-lg font-semibold">Agents</h2>
         <span className="text-xs text-slate-500">
-          {agents.length} core · {sdkAgents.length} SDK
+          {agents.length} core · {sdkAgents.length} SDK · {ccInstances.length} cc
         </span>
       </div>
 
@@ -1236,6 +1418,33 @@ export default function AgentsPage({
                 ccInstances={ccInstances}
               />
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* CC Instances */}
+      {ccInstances.length > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-cyan-400/70 font-medium mb-2 flex items-center gap-1.5">
+            <Layers className="w-3 h-3" />
+            CC Instances
+            <span className="text-slate-600 font-mono">({ccInstances.filter(i => i.status === "running").length} running)</span>
+          </div>
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            {ccInstances
+              .sort((a, b) => {
+                if (a.status === "running" && b.status !== "running") return -1;
+                if (b.status === "running" && a.status !== "running") return 1;
+                return b.startedAt - a.startedAt;
+              })
+              .slice(0, 20)
+              .map((inst) => (
+                <CcInstanceCard
+                  key={inst.id}
+                  instance={inst}
+                  onClick={() => setSelectedCcInstance(inst)}
+                />
+              ))}
           </div>
         </div>
       )}

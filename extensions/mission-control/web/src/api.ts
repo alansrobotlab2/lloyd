@@ -133,6 +133,18 @@ export interface LloydServicesData {
   timestamp: string;
 }
 
+export interface LloydServiceDetail {
+  unit: string;
+  name: string;
+  pid: number | null;
+  memory: string | null;
+  cpu: string | null;
+  tasks: string | null;
+  activeSince: string | null;
+  logLines: string[];
+  rawStatus: string;
+}
+
 // ── Tools types ──────────────────────────────────────────────────────────
 
 export interface ToolEntry {
@@ -398,6 +410,7 @@ export const api = {
     });
     return res.json();
   },
+  lloydServiceDetail: (unit: string) => fetchJson<LloydServiceDetail>(`/lloyd-services/detail?unit=${encodeURIComponent(unit)}`),
 
   stats: () => fetchJson<Stats>("/stats"),
   usageChart: (range = "7d") => fetchJson<UsageChartData>(`/usage-chart?range=${range}`),
@@ -653,7 +666,7 @@ export interface CcInstanceInfo {
 
 export interface CcInstanceMessage {
   ts: number;
-  type: "text" | "tool_use" | "tool_result" | "subagent_start" | "subagent_end" | "error";
+  type: "text" | "tool_use" | "tool_result" | "subagent_start" | "subagent_end" | "error" | "task_progress";
   agent?: string;
   content: string;
 }

@@ -69,7 +69,9 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
   // Granular activity state while thinking: "thinking" (LLM reasoning) vs "working" (tool call)
   const [activityType, setActivityType] = useState<"thinking" | "working" | null>(null);
   const [activityDetail, setActivityDetail] = useState<string | null>(null);
-  const [showToolCalls, setShowToolCalls] = useState(false);
+  const [showToolCalls, setShowToolCalls] = useState(() => {
+    try { return localStorage.getItem("mc-agent-details-visible") === "true"; } catch { return false; }
+  });
   const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({});
   // Slash command picker state
   const [commandsList, setCommandsList] = useState<CommandInfo[]>([]);
@@ -437,15 +439,20 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
         </div>
         <div className="flex items-center gap-1.5">
           <button
-            onClick={() => setShowToolCalls((v) => !v)}
-            title={showToolCalls ? "Hide tool calls" : "Show tool calls"}
+            onClick={() => setShowToolCalls((v) => {
+              const next = !v;
+              try { localStorage.setItem("mc-agent-details-visible", String(next)); } catch {}
+              return next;
+            })}
+            title={showToolCalls ? "Hide agent details" : "Show agent details"}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
               showToolCalls
                 ? "text-brand-400 bg-brand-500/10"
                 : "text-slate-400 hover:text-brand-400 hover:bg-brand-500/10"
             }`}
           >
-            <Wrench className="w-3.5 h-3.5" />
+            <Brain className="w-3.5 h-3.5" />
+            Agent Details
           </button>
           <button
             onClick={handleNew}

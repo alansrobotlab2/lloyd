@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Activity, Play, Square, RotateCcw, RefreshCw, ChevronDown, Terminal, Cpu, HardDrive, Clock, AlertTriangle } from "lucide-react";
-import { api, type ServiceStatus, type ServiceDetail, type LloydServiceUnit } from "../../api";
+import { api, type ServiceStatus, type ServiceDetail, type LloydServiceUnit, type LloydServiceDetail } from "../../api";
 
 export default function ServicesPage() {
-  // Existing managed services state
+  // Gateway (managed) services state
   const [services, setServices] = useState<ServiceStatus[]>([]);
   const [timestamp, setTimestamp] = useState("");
   const [loading, setLoading] = useState(true);
@@ -20,6 +20,9 @@ export default function ServicesPage() {
   const [lloydTimestamp, setLloydTimestamp] = useState("");
   const [lloydLoading, setLloydLoading] = useState(true);
   const [lloydActionLoading, setLloydActionLoading] = useState<string | null>(null);
+  const [lloydExpandedUnit, setLloydExpandedUnit] = useState<string | null>(null);
+  const [lloydDetail, setLloydDetail] = useState<LloydServiceDetail | null>(null);
+  const [lloydDetailLoading, setLloydDetailLoading] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -55,7 +58,7 @@ export default function ServicesPage() {
     return () => clearInterval(interval);
   }, [refreshLloyd]);
 
-  // Fetch detail when a service is expanded
+  // Fetch detail when a gateway service is expanded
   const fetchDetail = useCallback(async (id: string) => {
     setDetailLoading(true);
     try {
@@ -67,7 +70,7 @@ export default function ServicesPage() {
     setDetailLoading(false);
   }, []);
 
-  // Auto-refresh detail for expanded service
+  // Auto-refresh detail for expanded gateway service
   useEffect(() => {
     if (!expandedId) return;
     fetchDetail(expandedId);
@@ -82,12 +85,40 @@ export default function ServicesPage() {
     }
   }, [detail?.logLines]);
 
+  // Fetch detail when a lloyd service is expanded
+  const fetchLloydDetail = useCallback(async (unit: string) => {
+    setLloydDetailLoading(true);
+    try {
+      const data = await api.lloydServiceDetail(unit);
+      setLloydDetail(data);
+    } catch {
+      setLloydDetail(null);
+    }
+    setLloydDetailLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!lloydExpandedUnit) return;
+    fetchLloydDetail(lloydExpandedUnit);
+    const interval = setInterval(() => fetchLloydDetail(lloydExpandedUnit), 5000);
+    return () => clearInterval(interval);
+  }, [lloydExpandedUnit, fetchLloydDetail]);
+
   const toggleExpand = (id: string) => {
     if (expandedId === id) {
       setExpandedId(null);
       setDetail(null);
     } else {
       setExpandedId(id);
+    }
+  };
+
+  const toggleLloydExpand = (unit: string) => {
+    if (lloydExpandedUnit === unit) {
+      setLloydExpandedUnit(null);
+      setLloydDetail(null);
+    } else {
+      setLloydExpandedUnit(unit);
     }
   };
 
@@ -147,6 +178,7 @@ export default function ServicesPage() {
       await api.lloydServiceAction(serviceId, action);
       await new Promise((r) => setTimeout(r, 1500));
       await refreshLloyd();
+      if (lloydExpandedUnit) fetchLloydDetail(lloydExpandedUnit);
     } catch {
       await refreshLloyd();
     }
@@ -179,23 +211,10 @@ export default function ServicesPage() {
     }
   };
 
-  const subStateBadge = (sub: string) => {
-    switch (sub) {
-      case "running":
-        return "text-emerald-400";
-      case "failed":
-        return "text-red-400";
-      case "dead":
-      case "exited":
-        return "text-slate-500";
-      default:
-        return "text-slate-500";
-    }
-  };
-
   const healthyCount = services.filter((s) => s.health === "healthy").length;
-  const totalCount = services.length;
   const lloydHealthy = lloydServices.filter((s) => s.health === "healthy").length;
+  const totalHealthy = healthyCount + lloydHealthy;
+  const totalServices = services.length + lloydServices.length;
 
   return (
     <div className="p-6 space-y-6 overflow-auto">
@@ -203,11 +222,11 @@ export default function ServicesPage() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Activity className="w-5 h-5 text-brand-400" />
-          <h2 className="text-lg font-semibold">LLOYD Services</h2>
+          <h2 className="text-lg font-semibold">Services</h2>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs text-slate-500">
-            {healthyCount}/{totalCount} healthy
+            {totalHealthy}/{totalServices} healthy
           </span>
           {timestamp && (
             <span className="text-[10px] text-slate-600 font-mono">
@@ -237,14 +256,15 @@ export default function ServicesPage() {
       )}
 
       {/* Loading state */}
-      {loading && (
+      {loading && lloydLoading && (
         <div className="text-sm text-slate-500 text-center py-8">
           Loading services...
         </div>
       )}
 
-      {/* Service cards */}
+      {/* Unified service cards */}
       <div className="space-y-2">
+        {/* Gateway card(s) */}
         {services.map((svc) => {
           const isExpanded = expandedId === svc.id;
           return (
@@ -329,106 +349,100 @@ export default function ServicesPage() {
             </div>
           );
         })}
-      </div>
 
-      {/* Lloyd Services section */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Activity className="w-4 h-4 text-slate-500" />
-            <h3 className="text-sm font-medium text-slate-400">Lloyd Systemd Units</h3>
-          </div>
-          <div className="flex items-center gap-3">
-            {!lloydLoading && (
-              <span className="text-xs text-slate-600">
-                {lloydHealthy}/{lloydServices.length} running
-              </span>
-            )}
-            {lloydTimestamp && (
-              <span className="text-[10px] text-slate-700 font-mono">
-                {new Date(lloydTimestamp).toLocaleTimeString()}
-              </span>
-            )}
-          </div>
-        </div>
-
-        {lloydLoading && (
-          <div className="text-sm text-slate-500 text-center py-4">Loading systemd units...</div>
-        )}
-
-        <div className="space-y-1.5">
-          {lloydServices.map((svc) => (
-            <div key={svc.unit} className="rounded-lg border border-surface-3/40 bg-surface-1 px-4 py-3 flex items-center gap-3">
-              {/* Health dot */}
-              <div className={`w-2 h-2 rounded-full flex-shrink-0 ${healthDot(svc.health)}`} />
-
-              {/* Name + unit */}
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-slate-300 truncate">{svc.name}</div>
-                <div className="text-[10px] text-slate-600 font-mono mt-0.5 truncate">{svc.unit}</div>
-              </div>
-
-              {/* Uptime */}
-              {svc.uptime && (
-                <span className="text-[10px] text-slate-500 font-mono flex-shrink-0">{svc.uptime}</span>
-              )}
-
-              {/* Sub-state */}
-              <span className={`text-[10px] font-mono flex-shrink-0 ${subStateBadge(svc.subState)}`}>
-                {svc.subState}
-              </span>
-
-              {/* Active state badge */}
-              <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono border flex-shrink-0 ${stateBadge(svc.activeState)}`}>
-                {svc.activeState}
-              </span>
-
-              {/* Port indicator */}
-              {svc.port !== null && (
-                <span
-                  className={`text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0 ${svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}
-                  title={svc.portHealthy === true ? "Port responding" : svc.portHealthy === false ? "Port not responding" : "No port check"}
-                >
-                  :{svc.port}
+        {/* Lloyd service cards */}
+        {lloydServices.map((svc) => {
+          const isExpanded = lloydExpandedUnit === svc.unit;
+          return (
+            <div key={svc.unit} className="rounded-xl border border-surface-3/50 overflow-hidden">
+              <div
+                onClick={() => toggleLloydExpand(svc.unit)}
+                className={`bg-surface-1 px-5 py-4 flex items-center gap-4 cursor-pointer transition-colors ${
+                  isExpanded ? "border-b border-surface-3/50" : "hover:border-surface-3/80"
+                }`}
+              >
+                <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${healthDot(svc.health)}`} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-slate-200">{svc.name}</div>
+                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                    {svc.unit}{svc.port ? ` \u00b7 :${svc.port}` : ""}
+                  </div>
+                </div>
+                {svc.uptime && (
+                  <span className="text-[10px] text-slate-500 font-mono flex-shrink-0">{svc.uptime}</span>
+                )}
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono border ${stateBadge(svc.activeState)}`}>
+                  {svc.activeState}
                 </span>
-              )}
-
-              {/* Action buttons */}
-              <div className="flex gap-0.5 flex-shrink-0">
-                <button
-                  onClick={(e) => handleLloydAction(e, svc.id, "start")}
-                  disabled={lloydActionLoading !== null}
-                  title="Start"
-                  className="p-1.5 rounded text-slate-500 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40"
-                >
-                  <Play className="w-3 h-3" />
-                </button>
-                <button
-                  onClick={(e) => handleLloydAction(e, svc.id, "stop")}
-                  disabled={lloydActionLoading !== null}
-                  title="Stop"
-                  className="p-1.5 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
-                >
-                  <Square className="w-3 h-3" />
-                </button>
-                <button
-                  onClick={(e) => handleLloydAction(e, svc.id, "restart")}
-                  disabled={lloydActionLoading !== null}
-                  title="Restart"
-                  className={`p-1.5 rounded text-slate-500 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-40 ${lloydActionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}
-                >
-                  <RotateCcw className="w-3 h-3" />
-                </button>
+                {svc.port !== null && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}
+                    title={svc.portHealthy === true ? "Port responding" : svc.portHealthy === false ? "Port not responding" : "No port check"}
+                  >
+                    :{svc.port}
+                  </span>
+                )}
+                <div className="flex gap-1">
+                  <button onClick={(e) => handleLloydAction(e, svc.id, "start")} disabled={lloydActionLoading !== null} title="Start" className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50">
+                    <Play className="w-3.5 h-3.5" />
+                  </button>
+                  <button onClick={(e) => handleLloydAction(e, svc.id, "stop")} disabled={lloydActionLoading !== null} title="Stop" className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50">
+                    <Square className="w-3.5 h-3.5" />
+                  </button>
+                  <button onClick={(e) => handleLloydAction(e, svc.id, "restart")} disabled={lloydActionLoading !== null} title="Restart" className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50 ${lloydActionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}>
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
               </div>
-            </div>
-          ))}
 
-          {!lloydLoading && lloydServices.length === 0 && (
-            <div className="text-sm text-slate-600 text-center py-4 italic">
-              No lloyd-* systemd units found
+              {isExpanded && (
+                <div className="bg-surface-0 px-5 py-4 space-y-4">
+                  {lloydDetailLoading && !lloydDetail ? (
+                    <div className="text-xs text-slate-500 text-center py-4">Loading service details...</div>
+                  ) : lloydDetail && lloydDetail.unit === svc.unit ? (
+                    <>
+                      <div className="flex flex-wrap gap-4">
+                        {lloydDetail.pid && <StatChip icon={<Cpu className="w-3.5 h-3.5" />} label="PID" value={String(lloydDetail.pid)} />}
+                        {lloydDetail.memory && <StatChip icon={<HardDrive className="w-3.5 h-3.5" />} label="Memory" value={lloydDetail.memory} />}
+                        {lloydDetail.cpu && <StatChip icon={<Clock className="w-3.5 h-3.5" />} label="CPU" value={lloydDetail.cpu} />}
+                        {lloydDetail.tasks && <StatChip icon={<Activity className="w-3.5 h-3.5" />} label="Tasks" value={lloydDetail.tasks} />}
+                      </div>
+                      {lloydDetail.activeSince && (
+                        <div className="text-[11px] text-slate-400 font-mono">Active: {lloydDetail.activeSince}</div>
+                      )}
+                      <div>
+                        <div className="flex items-center gap-2 mb-2">
+                          <Terminal className="w-3.5 h-3.5 text-slate-500" />
+                          <span className="text-xs text-slate-400 font-medium">Recent Logs</span>
+                        </div>
+                        <div className="bg-black/40 rounded-lg p-3 max-h-72 overflow-y-auto font-mono text-[11px] leading-relaxed border border-surface-3/30">
+                          {lloydDetail.logLines.length > 0 ? (
+                            lloydDetail.logLines.map((line, i) => (
+                              <div key={i} className={`whitespace-pre-wrap break-all ${line.match(/error|fail|panic|critical/i) ? "text-red-400" : line.match(/warn/i) ? "text-amber-400" : "text-slate-400"}`}>
+                                {line}
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-slate-600 italic">No log lines available</div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-xs text-red-400 text-center py-4">Failed to load service details</div>
+                  )}
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          );
+        })}
+
+        {!loading && !lloydLoading && services.length === 0 && lloydServices.length === 0 && (
+          <div className="text-sm text-slate-600 text-center py-4 italic">
+            No services found
+          </div>
+        )}
       </div>
     </div>
   );

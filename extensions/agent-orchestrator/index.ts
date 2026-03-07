@@ -1287,13 +1287,14 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
-  // GET /api/mc/cc-instance-log?id=X&limit=50 — recent messages for an instance
+  // GET /api/mc/cc-instance-log?id=X&limit=200 — recent messages for an instance
+  // Serves from in-memory ring buffer for running instances, falls back to JSONL log files for completed ones
   api.registerHttpRoute({
     path: "/api/mc/cc-instance-log",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url || "/", "http://localhost");
       const id = url.searchParams.get("id");
-      const limit = parseInt(url.searchParams.get("limit") || "50", 10);
+      const limit = parseInt(url.searchParams.get("limit") || "200", 10);
 
       if (!id) {
         jsonResponse(res, { error: "Missing id parameter" }, 400);
@@ -1301,17 +1302,93 @@ export default function register(api: OpenClawPluginApi) {
       }
 
       const inst = instances.get(id);
-      if (!inst) {
+
+      // If instance is in memory and still running, serve from ring buffer
+      if (inst && inst.status === "running") {
+        const messages = inst.recentMessages.slice(-limit);
+        jsonResponse(res, { id: inst.id, status: inst.status, messages });
+        return;
+      }
+
+      // Fall back to JSONL log file for completed/error/aborted instances (or instances no longer in memory)
+      const logDir = join(homedir(), ".openclaw/logs/cc-instances");
+      const logFile = join(logDir, `${id}.jsonl`);
+
+      if (!existsSync(logFile)) {
+        // If we have the instance in memory (non-running), serve its buffer anyway
+        if (inst) {
+          const messages = inst.recentMessages.slice(-limit);
+          jsonResponse(res, { id: inst.id, status: inst.status, messages });
+          return;
+        }
         jsonResponse(res, { error: "Instance not found" }, 404);
         return;
       }
 
-      const messages = inst.recentMessages.slice(-limit);
-      jsonResponse(res, {
-        id: inst.id,
-        status: inst.status,
-        messages,
-      });
+      try {
+        const raw = readFileSync(logFile, "utf-8");
+        const lines = raw.split("\n").filter((l) => l.trim());
+        const messages: Array<{ ts: number; type: string; agent?: string; content: string }> = [];
+
+        for (const line of lines) {
+          try {
+            const entry = JSON.parse(line);
+            const ts = typeof entry.ts === "string" ? Date.parse(entry.ts) : (entry.ts || 0);
+            switch (entry.event) {
+              case "text":
+                messages.push({ ts, type: "text", content: entry.content || "" });
+                break;
+              case "tool_use":
+                messages.push({ ts, type: "tool_use", content: `${entry.tool}(${entry.params || ""})` });
+                break;
+              case "subagent_start":
+                messages.push({ ts, type: "subagent_start", agent: entry.agent, content: entry.description || (entry.prompt ? entry.prompt.slice(0, 200) : "") });
+                break;
+              case "task_started":
+                messages.push({ ts, type: "task_progress", agent: entry.taskType, content: `Task started: ${entry.description}` });
+                break;
+              case "task_progress":
+                messages.push({ ts, type: "task_progress", content: `Progress: ${entry.description || ""}${entry.lastTool ? ` (${entry.lastTool})` : ""}` });
+                break;
+              case "task_notification":
+                messages.push({
+                  ts,
+                  type: entry.status === "completed" ? "subagent_end" : "error",
+                  content: `Task ${entry.status}: ${entry.summary || ""}`,
+                });
+                break;
+              case "error":
+              case "fatal_error":
+                messages.push({ ts, type: "error", content: entry.content || entry.error || "Unknown error" });
+                break;
+              case "result":
+                messages.push({ ts, type: "text", content: `Result (${entry.status}): ${(entry.resultText || "").slice(0, 300)}` });
+                break;
+              case "complete":
+                messages.push({ ts, type: "text", content: `Completed in ${Math.round((entry.elapsedMs || 0) / 1000)}s — cost $${(entry.costUsd || 0).toFixed(3)}, ${entry.turns || 0} turns` });
+                break;
+              // Skip: "start", "session_init"
+            }
+          } catch {}
+        }
+
+        // Determine status
+        let status = inst?.status || "complete";
+        if (!inst) {
+          const summaryFile = join(logDir, `${id}.summary.json`);
+          if (existsSync(summaryFile)) {
+            try {
+              const summary = JSON.parse(readFileSync(summaryFile, "utf-8"));
+              status = summary.status || "complete";
+            } catch {}
+          }
+        }
+
+        const capped = messages.slice(-limit);
+        jsonResponse(res, { id, status, messages: capped });
+      } catch (err: any) {
+        jsonResponse(res, { error: `Failed to read log: ${err.message}` }, 500);
+      }
     },
   });
 

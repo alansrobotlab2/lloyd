@@ -41,7 +41,7 @@
       "name": "periodic-memory-capture",
       "enabled": true,
       "createdAtMs": 1772761670846,
-      "updatedAtMs": 1772818174418,
+      "updatedAtMs": 1772843592330,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -59,11 +59,11 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1772819054778,
-        "lastRunAtMs": 1772818154778,
+        "nextRunAtMs": 1772844470921,
+        "lastRunAtMs": 1772843570921,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 19640,
+        "lastDurationMs": 21409,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0,
         "lastDelivered": false
@@ -75,7 +75,7 @@
       "name": "nightly-reflection",
       "enabled": true,
       "createdAtMs": 1772766786499,
-      "updatedAtMs": 1772816418709,
+      "updatedAtMs": 1772819555845,
       "schedule": {
         "kind": "cron",
         "expr": "0 2 * * *",
@@ -95,15 +95,47 @@
       },
       "state": {
         "nextRunAtMs": 1772877600000,
-        "lastRunAtMs": 1772816171611,
-        "lastRunStatus": "error",
-        "lastStatus": "error",
-        "lastDurationMs": 247098,
+        "lastRunAtMs": 1772819492633,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 63212,
         "lastDelivered": false,
         "lastDeliveryStatus": "not-delivered",
-        "consecutiveErrors": 1,
-        "lastError": "⚠️ ✍️ Write: `to ~/obsidian/agents/lloyd/memory/learnings/2026-03-06.md (881 chars)` failed",
-        "lastDeliveryError": "⚠️ ✍️ Write: `to ~/obsidian/agents/lloyd/memory/learnings/2026-03-06.md (881 chars)` failed"
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "077df204-a0a9-406f-958d-052f6e64de66",
+      "agentId": "memory",
+      "name": "daily-vault-maintenance",
+      "enabled": true,
+      "createdAtMs": 1772826031683,
+      "updatedAtMs": 1772840876537,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 3 * * *"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "You are running the weekly vault maintenance pass. This is a separate job from nightly reflection — focus only on vault structure, tags, and organization.\n\n---\n\n## Pre-Flight: Git Snapshot\n\nBefore making ANY changes:\n```bash\ncd ~/obsidian && git add -A && git diff --cached --quiet || git commit -m \"vault-maintenance: pre-run snapshot\"\n```\n\n---\n\n## Task 1: Tag Hygiene\n\n1. Run `vault_overview(detail=\"tags\")` to get all tags with frequencies\n2. Identify issues:\n   - **Duplicate/overlapping tags** (e.g. \"llm\" vs \"large-language-model\", \"ai\" vs \"artificial-intelligence\")\n   - **Too-specific tags** used on only 1-2 docs that could be merged into broader tags\n   - **Inconsistent naming** (hyphens vs underscores, plural vs singular)\n3. For each merge/rename:\n   - Pick the canonical tag name\n   - Update all affected docs (frontmatter `tags:` field)\n   - Log every change\n4. Write summary to `agents/lloyd/memory/vault-maintenance/YYYY-MM-DD.md` (create dirs if needed)\n\n---\n\n## Task 2: Recently Touched Docs — Tag Review\n\n1. Check git log for docs modified in the last 7 days:\n   ```bash\n   cd ~/obsidian && git log --since=\"7 days ago\" --name-only --pretty=format: | sort -u | grep \"\\.md$\"\n   ```\n2. For each modified doc:\n   - Read it and assess whether its tags are accurate and complete\n   - Identify new tags that should be added based on content\n   - Check if other existing docs should ALSO get those tags (use `mem_search` to find related docs)\n   - Update tags on all affected docs\n\n---\n\n## Task 3: Frontmatter Validation\n\n1. Scan vault segments for docs with missing or incomplete frontmatter:\n   - Required fields: `tags` (array), `segment` (matches directory)\n   - Recommended: `summary` (1-line description)\n2. Fix missing frontmatter — add tags based on content and location\n3. Flag any files in wrong directories for their segment (e.g. project notes in knowledge/)\n\n---\n\n## Task 4: Structure Review\n\n1. Look for large docs (>200 lines) that could be split into focused sub-docs\n2. Look for orphan docs (no tags, no inbound links from other docs)\n3. Suggest or execute reorganization where clear wins exist\n4. Be conservative — only move/split files when the benefit is obvious\n\n---\n\n## Post-Flight: Git Snapshot\n\nAfter all changes:\n```bash\ncd ~/obsidian && git add -A && git commit -m \"vault-maintenance: YYYY-MM-DD\"\n```\n\n---\n\n## Guardrails\n\n- One retry max per task — if a task fails, log the failure and move on\n- Budget target: <$20 per run\n- Git snapshots provide rollback safety\n- DO NOT modify agents/lloyd/SOUL.md, AGENTS.md, or MEMORY.md — those are nightly reflection territory\n- DO NOT delete files — reorganize, merge, or flag for review\n- Log all changes to agents/lloyd/memory/vault-maintenance/YYYY-MM-DD.md",
+        "model": "anthropic/claude-opus-4-6",
+        "timeoutSeconds": 1800
+      },
+      "delivery": {
+        "mode": "none",
+        "channel": "last"
+      },
+      "state": {
+        "nextRunAtMs": 1772881200000,
+        "lastRunAtMs": 1772826097791,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 131695,
+        "lastDelivered": false,
+        "lastDeliveryStatus": "not-delivered",
+        "consecutiveErrors": 0
       }
     }
   ]
