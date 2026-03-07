@@ -995,7 +995,7 @@ export default function register(api: OpenClawPluginApi) {
   proxyTool(
     "backlog_update_task",
     "Backlog Update Task",
-    "Update a task's status, blocked state, priority, or add an activity note. Use to move tasks through the pipeline (up_next → in_progress → in_review) and communicate progress.",
+    "Update a task's status, blocked state, priority, name, description, or add an activity note. Use to move tasks through the pipeline (up_next → in_progress → in_review) and communicate progress.",
     {
       type: "object",
       properties: {
@@ -1017,6 +1017,14 @@ export default function register(api: OpenClawPluginApi) {
         activity_note: {
           type: "string",
           description: "Activity note to add (visible in task history, attributed to the agent)",
+        },
+        name: {
+          type: "string",
+          description: "New task title",
+        },
+        description: {
+          type: "string",
+          description: "New task description",
         },
       },
       required: ["id"],

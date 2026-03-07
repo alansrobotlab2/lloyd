@@ -37,6 +37,8 @@ import {
   clawhubAgent,
 } from "./agents/index.js";
 
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const MCP_SSE_URL = "http://127.0.0.1:8093/sse";
@@ -89,7 +91,7 @@ function spawnClaudeCode(options: { command: string; args: string[]; cwd?: strin
 // Much simpler than the old gateway WebSocket + Ed25519 auth approach.
 // Same mechanism the voice pipeline uses for ASR transcript injection.
 
-const HOOKS_URL = "http://127.0.0.1:18789/hooks/wake";
+const HOOKS_URL = "https://127.0.0.1:18789/hooks/wake";
 const HOOKS_SESSION_KEY = "agent:main:main";
 const OPENCLAW_CONFIG_PATH = join(process.env.HOME || "/home/alansrobotlab", ".openclaw/openclaw.json");
 
@@ -125,6 +127,7 @@ async function injectHookMessage(message: string, logger: any, sessionKey?: stri
       body: JSON.stringify({
         text: `[System Message] ${message}`,
         mode: "now",
+        sessionKey: sessionKey ?? HOOKS_SESSION_KEY,
       }),
     });
     console.error(`[agent-orchestrator] injectHookMessage response status=${resp.status}`);

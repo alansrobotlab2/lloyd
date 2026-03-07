@@ -516,11 +516,11 @@ export const api = {
   },
 
   // Abort the currently running agent turn
-  chatAbort: async (): Promise<{ ok: boolean }> => {
+  chatAbort: async (sessionKey?: string): Promise<{ ok: boolean }> => {
     const res = await fetch(`${BASE}/chat-abort`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: "{}",
+      body: JSON.stringify(sessionKey ? { sessionKey } : {}),
     });
     return res.json();
   },

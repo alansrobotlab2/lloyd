@@ -57,6 +57,7 @@ export default function Layout() {
   const [collapsed, setCollapsed] = useState(false);
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
+  const [voiceActive, setVoiceActive] = useState(false);
 
   // Auto-load session from URL query param ?session=<id>
   useEffect(() => {
@@ -91,12 +92,13 @@ export default function Layout() {
         onNavigate={setPage}
         collapsed={collapsed}
         onToggleCollapse={() => setCollapsed((c) => !c)}
+        voiceActive={voiceActive}
       />
       <main className="flex-1 flex min-h-0 overflow-hidden">
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           <ErrorBoundary>
             {page === "chat" && (
-              <ChatPanel requestedSessionId={chatSessionId} onSessionLoaded={handleSessionLoaded} />
+              <ChatPanel requestedSessionId={chatSessionId} onSessionLoaded={handleSessionLoaded} onVoiceActive={setVoiceActive} />
             )}
             {page === "sessions" && (
               <SessionsPage onOpenSession={handleOpenSession} />

@@ -41,7 +41,7 @@
       "name": "periodic-memory-capture",
       "enabled": true,
       "createdAtMs": 1772761670846,
-      "updatedAtMs": 1772858906211,
+      "updatedAtMs": 1772909287674,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -59,11 +59,11 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1772859770907,
-        "lastRunAtMs": 1772858870907,
+        "nextRunAtMs": 1772910185399,
+        "lastRunAtMs": 1772909285399,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 35304,
+        "lastDurationMs": 2275,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0,
         "lastDelivered": false
@@ -75,7 +75,7 @@
       "name": "nightly-reflection",
       "enabled": true,
       "createdAtMs": 1772766786499,
-      "updatedAtMs": 1772819555845,
+      "updatedAtMs": 1772877785239,
       "schedule": {
         "kind": "cron",
         "expr": "0 2 * * *",
@@ -94,11 +94,11 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1772877600000,
-        "lastRunAtMs": 1772819492633,
+        "nextRunAtMs": 1772964000000,
+        "lastRunAtMs": 1772877600003,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 63212,
+        "lastDurationMs": 185236,
         "lastDelivered": false,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0
@@ -110,7 +110,7 @@
       "name": "daily-vault-maintenance",
       "enabled": true,
       "createdAtMs": 1772826031683,
-      "updatedAtMs": 1772840876537,
+      "updatedAtMs": 1772881302768,
       "schedule": {
         "kind": "cron",
         "expr": "0 3 * * *"
@@ -128,11 +128,11 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1772881200000,
-        "lastRunAtMs": 1772826097791,
+        "nextRunAtMs": 1772964000000,
+        "lastRunAtMs": 1772881200002,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 131695,
+        "lastDurationMs": 102766,
         "lastDelivered": false,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0

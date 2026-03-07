@@ -175,6 +175,79 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+// ── Voice Pipeline SSE Bridge ───────────────────────────────────────────────
+
+const voiceSseClients = new Set<ServerResponse>();
+let voicePipeWs: any = null;
+let voicePipeWsReady = false;
+let voicePipeConnecting = false;
+
+function broadcastSse(event: string, data: string) {
+  for (const res of voiceSseClients) {
+    res.write(`event: ${event}\ndata: ${data}\n\n`);
+  }
+}
+
+function voicePipeConnect() {
+  if (voicePipeWs && voicePipeWs.readyState <= 1) return; // already open or connecting
+  if (voicePipeConnecting) return;
+  voicePipeConnecting = true;
+  try {
+    const ws = new WS("ws://127.0.0.1:8095");
+    ws.binaryType = "arraybuffer";
+    voicePipeWs = ws;
+
+    ws.on("open", () => {
+      voicePipeConnecting = false;
+      voicePipeWsReady = true;
+      broadcastSse("connected", JSON.stringify({ connected: true }));
+    });
+
+    ws.on("close", () => {
+      voicePipeWsReady = false;
+      broadcastSse("connected", JSON.stringify({ connected: false }));
+      voicePipeWs = null;
+      // Reconnect unconditionally after 3 seconds (eager connection)
+      setTimeout(() => voicePipeConnect(), 3000);
+    });
+
+    ws.on("error", () => {
+      voicePipeConnecting = false;
+      // close will fire next
+    });
+
+    ws.on("message", (rawData: any, isBinary: boolean) => {
+      if (isBinary) {
+        // Binary: TTS audio chunk (Float32 PCM) — base64 encode and broadcast
+        const buf = Buffer.isBuffer(rawData) ? rawData : Buffer.from(rawData);
+        broadcastSse("tts_audio", buf.toString("base64"));
+      } else {
+        // Text: JSON message from voice pipeline
+        try {
+          const msg = JSON.parse(typeof rawData === "string" ? rawData : rawData.toString("utf-8"));
+          if (msg.type === "state") {
+            broadcastSse("state", JSON.stringify({ state: msg.state }));
+          } else if (msg.type === "transcript") {
+            broadcastSse("transcript", JSON.stringify({ text: msg.text, speaker: msg.speaker, is_continuity: msg.is_continuity }));
+          } else if (msg.type === "tts_start") {
+            broadcastSse("tts_start", JSON.stringify({ sample_rate: msg.sample_rate || 24000 }));
+          } else if (msg.type === "tts_end") {
+            broadcastSse("tts_end", JSON.stringify({}));
+          } else if (msg.type === "wakeword") {
+            broadcastSse("wakeword", JSON.stringify({ detected: msg.detected }));
+          }
+        } catch {}
+      }
+    });
+  } catch {
+    voicePipeConnecting = false;
+    voicePipeWs = null;
+    voicePipeWsReady = false;
+    // Retry unconditionally after 3 seconds (eager connection)
+    setTimeout(() => voicePipeConnect(), 3000);
+  }
+}
+
 // ── Plugin Registration ────────────────────────────────────────────────────
 
 export default function register(api: OpenClawPluginApi) {
@@ -182,6 +255,7 @@ export default function register(api: OpenClawPluginApi) {
   const sessionsDir = join(rootDir, "agents/main/sessions");
   const timingLog = join(rootDir, "logs/timing.jsonl");
   const routingLog = join(rootDir, "logs/routing.jsonl");
+  const ccInstancesDir = join(rootDir, "logs/cc-instances");
   const modelsFile = join(rootDir, "agents/main/agent/models.json");
   const toolsFile = join(rootDir, "agents/main/agent/tools.json");
   const authFile = join(rootDir, "agents/main/agent/auth-profiles.json");
@@ -408,6 +482,26 @@ export default function register(api: OpenClawPluginApi) {
       .map((f) => join(sessionsDir, f));
   }
 
+  function loadCcInstanceSummaries(): Array<{ id: string; costUsd: number; startedAt: string; status: string }> {
+    return cached("cc-instance-summaries", () => {
+      if (!existsSync(ccInstancesDir)) return [];
+      const files = readdirSync(ccInstancesDir).filter(f => f.endsWith(".summary.json"));
+      const results: Array<{ id: string; costUsd: number; startedAt: string; status: string }> = [];
+      for (const f of files) {
+        try {
+          const data = JSON.parse(readFileSync(join(ccInstancesDir, f), "utf-8"));
+          results.push({
+            id: data.id || f,
+            costUsd: data.costUsd || 0,
+            startedAt: data.startedAt || "",
+            status: data.status || "unknown",
+          });
+        } catch {}
+      }
+      return results;
+    });
+  }
+
   function aggregateTokenUsage(): {
     totalInput: number;
     totalOutput: number;
@@ -595,11 +689,15 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const usage = aggregateTokenUsage();
+        const ccSummaries = loadCcInstanceSummaries();
+        const totalSubagentCost = ccSummaries.reduce((sum, s) => sum + s.costUsd, 0);
         jsonResponse(res, {
           totalInput: usage.totalInput,
           totalOutput: usage.totalOutput,
           totalCacheRead: usage.totalCacheRead,
           totalSessions: usage.totalSessions,
+          totalSubagentCost,
+          totalSubagentInstances: ccSummaries.length,
         });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
@@ -634,7 +732,7 @@ export default function register(api: OpenClawPluginApi) {
 
         const buckets = new Map<
           number,
-          { input: number; output: number; cacheRead: number }
+          { input: number; output: number; cacheRead: number; subagentCost: number }
         >();
 
         const sessionFiles = getSessionFiles();
@@ -653,6 +751,7 @@ export default function register(api: OpenClawPluginApi) {
                 input: 0,
                 output: 0,
                 cacheRead: 0,
+                subagentCost: 0,
               };
               existing.input += line.message.usage.input || 0;
               existing.output += line.message.usage.output || 0;
@@ -660,6 +759,18 @@ export default function register(api: OpenClawPluginApi) {
               buckets.set(key, existing);
             }
           }
+        }
+
+        // Add cc-instance (subagent) costs to buckets
+        const ccSummaries = loadCcInstanceSummaries();
+        for (const summary of ccSummaries) {
+          if (!summary.startedAt) continue;
+          const ts = new Date(summary.startedAt).getTime();
+          if (ts < cutoff || isNaN(ts)) continue;
+          const key = Math.floor(ts / bucket) * bucket;
+          const existing = buckets.get(key) || { input: 0, output: 0, cacheRead: 0, subagentCost: 0 };
+          existing.subagentCost += summary.costUsd;
+          buckets.set(key, existing);
         }
 
         const data = Array.from(buckets.entries())
@@ -863,7 +974,7 @@ export default function register(api: OpenClawPluginApi) {
 
         const idempotencyKey = randomUUID();
         const result = await gwWsSend("chat.send", {
-          sessionKey: "agent:main:main",
+          sessionKey: body.sessionKey || "agent:main:main",
           message,
           idempotencyKey,
         });
@@ -902,7 +1013,7 @@ export default function register(api: OpenClawPluginApi) {
       }
       try {
         const body = JSON.parse(await readBody(req));
-        await gwWsSend("chat.abort", { sessionKey: "agent:main:main" });
+        await gwWsSend("chat.abort", { sessionKey: body.sessionKey || "agent:main:main" });
         jsonResponse(res, { ok: true });
       } catch (err: any) {
         api.logger.error?.(`mission-control: chat.abort failed: ${err.message}`);
@@ -2088,24 +2199,7 @@ export default function register(api: OpenClawPluginApi) {
           return b.lastUpdated - a.lastUpdated;
         });
 
-        // 2. Also try to fetch live subagent list from gateway via WS
-        let gwSubagents: any[] = [];
-        try {
-          if (gwWsReady) {
-            const result = await Promise.race([
-              gwWsSend("subagents.list", {}),
-              new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
-            ]);
-            if (result && Array.isArray((result as any).runs)) {
-              gwSubagents = (result as any).runs;
-            } else if (result && Array.isArray(result)) {
-              gwSubagents = result as any[];
-            }
-          }
-        } catch {
-          // Gateway may not support subagents.list — that's fine, we still have
-          // diagnostic-derived sessions and runs.json data
-        }
+        const gwSubagents: any[] = [];
 
         // 3. Merge runs.json data for richer lifecycle info
         const subagentRuns = loadSubagentRuns();
@@ -2192,7 +2286,6 @@ export default function register(api: OpenClawPluginApi) {
     "lloyd-tool-mcp.service": 8093,
     "lloyd-voice-mcp.service": 8094,
     "lloyd-qmd-daemon.service": 8181,
-    "lloyd-clawdeck.service": 3001,
   };
 
   function checkPort(port: number, timeoutMs = 2000): Promise<boolean> {
@@ -3486,8 +3579,114 @@ export default function register(api: OpenClawPluginApi) {
         const data = await resp.json();
         jsonResponse(res, data);
       } catch (err: any) {
-        jsonResponse(res, { ws_active: false, ws_port: 8093, has_client: false, voice_enabled: false, state: "UNKNOWN" });
+        jsonResponse(res, { ws_active: false, ws_port: 8095, has_client: false, voice_enabled: false, state: "UNKNOWN" });
       }
+    },
+  });
+
+  // ── API: /api/mc/voice-toggle ─────────────────────────────────────────
+  api.registerHttpRoute({
+    path: "/api/mc/voice-toggle",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const resp = await fetch("http://127.0.0.1:8092/v1/voice/toggle", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const data = await resp.json();
+        jsonResponse(res, data);
+      } catch (err: any) {
+        jsonResponse(res, { error: "Voice service unreachable", detail: err.message }, 502);
+      }
+    },
+  });
+
+  // ── API: /api/mc/voice-say (proxy to voice pipeline TTS) ─────────────
+  api.registerHttpRoute({
+    path: "/api/mc/voice-say",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const body = Buffer.concat(chunks).toString("utf-8");
+      try {
+        const resp = await fetch("http://127.0.0.1:8092/v1/say", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+        const data = await resp.json();
+        jsonResponse(res, data);
+      } catch (err: any) {
+        res.writeHead(503); res.end("TTS unavailable");
+      }
+    },
+  });
+
+  // ── API: /api/mc/voice-stream (SSE bridge to voice pipeline WS) ─────
+  api.registerHttpRoute({
+    path: "/api/mc/voice-stream",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "GET") { res.writeHead(405); res.end(); return; }
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+      });
+      res.write(":\n\n"); // SSE comment to flush
+      voiceSseClients.add(res);
+      // Connect voice pipe if not connected
+      if (!voicePipeWs || voicePipeWs.readyState > 1) voicePipeConnect();
+      // Send current connected state
+      res.write(`event: connected\ndata: ${JSON.stringify({ connected: voicePipeWsReady })}\n\n`);
+      req.on("close", () => {
+        voiceSseClients.delete(res);
+      });
+    },
+  });
+
+  // ── API: /api/mc/voice-send (POST binary PCM audio to voice pipeline) ─
+  api.registerHttpRoute({
+    path: "/api/mc/voice-send",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+      if (!voicePipeWs || !voicePipeWsReady) { res.writeHead(503); res.end("Voice pipe not connected"); return; }
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const body = Buffer.concat(chunks);
+      if (body.length > 65536) { res.writeHead(413); res.end("Payload too large"); return; }
+      try {
+        voicePipeWs.send(body);
+      } catch {
+        res.writeHead(503);
+        res.end("Voice pipe send failed");
+        return;
+      }
+      res.writeHead(200);
+      res.end("ok");
+    },
+  });
+
+  // ── API: /api/mc/voice-cmd (POST JSON command to voice pipeline) ─────
+  api.registerHttpRoute({
+    path: "/api/mc/voice-cmd",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+      if (!voicePipeWs || !voicePipeWsReady) { res.writeHead(503); res.end("Voice pipe not connected"); return; }
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const body = Buffer.concat(chunks).toString("utf-8");
+      if (body.length > 1024) { res.writeHead(413); res.end("Payload too large"); return; }
+      try {
+        voicePipeWs.send(body);
+      } catch {
+        res.writeHead(503);
+        res.end("Voice pipe send failed");
+        return;
+      }
+      jsonResponse(res, { ok: true });
     },
   });
 
@@ -3566,4 +3765,7 @@ export default function register(api: OpenClawPluginApi) {
     }
     return true;
   });
+
+  // Connect voice pipeline eagerly on startup
+  voicePipeConnect();
 }

@@ -113,6 +113,39 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // -- voice_toggle --
+
+  api.registerTool({
+    name: "voice_toggle",
+    label: "Toggle Voice Mode",
+    description:
+      "Toggle Lloyd's voice mode on or off. When disabled, the pipeline ignores " +
+      "all microphone input. When re-enabled, listening resumes immediately. " +
+      "Returns the new state (enabled or disabled).",
+    parameters: {
+      type: "object" as const,
+      properties: {},
+    },
+    async execute(_id: string, _params: Record<string, unknown>) {
+      try {
+        const resp = await fetch("http://127.0.0.1:8092/v1/voice/toggle", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const data = await resp.json();
+        const enabled = data.voice_enabled;
+        return {
+          content: [{ type: "text" as const, text: `Voice mode ${enabled ? "enabled" : "disabled"}.` }],
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: "text" as const, text: `voice_toggle error: ${err.message}` }],
+        };
+      }
+    },
+  });
+
   // -- message_sending hook: extract <summary>, send to TTS, strip from display --
 
   const VOICE_TUI_URL = "http://127.0.0.1:8092";
@@ -154,5 +187,5 @@ export default function register(api: OpenClawPluginApi) {
     }
   });
 
-  api.logger.info?.("voice-tools: registered (3 tools + message_sending hook)");
+  api.logger.info?.("voice-tools: registered (4 tools + message_sending hook)");
 }

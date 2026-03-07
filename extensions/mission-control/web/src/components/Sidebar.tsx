@@ -67,25 +67,15 @@ interface SidebarProps {
   onNavigate: (page: Page) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  voiceActive?: boolean;
 }
 
-export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse }: SidebarProps) {
+export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, voiceActive }: SidebarProps) {
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft;
   const [workMode, setWorkMode] = useState(false);
-  const [voiceActive, setVoiceActive] = useState(false);
 
   useEffect(() => {
     const poll = () => api.mode().then((s) => setWorkMode(s.currentMode === "work")).catch(() => {});
-    poll();
-    const id = setInterval(poll, 5000);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    const poll = () => fetch("/api/mc/voice-status")
-      .then(r => r.json())
-      .then(d => setVoiceActive(d.ws_active && d.has_client))
-      .catch(() => setVoiceActive(false));
     poll();
     const id = setInterval(poll, 5000);
     return () => clearInterval(id);
