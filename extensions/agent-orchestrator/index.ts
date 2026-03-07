@@ -627,7 +627,7 @@ export default function register(api: OpenClawPluginApi) {
             thinking: { type: "adaptive" as const },
             effort: "medium" as const,
             cwd,
-            model: "sonnet",
+            model: "opus",
             maxBudgetUsd: planOnly ? 1.0 : budget,
             maxTurns: planOnly ? 15 : maxTurns,
             permissionMode: interactive ? "default" : "bypassPermissions",
@@ -1138,6 +1138,8 @@ export default function register(api: OpenClawPluginApi) {
                 "then produce a detailed execution plan. Do NOT modify any files or dispatch agents.",
             },
             cwd,
+            thinking: { type: "adaptive" as const },
+            effort: "medium" as const,
             model: "opus",
             maxBudgetUsd: 2.0,
             maxTurns: 20,
@@ -1220,7 +1222,7 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       const agentList = Object.entries(AGENT_CONFIGS).map(([name, config]) => ({
         id: name,
-        model: config.model || "sonnet",
+        model: config.model || "opus",
         description: config.description || "",
         maxTurns: config.maxTurns || 25,
         tools: (config.tools || []).filter((t: string) => !t.startsWith("mcp__")),
@@ -1232,7 +1234,7 @@ export default function register(api: OpenClawPluginApi) {
       // Add orchestrator as a virtual agent
       agentList.unshift({
         id: "orchestrator",
-        model: "sonnet",
+        model: "opus",
         description: "Autonomous project coordinator. Analyzes tasks, plans agent dispatch, manages execution, and delivers structured reports.",
         maxTurns: DEFAULT_MAX_TURNS,
         tools: ["Read", "Glob", "Grep", "Task"],
