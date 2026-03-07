@@ -41,7 +41,7 @@
       "name": "periodic-memory-capture",
       "enabled": true,
       "createdAtMs": 1772761670846,
-      "updatedAtMs": 1772848987216,
+      "updatedAtMs": 1772858906211,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -59,16 +59,14 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1772849870866,
-        "lastRunAtMs": 1772848970866,
-        "lastRunStatus": "error",
-        "lastStatus": "error",
-        "lastDurationMs": 16350,
+        "nextRunAtMs": 1772859770907,
+        "lastRunAtMs": 1772858870907,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 35304,
         "lastDeliveryStatus": "not-delivered",
-        "consecutiveErrors": 1,
-        "lastDelivered": false,
-        "lastError": "⚠️ ✍️ Write: `to agents/lloyd/memory/2026-03-06.md (3438 chars)` failed",
-        "lastDeliveryError": "⚠️ ✍️ Write: `to agents/lloyd/memory/2026-03-06.md (3438 chars)` failed"
+        "consecutiveErrors": 0,
+        "lastDelivered": false
       }
     },
     {

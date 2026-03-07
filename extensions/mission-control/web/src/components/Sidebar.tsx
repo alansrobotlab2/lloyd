@@ -17,6 +17,7 @@ import {
   ChevronsRight,
   Briefcase,
   GitBranch,
+  Mic,
 } from "lucide-react";
 import { api } from "../api";
 
@@ -71,9 +72,20 @@ interface SidebarProps {
 export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse }: SidebarProps) {
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft;
   const [workMode, setWorkMode] = useState(false);
+  const [voiceActive, setVoiceActive] = useState(false);
 
   useEffect(() => {
     const poll = () => api.mode().then((s) => setWorkMode(s.currentMode === "work")).catch(() => {});
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const poll = () => fetch("/api/mc/voice-status")
+      .then(r => r.json())
+      .then(d => setVoiceActive(d.ws_active && d.has_client))
+      .catch(() => setVoiceActive(false));
     poll();
     const id = setInterval(poll, 5000);
     return () => clearInterval(id);
@@ -150,6 +162,16 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
             </span>
           )}
         </button>
+        {/* Voice Mode indicator */}
+        {voiceActive && (
+          <div
+            title={collapsed ? "Voice Active" : undefined}
+            className={`w-full flex items-center ${collapsed ? "justify-center" : "gap-2.5"} px-3 py-2 rounded-lg text-xs font-medium text-green-400 bg-green-600/10`}
+          >
+            <Mic className="w-4 h-4 flex-shrink-0 animate-pulse" />
+            {!collapsed && <span className="truncate">Voice Active</span>}
+          </div>
+        )}
         {BOTTOM_ITEMS.map(renderItem)}
         <button
           onClick={onToggleCollapse}

@@ -262,8 +262,12 @@ export default function register(api: OpenClawPluginApi) {
     }
     gwWsReady = false;
     try {
-      const ws = new WS("ws://127.0.0.1:18789", {
-        headers: { Origin: "http://127.0.0.1:18789" },
+      const gwPort = api.config?.gateway?.port ?? 18789;
+      const useTls = !!api.config?.gateway?.tls?.enabled;
+      const wsProto = useTls ? "wss" : "ws";
+      const httpProto = useTls ? "https" : "http";
+      const ws = new WS(`${wsProto}://127.0.0.1:${gwPort}`, {
+        headers: { Origin: `${httpProto}://127.0.0.1:${gwPort}` },
       });
       gwWs = ws;
 
@@ -897,6 +901,7 @@ export default function register(api: OpenClawPluginApi) {
         return;
       }
       try {
+        const body = JSON.parse(await readBody(req));
         await gwWsSend("chat.abort", { sessionKey: "agent:main:main" });
         jsonResponse(res, { ok: true });
       } catch (err: any) {
@@ -3466,6 +3471,44 @@ export default function register(api: OpenClawPluginApi) {
 
         commandsCache = { data: commands, ts: now };
         jsonResponse(res, { commands });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/voice-status ──────────────────────────────────────────
+  api.registerHttpRoute({
+    path: "/api/mc/voice-status",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const resp = await fetch("http://127.0.0.1:8092/v1/voice/ws-status");
+        const data = await resp.json();
+        jsonResponse(res, data);
+      } catch (err: any) {
+        jsonResponse(res, { ws_active: false, ws_port: 8093, has_client: false, voice_enabled: false, state: "UNKNOWN" });
+      }
+    },
+  });
+
+  // ── TLS certificate download ─────────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/cert",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const certPath = join(homedir(), ".openclaw", "certs", "mc.crt");
+        if (!existsSync(certPath)) {
+          jsonResponse(res, { error: "Certificate not found" }, 404);
+          return;
+        }
+        const cert = readFileSync(certPath);
+        res.writeHead(200, {
+          "Content-Type": "application/x-x509-ca-cert",
+          "Content-Disposition": 'attachment; filename="openclaw-mc.crt"',
+          "Content-Length": cert.length,
+        });
+        res.end(cert);
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }

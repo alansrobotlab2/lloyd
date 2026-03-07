@@ -4,6 +4,7 @@ import { marked } from "marked";
 import { api, type MessageEntry, type CommandInfo } from "../api";
 import SlashCommandPicker from "./SlashCommandPicker";
 import SessionTabBar from "./SessionTabBar";
+import VoicePanel from "./VoicePanel";
 import { useSessionTabs } from "./hooks/useSessionTabs";
 
 // Configure marked for safe, sane defaults
@@ -304,7 +305,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
     } else if (isNearBottom.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [messages, thinking]);
+  }, [messages, thinking, activeTabId]);
 
   // Poll agent activity type while thinking is active
   useEffect(() => {
@@ -391,7 +392,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
     });
 
     try {
-      await api.chat(text);
+      await api.chat(text, sessionId ?? undefined);
       updateTab(tabId, { thinking: true });
     } catch (err) {
       console.error("Chat send failed:", err);
@@ -522,6 +523,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
 
       {/* Messages card */}
       <div className="flex-1 flex flex-col min-h-0 mx-6 mb-6 bg-surface-1 rounded-b-xl border border-t-0 border-surface-3/50 overflow-hidden">
+        <VoicePanel />
         <div ref={messagesContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
           {messages.length === 0 && !thinking && (
             <div className="flex flex-col items-center justify-center h-full text-slate-500">
