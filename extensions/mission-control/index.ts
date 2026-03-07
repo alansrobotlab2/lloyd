@@ -133,11 +133,12 @@ const MIME_TYPES: Record<string, string> = {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 const CACHE_TTL = 5_000; // 5 seconds — short enough for interactive chat
+const HEAVY_CACHE_TTL = 30_000; // 30 seconds — for expensive session-file aggregations
 const cache = new Map<string, CacheEntry<any>>();
 
-function cached<T>(key: string, fn: () => T): T {
+function cached<T>(key: string, fn: () => T, ttl: number = CACHE_TTL): T {
   const entry = cache.get(key);
-  if (entry && Date.now() - entry.ts < CACHE_TTL) return entry.data;
+  if (entry && Date.now() - entry.ts < ttl) return entry.data;
   const data = fn();
   cache.set(key, { data, ts: Date.now() });
   return data;
@@ -499,7 +500,7 @@ export default function register(api: OpenClawPluginApi) {
         } catch {}
       }
       return results;
-    });
+    }, HEAVY_CACHE_TTL);
   }
 
   function aggregateTokenUsage(): {
@@ -579,7 +580,7 @@ export default function register(api: OpenClawPluginApi) {
         totalSessions: bySession.length,
         bySession,
       };
-    });
+    }, HEAVY_CACHE_TTL);
   }
 
   // ── Session summaries (generated lazily via local LLM) ────────────────
@@ -714,70 +715,74 @@ export default function register(api: OpenClawPluginApi) {
         const url = new URL(req.url || "/", "http://localhost");
         const range = url.searchParams.get("range") || "7d";
 
-        const now = Date.now();
-        const rangeMs: Record<string, number> = {
-          "24h": 24 * 60 * 60 * 1000,
-          "7d": 7 * 24 * 60 * 60 * 1000,
-          "30d": 30 * 24 * 60 * 60 * 1000,
-        };
-        const cutoff = now - (rangeMs[range] || rangeMs["7d"]);
+        const result = cached(`usage-chart-${range}`, () => {
+          const now = Date.now();
+          const rangeMs: Record<string, number> = {
+            "24h": 24 * 60 * 60 * 1000,
+            "7d": 7 * 24 * 60 * 60 * 1000,
+            "30d": 30 * 24 * 60 * 60 * 1000,
+          };
+          const cutoff = now - (rangeMs[range] || rangeMs["7d"]);
 
-        // Bucket size: 1 hour for 24h, 6 hours for 7d, 1 day for 30d
-        const bucketMs: Record<string, number> = {
-          "24h": 60 * 60 * 1000,
-          "7d": 6 * 60 * 60 * 1000,
-          "30d": 24 * 60 * 60 * 1000,
-        };
-        const bucket = bucketMs[range] || bucketMs["7d"];
+          // Bucket size: 1 hour for 24h, 6 hours for 7d, 1 day for 30d
+          const bucketMs: Record<string, number> = {
+            "24h": 60 * 60 * 1000,
+            "7d": 6 * 60 * 60 * 1000,
+            "30d": 24 * 60 * 60 * 1000,
+          };
+          const bucket = bucketMs[range] || bucketMs["7d"];
 
-        const buckets = new Map<
-          number,
-          { input: number; output: number; cacheRead: number; subagentCost: number }
-        >();
+          const buckets = new Map<
+            number,
+            { input: number; output: number; cacheRead: number; subagentCost: number }
+          >();
 
-        const sessionFiles = getSessionFiles();
-        for (const file of sessionFiles) {
-          const lines = parseJsonl<SessionMessage>(file);
-          for (const line of lines) {
-            if (
-              line.type === "message" &&
-              line.message?.usage &&
-              line.timestamp
-            ) {
-              const ts = new Date(line.timestamp).getTime();
-              if (ts < cutoff) continue;
-              const key = Math.floor(ts / bucket) * bucket;
-              const existing = buckets.get(key) || {
-                input: 0,
-                output: 0,
-                cacheRead: 0,
-                subagentCost: 0,
-              };
-              existing.input += line.message.usage.input || 0;
-              existing.output += line.message.usage.output || 0;
-              existing.cacheRead += line.message.usage.cacheRead || 0;
-              buckets.set(key, existing);
+          const sessionFiles = getSessionFiles();
+          for (const file of sessionFiles) {
+            const lines = parseJsonl<SessionMessage>(file);
+            for (const line of lines) {
+              if (
+                line.type === "message" &&
+                line.message?.usage &&
+                line.timestamp
+              ) {
+                const ts = new Date(line.timestamp).getTime();
+                if (ts < cutoff) continue;
+                const key = Math.floor(ts / bucket) * bucket;
+                const existing = buckets.get(key) || {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  subagentCost: 0,
+                };
+                existing.input += line.message.usage.input || 0;
+                existing.output += line.message.usage.output || 0;
+                existing.cacheRead += line.message.usage.cacheRead || 0;
+                buckets.set(key, existing);
+              }
             }
           }
-        }
 
-        // Add cc-instance (subagent) costs to buckets
-        const ccSummaries = loadCcInstanceSummaries();
-        for (const summary of ccSummaries) {
-          if (!summary.startedAt) continue;
-          const ts = new Date(summary.startedAt).getTime();
-          if (ts < cutoff || isNaN(ts)) continue;
-          const key = Math.floor(ts / bucket) * bucket;
-          const existing = buckets.get(key) || { input: 0, output: 0, cacheRead: 0, subagentCost: 0 };
-          existing.subagentCost += summary.costUsd;
-          buckets.set(key, existing);
-        }
+          // Add cc-instance (subagent) costs to buckets
+          const ccSummaries = loadCcInstanceSummaries();
+          for (const summary of ccSummaries) {
+            if (!summary.startedAt) continue;
+            const ts = new Date(summary.startedAt).getTime();
+            if (ts < cutoff || isNaN(ts)) continue;
+            const key = Math.floor(ts / bucket) * bucket;
+            const existing = buckets.get(key) || { input: 0, output: 0, cacheRead: 0, subagentCost: 0 };
+            existing.subagentCost += summary.costUsd;
+            buckets.set(key, existing);
+          }
 
-        const data = Array.from(buckets.entries())
-          .map(([ts, vals]) => ({ ts, ...vals }))
-          .sort((a, b) => a.ts - b.ts);
+          const data = Array.from(buckets.entries())
+            .map(([ts, vals]) => ({ ts, ...vals }))
+            .sort((a, b) => a.ts - b.ts);
 
-        jsonResponse(res, { range, bucketMs: bucket, data });
+          return { range, bucketMs: bucket, data };
+        }, HEAVY_CACHE_TTL);
+
+        jsonResponse(res, result);
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
@@ -829,7 +834,7 @@ export default function register(api: OpenClawPluginApi) {
             }));
 
           return { runs: runs.reverse(), toolCalls: toolCalls.reverse() };
-        });
+        }, HEAVY_CACHE_TTL);
 
         jsonResponse(res, data);
       } catch (err: any) {

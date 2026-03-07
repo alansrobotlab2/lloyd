@@ -1343,15 +1343,28 @@ export default function register(api: OpenClawPluginApi) {
               case "text":
                 messages.push({ ts, type: "text", content: entry.content || "" });
                 break;
-              case "tool_use":
-                messages.push({ ts, type: "tool_use", content: `${entry.tool}(${entry.params || ""})` });
+              case "tool_use": {
+                if (entry.tool === "Agent") {
+                  // Subagent dispatch — extract agent name from params
+                  const agentMatch = typeof entry.params === "string"
+                    ? entry.params.match(/subagent_type:\s*(\w+)/)
+                    : null;
+                  const agent = agentMatch ? agentMatch[1] : "unknown";
+                  messages.push({ ts, type: "subagent_start", agent, content: `Dispatching ${agent}` });
+                } else {
+                  messages.push({ ts, type: "tool_use", content: `${entry.tool}(${entry.params || ""})` });
+                }
                 break;
+              }
               case "subagent_start":
+                // Legacy/backward compat — kept in case any code emits this event directly
                 messages.push({ ts, type: "subagent_start", agent: entry.agent, content: entry.description || (entry.prompt ? entry.prompt.slice(0, 200) : "") });
                 break;
-              case "task_started":
-                messages.push({ ts, type: "task_progress", agent: entry.taskType, content: `Task started: ${entry.description}` });
+              case "task_started": {
+                const taskAgent = entry.taskType || (typeof entry.description === "string" ? entry.description.split(" ")[0] : "task");
+                messages.push({ ts, type: "subagent_start", agent: taskAgent, content: `Task started: ${entry.description || ""}` });
                 break;
+              }
               case "task_progress":
                 messages.push({ ts, type: "task_progress", content: `Progress: ${entry.description || ""}${entry.lastTool ? ` (${entry.lastTool})` : ""}` });
                 break;
@@ -1367,10 +1380,10 @@ export default function register(api: OpenClawPluginApi) {
                 messages.push({ ts, type: "error", content: entry.content || entry.error || "Unknown error" });
                 break;
               case "result":
-                messages.push({ ts, type: "text", content: `Result (${entry.status}): ${(entry.resultText || "").slice(0, 300)}` });
+                messages.push({ ts, type: "subagent_end", content: `Result (${entry.status}): ${(entry.resultText || "").slice(0, 300)}` });
                 break;
               case "complete":
-                messages.push({ ts, type: "text", content: `Completed in ${Math.round((entry.elapsedMs || 0) / 1000)}s — cost $${(entry.costUsd || 0).toFixed(3)}, ${entry.turns || 0} turns` });
+                messages.push({ ts, type: "subagent_end", content: `Completed in ${Math.round((entry.elapsedMs || 0) / 1000)}s — cost $${(entry.costUsd || 0).toFixed(3)}, ${entry.turns || 0} turns` });
                 break;
               // Skip: "start", "session_init"
             }

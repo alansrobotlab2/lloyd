@@ -1,5 +1,10 @@
+/**
+ * AgentDeskRoom — Visual "Agent Lab" showing active agents seated at desks
+ * with animated avatars, thought bubbles, coffee mugs, and laptops.
+ */
 import { useState } from "react";
 import { SubagentRunInfo, CcInstanceInfo } from "../api";
+import type { SubagentDispatch } from "./pages/ActivityPage";
 
 const MAX_DESKS = 8;
 
@@ -14,6 +19,7 @@ interface DeskOccupant {
 interface Props {
   activeAgents: SubagentRunInfo[];
   ccInstances?: CcInstanceInfo[];
+  activeDispatches?: SubagentDispatch[];
   onAgentClick?: (agentId: string) => void;
 }
 
@@ -31,7 +37,7 @@ function agentIdFromSubagent(agent: SubagentRunInfo): string | null {
 }
 
 /** Convert active subagents + CC running instances into unified desk occupants */
-function buildOccupants(active: SubagentRunInfo[], ccInstances: CcInstanceInfo[]): DeskOccupant[] {
+function buildOccupants(active: SubagentRunInfo[], ccInstances: CcInstanceInfo[], dispatches: SubagentDispatch[]): DeskOccupant[] {
   const occupants: DeskOccupant[] = [];
 
   // Legacy subagents
@@ -47,6 +53,18 @@ function buildOccupants(active: SubagentRunInfo[], ccInstances: CcInstanceInfo[]
     if (inst.status !== "running") continue;
     const agentId = inst.type === "orchestrate" ? "orchestrator" : (inst.agent || "unknown");
     occupants.push({ id: inst.id, agentId, task: inst.activity || inst.task, source: "cc" });
+  }
+
+  // Orchestrator subagent dispatches (running only)
+  for (const d of dispatches) {
+    // Avoid duplicate if this agent already has a desk from CC instances
+    if (occupants.some(o => o.agentId === d.agent)) continue;
+    occupants.push({
+      id: `dispatch-${d.agent}-${d.startTs}`,
+      agentId: d.agent,
+      task: `working...`,
+      source: "cc",
+    });
   }
 
   return occupants.slice(0, MAX_DESKS);
@@ -215,7 +233,7 @@ function DeskSlot({ occupant, index, onAgentClick }: { occupant?: DeskOccupant; 
         <rect x={dL+4} y={deskFrontY+deskHeight+17} width={dR-dL-8} height="3" rx="1.5" fill="#3d2416" opacity={active ? 0.5 : 0.3} />
 
         {/* Coffee cup on left side of desk */}
-        <g opacity={active ? 1 : 0.45}>
+        <g opacity={active ? 1 : 0.45} transform="translate(0, 10)">
           <polygon points={`14,${deskTopY} 30,${deskTopY} 29,${deskTopY-12} 15,${deskTopY-12}`} fill={mugColor} />
           <ellipse cx={22} cy={deskTopY-12} rx={8} ry={2.5} fill={mugColor} />
           <ellipse cx={22} cy={deskTopY-12} rx={6.5} ry={2} fill="#3d1f00" />
@@ -293,8 +311,8 @@ function DeskSlot({ occupant, index, onAgentClick }: { occupant?: DeskOccupant; 
   );
 }
 
-export default function AgentDeskRoom({ activeAgents, ccInstances, onAgentClick }: Props) {
-  const occupants = buildOccupants(activeAgents, ccInstances || []);
+export default function AgentDeskRoom({ activeAgents, ccInstances, activeDispatches, onAgentClick }: Props) {
+  const occupants = buildOccupants(activeAgents, ccInstances || [], activeDispatches || []);
   const activeCount = occupants.length;
 
   return (

@@ -67,6 +67,10 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
       if (!playbackCtxRef.current || playbackCtxRef.current.state === "closed") {
         playbackCtxRef.current = new AudioContext({ sampleRate: msg.sample_rate || 24000 });
       }
+      // Resume if suspended (browser autoplay policy after refresh)
+      if (playbackCtxRef.current.state === "suspended") {
+        playbackCtxRef.current.resume();
+      }
       nextPlayTimeRef.current = 0;
       setIsSpeaking(true);
     });
@@ -84,6 +88,7 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
     es.addEventListener("tts_audio", (e) => {
       const ctx = playbackCtxRef.current;
       if (!ctx) return;
+      if (ctx.state === "suspended") ctx.resume();
       // Decode base64 to Float32Array
       const b64 = (e as MessageEvent).data;
       const binary = atob(b64);
@@ -113,21 +118,31 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
 
   }, []);
 
-  // Resample Float32 from native rate to 16kHz
-  function resampleTo16k(input: Float32Array, inputRate: number): Int16Array {
-    const ratio = inputRate / 16000;
-    const outputLen = Math.floor(input.length / ratio);
-    const output = new Int16Array(outputLen);
-    for (let i = 0; i < outputLen; i++) {
-      const srcIdx = i * ratio;
-      const idx = Math.floor(srcIdx);
-      const frac = srcIdx - idx;
-      const s0 = input[idx] || 0;
-      const s1 = input[idx + 1] || 0;
-      const sample = s0 + frac * (s1 - s0);
-      output[i] = Math.max(-32768, Math.min(32767, Math.round(sample * 32767)));
+  // Convert Float32 PCM to Int16 PCM
+  function float32ToInt16(input: Float32Array): Int16Array {
+    const output = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      output[i] = Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767)));
     }
     return output;
+  }
+
+  // Resample Float32 from native rate to 16kHz using OfflineAudioContext
+  async function resampleTo16k(input: Float32Array, inputRate: number): Promise<Int16Array> {
+    const offlineCtx = new OfflineAudioContext(1, Math.ceil(input.length * 16000 / inputRate), 16000);
+    const buffer = offlineCtx.createBuffer(1, input.length, inputRate);
+    buffer.getChannelData(0).set(input);
+    const source = offlineCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(offlineCtx.destination);
+    source.start();
+    const rendered = await offlineCtx.startRendering();
+    const float32 = rendered.getChannelData(0);
+    const int16 = new Int16Array(float32.length);
+    for (let i = 0; i < float32.length; i++) {
+      int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
+    }
+    return int16;
   }
 
   const startMic = useCallback(async () => {
@@ -144,7 +159,7 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
 
     // Get mic
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, sampleRate: { ideal: 48000 } }
+      audio: { channelCount: 1, sampleRate: { ideal: 16000 } }
     });
     mediaStreamRef.current = stream;
 
@@ -158,19 +173,29 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
 
     processor.onaudioprocess = (e) => {
       const inputData = e.inputBuffer.getChannelData(0);
-      const resampled = resampleTo16k(inputData, nativeRate);
-      // Send audio via POST
-      fetch("/api/mc/voice-send", {
-        method: "POST",
-        credentials: "include",
-        body: resampled.buffer.slice(0) as ArrayBuffer,
-      }).catch(() => {}); // fire-and-forget
+      if (nativeRate === 16000) {
+        const int16 = float32ToInt16(inputData);
+        fetch("/api/mc/voice-send", {
+          method: "POST",
+          credentials: "include",
+          body: int16.buffer.slice(0) as ArrayBuffer,
+        }).catch(() => {});
+      } else {
+        resampleTo16k(new Float32Array(inputData), nativeRate).then(resampled => {
+          fetch("/api/mc/voice-send", {
+            method: "POST",
+            credentials: "include",
+            body: resampled.buffer.slice(0) as ArrayBuffer,
+          }).catch(() => {});
+        }).catch(() => {});
+      }
     };
 
     source.connect(processor);
     processor.connect(audioCtx.destination);
 
     setIsListening(true);
+    try { localStorage.setItem("voice-mic-enabled", "true"); } catch {}
   }, [connectSse]);
 
   const stopMic = useCallback(() => {
@@ -196,6 +221,7 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
     }
 
     setIsListening(false);
+    try { localStorage.setItem("voice-mic-enabled", "false"); } catch {}
   }, []);
 
   const clearTranscripts = useCallback(() => setTranscripts([]), []);
@@ -221,4 +247,8 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
   }, [stopMic]);
 
   return { isConnected, isListening, isSpeaking, wakewordDetected, pipelineState, transcripts, startMic, stopMic, clearTranscripts };
+}
+
+export function getPersistedMicEnabled(): boolean {
+  try { return localStorage.getItem("voice-mic-enabled") === "true"; } catch { return false; }
 }

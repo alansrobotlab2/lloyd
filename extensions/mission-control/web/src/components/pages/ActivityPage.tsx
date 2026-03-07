@@ -1,6 +1,10 @@
-import { useEffect, useState, useCallback } from "react";
-import { Activity, X, Cpu, Square, Radio, Filter } from "lucide-react";
-import { api, AgentStatusData, SubagentRunInfo, CcInstanceInfo, GatewaySessionInfo } from "../../api";
+/**
+ * ActivityPage — Real-time activity dashboard showing agent status,
+ * subagent runs, gateway sessions, and Claude Code instances.
+ */
+import { useEffect, useState, useCallback, useRef } from "react";
+import { Activity, X, Cpu, Square, Radio, Filter, ChevronDown, ChevronRight } from "lucide-react";
+import { api, AgentStatusData, SubagentRunInfo, CcInstanceInfo, CcInstanceMessage, GatewaySessionInfo } from "../../api";
 import AgentDeskRoom from "../AgentDeskRoom";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -327,6 +331,214 @@ function CcInstanceCard({
   );
 }
 
+// ── Subagent Dispatch Info (parsed from log messages) ─────────────────
+
+export interface SubagentDispatch {
+  agent: string;
+  startTs: number;
+  endTs?: number;
+  status: "running" | "complete";
+}
+
+export function parseSubagentDispatches(messages: CcInstanceMessage[]): SubagentDispatch[] {
+  const dispatches: SubagentDispatch[] = [];
+  let currentOpen: { agent: string; startTs: number } | null = null;
+
+  for (const msg of messages) {
+    if (msg.type === "subagent_start" && msg.agent) {
+      // Close previous open dispatch (implicit end for sequential dispatches)
+      if (currentOpen) {
+        dispatches.push({
+          agent: currentOpen.agent,
+          startTs: currentOpen.startTs,
+          endTs: msg.ts,
+          status: "complete",
+        });
+      }
+      currentOpen = { agent: msg.agent, startTs: msg.ts };
+    } else if (msg.type === "subagent_end") {
+      if (currentOpen) {
+        dispatches.push({
+          agent: currentOpen.agent,
+          startTs: currentOpen.startTs,
+          endTs: msg.ts,
+          status: "complete",
+        });
+        currentOpen = null;
+      }
+    }
+  }
+
+  // Remaining open dispatch is still running
+  if (currentOpen) {
+    dispatches.push({
+      agent: currentOpen.agent,
+      startTs: currentOpen.startTs,
+      status: "running",
+    });
+  }
+
+  // Sort: running first, then by startTs desc
+  dispatches.sort((a, b) => {
+    if (a.status === "running" && b.status !== "running") return -1;
+    if (b.status === "running" && a.status !== "running") return 1;
+    return b.startTs - a.startTs;
+  });
+
+  return dispatches;
+}
+
+function SubagentDispatchRow({
+  dispatch,
+  messages,
+}: {
+  dispatch: SubagentDispatch;
+  messages: CcInstanceMessage[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const duration = dispatch.endTs
+    ? dispatch.endTs - dispatch.startTs
+    : Date.now() - dispatch.startTs;
+
+  // Filter messages belonging to this dispatch window
+  const dispatchMessages = messages.filter(
+    (m) =>
+      m.ts >= dispatch.startTs &&
+      (dispatch.endTs ? m.ts <= dispatch.endTs : true) &&
+      (m.agent === dispatch.agent || m.type === "tool_use" || m.type === "tool_result" || m.type === "text") &&
+      (m.agent === dispatch.agent || !m.agent)
+  );
+
+  return (
+    <div>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full text-left flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-surface-2/30 transition-colors group"
+      >
+        <div className="flex-shrink-0 relative">
+          <div
+            className={`w-2 h-2 rounded-full ${
+              dispatch.status === "running"
+                ? "bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.5)]"
+                : "bg-emerald-400"
+            }`}
+          />
+          {dispatch.status === "running" && (
+            <div className="absolute inset-0 w-2 h-2 rounded-full bg-cyan-400 animate-ping opacity-30" />
+          )}
+        </div>
+        <img
+          src={`/api/mc/agent-avatar?id=${dispatch.agent}`}
+          alt={dispatch.agent}
+          className="w-5 h-5 rounded-md object-cover flex-shrink-0"
+          onError={(e) => {
+            (e.target as HTMLImageElement).style.display = "none";
+          }}
+        />
+        <span
+          className={`text-[10px] font-mono flex-shrink-0 ${
+            dispatch.status === "running" ? "text-cyan-400" : "text-emerald-400"
+          }`}
+        >
+          {dispatch.agent}
+        </span>
+        <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">
+          {formatElapsed(duration)}
+        </span>
+        <div className="flex-1" />
+        {expanded ? (
+          <ChevronDown className="w-3 h-3 text-slate-600 group-hover:text-slate-400" />
+        ) : (
+          <ChevronRight className="w-3 h-3 text-slate-600 group-hover:text-slate-400" />
+        )}
+      </button>
+
+      {expanded && dispatchMessages.length > 0 && (
+        <div className="ml-4 pl-3 border-l border-surface-3/30 mt-1 mb-2 space-y-0.5 max-h-48 overflow-y-auto">
+          {dispatchMessages.map((msg, i) => (
+            <div key={i} className="flex gap-2 py-0.5">
+              <span
+                className={`text-[10px] font-mono w-8 flex-shrink-0 ${
+                  msg.type === "tool_use"
+                    ? "text-blue-400"
+                    : msg.type === "error"
+                    ? "text-red-400"
+                    : msg.type === "task_progress"
+                    ? "text-amber-400"
+                    : "text-slate-500"
+                }`}
+              >
+                {msg.type === "tool_use"
+                  ? "tool"
+                  : msg.type === "error"
+                  ? "err"
+                  : msg.type === "task_progress"
+                  ? "task"
+                  : "txt"}
+              </span>
+              <span className="text-[10px] text-slate-400 truncate flex-1">
+                {msg.content}
+              </span>
+              <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">
+                {new Date(msg.ts).toLocaleTimeString()}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CcInstanceCardWithSubagents({
+  instance,
+  onAbort,
+}: {
+  instance: CcInstanceInfo;
+  onAbort: (id: string) => void;
+}) {
+  const [messages, setMessages] = useState<CcInstanceMessage[]>([]);
+  const [dispatches, setDispatches] = useState<SubagentDispatch[]>([]);
+  const fetchedOnce = useRef(false);
+
+  useEffect(() => {
+    const load = () => {
+      api
+        .ccInstanceLog(instance.id, 100)
+        .then((d) => {
+          setMessages(d.messages);
+          setDispatches(parseSubagentDispatches(d.messages));
+          fetchedOnce.current = true;
+        })
+        .catch(() => {});
+    };
+
+    load();
+
+    if (instance.status === "running") {
+      const interval = setInterval(load, 2000);
+      return () => clearInterval(interval);
+    }
+  }, [instance.id, instance.status]);
+
+  return (
+    <div>
+      <CcInstanceCard instance={instance} onAbort={onAbort} />
+      {dispatches.length > 0 && (
+        <div className="ml-6 mt-1 pl-3 border-l-2 border-cyan-500/20 space-y-0.5">
+          {dispatches.map((d, i) => (
+            <SubagentDispatchRow
+              key={`${d.agent}-${d.startTs}-${i}`}
+              dispatch={d}
+              messages={messages}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Gateway Session Card ──────────────────────────────────────────────
 
 const GW_STATE_COLORS: Record<string, string> = {
@@ -441,10 +653,24 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
   const [gatewaySessions, setGatewaySessions] = useState<GatewaySessionInfo[]>([]);
   const [gwSubagentRuns, setGwSubagentRuns] = useState<SubagentRunInfo[]>([]);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [activeDispatches, setActiveDispatches] = useState<SubagentDispatch[]>([]);
 
   const refresh = useCallback(() => {
     api.agentStatus().then(setStatus).catch(console.error);
-    api.ccInstances().then((d) => setCcInstances(d.instances)).catch(() => setCcInstances([]));
+    api.ccInstances().then((d) => {
+      setCcInstances(d.instances);
+      // Collect running subagent dispatches from orchestrators
+      const orchestrators = d.instances.filter(i => i.type === "orchestrate" && i.status === "running");
+      if (orchestrators.length > 0) {
+        Promise.all(orchestrators.map(inst =>
+          api.ccInstanceLog(inst.id, 100).then(log => parseSubagentDispatches(log.messages)).catch(() => [])
+        )).then(results => {
+          setActiveDispatches(results.flat().filter(d => d.status === "running"));
+        });
+      } else {
+        setActiveDispatches([]);
+      }
+    }).catch(() => { setCcInstances([]); setActiveDispatches([]); });
     api.gatewaySessions().then((d) => {
       setGatewaySessions(d.sessions);
       setGwSubagentRuns(d.subagentRuns);
@@ -524,7 +750,7 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
       </div>
 
       {/* Agent Desk Room — shows both legacy subagents and CC instances */}
-      <AgentDeskRoom activeAgents={active} ccInstances={ccInstances} onAgentClick={onNavigateToAgent} />
+      <AgentDeskRoom activeAgents={active} ccInstances={ccInstances} activeDispatches={activeDispatches} onAgentClick={onNavigateToAgent} />
 
       {/* Main Agent Status */}
       {(sourceFilter === "all" || sourceFilter === "board") && (
@@ -605,12 +831,20 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
             <Cpu className="w-3 h-3" />
             Claude Code Instances ({ccRunning.length} running{ccCompleted.length > 0 ? `, ${ccCompleted.length} done` : ""})
           </div>
-          {ccRunning.map((inst) => (
-            <CcInstanceCard key={inst.id} instance={inst} onAbort={handleCcAbort} />
-          ))}
-          {ccCompleted.slice(0, 5).map((inst) => (
-            <CcInstanceCard key={inst.id} instance={inst} onAbort={handleCcAbort} />
-          ))}
+          {ccRunning.map((inst) =>
+            inst.type === "orchestrate" ? (
+              <CcInstanceCardWithSubagents key={inst.id} instance={inst} onAbort={handleCcAbort} />
+            ) : (
+              <CcInstanceCard key={inst.id} instance={inst} onAbort={handleCcAbort} />
+            )
+          )}
+          {ccCompleted.slice(0, 5).map((inst) =>
+            inst.type === "orchestrate" ? (
+              <CcInstanceCardWithSubagents key={inst.id} instance={inst} onAbort={handleCcAbort} />
+            ) : (
+              <CcInstanceCard key={inst.id} instance={inst} onAbort={handleCcAbort} />
+            )
+          )}
         </div>
       )}
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Mic, MicOff, Power, Radio, Volume2 } from "lucide-react";
-import { useVoiceStream } from "../hooks/useVoiceStream";
+import { useVoiceStream, getPersistedMicEnabled } from "../hooks/useVoiceStream";
 
 interface VoicePanelProps {
   onVoiceActive?: (active: boolean) => void;
@@ -15,33 +15,44 @@ export default function VoicePanel({ onVoiceActive, onVoiceEnabled }: VoicePanel
 
   // Check if voice WS mode is available
   const [wsAvailable, setWsAvailable] = useState(false);
-  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [statusLoaded, setStatusLoaded] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(() => {
+    try { return localStorage.getItem("voice-power-enabled") === "true"; } catch { return false; }
+  });
   useEffect(() => {
-    fetch("/api/mc/voice-status", { credentials: "include" as RequestCredentials })
-      .then(r => r.json())
-      .then(data => {
-        setWsAvailable(data.ws_active);
-        if (data.ws_port) setWsPort(data.ws_port);
-        setVoiceEnabled(data.voice_enabled);
-      })
-      .catch(() => setWsAvailable(false));
-    const id = setInterval(() => {
+    const fetchStatus = () =>
       fetch("/api/mc/voice-status", { credentials: "include" as RequestCredentials })
         .then(r => r.json())
         .then(data => {
           setWsAvailable(data.ws_active);
+          if (data.ws_port) setWsPort(data.ws_port);
           setVoiceEnabled(data.voice_enabled);
+          setStatusLoaded(true);
+          try { localStorage.setItem("voice-power-enabled", String(data.voice_enabled)); } catch {}
+          // Gateway WS may not have reconnected yet after refresh — retry sooner
+          if (!data.ws_active) setTimeout(fetchStatus, 2000);
         })
         .catch(() => setWsAvailable(false));
-    }, 10000);
+    fetchStatus();
+    const id = setInterval(fetchStatus, 10000);
     return () => clearInterval(id);
   }, []);
+
+  // Auto-start mic after refresh if voice pipeline is active, enabled, AND mic was previously on
+  useEffect(() => {
+    if (wsAvailable && voiceEnabled && !isListening && getPersistedMicEnabled()) {
+      try { startMic(); } catch { /* getUserMedia may need user gesture */ }
+    }
+  }, [wsAvailable, voiceEnabled]);
 
   const handleVoiceToggle = async () => {
     try {
       const resp = await fetch("/api/mc/voice-toggle", { method: "POST", credentials: "include" as RequestCredentials });
       const data = await resp.json();
-      if (data.voice_enabled !== undefined) setVoiceEnabled(data.voice_enabled);
+      if (data.voice_enabled !== undefined) {
+        setVoiceEnabled(data.voice_enabled);
+        try { localStorage.setItem("voice-power-enabled", String(data.voice_enabled)); } catch {}
+      }
     } catch {
       // ignore
     }
@@ -79,34 +90,37 @@ export default function VoicePanel({ onVoiceActive, onVoiceEnabled }: VoicePanel
       {/* Compact bar */}
       <div className="flex items-center gap-2 px-3 py-1.5">
         <button
-          onClick={wsAvailable ? () => (isListening ? stopMic() : startMic()) : undefined}
+          onClick={wsAvailable && statusLoaded ? () => (isListening ? stopMic() : startMic()) : undefined}
           className={`p-1.5 rounded-lg transition-colors ${
-            !wsAvailable
+            !wsAvailable || !statusLoaded
               ? "bg-surface-2 text-slate-600 cursor-not-allowed opacity-50"
               : isListening
                 ? "bg-green-600/20 text-green-400 hover:bg-green-600/30"
                 : "bg-red-600/20 text-red-400 hover:bg-red-600/30"
           }`}
-          title={!wsAvailable ? "Voice service unavailable" : isListening ? "Stop mic" : "Start mic"}
-          disabled={!wsAvailable}
+          title={!statusLoaded ? "Loading..." : !wsAvailable ? "Voice service unavailable" : isListening ? "Stop mic" : "Start mic"}
+          disabled={!wsAvailable || !statusLoaded}
         >
           {isListening ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
         </button>
 
         <button
-          onClick={handleVoiceToggle}
+          onClick={statusLoaded ? handleVoiceToggle : undefined}
           className={`p-1.5 rounded-lg transition-colors ${
-            voiceEnabled
-              ? "bg-green-600/20 text-green-400 hover:bg-green-600/30"
-              : "bg-surface-2 text-slate-500 hover:text-slate-300 hover:bg-surface-3"
+            !statusLoaded
+              ? "bg-surface-2 text-slate-600 cursor-not-allowed opacity-50"
+              : voiceEnabled
+                ? "bg-green-600/20 text-green-400 hover:bg-green-600/30"
+                : "bg-surface-2 text-slate-500 hover:text-slate-300 hover:bg-surface-3"
           }`}
-          title={voiceEnabled ? "Disable voice" : "Enable voice"}
+          title={!statusLoaded ? "Loading..." : voiceEnabled ? "Disable voice" : "Enable voice"}
+          disabled={!statusLoaded}
         >
           <Power className="w-4 h-4" />
         </button>
 
-        <span className={`text-[10px] font-mono ${wsAvailable ? stateColor : "text-slate-600"}`}>
-          {wsAvailable ? stateText : "Voice offline"}
+        <span className={`text-[10px] font-mono ${!statusLoaded ? "text-slate-500" : wsAvailable ? stateColor : "text-slate-600"}`}>
+          {!statusLoaded ? "Connecting..." : wsAvailable ? stateText : "Voice offline"}
         </span>
 
         {isConnected && (

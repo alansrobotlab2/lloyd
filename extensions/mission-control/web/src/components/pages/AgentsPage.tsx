@@ -1,3 +1,7 @@
+/**
+ * AgentsPage — Agent management dashboard with core agents, SDK agents,
+ * Claude Code instances, tools/skills editors, and work log viewer.
+ */
 import { useEffect, useState, useCallback } from "react";
 import { Bot, ChevronLeft, ChevronDown, ChevronRight, Cpu, Wrench, Sparkles, Users, Layers, FileText, Pencil, X, Save } from "lucide-react";
 import { marked } from "marked";
@@ -1030,10 +1034,12 @@ function SdkAgentCard({
   agent,
   instanceCounts,
   ccInstances,
+  onInstanceSelect,
 }: {
   agent: SdkAgentInfo;
   instanceCounts: Record<string, { active: number; recent: number }>;
   ccInstances: CcInstanceInfo[];
+  onInstanceSelect?: (inst: CcInstanceInfo) => void;
 }) {
   const counts = instanceCounts[agent.id] || { active: 0, recent: 0 };
   const [expanded, setExpanded] = useState(false);
@@ -1042,10 +1048,26 @@ function SdkAgentCard({
     (i.type === "spawn" && i.agent === agent.id)
   );
 
+  const handleHeaderClick = () => {
+    if (onInstanceSelect && agentInstances.length > 0) {
+      const running = agentInstances.find((i) => i.status === "running");
+      if (running) {
+        onInstanceSelect(running);
+        return;
+      }
+      // No running instance — if card is already expanded, navigate to most recent
+      if (expanded) {
+        onInstanceSelect(agentInstances[0]);
+        return;
+      }
+    }
+    setExpanded(!expanded);
+  };
+
   return (
     <div className="bg-surface-1 rounded-xl border border-surface-3/50 overflow-hidden">
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={handleHeaderClick}
         className="w-full p-4 text-left hover:bg-surface-2/50 transition-colors"
       >
         <div className="flex items-center gap-3">
@@ -1111,7 +1133,14 @@ function SdkAgentCard({
               </div>
               <div className="space-y-1.5">
                 {agentInstances.slice(0, 5).map((inst) => (
-                  <div key={inst.id} className="flex items-center gap-2 text-[10px]">
+                  <button
+                    key={inst.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onInstanceSelect?.(inst);
+                    }}
+                    className="w-full text-left flex items-center gap-2 text-[10px] py-1 px-1.5 -mx-1.5 rounded-md hover:bg-surface-2/50 transition-colors cursor-pointer"
+                  >
                     <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
                       inst.status === "running" ? "bg-cyan-400" :
                       inst.status === "complete" ? "bg-emerald-400" :
@@ -1121,7 +1150,7 @@ function SdkAgentCard({
                     <span className="text-slate-600 font-mono flex-shrink-0">
                       {inst.turns}t · ${inst.costUsd.toFixed(2)}
                     </span>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
@@ -1416,6 +1445,7 @@ export default function AgentsPage({
                 agent={agent}
                 instanceCounts={instanceCounts}
                 ccInstances={ccInstances}
+                onInstanceSelect={setSelectedCcInstance}
               />
             ))}
           </div>
