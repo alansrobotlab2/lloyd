@@ -324,6 +324,8 @@ export default function register(api: OpenClawPluginApi) {
   let gwWsReady = false;
   let gwWsReqId = 0;
   const gwWsPending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  let streamTextAccum = "";
+  let streamTtsInFlight = false;
 
   const deviceIdentity = loadDeviceIdentity();
 
@@ -412,6 +414,47 @@ export default function register(api: OpenClawPluginApi) {
             return;
           }
 
+          // Verbose WS event logging — disabled by default (very noisy)
+          // Uncomment for debugging: api.logger.info?.(`mc-ws-event: ${msg.event} ${JSON.stringify(msg.payload ?? {}).slice(0, 300)}`);
+
+          // Accumulate streaming text for TTS detection
+          if (msg.type === "event") {
+            const payload = msg.payload || {};
+            let delta: string | null = null;
+
+            // Handle streaming text from agent events
+            if (msg.event === "agent" && payload.stream === "assistant" && payload.data?.delta) {
+              delta = payload.data.delta;
+            }
+            // Handle batched chat deltas (less granular — don't use for accumulation)
+            // else if (msg.event === "chat" && payload.state === "delta" && payload.message?.content) {
+            //   // payload.message.content[0].text has the full accumulated text
+            // }
+
+            if (delta) {
+              streamTextAccum += delta;
+            }
+
+            // Reset accumulator on lifecycle end
+            if (msg.event === "agent" && payload.stream === "lifecycle") {
+              const phase = payload.data?.phase;
+              if (phase === "end" || phase === "complete" || phase === "done" || phase === "stop") {
+                // Final check before reset
+                if (!streamTtsInFlight) {
+                  triggerStreamTts(streamTextAccum);
+                }
+                streamTextAccum = "";
+                streamTtsInFlight = false;
+              }
+            }
+
+            // Check for </summary> in accumulated text
+            if (!streamTtsInFlight && streamTextAccum.includes("</summary>")) {
+              triggerStreamTts(streamTextAccum);
+              streamTtsInFlight = true;
+            }
+          }
+
           if (msg.type === "res") {
             if (msg.payload?.type === "hello-ok") {
               gwWsReady = true;
@@ -467,6 +510,54 @@ export default function register(api: OpenClawPluginApi) {
       gwWsPending.set(id, { resolve, reject, timer });
       gwWs.send(JSON.stringify({ type: "req", id, method, params }));
     });
+  }
+
+  function triggerStreamTts(accum: string) {
+    const match = accum.match(/<summary>([\s\S]*?)<\/summary>/);
+    if (!match) return;
+    const summaryText = match[1].trim();
+    if (!summaryText) return;
+
+    api.logger.info?.(`mc-stream-tts: firing TTS for summary (${summaryText.length} chars)`);
+
+    // Fire and forget — don't block the WS handler
+    (async () => {
+      try {
+        const ttsResp = await fetch("http://127.0.0.1:8090/v1/audio/speech", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sk-local",
+          },
+          body: JSON.stringify({
+            input: summaryText,
+            model: "tts-1",
+            voice: "clone:cullen",
+            response_format: "mp3",
+          }),
+        });
+        if (!ttsResp.ok || !ttsResp.body) {
+          api.logger.error?.("mc-stream-tts: TTS synthesis failed");
+          return;
+        }
+        const chunks: Uint8Array[] = [];
+        const reader = ttsResp.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) chunks.push(value);
+        }
+        const total = chunks.reduce((s, c) => s + c.length, 0);
+        const merged = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) { merged.set(c, offset); offset += c.length; }
+        const audio = Buffer.from(merged).toString("base64");
+        broadcastSse("tts_mp3", JSON.stringify({ audio, mimeType: "audio/mpeg" }));
+        api.logger.info?.("mc-stream-tts: broadcast tts_mp3 via SSE");
+      } catch (err: any) {
+        api.logger.error?.(`mc-stream-tts: error: ${err.message}`);
+      }
+    })();
   }
 
   // Start the gateway WS connection after a brief delay to let the

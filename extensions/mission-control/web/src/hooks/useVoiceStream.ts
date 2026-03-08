@@ -1,5 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
+// Shared flag for TTS dedup across SSE and polling paths
+let _lastSseTtsMp3At = 0;
+export function getLastSseTtsMp3At(): number { return _lastSseTtsMp3At; }
+
 interface Transcript {
   text: string;
   speaker: string;
@@ -126,6 +130,7 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
         audio.onended = () => URL.revokeObjectURL(url);
         audio.onerror = () => URL.revokeObjectURL(url);
         audio.play().catch((err) => console.warn("TTS MP3 playback failed:", err));
+        _lastSseTtsMp3At = Date.now();
       } catch { /* ignore malformed SSE */ }
     });
 

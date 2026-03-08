@@ -6,6 +6,7 @@ import { sanitizeHtml } from "../utils/sanitize";
 import SlashCommandPicker from "./SlashCommandPicker";
 import VoicePanel from "./VoicePanel";
 import { useVoiceContext } from "../contexts/VoiceContext";
+import { getLastSseTtsMp3At } from "../hooks/useVoiceStream";
 
 // Configure marked for safe, sane defaults
 marked.setOptions({ breaks: true, gfm: true });
@@ -331,6 +332,11 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
     if (spokenMsgIds.current.has(last.id)) return;
     const summary = extractSummary(last.content);
     if (!summary) return;
+    // Skip if SSE stream already triggered TTS recently (dedup)
+    if (Date.now() - getLastSseTtsMp3At() < 15_000) {
+      spokenMsgIds.current.add(last.id);
+      return;
+    }
     spokenMsgIds.current.add(last.id);
     fetch("/api/mc/tts", {
       method: "POST",
