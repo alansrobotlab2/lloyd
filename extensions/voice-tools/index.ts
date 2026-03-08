@@ -175,6 +175,17 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // -- before_prompt_build hook: inject <summary> TTS instruction for webchat --
+
+  api.on("before_prompt_build", (event, ctx) => {
+    // Only inject summary instruction for webchat sessions
+    if (ctx.channelId !== "webchat") return;
+
+    return {
+      appendSystemContext: `Before your response, provide a 1 to 3 sentence brief high level summary wrapped in <summary> tags. This will be immediately spoken back to the user via TTS as you provide a more detailed response. Example:\n<summary>\n1 to 3 sentence summary\n</summary>\n\nYour detailed response follows with no preface.`,
+    };
+  });
+
   // -- message_sending hook: extract <summary>, synthesize TTS, push via MC SSE --
 
   const gwPort = (api as any).config?.gateway?.port ?? 18789;
@@ -232,5 +243,5 @@ export default function register(api: OpenClawPluginApi) {
     }
   });
 
-  api.logger.info?.("voice-tools: registered (4 tools + message_sending hook)");
+  api.logger.info?.("voice-tools: registered (4 tools + before_prompt_build + message_sending hooks)");
 }

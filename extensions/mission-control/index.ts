@@ -8,7 +8,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { onDiagnosticEvent, type DiagnosticEventPayload } from "openclaw/plugin-sdk";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readFileSync, writeFileSync, readdirSync, existsSync, statSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from "fs";
 import { join, extname, relative } from "path";
 import { execSync, execFileSync } from "child_process";
 import { connect as netConnect } from "net";
@@ -258,7 +258,6 @@ function voicePipeConnect() {
 
 export default function register(api: OpenClawPluginApi) {
   const rootDir = join(__dirname, "../..");
-  const sessionsDir = join(rootDir, "agents/main/sessions");
   const timingLog = join(rootDir, "logs/timing.jsonl");
   const routingLog = join(rootDir, "logs/routing.jsonl");
   const ccInstancesDir = join(rootDir, "logs/cc-instances");
@@ -268,6 +267,52 @@ export default function register(api: OpenClawPluginApi) {
   const cronJobsFile = join(rootDir, "cron/jobs.json");
   const configFile = join(rootDir, "openclaw.json");
   const distWebDir = join(__dirname, "dist-web");
+  const summariesFile = join(rootDir, "data/session-summaries.json");
+  const pendingSummaries = new Set<string>();
+
+  function loadSummaries(): Record<string, string> {
+    try {
+      if (existsSync(summariesFile)) return JSON.parse(readFileSync(summariesFile, "utf-8"));
+    } catch (e) { api.logger.debug?.(`mission-control: loadSummaries: ${(e as Error).message}`); }
+    return {};
+  }
+
+  function saveSummaries(summaries: Record<string, string>) {
+    try { writeFileSync(summariesFile, JSON.stringify(summaries, null, 2)); } catch (e) { api.logger.debug?.(`mission-control: saveSummaries: ${(e as Error).message}`); }
+  }
+
+  function stripInjectedContext(text: string): string {
+    return text
+      .replace(/<daily_notes>[\s\S]*?<\/daily_notes>\s*/i, "")
+      .replace(/<active_mode>\w*<\/active_mode>\s*/i, "")
+      .replace(/<memory_context>[\s\S]*?<\/memory_context>\s*/i, "")
+      .replace(/\[(?:[A-Z][a-z]{2} )?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?[^\]]*\]\s*/, "")
+      .replace(/A new session was started via\b[\s\S]*/i, "")
+      .trim();
+  }
+
+  function parseSessionSource(sessionKey: string): { source: string; peer: string | null } {
+    const parts = sessionKey.split(":");
+    const channel = parts[2] || "";
+
+    // Known messaging channels live at parts[2]
+    const knownChannels = ["discord", "telegram", "signal", "whatsapp"];
+    if (knownChannels.includes(channel)) {
+      // Discord guild channel: agent:main:discord:channel:<channelId>
+      if (channel === "discord" && parts[3] === "channel") return { source: "discord", peer: null };
+      // DM sessions: agent:main:discord:direct:<userId> or agent:main:discord:dm:<userId>
+      // Strip the dm-type prefix, return just the user/peer ID
+      if (parts[3] === "direct" || parts[3] === "dm") {
+        return { source: channel, peer: parts[4] || null };
+      }
+      // Other formats: just take everything after channel name
+      const peerId = parts.slice(3).join(":") || null;
+      return { source: channel, peer: peerId };
+    }
+
+    // Everything else (main, mc-*, bare UUIDs, earbuddy-*, unknown) → webchat
+    return { source: "webchat", peer: null };
+  }
 
   api.logger.info?.("mission-control: loaded");
 
@@ -512,6 +557,70 @@ export default function register(api: OpenClawPluginApi) {
     });
   }
 
+  async function generateSummary(sessionKey: string): Promise<string | null> {
+    try {
+      const result = await gwWsSend("chat.history", { sessionKey, limit: 10 });
+      const messages: any[] = result?.messages || result?.history || [];
+      let text: string | null = null;
+      for (const msg of messages) {
+        const role = msg.role || msg.message?.role;
+        if (role !== "user") continue;
+        const content = msg.content || msg.message?.content || [];
+        const parts = Array.isArray(content) ? content : [{ type: "text", text: String(content) }];
+        for (const p of parts) {
+          if (p.type === "text" && p.text) {
+            const cleaned = stripInjectedContext(p.text);
+            if (cleaned.length > 5) { text = cleaned; break; }
+          }
+        }
+        if (text) break;
+      }
+      if (!text) return null;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3000);
+      try {
+        const resp = await fetch("http://127.0.0.1:8091/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer none" },
+          body: JSON.stringify({
+            model: "Qwen3.5-35B-A3B",
+            messages: [
+              { role: "system", content: "Summarize this conversation opener in 3-6 words. No quotes, no punctuation at the end. Just a brief title." },
+              { role: "user", content: text.slice(0, 500) },
+            ],
+            max_tokens: 20,
+            temperature: 0.3,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        const data = await resp.json() as any;
+        const summary = data?.choices?.[0]?.message?.content?.trim();
+        return summary || null;
+      } catch {
+        clearTimeout(timer);
+        return null;
+      }
+    } catch (e) {
+      api.logger.debug?.(`mission-control: generateSummary error: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  function triggerSummaryGeneration(sessionKey: string) {
+    if (pendingSummaries.has(sessionKey)) return;
+    pendingSummaries.add(sessionKey);
+    generateSummary(sessionKey).then((summary) => {
+      pendingSummaries.delete(sessionKey);
+      if (summary) {
+        const summaries = loadSummaries();
+        summaries[sessionKey] = summary;
+        saveSummaries(summaries);
+      }
+    }).catch(() => { pendingSummaries.delete(sessionKey); });
+  }
+
   function triggerStreamTts(accum: string) {
     const match = accum.match(/<summary>([\s\S]*?)<\/summary>/);
     if (!match) return;
@@ -573,15 +682,6 @@ export default function register(api: OpenClawPluginApi) {
     api.logger.info?.("mission-control: skipping gateway WS (already active in this process)");
   }
 
-  // ── Helper: aggregate token usage from session files ──────────────────
-
-  function getSessionFiles(): string[] {
-    if (!existsSync(sessionsDir)) return [];
-    return readdirSync(sessionsDir)
-      .filter((f) => f.endsWith(".jsonl") && !f.includes(".reset."))
-      .map((f) => join(sessionsDir, f));
-  }
-
   function loadCcInstanceSummaries(): Array<{ id: string; costUsd: number; startedAt: string; status: string }> {
     return cached("cc-instance-summaries", () => {
       if (!existsSync(ccInstancesDir)) return [];
@@ -602,186 +702,6 @@ export default function register(api: OpenClawPluginApi) {
     }, HEAVY_CACHE_TTL);
   }
 
-  function aggregateTokenUsage(): {
-    totalInput: number;
-    totalOutput: number;
-    totalCacheRead: number;
-    totalSessions: number;
-    bySession: Array<{
-      sessionId: string;
-      input: number;
-      output: number;
-      cacheRead: number;
-      messageCount: number;
-      lastActivity: string;
-      model: string;
-    }>;
-  } {
-    return cached("token-usage", () => {
-      let totalInput = 0;
-      let totalOutput = 0;
-      let totalCacheRead = 0;
-      const bySession: any[] = [];
-      const sessionFiles = getSessionFiles();
-
-      for (const file of sessionFiles) {
-        const lines = parseJsonl<SessionMessage>(file);
-        let sInput = 0;
-        let sOutput = 0;
-        let sCacheRead = 0;
-        let msgCount = 0;
-        let lastActivity = "";
-        let model = "";
-        let sessionId = "";
-
-        for (const line of lines) {
-          if (line.type === "session") {
-            sessionId = (line as any).id || "";
-          }
-          if (line.type === "message" && line.message?.usage) {
-            const u = line.message.usage;
-            sInput += u.input || 0;
-            sOutput += u.output || 0;
-            sCacheRead += u.cacheRead || 0;
-            msgCount++;
-            if (line.timestamp) lastActivity = line.timestamp;
-            if (line.message.model) model = line.message.model;
-          }
-        }
-
-        totalInput += sInput;
-        totalOutput += sOutput;
-        totalCacheRead += sCacheRead;
-
-        if (msgCount > 0) {
-          bySession.push({
-            sessionId,
-            input: sInput,
-            output: sOutput,
-            cacheRead: sCacheRead,
-            messageCount: msgCount,
-            lastActivity,
-            model,
-          });
-        }
-      }
-
-      bySession.sort(
-        (a, b) =>
-          new Date(b.lastActivity).getTime() -
-          new Date(a.lastActivity).getTime(),
-      );
-
-      return {
-        totalInput,
-        totalOutput,
-        totalCacheRead,
-        totalSessions: bySession.length,
-        bySession,
-      };
-    }, HEAVY_CACHE_TTL);
-  }
-
-  // ── Session summaries (generated lazily via local LLM) ────────────────
-
-  const summariesFile = join(sessionsDir, "summaries.json");
-  const pendingSummaries = new Set<string>();
-
-  function loadSummaries(): Record<string, string> {
-    try {
-      if (existsSync(summariesFile)) return JSON.parse(readFileSync(summariesFile, "utf-8"));
-    } catch (e) { api.logger.debug?.(`mission-control: loadSummaries: ${(e as Error).message}`); }
-    return {};
-  }
-
-  function saveSummaries(summaries: Record<string, string>) {
-    try { writeFileSync(summariesFile, JSON.stringify(summaries, null, 2)); } catch (e) { api.logger.debug?.(`mission-control: saveSummaries: ${(e as Error).message}`); }
-  }
-
-  /** Strip all gateway-injected context wrappers to find the real user text */
-  function stripInjectedContext(text: string): string {
-    return text
-      .replace(/<daily_notes>[\s\S]*?<\/daily_notes>\s*/i, "")
-      .replace(/<active_mode>\w*<\/active_mode>\s*/i, "")
-      .replace(/<memory_context>[\s\S]*?<\/memory_context>\s*/i, "")
-      .replace(/\[(?:[A-Z][a-z]{2} )?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?[^\]]*\]\s*/, "")
-      .replace(/A new session was started via\b[\s\S]*/i, "")
-      .trim();
-  }
-
-  function getFirstUserMessage(sessionId: string): string | null {
-    const files = readdirSync(sessionsDir);
-    const match = files.find((f) => f.startsWith(sessionId) && f.endsWith(".jsonl"));
-    if (!match) return null;
-    const lines = parseJsonl<SessionMessage>(join(sessionsDir, match));
-    const userMsgs = lines.filter((l) => l.type === "message" && l.message?.role === "user");
-
-    for (const msg of userMsgs) {
-      if (!msg.message?.content) continue;
-      let text = msg.message.content
-        .filter((c: any) => c.type === "text" && c.text)
-        .map((c: any) => c.text)
-        .join("\n");
-      if (!text) continue;
-
-      // Strip all injected gateway context wrappers
-      text = stripInjectedContext(text);
-      if (!text) continue;
-
-      // Strip cron hook wrapper: "[cron:... Hook] actual text\nCurrent time: ..."
-      const cronMatch = text.match(/^\[cron:[^\]]+\]\s*/);
-      if (cronMatch) text = text.slice(cronMatch[0].length);
-      // Strip trailing "Current time: ..." injected by hooks
-      text = text.replace(/\nCurrent time:[\s\S]*$/, "").trim();
-
-      return text || null;
-    }
-    return null;
-  }
-
-  async function generateSummary(sessionId: string): Promise<string | null> {
-    const text = getFirstUserMessage(sessionId);
-    if (!text) return null;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
-    try {
-      const resp = await fetch("http://127.0.0.1:8091/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer none" },
-        body: JSON.stringify({
-          model: "Qwen3.5-35B-A3B",
-          messages: [
-            { role: "system", content: "Summarize this conversation opener in 3-6 words. No quotes, no punctuation at the end. Just a brief title." },
-            { role: "user", content: text.slice(0, 500) },
-          ],
-          max_tokens: 20,
-          temperature: 0.3,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      const data = await resp.json() as any;
-      const summary = data?.choices?.[0]?.message?.content?.trim();
-      return summary || null;
-    } catch {
-      clearTimeout(timer);
-      return null;
-    }
-  }
-
-  function triggerSummaryGeneration(sessionId: string) {
-    if (pendingSummaries.has(sessionId)) return;
-    pendingSummaries.add(sessionId);
-    generateSummary(sessionId).then((summary) => {
-      pendingSummaries.delete(sessionId);
-      if (summary) {
-        const all = loadSummaries();
-        all[sessionId] = summary;
-        saveSummaries(all);
-      }
-    }).catch(() => pendingSummaries.delete(sessionId));
-  }
-
   // ── API: /api/mc/stats ────────────────────────────────────────────────
 
   api.registerHttpRoute({
@@ -789,14 +709,13 @@ export default function register(api: OpenClawPluginApi) {
     auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
-        const usage = aggregateTokenUsage();
         const ccSummaries = loadCcInstanceSummaries();
         const totalSubagentCost = ccSummaries.reduce((sum, s) => sum + s.costUsd, 0);
         jsonResponse(res, {
-          totalInput: usage.totalInput,
-          totalOutput: usage.totalOutput,
-          totalCacheRead: usage.totalCacheRead,
-          totalSessions: usage.totalSessions,
+          totalInput: 0,
+          totalOutput: 0,
+          totalCacheRead: 0,
+          totalSessions: 0,
           totalSubagentCost,
           totalSubagentInstances: ccSummaries.length,
         });
@@ -837,32 +756,6 @@ export default function register(api: OpenClawPluginApi) {
             number,
             { input: number; output: number; cacheRead: number; subagentCost: number }
           >();
-
-          const sessionFiles = getSessionFiles();
-          for (const file of sessionFiles) {
-            const lines = parseJsonl<SessionMessage>(file);
-            for (const line of lines) {
-              if (
-                line.type === "message" &&
-                line.message?.usage &&
-                line.timestamp
-              ) {
-                const ts = new Date(line.timestamp).getTime();
-                if (ts < cutoff) continue;
-                const key = Math.floor(ts / bucket) * bucket;
-                const existing = buckets.get(key) || {
-                  input: 0,
-                  output: 0,
-                  cacheRead: 0,
-                  subagentCost: 0,
-                };
-                existing.input += line.message.usage.input || 0;
-                existing.output += line.message.usage.output || 0;
-                existing.cacheRead += line.message.usage.cacheRead || 0;
-                buckets.set(key, existing);
-              }
-            }
-          }
 
           // Add cc-instance (subagent) costs to buckets
           const ccSummaries = loadCcInstanceSummaries();
@@ -952,13 +845,38 @@ export default function register(api: OpenClawPluginApi) {
     auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
-        const usage = aggregateTokenUsage();
-        const summaries = loadSummaries();
-        const sessions = usage.bySession.slice(0, 100).map((s) => {
-          const summary = summaries[s.sessionId];
-          if (!summary) triggerSummaryGeneration(s.sessionId);
-          return { ...s, summary: summary || undefined };
-        });
+        const result = await gwWsSend("sessions.list", { agentId: "main" });
+        const entries: any[] = result?.entries || result?.sessions || [];
+        const sessions = entries
+          .filter((e: any) => {
+            const key = e.sessionKey || e.key || "";
+            return !key.includes(":cron:") && !key.includes(":sub:");
+          })
+          .map((e: any) => {
+            const key = e.sessionKey || e.key || "";
+            const { source, peer } = parseSessionSource(key);
+            return {
+              sessionKey: key,
+              sessionId: e.sessionId || e.id || undefined,
+              lastActivity: e.lastActivity || e.updatedAt || e.createdAt || new Date().toISOString(),
+              messageCount: e.messageCount || undefined,
+              model: e.model || "",
+              summary: e.summary || undefined,
+              source,
+              peer,
+            };
+          });
+
+        // Enrich with cached summaries and trigger generation for missing ones
+        const cachedSummaries = loadSummaries();
+        for (const s of sessions) {
+          if (cachedSummaries[s.sessionKey]) {
+            s.summary = cachedSummaries[s.sessionKey];
+          } else {
+            triggerSummaryGeneration(s.sessionKey);
+          }
+        }
+
         jsonResponse(res, { sessions });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
@@ -966,7 +884,7 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
-  // ── API: /api/mc/session-messages (query param: id) ───────────────────
+  // ── API: /api/mc/session-messages (query param: sessionKey) ───────────
 
   api.registerHttpRoute({
     path: "/api/mc/session-messages",
@@ -974,76 +892,73 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "/", "http://localhost");
-        const sessionId = url.searchParams.get("id");
-        if (!sessionId) {
-          jsonResponse(res, { error: "Missing session id" }, 400);
-          return;
-        }
-
-        // Find the session file
-        const files = readdirSync(sessionsDir);
-        const match = files.find(
-          (f) => f.startsWith(sessionId) && f.endsWith(".jsonl"),
-        );
-        if (!match) {
-          // No transcript file yet — session was just created but has no messages
-          jsonResponse(res, { sessionId, messages: [] });
+        const sessionKey = url.searchParams.get("sessionKey") || url.searchParams.get("id");
+        if (!sessionKey) {
+          jsonResponse(res, { error: "Missing sessionKey" }, 400);
           return;
         }
 
         const includeTools = url.searchParams.get("tools") === "1";
-        const lines = parseJsonl<SessionMessage>(join(sessionsDir, match));
+
+        const result = await gwWsSend("chat.history", { sessionKey, limit: 200 });
+        const rawMessages: any[] = result?.messages || result?.history || [];
+
         let lastUserTs: number | null = null;
         let turnHadThinking = false;
         const messages: Record<string, any>[] = [];
-        for (const l of lines) {
-          if (l.type !== "message" || !l.message) continue;
-          const msg: any = l.message!;
-          const role = msg.role;
+
+        for (const msg of rawMessages) {
+          const role = msg.role || msg.message?.role;
+          const content = msg.content || msg.message?.content || [];
+          const timestamp = msg.timestamp || msg.ts || "";
+          const id = msg.id || msg.messageId || `msg-${messages.length}`;
+          const model = msg.model || msg.message?.model;
+          const usage = msg.usage || msg.message?.usage;
+
           if (role === "user") {
-            const ts = l.timestamp || msg.timestamp;
-            if (ts) lastUserTs = new Date(ts).getTime();
+            if (timestamp) lastUserTs = new Date(timestamp).getTime();
             turnHadThinking = false;
           } else if (role === "assistant") {
-            if (msg.content?.some((c: any) => c.type === "thinking")) turnHadThinking = true;
-            if (!includeTools && !msg.content?.some((c: any) => c.type === "text" && c.text)) continue;
+            if (content.some((c: any) => c.type === "thinking")) turnHadThinking = true;
+            if (!includeTools && !content.some((c: any) => c.type === "text" && c.text)) continue;
           } else if (role === "toolResult") {
             if (!includeTools) continue;
           } else {
             continue;
           }
+
           const entry: Record<string, any> = {
-            id: l.id,
-            timestamp: l.timestamp || msg.timestamp,
-            role: msg.role,
-            content: msg.content,
-            model: msg.model,
-            usage: msg.usage,
+            id,
+            timestamp,
+            role,
+            content,
+            model,
+            usage,
           };
-          if (msg.role === "assistant") {
-            const content: any[] = msg.content || [];
+
+          if (role === "assistant") {
             entry.hasThinking = (turnHadThinking || content.some((c: any) => c.type === "thinking")) || undefined;
             const tcc = content.filter((c: any) => c.type === "toolCall").length;
             if (tcc > 0) entry.toolCallCount = tcc;
-            if (lastUserTs) {
-              const ts = l.timestamp || msg.timestamp;
-              if (ts) entry.durationMs = new Date(ts).getTime() - lastUserTs;
+            if (lastUserTs && timestamp) {
+              entry.durationMs = new Date(timestamp).getTime() - lastUserTs;
             }
           }
-          if (msg.role === "toolResult") {
-            entry.toolCallId = msg.toolCallId;
-            entry.toolName = msg.toolName;
-            entry.isError = msg.isError || false;
-            // Truncate tool result content to keep payloads small
-            entry.content = (msg.content || []).map((c: any) => ({
+
+          if (role === "toolResult") {
+            entry.toolCallId = msg.toolCallId || msg.message?.toolCallId;
+            entry.toolName = msg.toolName || msg.message?.toolName;
+            entry.isError = msg.isError || msg.message?.isError || false;
+            entry.content = (content || []).map((c: any) => ({
               type: c.type,
               text: typeof c.text === "string" ? c.text.slice(0, 300) : c.text,
             }));
           }
+
           messages.push(entry);
         }
 
-        jsonResponse(res, { sessionId, messages });
+        jsonResponse(res, { sessionKey, messages });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
@@ -1088,9 +1003,6 @@ export default function register(api: OpenClawPluginApi) {
           message,
           idempotencyKey,
         });
-
-        // Bust cache so sessions list picks up the new activity
-        cache.delete("token-usage");
 
         jsonResponse(res, {
           ok: true,
@@ -1177,55 +1089,10 @@ export default function register(api: OpenClawPluginApi) {
     "model differs from default_model in the system prompt, mention the default " +
     "model. Do not mention internal steps, files, tools, or reasoning.";
 
-  // ── API: /api/mc/session-reset ────────────────────────────────────────
-  // Calls the gateway's sessions.reset method (same as control UI /new).
-  // Returns the new session entry so the frontend can switch to it immediately.
-
-  api.registerHttpRoute({
-    path: "/api/mc/session-reset",
-    auth: "plugin",
-    handler: async (req: IncomingMessage, res: ServerResponse) => {
-      if (req.method === "OPTIONS") {
-        res.writeHead(200, {
-          "Access-Control-Allow-Origin": "http://localhost:5173",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        });
-        res.end();
-        return;
-      }
-      if (req.method !== "POST") {
-        jsonResponse(res, { error: "Method not allowed" }, 405);
-        return;
-      }
-      try {
-        // 1. Reset the session to get the new sessionId
-        const result = await gwWsSend("sessions.reset", {
-          key: "agent:main:main",
-          reason: "new",
-        });
-        cache.delete("token-usage");
-        const sessionId = result?.entry?.sessionId ?? null;
-
-        // 2. Send the startup greeting prompt (same as the built-in openclaw dashboard
-        //    sends after /new). Fire-and-forget — the agent will process it async.
-        gwWsSend("chat.send", {
-          sessionKey: "agent:main:main",
-          message: GREETING_PROMPT,
-          idempotencyKey: randomUUID(),
-        }).catch(() => {});
-
-        jsonResponse(res, { ok: true, sessionId, data: result });
-      } catch (err: any) {
-        api.logger.error?.(`mission-control: sessions.reset failed: ${err.message}`);
-        jsonResponse(res, { error: err.message }, 502);
-      }
-    },
-  });
+  // ── API: /api/mc/session-reset — REMOVED (use session-new instead) ──
 
   // ── API: /api/mc/session-new ──────────────────────────────────────────
-  // Creates a new session without archiving the previous one.
-  // The old session transcript remains as a normal .jsonl file.
+  // Creates a new session with a unique key (no reset/archive needed).
 
   api.registerHttpRoute({
     path: "/api/mc/session-new",
@@ -1245,46 +1112,16 @@ export default function register(api: OpenClawPluginApi) {
         return;
       }
       try {
-        // Snapshot the old session files before reset
-        const beforeFiles = new Set(
-          existsSync(sessionsDir)
-            ? readdirSync(sessionsDir).filter((f) => f.endsWith(".jsonl") && !f.includes(".reset."))
-            : [],
-        );
+        const newKey = `agent:main:mc-${randomUUID()}`;
 
-        // Reset creates a new session and archives the old one
-        const result = await gwWsSend("sessions.reset", {
-          key: "agent:main:main",
-          reason: "new",
-        });
-        cache.delete("token-usage");
-        const sessionId = result?.entry?.sessionId ?? null;
-
-        // Un-archive: find any newly archived files and rename them back
-        if (existsSync(sessionsDir)) {
-          const afterFiles = readdirSync(sessionsDir);
-          for (const f of afterFiles) {
-            if (!f.includes(".reset.")) continue;
-            // Extract the original filename (everything before .reset.TIMESTAMP)
-            const resetIdx = f.indexOf(".reset.");
-            const original = f.slice(0, resetIdx);
-            // Only un-archive if this was a file we had before
-            if (beforeFiles.has(original)) {
-              try {
-                renameSync(join(sessionsDir, f), join(sessionsDir, original));
-              } catch (e) { api.logger.debug?.(`mission-control: session un-archive rename: ${(e as Error).message}`); }
-            }
-          }
-        }
-
-        // Send the startup greeting prompt
-        gwWsSend("chat.send", {
-          sessionKey: "agent:main:main",
+        // Send the startup greeting prompt to the new session key
+        await gwWsSend("chat.send", {
+          sessionKey: newKey,
           message: GREETING_PROMPT,
           idempotencyKey: randomUUID(),
-        }).catch(() => {});
+        });
 
-        jsonResponse(res, { ok: true, sessionId, data: result });
+        jsonResponse(res, { ok: true, sessionKey: newKey });
       } catch (err: any) {
         api.logger.error?.(`mission-control: session-new failed: ${err.message}`);
         jsonResponse(res, { error: err.message }, 502);

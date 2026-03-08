@@ -56,21 +56,21 @@ const PAGES: Record<string, React.ComponentType> = {
 export default function Layout() {
   const [page, setPage] = useState<Page>("chat");
   const [collapsed, setCollapsed] = useState(false);
-  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  const [chatSessionKey, setChatSessionKey] = useState<string | null>(null);
   const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
 
-  // Auto-load session from URL query param ?session=<id>
+  // Auto-load session from URL query param ?session=<key>
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const sessionId = params.get("session");
-    if (sessionId) {
-      setChatSessionId(sessionId);
+    const sessionKey = params.get("session");
+    if (sessionKey) {
+      setChatSessionKey(sessionKey);
       setPage("chat");
     }
   }, []);
 
-  const handleOpenSession = useCallback((sessionId: string) => {
-    setChatSessionId(sessionId);
+  const handleOpenSession = useCallback((sessionKey: string) => {
+    setChatSessionKey(sessionKey);
     setPage("chat");
   }, []);
 
@@ -80,7 +80,7 @@ export default function Layout() {
   }, []);
 
   const handleSessionLoaded = useCallback(() => {
-    setChatSessionId(null);
+    setChatSessionKey(null);
   }, []);
 
   const PageComponent = PAGES[page];
@@ -98,7 +98,7 @@ export default function Layout() {
           <main className="flex-1 flex min-h-0 overflow-hidden">
             <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
               <div className={page === "chat" ? "flex flex-col min-h-0 flex-1 overflow-hidden" : "hidden"}>
-                <ChatPanel requestedSessionId={chatSessionId} onSessionLoaded={handleSessionLoaded} />
+                <ChatPanel requestedSessionKey={chatSessionKey} onSessionLoaded={handleSessionLoaded} />
               </div>
               {page === "sessions" && (
                 <SessionsPage onOpenSession={handleOpenSession} />

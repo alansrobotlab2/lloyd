@@ -208,7 +208,9 @@ function processAssistantMessage(instance: CcInstance, message: any, onChildInst
     } else if (block.type === "tool_use") {
       const toolName = block.name || "unknown";
       const isSubagent = toolName === "Task" || toolName === "Agent";
-      const agentType = isSubagent ? block.input?.subagent_type : undefined;
+      const AGENT_NAME_MAP: Record<string, string> = { "Explore": "explorer" };
+      const rawAgentType = isSubagent ? block.input?.subagent_type : undefined;
+      const agentType = rawAgentType ? (AGENT_NAME_MAP[rawAgentType] || rawAgentType) : undefined;
 
       if (isSubagent && agentType) {
         instance.activity = `spawning ${agentType} agent`;

@@ -56,6 +56,11 @@ export interface CcInstance {
   endedAt?: number;
   sessionId?: string;
   sessionKey?: string;
+  /** Delivery context captured at spawn time for active push notifications */
+  channel?: string;
+  accountId?: string;
+  to?: string;
+  threadId?: string;
   costUsd: number;
   turns: number;
   budgetUsd: number;

@@ -1,8 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 // Shared flag for TTS dedup across SSE and polling paths
-let _lastSseTtsMp3At = 0;
-export function getLastSseTtsMp3At(): number { return _lastSseTtsMp3At; }
+let _lastTtsPlayedAt = 0;
+export function getLastTtsPlayedAt(): number { return _lastTtsPlayedAt; }
+export function setLastTtsPlayedAt(ts: number) { _lastTtsPlayedAt = ts; }
 
 interface Transcript {
   text: string;
@@ -119,6 +120,8 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
 
     es.addEventListener("tts_mp3", (e) => {
       try {
+        // Skip if another TTS path already played recently (dedup)
+        if (Date.now() - _lastTtsPlayedAt < 15_000) return;
         const msg = JSON.parse((e as MessageEvent).data);
         if (!msg.audio) return;
         const binary = atob(msg.audio);
@@ -130,7 +133,7 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
         audio.onended = () => URL.revokeObjectURL(url);
         audio.onerror = () => URL.revokeObjectURL(url);
         audio.play().catch((err) => console.warn("TTS MP3 playback failed:", err));
-        _lastSseTtsMp3At = Date.now();
+        _lastTtsPlayedAt = Date.now();
       } catch { /* ignore malformed SSE */ }
     });
 

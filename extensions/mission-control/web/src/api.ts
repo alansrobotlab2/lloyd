@@ -44,14 +44,17 @@ export interface ApiCallsData {
 }
 
 export interface SessionSummary {
-  sessionId: string;
-  input: number;
-  output: number;
-  cacheRead: number;
-  messageCount: number;
+  sessionKey: string;
+  sessionId?: string;
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  messageCount?: number;
   lastActivity: string;
   model: string;
   summary?: string;
+  source?: string;
+  peer?: string;
 }
 
 export interface MessageEntry {
@@ -416,8 +419,8 @@ export const api = {
   usageChart: (range = "7d") => fetchJson<UsageChartData>(`/usage-chart?range=${range}`),
   apiCalls: () => fetchJson<ApiCallsData>("/api-calls"),
   sessions: () => fetchJson<{ sessions: SessionSummary[] }>("/sessions"),
-  sessionMessages: (id: string, includeTools?: boolean) =>
-    fetchJson<{ sessionId: string; messages: MessageEntry[] }>(`/session-messages?id=${id}${includeTools ? "&tools=1" : ""}`),
+  sessionMessages: (sessionKey: string, includeTools?: boolean) =>
+    fetchJson<{ sessionKey: string; messages: MessageEntry[] }>(`/session-messages?sessionKey=${encodeURIComponent(sessionKey)}${includeTools ? "&tools=1" : ""}`),
   chat: async (message: string, sessionKey?: string) => {
     const res = await fetch(`${BASE}/chat`, {
       method: "POST",
@@ -526,17 +529,7 @@ export const api = {
   },
 
   // Session management
-  sessionReset: async (): Promise<{ ok: boolean; sessionId: string | null }> => {
-    const res = await fetch(`${BASE}/session-reset`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    if (!res.ok) throw new Error(`Session reset failed: ${res.status}`);
-    return res.json();
-  },
-
-  sessionNew: async (): Promise<{ ok: boolean; sessionId: string | null }> => {
+  sessionNew: async (): Promise<{ ok: boolean; sessionKey: string }> => {
     const res = await fetch(`${BASE}/session-new`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

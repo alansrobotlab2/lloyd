@@ -20,7 +20,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import https from "node:https";
 
 import type { CcInstance, InstanceStatusResponse, McInstanceInfo, PendingQuestionInfo, QuestionAnswer } from "./types.js";
 import { consumeQuery, type ChildInstanceCallback } from "./query-consumer.js";
@@ -84,67 +83,30 @@ function spawnClaudeCode(options: { command: string; args: string[]; cwd?: strin
   });
 }
 
-// ── Hook-Based Notification ──────────────────────────────────────────────
+// ── Session Notification ─────────────────────────────────────────────────
 //
-// Push messages into Lloyd's session via the OpenClaw HTTP hooks endpoint.
-// Much simpler than the old gateway WebSocket + Ed25519 auth approach.
-// Same mechanism the voice pipeline uses for ASR transcript injection.
+// Push messages into Lloyd's session via the plugin SDK's enqueueSystemEvent.
+// Same internal API used by WhatsApp, Discord, exec notifications, etc.
 
-const HOOKS_URL = "https://127.0.0.1:18789/hooks/wake";
 const HOOKS_SESSION_KEY = "agent:main:main";
-const OPENCLAW_CONFIG_PATH = join(process.env.HOME || "/home/alansrobotlab", ".openclaw/openclaw.json");
-
-let _hooksToken: string | null = null;
-
-function loadHooksToken(): string | null {
-  if (_hooksToken) return _hooksToken;
-  try {
-    const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, "utf-8"));
-    _hooksToken = config?.hooks?.token || null;
-  } catch {}
-  return _hooksToken;
-}
 
 /**
- * Inject a message into Lloyd's session via the HTTP hooks endpoint.
+ * Inject a system event into the target session via the plugin SDK.
+ * Uses enqueueSystemEvent + requestHeartbeatNow for immediate delivery.
  * Non-blocking and error-swallowing — never throws.
  */
-async function injectHookMessage(message: string, logger: any, sessionKey?: string): Promise<void> {
-  const token = loadHooksToken();
-  if (!token) {
-    logger.warn?.("agent-orchestrator: cannot inject — hooks token not found in openclaw.json");
-    return;
-  }
+async function injectHookMessage(
+  message: string,
+  api: OpenClawPluginApi,
+  sessionKey?: string,
+): Promise<void> {
+  const targetKey = sessionKey ?? HOOKS_SESSION_KEY;
+  const text = `[System Message] ${message}`;
   try {
-    console.error(`[agent-orchestrator] injectHookMessage sessionKey=${sessionKey ?? "(none)"} url=${HOOKS_URL}`);
-    const agent = new https.Agent({ rejectUnauthorized: false });
-    const url = new URL(HOOKS_URL);
-    await new Promise<void>((resolve) => {
-      const req = https.request({
-        hostname: url.hostname,
-        port: url.port,
-        path: url.pathname,
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        agent,
-      }, (res) => {
-        console.error(`[agent-orchestrator] injectHookMessage response status=${res.statusCode}`);
-        res.resume();
-        res.on("end", resolve);
-      });
-      req.on("error", () => resolve());
-      req.write(JSON.stringify({
-        text: `[System Message] ${message}`,
-        mode: "now",
-        sessionKey: sessionKey ?? HOOKS_SESSION_KEY,
-      }));
-      req.end();
-    });
+    api.runtime.system.enqueueSystemEvent(text, { sessionKey: targetKey });
+    api.runtime.system.requestHeartbeatNow();
   } catch (err: any) {
-    logger.warn?.(`agent-orchestrator: hook inject failed: ${err.message}`);
+    api.logger?.error?.(`agent-orchestrator: injectHookMessage failed: ${err.message}`);
   }
 }
 
@@ -356,12 +318,13 @@ export default function register(api: OpenClawPluginApi) {
     console.error(`[agent-orchestrator] notifyCompletion instance.sessionKey=${instance.sessionKey ?? "(none)"}`);
     const message = formatCompletionNotification(instance);
     // Fire-and-forget — non-blocking, never delays pipeline completion
-    injectHookMessage(message, api.logger, instance.sessionKey).catch(() => {});
+    injectHookMessage(message, api, instance.sessionKey).catch(() => {});
   }
 
   /** Progress callback — injects milestone notifications for interactive instances */
   function notifyProgress(instanceId: string, message: string): void {
-    injectHookMessage(message, api.logger, instances.get(instanceId)?.sessionKey).catch(() => {});
+    const inst = instances.get(instanceId);
+    injectHookMessage(message, api, inst?.sessionKey).catch(() => {});
   }
 
   /** Push a pending question notification into Lloyd's session */
@@ -387,7 +350,7 @@ export default function register(api: OpenClawPluginApi) {
 
     lines.push(`→ Use \`cc_respond("${q.id}", action, text)\` to answer. Actions: "allow", "deny", or "answer".`);
 
-    injectHookMessage(lines.join("\n"), api.logger, instance.sessionKey).catch(() => {});
+    injectHookMessage(lines.join("\n"), api, instance.sessionKey).catch(() => {});
   }
 
   // ── Interactive Mode: canUseTool Callback ───────────────────────────────
@@ -607,6 +570,8 @@ export default function register(api: OpenClawPluginApi) {
           recentMessages: [],
           _abort: abort,
           sessionKey: ctx.sessionKey,
+          channel: ctx.messageChannel,
+          accountId: ctx.agentAccountId,
         };
         console.error(`[agent-orchestrator] spawn sessionKey: ${ctx.sessionKey ?? "(none)"}`);
 
@@ -851,6 +816,8 @@ export default function register(api: OpenClawPluginApi) {
           recentMessages: [],
           _abort: abort,
           sessionKey: ctx.sessionKey,
+          channel: ctx.messageChannel,
+          accountId: ctx.agentAccountId,
         };
         console.error(`[agent-orchestrator] spawn sessionKey: ${ctx.sessionKey ?? "(none)"}`);
 
@@ -1314,6 +1281,18 @@ export default function register(api: OpenClawPluginApi) {
         mcpTools: ["mem_search", "mem_get", "tag_search", "tag_explore"],
         hasMcp: true,
         avatarUrl: "/api/mc/agent-avatar?id=orchestrator",
+      });
+
+      // Add explorer as a virtual agent (built-in SDK agent)
+      agentList.push({
+        id: "explorer",
+        model: "sonnet",
+        description: "Built-in Claude Code SDK exploration agent. Reads and navigates codebases during orchestrator pipelines.",
+        maxTurns: 0,
+        tools: ["Read", "Glob", "Grep"],
+        mcpTools: [],
+        hasMcp: false,
+        avatarUrl: "/api/mc/agent-avatar?id=explorer",
       });
 
       // Augment each agent with active/recent instance counts

@@ -1000,6 +1000,7 @@ const MUG_COLORS: Record<string, string> = {
   operator: "#1abc9c",
   orchestrator: "#2c3e50",
   clawhub: "#e91e63",
+  explorer: "#06b6d4",  // cyan-500
 };
 
 function CoffeeMug({ agentId, isWorking }: { agentId: string; isWorking: boolean }) {
