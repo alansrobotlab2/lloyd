@@ -1291,6 +1291,7 @@ export default function register(api: OpenClawPluginApi) {
   // GET /api/mc/cc-agents — list SDK agent definitions for Mission Control
   api.registerHttpRoute({
     path: "/api/mc/cc-agents",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       const agentList = Object.entries(AGENT_CONFIGS).map(([name, config]) => ({
         id: name,
@@ -1334,6 +1335,7 @@ export default function register(api: OpenClawPluginApi) {
   // GET /api/mc/cc-instances — list all instances
   api.registerHttpRoute({
     path: "/api/mc/cc-instances",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       const list: McInstanceInfo[] = Array.from(instances.values())
         .sort((a, b) => b.startedAt - a.startedAt)
@@ -1365,6 +1367,7 @@ export default function register(api: OpenClawPluginApi) {
   // Serves from in-memory ring buffer for running instances, falls back to JSONL log files for completed ones
   api.registerHttpRoute({
     path: "/api/mc/cc-instance-log",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url || "/", "http://localhost");
       const id = url.searchParams.get("id");
@@ -1482,6 +1485,7 @@ export default function register(api: OpenClawPluginApi) {
   // POST /api/mc/cc-instance-abort — abort an instance
   api.registerHttpRoute({
     path: "/api/mc/cc-instance-abort",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") {
         jsonResponse(res, { error: "Method not allowed" }, 405);

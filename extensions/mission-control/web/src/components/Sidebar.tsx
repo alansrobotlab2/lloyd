@@ -21,6 +21,8 @@ import {
   MicOff,
   Power,
   Radio,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import { api } from "../api";
 import { useVoiceContext } from "../contexts/VoiceContext";
@@ -76,7 +78,7 @@ interface SidebarProps {
 export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse }: SidebarProps) {
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft;
   const [workMode, setWorkMode] = useState(false);
-  const { isListening, voiceEnabled, wsAvailable, statusLoaded, latestTranscript, transcriptVisible, stateColor, stateText, startMic, stopMic, handleVoiceToggle, pipelineState } = useVoiceContext();
+  const { isListening, voiceEnabled, wsAvailable, statusLoaded, latestTranscript, transcriptVisible, stateColor, stateText, startMic, stopMic, handleVoiceToggle, ttsEnabled, handleTtsToggle, pipelineState } = useVoiceContext();
 
   useEffect(() => {
     const poll = () => api.mode().then((s) => setWorkMode(s.currentMode === "work")).catch(() => {});
@@ -127,6 +129,9 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
       <div className="px-2 pt-2 border-t border-surface-3/30 space-y-0.5">
         {/* Voice status section */}
         <div className="space-y-0.5 mb-1">
+          {!collapsed && (
+            <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Voice Mode</div>
+          )}
           {/* Row 1 — Last utterance */}
           {latestTranscript && (
             <div
@@ -169,6 +174,20 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
             {!collapsed && <span className="truncate">{isListening ? "Active" : "Inactive"}</span>}
           </button>
 
+          {/* Row 3.5 — Speaker toggle */}
+          <button
+            onClick={handleTtsToggle}
+            title={collapsed ? (ttsEnabled ? "Voice On" : "Voice Off") : undefined}
+            className={`w-full flex items-center ${collapsed ? "justify-center" : "gap-2.5"} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+              ttsEnabled
+                ? "text-green-400 bg-green-600/10 hover:bg-green-600/20"
+                : "text-red-400 bg-red-600/10 hover:bg-red-600/20"
+            }`}
+          >
+            {ttsEnabled ? <Volume2 className="w-4 h-4 flex-shrink-0" /> : <VolumeX className="w-4 h-4 flex-shrink-0" />}
+            {!collapsed && <span className="truncate">{ttsEnabled ? "Voice" : "Voice"}</span>}
+          </button>
+
           {/* Row 4 — Power toggle */}
           <button
             onClick={statusLoaded ? handleVoiceToggle : undefined}
@@ -186,6 +205,7 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
             {!collapsed && <span className="truncate">{voiceEnabled ? "Enabled" : "Disabled"}</span>}
           </button>
         </div>
+        <div className="border-t border-surface-3/30 my-1" />
 
         {/* Work Mode toggle */}
         <button
@@ -218,7 +238,9 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
             </span>
           )}
         </button>
+        <div className="border-t border-surface-3/30 my-1" />
         {BOTTOM_ITEMS.map(renderItem)}
+        <div className="border-t border-surface-3/30 my-1" />
         <button
           onClick={onToggleCollapse}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}

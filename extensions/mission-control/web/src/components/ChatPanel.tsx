@@ -19,13 +19,15 @@ function extractSummary(content: Array<{ type: string; text?: string }>): string
   return match ? match[1].trim() : null;
 }
 
-function extractText(content: Array<{ type: string; text?: string }>): string {
-  return content
+function extractText(content: Array<{ type: string; text?: string }>, keepSummary = false): string {
+  let text = content
     .filter((c) => c.type === "text" && c.text)
     .map((c) => c.text!)
-    .join("\n")
-    .replace(/<summary>[\s\S]*?<\/summary>/g, "")
-    .trim();
+    .join("\n");
+  if (!keepSummary) {
+    text = text.replace(/<summary>[\s\S]*?<\/summary>/g, "");
+  }
+  return text.trim();
 }
 
 /** Detect pure system-injected messages with no real user text */
@@ -79,8 +81,6 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
   const [activityDetail, setActivityDetail] = useState<string | null>(null);
   const [awaitingReset, setAwaitingReset] = useState(false);
   const [lastUserSendTs, setLastUserSendTs] = useState(0);
-  const { voiceEnabled } = useVoiceContext();
-
   // ── Shared state ─────────────────────────────────────────────────
   const [sending, setSending] = useState(false);
   const [sessions, setSessions] = useState<Array<{ sessionId: string; lastActivity: string; model: string; summary?: string }>>([]);
@@ -103,6 +103,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
   const workingStartRef = useRef<number>(0);
   const workingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isWorkingRef = useRef(false);
+  const { voiceEnabled, ttsEnabled } = useVoiceContext();
   const spokenMsgIds = useRef<Set<string>>(new Set());
 
   // ── Derived state ──────────────────────────────────────────────────
@@ -322,21 +323,33 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
     };
   }, [thinking]);
 
-  // Trigger TTS for assistant messages with <summary> tags
+  // ── TTS fallback: extract <summary> tags and play audio ──────────
   useEffect(() => {
-    if (!voiceEnabled || thinking || messages.length === 0) return;
+    if (!ttsEnabled || thinking || messages.length === 0) return;
     const last = messages[messages.length - 1];
     if (last.role !== "assistant") return;
     if (spokenMsgIds.current.has(last.id)) return;
     const summary = extractSummary(last.content);
     if (!summary) return;
     spokenMsgIds.current.add(last.id);
-    fetch("/api/mc/voice-say", {
+    fetch("/api/mc/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: summary }),
-    }).catch((err) => console.error("TTS trigger failed:", err));
-  }, [messages, thinking, voiceEnabled]);
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`TTS returned ${res.status}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => URL.revokeObjectURL(url);
+        audio.onerror = () => URL.revokeObjectURL(url);
+        audio.play().catch((err) => console.error("TTS playback failed:", err));
+      })
+      .catch((err) => console.error("TTS fetch failed:", err));
+  }, [messages, thinking, ttsEnabled]);
 
   const handleSend = async () => {
     if (!input.trim() || sending || !sessionId) return;
@@ -494,7 +507,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
             .map((msg) => {
               // Tool result messages — compact inline row
               if (msg.role === "toolResult") {
-                const preview = extractText(msg.content);
+                const preview = extractText(msg.content, showToolCalls);
                 return (
                   <div key={msg.id} className="flex gap-3">
                     <div className="w-7 flex-shrink-0" /> {/* spacer to align under assistant */}
@@ -507,7 +520,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatP
                 );
               }
 
-              const text = extractText(msg.content);
+              const text = extractText(msg.content, showToolCalls);
               const isCtx = isContextMessage(msg);
               const toolCalls = showToolCalls ? msg.content.filter((c) => c.type === "toolCall") : [];
               const thinkingBlocks = showToolCalls ? msg.content.filter((c) => c.type === "thinking") : [];

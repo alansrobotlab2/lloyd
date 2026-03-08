@@ -8,8 +8,37 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { McpSseClient } from "../mcp-tools/mcp-sse-client.js";
+import { request as httpsRequest } from "node:https";
 
 const VOICE_MCP_URL = "http://127.0.0.1:8094";
+const TTS_API_URL = "http://127.0.0.1:8090/v1/audio/speech";
+
+function postToMc(port: number, path: string, body: object, token?: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Content-Length": String(Buffer.byteLength(data)),
+    };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const req = httpsRequest(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path,
+        method: "POST",
+        headers,
+        rejectUnauthorized: false,
+      },
+      (res) => {
+        res.resume(); // drain
+        resolve();
+      },
+    );
+    req.on("error", reject);
+    req.end(data);
+  });
+}
 
 export default function register(api: OpenClawPluginApi) {
   api.logger.info?.(
@@ -146,9 +175,10 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
-  // -- message_sending hook: extract <summary>, send to TTS, strip from display --
+  // -- message_sending hook: extract <summary>, synthesize TTS, push via MC SSE --
 
-  const VOICE_TUI_URL = "http://127.0.0.1:8092";
+  const gwPort = (api as any).config?.gateway?.port ?? 18789;
+  const gwToken = (api as any).config?.gateway?.auth?.token as string | undefined;
 
   api.on("message_sending", async (event) => {
     const content = event.content;
@@ -164,15 +194,30 @@ export default function register(api: OpenClawPluginApi) {
 
     if (matches.length === 0) return;
 
-    // Send each summary block to voice TUI for TTS playback
+    // Synthesize each summary block via Qwen3-TTS and push MP3 to MC SSE
     for (const text of matches) {
       try {
-        await fetch(`${VOICE_TUI_URL}/v1/say`, {
+        const ttsResp = await fetch(TTS_API_URL, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sk-local",
+          },
+          body: JSON.stringify({
+            input: text,
+            model: "tts-1",
+            voice: "clone:cullen",
+            response_format: "mp3",
+          }),
         });
-        api.logger.info?.(`voice-tools: sent summary to TTS (${text.length} chars)`);
+        if (!ttsResp.ok) {
+          api.logger.warn?.(`voice-tools: TTS synthesis failed (${ttsResp.status})`);
+          continue;
+        }
+        const audioBuffer = await ttsResp.arrayBuffer();
+        const base64Audio = Buffer.from(audioBuffer).toString("base64");
+        await postToMc(gwPort, "/api/mc/tts-push", { audio: base64Audio }, gwToken);
+        api.logger.info?.(`voice-tools: TTS pushed via SSE (${text.length} chars, ${audioBuffer.byteLength} bytes)`);
       } catch (err: any) {
         api.logger.warn?.(`voice-tools: TTS delivery failed: ${err.message}`);
       }

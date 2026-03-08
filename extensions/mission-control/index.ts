@@ -3680,6 +3680,72 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // ── API: /api/mc/tts (proxy TTS synthesis, return audio to browser) ───
+  api.registerHttpRoute({
+    path: "/api/mc/tts",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      let text: string;
+      try {
+        text = JSON.parse(Buffer.concat(chunks).toString("utf-8")).text;
+      } catch { res.writeHead(400); res.end("Invalid JSON"); return; }
+      if (!text) { res.writeHead(400); res.end("Missing text"); return; }
+      try {
+        const ttsResp = await fetch("http://127.0.0.1:8090/v1/audio/speech", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sk-local",
+          },
+          body: JSON.stringify({
+            input: text,
+            model: "tts-1",
+            voice: "clone:cullen",
+            response_format: "mp3",
+          }),
+        });
+        if (!ttsResp.ok || !ttsResp.body) {
+          res.writeHead(503); res.end("TTS synthesis failed"); return;
+        }
+        res.writeHead(200, { "Content-Type": "audio/mpeg" });
+        // Pipe the ReadableStream from fetch to the Node response
+        const reader = ttsResp.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(value);
+        }
+        res.end();
+      } catch (err: any) {
+        if (!res.headersSent) { res.writeHead(503); res.end("TTS unavailable"); }
+      }
+    },
+  });
+
+  // ── API: /api/mc/tts-push (receive base64 MP3 from voice-tools, broadcast via SSE) ──
+  api.registerHttpRoute({
+    path: "/api/mc/tts-push",
+    auth: "gateway",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      try {
+        const { audio } = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+        if (!audio) { res.writeHead(400); res.end("Missing audio"); return; }
+        broadcastSse("tts_mp3", JSON.stringify({ audio, mimeType: "audio/mpeg" }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch {
+        res.writeHead(400);
+        res.end("Invalid JSON");
+      }
+    },
+  });
+
   // ── API: /api/mc/voice-stream (SSE bridge to voice pipeline WS) ─────
   api.registerHttpRoute({
     path: "/api/mc/voice-stream",

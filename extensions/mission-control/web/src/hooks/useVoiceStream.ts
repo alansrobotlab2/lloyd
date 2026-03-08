@@ -113,6 +113,22 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
       nextPlayTimeRef.current = startTime + buffer.duration;
     });
 
+    es.addEventListener("tts_mp3", (e) => {
+      try {
+        const msg = JSON.parse((e as MessageEvent).data);
+        if (!msg.audio) return;
+        const binary = atob(msg.audio);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes], { type: msg.mimeType || "audio/mpeg" });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => URL.revokeObjectURL(url);
+        audio.onerror = () => URL.revokeObjectURL(url);
+        audio.play().catch((err) => console.warn("TTS MP3 playback failed:", err));
+      } catch { /* ignore malformed SSE */ }
+    });
+
     es.addEventListener("wakeword", () => {
       setWakewordDetected(true);
       setTimeout(() => setWakewordDetected(false), 2000);

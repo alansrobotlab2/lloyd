@@ -15,6 +15,8 @@ interface VoiceContextValue {
   statusLoaded: boolean;
   voiceEnabled: boolean;
   handleVoiceToggle: () => Promise<void>;
+  ttsEnabled: boolean;
+  handleTtsToggle: () => void;
   latestTranscript: string | undefined;
   transcriptVisible: boolean;
   stateColor: string;
@@ -35,6 +37,9 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(() => {
     try { return localStorage.getItem("voice-power-enabled") === "true"; } catch { return false; }
+  });
+  const [ttsEnabled, setTtsEnabled] = useState(() => {
+    try { return localStorage.getItem("tts-enabled") === "true"; } catch { return false; }
   });
   const [transcriptVisible, setTranscriptVisible] = useState(true);
 
@@ -83,6 +88,12 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const handleTtsToggle = useCallback(async () => {
+    const next = !ttsEnabled;
+    setTtsEnabled(next);
+    try { localStorage.setItem("tts-enabled", String(next)); } catch {}
+  }, [ttsEnabled]);
+
   // Latest transcript + 5s fade
   const latestTranscript = transcripts[transcripts.length - 1]?.text;
   useEffect(() => {
@@ -109,6 +120,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       isConnected, isListening, isSpeaking, wakewordDetected, pipelineState,
       transcripts, startMic, stopMic, clearTranscripts,
       wsAvailable, statusLoaded, voiceEnabled, handleVoiceToggle,
+      ttsEnabled, handleTtsToggle,
       latestTranscript, transcriptVisible, stateColor, stateText,
     }}>
       {children}
