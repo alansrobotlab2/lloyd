@@ -331,7 +331,10 @@ export default function register(api: OpenClawPluginApi) {
     try {
       const cfg = JSON.parse(readFileSync(configFile, "utf-8"));
       return cfg.gateway?.auth?.token || "";
-    } catch { return ""; }
+    } catch (err: any) {
+      api.logger.error?.(`mission-control: failed to read gateway token from ${configFile}: ${err.message}`);
+      return "";
+    }
   }
 
   function gwWsConnect() {
@@ -692,6 +695,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/stats",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const usage = aggregateTokenUsage();
@@ -715,6 +719,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/usage-chart",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "/", "http://localhost");
@@ -798,6 +803,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/api-calls",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const data = cached("api-calls", () => {
@@ -852,6 +858,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/sessions",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const usage = aggregateTokenUsage();
@@ -872,6 +879,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/session-messages",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "/", "http://localhost");
@@ -958,6 +966,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/chat",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
@@ -1007,6 +1016,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/chat-abort ──────────────────────────────────────────
   api.registerHttpRoute({
     path: "/api/mc/chat-abort",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
@@ -1036,6 +1046,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/subagent-abort ─────────────────────────────────────
   api.registerHttpRoute({
     path: "/api/mc/subagent-abort",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
@@ -1081,6 +1092,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/session-reset",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
@@ -1126,6 +1138,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/session-new",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
@@ -1192,6 +1205,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/models",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         if (!existsSync(modelsFile)) {
@@ -1230,6 +1244,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/model-toggle",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") {
         jsonResponse(res, { error: "POST only" }, 405);
@@ -1362,6 +1377,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/tools",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const state = loadToolsState();
@@ -1383,6 +1399,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/tool-toggle",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") {
         jsonResponse(res, { error: "POST only" }, 405);
@@ -1541,6 +1558,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/skills",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const now = Date.now();
@@ -1564,6 +1582,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/skill-toggle",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") {
         jsonResponse(res, { error: "POST only" }, 405);
@@ -1609,6 +1628,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/skill-content",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "GET") {
         const url = new URL(req.url!, `http://localhost`);
@@ -1712,6 +1732,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/agents",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const config = JSON.parse(readFileSync(configFile, "utf-8"));
@@ -1838,6 +1859,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/agent-tools-update",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") { jsonResponse(res, { error: "POST only" }, 405); return; }
       try {
@@ -1870,6 +1892,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/agent-skills-update",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") { jsonResponse(res, { error: "POST only" }, 405); return; }
       try {
@@ -1901,6 +1924,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/agent-file-save",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") { jsonResponse(res, { error: "POST only" }, 405); return; }
       try {
@@ -1956,6 +1980,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/agent-call-log",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "/", "http://localhost");
@@ -2097,6 +2122,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/agent-status",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         // Find main agent session state
@@ -2162,6 +2188,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/gateway-sessions",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         // 1. Collect all non-main gateway sessions from diagnostic events
@@ -2223,6 +2250,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/health",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const health: any = { gateway: "up", timestamp: new Date().toISOString() };
@@ -2303,6 +2331,7 @@ export default function register(api: OpenClawPluginApi) {
   // GET /api/mc/services
   api.registerHttpRoute({
     path: "/api/mc/services",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const services = await Promise.all(
@@ -2347,6 +2376,7 @@ export default function register(api: OpenClawPluginApi) {
   // POST /api/mc/services/action
   api.registerHttpRoute({
     path: "/api/mc/services/action",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
@@ -2423,6 +2453,7 @@ export default function register(api: OpenClawPluginApi) {
   // GET /api/mc/services/detail?id=<serviceId>
   api.registerHttpRoute({
     path: "/api/mc/services/detail",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "", "http://localhost");
@@ -2491,6 +2522,7 @@ export default function register(api: OpenClawPluginApi) {
   // GET /api/mc/lloyd-services/detail?unit=<unit>
   api.registerHttpRoute({
     path: "/api/mc/lloyd-services/detail",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "", "http://localhost");
@@ -2554,6 +2586,7 @@ export default function register(api: OpenClawPluginApi) {
   // GET /api/mc/lloyd-services
   api.registerHttpRoute({
     path: "/api/mc/lloyd-services",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         // Get all lloyd-* units from systemctl
@@ -2711,6 +2744,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/memory/stats",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const docs = getVaultIndex();
@@ -2744,6 +2778,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/vault-graph",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const docs = getVaultIndex();
@@ -2809,6 +2844,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/tag-graph",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const docs = getVaultIndex();
@@ -2859,6 +2895,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/memory/search",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "", "http://localhost");
@@ -2912,6 +2949,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/memory/tags",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "", "http://localhost");
@@ -2939,6 +2977,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/memory/browse",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "", "http://localhost");
@@ -2998,6 +3037,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/memory/read",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "", "http://localhost");
@@ -3075,6 +3115,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/memory/save",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") {
         jsonResponse(res, { error: "Method not allowed" }, 405);
@@ -3187,6 +3228,7 @@ export default function register(api: OpenClawPluginApi) {
   // GET /api/mc/backlog/boards
   api.registerHttpRoute({
     path: "/api/mc/backlog/boards",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const db = getBacklogDb();
@@ -3204,6 +3246,7 @@ export default function register(api: OpenClawPluginApi) {
   // GET /api/mc/backlog/tasks
   api.registerHttpRoute({
     path: "/api/mc/backlog/tasks",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const db = getBacklogDb();
@@ -3237,6 +3280,7 @@ export default function register(api: OpenClawPluginApi) {
   // POST /api/mc/backlog/task-update (body: { id, status?, blocked?, name?, description?, priority?, tags?, position?, assigned_to_agent?, activity_note? })
   api.registerHttpRoute({
     path: "/api/mc/backlog/task-update",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, { "Access-Control-Allow-Origin": "http://localhost:5173", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
@@ -3302,6 +3346,7 @@ export default function register(api: OpenClawPluginApi) {
   // POST /api/mc/backlog/task-delete (body: { id })
   api.registerHttpRoute({
     path: "/api/mc/backlog/task-delete",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, { "Access-Control-Allow-Origin": "http://localhost:5173", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
@@ -3325,6 +3370,7 @@ export default function register(api: OpenClawPluginApi) {
   // POST /api/mc/backlog/task-create (body: { name, description?, board_id?, status?, tags?, priority? })
   api.registerHttpRoute({
     path: "/api/mc/backlog/task-create",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, { "Access-Control-Allow-Origin": "http://localhost:5173", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
@@ -3404,6 +3450,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/agent-avatar",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url || "/", "http://localhost");
       const id = url.searchParams.get("id");
@@ -3439,6 +3486,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/mode",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, readModeState());
     },
@@ -3448,6 +3496,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/mode-set",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method === "OPTIONS") {
         res.writeHead(200, {
@@ -3526,6 +3575,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/commands",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const now = Date.now();
@@ -3576,6 +3626,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/voice-status ──────────────────────────────────────────
   api.registerHttpRoute({
     path: "/api/mc/voice-status",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const resp = await fetch("http://127.0.0.1:8092/v1/voice/ws-status");
@@ -3590,6 +3641,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/voice-toggle ─────────────────────────────────────────
   api.registerHttpRoute({
     path: "/api/mc/voice-toggle",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const resp = await fetch("http://127.0.0.1:8092/v1/voice/toggle", {
@@ -3608,6 +3660,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/voice-say (proxy to voice pipeline TTS) ─────────────
   api.registerHttpRoute({
     path: "/api/mc/voice-say",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
       const chunks: Buffer[] = [];
@@ -3630,6 +3683,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/voice-stream (SSE bridge to voice pipeline WS) ─────
   api.registerHttpRoute({
     path: "/api/mc/voice-stream",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "GET") { res.writeHead(405); res.end(); return; }
       res.writeHead(200, {
@@ -3653,6 +3707,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/voice-send (POST binary PCM audio to voice pipeline) ─
   api.registerHttpRoute({
     path: "/api/mc/voice-send",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
       if (!voicePipeWs || !voicePipeWsReady) { res.writeHead(503); res.end("Voice pipe not connected"); return; }
@@ -3675,6 +3730,7 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/voice-cmd (POST JSON command to voice pipeline) ─────
   api.registerHttpRoute({
     path: "/api/mc/voice-cmd",
+    auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
       if (!voicePipeWs || !voicePipeWsReady) { res.writeHead(503); res.end("Voice pipe not connected"); return; }
@@ -3697,6 +3753,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerHttpRoute({
     path: "/api/mc/cert",
+    auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const certPath = join(homedir(), ".openclaw", "certs", "mc.crt");
@@ -3718,55 +3775,56 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   // ── Static file serving for /mc/* ─────────────────────────────────────
-  // Use registerHttpHandler to intercept all /mc paths (prefix-based)
 
-  api.registerHttpHandler(async (req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url || "/", "http://localhost");
-    const pathname = url.pathname;
+  api.registerHttpRoute({
+    path: "/mc",
+    match: "prefix",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      const url = new URL(req.url || "/", "http://localhost");
+      const pathname = url.pathname;
 
-    // Only handle /mc and /mc/* paths
-    if (pathname !== "/mc" && !pathname.startsWith("/mc/")) return false;
+      if (!existsSync(distWebDir)) {
+        res.writeHead(503, { "Content-Type": "text/html" });
+        res.end(
+          "<h1>Mission Control</h1><p>Dashboard not built yet. Run <code>npm run build</code> in extensions/mission-control/web/</p>",
+        );
+        return true;
+      }
 
-    if (!existsSync(distWebDir)) {
-      res.writeHead(503, { "Content-Type": "text/html" });
-      res.end(
-        "<h1>Mission Control</h1><p>Dashboard not built yet. Run <code>npm run build</code> in extensions/mission-control/web/</p>",
-      );
+      let filePath = pathname.replace(/^\/mc\/?/, "") || "index.html";
+
+      // Security: prevent directory traversal
+      if (filePath.includes("..")) {
+        res.writeHead(400);
+        res.end("Bad request");
+        return true;
+      }
+
+      let fullPath = join(distWebDir, filePath);
+
+      // SPA fallback: if file doesn't exist, serve index.html
+      if (!existsSync(fullPath) || statSync(fullPath).isDirectory()) {
+        fullPath = join(distWebDir, "index.html");
+        filePath = "index.html";
+      }
+
+      try {
+        const content = readFileSync(fullPath);
+        const ext = extname(filePath);
+        const mime = MIME_TYPES[ext] || "application/octet-stream";
+        res.writeHead(200, {
+          "Content-Type": mime,
+          "Cache-Control":
+            ext === ".html" ? "no-cache" : "public, max-age=31536000",
+        });
+        res.end(content);
+      } catch {
+        res.writeHead(404);
+        res.end("Not found");
+      }
       return true;
-    }
-
-    let filePath = pathname.replace(/^\/mc\/?/, "") || "index.html";
-
-    // Security: prevent directory traversal
-    if (filePath.includes("..")) {
-      res.writeHead(400);
-      res.end("Bad request");
-      return true;
-    }
-
-    let fullPath = join(distWebDir, filePath);
-
-    // SPA fallback: if file doesn't exist, serve index.html
-    if (!existsSync(fullPath) || statSync(fullPath).isDirectory()) {
-      fullPath = join(distWebDir, "index.html");
-      filePath = "index.html";
-    }
-
-    try {
-      const content = readFileSync(fullPath);
-      const ext = extname(filePath);
-      const mime = MIME_TYPES[ext] || "application/octet-stream";
-      res.writeHead(200, {
-        "Content-Type": mime,
-        "Cache-Control":
-          ext === ".html" ? "no-cache" : "public, max-age=31536000",
-      });
-      res.end(content);
-    } catch {
-      res.writeHead(404);
-      res.end("Not found");
-    }
-    return true;
+    },
   });
 
   // Connect voice pipeline eagerly on startup
