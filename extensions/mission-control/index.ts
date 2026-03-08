@@ -15,7 +15,7 @@ import { connect as netConnect } from "net";
 import { homedir } from "os";
 import { randomUUID, createPrivateKey, createPublicKey, createHash, sign as cryptoSign } from "crypto";
 // Use the ws module bundled with openclaw (can't use bare "ws" from plugin context)
-const WS = require(require.resolve("ws", { paths: [require.resolve("openclaw")] }));
+const WS = require("/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/ws");
 
 // ── Device identity helpers for WebSocket auth ──────────────────────────
 
@@ -1411,7 +1411,7 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── API: /api/mc/skills ──────────────────────────────────────────────
 
-  const YAML = require(require.resolve("yaml", { paths: [require.resolve("openclaw")] }));
+  const YAML = require("/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/yaml");
   // Resolve main agent workspace from config (supports relocated workspaces)
   const mainAgentWorkspace = (() => {
     try {
@@ -3191,7 +3191,7 @@ export default function register(api: OpenClawPluginApi) {
       try {
         const db = getBacklogDb();
         const rows = db.prepare(`
-          SELECT b.*, (SELECT COUNT(*) FROM tasks t WHERE t.board_id = b.id) AS tasks_count
+          SELECT b.*, (SELECT COUNT(*) FROM tasks t WHERE t.board_id = b.id AND t.status != 'done') AS tasks_count
           FROM boards b ORDER BY b.position, b.id
         `).all();
         jsonResponse(res, rows);

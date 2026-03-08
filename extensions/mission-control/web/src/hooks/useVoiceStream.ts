@@ -42,27 +42,34 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
     eventSourceRef.current = es;
 
     es.addEventListener("connected", (e) => {
-      const data = JSON.parse((e as MessageEvent).data);
-      setIsConnected(data.connected);
+      try {
+        const data = JSON.parse((e as MessageEvent).data);
+        setIsConnected(data.connected);
+      } catch { /* ignore malformed SSE during reconnection */ }
     });
 
     es.addEventListener("state", (e) => {
-      const data = JSON.parse((e as MessageEvent).data);
-      setPipelineState(data.state);
+      try {
+        const data = JSON.parse((e as MessageEvent).data);
+        setPipelineState(data.state);
+      } catch { /* ignore malformed SSE during reconnection */ }
     });
 
     es.addEventListener("transcript", (e) => {
-      const msg = JSON.parse((e as MessageEvent).data);
-      setTranscripts(prev => [...prev.slice(-49), {
-        text: msg.text,
-        speaker: msg.speaker,
-        is_continuity: msg.is_continuity,
-        timestamp: Date.now(),
-      }]);
+      try {
+        const msg = JSON.parse((e as MessageEvent).data);
+        setTranscripts(prev => [...prev.slice(-49), {
+          text: msg.text,
+          speaker: msg.speaker,
+          is_continuity: msg.is_continuity,
+          timestamp: Date.now(),
+        }]);
+      } catch { /* ignore malformed SSE during reconnection */ }
     });
 
     es.addEventListener("tts_start", (e) => {
-      const msg = JSON.parse((e as MessageEvent).data);
+      let msg: any;
+      try { msg = JSON.parse((e as MessageEvent).data); } catch { return; }
       ttsSampleRateRef.current = msg.sample_rate || 24000;
       if (!playbackCtxRef.current || playbackCtxRef.current.state === "closed") {
         playbackCtxRef.current = new AudioContext({ sampleRate: msg.sample_rate || 24000 });

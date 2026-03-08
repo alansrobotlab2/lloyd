@@ -5,6 +5,7 @@ import { api, type MessageEntry, type CommandInfo } from "../api";
 import { sanitizeHtml } from "../utils/sanitize";
 import SlashCommandPicker from "./SlashCommandPicker";
 import VoicePanel from "./VoicePanel";
+import { useVoiceContext } from "../contexts/VoiceContext";
 
 // Configure marked for safe, sane defaults
 marked.setOptions({ breaks: true, gfm: true });
@@ -66,10 +67,9 @@ function stripDatetimePrefix(text: string): string {
 interface ChatPanelProps {
   requestedSessionId?: string | null;
   onSessionLoaded?: () => void;
-  onVoiceActive?: (active: boolean) => void;
 }
 
-export default function ChatPanel({ requestedSessionId, onSessionLoaded, onVoiceActive }: ChatPanelProps = {}) {
+export default function ChatPanel({ requestedSessionId, onSessionLoaded }: ChatPanelProps = {}) {
   // ── Single-session state ─────────────────────────────────────────
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageEntry[]>([]);
@@ -79,10 +79,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded, onVoice
   const [activityDetail, setActivityDetail] = useState<string | null>(null);
   const [awaitingReset, setAwaitingReset] = useState(false);
   const [lastUserSendTs, setLastUserSendTs] = useState(0);
-  const [voiceEnabled, setVoiceEnabled] = useState(false);
-  const handleVoiceActive = useCallback((active: boolean) => {
-    onVoiceActive?.(active);
-  }, [onVoiceActive]);
+  const { voiceEnabled } = useVoiceContext();
 
   // ── Shared state ─────────────────────────────────────────────────
   const [sending, setSending] = useState(false);
@@ -469,7 +466,7 @@ export default function ChatPanel({ requestedSessionId, onSessionLoaded, onVoice
 
       {/* Messages card */}
       <div className="flex-1 flex flex-col min-h-0 mx-6 mb-6 bg-surface-1 rounded-xl border border-surface-3/50 overflow-hidden">
-        <VoicePanel onVoiceEnabled={setVoiceEnabled} onVoiceActive={handleVoiceActive} />
+        <VoicePanel />
         <div ref={messagesContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
           {messages.length === 0 && !thinking && (
             <div className="flex flex-col items-center justify-center h-full text-slate-500">

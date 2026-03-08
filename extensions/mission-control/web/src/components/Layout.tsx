@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect } from "react";
 import Sidebar, { type Page } from "./Sidebar";
 import ChatPanel from "./ChatPanel";
+import { VoiceProvider } from "../contexts/VoiceContext";
 import ServicesPage from "./pages/ServicesPage";
 import DashboardPage from "./pages/DashboardPage";
 import BacklogPage from "./pages/BacklogPage";
@@ -57,7 +58,6 @@ export default function Layout() {
   const [collapsed, setCollapsed] = useState(false);
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
-  const [voiceActive, setVoiceActive] = useState(false);
 
   // Auto-load session from URL query param ?session=<id>
   useEffect(() => {
@@ -86,36 +86,37 @@ export default function Layout() {
   const PageComponent = PAGES[page];
 
   return (
-    <div className="h-screen flex bg-surface-0">
-      <Sidebar
-        active={page}
-        onNavigate={setPage}
-        collapsed={collapsed}
-        onToggleCollapse={() => setCollapsed((c) => !c)}
-        voiceActive={voiceActive}
-      />
-      <main className="flex-1 flex min-h-0 overflow-hidden">
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          <ErrorBoundary>
-            {page === "chat" && (
-              <ChatPanel requestedSessionId={chatSessionId} onSessionLoaded={handleSessionLoaded} onVoiceActive={setVoiceActive} />
-            )}
-            {page === "sessions" && (
-              <SessionsPage onOpenSession={handleOpenSession} />
-            )}
-            {page === "agents" && (
-              <AgentsPage
-                initialAgentId={pendingAgentId}
-                onAgentIdConsumed={() => setPendingAgentId(null)}
-              />
-            )}
-            {page === "activity" && (
-              <ActivityPage onNavigateToAgent={handleNavigateToAgent} />
-            )}
-            {PageComponent && <PageComponent />}
-          </ErrorBoundary>
+    <ErrorBoundary>
+      <VoiceProvider>
+        <div className="h-screen flex bg-surface-0">
+          <Sidebar
+            active={page}
+            onNavigate={setPage}
+            collapsed={collapsed}
+            onToggleCollapse={() => setCollapsed((c) => !c)}
+          />
+          <main className="flex-1 flex min-h-0 overflow-hidden">
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+              <div className={page === "chat" ? "flex flex-col min-h-0 flex-1 overflow-hidden" : "hidden"}>
+                <ChatPanel requestedSessionId={chatSessionId} onSessionLoaded={handleSessionLoaded} />
+              </div>
+              {page === "sessions" && (
+                <SessionsPage onOpenSession={handleOpenSession} />
+              )}
+              {page === "agents" && (
+                <AgentsPage
+                  initialAgentId={pendingAgentId}
+                  onAgentIdConsumed={() => setPendingAgentId(null)}
+                />
+              )}
+              {page === "activity" && (
+                <ActivityPage onNavigateToAgent={handleNavigateToAgent} />
+              )}
+              {PageComponent && <PageComponent />}
+            </div>
+          </main>
         </div>
-      </main>
-    </div>
+      </VoiceProvider>
+    </ErrorBoundary>
   );
 }

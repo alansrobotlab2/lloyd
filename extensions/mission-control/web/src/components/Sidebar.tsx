@@ -18,8 +18,12 @@ import {
   Briefcase,
   GitBranch,
   Mic,
+  MicOff,
+  Power,
+  Radio,
 } from "lucide-react";
 import { api } from "../api";
+import { useVoiceContext } from "../contexts/VoiceContext";
 
 export type Page =
   | "chat"
@@ -67,12 +71,12 @@ interface SidebarProps {
   onNavigate: (page: Page) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
-  voiceActive?: boolean;
 }
 
-export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, voiceActive }: SidebarProps) {
+export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse }: SidebarProps) {
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft;
   const [workMode, setWorkMode] = useState(false);
+  const { isListening, voiceEnabled, wsAvailable, statusLoaded, latestTranscript, transcriptVisible, stateColor, stateText, startMic, stopMic, handleVoiceToggle, pipelineState } = useVoiceContext();
 
   useEffect(() => {
     const poll = () => api.mode().then((s) => setWorkMode(s.currentMode === "work")).catch(() => {});
@@ -121,6 +125,68 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
 
       {/* Bottom nav */}
       <div className="px-2 pt-2 border-t border-surface-3/30 space-y-0.5">
+        {/* Voice status section */}
+        <div className="space-y-0.5 mb-1">
+          {/* Row 1 — Last utterance */}
+          {latestTranscript && (
+            <div
+              title={collapsed ? latestTranscript : undefined}
+              className={`w-full flex items-center ${collapsed ? "justify-center" : "gap-2.5"} px-3 py-1.5 rounded-lg text-xs transition-opacity duration-1000 ${transcriptVisible ? "opacity-100" : "opacity-0"} text-slate-400`}
+            >
+              {collapsed ? (
+                <MessageCircle className="w-4 h-4 flex-shrink-0 text-slate-500" />
+              ) : (
+                <span className="truncate text-[11px] italic">"{latestTranscript}"</span>
+              )}
+            </div>
+          )}
+
+          {/* Row 2 — Pipeline state */}
+          {wsAvailable && (
+            <div
+              title={collapsed ? stateText : undefined}
+              className={`w-full flex items-center ${collapsed ? "justify-center" : "gap-2.5"} px-3 py-1.5 rounded-lg text-xs font-medium ${stateColor}`}
+            >
+              <Radio className="w-4 h-4 flex-shrink-0" />
+              {!collapsed && <span className="truncate text-[11px] font-mono">{stateText}</span>}
+            </div>
+          )}
+
+          {/* Row 3 — Mic toggle */}
+          <button
+            onClick={wsAvailable && statusLoaded ? () => (isListening ? stopMic() : startMic()) : undefined}
+            disabled={!wsAvailable || !statusLoaded}
+            title={collapsed ? (isListening ? "Mic Active" : "Mic Inactive") : undefined}
+            className={`w-full flex items-center ${collapsed ? "justify-center" : "gap-2.5"} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+              !wsAvailable || !statusLoaded
+                ? "text-slate-600 cursor-not-allowed opacity-50"
+                : isListening
+                  ? "text-green-400 bg-green-600/10 hover:bg-green-600/20"
+                  : "text-red-400 bg-red-600/10 hover:bg-red-600/20"
+            }`}
+          >
+            {isListening ? <Mic className={`w-4 h-4 flex-shrink-0 ${pipelineState === "LISTENING" || pipelineState === "ACTIVE_LISTEN" ? "animate-pulse" : ""}`} /> : <MicOff className="w-4 h-4 flex-shrink-0" />}
+            {!collapsed && <span className="truncate">{isListening ? "Active" : "Inactive"}</span>}
+          </button>
+
+          {/* Row 4 — Power toggle */}
+          <button
+            onClick={statusLoaded ? handleVoiceToggle : undefined}
+            disabled={!statusLoaded}
+            title={collapsed ? (voiceEnabled ? "Voice Enabled" : "Voice Disabled") : undefined}
+            className={`w-full flex items-center ${collapsed ? "justify-center" : "gap-2.5"} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+              !statusLoaded
+                ? "text-slate-600 cursor-not-allowed opacity-50"
+                : voiceEnabled
+                  ? "text-green-400 bg-green-600/10 hover:bg-green-600/20"
+                  : "text-slate-500 hover:text-slate-300 hover:bg-surface-2"
+            }`}
+          >
+            <Power className="w-4 h-4 flex-shrink-0" />
+            {!collapsed && <span className="truncate">{voiceEnabled ? "Enabled" : "Disabled"}</span>}
+          </button>
+        </div>
+
         {/* Work Mode toggle */}
         <button
           onClick={async () => {
@@ -152,16 +218,6 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
             </span>
           )}
         </button>
-        {/* Voice Mode indicator */}
-        {voiceActive && (
-          <div
-            title={collapsed ? "Voice Active" : undefined}
-            className={`w-full flex items-center ${collapsed ? "justify-center" : "gap-2.5"} px-3 py-2 rounded-lg text-xs font-medium text-green-400 bg-green-600/10`}
-          >
-            <Mic className="w-4 h-4 flex-shrink-0 animate-pulse" />
-            {!collapsed && <span className="truncate">Voice Active</span>}
-          </div>
-        )}
         {BOTTOM_ITEMS.map(renderItem)}
         <button
           onClick={onToggleCollapse}

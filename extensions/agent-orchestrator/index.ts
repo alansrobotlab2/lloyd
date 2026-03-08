@@ -23,7 +23,7 @@ import { homedir } from "node:os";
 import https from "node:https";
 
 import type { CcInstance, InstanceStatusResponse, McInstanceInfo, PendingQuestionInfo, QuestionAnswer } from "./types.js";
-import { consumeQuery } from "./query-consumer.js";
+import { consumeQuery, type ChildInstanceCallback } from "./query-consumer.js";
 import { buildOrchestratorPrompt, buildDirectPrompt, buildInteractivePlanningPrompt } from "./orchestrator-prompt.js";
 import type { PipelineType } from "./orchestrator-prompt.js";
 import { createQuestion, resolveQuestion, listPendingQuestions, cancelAllForInstance } from "./pending-questions.js";
@@ -294,6 +294,9 @@ function buildAgentDefs(logger: any, vaultScope?: { mode: string; scope: string 
 // ── Instance Store ─────────────────────────────────────────────────────────
 
 const instances = new Map<string, CcInstance>();
+
+/** Maps taskId (or parentId:agent) to child instance ID for sub-agent tracking */
+const childInstanceMap = new Map<string, string>();
 
 /** Clean up old completed instances (keep last 50) */
 function pruneInstances(): void {
@@ -667,8 +670,62 @@ export default function register(api: OpenClawPluginApi) {
         instances.set(instanceId, instance);
         pruneInstances();
 
+        // Build callback to register sub-agent instances in the instances Map
+        const onChildInstance: ChildInstanceCallback = (event, info) => {
+          if (event === "start") {
+            const childId = randomUUID().slice(0, 12);
+            const childInstance: CcInstance = {
+              id: childId,
+              type: "spawn",
+              status: "running",
+              task: info.taskDescription,
+              agent: info.agent,
+              startedAt: Date.now(),
+              costUsd: 0,
+              turns: 0,
+              budgetUsd: instance.budgetUsd,
+              maxTurns: 25,
+              pendingQuestions: [],
+              recentMessages: [],
+            };
+            instances.set(childId, childInstance);
+
+            // Register mapping for correlation on "end"
+            // taskId (block.id from tool_use) is the primary key; agentKey is fallback
+            if (info.taskId) {
+              childInstanceMap.set(info.taskId, childId);
+            }
+            const agentKey = `${info.parentId}:${info.agent}`;
+            childInstanceMap.set(agentKey, childId);
+
+            api.logger.info?.(`agent-orchestrator: registered child instance ${childId} (${info.agent}) for parent ${info.parentId}`);
+          } else if (event === "end") {
+            // Look up child instance by taskId first, then by parentId:agent
+            let childId = info.taskId ? childInstanceMap.get(info.taskId) : undefined;
+            if (!childId) {
+              childId = childInstanceMap.get(`${info.parentId}:${info.agent}`);
+            }
+            if (childId) {
+              const child = instances.get(childId);
+              if (child) {
+                child.status = info.status === "completed" ? "complete" : "error";
+                child.endedAt = Date.now();
+                if (info.summary) {
+                  child.resultText = info.summary;
+                }
+                if (info.status === "failed") {
+                  child.error = info.summary || "Task failed";
+                }
+              }
+              // Clean up mapping entries
+              if (info.taskId) childInstanceMap.delete(info.taskId);
+              childInstanceMap.delete(`${info.parentId}:${info.agent}`);
+            }
+          }
+        };
+
         // Consume in background — don't await
-        consumeQuery(instance, q, api.logger, notifyCompletion, notifyProgress).catch((err) => {
+        consumeQuery(instance, q, api.logger, notifyCompletion, notifyProgress, onChildInstance).catch((err) => {
           api.logger.error?.(`agent-orchestrator: consumeQuery error for ${instanceId}:`, err);
         });
 

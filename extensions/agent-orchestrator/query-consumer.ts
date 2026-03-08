@@ -31,6 +31,16 @@ type NotifyFn = (instanceId: string, summary: string) => void;
 /** Callback to push progress messages into Lloyd's session (interactive mode) */
 type ProgressNotifyFn = (instanceId: string, message: string) => void;
 
+/** Callback fired when a child sub-agent is started or finishes within an orchestrator query */
+export type ChildInstanceCallback = (event: "start" | "end", info: {
+  parentId: string;
+  agent: string;
+  taskDescription: string;
+  taskId?: string;
+  status?: string;
+  summary?: string;
+}) => void;
+
 /**
  * Append a line to the instance's JSONL log file.
  */
@@ -80,7 +90,24 @@ export async function consumeQuery(
   logger: Logger,
   notify: NotifyFn,
   notifyProgress?: ProgressNotifyFn,
+  onChildInstance?: ChildInstanceCallback,
 ): Promise<void> {
+  // Track children started within this query to detect orphans on completion
+  const activeChildren = new Map<string, { agent: string; taskDescription: string; taskId?: string }>();
+
+  const wrappedChildCallback: ChildInstanceCallback | undefined = onChildInstance ? (event, info) => {
+    if (event === "start") {
+      // Track by agentKey (parentId:agent) since taskId correlation is unreliable
+      const key = info.taskId || `${info.parentId}:${info.agent}`;
+      activeChildren.set(key, { agent: info.agent, taskDescription: info.taskDescription, taskId: info.taskId });
+    } else if (event === "end") {
+      const key = info.taskId || `${info.parentId}:${info.agent}`;
+      activeChildren.delete(key);
+    }
+    // Always forward to the real callback
+    onChildInstance(event, info);
+  } : undefined;
+
   // Log instance start
   logToFile(instance, {
     event: "start",
@@ -102,7 +129,7 @@ export async function consumeQuery(
 
       // Process based on message type
       if (message.type === "assistant" && message.message) {
-        processAssistantMessage(instance, message);
+        processAssistantMessage(instance, message, wrappedChildCallback);
       } else if (message.type === "result") {
         processResultMessage(instance, message);
       } else if (message.type === "error") {
@@ -111,7 +138,7 @@ export async function consumeQuery(
         logToFile(instance, { event: "error", content: errorContent });
       } else if (message.type === "system") {
         // Task lifecycle messages — subagent progress tracking
-        processSystemMessage(instance, message, logger, notifyProgress);
+        processSystemMessage(instance, message, logger, notifyProgress, wrappedChildCallback);
       }
     }
   } catch (err: any) {
@@ -121,6 +148,23 @@ export async function consumeQuery(
     logger.error?.(`agent-orchestrator: instance ${instance.id} error:`, err.message);
     pushMessage(instance, { ts: Date.now(), type: "error", content: `Fatal error: ${err.message}` });
     logToFile(instance, { event: "fatal_error", error: err.message });
+  }
+
+  // Complete any orphaned child instances that were started but never received an "end" event
+  if (onChildInstance && activeChildren.size > 0) {
+    for (const [key, child] of activeChildren) {
+      onChildInstance("end", {
+        parentId: instance.id,
+        agent: child.agent,
+        taskDescription: child.taskDescription,
+        taskId: child.taskId,
+        status: instance.status === "complete" ? "completed" : "failed",
+        summary: instance.status === "complete"
+          ? `Completed with parent orchestrator`
+          : `Parent orchestrator failed: ${instance.error || "unknown"}`,
+      });
+    }
+    activeChildren.clear();
   }
 
   // Write completion summary
@@ -148,7 +192,7 @@ export async function consumeQuery(
 /**
  * Process an assistant message — extract tool use, text content, subagent activity.
  */
-function processAssistantMessage(instance: CcInstance, message: any): void {
+function processAssistantMessage(instance: CcInstance, message: any, onChildInstance?: ChildInstanceCallback): void {
   const content = message.message?.content;
   if (!Array.isArray(content)) return;
 
@@ -163,7 +207,7 @@ function processAssistantMessage(instance: CcInstance, message: any): void {
       logToFile(instance, { event: "text", content: truncate(block.text, 1000) });
     } else if (block.type === "tool_use") {
       const toolName = block.name || "unknown";
-      const isSubagent = toolName === "Task";
+      const isSubagent = toolName === "Task" || toolName === "Agent";
       const agentType = isSubagent ? block.input?.subagent_type : undefined;
 
       if (isSubagent && agentType) {
@@ -181,6 +225,16 @@ function processAssistantMessage(instance: CcInstance, message: any): void {
           description: block.input?.description,
           prompt: truncate(block.input?.prompt || "", 2000),
         });
+
+        // Notify parent about child instance creation
+        if (onChildInstance) {
+          onChildInstance("start", {
+            parentId: instance.id,
+            agent: agentType,
+            taskDescription: block.input?.description || block.input?.prompt || agentType,
+            taskId: block.id,
+          });
+        }
       } else {
         instance.activity = `using ${toolName}`;
         const paramSummary = `${toolName}(${summarizeParams(block.input)})`;
@@ -292,6 +346,7 @@ function processSystemMessage(
   message: any,
   logger: Logger,
   notifyProgress?: ProgressNotifyFn,
+  onChildInstance?: ChildInstanceCallback,
 ): void {
   const subtype = message.subtype;
 
@@ -342,6 +397,18 @@ function processSystemMessage(
       summary: truncate(summary, 2000),
       usage: message.usage,
     });
+
+    // Notify parent about child instance completion
+    if (onChildInstance && (status === "completed" || status === "failed")) {
+      onChildInstance("end", {
+        parentId: instance.id,
+        agent: message.agent || "",
+        taskDescription: "",
+        taskId: message.task_id,
+        status,
+        summary,
+      });
+    }
 
     // In interactive mode, push milestone notifications to Lloyd's session
     if (instance.interactive && notifyProgress) {
