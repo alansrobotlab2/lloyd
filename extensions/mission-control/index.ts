@@ -377,7 +377,12 @@ export default function register(api: OpenClawPluginApi) {
   function readGatewayToken(): string {
     try {
       const cfg = JSON.parse(readFileSync(configFile, "utf-8"));
-      return cfg.gateway?.auth?.token || "";
+      const tok = cfg.gateway?.auth?.token;
+      if (!tok) return "";
+      if (typeof tok === "string") return tok;
+      // Resolve SecretRef: { source: "env", id: "ENV_VAR_NAME" }
+      if (tok.source === "env" && tok.id) return process.env[tok.id] || "";
+      return "";
     } catch (err: any) {
       api.logger.error?.(`mission-control: failed to read gateway token from ${configFile}: ${err.message}`);
       return "";

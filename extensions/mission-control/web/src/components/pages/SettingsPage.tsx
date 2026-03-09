@@ -68,13 +68,26 @@ function ConfigurationTab() {
           <Lock className="w-4 h-4 text-amber-400" />
           <span className="text-sm font-medium text-slate-300">TLS Certificate</span>
         </div>
-        <a
-          href="/api/mc/cert"
-          download
+        <button
+          onClick={async () => {
+            try {
+              const res = await fetch("/api/mc/cert");
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              const blob = await res.blob();
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = "openclaw-mc.crt";
+              a.click();
+              URL.revokeObjectURL(url);
+            } catch (e) {
+              console.error("Certificate download failed:", e);
+            }
+          }}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-brand-600 hover:bg-brand-500 text-white transition-colors"
         >
           Download Certificate
-        </a>
+        </button>
         <div className="mt-3 space-y-2 text-xs text-slate-400">
           <div>
             <p className="font-medium text-slate-300">Access URLs:</p>
