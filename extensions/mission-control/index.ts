@@ -1020,8 +1020,36 @@ export default function register(api: OpenClawPluginApi) {
 
         const includeTools = url.searchParams.get("tools") === "1";
 
-        const result = await gwWsSend("chat.history", { sessionKey, limit: 200 });
-        const rawMessages: any[] = result?.messages || result?.history || [];
+        let rawMessages: any[] = [];
+
+        // Try reading directly from JSONL for full usage data
+        let fromJsonl = false;
+        try {
+          const sessResult = await gwWsSend("sessions.list", { agentId: "main" });
+          const entries: any[] = sessResult?.entries || sessResult?.sessions || [];
+          const match = entries.find((e: any) => (e.sessionKey || e.key) === sessionKey);
+          const sessionId = match?.sessionId || match?.id;
+          if (sessionId) {
+            const jsonlPath = join(sessionsDir, sessionId + ".jsonl");
+            if (existsSync(jsonlPath)) {
+              const allLines = parseJsonl<any>(jsonlPath);
+              rawMessages = allLines
+                .filter((l: any) => l.type === "message" || l.type === "result")
+                .map((l: any) => ({
+                  id: l.id,
+                  timestamp: l.timestamp,
+                  ...l.message,
+                }));
+              fromJsonl = true;
+            }
+          }
+        } catch { /* fall through to gateway WS */ }
+
+        // Fallback to gateway WebSocket
+        if (!fromJsonl) {
+          const result = await gwWsSend("chat.history", { sessionKey, limit: 200 });
+          rawMessages = result?.messages || result?.history || [];
+        }
 
         let lastUserTs: number | null = null;
         let turnHadThinking = false;
@@ -1053,7 +1081,14 @@ export default function register(api: OpenClawPluginApi) {
             role,
             content,
             model,
-            usage,
+            usage: usage ? {
+              input: usage.input || 0,
+              output: usage.output || 0,
+              cacheRead: usage.cacheRead || 0,
+              cacheCreation: usage.cacheWrite || 0,
+              totalTokens: usage.totalTokens || 0,
+              cost: usage.cost?.total,
+            } : undefined,
           };
 
           if (role === "assistant") {

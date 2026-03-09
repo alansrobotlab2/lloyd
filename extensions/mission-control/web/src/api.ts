@@ -63,7 +63,7 @@ export interface MessageEntry {
   role: "user" | "assistant" | "toolResult";
   content: Array<{ type: string; text?: string; thinking?: string; id?: string; name?: string; arguments?: Record<string, unknown> }>;
   model?: string;
-  usage?: { input: number; output: number; cacheRead: number; totalTokens: number };
+  usage?: { input: number; output: number; cacheRead: number; cacheCreation: number; totalTokens: number; cost?: number };
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;

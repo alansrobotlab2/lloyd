@@ -59,6 +59,8 @@ function stripInjectedContext(text: string): string {
     .replace(/<memory_context>[\s\S]*?<\/memory_context>\s*/i, "")
     .replace(/\[(?:[A-Z][a-z]{2} )?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?[^\]]*\]\s*/, "")
     .replace(/A new session was started via\b[\s\S]*/i, "")
+    .replace(/Sender \(untrusted metadata\):\n```json\n[\s\S]*?\n```\n?/i, "")
+    .replace(/Sender \(untrusted metadata\):\n\{[\s\S]*?\}\n?/i, "")
     .trim();
 }
 
@@ -72,6 +74,11 @@ function formatSessionKey(key: string): string {
   const name = parts[parts.length - 1];
   if (name === "main") return "Main";
   return name.length > 12 ? name.slice(0, 12) + "..." : name;
+}
+
+function formatTokenCount(n: number): string {
+  if (n < 1000) return String(n);
+  return (n / 1000).toFixed(1) + "k";
 }
 
 function timeAgo(iso: string): string {
@@ -714,20 +721,42 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded }: Chat
                           })}
                         </div>
                       )}
-                      <div className="flex items-center gap-2 mt-1.5 text-[10px] text-slate-500">
-                        <span>{timeStr(msg.timestamp)}</span>
-                        {msg.model && <span>{msg.model}</span>}
-                        {msg.hasThinking && <Brain className="w-3 h-3 text-purple-400" />}
-                        {msg.usage && (
-                          <span>{msg.usage.totalTokens} tok</span>
-                        )}
-                        {msg.toolCallCount != null && msg.toolCallCount > 0 && (
-                          <span>{msg.toolCallCount} calls</span>
-                        )}
-                        {msg.durationMs != null && (
-                          <span>{(msg.durationMs / 1000).toFixed(1)}s</span>
-                        )}
-                      </div>
+                      {msg.role === "assistant" && (
+                        <div className="flex items-center flex-wrap gap-x-1.5 gap-y-0.5 mt-1.5 text-[10px] text-slate-600 font-mono">
+                          {msg.model && <span className="text-slate-500">{msg.model}</span>}
+                          {msg.model && msg.usage && <span className="text-slate-700">·</span>}
+                          {msg.usage && (
+                            <span>
+                              {msg.usage.input.toLocaleString()} in / {msg.usage.output.toLocaleString()} out
+                              {msg.usage.cacheRead > 0 && <> / {msg.usage.cacheRead.toLocaleString()} cache</>}
+                            </span>
+                          )}
+                          {msg.durationMs != null && (
+                            <>
+                              <span className="text-slate-700">·</span>
+                              <span>{(msg.durationMs / 1000).toFixed(1)}s</span>
+                            </>
+                          )}
+                          {msg.usage && (
+                            <>
+                              <span className="text-slate-700">·</span>
+                              <span>{formatTokenCount(msg.usage.input + (msg.usage.cacheRead || 0) + (msg.usage.cacheCreation || 0))} ctx</span>
+                            </>
+                          )}
+                          {msg.hasThinking && <Brain className="w-3 h-3 text-purple-400 ml-0.5" />}
+                          {msg.toolCallCount != null && msg.toolCallCount > 0 && (
+                            <>
+                              <span className="text-slate-700">·</span>
+                              <span>{msg.toolCallCount} tools</span>
+                            </>
+                          )}
+                        </div>
+                      )}
+                      {msg.role === "user" && (
+                        <div className="mt-1.5 text-[10px] text-slate-500">
+                          <span>{timeStr(msg.timestamp)}</span>
+                        </div>
+                      )}
                     </div>
                     {msg.role === "user" && (
                       <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5">
