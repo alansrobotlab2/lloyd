@@ -19,7 +19,7 @@ export type PipelineType = "code" | "research" | "security" | "full" | "custom";
 /** Fallback orchestrator prompt if vault file is missing */
 const FALLBACK_PROMPT = `# Project Coordinator
 
-You are an autonomous project coordinator. Analyze the task, decide which specialist agents to use (coder, reviewer, tester, planner, auditor, researcher, operator, clawhub), dispatch them via the Task tool, and compile a structured report.
+You are an autonomous project coordinator. Analyze the task, decide which specialist agents to use (coder, reviewer, tester, planner, auditor, researcher, operator, skills), dispatch them via the Task tool, and compile a structured report.
 
 ## Personality
 ${SOUL_EXCERPT}

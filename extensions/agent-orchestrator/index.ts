@@ -34,7 +34,7 @@ import {
   plannerAgent,
   auditorAgent,
   operatorAgent,
-  clawhubAgent,
+  skillsAgent,
 } from "./agents/index.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -203,11 +203,11 @@ const AGENT_CONFIGS: Record<string, any> = {
   planner: plannerAgent,
   auditor: auditorAgent,
   operator: operatorAgent,
-  clawhub: clawhubAgent,
+  skills: skillsAgent,
 };
 
 /** Agents that use vault MCP tools and need scope injection */
-const VAULT_USING_AGENTS = new Set(["researcher", "planner", "coder", "operator", "clawhub"]);
+const VAULT_USING_AGENTS = new Set(["researcher", "planner", "coder", "operator", "skills"]);
 
 /**
  * Build fresh agent definitions by merging static configs with vault prompts.

@@ -9,4 +9,4 @@ export { coderAgent } from "./coder.js";
 export { researcherAgent } from "./researcher.js";
 export { testerAgent } from "./tester.js";
 export { operatorAgent } from "./operator.js";
-export { clawhubAgent } from "./clawhub.js";
+export { skillsAgent } from "./skills.js";
