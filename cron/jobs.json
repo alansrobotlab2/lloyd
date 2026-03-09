@@ -7,7 +7,7 @@
       "name": "periodic-memory-capture",
       "enabled": true,
       "createdAtMs": 1772761670846,
-      "updatedAtMs": 1773017320489,
+      "updatedAtMs": 1773027699161,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -25,11 +25,11 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1773018175316,
-        "lastRunAtMs": 1773017275316,
+        "nextRunAtMs": 1773028570732,
+        "lastRunAtMs": 1773027670732,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 45173,
+        "lastDurationMs": 28429,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0,
         "lastDelivered": false
