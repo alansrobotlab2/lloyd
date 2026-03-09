@@ -97,7 +97,7 @@ All credentials are stored as environment variables, referenced via OpenClaw's S
 | `OPENCLAW_TTS_OPENAI_KEY` | TTS API key |
 | `OPENCLAW_LOCAL_LLM_KEY` | Local LLM API key |
 
-The `openclaw.example.json` config uses SecretRef objects instead of plaintext:
+The `openclaw.json` config uses SecretRef objects instead of plaintext:
 ```json
 "token": { "source": "env", "provider": "default", "id": "OPENCLAW_DISCORD_TOKEN" }
 ```
@@ -112,7 +112,7 @@ Or via systemd (recommended for persistent deployment).
 
 ## What's NOT in This Repo
 
-- `openclaw.json` — main config file (contains one non-SecretRef token, gitignored). Copy from `openclaw.example.json` and fill in secrets.
+- `openclaw.json` — main config file (contains SecretRef pointers, gitignored)
 - `identity/` — device keys and auth tokens
 - `devices/` — paired device registry
 - `certs/` — TLS certificates

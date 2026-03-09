@@ -164,6 +164,8 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded }: Chat
         lastActivity: s.lastActivity,
         model: s.model,
         summary: s.summary,
+        source: s.source,
+        peer: s.peer,
       }));
       setSessions((prev) => {
         // Keep optimistic entries not yet in the API response
@@ -566,17 +568,17 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded }: Chat
                         : "text-slate-400 hover:bg-surface-2"
                     }`}
                   >
-                    <div className="truncate text-xs font-medium">
-                      <SourceIcon className="w-3.5 h-3.5 inline-block mr-1 -mt-0.5" />{label}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="truncate text-xs font-medium">
+                        <SourceIcon className="w-3.5 h-3.5 inline-block mr-1 -mt-0.5" />{label}
+                      </div>
+                      <span className="text-[10px] text-slate-600 whitespace-nowrap shrink-0">{timeAgo(s.lastActivity)}</span>
                     </div>
                     {(s.summary || formatSessionKey(s.sessionKey) !== label) && (
                       <div className="truncate text-[10px] text-slate-500 mt-0.5">
                         {s.summary || formatSessionKey(s.sessionKey)}
                       </div>
                     )}
-                    <div className="text-[10px] text-slate-600 mt-0.5">
-                      {timeAgo(s.lastActivity)}
-                    </div>
                   </button>
                 );
               })}

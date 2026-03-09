@@ -104,7 +104,7 @@ async function injectHookMessage(
   const text = `[System Message] ${message}`;
   try {
     api.runtime.system.enqueueSystemEvent(text, { sessionKey: targetKey });
-    api.runtime.system.requestHeartbeatNow();
+    api.runtime.system.requestHeartbeatNow({ sessionKey: targetKey });
   } catch (err: any) {
     api.logger?.error?.(`agent-orchestrator: injectHookMessage failed: ${err.message}`);
   }
