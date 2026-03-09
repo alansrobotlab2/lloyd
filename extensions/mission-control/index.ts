@@ -2174,6 +2174,60 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // ── API: /api/mc/cron-jobs ──────────────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/cron-jobs",
+    auth: "plugin",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        let jobs: any[] = [];
+        if (existsSync(cronJobsFile)) {
+          const data = JSON.parse(readFileSync(cronJobsFile, "utf-8"));
+          jobs = data.jobs || [];
+        }
+        jsonResponse(res, { jobs });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/cron-runs ────────────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/cron-runs",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const url = new URL(req.url || "/", "http://localhost");
+        const jobId = url.searchParams.get("jobId");
+        if (!jobId) {
+          jsonResponse(res, { error: "Missing jobId parameter" }, 400);
+          return;
+        }
+        const limit = parseInt(url.searchParams.get("limit") || "20", 10);
+        const runsDir = join(rootDir, "cron/runs");
+        const runFile = join(runsDir, `${jobId}.jsonl`);
+        let runs: any[] = [];
+        if (existsSync(runFile)) {
+          const lines = readFileSync(runFile, "utf-8").trim().split("\n").filter(Boolean);
+          const parsed: any[] = [];
+          for (const line of lines) {
+            try {
+              const entry = JSON.parse(line);
+              if (entry.action === "finished") parsed.push(entry);
+            } catch { /* skip malformed lines */ }
+          }
+          runs = parsed.slice(-limit).reverse();
+        }
+        jsonResponse(res, { jobId, runs });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
   // ── API: /api/mc/health ───────────────────────────────────────────────
 
   api.registerHttpRoute({

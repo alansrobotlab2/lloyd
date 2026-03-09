@@ -391,6 +391,67 @@ export interface TagGraphData {
   edges: TagGraphEdge[];
 }
 
+// ── Cron types ──────────────────────────────────────────────────────────
+
+export interface CronSchedule {
+  kind: "cron" | "every";
+  expr?: string;
+  tz?: string;
+  everyMs?: number;
+  anchorMs?: number;
+}
+
+export interface CronPayload {
+  kind: string;
+  message: string;
+  model?: string;
+  timeoutSeconds?: number;
+}
+
+export interface CronDelivery {
+  mode: string;
+  channel: string;
+}
+
+export interface CronState {
+  nextRunAtMs: number;
+  lastRunAtMs?: number;
+  lastRunStatus?: string;
+  lastStatus?: string;
+  lastDurationMs?: number;
+  lastDeliveryStatus?: string;
+  consecutiveErrors: number;
+}
+
+export interface CronJob {
+  id: string;
+  agentId: string;
+  name: string;
+  enabled: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+  schedule: CronSchedule;
+  sessionTarget: string;
+  wakeMode: string;
+  payload: CronPayload;
+  delivery: CronDelivery;
+  state: CronState;
+}
+
+export interface CronRunEntry {
+  ts: number;
+  jobId: string;
+  action: string;
+  status: string;
+  summary?: string;
+  durationMs?: number;
+  runAtMs?: number;
+  error?: string;
+  sessionId?: string;
+  model?: string;
+  provider?: string;
+}
+
 export const api = {
   // Services
   services: () => fetchJson<ServicesData>("/services"),
@@ -430,6 +491,12 @@ export const api = {
     return res.json();
   },
   health: () => fetchJson<HealthData>("/health"),
+
+  // Cron
+  cronJobs: () => fetchJson<{ jobs: CronJob[] }>("/cron-jobs"),
+  cronRuns: (jobId: string, limit = 20) =>
+    fetchJson<{ jobId: string; runs: CronRunEntry[] }>(`/cron-runs?jobId=${encodeURIComponent(jobId)}&limit=${limit}`),
+
   models: () => fetchJson<{ providers: Record<string, any> }>("/models"),
   modelToggle: async (provider: string, modelId: string, enabled: boolean) => {
     const res = await fetch(`${BASE}/model-toggle`, {
