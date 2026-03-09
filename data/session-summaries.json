@@ -23,5 +23,11 @@
   "agent:main:mc-3c54aec0-608a-4159-a281-f5a69159540a": "Create and start backlog item",
   "agent:main:mc-441da87c-761b-4170-9019-046534dae676": "New session scroll and sidebar issues",
   "agent:main:discord:channel:heartbeat": "Cron hook task completed successfully",
-  "agent:main:mc-99b0c753-5495-4d78-b359-62c321ee1773": "Test new subagent notifications"
+  "agent:main:mc-99b0c753-5495-4d78-b359-62c321ee1773": "Test new subagent notifications",
+  "agent:main:discord:direct:1479651195403636857": "Designing servo mounts and battery pack",
+  "agent:main:mc-31d79db6-192d-428b-8bda-7c5769e0266d": "Why DMs don't show in sessions",
+  "agent:main:mc-675faef0-0dd7-49e0-8b7f-e512a8d27b25": "Back to backlog item 99",
+  "agent:main:mc-e4261b70-5182-4f70-8f04-c36e41c260cd": "Mic activation issue on voice mode",
+  "agent:main:discord:channel:1478527694013468755": "Alan's Robot Lab begins",
+  "agent:main:mc-f4b0c53c-1eb8-4626-b000-702b25440c18": "Whisper Fast word list support"
 }
