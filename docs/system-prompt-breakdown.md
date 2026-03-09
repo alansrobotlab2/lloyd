@@ -178,8 +178,8 @@ Operational knowledge lives in `skills/` — check there before improvising a co
 - Full procedure: `skills/claude-code-subagent.md`
 
 ## HuggingFace
-- Read-only token: `REDACTED_HF_TOKEN`
-- Note: there's also an older token in `projects/alfie/jetson-orin-nx-16gb/tensorrt-llm.md` (`REDACTED_HF_TOKEN`) — may be stale
+- Read-only token: stored in vault (see `projects/alfie/jetson-orin-nx-16gb/tensorrt-llm.md`)
+- Note: rotate tokens at https://huggingface.co/settings/tokens if compromised
 
 ## Alan's GitHub
 - GitHub username: alansrobotlab2
