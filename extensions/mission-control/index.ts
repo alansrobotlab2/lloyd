@@ -8,8 +8,8 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { onDiagnosticEvent, type DiagnosticEventPayload } from "openclaw/plugin-sdk";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from "fs";
-import { join, extname, relative } from "path";
+import { readFileSync, writeFileSync, readdirSync, existsSync, statSync, mkdirSync } from "fs";
+import { join, extname, relative, dirname } from "path";
 import { execSync, execFileSync } from "child_process";
 import { connect as netConnect } from "net";
 import { homedir } from "os";
@@ -261,6 +261,7 @@ export default function register(api: OpenClawPluginApi) {
   const timingLog = join(rootDir, "logs/timing.jsonl");
   const routingLog = join(rootDir, "logs/routing.jsonl");
   const ccInstancesDir = join(rootDir, "logs/cc-instances");
+  const sessionsDir = join(rootDir, "agents/main/sessions");
   const modelsFile = join(rootDir, "agents/main/agent/models.json");
   const toolsFile = join(rootDir, "agents/main/agent/tools.json");
   const authFile = join(rootDir, "agents/main/agent/auth-profiles.json");
@@ -278,7 +279,7 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   function saveSummaries(summaries: Record<string, string>) {
-    try { writeFileSync(summariesFile, JSON.stringify(summaries, null, 2)); } catch (e) { api.logger.debug?.(`mission-control: saveSummaries: ${(e as Error).message}`); }
+    try { mkdirSync(dirname(summariesFile), { recursive: true }); writeFileSync(summariesFile, JSON.stringify(summaries, null, 2)); } catch (e) { api.logger.debug?.(`mission-control: saveSummaries: ${(e as Error).message}`); }
   }
 
   function stripInjectedContext(text: string): string {
@@ -687,6 +688,93 @@ export default function register(api: OpenClawPluginApi) {
     api.logger.info?.("mission-control: skipping gateway WS (already active in this process)");
   }
 
+  function getSessionFiles(): string[] {
+    if (!existsSync(sessionsDir)) return [];
+    return readdirSync(sessionsDir)
+      .filter((f) => f.endsWith(".jsonl") && !f.includes(".reset."))
+      .map((f) => join(sessionsDir, f));
+  }
+
+  function aggregateTokenUsage(): {
+    totalInput: number;
+    totalOutput: number;
+    totalCacheRead: number;
+    totalSessions: number;
+    bySession: Array<{
+      sessionId: string;
+      input: number;
+      output: number;
+      cacheRead: number;
+      messageCount: number;
+      lastActivity: string;
+      model: string;
+    }>;
+  } {
+    return cached("token-usage", () => {
+      let totalInput = 0;
+      let totalOutput = 0;
+      let totalCacheRead = 0;
+      const bySession: any[] = [];
+      const sessionFiles = getSessionFiles();
+
+      for (const file of sessionFiles) {
+        const lines = parseJsonl<SessionMessage>(file);
+        let sInput = 0;
+        let sOutput = 0;
+        let sCacheRead = 0;
+        let msgCount = 0;
+        let lastActivity = "";
+        let model = "";
+        let sessionId = "";
+
+        for (const line of lines) {
+          if (line.type === "session") {
+            sessionId = (line as any).id || "";
+          }
+          if (line.type === "message" && line.message?.usage) {
+            const u = line.message.usage;
+            sInput += u.input || 0;
+            sOutput += u.output || 0;
+            sCacheRead += u.cacheRead || 0;
+            msgCount++;
+            if (line.timestamp) lastActivity = line.timestamp;
+            if (line.message.model) model = line.message.model;
+          }
+        }
+
+        totalInput += sInput;
+        totalOutput += sOutput;
+        totalCacheRead += sCacheRead;
+
+        if (msgCount > 0) {
+          bySession.push({
+            sessionId,
+            input: sInput,
+            output: sOutput,
+            cacheRead: sCacheRead,
+            messageCount: msgCount,
+            lastActivity,
+            model,
+          });
+        }
+      }
+
+      bySession.sort(
+        (a, b) =>
+          new Date(b.lastActivity).getTime() -
+          new Date(a.lastActivity).getTime(),
+      );
+
+      return {
+        totalInput,
+        totalOutput,
+        totalCacheRead,
+        totalSessions: bySession.length,
+        bySession,
+      };
+    }, HEAVY_CACHE_TTL);
+  }
+
   function loadCcInstanceSummaries(): Array<{ id: string; costUsd: number; startedAt: string; status: string }> {
     return cached("cc-instance-summaries", () => {
       if (!existsSync(ccInstancesDir)) return [];
@@ -714,13 +802,14 @@ export default function register(api: OpenClawPluginApi) {
     auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
+        const usage = aggregateTokenUsage();
         const ccSummaries = loadCcInstanceSummaries();
         const totalSubagentCost = ccSummaries.reduce((sum, s) => sum + s.costUsd, 0);
         jsonResponse(res, {
-          totalInput: 0,
-          totalOutput: 0,
-          totalCacheRead: 0,
-          totalSessions: 0,
+          totalInput: usage.totalInput,
+          totalOutput: usage.totalOutput,
+          totalCacheRead: usage.totalCacheRead,
+          totalSessions: usage.totalSessions,
           totalSubagentCost,
           totalSubagentInstances: ccSummaries.length,
         });
@@ -761,6 +850,32 @@ export default function register(api: OpenClawPluginApi) {
             number,
             { input: number; output: number; cacheRead: number; subagentCost: number }
           >();
+
+          const sessionFiles = getSessionFiles();
+          for (const file of sessionFiles) {
+            const lines = parseJsonl<SessionMessage>(file);
+            for (const line of lines) {
+              if (
+                line.type === "message" &&
+                line.message?.usage &&
+                line.timestamp
+              ) {
+                const ts = new Date(line.timestamp).getTime();
+                if (ts < cutoff) continue;
+                const key = Math.floor(ts / bucket) * bucket;
+                const existing = buckets.get(key) || {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  subagentCost: 0,
+                };
+                existing.input += line.message.usage.input || 0;
+                existing.output += line.message.usage.output || 0;
+                existing.cacheRead += line.message.usage.cacheRead || 0;
+                buckets.set(key, existing);
+              }
+            }
+          }
 
           // Add cc-instance (subagent) costs to buckets
           const ccSummaries = loadCcInstanceSummaries();
