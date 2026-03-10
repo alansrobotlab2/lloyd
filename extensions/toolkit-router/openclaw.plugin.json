@@ -1,0 +1,12 @@
+{
+  "id": "toolkit-router",
+  "name": "Toolkit Router",
+  "version": "1.0.0",
+  "description": "Keyword-activated toolkit routing — dynamically loads tool groups based on user message content",
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
