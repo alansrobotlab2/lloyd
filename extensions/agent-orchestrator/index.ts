@@ -653,6 +653,7 @@ export default function register(api: OpenClawPluginApi) {
               pendingQuestions: [],
               recentMessages: [],
             };
+            childInstance.activity = `starting: ${(info.taskDescription || info.agent).slice(0, 80)}`;
             instances.set(childId, childInstance);
 
             // Register mapping for correlation on "end"
@@ -689,8 +690,13 @@ export default function register(api: OpenClawPluginApi) {
           }
         };
 
+        const resolveChild = (taskId: string): CcInstance | undefined => {
+          const childId = childInstanceMap.get(taskId);
+          return childId ? instances.get(childId) : undefined;
+        };
+
         // Consume in background — don't await
-        consumeQuery(instance, q, api.logger, notifyCompletion, notifyProgress, onChildInstance).catch((err) => {
+        consumeQuery(instance, q, api.logger, notifyCompletion, notifyProgress, onChildInstance, resolveChild).catch((err) => {
           api.logger.error?.(`agent-orchestrator: consumeQuery error for ${instanceId}:`, err);
         });
 

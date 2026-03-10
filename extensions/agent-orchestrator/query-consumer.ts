@@ -91,6 +91,7 @@ export async function consumeQuery(
   notify: NotifyFn,
   notifyProgress?: ProgressNotifyFn,
   onChildInstance?: ChildInstanceCallback,
+  resolveChild?: (taskId: string) => CcInstance | undefined,
 ): Promise<void> {
   // Track children started within this query to detect orphans on completion
   const activeChildren = new Map<string, { agent: string; taskDescription: string; taskId?: string }>();
@@ -138,7 +139,7 @@ export async function consumeQuery(
         logToFile(instance, { event: "error", content: errorContent });
       } else if (message.type === "system") {
         // Task lifecycle messages — subagent progress tracking
-        processSystemMessage(instance, message, logger, notifyProgress, wrappedChildCallback);
+        processSystemMessage(instance, message, logger, notifyProgress, wrappedChildCallback, resolveChild);
       }
     }
   } catch (err: any) {
@@ -349,6 +350,7 @@ function processSystemMessage(
   logger: Logger,
   notifyProgress?: ProgressNotifyFn,
   onChildInstance?: ChildInstanceCallback,
+  resolveChild?: (taskId: string) => CcInstance | undefined,
 ): void {
   const subtype = message.subtype;
 
@@ -368,6 +370,19 @@ function processSystemMessage(
       taskType,
       description: desc,
     });
+    // Mirror to child instance
+    if (resolveChild && message.task_id) {
+      const child = resolveChild(message.task_id);
+      if (child) {
+        child.activity = `task: ${desc}`;
+        pushMessage(child, {
+          ts: Date.now(),
+          type: "task_progress",
+          agent: taskType,
+          content: `Task started: ${desc}`,
+        });
+      }
+    }
   } else if (subtype === "task_progress") {
     const desc = message.description || "";
     const lastTool = message.last_tool_name || "";
@@ -383,6 +398,19 @@ function processSystemMessage(
       description: desc,
       lastTool,
     });
+    // Mirror to child instance
+    if (resolveChild && message.task_id) {
+      const child = resolveChild(message.task_id);
+      if (child) {
+        child.activity = desc || `using ${lastTool}`;
+        pushMessage(child, {
+          ts: Date.now(),
+          type: "task_progress",
+          content: `Progress: ${desc}${lastTool ? ` (${lastTool})` : ""}`,
+        });
+        child.turns++;
+      }
+    }
   } else if (subtype === "task_notification") {
     const status = message.status || "unknown";
     const summary = message.summary || "";
@@ -399,6 +427,21 @@ function processSystemMessage(
       summary: truncate(summary, 2000),
       usage: message.usage,
     });
+    // Mirror to child instance
+    if (resolveChild && message.task_id) {
+      const child = resolveChild(message.task_id);
+      if (child) {
+        child.activity = `${status}: ${truncate(summary, 100)}`;
+        pushMessage(child, {
+          ts: Date.now(),
+          type: isComplete ? "subagent_end" : "error",
+          content: `Task ${status}: ${truncate(summary, 300)}`,
+        });
+        if (message.usage?.total_cost_usd != null) {
+          child.costUsd = message.usage.total_cost_usd;
+        }
+      }
+    }
 
     // Notify parent about child instance completion
     if (onChildInstance && (status === "completed" || status === "failed")) {
