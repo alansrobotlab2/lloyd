@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Sparkles, Package, Pencil, X, Save } from "lucide-react";
+import { Sparkles, Package, Pencil, X, Save, Search } from "lucide-react";
 import { api, SkillInfo } from "../../api";
 import { sanitizeHtml } from "../../utils/sanitize";
 
@@ -30,6 +30,8 @@ export default function SkillsPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [activeTab, setActiveTab] = useState<"skills" | "builtin">("skills");
 
   const loadSkills = useCallback(() => {
     api
@@ -39,6 +41,15 @@ export default function SkillsPage() {
         const bd = d.bundled || [];
         setWorkspace(ws);
         setBundled(bd);
+        // Set default tab based on available data (initial load only)
+        setSelectedSkill((prev) => {
+          if (!prev) {
+            // Initial load -- pick tab based on data
+            if (ws.length === 0 && bd.length > 0) setActiveTab("builtin");
+            else if (ws.length > 0) setActiveTab("skills");
+          }
+          return prev;
+        });
         // Auto-select first skill if none selected
         setSelectedSkill((prev) => {
           if (prev) {
@@ -110,79 +121,87 @@ export default function SkillsPage() {
     }
   };
 
-  const total = workspace.length + bundled.length;
-  const enabledCount =
-    workspace.filter((s) => s.enabled).length +
-    bundled.filter((s) => s.enabled).length;
-
   const renderedContent = content
     ? sanitizeHtml(content)
     : "";
 
+  const activeList = activeTab === "skills" ? workspace : bundled;
+  const filteredSkills = searchQuery
+    ? activeList.filter((s) => s.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    : activeList;
+
   return (
     <div className="flex h-full overflow-hidden">
       {/* Left panel -- skill list */}
-      <div className="w-1/4 min-w-48 flex flex-col border-r border-surface-3/50 overflow-hidden">
+      <div className="w-[15%] min-w-36 flex flex-col border-r border-surface-3/50 overflow-hidden">
         {/* Header */}
         <div className="flex items-center gap-2 px-4 py-3 border-b border-surface-3/30 flex-shrink-0">
           <Sparkles className="w-4 h-4 text-brand-400" />
           <span className="text-sm font-semibold text-slate-200">Skills</span>
           <span className="ml-auto text-[10px] text-slate-500">
-            {enabledCount}/{total}
+            {filteredSkills.length}/{activeList.length}
           </span>
         </div>
 
-        {/* Skill list */}
-        <div className="flex-1 overflow-y-auto py-2">
-          {workspace.length > 0 && (
-            <div>
-              <div className="px-4 py-1 text-[10px] uppercase tracking-wider text-slate-500 font-medium">
-                Workspace
-              </div>
-              {workspace.map((s) => (
-                <button
-                  key={s.name}
-                  onClick={() => setSelectedSkill(s)}
-                  className={`w-full flex items-center gap-2 px-4 py-2 text-left text-sm transition-colors ${
-                    selectedSkill?.name === s.name
-                      ? "bg-brand-600/20 text-slate-100"
-                      : "hover:bg-surface-2/60 text-slate-400"
-                  } ${!s.enabled ? "opacity-40" : ""}`}
-                >
-                  {s.emoji ? (
-                    <span className="text-base leading-none flex-shrink-0">{s.emoji}</span>
-                  ) : (
-                    <Package className="w-3.5 h-3.5 flex-shrink-0 text-slate-500" />
-                  )}
-                  <span className="truncate text-xs">{s.name}</span>
-                </button>
-              ))}
-            </div>
-          )}
+        <div className="px-3 py-2 flex-shrink-0">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+            <input
+              type="text"
+              placeholder="Search skills..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-8 pr-3 py-1.5 bg-surface-2 rounded-lg text-xs text-slate-300 placeholder-slate-500 border border-transparent focus:border-brand-500/30 focus:outline-none"
+            />
+          </div>
+        </div>
 
-          {bundled.length > 0 && (
-            <div className={workspace.length > 0 ? "mt-2" : ""}>
-              <div className="px-4 py-1 text-[10px] uppercase tracking-wider text-slate-500 font-medium">
-                Built-in
-              </div>
-              {bundled.map((s) => (
-                <button
-                  key={s.name}
-                  onClick={() => setSelectedSkill(s)}
-                  className={`w-full flex items-center gap-2 px-4 py-2 text-left text-sm transition-colors ${
-                    selectedSkill?.name === s.name
-                      ? "bg-brand-600/20 text-slate-100"
-                      : "hover:bg-surface-2/60 text-slate-400"
-                  } ${!s.enabled ? "opacity-40" : ""}`}
-                >
-                  {s.emoji ? (
-                    <span className="text-base leading-none flex-shrink-0">{s.emoji}</span>
-                  ) : (
-                    <Package className="w-3.5 h-3.5 flex-shrink-0 text-slate-500" />
-                  )}
-                  <span className="truncate text-xs">{s.name}</span>
-                </button>
-              ))}
+        <div className="flex border-b border-surface-3/30 flex-shrink-0">
+          <button
+            onClick={() => setActiveTab("skills")}
+            className={`flex-1 py-2 text-[10px] uppercase tracking-wider font-medium transition-colors ${
+              activeTab === "skills"
+                ? "text-brand-400 border-b-2 border-brand-400"
+                : "text-slate-500 hover:text-slate-400"
+            }`}
+          >
+            Skills
+          </button>
+          <button
+            onClick={() => setActiveTab("builtin")}
+            className={`flex-1 py-2 text-[10px] uppercase tracking-wider font-medium transition-colors ${
+              activeTab === "builtin"
+                ? "text-brand-400 border-b-2 border-brand-400"
+                : "text-slate-500 hover:text-slate-400"
+            }`}
+          >
+            Builtin
+          </button>
+        </div>
+
+        {/* Skill list */}
+        <div className="flex-1 overflow-y-auto py-1">
+          {filteredSkills.map((s) => (
+            <button
+              key={s.name}
+              onClick={() => setSelectedSkill(s)}
+              className={`w-full flex items-center gap-2 px-4 py-2 text-left text-sm transition-colors ${
+                selectedSkill?.name === s.name
+                  ? "bg-brand-600/20 text-slate-100"
+                  : "hover:bg-surface-2/60 text-slate-400"
+              } ${!s.enabled ? "opacity-40" : ""}`}
+            >
+              {s.emoji ? (
+                <span className="text-base leading-none flex-shrink-0">{s.emoji}</span>
+              ) : (
+                <Package className="w-3.5 h-3.5 flex-shrink-0 text-slate-500" />
+              )}
+              <span className="truncate text-xs">{s.name}</span>
+            </button>
+          ))}
+          {filteredSkills.length === 0 && (
+            <div className="px-4 py-3 text-xs text-slate-500 italic">
+              {searchQuery ? "No matching skills" : "No skills found"}
             </div>
           )}
         </div>

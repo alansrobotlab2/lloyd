@@ -45,15 +45,15 @@ export default function register(api: OpenClawPluginApi) {
   const MODE_STATE_PATH = join(__dirname, "mode-state.json");
 
   const MODE_SCOPE: Record<WorkMode, string> = {
-    work:     "work,knowledge,agents",
-    personal: "personal,projects,knowledge,agents",
+    work:     "work,knowledge,agents,memory,skills",
+    personal: "personal,projects,knowledge,agents,memory,skills,work",
     general:  "",
   };
 
   const MODE_MEMORY_PREFIX: Record<WorkMode, string> = {
-    work:     "lloyd/memory/work",
-    personal: "lloyd/memory/personal",
-    general:  "lloyd/memory/personal",
+    work:     "memory",
+    personal: "memory",
+    general:  "memory",
   };
 
   function readModeState(): ModeState {
@@ -90,7 +90,7 @@ export default function register(api: OpenClawPluginApi) {
     description: "Switch to work mode (work, knowledge, agents vault segments)",
     handler: () => {
       saveMode("work");
-      return { text: "Switched to **work mode**. Vault scope: work, knowledge, agents. Daily notes → memory/work/" };
+      return { text: "Switched to **work mode**. Vault scope: work, knowledge, agents. Daily notes → memory/" };
     },
   });
 
@@ -99,7 +99,7 @@ export default function register(api: OpenClawPluginApi) {
     description: "Switch to personal mode (personal, projects, knowledge, agents vault segments)",
     handler: () => {
       saveMode("personal");
-      return { text: "Switched to **personal mode**. Vault scope: personal, projects, knowledge, agents. Daily notes → memory/personal/" };
+      return { text: "Switched to **personal mode**. Vault scope: personal, projects, knowledge, agents. Daily notes → memory/" };
     },
   });
 

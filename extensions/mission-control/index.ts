@@ -289,6 +289,7 @@ export default function register(api: OpenClawPluginApi) {
       .replace(/<memory_context>[\s\S]*?<\/memory_context>\s*/i, "")
       .replace(/\[(?:[A-Z][a-z]{2} )?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?[^\]]*\]\s*/, "")
       .replace(/A new session was started via\b[\s\S]*/i, "")
+      .replace(/Sender \(untrusted metadata\):[\s]*(?:```json\s*\{[\s\S]*?\}\s*```|\{[\s\S]*?\})\s*/i, "")
       .trim();
   }
 
@@ -583,26 +584,28 @@ export default function register(api: OpenClawPluginApi) {
       }
       if (!text) return null;
 
+      api.logger.info?.(`mc-summary-input: ${sessionKey} text="${text.slice(0, 100)}"`);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 3000);
+      const timer = setTimeout(() => controller.abort(), 5000);
       try {
-        const resp = await fetch("http://127.0.0.1:8091/v1/chat/completions", {
+        const sysMsg = "Summarize this conversation opener in 3-6 words. No quotes, no punctuation at the end. Just a brief title.";
+        const userMsg = text.slice(0, 500);
+        // Use /completion endpoint with pre-closed <think> tags to skip reasoning
+        const prompt = `<|im_start|>system\n${sysMsg}<|im_end|>\n<|im_start|>user\n${userMsg}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`;
+        const resp = await fetch("http://127.0.0.1:8091/completion", {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: "Bearer none" },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "Qwen3.5-35B-A3B",
-            messages: [
-              { role: "system", content: "Summarize this conversation opener in 3-6 words. No quotes, no punctuation at the end. Just a brief title." },
-              { role: "user", content: text.slice(0, 500) },
-            ],
-            max_tokens: 20,
+            prompt,
+            n_predict: 40,
             temperature: 0.3,
+            stop: ["<|im_end|>"],
           }),
           signal: controller.signal,
         });
         clearTimeout(timer);
         const data = await resp.json() as any;
-        const summary = data?.choices?.[0]?.message?.content?.trim();
+        const summary = data?.content?.trim();
         return summary || null;
       } catch {
         clearTimeout(timer);
@@ -618,6 +621,7 @@ export default function register(api: OpenClawPluginApi) {
     if (pendingSummaries.has(sessionKey)) return;
     pendingSummaries.add(sessionKey);
     generateSummary(sessionKey).then((summary) => {
+        api.logger.info?.(`mc-summary: ${sessionKey} -> "${summary}"`);
       pendingSummaries.delete(sessionKey);
       if (summary) {
         const summaries = loadSummaries();
@@ -1390,7 +1394,7 @@ export default function register(api: OpenClawPluginApi) {
     },
     {
       source: "mcp-tools",
-      tools: ["mem_search", "mem_get", "mem_write", "tag_search", "tag_explore", "vault_overview", "prefill_context", "http_search", "http_fetch", "http_request", "file_read", "file_write", "file_edit", "file_patch", "file_glob", "file_grep", "run_bash", "bg_exec", "bg_process"],
+      tools: ["mem_search", "mem_get", "mem_write", "tag_search", "tag_explore", "vault_overview", "prefill_context", "http_search", "http_fetch", "http_request", "file_read", "file_write", "file_edit", "file_patch", "file_glob", "file_grep", "run_bash", "bg_exec", "bg_process", "skills_search", "skills_get"],
     },
     {
       source: "mcp-tools — backlog",
@@ -1399,6 +1403,10 @@ export default function register(api: OpenClawPluginApi) {
     {
       source: "voice-tools",
       tools: ["voice_last_utterance", "voice_enroll_speaker", "voice_list_speakers"],
+    },
+    {
+      source: "agent-orchestrator",
+      tools: ["cc_orchestrate", "cc_spawn", "cc_status", "cc_result", "cc_abort", "cc_respond", "cc_plan_interactive"],
     },
     {
       source: "thunderbird-tools",
@@ -1512,17 +1520,25 @@ export default function register(api: OpenClawPluginApi) {
   // ── API: /api/mc/skills ──────────────────────────────────────────────
 
   const YAML = require("/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/yaml");
-  // Resolve main agent workspace from config (supports relocated workspaces)
-  const mainAgentWorkspace = (() => {
+  // Resolve workspace skill directories from config (agent workspace + extraDirs)
+  const workspaceSkillsDirs: string[] = (() => {
+    const dirs: string[] = [];
     try {
       const cfg = JSON.parse(readFileSync(configFile, "utf-8"));
+      // 1. Main agent workspace /skills
       const mainAgent = cfg.agents?.list?.find((a: any) => a.id === "main") || cfg.agents?.list?.[0];
-      return mainAgent?.workspace?.replace(/^~/, homedir()) ?? null;
-    } catch { return null; }
+      const ws = mainAgent?.workspace?.replace(/^~/, homedir()) ?? null;
+      dirs.push(ws ? join(ws, "skills") : join(homedir(), ".openclaw/workspaces/lloyd/skills"));
+      // 2. Extra skill directories from skills.load.extraDirs
+      const extraDirs: string[] = cfg.skills?.load?.extraDirs ?? [];
+      for (const d of extraDirs) {
+        dirs.push(d.replace(/^~/, homedir()));
+      }
+    } catch {
+      dirs.push(join(homedir(), ".openclaw/workspaces/lloyd/skills"));
+    }
+    return dirs;
   })();
-  const workspaceSkillsDir = mainAgentWorkspace
-    ? join(mainAgentWorkspace, "skills")
-    : join(homedir(), ".openclaw/workspaces/lloyd/skills");
   const bundledSkillsDir = join(homedir(), ".npm-global/lib/node_modules/openclaw/skills");
 
   interface SkillInfo {
@@ -1646,9 +1662,19 @@ export default function register(api: OpenClawPluginApi) {
       try {
         const now = Date.now();
         if (!skillsCache || now - skillsCache.ts > 30_000) {
+          const allWorkspace = workspaceSkillsDirs.flatMap(d => parseSkillDir(d));
+          // Deduplicate by skill name, preferring first occurrence
+          const seen = new Set<string>();
+          const workspace: SkillInfo[] = [];
+          for (const s of allWorkspace) {
+            if (!seen.has(s.name)) {
+              seen.add(s.name);
+              workspace.push(s);
+            }
+          }
           skillsCache = {
             data: {
-              workspace: parseSkillDir(workspaceSkillsDir),
+              workspace: workspace.sort((a, b) => a.name.localeCompare(b.name)),
               bundled: parseSkillDir(bundledSkillsDir),
             },
             ts: now,
@@ -1720,8 +1746,8 @@ export default function register(api: OpenClawPluginApi) {
           jsonResponse(res, { error: "Missing name parameter" }, 400);
           return;
         }
-        // Search in workspace first, then bundled
-        const dirs = [workspaceSkillsDir, bundledSkillsDir];
+        // Search in workspace dirs first, then bundled
+        const dirs = [...workspaceSkillsDirs, bundledSkillsDir];
         for (const dir of dirs) {
           if (!existsSync(dir)) continue;
           for (const entry of readdirSync(dir)) {
@@ -1753,7 +1779,7 @@ export default function register(api: OpenClawPluginApi) {
             return;
           }
           // Find the skill file location
-          const dirs = [workspaceSkillsDir, bundledSkillsDir];
+          const dirs = [...workspaceSkillsDirs, bundledSkillsDir];
           for (const dir of dirs) {
             if (!existsSync(dir)) continue;
             for (const entry of readdirSync(dir)) {
@@ -1788,7 +1814,13 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── API: /api/mc/agents ──────────────────────────────────────────────
 
-  const workspaceDir = mainAgentWorkspace || join(rootDir, "workspaces/lloyd");
+  const workspaceDir = (() => {
+    try {
+      const cfg = JSON.parse(readFileSync(configFile, "utf-8"));
+      const mainAgent = cfg.agents?.list?.find((a: any) => a.id === "main") || cfg.agents?.list?.[0];
+      return mainAgent?.workspace?.replace(/^~/, homedir()) ?? join(rootDir, "workspaces/lloyd");
+    } catch { return join(rootDir, "workspaces/lloyd"); }
+  })();
 
   function readFileOpt(p: string): string | null {
     try { return existsSync(p) ? readFileSync(p, "utf-8") : null; } catch { return null; }
@@ -1927,7 +1959,7 @@ export default function register(api: OpenClawPluginApi) {
 
         // Collect all available tool names and skill names for the UI
         const allToolGroups = TOOL_GROUPS.map((g) => ({ source: g.source, tools: g.tools }));
-        const wsSkills = parseSkillDir(workspaceSkillsDir);
+        const wsSkills = workspaceSkillsDirs.flatMap(d => parseSkillDir(d));
         const bdSkills = parseSkillDir(bundledSkillsDir);
         const allSkillNames = [...wsSkills, ...bdSkills].map((s) => s.name);
 
@@ -3739,7 +3771,7 @@ export default function register(api: OpenClawPluginApi) {
 
         // Skill commands (from workspace skills)
         try {
-          for (const skill of parseSkillDir(workspaceSkillsDir)) {
+          for (const skill of workspaceSkillsDirs.flatMap(d => parseSkillDir(d))) {
             if (skill.enabled) {
               commands.push({
                 name: skill.name,

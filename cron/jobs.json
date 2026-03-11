@@ -7,7 +7,7 @@
       "name": "periodic-memory-capture",
       "enabled": true,
       "createdAtMs": 1772761670846,
-      "updatedAtMs": 1773091397156,
+      "updatedAtMs": 1773189965562,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -17,19 +17,19 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "Run a memory capture pass.\n\nStep 1: Run `python3 ~/obsidian/agents/memory/scripts/extract-transcript.py` via run_bash.\nIf output is empty, reply 'no new content' and stop.\n\nStep 2: Read today's daily note (use PST timezone for the date):\n  mem_get(path=\"agents/lloyd/memory/2026-XX-XX.md\")  ← replace XX-XX with today's MM-DD\n\nStep 3: Extract from the transcript: decisions, facts, context shifts, project updates, preferences, action/result pairs. Format as timestamped entries with session links.\n\nStep 4: Write the daily note:\n  mem_write(path=\"agents/lloyd/memory/2026-XX-XX.md\", content=...)  ← replace XX-XX with today's MM-DD\n\nPATH RULE: Always use \"agents/lloyd/memory/\" as the path prefix. Never use \"lloyd/memory/\" — that resolves to the wrong directory.\n\nDo not duplicate entries already in the file.",
-        "timeoutSeconds": 120
+        "message": "Read the skill file at ~/obsidian/skills/periodic-memory-capture/SKILL.md and execute all instructions in it.",
+        "timeoutSeconds": 180
       },
       "delivery": {
         "mode": "none",
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1773092288646,
-        "lastRunAtMs": 1773091388646,
+        "nextRunAtMs": 1773190849236,
+        "lastRunAtMs": 1773189949236,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 8510,
+        "lastDurationMs": 16326,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0,
         "lastDelivered": false
@@ -41,7 +41,7 @@
       "name": "nightly-reflection",
       "enabled": true,
       "createdAtMs": 1772766786499,
-      "updatedAtMs": 1773047004101,
+      "updatedAtMs": 1773133379487,
       "schedule": {
         "kind": "cron",
         "expr": "0 2 * * *",
@@ -51,7 +51,7 @@
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "You are running the nightly reflection pass. You have three tasks. Execute them in order.\n\n---\n\n## Task 1: Self-Improvement Review\n\nRead agents/lloyd/memory/corrections.md and the last 3 days of daily notes (agents/lloyd/memory/YYYY-MM-DD.md for today and the 2 prior days).\n\nLook for **negative signals:**\n- Corrections Alan made to Lloyd's behavior\n- Frustrations expressed about how Lloyd responded\n- Explicit preferences stated (\"I want X, not Y\")\n- Patterns of repeated mistakes\n- \"bad lloyd\" entries\n\nLook for **positive signals:**\n- Praise (\"perfect\", \"exactly\", \"that's great\", \"good lloyd\")\n- Implicit approval (Alan built on Lloyd's suggestion without pushback)\n- Patterns of behavior that consistently go well\n- Entries with `Signal: positive` in corrections.md\n\nProcess both signal types:\n1. Read corrections.md — separate positive and negative entries\n2. Append any NEW corrections/reinforcements found in daily notes to agents/lloyd/memory/corrections.md (create if missing). Format: date, what happened, category (tone/tool-use/memory/formatting/delegation/other), Signal: positive or negative\n3. **Negative signals:** Group by category and frequency. If a correction has 3+ occurrences → strong signal, apply incremental fix to AGENTS.md and/or SOUL.md. If fewer than 3 → keep in log but don't change config yet.\n4. **Positive signals:** Identify reinforced behaviors. If 3+ occurrences → codify in AGENTS.md to protect the pattern from accidental removal.\n5. When modifying SOUL.md or AGENTS.md:\n   - Prefer additions and clarifications over removals\n   - Do NOT remove existing content without strong justification\n   - No drastic rewrites — one small improvement at a time\n6. Log every change to agents/lloyd/memory/learnings/YYYY-MM-DD.md (create if missing):\n   - File changed (SOUL.md or AGENTS.md)\n   - What was added/modified/removed (include the exact text)\n   - Why (which correction or pattern triggered it)\n   - Timestamp\n\nIf no corrections or reinforcements found, write \"No corrections found — no SOUL.md/AGENTS.md changes\" to the learnings log and skip the rest of this task.\n\n---\n\n## Task 2: Mental Models\n\nRead last 7 days of daily notes (agents/lloyd/memory/YYYY-MM-DD.md). Identify:\n- Recurring decision patterns (how Alan evaluates options)\n- Reasoning heuristics Alan uses\n- Communication preferences (when he wants detail vs. brevity)\n- Project prioritization patterns\n- Domains where Alan has strong opinions vs. is open\n\nUpdate agents/lloyd/memory/mental-models.md (create if missing, update if exists). Organize by: Decision-Making Patterns, Communication Preferences, Technical Preferences, Project Prioritization. Include concrete examples from recent conversations. Date-stamp the bottom: `_Last updated: YYYY-MM-DD by nightly reflection_`\n\n---\n\n## Task 3: MEMORY.md Consolidation\n\nRead last 7 days of daily notes + current agents/lloyd/MEMORY.md.\n\nGit snapshot BEFORE:\n  cd ~/obsidian && git add -A && git diff --cached --quiet || git commit -m \"nightly reflection: pre-consolidation snapshot\"\n\nSafety net: Check if yesterday's daily note exists at agents/lloyd/memory/YYYY-MM-DD.md (calculate yesterday's date). If missing, create a stub via mem_write with frontmatter (segment: agents), header, and a note: '(No daily note was written for this day.)'\n\nConsolidation rules:\n- Add new significant facts/decisions to agents/lloyd/MEMORY.md\n- For entries that are too project-specific: move them to the appropriate project doc (e.g. projects/alfie/...) or knowledge doc (e.g. knowledge/...) — don't just delete them\n- Remove or update entries that are outdated, resolved, or contradicted by newer info\n- Keep MEMORY.md focused on universal, always-relevant context: who Alan is, key people, persistent preferences, high-level project phases — not detailed status or resolved items\n- Keep agents/lloyd/MEMORY.md under 200 lines\n\nGit snapshot AFTER:\n  cd ~/obsidian && git add -A && git commit -m \"nightly reflection: YYYY-MM-DD\"\n\n---\n\n## Guardrails\n\n- One retry max per task — if a task fails, log the failure to agents/lloyd/memory/corrections.md and move to the next task\n- Budget target: <$20 per run\n- Git snapshot provides rollback safety — don't fear making incremental changes\n- The learnings log is a changelog for Alan's visibility, not a review queue — he does not want to be a bottleneck",
+        "message": "Read the skill file at ~/obsidian/skills/nightly-reflection/SKILL.md and execute all instructions in it.",
         "model": "anthropic/claude-opus-4-6",
         "timeoutSeconds": 1800
       },
@@ -60,11 +60,11 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1773133200000,
-        "lastRunAtMs": 1773046800003,
+        "nextRunAtMs": 1773219600000,
+        "lastRunAtMs": 1773133200002,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 204098,
+        "lastDurationMs": 179485,
         "lastDelivered": false,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0
@@ -76,16 +76,17 @@
       "name": "daily-vault-maintenance",
       "enabled": true,
       "createdAtMs": 1772826031683,
-      "updatedAtMs": 1773050586105,
+      "updatedAtMs": 1773136938372,
       "schedule": {
         "kind": "cron",
-        "expr": "0 3 * * *"
+        "expr": "0 3 * * *",
+        "tz": "America/Los_Angeles"
       },
       "sessionTarget": "isolated",
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
-        "message": "You are running the weekly vault maintenance pass. This is a separate job from nightly reflection — focus only on vault structure, tags, and organization.\n\n---\n\n## Pre-Flight: Git Snapshot\n\nBefore making ANY changes:\n```bash\ncd ~/obsidian && git add -A && git diff --cached --quiet || git commit -m \"vault-maintenance: pre-run snapshot\"\n```\n\n---\n\n## Task 1: Tag Hygiene\n\n1. Run `vault_overview(detail=\"tags\")` to get all tags with frequencies\n2. Identify issues:\n   - **Duplicate/overlapping tags** (e.g. \"llm\" vs \"large-language-model\", \"ai\" vs \"artificial-intelligence\")\n   - **Too-specific tags** used on only 1-2 docs that could be merged into broader tags\n   - **Inconsistent naming** (hyphens vs underscores, plural vs singular)\n3. For each merge/rename:\n   - Pick the canonical tag name\n   - Update all affected docs (frontmatter `tags:` field)\n   - Log every change\n4. Write summary to `agents/lloyd/memory/vault-maintenance/YYYY-MM-DD.md` (create dirs if needed)\n\n---\n\n## Task 2: Recently Touched Docs — Tag Review\n\n1. Check git log for docs modified in the last 7 days:\n   ```bash\n   cd ~/obsidian && git log --since=\"7 days ago\" --name-only --pretty=format: | sort -u | grep \"\\.md$\"\n   ```\n2. For each modified doc:\n   - Read it and assess whether its tags are accurate and complete\n   - Identify new tags that should be added based on content\n   - Check if other existing docs should ALSO get those tags (use `mem_search` to find related docs)\n   - Update tags on all affected docs\n\n---\n\n## Task 3: Frontmatter Validation\n\n1. Scan vault segments for docs with missing or incomplete frontmatter:\n   - Required fields: `tags` (array), `segment` (matches directory)\n   - Recommended: `summary` (1-line description)\n2. Fix missing frontmatter — add tags based on content and location\n3. Flag any files in wrong directories for their segment (e.g. project notes in knowledge/)\n\n---\n\n## Task 4: Structure Review\n\n1. Look for large docs (>200 lines) that could be split into focused sub-docs\n2. Look for orphan docs (no tags, no inbound links from other docs)\n3. Suggest or execute reorganization where clear wins exist\n4. Be conservative — only move/split files when the benefit is obvious\n\n---\n\n## Post-Flight: Git Snapshot\n\nAfter all changes:\n```bash\ncd ~/obsidian && git add -A && git commit -m \"vault-maintenance: YYYY-MM-DD\"\n```\n\n---\n\n## Guardrails\n\n- One retry max per task — if a task fails, log the failure and move on\n- Budget target: <$20 per run\n- Git snapshots provide rollback safety\n- DO NOT modify agents/lloyd/SOUL.md, AGENTS.md, or MEMORY.md — those are nightly reflection territory\n- DO NOT delete files — reorganize, merge, or flag for review\n- Log all changes to agents/lloyd/memory/vault-maintenance/YYYY-MM-DD.md",
+        "message": "Read the skill file at ~/obsidian/skills/nightly-vault-maintenance/SKILL.md and execute all instructions in it.",
         "model": "anthropic/claude-opus-4-6",
         "timeoutSeconds": 1800
       },
@@ -94,14 +95,83 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1773136800000,
-        "lastRunAtMs": 1773050400002,
+        "nextRunAtMs": 1773223200000,
+        "lastRunAtMs": 1773136800003,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 186103,
+        "lastDurationMs": 138369,
         "lastDelivered": false,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "a80bd8c7-1902-4604-817a-b76a8d11dfac",
+      "agentId": "memory",
+      "name": "nightly-skills-management",
+      "enabled": true,
+      "createdAtMs": 1773118213958,
+      "updatedAtMs": 1773164733565,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 4 * * *",
+        "tz": "America/Los_Angeles"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Read the skill file at ~/obsidian/skills/nightly-skills-management/SKILL.md and execute all instructions in it.",
+        "model": "anthropic/claude-opus-4-6",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "nextRunAtMs": 1773226800000,
+        "lastRunAtMs": 1773140400003,
+        "lastRunStatus": "error",
+        "lastStatus": "error",
+        "lastDurationMs": 180125,
+        "lastDeliveryStatus": "unknown",
+        "consecutiveErrors": 2,
+        "lastError": "Discord recipient is required. Use \"channel:<id>\" for channels or \"user:<id>\" for DMs."
+      }
+    },
+    {
+      "id": "fad06bff-5a8f-44d1-a95d-d98933aa8641",
+      "agentId": "main",
+      "sessionKey": "agent:main:mc-e3b4f917-b66e-4d8c-ab86-a366415b4dbd",
+      "name": "local-llm-skills-eval-comparison",
+      "enabled": false,
+      "deleteAfterRun": true,
+      "createdAtMs": 1773170742560,
+      "updatedAtMs": 1773171047030,
+      "schedule": {
+        "kind": "at",
+        "at": "2026-03-10T19:26:00.000Z"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the nightly skills management evaluation against session logs from March 8, 2026. This is a COMPARISON TEST — write all output to ~/obsidian/memory/skill-maintenance/2026-03-08-local-llm-eval/ instead of modifying any actual skills.\n\n## Instructions\n\nRead the skill file at ~/obsidian/skills/nightly-skills-management/SKILL.md for the full evaluation criteria.\n\n**SKIP Stage 1** — logs are already extracted at ~/obsidian/memory/skill-maintenance/2026-03-08/\n\n**Stage 2: Evaluate each session log** — Read each .log file in that directory and evaluate for skill-worthy patterns per the criteria in the SKILL.md. For each file, note: filename, size, whether it's skill-worthy, and what pattern you'd extract.\n\n**Stage 3: Dedup check** — Inventory existing skills (find ~/obsidian/skills/ -name 'SKILL.md') and note any overlaps with what you found.\n\n**CRITICAL: Do NOT modify any actual skill files.** This is a dry run. Instead, write:\n\n1. ~/obsidian/memory/skill-maintenance/2026-03-08-local-llm-eval/report.md — Full report in the same format as the SKILL.md specifies\n2. ~/obsidian/memory/skill-maintenance/2026-03-08-local-llm-eval/proposed-changes.md — For each skill you would create or update, write the proposed content (what you'd add/change)\n\nSkip git snapshots since this is a dry run.",
+        "model": "local",
+        "thinking": "enabled",
+        "timeoutSeconds": 1800
+      },
+      "delivery": {
+        "mode": "announce"
+      },
+      "state": {
+        "lastRunAtMs": 1773170760006,
+        "lastRunStatus": "error",
+        "lastStatus": "error",
+        "lastDurationMs": 287024,
+        "lastError": "Error",
+        "lastDeliveryStatus": "unknown",
+        "consecutiveErrors": 1
       }
     }
   ]

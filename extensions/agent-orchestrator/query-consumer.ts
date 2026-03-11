@@ -6,6 +6,21 @@
  * summary JSON on completion for post-mortem review.
  */
 
+/*
+ * resolveChild callback pattern:
+ *
+ * consumeQuery accepts an optional `resolveChild: (taskId: string) => CcInstance | undefined`
+ * callback. When the Agent SDK emits subagent lifecycle events (subagent_started,
+ * subagent_output, subagent_completed), this callback maps the SDK's `task_id` to the
+ * corresponding child CcInstance tracked by the orchestrator. This lets the consumer
+ * mirror activity, turn counts, and messages onto the child instance in real time,
+ * making child progress visible in Mission Control without polling.
+ *
+ * The callback is constructed in index.ts from `childInstanceMap` (SDK task_id -> child
+ * instance ID) and the global `instances` Map. The orchestrator populates
+ * `childInstanceMap` via the `onChildInstance` callback when subagents are spawned.
+ */
+
 import type { CcInstance, InstanceMessage } from "./types.js";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

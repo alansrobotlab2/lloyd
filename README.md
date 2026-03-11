@@ -4,6 +4,10 @@ Lloyd is a personal AI assistant built on [OpenClaw](https://github.com/openclaw
 
 This repo is the full configuration and customization layer for a self-hosted OpenClaw deployment running on a Linux workstation (Arch, via distrobox container). It's a working example of what a mature OpenClaw setup looks like after weeks of daily use and iteration.
 
+<p align="center">
+  <img src="media/lloyd-mission-control.jpg" alt="Lloyd Mission Control" width="800">
+</p>
+
 ## Key Features
 
 - **Custom Mission Control** — a React-based web dashboard (`extensions/mission-control/`) with real-time chat, token usage stats, API monitoring, service health, and multi-session management. This is the primary interface for interacting with Lloyd.

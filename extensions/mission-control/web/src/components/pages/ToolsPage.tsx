@@ -10,6 +10,7 @@ const SOURCE_ICONS: Record<string, React.ComponentType<{ className?: string }>> 
   "mcp-tools": Terminal,
   "mcp-tools — backlog": LayoutGrid,
   "voice-tools": Mic,
+  "agent-orchestrator": GitFork,
 };
 
 const SOURCE_COLORS: Record<string, string> = {
@@ -20,6 +21,7 @@ const SOURCE_COLORS: Record<string, string> = {
   "mcp-tools": "text-indigo-400",
   "mcp-tools — backlog": "text-emerald-400",
   "voice-tools": "text-amber-400",
+  "agent-orchestrator": "text-rose-400",
 };
 
 export default function ToolsPage() {

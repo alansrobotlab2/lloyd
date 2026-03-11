@@ -10,6 +10,9 @@ import {
   Settings,
   FileText,
   History,
+  Edit3,
+  Save,
+  X,
 } from "lucide-react";
 import { api, type CronJob, type CronRunEntry } from "../../api";
 
@@ -31,11 +34,29 @@ function truncate(str: string, max: number): string {
   return str.slice(0, max) + "...";
 }
 
+function parseSkillRef(message: string | undefined): { skillName: string; path: string } | null {
+  if (!message) return null;
+  const m = message.match(/Read the skill file at ([^\s]+SKILL\.md) and execute all instructions in it/);
+  if (!m) return null;
+  const path = m[1];
+  const parts = path.split('/');
+  const skillIdx = parts.lastIndexOf('skills');
+  const skillName = skillIdx >= 0 && skillIdx + 1 < parts.length ? parts[skillIdx + 1] : parts[parts.length - 2] || 'unknown';
+  return { skillName, path };
+}
+
 export default function CronPage() {
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [runs, setRuns] = useState<CronRunEntry[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
+  const [skillContent, setSkillContent] = useState<string>('');
+  const [skillLoading, setSkillLoading] = useState(false);
+  const [skillEditing, setSkillEditing] = useState(false);
+  const [skillEditContent, setSkillEditContent] = useState('');
+  const [skillSaving, setSkillSaving] = useState(false);
+  const [skillFeedback, setSkillFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [skillLoadedFor, setSkillLoadedFor] = useState<string | null>(null);
 
   useEffect(() => {
     api.cronJobs().then((d) => setJobs(d.jobs)).catch(console.error);
@@ -53,6 +74,25 @@ export default function CronPage() {
       .catch(console.error)
       .finally(() => setRunsLoading(false));
   }, [expandedId]);
+
+  useEffect(() => {
+    if (!expandedId) {
+      setSkillContent('');
+      setSkillLoadedFor(null);
+      setSkillEditing(false);
+      return;
+    }
+    const job = jobs.find(j => j.id === expandedId);
+    const ref = parseSkillRef(job?.payload?.message);
+    if (ref && skillLoadedFor !== expandedId) {
+      setSkillLoading(true);
+      setSkillLoadedFor(expandedId);
+      api.skillContent(ref.skillName)
+        .then(d => setSkillContent(d.content))
+        .catch(() => setSkillContent('(failed to load skill file)'))
+        .finally(() => setSkillLoading(false));
+    }
+  }, [expandedId, jobs, skillLoadedFor]);
 
   return (
     <div className="p-6 space-y-6 overflow-auto">
@@ -217,9 +257,94 @@ export default function CronPage() {
                         </span>
                       )}
                     </div>
-                    <pre className="bg-surface-2 rounded-lg p-3 text-xs text-slate-300 font-mono whitespace-pre-wrap max-h-64 overflow-y-auto">
-                      {job.payload?.message || "(no message)"}
-                    </pre>
+                    {(() => {
+                      const ref = parseSkillRef(job.payload?.message);
+                      if (!ref) {
+                        return (
+                          <pre className="bg-surface-2 rounded-lg p-3 text-xs text-slate-300 font-mono whitespace-pre-wrap max-h-64 overflow-y-auto">
+                            {job.payload?.message || "(no message)"}
+                          </pre>
+                        );
+                      }
+                      return (
+                        <div className="space-y-2">
+                          <div className="text-[10px] text-slate-500 italic">
+                            {job.payload?.message}
+                          </div>
+                          <div className="flex items-center gap-2 bg-surface-2 rounded-lg px-3 py-2">
+                            <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span className="text-xs font-mono text-slate-300 flex-1">{ref.path}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-brand-400/10 text-[10px] text-brand-400 font-medium">
+                              {ref.skillName}
+                            </span>
+                          </div>
+                          {skillLoading ? (
+                            <div className="text-xs text-slate-500 animate-pulse py-2">Loading skill file...</div>
+                          ) : (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2">
+                                {!skillEditing ? (
+                                  <button
+                                    onClick={() => { setSkillEditing(true); setSkillEditContent(skillContent); setSkillFeedback(null); }}
+                                    className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium bg-surface-2 text-slate-400 hover:text-slate-200 transition-colors"
+                                  >
+                                    <Edit3 className="w-3 h-3" /> Edit
+                                  </button>
+                                ) : (
+                                  <>
+                                    <button
+                                      onClick={async () => {
+                                        setSkillSaving(true);
+                                        setSkillFeedback(null);
+                                        try {
+                                          await api.skillContentSave(ref.skillName, skillEditContent);
+                                          setSkillContent(skillEditContent);
+                                          setSkillEditing(false);
+                                          setSkillFeedback({ type: 'success', msg: 'Saved' });
+                                          setTimeout(() => setSkillFeedback(null), 2500);
+                                        } catch (e: any) {
+                                          setSkillFeedback({ type: 'error', msg: e.message || 'Save failed' });
+                                          setTimeout(() => setSkillFeedback(null), 3000);
+                                        } finally {
+                                          setSkillSaving(false);
+                                        }
+                                      }}
+                                      disabled={skillSaving}
+                                      className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium bg-emerald-400/10 text-emerald-400 hover:bg-emerald-400/20 transition-colors disabled:opacity-50"
+                                    >
+                                      <Save className="w-3 h-3" /> {skillSaving ? 'Saving...' : 'Save'}
+                                    </button>
+                                    <button
+                                      onClick={() => { setSkillEditing(false); setSkillFeedback(null); }}
+                                      className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium bg-surface-2 text-slate-400 hover:text-slate-200 transition-colors"
+                                    >
+                                      <X className="w-3 h-3" /> Cancel
+                                    </button>
+                                  </>
+                                )}
+                                {skillFeedback && (
+                                  <span className={`text-[10px] ${skillFeedback.type === 'success' ? 'text-emerald-400' : 'text-red-400'}`}>
+                                    {skillFeedback.msg}
+                                  </span>
+                                )}
+                              </div>
+                              {skillEditing ? (
+                                <textarea
+                                  value={skillEditContent}
+                                  onChange={e => setSkillEditContent(e.target.value)}
+                                  className="w-full bg-surface-2 rounded-lg p-3 text-xs text-slate-300 font-mono whitespace-pre-wrap min-h-[200px] max-h-[500px] overflow-y-auto resize-y border border-brand-400/30 focus:outline-none focus:border-brand-400/60"
+                                  spellCheck={false}
+                                />
+                              ) : (
+                                <pre className="bg-surface-2 rounded-lg p-3 text-xs text-slate-300 font-mono whitespace-pre-wrap max-h-[500px] overflow-y-auto">
+                                  {skillContent || '(empty)'}
+                                </pre>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* Configuration */}
