@@ -11,23 +11,52 @@ import { getLastTtsPlayedAt, setLastTtsPlayedAt } from "../hooks/useVoiceStream"
 // Configure marked for safe, sane defaults
 marked.setOptions({ breaks: true, gfm: true });
 
+const SKIP_PATTERNS = new Set(["NO_REPLY", "HEARTBEAT_OK"]);
+
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/#{1,6}\s+/g, '')       // headers
+    .replace(/\*\*(.+?)\*\*/g, '$1') // bold
+    .replace(/\*(.+?)\*/g, '$1')     // italic
+    .replace(/_(.+?)_/g, '$1')       // italic underscore
+    .replace(/`(.+?)`/g, '$1')       // inline code
+    .trim();
+}
+
 function extractSummary(content: Array<{ type: string; text?: string }>): string | null {
   const fullText = content
     .filter((c) => c.type === "text" && c.text)
     .map((c) => c.text!)
     .join("\n");
-  const match = fullText.match(/<summary>([\s\S]*?)<\/summary>/);
-  return match ? match[1].trim() : null;
+  if (!fullText.trim()) return null;
+  const trimmed = fullText.trim();
+
+  // Skip known non-speech patterns
+  if (SKIP_PATTERNS.has(trimmed)) return null;
+
+  // Primary: first paragraph before \n\n
+  const idx = trimmed.indexOf("\n\n");
+  if (idx > 0) {
+    const first = trimmed.slice(0, idx).trim();
+    return first ? stripMarkdown(first) : null;
+  }
+
+  // No \n\n: short text IS the summary
+  if (trimmed.length <= 300) return stripMarkdown(trimmed);
+
+  // Fallback: first 2 sentences or 300 chars at word boundary
+  const sentenceMatch = trimmed.match(/^((?:[^.!?]*[.!?]){1,2})\s/);
+  if (sentenceMatch) return stripMarkdown(sentenceMatch[1].trim());
+
+  const boundary = trimmed.lastIndexOf(" ", 300);
+  return stripMarkdown(trimmed.slice(0, boundary > 0 ? boundary : 300).trim());
 }
 
 function extractText(content: Array<{ type: string; text?: string }>, keepSummary = false): string {
-  let text = content
+  const text = content
     .filter((c) => c.type === "text" && c.text)
     .map((c) => c.text!)
     .join("\n");
-  if (!keepSummary) {
-    text = text.replace(/<summary>[\s\S]*?<\/summary>/g, "");
-  }
   return text.trim();
 }
 
@@ -92,9 +121,10 @@ function timeAgo(iso: string): string {
 interface ChatPanelProps {
   requestedSessionKey?: string | null;
   onSessionLoaded?: () => void;
+  onActiveSessionChange?: (key: string | null) => void;
 }
 
-export default function ChatPanel({ requestedSessionKey, onSessionLoaded }: ChatPanelProps = {}) {
+export default function ChatPanel({ requestedSessionKey, onSessionLoaded, onActiveSessionChange }: ChatPanelProps = {}) {
   // ── Multi-session state ─────────────────────────────────────────
   const [sessionKey, setSessionKey] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageEntry[]>([]);
@@ -129,6 +159,11 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded }: Chat
   const isWorkingRef = useRef(false);
   const { voiceEnabled, ttsEnabled } = useVoiceContext();
   const spokenMsgIds = useRef<Set<string>>(new Set());
+
+  // Notify parent of active session key changes (for voice pipeline routing)
+  useEffect(() => {
+    onActiveSessionChange?.(sessionKey);
+  }, [sessionKey, onActiveSessionChange]);
 
   // ── Derived state ──────────────────────────────────────────────────
   const currentModel = useMemo(() => {
@@ -373,7 +408,7 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded }: Chat
     };
   }, [thinking]);
 
-  // ── TTS fallback: extract <summary> tags and play audio ──────────
+  // ── TTS fallback: extract first paragraph and play audio ──────────
   useEffect(() => {
     if (!ttsEnabled || thinking || messages.length === 0) return;
     const last = messages[messages.length - 1];

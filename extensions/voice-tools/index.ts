@@ -40,6 +40,46 @@ function postToMc(port: number, path: string, body: object, token?: string): Pro
   });
 }
 
+const SKIP_PATTERNS = new Set(["NO_REPLY", "HEARTBEAT_OK"]);
+
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/#{1,6}\s+/g, '')       // headers
+    .replace(/\*\*(.+?)\*\*/g, '$1') // bold
+    .replace(/\*(.+?)\*/g, '$1')     // italic
+    .replace(/_(.+?)_/g, '$1')       // italic underscore
+    .replace(/`(.+?)`/g, '$1')       // inline code
+    .trim();
+}
+
+/** Extract TTS summary: first paragraph (before \n\n), with fallback */
+function extractFirstParagraph(text: string): string | null {
+  if (!text || !text.trim()) return null;
+  const trimmed = text.trim();
+
+  // Skip known non-speech patterns
+  if (SKIP_PATTERNS.has(trimmed)) return null;
+
+  // Primary: split on double newline
+  const idx = trimmed.indexOf("\n\n");
+  if (idx > 0) {
+    const first = trimmed.slice(0, idx).trim();
+    return first ? stripMarkdown(first) : null;
+  }
+
+  // No \n\n: short text IS the summary
+  if (trimmed.length <= 300) return stripMarkdown(trimmed);
+
+  // Fallback: first 2 sentences or 300 chars at word boundary
+  const sentenceMatch = trimmed.match(/^((?:[^.!?]*[.!?]){1,2})\s/);
+  if (sentenceMatch) {
+    return stripMarkdown(sentenceMatch[1].trim());
+  }
+
+  const boundary = trimmed.lastIndexOf(" ", 300);
+  return stripMarkdown(trimmed.slice(0, boundary > 0 ? boundary : 300).trim());
+}
+
 export default function register(api: OpenClawPluginApi) {
   api.logger.info?.(
     "voice-tools: registering voice tools (proxied through voice MCP SSE server)",
@@ -175,18 +215,7 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
-  // -- before_prompt_build hook: inject <summary> TTS instruction for webchat --
-
-  api.on("before_prompt_build", (event, ctx) => {
-    // Only inject summary instruction for webchat sessions
-    if (ctx.channelId !== "webchat") return;
-
-    return {
-      appendSystemContext: `Before your response, provide a 1 to 3 sentence brief high level summary wrapped in <summary> tags. This will be immediately spoken back to the user via TTS as you provide a more detailed response. Example:\n<summary>\n1 to 3 sentence summary\n</summary>\n\nYour detailed response follows with no preface.`,
-    };
-  });
-
-  // -- message_sending hook: extract <summary>, synthesize TTS, push via MC SSE --
+  // -- message_sending hook: extract first paragraph, synthesize TTS, push via MC SSE --
 
   const gwPort = (api as any).config?.gateway?.port ?? 18789;
   const gwToken = (api as any).config?.gateway?.auth?.token as string | undefined;
@@ -195,53 +224,36 @@ export default function register(api: OpenClawPluginApi) {
     const content = event.content;
     if (!content) return;
 
-    const summaryRegex = /<summary>([\s\S]*?)<\/summary>/g;
-    const matches: string[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = summaryRegex.exec(content)) !== null) {
-      const text = m[1].trim();
-      if (text) matches.push(text);
-    }
+    const summary = extractFirstParagraph(content);
+    if (!summary) return;
 
-    if (matches.length === 0) return;
-
-    // Synthesize each summary block via Qwen3-TTS and push MP3 to MC SSE
-    for (const text of matches) {
-      try {
-        const ttsResp = await fetch(TTS_API_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer sk-local",
-          },
-          body: JSON.stringify({
-            input: text,
-            model: "tts-1",
-            voice: "clone:cullen",
-            response_format: "mp3",
-          }),
-        });
-        if (!ttsResp.ok) {
-          api.logger.warn?.(`voice-tools: TTS synthesis failed (${ttsResp.status})`);
-          continue;
-        }
-        const audioBuffer = await ttsResp.arrayBuffer();
-        const base64Audio = Buffer.from(audioBuffer).toString("base64");
-        await postToMc(gwPort, "/api/mc/tts-push", { audio: base64Audio }, gwToken);
-        api.logger.info?.(`voice-tools: TTS pushed via SSE (${text.length} chars, ${audioBuffer.byteLength} bytes)`);
-      } catch (err: any) {
-        api.logger.warn?.(`voice-tools: TTS delivery failed: ${err.message}`);
+    // Synthesize first paragraph via Qwen3-TTS and push MP3 to MC SSE
+    try {
+      const ttsResp = await fetch(TTS_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer sk-local",
+        },
+        body: JSON.stringify({
+          input: summary,
+          model: "tts-1",
+          voice: "clone:cullen",
+          response_format: "mp3",
+        }),
+      });
+      if (!ttsResp.ok) {
+        api.logger.warn?.(`voice-tools: TTS synthesis failed (${ttsResp.status})`);
+        return;
       }
-    }
-
-    // Strip <summary> tags from displayed output
-    let stripped = content.replace(/<summary>[\s\S]*?<\/summary>/g, "").trim();
-    stripped = stripped.replace(/\n{3,}/g, "\n\n");
-
-    if (stripped !== content) {
-      return { content: stripped };
+      const audioBuffer = await ttsResp.arrayBuffer();
+      const base64Audio = Buffer.from(audioBuffer).toString("base64");
+      await postToMc(gwPort, "/api/mc/tts-push", { audio: base64Audio }, gwToken);
+      api.logger.info?.(`voice-tools: TTS pushed via SSE (${summary.length} chars, ${audioBuffer.byteLength} bytes)`);
+    } catch (err: any) {
+      api.logger.warn?.(`voice-tools: TTS delivery failed: ${err.message}`);
     }
   });
 
-  api.logger.info?.("voice-tools: registered (4 tools + before_prompt_build + message_sending hooks)");
+  api.logger.info?.("voice-tools: registered (3 tools + message_sending hook)");
 }
