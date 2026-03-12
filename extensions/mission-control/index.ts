@@ -2520,7 +2520,7 @@ export default function register(api: OpenClawPluginApi) {
   function parseSupervisorStatus(): SupervisorProcess[] {
     try {
       const output = execSync(
-        `supervisorctl -c ${SUPERVISOR_CONF} status 2>/dev/null`,
+        `/usr/sbin/supervisorctl -c ${SUPERVISOR_CONF} status 2>/dev/null`,
         { encoding: "utf-8", timeout: 5000 },
       );
       return output.split("\n").filter(l => l.trim()).map(line => {
@@ -2537,7 +2537,8 @@ export default function register(api: OpenClawPluginApi) {
         }
         return { name, state, pid, uptime };
       }).filter(Boolean) as SupervisorProcess[];
-    } catch {
+    } catch (err: any) {
+      console.error("[MC] supervisorctl failed:", err?.message || String(err));
       return [];
     }
   }
@@ -2636,7 +2637,7 @@ export default function register(api: OpenClawPluginApi) {
         if (isSupervisorSvc) {
           const supervisorAction = action === "restart" ? "restart" : action;
           execSync(
-            `supervisorctl -c ${SUPERVISOR_CONF} ${supervisorAction} ${serviceId}`,
+            `/usr/sbin/supervisorctl -c ${SUPERVISOR_CONF} ${supervisorAction} ${serviceId}`,
             { encoding: "utf-8", timeout: 15000 },
           );
           jsonResponse(res, { ok: true, serviceId, action });
