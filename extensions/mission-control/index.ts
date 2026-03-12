@@ -206,6 +206,8 @@ function voicePipeConnect() {
     ws.on("open", () => {
       voicePipeConnecting = false;
       voicePipeWsReady = true;
+      // Send hello with default session key
+      ws.send(JSON.stringify({ type: "hello" }));
       broadcastSse("connected", JSON.stringify({ connected: true }));
     });
 
@@ -2476,6 +2478,7 @@ export default function register(api: OpenClawPluginApi) {
     "lloyd-voice-mcp.service": "Voice Services MCP",
     "lloyd-qmd-daemon.service": "QMD Daemon",
     "lloyd-clawdeck.service": "Backlog Server",
+    "lloyd-supervisor.service": "Supervisor (distrobox)",
   };
 
   // Known port map for lloyd-* services (dynamic discovery)
@@ -2487,6 +2490,57 @@ export default function register(api: OpenClawPluginApi) {
     "lloyd-voice-mcp.service": 8094,
     "lloyd-qmd-daemon.service": 8181,
   };
+
+  // ── Supervisord-managed processes ──────────────────────────────────
+  const SUPERVISOR_CONF = "/home/alansrobotlab/Projects/lloyd-services/supervisor/supervisord.conf";
+
+  const SUPERVISOR_PROCESSES = new Set(["lloyd-tts", "lloyd-tool-mcp", "lloyd-voice-mcp", "lloyd-voice-mode"]);
+
+  const SUPERVISOR_PORT_MAP: Record<string, number> = {
+    "lloyd-tts": 8090,
+    "lloyd-tool-mcp": 8093,
+    "lloyd-voice-mcp": 8094,
+    "lloyd-voice-mode": 8095,
+  };
+
+  const SUPERVISOR_DISPLAY_NAMES: Record<string, string> = {
+    "lloyd-tts": "TTS Service",
+    "lloyd-tool-mcp": "Tool Services MCP",
+    "lloyd-voice-mcp": "Voice Services MCP",
+    "lloyd-voice-mode": "Voice Mode",
+  };
+
+  interface SupervisorProcess {
+    name: string;
+    state: string;
+    pid: number | null;
+    uptime: string | null;
+  }
+
+  function parseSupervisorStatus(): SupervisorProcess[] {
+    try {
+      const output = execSync(
+        `supervisorctl -c ${SUPERVISOR_CONF} status 2>/dev/null`,
+        { encoding: "utf-8", timeout: 5000 },
+      );
+      return output.split("\n").filter(l => l.trim()).map(line => {
+        const match = line.match(/^(\S+)\s+(RUNNING|STOPPED|STARTING|BACKOFF|STOPPING|EXITED|FATAL|UNKNOWN)\s*(.*)/);
+        if (!match) return null;
+        const [, name, state, rest] = match;
+        let pid: number | null = null;
+        let uptime: string | null = null;
+        if (state === "RUNNING") {
+          const pidMatch = rest.match(/pid\s+(\d+)/);
+          const uptimeMatch = rest.match(/uptime\s+(\S+)/);
+          if (pidMatch) pid = parseInt(pidMatch[1], 10);
+          if (uptimeMatch) uptime = uptimeMatch[1];
+        }
+        return { name, state, pid, uptime };
+      }).filter(Boolean) as SupervisorProcess[];
+    } catch {
+      return [];
+    }
+  }
 
   function checkPort(port: number, timeoutMs = 2000): Promise<boolean> {
     return new Promise((resolve) => {
@@ -2567,13 +2621,25 @@ export default function register(api: OpenClawPluginApi) {
         const svc = MANAGED_SERVICES.find((s) => s.id === serviceId);
         // Also allow lloyd-* unit names directly (dynamic services)
         const lloydUnit = !svc && serviceId.startsWith("lloyd-") ? `${serviceId}.service` : null;
-        if (!svc && !lloydUnit) {
+        const isSupervisorSvc = SUPERVISOR_PROCESSES.has(serviceId);
+        if (!svc && !lloydUnit && !isSupervisorSvc) {
           jsonResponse(res, { error: `Unknown service: ${serviceId}` }, 400);
           return;
         }
         const unitName = svc ? svc.unit : lloydUnit!;
         if (!["start", "stop", "restart"].includes(action)) {
           jsonResponse(res, { error: `Invalid action: ${action}` }, 400);
+          return;
+        }
+
+        // Route supervisor-managed processes to supervisorctl
+        if (isSupervisorSvc) {
+          const supervisorAction = action === "restart" ? "restart" : action;
+          execSync(
+            `supervisorctl -c ${SUPERVISOR_CONF} ${supervisorAction} ${serviceId}`,
+            { encoding: "utf-8", timeout: 15000 },
+          );
+          jsonResponse(res, { ok: true, serviceId, action });
           return;
         }
 
@@ -2697,12 +2763,53 @@ export default function register(api: OpenClawPluginApi) {
         const url = new URL(req.url || "", "http://localhost");
         const unit = url.searchParams.get("unit");
 
-        if (!unit || !unit.startsWith("lloyd-") || !unit.endsWith(".service")) {
+        const supervisorName = unit?.replace(" (supervisor)", "");
+        const isSupervisor = supervisorName ? SUPERVISOR_PROCESSES.has(supervisorName) : false;
+
+        if (!isSupervisor && (!unit || !unit.startsWith("lloyd-") || !unit.endsWith(".service"))) {
           jsonResponse(res, { error: `Invalid lloyd unit: ${unit}` }, 400);
           return;
         }
 
-        const name = LLOYD_DISPLAY_NAMES[unit] ?? unit.replace(/^lloyd-/, "").replace(/\.service$/, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        if (isSupervisor) {
+          const procs = parseSupervisorStatus();
+          const proc = procs.find(p => p.name === supervisorName);
+          const name = SUPERVISOR_DISPLAY_NAMES[supervisorName!] ?? supervisorName!;
+
+          let logs = "";
+          try {
+            logs = execSync(
+              `supervisorctl -c ${SUPERVISOR_CONF} tail -4000 ${supervisorName} stderr 2>/dev/null`,
+              { encoding: "utf-8", timeout: 5000 },
+            );
+          } catch (e: any) {
+            try {
+              logs = execSync(
+                `supervisorctl -c ${SUPERVISOR_CONF} tail -4000 ${supervisorName} stdout 2>/dev/null`,
+                { encoding: "utf-8", timeout: 5000 },
+              );
+            } catch {
+              logs = e.stdout || "Unable to fetch logs";
+            }
+          }
+
+          const logLines = logs.split("\n").filter((l: string) => l.trim() !== "").slice(-40);
+
+          jsonResponse(res, {
+            unit: unit!,
+            name,
+            pid: proc?.pid ?? null,
+            memory: null,
+            cpu: null,
+            tasks: null,
+            activeSince: proc?.uptime ? `up ${proc.uptime}` : null,
+            logLines,
+            rawStatus: proc ? `${proc.name} ${proc.state} pid ${proc.pid}, uptime ${proc.uptime}` : "unknown",
+          });
+          return;
+        }
+
+        const name = LLOYD_DISPLAY_NAMES[unit!] ?? unit!.replace(/^lloyd-/, "").replace(/\.service$/, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
         let statusOutput = "";
         try {
@@ -2765,7 +2872,8 @@ export default function register(api: OpenClawPluginApi) {
             `systemctl --user list-units 'lloyd-*' --all --output=json 2>/dev/null`,
             { encoding: "utf-8", timeout: 5000 },
           );
-          units = JSON.parse(output);
+          units = JSON.parse(output).filter((u: any) => u.load !== "not-found");
+          units = units.filter((u: any) => !SUPERVISOR_PROCESSES.has((u.unit || "").replace(".service", "")));
         } catch (e: any) {
           jsonResponse(res, { error: "Failed to query systemctl: " + (e.message || String(e)) }, 500);
           return;
@@ -2823,7 +2931,42 @@ export default function register(api: OpenClawPluginApi) {
           }),
         );
 
-        jsonResponse(res, { services, timestamp: new Date().toISOString() });
+        // Query supervisord for managed processes
+        const supervisorProcs = parseSupervisorStatus();
+        const supervisorServices = await Promise.all(
+          supervisorProcs
+            .filter(p => SUPERVISOR_PROCESSES.has(p.name))
+            .map(async (p) => {
+              const port = SUPERVISOR_PORT_MAP[p.name] ?? null;
+              let portHealthy: boolean | null = null;
+              if (port !== null) portHealthy = await checkPort(port);
+
+              const activeState = p.state === "RUNNING" ? "active"
+                : (p.state === "FATAL" || p.state === "EXITED") ? "failed"
+                : "inactive";
+              const subState = p.state === "RUNNING" ? "running" : p.state.toLowerCase();
+
+              let health: string;
+              if (activeState === "failed") health = "stopped";
+              else if (activeState === "active") health = portHealthy === false ? "degraded" : "healthy";
+              else health = "stopped";
+
+              return {
+                id: p.name,
+                unit: `${p.name} (supervisor)`,
+                name: SUPERVISOR_DISPLAY_NAMES[p.name] ?? p.name,
+                activeState,
+                subState,
+                port,
+                portHealthy,
+                uptime: p.uptime ?? null,
+                health,
+              };
+            })
+        );
+
+        const allServices = [...services, ...supervisorServices];
+        jsonResponse(res, { services: allServices, timestamp: new Date().toISOString() });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
