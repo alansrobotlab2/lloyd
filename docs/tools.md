@@ -2,21 +2,20 @@
 tags:
   - lloyd
   - architecture
-  - mcp
-  - tools
 type: reference
 segment: projects
 ---
 
-# MCP Tools Server
+# MCP Tools
 
-The MCP Tools Server is a consolidated Python service providing 28 tools to the [[index|OpenClaw Gateway]] via SSE transport.
+The MCP Tools Server is a consolidated Python service providing 26 tools to the [[index|OpenClaw Gateway]] via SSE transport.
 
 ## Server
 
 - **Source:** `~/Projects/lloyd-services/tool_services.py`
 - **Framework:** Python, FastMCP
-- **Service:** `lloyd-tool-mcp.service` (systemd user service)
+- **Service:** `lloyd-tool-mcp` (supervisord inside distrobox `lloyd-services`)
+- **Command:** `uv run tool_services.py --transport sse --port 8093`
 - **Port:** 8093 (SSE transport)
 - **Architecture:** Single consolidated server replacing 5 separate per-plugin `server.py` processes
 - **Dependencies:** mcp[cli], pyyaml, ddgs, httpx, readability-lxml, html2text, uvicorn, starlette, sse-starlette
@@ -24,14 +23,18 @@ The MCP Tools Server is a consolidated Python service providing 28 tools to the 
 ## OpenClaw Plugin
 
 - **Path:** `~/.openclaw/extensions/mcp-tools/`
-- **Implementation:** `index.ts` registers 25 tools + prefill hook + work mode commands
+- **Implementation:** `index.ts` registers tools + prefill hook + work mode commands
 - **Transport:** Uses `McpSseClient` to proxy tool calls to the Python MCP server
 - **Additional responsibilities:**
   - Mode switching (`/work`, `/personal`, `/general`, `/mode` commands)
   - Daily memory file creation on `session_end` hook
   - Mode-aware scope injection via `before_tool_call` hook
 
-## Tool Inventory (28 Tools)
+## Tool Allowlists
+
+Each agent in `~/.openclaw/openclaw.json` has a tool allowlist controlling which of the 26 tools it can access. The gateway enforces these per-agent, so skill-only agents never see file or bash tools.
+
+## Tool Inventory (26 Tools)
 
 ### Memory / Vault (6)
 
@@ -79,16 +82,14 @@ All file operations are sandboxed to `$HOME`.
 | `bg_exec` | Background process execution (long-running) |
 | `bg_process` | Background process management |
 
-### Backlog (6)
+### Backlog (4)
 
 | Tool | Description |
 |------|-------------|
 | `backlog_boards` | List all boards |
 | `backlog_tasks` | List/filter tasks |
-| `backlog_next_task` | Get highest-priority assigned up_next task |
 | `backlog_get_task` | Full task details by ID |
-| `backlog_update_task` | Update task status, priority, notes |
-| `backlog_create_task` | Create new task |
+| `backlog_write_task` | Create or update a task |
 
 See [[backlog]] for the backlog system architecture.
 
@@ -124,7 +125,7 @@ graph LR
 
     subgraph "External"
         DDG["DuckDuckGo"]
-        LocalLLM["vLLM :8091"]
+        LocalLLM["Local LLM :8091"]
     end
 
     Plugin -->|"SSE (McpSseClient)"| FastMCP
@@ -144,9 +145,9 @@ graph LR
 
 ## Related Docs
 
-- [[index]] — High-Level Architecture
-- [[memory-system]] — Memory System (prefill pipeline, vault search)
-- [[voice-pipeline]] — Voice Pipeline (voice MCP is a separate server)
-- [[backlog]] — Backlog System
-- [[skills]] — Skill System
-- [[infrastructure]] — Infrastructure (service configuration)
+- [[index]] -- High-Level Architecture
+- [[memory]] -- Memory System (prefill pipeline, vault search)
+- [[voice]] -- Voice Pipeline (voice MCP is a separate server)
+- [[backlog]] -- Backlog System
+- [[skills]] -- Skill System
+- [[infrastructure]] -- Infrastructure (service configuration)

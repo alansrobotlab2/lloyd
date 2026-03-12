@@ -51,3 +51,7 @@ update-check.json
 /cron/runs/
 
 /docs/archive/
+
+/delivery-queue/
+
+jobs.json

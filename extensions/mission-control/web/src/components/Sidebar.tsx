@@ -73,9 +73,10 @@ interface SidebarProps {
   onNavigate: (page: Page) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  sessionKey?: string | null;
 }
 
-export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse }: SidebarProps) {
+export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, sessionKey }: SidebarProps) {
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft;
   const [workMode, setWorkMode] = useState(false);
   const { isListening, voiceEnabled, wsAvailable, statusLoaded, latestTranscript, transcriptVisible, stateColor, stateText, startMic, stopMic, handleVoiceToggle, ttsEnabled, handleTtsToggle, pipelineState } = useVoiceContext();
@@ -159,7 +160,7 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
 
           {/* Row 3 — Mic toggle */}
           <button
-            onClick={wsAvailable && statusLoaded ? () => (isListening ? stopMic() : startMic()) : undefined}
+            onClick={wsAvailable && statusLoaded ? () => (isListening ? stopMic() : startMic(sessionKey || undefined)) : undefined}
             disabled={!wsAvailable || !statusLoaded}
             title={collapsed ? (isListening ? "Mic Active" : "Mic Inactive") : undefined}
             className={`w-full flex items-center ${collapsed ? "justify-center" : "gap-2.5"} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${

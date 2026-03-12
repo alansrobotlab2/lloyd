@@ -58,6 +58,7 @@ export default function Layout() {
   const [collapsed, setCollapsed] = useState(false);
   const [chatSessionKey, setChatSessionKey] = useState<string | null>(null);
   const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
+  const [activeSessionKey, setActiveSessionKey] = useState<string | null>(null);
 
   // Auto-load session from URL query param ?session=<key>
   useEffect(() => {
@@ -87,18 +88,19 @@ export default function Layout() {
 
   return (
     <ErrorBoundary>
-      <VoiceProvider>
+      <VoiceProvider activeSessionKey={activeSessionKey}>
         <div className="h-screen flex bg-surface-0">
           <Sidebar
             active={page}
             onNavigate={setPage}
             collapsed={collapsed}
             onToggleCollapse={() => setCollapsed((c) => !c)}
+            sessionKey={chatSessionKey || activeSessionKey}
           />
           <main className="flex-1 flex min-h-0 overflow-hidden">
             <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
               <div className={page === "chat" ? "flex flex-col min-h-0 flex-1 overflow-hidden" : "hidden"}>
-                <ChatPanel requestedSessionKey={chatSessionKey} onSessionLoaded={handleSessionLoaded} />
+                <ChatPanel requestedSessionKey={chatSessionKey} onSessionLoaded={handleSessionLoaded} onActiveSessionChange={setActiveSessionKey} />
               </div>
               {page === "sessions" && (
                 <SessionsPage onOpenSession={handleOpenSession} />

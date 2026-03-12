@@ -2,7 +2,6 @@
 tags:
   - lloyd
   - architecture
-  - skills
 type: reference
 segment: projects
 ---
@@ -21,16 +20,16 @@ Skills are on-demand procedures that Lloyd reads before executing. They are simp
 
 ## Discovery and Loading
 
-- **Discovery:** `skills_search` [[mcp-tools|MCP tool]] queries both the local index and ClawhHub catalog in parallel
+- **Discovery:** `skills_search` [[tools|MCP tool]] queries both the local index and ClawhHub catalog in parallel
 - Results tagged with `source: "local"` (custom/built-in) vs `source: "clawhub"`
 - Local results returned first, ClawhHub appended (deduped by name/slug match)
 - 1-hour cache TTL on ClawhHub results; graceful degradation on API errors
 - **Source filter:** `source` param accepts `"all"` (default), `"builtin"`, `"custom"`, `"clawhub"`
 - **Inspection:** `skills_get` supports `clawhub:<slug>` prefix for read-only inspection of catalog skills
 - **Loading:** On-demand — Lloyd reads the `SKILL.md` via `file_read` before executing
-- **Not loaded into the system prompt by default**
+- **Not loaded into the system prompt by default** (`maxSkillsInPrompt=0`); skills are loaded from config at `~/obsidian/skills/`
 
-## Current Custom Skills
+## Current Custom Skills (34)
 
 | Skill | Path |
 |-------|------|
@@ -116,6 +115,6 @@ Security scanning powered by Snyk agent integration.
 ## Related Docs
 
 - [[index]] — High-Level Architecture
-- [[mcp-tools]] — MCP Tools Server (skills_search, skills_get, skills_install)
-- [[skills-extraction-pipeline]] — Skills Extraction Pipeline
-- [[agent-system]] — Agent System
+- [[tools]] — MCP Tools Server (skills_search, skills_get, skills_install)
+- [[nightly-skills-management]] — Skills Extraction Pipeline
+- [[agents]] — Agent System

@@ -6,81 +6,106 @@ type: reference
 segment: projects
 ---
 
-# Lloyd — High-Level Architecture Overview
+# Lloyd -- High-Level Architecture Overview
 
-Lloyd is a voice-first AI assistant built on top of **OpenClaw**, a custom gateway/agent platform. The system combines a Node.js gateway, Python tool and voice services, a local LLM, and an Obsidian knowledge vault into a unified personal assistant.
+Lloyd is a voice-first AI assistant built on **OpenClaw**, a custom gateway/agent platform. The system combines a Node.js gateway, Python tool and voice services, a local LLM, and an Obsidian knowledge vault into a unified personal assistant.
+
+**Model:** Claude Opus 4.6 (Anthropic Max plan, OAuth auth)
+**Multi-session:** Per-channel-peer DM scoping, Mission Control session resume
+**Process management:** Supervisord (inside distrobox) + systemd user services
 
 ## Core Components
 
-### OpenClaw Gateway
-Node.js/TypeScript gateway service running as `openclaw-gateway.service` (systemd user service, port 18789). Runs inside a distrobox container named `lloyd`. Manages agents, sessions, cron jobs, extensions/plugins, and the WebSocket/HTTP API.
+| Component | Description | Detail Doc |
+|-----------|-------------|------------|
+| OpenClaw Gateway | Node.js/TypeScript gateway (port 18789). Agents, sessions, cron, extensions, WebSocket/HTTP API. Runs inside distrobox container `lloyd`. | [[infrastructure]] |
+| Main Agent (Lloyd) | Primary conversational agent. Opus 4.6 via Anthropic. Agent ID: `main`. | [[agents]] |
+| Memory Agent | Local Qwen3.5-35B-A3B for periodic capture. | [[agents]], [[memory]] |
+| Discord Agent | Local LLM for non-DM Discord channels. Agent ID: `discord-lloyd`. | [[agents]] |
+| MCP Tools Server | Python FastMCP server (port 8093). 26 tools across vault, web, filesystem, system, backlog, and skills categories. | [[tools]] |
+| Voice Pipeline | Wake word + VAD + Whisper STT + speaker ID + Qwen3-TTS. WebSocket streaming to browser. | [[voice]] |
+| Mission Control | React dashboard at `/mc/`. Chat, token usage, API monitoring, services tab. | [[infrastructure]] |
+| Obsidian Vault | Knowledge base at `~/obsidian/`. 5 segments: agents, personal, work, projects, knowledge. BM25 FTS5 search. | [[memory]] |
+| Memory System | 3-tier: periodic capture (15m), nightly reflection, real-time signal detection. Prefill context injection. | [[memory]] |
+| Backlog System | SQLite kanban. 4 tools: boards, tasks, get_task, write_task. | [[backlog]] |
+| Skill System | 34 skills in `~/obsidian/skills/`. Loaded on-demand via SKILL.md. ClawhHub catalog integration. | [[skills]] |
+| Usage Tracking | Token and cost tracking across agents and models. | [[usage-tracking]] |
 
-### Lloyd (Main Agent)
-The primary conversational agent. Model: Claude Sonnet 4.6 via Anthropic (Max plan, OAuth auth). Agent ID: `main`. Workspace: `~/obsidian/agents/lloyd/`. Personality defined in SOUL.md, behavior rules in AGENTS.md. See [[agent-system]] for full agent architecture.
+## GPU Allocation
 
-### MCP Tools Server
-Python (FastMCP) server at `~/Projects/lloyd-services/tool_services.py`. Runs as `lloyd-tool-mcp.service` (systemd), exposed on port 8093 via SSE. Provides 27+ tools across vault/memory, web, file system, bash, and backlog categories. See [[mcp-tools]] for the full tool inventory.
+| GPU | Hardware | Role |
+|-----|----------|------|
+| GPU0 | RTX 5090 32GB | LLM inference (vLLM, Qwen3.5-35B-A3B) |
+| GPU1 | RTX 3090 24GB | TTS (Qwen3-TTS) + voice pipeline |
+| GPU2 | RTX 3090 24GB | QMD daemon + gateway |
 
-### Voice Pipeline
-Python voice processing at `~/Projects/lloyd-services/`. Includes `voice_pipeline.py` (wake word + VAD + STT + speaker ID), `voice_mode.py` (Textual TUI), `voice_services.py` (voice MCP server on port 8094). See [[voice-pipeline]] for details.
+## Nightly Schedule (PST)
 
-### Mission Control
-React dashboard extension at `~/.openclaw/extensions/mission-control/`. Served at `/mc/`. Chat interface, token usage stats, API monitoring, services tab. See [[infrastructure]] for build and deployment details.
+| Time | Job | Detail Doc |
+|------|-----|------------|
+| 2:00am | Vault maintenance -- tag hygiene, frontmatter, structure | [[nightly-vault-maintenance]] |
+| 3:00am | Skills management -- extraction, evaluation, deduplication | [[nightly-skills-management]] |
+| 4:00am | Reflection + self-improvement -- corrections, mental models, MEMORY.md consolidation | [[nightly-reflection]] |
 
-### Obsidian Vault
-Knowledge base at `~/obsidian/`. 5 segments: `agents/`, `personal/`, `work/`, `projects/`, `knowledge/`. Indexed by BM25 FTS5 for search.
+Periodic memory capture runs every 15 minutes (local Qwen3.5-35B-A3B).
 
-### Backlog System
-SQLite-based kanban at `~/.openclaw/data/backlog.db`. Tasks flow: inbox -> up_next -> in_progress -> in_review -> done. See [[backlog]] for details.
+## Services
 
-### Memory System
-3-tier architecture: periodic capture (local Qwen3.5, every 15m), nightly reflection (Opus, 2am PST), SOUL.md/AGENTS.md auto-updates. See [[memory-system]] for the full breakdown.
+### Systemd (user services)
 
-### Local LLM
-vLLM serving Qwen3.5-35B-A3B on port 8091 (~160 tps). Used for periodic memory capture and ASR cleaning.
+| Service | Description |
+|---------|-------------|
+| `lloyd-llm` | vLLM serving Qwen3.5-35B-A3B |
+| `lloyd-qmd-daemon` | QMD daemon (port 8181) |
+| `lloyd-qmd-watcher` | QMD file watcher |
 
-## Component Diagram
+### Supervisord (inside distrobox)
 
-```mermaid
-graph TB
-    subgraph External
-        Anthropic["Anthropic API<br/>(Claude Sonnet 4.6)"]
-        DuckDuckGo["DuckDuckGo<br/>(Web Search)"]
-    end
+| Service | Port | Description |
+|---------|------|-------------|
+| `lloyd-tool-mcp` | 8093 | MCP tools server (SSE) |
+| `lloyd-tts` | 8090 | Qwen3-TTS (OpenAI-compatible API) |
+| `lloyd-voice-mcp` | 8094 | Voice MCP server (SSE) |
+| `lloyd-voice-mode` | 8092 | Voice TUI + HTTP API |
+| `openclaw-gateway` | 18789 | Gateway (manual start, not autostart) |
 
-    subgraph Gateway["OpenClaw Gateway :18789"]
-        GW["Node.js Gateway"]
-        MC["Mission Control /mc/<br/>(React Dashboard)"]
-        Extensions["Extensions<br/>mcp-tools | voice-tools<br/>agent-orchestrator | thunderbird-tools"]
-    end
+## Architecture Diagram
 
-    subgraph Python Services
-        MCP["MCP Tools Server<br/>:8093 SSE"]
-        VMCP["Voice MCP Server<br/>:8094 SSE"]
-        VP["Voice Pipeline<br/>:8092 HTTP"]
-        TTS["Orpheus / CosyVoice TTS"]
-    end
-
-    subgraph Local
-        Vault["Obsidian Vault<br/>~/obsidian/"]
-        Backlog["Backlog SQLite<br/>~/.openclaw/data/backlog.db"]
-        LocalLLM["vLLM Qwen3.5<br/>:8091"]
-    end
-
-    GW -->|SSE| MCP
-    GW -->|SSE| VMCP
-    GW --> Anthropic
-    GW --> MC
-
-    VMCP -->|HTTP| VP
-    VP --> TTS
-
-    MCP --> Vault
-    MCP --> Backlog
-    MCP --> DuckDuckGo
-    MCP --> LocalLLM
-
-    VP -->|"Mic / Audio"| TTS
+```
++------------------+       +-------------------------+
+|   Anthropic API  |       |      Discord / Web      |
+|  (Opus 4.6)     |       |      Mission Control     |
++--------+---------+       +------------+------------+
+         |                              |
+         v                              v
++----------------------------------------------------------+
+|              OpenClaw Gateway :18789                      |
+|  Agents | Sessions | Cron | Extensions | WebSocket API   |
++----+------------------+------------------+---------------+
+     |                  |                  |
+     v                  v                  v
++----------+    +-----------+    +------------------+
+| MCP Tools|    | Voice MCP |    | Extensions       |
+| :8093    |    | :8094     |    | mcp-tools        |
++----+-----+    +-----+-----+   | voice-tools      |
+     |                |          | mission-control   |
+     v                v          +------------------+
++---------+    +-----------+
+| Vault   |    | Voice     |
+| BM25    |    | Pipeline  |
+| Backlog |    | :8092     |
+| Web     |    +-----+-----+
++---------+          |
+     |               v
+     v          +---------+
++---------+    | TTS     |
+| Local   |    | :8090   |
+| LLM     |    +---------+
+| :8091   |
++---------+
+  GPU0          GPU1         GPU2
+  RTX 5090      RTX 3090     RTX 3090
+  (LLM)        (TTS+Voice)  (QMD+GW)
 ```
 
 ## Key Paths
@@ -89,16 +114,22 @@ graph TB
 |------|---------|
 | `~/Projects/lloyd-services/` | Voice pipeline + MCP servers (Python) |
 | `~/.openclaw/` | Gateway config, extensions, data, sessions |
+| `~/.openclaw/openclaw.json` | Main configuration file |
 | `~/.openclaw/extensions/` | Plugins: mcp-tools, voice-tools, mission-control |
 | `~/obsidian/` | Knowledge vault |
-| `~/obsidian/agents/lloyd/` | Lloyd's workspace (SOUL.md, AGENTS.md, MEMORY.md, skills/) |
+| `~/obsidian/agents/lloyd/` | Lloyd's workspace (SOUL.md, AGENTS.md, MEMORY.md) |
+| `~/obsidian/skills/` | 34 custom skills |
 
 ## Related Docs
 
-- [[memory-system]] — Memory System Architecture
-- [[mcp-tools]] — MCP Tools Server
-- [[voice-pipeline]] — Voice Pipeline
-- [[agent-system]] — Agent System
-- [[skills]] — Skill System
-- [[infrastructure]] — Infrastructure
-- [[backlog]] — Backlog System
+- [[agents]] -- Agent System
+- [[memory]] -- Memory System Architecture
+- [[tools]] -- MCP Tools Server
+- [[voice]] -- Voice Pipeline
+- [[infrastructure]] -- Infrastructure and Services
+- [[backlog]] -- Backlog System
+- [[skills]] -- Skill System
+- [[usage-tracking]] -- Usage Tracking
+- [[nightly-vault-maintenance]] -- Nightly Vault Maintenance
+- [[nightly-skills-management]] -- Nightly Skills Management
+- [[nightly-reflection]] -- Nightly Reflection + Self-Improvement

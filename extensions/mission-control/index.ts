@@ -1400,7 +1400,7 @@ export default function register(api: OpenClawPluginApi) {
     },
     {
       source: "mcp-tools — backlog",
-      tools: ["backlog_boards", "backlog_tasks", "backlog_next_task", "backlog_get_task", "backlog_update_task", "backlog_create_task"],
+      tools: ["backlog_boards", "backlog_tasks", "backlog_get_task", "backlog_write_task"],
     },
     {
       source: "voice-tools",
@@ -2518,29 +2518,35 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   function parseSupervisorStatus(): SupervisorProcess[] {
+    let output: string;
     try {
-      const output = execSync(
+      output = execSync(
         `/usr/sbin/supervisorctl -c ${SUPERVISOR_CONF} status 2>/dev/null`,
         { encoding: "utf-8", timeout: 5000 },
       );
-      return output.split("\n").filter(l => l.trim()).map(line => {
-        const match = line.match(/^(\S+)\s+(RUNNING|STOPPED|STARTING|BACKOFF|STOPPING|EXITED|FATAL|UNKNOWN)\s*(.*)/);
-        if (!match) return null;
-        const [, name, state, rest] = match;
-        let pid: number | null = null;
-        let uptime: string | null = null;
-        if (state === "RUNNING") {
-          const pidMatch = rest.match(/pid\s+(\d+)/);
-          const uptimeMatch = rest.match(/uptime\s+(\S+)/);
-          if (pidMatch) pid = parseInt(pidMatch[1], 10);
-          if (uptimeMatch) uptime = uptimeMatch[1];
-        }
-        return { name, state, pid, uptime };
-      }).filter(Boolean) as SupervisorProcess[];
     } catch (err: any) {
-      console.error("[MC] supervisorctl failed:", err?.message || String(err));
-      return [];
+      // supervisorctl exits non-zero when any process is not RUNNING, but stdout still has valid output
+      if (err?.stdout) {
+        output = err.stdout;
+      } else {
+        console.error("[MC] supervisorctl failed:", err?.message || String(err));
+        return [];
+      }
     }
+    return output.split("\n").filter(l => l.trim()).map(line => {
+      const match = line.match(/^(\S+)\s+(RUNNING|STOPPED|STARTING|BACKOFF|STOPPING|EXITED|FATAL|UNKNOWN)\s*(.*)/);
+      if (!match) return null;
+      const [, name, state, rest] = match;
+      let pid: number | null = null;
+      let uptime: string | null = null;
+      if (state === "RUNNING") {
+        const pidMatch = rest.match(/pid\s+(\d+)/);
+        const uptimeMatch = rest.match(/uptime\s+(\S+)/);
+        if (pidMatch) pid = parseInt(pidMatch[1], 10);
+        if (uptimeMatch) uptime = uptimeMatch[1];
+      }
+      return { name, state, pid, uptime };
+    }).filter(Boolean) as SupervisorProcess[];
   }
 
   function checkPort(port: number, timeoutMs = 2000): Promise<boolean> {
@@ -2780,13 +2786,13 @@ export default function register(api: OpenClawPluginApi) {
           let logs = "";
           try {
             logs = execSync(
-              `supervisorctl -c ${SUPERVISOR_CONF} tail -4000 ${supervisorName} stderr 2>/dev/null`,
+              `/usr/sbin/supervisorctl -c ${SUPERVISOR_CONF} tail -4000 ${supervisorName} stderr 2>/dev/null`,
               { encoding: "utf-8", timeout: 5000 },
             );
           } catch (e: any) {
             try {
               logs = execSync(
-                `supervisorctl -c ${SUPERVISOR_CONF} tail -4000 ${supervisorName} stdout 2>/dev/null`,
+                `/usr/sbin/supervisorctl -c ${SUPERVISOR_CONF} tail -4000 ${supervisorName} stdout 2>/dev/null`,
                 { encoding: "utf-8", timeout: 5000 },
               );
             } catch {

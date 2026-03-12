@@ -225,7 +225,10 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   // Fetch yesterday's and today's daily memory files from the vault.
-  // Uses the current mode's memory prefix for path resolution.
+  // Extracts the last MAX_ENTRIES session entries (### Session headers)
+  // across both days combined, keeping chronological order (yesterday then today).
+  const MAX_DAILY_NOTE_ENTRIES = 8;
+
   async function fetchDailyNotes(): Promise<string> {
     const now = new Date();
     const toPstDateStr = (d: Date): string => {
@@ -238,9 +241,10 @@ export default function register(api: OpenClawPluginApi) {
 
     const memPrefix = MODE_MEMORY_PREFIX[getCurrentMode()];
 
+    // Fetch yesterday first, then today (chronological order)
     const entries = [
-      { date: toPstDateStr(now), label: "today" },
       { date: toPstDateStr(new Date(now.getTime() - 86_400_000)), label: "yesterday" },
+      { date: toPstDateStr(now), label: "today" },
     ];
 
     const results = await Promise.allSettled(
@@ -249,7 +253,10 @@ export default function register(api: OpenClawPluginApi) {
       ),
     );
 
-    const sections: string[] = [];
+    // Parse each file into session entries (split on ### Session headers)
+    interface DayEntries { date: string; label: string; header: string; entries: string[]; totalCount: number; }
+    const days: DayEntries[] = [];
+
     for (let i = 0; i < results.length; i++) {
       const r = results[i];
       const { date, label } = entries[i];
@@ -259,12 +266,62 @@ export default function register(api: OpenClawPluginApi) {
         .map((b: any) => b.text)
         .join("")
         .trim();
-      // mem_get returns JSON: {path, text} — unwrap if needed
       let text = raw;
       try { text = JSON.parse(raw)?.text ?? raw; } catch { /* use raw */ }
-      if (text && !text.startsWith("File not found")) {
-        sections.push(`--- ${date} (${label}) ---\n${text.trim()}`);
+      if (!text || text.startsWith("File not found")) continue;
+
+      // Split into frontmatter/header and session entries
+      const lines = text.split("\n");
+      const headerLines: string[] = [];
+      const sessionEntries: string[] = [];
+      let currentEntry: string[] = [];
+      let inSessions = false;
+
+      for (const line of lines) {
+        if (line.startsWith("### ")) {
+          if (currentEntry.length > 0) sessionEntries.push(currentEntry.join("\n"));
+          currentEntry = [line];
+          inSessions = true;
+        } else if (inSessions) {
+          currentEntry.push(line);
+        } else {
+          headerLines.push(line);
+        }
       }
+      if (currentEntry.length > 0) sessionEntries.push(currentEntry.join("\n"));
+
+      days.push({
+        date, label,
+        header: headerLines.join("\n").trim(),
+        entries: sessionEntries,
+        totalCount: sessionEntries.length,
+      });
+    }
+
+    if (days.length === 0) return "";
+
+    // Take last MAX_DAILY_NOTE_ENTRIES entries across both days combined.
+    // Flatten all entries with day metadata, then take the tail.
+    const allEntries: { dayIdx: number; entry: string }[] = [];
+    for (let d = 0; d < days.length; d++) {
+      for (const entry of days[d].entries) {
+        allEntries.push({ dayIdx: d, entry });
+      }
+    }
+
+    const totalEntries = allEntries.length;
+    const kept = allEntries.slice(-MAX_DAILY_NOTE_ENTRIES);
+    const truncatedCount = totalEntries - kept.length;
+
+    // Group kept entries back by day
+    const sections: string[] = [];
+    for (let d = 0; d < days.length; d++) {
+      const dayEntries = kept.filter(e => e.dayIdx === d).map(e => e.entry);
+      if (dayEntries.length === 0) continue;
+      const { date, label, totalCount } = days[d];
+      const dayTruncated = totalCount - dayEntries.length;
+      const truncNote = dayTruncated > 0 ? `\n[... ${dayTruncated} earlier sessions omitted ...]\n\n` : "";
+      sections.push(`--- ${date} (${label}) ---\n${days[d].header}\n${truncNote}${dayEntries.join("\n\n")}`);
     }
 
     if (sections.length === 0) return "";
@@ -977,18 +1034,6 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "backlog_next_task",
-    "Backlog Next Task",
-    "Get the next assigned task ready to work on. Returns the highest-priority assigned up_next task, or null if the queue is empty.",
-    {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-    5_000,
-  );
-
-  proxyTool(
     "backlog_get_task",
     "Backlog Get Task",
     "Get full details for a single task by ID, including description, status, tags, and assignment state.",
@@ -1003,71 +1048,40 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   proxyTool(
-    "backlog_update_task",
-    "Backlog Update Task",
-    "Update a task's status, blocked state, priority, name, description, or add an activity note. Use to move tasks through the pipeline (up_next → in_progress → in_review) and communicate progress.",
+    "backlog_write_task",
+    "Backlog Write Task",
+    "Create or update a backlog task. Omit id to create a new task; include id to update an existing one. Use to track work, move tasks through the pipeline, and communicate progress.",
     {
       type: "object",
       properties: {
-        id: { type: "integer", description: "Task ID to update" },
+        id: { type: "integer", description: "Task ID to update (omit to create new)" },
+        name: { type: "string", description: "Task title (required for create)" },
+        description: { type: "string", description: "Task description" },
         status: {
           type: "string",
           enum: ["inbox", "up_next", "in_progress", "in_review", "done"],
-          description: "New status for the task",
+          description: "Task status",
+        },
+        priority: {
+          type: "string",
+          enum: ["none", "low", "medium", "high"],
+          description: "Task priority",
         },
         blocked: {
           type: "string",
           description: "Set blocked state (true/false)",
         },
-        priority: {
-          type: "string",
-          enum: ["none", "low", "medium", "high"],
-          description: "Set task priority",
-        },
+        board_id: { type: "integer", description: "Board ID (used when creating)" },
+        tags: { type: "string", description: "Comma-separated tags (e.g. \"bug,auth\")" },
         activity_note: {
           type: "string",
-          description: "Activity note to add (visible in task history, attributed to the agent)",
-        },
-        name: {
-          type: "string",
-          description: "New task title",
-        },
-        description: {
-          type: "string",
-          description: "New task description",
+          description: "Activity note to add (visible in task history)",
         },
       },
-      required: ["id"],
+      required: [],
     },
     5_000,
   );
 
-  proxyTool(
-    "backlog_create_task",
-    "Backlog Create Task",
-    "Create a new task on a backlog board. Use when you discover work that should be tracked (tech debt, follow-ups, new ideas).",
-    {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "Task title (short, descriptive)" },
-        description: { type: "string", description: "Detailed task description" },
-        board_id: { type: "integer", description: "Board ID to create the task on" },
-        status: {
-          type: "string",
-          enum: ["inbox", "up_next"],
-          description: "Initial status (default: inbox)",
-        },
-        tags: { type: "string", description: "Comma-separated tags (e.g. \"bug,auth\")" },
-        priority: {
-          type: "string",
-          enum: ["none", "low", "medium", "high"],
-          description: "Task priority (default: none)",
-        },
-      },
-      required: ["name"],
-    },
-    5_000,
-  );
-
-  api.logger.info?.("mcp-tools: registered 25 tools + prefill hook via single MCP server");
+  api.logger.info?.("mcp-tools: registered 23 tools + prefill hook via single MCP server");
 }

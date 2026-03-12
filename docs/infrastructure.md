@@ -2,7 +2,6 @@
 tags:
   - lloyd
   - architecture
-  - infrastructure
 type: reference
 segment: projects
 ---
@@ -13,56 +12,63 @@ segment: projects
 
 | Property | Value |
 |----------|-------|
-| Host OS | Arch Linux (kernel 6.18.9) |
-| Container | Distrobox container named `lloyd` |
-| GPU | NVIDIA (CUDA 12, used by [[voice-pipeline]] ONNX Runtime) |
+| Host OS | Arch Linux |
+| Container | Distrobox container named `lloyd-services` |
+| Model | Opus 4.6 |
+| Config | `~/.openclaw/openclaw.json` |
+| Gateway | Local + LAN, TLS, token auth |
+
+## GPUs
+
+| GPU | Hardware | VRAM | Assignment |
+|-----|----------|------|------------|
+| GPU0 | RTX 5090 | 32 GB | Local LLM via llama-server (Qwen3.5-35B-A3B) |
+| GPU1 | RTX 3090 | 24 GB | TTS + voice pipeline |
+| GPU2 | RTX 3090 | 24 GB | QMD search + OpenClaw gateway |
 
 ## Systemd Services (User)
 
-| Service | Process | Port | Description |
-|---------|---------|------|-------------|
-| `openclaw-gateway.service` | OpenClaw gateway (Node.js) | 18789 | Main gateway, API, WebSocket, serves Mission Control |
-| `lloyd-tool-mcp.service` | tool_services.py (Python) | 8093 | [[mcp-tools|MCP tools server]] (27 tools) |
-| `lloyd-voice-mcp.service` | voice_services.py (Python) | 8094 | [[voice-pipeline|Voice MCP server]] |
+Three systemd user services run on the host (outside the distrobox container).
 
-**Known issue:** `lloyd-tool-mcp.service` needs `KillMode=control-group` to avoid stale PIDs on restart.
+| Service | Process | Description |
+|---------|---------|-------------|
+| `lloyd-llm.service` | llama-server | Local LLM -- Qwen3.5-35B-A3B on GPU0 |
+| `lloyd-qmd-daemon.service` | QMD Search | HTTP MCP search endpoint on port 8181 |
+| `lloyd-qmd-watcher.service` | QMD Vault Watcher | Auto-indexes vault changes for QMD |
 
-## Other Services
+## Supervisord Services (Distrobox `lloyd-services`)
 
-| Service | Port | Notes |
-|---------|------|-------|
-| Voice TUI (voice_mode.py) | 8092 | Manual start (not yet a systemd service) |
-| Local vLLM | 8091 | Qwen3.5-35B-A3B |
-| PostgreSQL | -- | System service (used by legacy Backlog Rails app, may be deprecated) |
+Five services managed by supervisord inside the distrobox container.
+
+| Service | Command | Port | Autostart |
+|---------|---------|------|-----------|
+| `lloyd-tool-mcp` | `uv run tool_services.py --transport sse --port 8093` | 8093 | Yes |
+| `lloyd-tts` | `bin/start-qwen3-tts.sh` (CUDA device 1) | 8090 | Yes |
+| `lloyd-voice-mcp` | `uv run voice_services.py --transport sse --port 8094` | 8094 | Yes |
+| `lloyd-voice-mode` | `uv run python voice_mode.py --headless` | 8092 | Yes |
+| `openclaw-gateway` | `bin/start-gateway.sh` (CUDA device 2) | 18790 | No (manual) |
 
 ## Port Map
 
-| Port | Service |
-|------|---------|
-| 8091 | vLLM (local LLM) |
-| 8092 | Voice TUI HTTP API |
-| 8093 | MCP Tools Server (SSE) |
-| 8094 | Voice MCP Server (SSE) |
-| 18789 | OpenClaw Gateway |
+| Port | Service | Protocol |
+|------|---------|----------|
+| 8090 | Qwen3-TTS | HTTP |
+| 8091 | Local LLM (llama-server) | HTTP |
+| 8092 | Voice Mode API (voice_mode.py) | HTTP |
+| 8093 | Tool Services MCP (tool_services.py) | SSE |
+| 8094 | Voice MCP (voice_services.py) | SSE |
+| 8181 | QMD Search | HTTP |
+| 18790 | OpenClaw Gateway + Mission Control | HTTPS |
 
-## Cron System
+## Nightly Crons
 
 OpenClaw has a built-in cron system (`openclaw cron`). Jobs run as isolated sessions with configurable model, timeout, and timezone.
 
-### Active Crons
-
-| Job | ID | Schedule | Agent | Model | Timeout |
-|-----|----|----------|-------|-------|---------|
-| `periodic-memory-capture` | `06a1d2b2` | Every 15m | memory | local-llm | 120s |
-| `nightly-reflection` | `9de0e564` | Daily 2am PST | memory | Opus | 300s |
-
-### Disabled Crons
-
-| Job | ID | Notes |
-|-----|----|-------|
-| `nightly-memory-consolidation` | `f53ad621` | Replaced by nightly reflection |
-
-See [[memory-system]] for details on what these crons do.
+| Job | Schedule | Description |
+|-----|----------|-------------|
+| Vault maintenance | 2:00 AM PST | Nightly vault cleanup and organization |
+| Skills management | 3:00 AM PST | Skill review, updates, and maintenance |
+| Reflection + self-improvement | 4:00 AM PST | Nightly reflection and self-improvement loop |
 
 ## Extension System
 
@@ -72,8 +78,8 @@ Plugins live at `~/.openclaw/extensions/`.
 
 | Extension | Purpose |
 |-----------|---------|
-| `mcp-tools` | [[mcp-tools|27 MCP tools + prefill + mode switching]] |
-| `voice-tools` | [[voice-pipeline|Voice tools + TTS hook]] |
+| `mcp-tools` | [[tools|26 MCP tools + prefill + mode switching]] |
+| `voice-tools` | [[voice|Voice tools + TTS hook]] |
 | `mission-control` | React dashboard |
 | `timing-profiler` | Performance profiling |
 
@@ -89,16 +95,16 @@ Plugins live at `~/.openclaw/extensions/`.
 ### Extension Structure
 
 Each extension contains:
-- `openclaw.plugin.json` — metadata
-- `index.ts` — implementation
+- `openclaw.plugin.json` -- metadata
+- `index.ts` -- implementation
 
 ### Plugin API
 
 `OpenClawPluginApi` provides:
-- `registerTool` — expose tools to agents
-- `registerCommand` — slash commands
-- `on(hook)` — lifecycle hooks
-- `logger` — structured logging
+- `registerTool` -- expose tools to agents
+- `registerCommand` -- slash commands
+- `on(hook)` -- lifecycle hooks
+- `logger` -- structured logging
 
 ### Available Hooks
 
@@ -127,14 +133,21 @@ React dashboard served by the [[index|OpenClaw Gateway]].
 
 Code changes require: compile + gateway restart.
 
+## Configuration
+
+- **Main config:** `~/.openclaw/openclaw.json`
+- **Gateway:** Serves local and LAN connections over TLS with token authentication
+- **Tool allowlists:** Per-agent tool access defined in `openclaw.json`
+- **Voice config:** `voice_bridge_config.json` for input mode and pipeline settings
+
 ## Ops Reference
 
 Full startup and troubleshooting guide: `~/Projects/lloyd/docs/OPS.md`
 
 ## Related Docs
 
-- [[index]] — High-Level Architecture
-- [[mcp-tools]] — MCP Tools Server
-- [[voice-pipeline]] — Voice Pipeline
-- [[memory-system]] — Memory System (cron jobs)
-- [[backlog]] — Backlog System
+- [[index]] -- High-Level Architecture
+- [[tools]] -- MCP Tools Server
+- [[voice]] -- Voice Pipeline
+- [[memory]] -- Memory System
+- [[backlog]] -- Backlog System

@@ -2,14 +2,13 @@
 tags:
   - lloyd
   - architecture
-  - backlog
 type: reference
 segment: projects
 ---
 
 # Backlog System
 
-SQLite-based kanban task management integrated into the [[mcp-tools|MCP Tools Server]].
+SQLite-based kanban task management integrated into the [[tools|MCP Tools Server]].
 
 ## Storage
 
@@ -42,16 +41,18 @@ graph LR
 
 Multiple kanban boards, each with its own task list.
 
-## MCP Tools (6)
+## MCP Tools (4)
+
+Previously 6 tools; consolidated to 4 by merging create/update into `backlog_write_task` and removing `backlog_next_task` (covered by `backlog_tasks` filters).
 
 | Tool | Description |
 |------|-------------|
 | `backlog_boards` | List all boards |
 | `backlog_tasks` | List/filter tasks (by status, assigned, blocked, board, tag) |
-| `backlog_next_task` | Get highest-priority assigned up_next task |
 | `backlog_get_task` | Full task details by ID |
-| `backlog_update_task` | Change status, blocked, priority, add activity notes |
-| `backlog_create_task` | Create new task |
+| `backlog_write_task` | Create or update a task (status, priority, blocked, activity notes) |
+
+See [[tools]] for full tool definitions and parameters.
 
 ## Webhook Integration
 
@@ -68,11 +69,11 @@ Backlog triggers an OpenClaw webhook on task create/update:
 
 ## Previous System
 
-The backlog was previously a Rails 8 app (Clawdeck) at `~/Development/clawdeck/`, port 3001, backed by PostgreSQL. It was migrated to the current SQLite-based system integrated into the [[mcp-tools|MCP tools server]].
+The backlog was previously a Rails 8 app (Clawdeck) at `~/Development/clawdeck/`, port 3001, backed by PostgreSQL. It was migrated to the current SQLite-based system integrated into the [[tools|MCP tools server]].
 
 ## Related Docs
 
 - [[index]] — High-Level Architecture
-- [[mcp-tools]] — MCP Tools Server (tool implementations)
-- [[agent-system]] — Agent System (task delegation)
+- [[tools]] — MCP Tools Server (tool implementations)
+- [[agents]] — Agent System (task delegation)
 - [[infrastructure]] — Infrastructure

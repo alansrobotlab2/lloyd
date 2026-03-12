@@ -1,11 +1,9 @@
 ---
-title: "OpenClaw Usage Tracking Architecture"
 tags:
-segment: projects
   - lloyd
   - architecture
-  - infrastructure
-created: 2026-03-06
+type: reference
+segment: projects
 ---
 
 # OpenClaw Usage Tracking Architecture

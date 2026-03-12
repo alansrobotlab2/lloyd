@@ -19,9 +19,10 @@ interface UseVoiceStreamReturn {
   wakewordDetected: boolean;
   pipelineState: string;
   transcripts: Transcript[];
-  startMic: () => Promise<void>;
+  startMic: (sessionKey?: string) => Promise<void>;
   stopMic: () => void;
   clearTranscripts: () => void;
+  updateSessionKey: (sessionKey: string) => void;
 }
 
 export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
@@ -176,7 +177,7 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
     return int16;
   }
 
-  const startMic = useCallback(async () => {
+  const startMic = useCallback(async (sessionKey?: string) => {
     // Connect SSE if not connected
     connectSse();
 
@@ -185,7 +186,7 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "start" }),
+      body: JSON.stringify({ type: "start", ...(sessionKey ? { sessionKey } : {}) }),
     });
 
     // Get mic
@@ -252,7 +253,17 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
     }
 
     setIsListening(false);
+    setPipelineState("IDLE");
     try { localStorage.setItem("voice-mic-enabled", "false"); } catch {}
+  }, []);
+
+  const updateSessionKey = useCallback((sessionKey: string) => {
+    fetch("/api/mc/voice-cmd", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "start", sessionKey }),
+    }).catch(() => {});
   }, []);
 
   const clearTranscripts = useCallback(() => setTranscripts([]), []);
@@ -277,7 +288,7 @@ export function useVoiceStream(_wsPort: number = 8095): UseVoiceStreamReturn {
     };
   }, [stopMic]);
 
-  return { isConnected, isListening, isSpeaking, wakewordDetected, pipelineState, transcripts, startMic, stopMic, clearTranscripts };
+  return { isConnected, isListening, isSpeaking, wakewordDetected, pipelineState, transcripts, startMic, stopMic, clearTranscripts, updateSessionKey };
 }
 
 export function getPersistedMicEnabled(): boolean {

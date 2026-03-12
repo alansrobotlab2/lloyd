@@ -8,7 +8,7 @@ interface VoiceContextValue {
   wakewordDetected: boolean;
   pipelineState: string;
   transcripts: Array<{ text: string; speaker: string; is_continuity: boolean; timestamp: number }>;
-  startMic: () => Promise<void>;
+  startMic: (sessionKey?: string) => Promise<void>;
   stopMic: () => void;
   clearTranscripts: () => void;
   wsAvailable: boolean;
@@ -21,6 +21,7 @@ interface VoiceContextValue {
   transcriptVisible: boolean;
   stateColor: string;
   stateText: string;
+  updateSessionKey: (sessionKey: string) => void;
 }
 
 const VoiceContext = createContext<VoiceContextValue | null>(null);
@@ -31,7 +32,7 @@ export function useVoiceContext(): VoiceContextValue {
   return ctx;
 }
 
-export function VoiceProvider({ children }: { children: ReactNode }) {
+export function VoiceProvider({ children, activeSessionKey }: { children: ReactNode; activeSessionKey?: string | null }) {
   const [wsPort, setWsPort] = useState(8095);
   const [wsAvailable, setWsAvailable] = useState(false);
   const [statusLoaded, setStatusLoaded] = useState(false);
@@ -45,7 +46,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
 
   const {
     isConnected, isListening, isSpeaking, wakewordDetected,
-    pipelineState, transcripts, startMic, stopMic, clearTranscripts,
+    pipelineState, transcripts, startMic, stopMic, clearTranscripts, updateSessionKey,
   } = useVoiceStream(wsPort);
 
   // Poll voice status
@@ -70,9 +71,16 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   // Auto-start mic after refresh if voice pipeline is active, enabled, AND mic was previously on
   useEffect(() => {
     if (wsAvailable && voiceEnabled && !isListening && getPersistedMicEnabled()) {
-      try { startMic(); } catch { /* getUserMedia may need user gesture */ }
+      try { startMic(activeSessionKey || undefined); } catch { /* getUserMedia may need user gesture */ }
     }
   }, [wsAvailable, voiceEnabled]);
+
+  // Sync session key to the voice pipeline whenever it changes while mic is active
+  useEffect(() => {
+    if (activeSessionKey && isListening) {
+      updateSessionKey(activeSessionKey);
+    }
+  }, [activeSessionKey, isListening, updateSessionKey]);
 
   // Voice toggle handler
   const handleVoiceToggle = useCallback(async () => {
@@ -118,7 +126,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   return (
     <VoiceContext.Provider value={{
       isConnected, isListening, isSpeaking, wakewordDetected, pipelineState,
-      transcripts, startMic, stopMic, clearTranscripts,
+      transcripts, startMic, stopMic, clearTranscripts, updateSessionKey,
       wsAvailable, statusLoaded, voiceEnabled, handleVoiceToggle,
       ttsEnabled, handleTtsToggle,
       latestTranscript, transcriptVisible, stateColor, stateText,
