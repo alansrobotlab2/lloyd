@@ -7,7 +7,7 @@
       "name": "periodic-memory-capture",
       "enabled": true,
       "createdAtMs": 1772761670846,
-      "updatedAtMs": 1773881310638,
+      "updatedAtMs": 1773884967313,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -25,17 +25,16 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1773884910638,
-        "lastRunAtMs": 1773881290592,
+        "nextRunAtMs": 1773888567313,
+        "lastRunAtMs": 1773884910642,
         "lastRunStatus": "error",
         "lastStatus": "error",
-        "lastDurationMs": 20046,
+        "lastDurationMs": 56671,
         "lastDeliveryStatus": "not-delivered",
-        "consecutiveErrors": 5,
+        "consecutiveErrors": 6,
         "lastDelivered": false,
-        "lastErrorReason": "timeout",
-        "lastDeliveryError": "LLM request timed out.",
-        "lastError": "LLM request timed out."
+        "lastDeliveryError": "⚠️ 🧩 Run Bash failed",
+        "lastError": "⚠️ 🧩 Run Bash failed"
       }
     },
     {

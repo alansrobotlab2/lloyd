@@ -350,8 +350,12 @@ export default function ServicesPage() {
           );
         })}
 
-        {/* Lloyd service cards */}
-        {lloydServices.map((svc) => {
+        {/* Lloyd service cards — gateway category pinned to top */}
+        {[...lloydServices].sort((a, b) => {
+          const aGw = a.unit.startsWith("openclaw-") && !a.unit.includes("cert") ? 0 : 1;
+          const bGw = b.unit.startsWith("openclaw-") && !b.unit.includes("cert") ? 0 : 1;
+          return aGw - bGw;
+        }).map((svc) => {
           const isExpanded = lloydExpandedUnit === svc.unit;
           return (
             <div key={svc.unit} className="rounded-xl border border-surface-3/50 overflow-hidden">

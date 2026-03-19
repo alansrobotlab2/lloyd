@@ -465,7 +465,7 @@ export const api = {
     return res.json();
   },
 
-  lloydServices: () => fetchJson<LloydServicesData>("/lloyd-services"),
+  lloydServices: () => fetchJson<LloydServicesData>("/agent-services"),
   lloydServiceAction: async (serviceId: string, action: "start" | "stop" | "restart") => {
     const res = await fetch(`${BASE}/services/action`, {
       method: "POST",
@@ -474,7 +474,7 @@ export const api = {
     });
     return res.json();
   },
-  lloydServiceDetail: (unit: string) => fetchJson<LloydServiceDetail>(`/lloyd-services/detail?unit=${encodeURIComponent(unit)}`),
+  lloydServiceDetail: (unit: string) => fetchJson<LloydServiceDetail>(`/agent-services/detail?unit=${encodeURIComponent(unit)}`),
 
   stats: () => fetchJson<Stats>("/stats"),
   usageChart: (range = "7d") => fetchJson<UsageChartData>(`/usage-chart?range=${range}`),
