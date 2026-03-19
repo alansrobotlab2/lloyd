@@ -15,7 +15,7 @@ import { connect as netConnect } from "net";
 import { homedir } from "os";
 import { randomUUID, createPrivateKey, createPublicKey, createHash, sign as cryptoSign } from "crypto";
 // Use the ws module bundled with openclaw (can't use bare "ws" from plugin context)
-const WS = require("/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/ws");
+const WS = require(join(homedir(), ".npm-global/lib/node_modules/openclaw/node_modules/ws"));
 
 // ── Device identity helpers for WebSocket auth ──────────────────────────
 
@@ -369,12 +369,30 @@ export default function register(api: OpenClawPluginApi) {
   // messages are injected into the active agent session rather than
   // creating isolated hook sessions.
 
-  let gwWs: InstanceType<typeof WS> | null = null;
-  let gwWsReady = false;
-  let gwWsReqId = 0;
-  const gwWsPending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-  let streamTextAccum = "";
-  let streamTtsInFlight = false;
+  // ── Shared WS state across plugin re-loads in the same process ──────
+  // When subagents spawn, plugins reload but we want a single WS. Store
+  // the mutable state on globalThis so every instance's gwWsSend() and
+  // HTTP handlers reference the SAME connection.
+  const GW_STATE_KEY = Symbol.for("mission-control-gw-state");
+  type GwState = {
+    ws: InstanceType<typeof WS> | null;
+    ready: boolean;
+    reqId: number;
+    pending: Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>;
+    streamTextAccum: string;
+    streamTtsInFlight: boolean;
+  };
+  if (!(globalThis as any)[GW_STATE_KEY]) {
+    (globalThis as any)[GW_STATE_KEY] = {
+      ws: null,
+      ready: false,
+      reqId: 0,
+      pending: new Map(),
+      streamTextAccum: "",
+      streamTtsInFlight: false,
+    } as GwState;
+  }
+  const gwState: GwState = (globalThis as any)[GW_STATE_KEY];
 
   const deviceIdentity = loadDeviceIdentity();
 
@@ -394,12 +412,12 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   function gwWsConnect() {
-    if (gwWs && (gwWs.readyState === WS.OPEN || gwWs.readyState === WS.CONNECTING)) return;
+    if (gwState.ws && (gwState.ws.readyState === WS.OPEN || gwState.ws.readyState === WS.CONNECTING)) return;
     if (!deviceIdentity) {
       api.logger.error?.("mission-control: no device identity found, cannot connect to gateway WS");
       return;
     }
-    gwWsReady = false;
+    gwState.ready = false;
     try {
       const gwPort = api.config?.gateway?.port ?? 18789;
       const useTls = !!api.config?.gateway?.tls?.enabled;
@@ -408,7 +426,7 @@ export default function register(api: OpenClawPluginApi) {
       const ws = new WS(`${wsProto}://127.0.0.1:${gwPort}`, {
         headers: { Origin: `${httpProto}://127.0.0.1:${gwPort}` },
       });
-      gwWs = ws;
+      gwState.ws = ws;
 
       ws.on("message", (data: Buffer | string) => {
         try {
@@ -438,7 +456,7 @@ export default function register(api: OpenClawPluginApi) {
             const signature = signDevicePayload(deviceIdentity.privateKeyPem, payload);
             const publicKeyBase64Url = base64UrlEncode(derivePublicKeyRaw(deviceIdentity.publicKeyPem));
 
-            const connectId = `mc-connect-${++gwWsReqId}`;
+            const connectId = `mc-connect-${++gwState.reqId}`;
             ws.send(JSON.stringify({
               type: "req",
               id: connectId,
@@ -486,7 +504,7 @@ export default function register(api: OpenClawPluginApi) {
             // }
 
             if (delta) {
-              streamTextAccum += delta;
+              gwState.streamTextAccum += delta;
             }
 
             // Reset accumulator on lifecycle end
@@ -494,29 +512,29 @@ export default function register(api: OpenClawPluginApi) {
               const phase = payload.data?.phase;
               if (phase === "end" || phase === "complete" || phase === "done" || phase === "stop") {
                 // Final check before reset
-                if (!streamTtsInFlight) {
-                  triggerStreamTts(streamTextAccum);
+                if (!gwState.streamTtsInFlight) {
+                  triggerStreamTts(gwState.streamTextAccum);
                 }
-                streamTextAccum = "";
-                streamTtsInFlight = false;
+                gwState.streamTextAccum = "";
+                gwState.streamTtsInFlight = false;
               }
             }
 
             // Check for </summary> in accumulated text
-            if (!streamTtsInFlight && streamTextAccum.includes("</summary>")) {
-              triggerStreamTts(streamTextAccum);
-              streamTtsInFlight = true;
+            if (!gwState.streamTtsInFlight && gwState.streamTextAccum.includes("</summary>")) {
+              triggerStreamTts(gwState.streamTextAccum);
+              gwState.streamTtsInFlight = true;
             }
           }
 
           if (msg.type === "res") {
             if (msg.payload?.type === "hello-ok") {
-              gwWsReady = true;
+              gwState.ready = true;
               api.logger.info?.("mission-control: gateway WS connected (device auth OK)");
             }
-            const entry = gwWsPending.get(msg.id);
+            const entry = gwState.pending.get(msg.id);
             if (entry) {
-              gwWsPending.delete(msg.id);
+              gwState.pending.delete(msg.id);
               clearTimeout(entry.timer);
               if (msg.ok) {
                 entry.resolve(msg.payload);
@@ -531,12 +549,12 @@ export default function register(api: OpenClawPluginApi) {
       });
 
       ws.on("close", () => {
-        gwWsReady = false;
-        gwWs = null;
-        for (const [id, entry] of gwWsPending) {
+        gwState.ready = false;
+        gwState.ws = null;
+        for (const [id, entry] of gwState.pending) {
           clearTimeout(entry.timer);
           entry.reject(new Error("WebSocket closed"));
-          gwWsPending.delete(id);
+          gwState.pending.delete(id);
         }
         setTimeout(gwWsConnect, 5000);
       });
@@ -552,17 +570,17 @@ export default function register(api: OpenClawPluginApi) {
 
   function gwWsSend(method: string, params: Record<string, unknown>): Promise<any> {
     return new Promise((resolve, reject) => {
-      if (!gwWs || !gwWsReady) {
+      if (!gwState.ws || !gwState.ready) {
         reject(new Error("Gateway WebSocket not connected"));
         return;
       }
-      const id = `mc-${++gwWsReqId}`;
+      const id = `mc-${++gwState.reqId}`;
       const timer = setTimeout(() => {
-        gwWsPending.delete(id);
+        gwState.pending.delete(id);
         reject(new Error("Gateway request timeout"));
       }, 60_000);
-      gwWsPending.set(id, { resolve, reject, timer });
-      gwWs.send(JSON.stringify({ type: "req", id, method, params }));
+      gwState.pending.set(id, { resolve, reject, timer });
+      gwState.ws.send(JSON.stringify({ type: "req", id, method, params }));
     });
   }
 
@@ -619,18 +637,29 @@ export default function register(api: OpenClawPluginApi) {
     }
   }
 
+  const summaryFailures = new Map<string, number>(); // sessionKey -> failure count
+
   function triggerSummaryGeneration(sessionKey: string) {
     if (pendingSummaries.has(sessionKey)) return;
+    // Don't retry sessions that have already failed multiple times
+    const failures = summaryFailures.get(sessionKey) || 0;
+    if (failures >= 3) return;
     pendingSummaries.add(sessionKey);
     generateSummary(sessionKey).then((summary) => {
         api.logger.info?.(`mc-summary: ${sessionKey} -> "${summary}"`);
       pendingSummaries.delete(sessionKey);
       if (summary) {
+        summaryFailures.delete(sessionKey);
         const summaries = loadSummaries();
         summaries[sessionKey] = summary;
         saveSummaries(summaries);
+      } else {
+        summaryFailures.set(sessionKey, failures + 1);
       }
-    }).catch(() => { pendingSummaries.delete(sessionKey); });
+    }).catch(() => {
+      pendingSummaries.delete(sessionKey);
+      summaryFailures.set(sessionKey, failures + 1);
+    });
   }
 
   function triggerStreamTts(accum: string) {
@@ -1297,16 +1326,15 @@ export default function register(api: OpenClawPluginApi) {
     auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
-        if (!existsSync(modelsFile)) {
+        if (!existsSync(configFile)) {
           jsonResponse(res, { providers: {} });
           return;
         }
-        const models = JSON.parse(readFileSync(modelsFile, "utf-8"));
+        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        const providers = config.models?.providers || {};
         // Strip API keys
         const safe: any = { providers: {} };
-        for (const [name, provider] of Object.entries<any>(
-          models.providers || {},
-        )) {
+        for (const [name, provider] of Object.entries<any>(providers)) {
           safe.providers[name] = {
             baseUrl: provider.baseUrl,
             api: provider.api,
@@ -1347,13 +1375,15 @@ export default function register(api: OpenClawPluginApi) {
           return;
         }
 
-        if (!existsSync(modelsFile)) {
-          jsonResponse(res, { error: "models.json not found" }, 404);
+        if (!existsSync(configFile)) {
+          jsonResponse(res, { error: "openclaw.json not found" }, 404);
           return;
         }
 
-        const models = JSON.parse(readFileSync(modelsFile, "utf-8"));
-        const provider = models.providers?.[providerName];
+        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        if (!config.models) config.models = {};
+        if (!config.models.providers) config.models.providers = {};
+        const provider = config.models.providers[providerName];
         if (!provider) {
           jsonResponse(res, { error: `Provider '${providerName}' not found` }, 404);
           return;
@@ -1366,7 +1396,7 @@ export default function register(api: OpenClawPluginApi) {
         }
 
         model.enabled = enabled;
-        writeFileSync(modelsFile, JSON.stringify(models, null, 2) + "\n");
+        writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n");
         jsonResponse(res, { ok: true, provider: providerName, modelId, enabled });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
@@ -1521,7 +1551,7 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── API: /api/mc/skills ──────────────────────────────────────────────
 
-  const YAML = require("/home/alansrobotlab/.npm-global/lib/node_modules/openclaw/node_modules/yaml");
+  const YAML = require(join(homedir(), ".npm-global/lib/node_modules/openclaw/node_modules/yaml"));
   // Resolve workspace skill directories from config (agent workspace + extraDirs)
   const workspaceSkillsDirs: string[] = (() => {
     const dirs: string[] = [];
@@ -1530,14 +1560,14 @@ export default function register(api: OpenClawPluginApi) {
       // 1. Main agent workspace /skills
       const mainAgent = cfg.agents?.list?.find((a: any) => a.id === "main") || cfg.agents?.list?.[0];
       const ws = mainAgent?.workspace?.replace(/^~/, homedir()) ?? null;
-      dirs.push(ws ? join(ws, "skills") : join(homedir(), ".openclaw/workspaces/lloyd/skills"));
+      dirs.push(ws ? join(ws, "skills") : join(homedir(), ".openclaw/state/workspaces/lloyd/skills"));
       // 2. Extra skill directories from skills.load.extraDirs
       const extraDirs: string[] = cfg.skills?.load?.extraDirs ?? [];
       for (const d of extraDirs) {
         dirs.push(d.replace(/^~/, homedir()));
       }
     } catch {
-      dirs.push(join(homedir(), ".openclaw/workspaces/lloyd/skills"));
+      dirs.push(join(homedir(), ".openclaw/state/workspaces/lloyd/skills"));
     }
     return dirs;
   })();
@@ -2466,88 +2496,43 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── Service Management ──────────────────────────────────────────────
 
-  const MANAGED_SERVICES = [
-    { id: "gateway", name: "OpenClaw Gateway", unit: "openclaw-gateway.service", port: 18789 },
-  ];
+  const MANAGED_SERVICES: { id: string; name: string; unit: string; port: number }[] = [];
 
-  const LLOYD_DISPLAY_NAMES: Record<string, string> = {
-    "lloyd-llm.service": "LLM Service",
-    "lloyd-tts.service": "TTS Service",
-    "lloyd-voice-mode.service": "Voice Mode",
-    "lloyd-tool-mcp.service": "Tool Services MCP",
-    "lloyd-voice-mcp.service": "Voice Services MCP",
-    "lloyd-qmd-daemon.service": "QMD Daemon",
-    "lloyd-clawdeck.service": "Backlog Server",
-    "lloyd-supervisor.service": "Supervisor (distrobox)",
+  const AGENT_DISPLAY_NAMES: Record<string, string> = {
+    "agent-discord-voice-bridge.service": "Discord Voice Bridge",
+    "agent-discord-voice-server.service": "Discord Voice Server",
+    "agent-distrobox.service": "Distrobox (supervisord)",
+    "agent-llm.service": "LLM Service",
+    "agent-llm-0.8b.service": "LLM 0.8B",
+    "agent-llm-2.0b.service": "LLM 2.0B",
+    "agent-llm-4.0b.service": "LLM 4.0B",
+    "agent-qmd-daemon.service": "QMD Daemon",
+    "agent-qmd-watcher.service": "QMD Watcher",
+    "agent-tool-mcp.service": "Tool Services MCP",
+    "agent-tts.service": "TTS Service",
+    "agent-voice-mcp.service": "Voice Services MCP",
+    "agent-voice-mode.service": "Voice Mode",
+    "openclaw-cert.service": "Certificate Page",
+    "openclaw-dee.service": "OpenClaw DEE Gateway",
+    "openclaw-lloyd.service": "OpenClaw LLOYD Gateway",
+    "openclaw-trey.service": "OpenClaw TREY Gateway",
   };
 
-  // Known port map for lloyd-* services (dynamic discovery)
-  const LLOYD_PORT_MAP: Record<string, number> = {
-    "lloyd-llm.service": 8091,
-    "lloyd-tts.service": 8090,
-    "lloyd-voice-mode.service": 8092,
-    "lloyd-tool-mcp.service": 8093,
-    "lloyd-voice-mcp.service": 8094,
-    "lloyd-qmd-daemon.service": 8181,
+  // Known port map for agent-* services (dynamic discovery)
+  const AGENT_PORT_MAP: Record<string, number> = {
+    "agent-llm.service": 8091,
+    "agent-llm-0.8b.service": 8098,
+    "agent-llm-2.0b.service": 8097,
+    "agent-llm-4.0b.service": 8099,
+    "agent-tts.service": 8090,
+    "agent-voice-mode.service": 8092,
+    "agent-tool-mcp.service": 8093,
+    "agent-voice-mcp.service": 8094,
+    "agent-qmd-daemon.service": 8181,
+    "openclaw-cert.service": 18790,
+    "openclaw-dee.service": 19789,
+    "openclaw-lloyd.service": 18789,
   };
-
-  // ── Supervisord-managed processes ──────────────────────────────────
-  const SUPERVISOR_CONF = "/home/alansrobotlab/Projects/lloyd-services/supervisor/supervisord.conf";
-
-  const SUPERVISOR_PROCESSES = new Set(["lloyd-tts", "lloyd-tool-mcp", "lloyd-voice-mcp", "lloyd-voice-mode"]);
-
-  const SUPERVISOR_PORT_MAP: Record<string, number> = {
-    "lloyd-tts": 8090,
-    "lloyd-tool-mcp": 8093,
-    "lloyd-voice-mcp": 8094,
-    "lloyd-voice-mode": 8095,
-  };
-
-  const SUPERVISOR_DISPLAY_NAMES: Record<string, string> = {
-    "lloyd-tts": "TTS Service",
-    "lloyd-tool-mcp": "Tool Services MCP",
-    "lloyd-voice-mcp": "Voice Services MCP",
-    "lloyd-voice-mode": "Voice Mode",
-  };
-
-  interface SupervisorProcess {
-    name: string;
-    state: string;
-    pid: number | null;
-    uptime: string | null;
-  }
-
-  function parseSupervisorStatus(): SupervisorProcess[] {
-    let output: string;
-    try {
-      output = execSync(
-        `/usr/sbin/supervisorctl -c ${SUPERVISOR_CONF} status 2>/dev/null`,
-        { encoding: "utf-8", timeout: 5000 },
-      );
-    } catch (err: any) {
-      // supervisorctl exits non-zero when any process is not RUNNING, but stdout still has valid output
-      if (err?.stdout) {
-        output = err.stdout;
-      } else {
-        console.error("[MC] supervisorctl failed:", err?.message || String(err));
-        return [];
-      }
-    }
-    return output.split("\n").filter(l => l.trim()).map(line => {
-      const match = line.match(/^(\S+)\s+(RUNNING|STOPPED|STARTING|BACKOFF|STOPPING|EXITED|FATAL|UNKNOWN)\s*(.*)/);
-      if (!match) return null;
-      const [, name, state, rest] = match;
-      let pid: number | null = null;
-      let uptime: string | null = null;
-      if (state === "RUNNING") {
-        const pidMatch = rest.match(/pid\s+(\d+)/);
-        const uptimeMatch = rest.match(/uptime\s+(\S+)/);
-        if (pidMatch) pid = parseInt(pidMatch[1], 10);
-        if (uptimeMatch) uptime = uptimeMatch[1];
-      }
-      return { name, state, pid, uptime };
-    }).filter(Boolean) as SupervisorProcess[];
-  }
 
   function checkPort(port: number, timeoutMs = 2000): Promise<boolean> {
     return new Promise((resolve) => {
@@ -2556,6 +2541,54 @@ export default function register(api: OpenClawPluginApi) {
       socket.on("connect", () => { clearTimeout(timer); socket.destroy(); resolve(true); });
       socket.on("error", () => { clearTimeout(timer); resolve(false); });
     });
+  }
+
+
+  interface SupervisorEntry {
+    name: string;
+    state: string;
+    pid: number | null;
+    uptime: string | null;
+  }
+
+  function getSupervisorStatus(): SupervisorEntry[] {
+    try {
+      const xmlBody = '<?xml version="1.0"?><methodCall><methodName>supervisor.getAllProcessInfo</methodName></methodCall>';
+      const output = execSync(
+        `curl --unix-socket /tmp/agent-supervisor.sock -s -X POST http://localhost/RPC2 -H "Content-Type: text/xml" -d '${xmlBody}'`,
+        { encoding: "utf-8", timeout: 5000 },
+      );
+      const entries: SupervisorEntry[] = [];
+      const procRegex = /<struct>([\s\S]*?)<\/struct>/g;
+      let match;
+      while ((match = procRegex.exec(output)) !== null) {
+        const block = match[1];
+        const getName = (field: string) => {
+          const m = block.match(new RegExp(`<name>${field}</name>[\\s\\S]*?<(?:string|int)>([^<]*)</`));
+          return m ? m[1] : null;
+        };
+        const name = getName("name");
+        const statename = getName("statename");
+        const pid = getName("pid");
+        const description = getName("description");
+        if (name && statename) {
+          let uptime: string | null = null;
+          if (description) {
+            const um = description.match(/uptime\s+(\S+)/);
+            if (um) uptime = um[1];
+          }
+          entries.push({
+            name,
+            state: statename,
+            pid: pid ? parseInt(pid, 10) : null,
+            uptime,
+          });
+        }
+      }
+      return entries;
+    } catch {
+      return [];
+    }
   }
 
   // GET /api/mc/services
@@ -2626,50 +2659,65 @@ export default function register(api: OpenClawPluginApi) {
         const { serviceId, action } = body;
 
         const svc = MANAGED_SERVICES.find((s) => s.id === serviceId);
-        // Also allow lloyd-* unit names directly (dynamic services)
-        const lloydUnit = !svc && serviceId.startsWith("lloyd-") ? `${serviceId}.service` : null;
-        const isSupervisorSvc = SUPERVISOR_PROCESSES.has(serviceId);
-        if (!svc && !lloydUnit && !isSupervisorSvc) {
+        // Also allow agent-* and openclaw-* unit names directly (dynamic services)
+        const agentUnit = !svc && (serviceId.startsWith("agent-") || serviceId.startsWith("openclaw-")) ? `${serviceId}.service` : null;
+        if (!svc && !agentUnit) {
           jsonResponse(res, { error: `Unknown service: ${serviceId}` }, 400);
           return;
         }
-        const unitName = svc ? svc.unit : lloydUnit!;
+        const unitName = svc ? svc.unit : agentUnit!;
         if (!["start", "stop", "restart"].includes(action)) {
           jsonResponse(res, { error: `Invalid action: ${action}` }, 400);
           return;
         }
 
-        // Route supervisor-managed processes to supervisorctl
-        if (isSupervisorSvc) {
-          const supervisorAction = action === "restart" ? "restart" : action;
-          execSync(
-            `/usr/sbin/supervisorctl -c ${SUPERVISOR_CONF} ${supervisorAction} ${serviceId}`,
-            { encoding: "utf-8", timeout: 15000 },
-          );
-          jsonResponse(res, { ok: true, serviceId, action });
+        // Check if this is a supervisor-managed service
+        const supervisorName = unitName.replace(".service", "");
+        const supEntries = getSupervisorStatus();
+        if (supEntries.some(e => e.name === supervisorName)) {
+          try {
+            const xmlRpc = (method: string, name: string) => {
+              const body = `<?xml version="1.0"?><methodCall><methodName>${method}</methodName><params><param><value><string>${name}</string></value></param></params></methodCall>`;
+              return execSync(
+                `curl --unix-socket /tmp/agent-supervisor.sock -s -X POST http://localhost/RPC2 -H "Content-Type: text/xml" -d '${body}'`,
+                { encoding: "utf-8", timeout: 15000 },
+              );
+            };
+            if (action === "restart") {
+              try { xmlRpc("supervisor.stopProcess", supervisorName); } catch { /* may already be stopped */ }
+              xmlRpc("supervisor.startProcess", supervisorName);
+            } else if (action === "start") {
+              xmlRpc("supervisor.startProcess", supervisorName);
+            } else if (action === "stop") {
+              xmlRpc("supervisor.stopProcess", supervisorName);
+            }
+            jsonResponse(res, { ok: true, serviceId, action, managedBy: "supervisor" });
+          } catch (err: any) {
+            jsonResponse(res, { error: err.message }, 500);
+          }
           return;
         }
 
         // For gateway restart/start, kill the port first to avoid conflicts
-        if (svc?.id === "gateway" && (action === "restart" || action === "start")) {
+        if (unitName === "openclaw-lloyd.service" && (action === "restart" || action === "start")) {
           try {
-            execSync(`kill $(lsof -ti :18789) 2>/dev/null`, { timeout: 5000 });
+            execSync(`kill $(lsof -ti :18789 -sTCP:LISTEN) 2>/dev/null`, { timeout: 5000 });
           } catch { /* non-fatal: nothing to kill */ }
           await new Promise((r) => setTimeout(r, 2000));
           execSync(`systemctl --user ${action} ${unitName}`, {
             encoding: "utf-8",
             timeout: 15000,
           });
-        } else if ((action === "stop" || action === "restart") && (svc?.port || LLOYD_PORT_MAP[unitName])) {
+        } else if ((action === "stop" || action === "restart") && (svc?.port || AGENT_PORT_MAP[unitName])) {
           // For any service with a known port: stop unit, kill stale port holder, then optionally restart
-          const port = svc?.port ?? LLOYD_PORT_MAP[unitName];
+          const port = svc?.port ?? AGENT_PORT_MAP[unitName];
           execSync(`systemctl --user stop ${unitName}`, {
             encoding: "utf-8",
             timeout: 15000,
           });
           await new Promise((r) => setTimeout(r, 1000));
           try {
-            execSync(`kill $(lsof -ti :${port}) 2>/dev/null`, { timeout: 5000 });
+            execSync(`kill $(lsof -ti :${port} -sTCP:LISTEN) 2>/dev/null`, { timeout: 5000 });
           } catch { /* non-fatal: nothing to kill */ }
           await new Promise((r) => setTimeout(r, 1000));
           if (action === "restart") {
@@ -2761,62 +2809,54 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
-  // GET /api/mc/lloyd-services/detail?unit=<unit>
+  // GET /api/mc/agent-services/detail?unit=<unit>
   api.registerHttpRoute({
-    path: "/api/mc/lloyd-services/detail",
+    path: "/api/mc/agent-services/detail",
     auth: "plugin",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || "", "http://localhost");
         const unit = url.searchParams.get("unit");
 
-        const supervisorName = unit?.replace(" (supervisor)", "");
-        const isSupervisor = supervisorName ? SUPERVISOR_PROCESSES.has(supervisorName) : false;
-
-        if (!isSupervisor && (!unit || !unit.startsWith("lloyd-") || !unit.endsWith(".service"))) {
-          jsonResponse(res, { error: `Invalid lloyd unit: ${unit}` }, 400);
+        if (!unit || ((!unit.startsWith("agent-") && !unit.startsWith("openclaw-")) || !unit.endsWith(".service"))) {
+          jsonResponse(res, { error: `Invalid unit: ${unit}` }, 400);
           return;
         }
 
-        if (isSupervisor) {
-          const procs = parseSupervisorStatus();
-          const proc = procs.find(p => p.name === supervisorName);
-          const name = SUPERVISOR_DISPLAY_NAMES[supervisorName!] ?? supervisorName!;
+        const name = AGENT_DISPLAY_NAMES[unit!] ?? unit!.replace(/^agent-/, "").replace(/\.service$/, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
-          let logs = "";
+        const supervisorName = unit!.replace(".service", "");
+        const supEntries = getSupervisorStatus();
+        if (supEntries.some(e => e.name === supervisorName)) {
+          const sup = supEntries.find(e => e.name === supervisorName);
+
+          // Read log files
+          const logsDir = "/home/alansrobotlab/agents/agent-services-home/agent-services/logs";
+          let logLines: string[] = [];
           try {
-            logs = execSync(
-              `/usr/sbin/supervisorctl -c ${SUPERVISOR_CONF} tail -4000 ${supervisorName} stderr 2>/dev/null`,
-              { encoding: "utf-8", timeout: 5000 },
-            );
-          } catch (e: any) {
-            try {
-              logs = execSync(
-                `/usr/sbin/supervisorctl -c ${SUPERVISOR_CONF} tail -4000 ${supervisorName} stdout 2>/dev/null`,
-                { encoding: "utf-8", timeout: 5000 },
-              );
-            } catch {
-              logs = e.stdout || "Unable to fetch logs";
-            }
-          }
-
-          const logLines = logs.split("\n").filter((l: string) => l.trim() !== "").slice(-40);
+            const stdout = readFileSync(join(logsDir, `${supervisorName}.log`), "utf-8");
+            const stderr = readFileSync(join(logsDir, `${supervisorName}.err`), "utf-8");
+            const combined = [
+              ...stdout.split("\n").filter((l: string) => l.trim()).slice(-30).map((l: string) => l),
+              ...stderr.split("\n").filter((l: string) => l.trim()).slice(-10).map((l: string) => `[stderr] ${l}`),
+            ].slice(-40);
+            logLines = combined;
+          } catch { /* logs may not exist */ }
 
           jsonResponse(res, {
             unit: unit!,
             name,
-            pid: proc?.pid ?? null,
+            pid: sup?.pid ?? null,
             memory: null,
             cpu: null,
             tasks: null,
-            activeSince: proc?.uptime ? `up ${proc.uptime}` : null,
+            activeSince: sup?.uptime ? `uptime ${sup.uptime}` : null,
             logLines,
-            rawStatus: proc ? `${proc.name} ${proc.state} pid ${proc.pid}, uptime ${proc.uptime}` : "unknown",
+            rawStatus: sup ? `${sup.name} ${sup.state} pid ${sup.pid}, uptime ${sup.uptime}` : "unknown",
+            managedBy: "supervisor",
           });
           return;
         }
-
-        const name = LLOYD_DISPLAY_NAMES[unit!] ?? unit!.replace(/^lloyd-/, "").replace(/\.service$/, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
         let statusOutput = "";
         try {
@@ -2866,37 +2906,80 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
-  // GET /api/mc/lloyd-services
+  // GET /api/mc/agent-services
   api.registerHttpRoute({
-    path: "/api/mc/lloyd-services",
+    path: "/api/mc/agent-services",
     auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
-        // Get all lloyd-* units from systemctl
+        // Get all agent-* units from systemctl
+        // Use list-units for running services, then list-unit-files to discover installed-but-stopped ones
         let units: any[] = [];
         try {
           const output = execSync(
-            `systemctl --user list-units 'lloyd-*' --all --output=json 2>/dev/null`,
+            `systemctl --user list-units 'agent-*' 'openclaw-*' --all --output=json 2>/dev/null`,
             { encoding: "utf-8", timeout: 5000 },
           );
           units = JSON.parse(output).filter((u: any) => u.load !== "not-found");
-          units = units.filter((u: any) => !SUPERVISOR_PROCESSES.has((u.unit || "").replace(".service", "")));
         } catch (e: any) {
           jsonResponse(res, { error: "Failed to query systemctl: " + (e.message || String(e)) }, 500);
           return;
         }
+
+        // Discover installed-but-unloaded unit files (not returned by list-units after reboot)
+        try {
+          const ufOutput = execSync(
+            `systemctl --user list-unit-files 'agent-*.service' 'openclaw-*.service' --output=json 2>/dev/null`,
+            { encoding: "utf-8", timeout: 5000 },
+          );
+          const unitFiles: any[] = JSON.parse(ufOutput);
+          const loadedUnits = new Set(units.map((u: any) => u.unit));
+          for (const uf of unitFiles) {
+            const unitName: string = uf.unit_file || uf["unit file"] || "";
+            if (!unitName || loadedUnits.has(unitName)) continue;
+            if (uf.state === "disabled") continue; // skip explicitly disabled units
+            // Query actual state for this unloaded unit
+            try {
+              const showOutput = execSync(
+                `systemctl --user show ${unitName} --property=ActiveState,SubState,Description 2>/dev/null`,
+                { encoding: "utf-8", timeout: 2000 },
+              ).trim();
+              const props: Record<string, string> = {};
+              for (const line of showOutput.split("\n")) {
+                const eq = line.indexOf("=");
+                if (eq > 0) props[line.slice(0, eq)] = line.slice(eq + 1);
+              }
+              units.push({
+                unit: unitName,
+                load: "loaded",
+                active: props.ActiveState || "inactive",
+                sub: props.SubState || "dead",
+                description: props.Description || unitName,
+              });
+            } catch {
+              // Fallback: add as inactive
+              units.push({
+                unit: unitName,
+                load: "loaded",
+                active: "inactive",
+                sub: "dead",
+                description: unitName,
+              });
+            }
+          }
+        } catch { /* non-fatal: list-unit-files may not support json on older systemd */ }
 
         // Get uptime/active-since for each unit
         const services = await Promise.all(
           units.map(async (u: any) => {
             const unit: string = u.unit || "";
             const id = unit.replace(".service", "");
-            const name = LLOYD_DISPLAY_NAMES[unit] ?? unit.replace(/^lloyd-/, "").replace(/\.service$/, "").replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
+            const name = AGENT_DISPLAY_NAMES[unit] ?? unit.replace(/^agent-/, "").replace(/\.service$/, "").replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
             const activeState: string = u.active || "unknown";
             const subState: string = u.sub || "unknown";
 
             // Determine port from known map
-            const port: number | null = LLOYD_PORT_MAP[unit] ?? null;
+            const port: number | null = AGENT_PORT_MAP[unit] ?? null;
 
             // Check port health if we know the port
             let portHealthy: boolean | null = null;
@@ -2934,46 +3017,78 @@ export default function register(api: OpenClawPluginApi) {
             } else if (activeState === "active") health = "healthy";
             else health = "stopped";
 
-            return { id, unit, name, activeState, subState, port, portHealthy, uptime, health };
+            // Categorize
+            let category: string;
+            if (unit.startsWith("openclaw-") && !unit.includes("cert")) category = "gateway";
+            else if (/voice|tts|discord-voice/.test(unit)) category = "voice";
+            else if (/tool-mcp|qmd/.test(unit)) category = "mcp";
+            else if (unit.includes("llm")) category = "llm";
+            else if (/distrobox|cert/.test(unit)) category = "infra";
+            else category = "other";
+
+            return { id, unit, name, activeState, subState, port, portHealthy, uptime, health, category };
           }),
         );
 
-        // Query supervisord for managed processes
-        const supervisorProcs = parseSupervisorStatus();
-        const supervisorServices = await Promise.all(
-          supervisorProcs
-            .filter(p => SUPERVISOR_PROCESSES.has(p.name))
-            .map(async (p) => {
-              const port = SUPERVISOR_PORT_MAP[p.name] ?? null;
-              let portHealthy: boolean | null = null;
-              if (port !== null) portHealthy = await checkPort(port);
+        // Overlay supervisor-managed services
+        const supervisorEntries = getSupervisorStatus();
+        for (const sup of supervisorEntries) {
+          if (sup.name === "openclaw-gateway") continue;
 
-              const activeState = p.state === "RUNNING" ? "active"
-                : (p.state === "FATAL" || p.state === "EXITED") ? "failed"
-                : "inactive";
-              const subState = p.state === "RUNNING" ? "running" : p.state.toLowerCase();
+          const unitName = `${sup.name}.service`;
+          const existing = services.find((s: any) => s.unit === unitName);
 
-              let health: string;
-              if (activeState === "failed") health = "stopped";
-              else if (activeState === "active") health = portHealthy === false ? "degraded" : "healthy";
-              else health = "stopped";
+          const activeState = sup.state === "RUNNING" ? "active" : sup.state === "FATAL" ? "failed" : "inactive";
+          const subState = sup.state === "RUNNING" ? "running" : sup.state.toLowerCase();
 
-              return {
-                id: p.name,
-                unit: `${p.name} (supervisor)`,
-                name: SUPERVISOR_DISPLAY_NAMES[p.name] ?? p.name,
-                activeState,
-                subState,
-                port,
-                portHealthy,
-                uptime: p.uptime ?? null,
-                health,
-              };
-            })
-        );
+          if (existing) {
+            existing.activeState = activeState;
+            existing.subState = subState;
+            existing.managedBy = "supervisor";
+            if (sup.uptime) existing.uptime = sup.uptime;
+            if (sup.pid) {
+              if (activeState === "active") {
+                existing.health = existing.portHealthy === false ? "degraded" : "healthy";
+              } else if (activeState === "failed") {
+                existing.health = "stopped";
+              } else {
+                existing.health = "stopped";
+              }
+            }
+          } else {
+            const port: number | null = AGENT_PORT_MAP[unitName] ?? null;
+            let portHealthy: boolean | null = null;
+            if (port !== null) {
+              portHealthy = await checkPort(port);
+            }
+            let health: string;
+            if (activeState === "active") health = portHealthy === false ? "degraded" : "healthy";
+            else health = "stopped";
 
-        const allServices = [...services, ...supervisorServices];
-        jsonResponse(res, { services: allServices, timestamp: new Date().toISOString() });
+            let category: string;
+            if (/voice|tts/.test(unitName)) category = "voice";
+            else if (/tool-mcp/.test(unitName)) category = "mcp";
+            else category = "other";
+
+            const name = AGENT_DISPLAY_NAMES[unitName] ?? sup.name.replace(/^agent-/, "").replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
+
+            services.push({
+              id: sup.name,
+              unit: unitName,
+              name,
+              activeState,
+              subState,
+              port,
+              portHealthy,
+              uptime: sup.uptime,
+              health,
+              category,
+              managedBy: "supervisor" as const,
+            });
+          }
+        }
+
+        jsonResponse(res, { services, timestamp: new Date().toISOString() });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
@@ -3286,6 +3401,41 @@ export default function register(api: OpenClawPluginApi) {
           .map(([tag, count]) => ({ tag, count }));
 
         jsonResponse(res, { tags });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // ── API: /api/mc/memory/tag-documents ────────────────────────────────────
+
+  api.registerHttpRoute({
+    path: "/api/mc/memory/tag-documents",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const url = new URL(req.url || "", "http://localhost");
+        const tag = url.searchParams.get("tag");
+        const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 200);
+
+        if (!tag) {
+          jsonResponse(res, { error: "Missing tag parameter" }, 400);
+          return;
+        }
+
+        const docs = getVaultIndex();
+        const matches = docs
+          .filter((d) => d.tags.includes(tag))
+          .slice(0, limit)
+          .map((d) => ({
+            path: d.path,
+            title: d.title,
+            type: d.type,
+            summary: d.summary,
+            folder: d.folder,
+          }));
+
+        jsonResponse(res, { tag, count: matches.length, documents: matches });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }

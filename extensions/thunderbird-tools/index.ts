@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 
 const BRIDGE_PATH = join(
   homedir(),
-  "Projects", "lloyd-services", "services", "thunderbird-mcp", "mcp-bridge.cjs"
+  "agent-services", "services", "thunderbird-mcp", "mcp-bridge.cjs"
 );
 
 const TOOL_NAMES: Record<string, string> = {

@@ -55,3 +55,6 @@ update-check.json
 /delivery-queue/
 
 jobs.json
+
+# Runtime state (created by gateway)
+/state/
