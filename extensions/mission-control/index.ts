@@ -80,6 +80,53 @@ export default function register(api: OpenClawPluginApi) {
     }
   });
 
+  // ── Idler task completion polling ───────────────────────────────────
+
+  // Poll for completed idler tasks every 20 seconds.
+  // Session keys are normalized by the gateway as: agent:{targetAgentId}:hook:idler:task-{taskId}
+  // where targetAgentId comes from task routing (e.g. "memory", "orchestrator", "researcher").
+  // We scan agentSessionStates for any key containing "hook:idler:task-{taskId}" to be robust
+  // against routing changes.
+  setInterval(async () => {
+    try {
+      const { getInProgressTasks, completeActiveRun, completeTask } = await import("./autonomy-service.js");
+      const inProgressTasks = await getInProgressTasks();
+
+      for (const task of inProgressTasks) {
+        const taskId = task.id;
+        const suffix = `hook:idler:task-${taskId}`;
+
+        // Find matching session state by suffix — agent prefix varies by target agent
+        let sessionState: AgentSessionStatus | undefined;
+        for (const [key, state] of agentSessionStates) {
+          if (key.endsWith(suffix)) {
+            sessionState = state;
+            break;
+          }
+        }
+
+        if (!sessionState) continue; // No OTel event yet — still running or not started
+
+        // Session states are: "idle" | "processing" | "waiting"
+        // A completed cron session transitions to "idle" with queueDepth 0.
+        if (sessionState.state === "idle" && (sessionState.queueDepth ?? 0) <= 0) {
+          await completeActiveRun(taskId, "success", "Completed");
+          await completeTask(taskId);
+          api.logger.info?.(`[autonomy] Task #${taskId} completed via session state`);
+          // Clean up tracked session state to avoid re-processing
+          for (const [key] of agentSessionStates) {
+            if (key.endsWith(suffix)) {
+              agentSessionStates.delete(key);
+              break;
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      api.logger.error?.(`[autonomy] Poll error: ${err.message}`);
+    }
+  }, 20000);
+
   // ── Wire up domain modules ────────────────────────────────────────
 
   // Voice pipeline (must be before gateway — gateway imports broadcastSse)
