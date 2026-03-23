@@ -55,7 +55,9 @@ function formatRunsPerDay(rpd: number | null): string {
 
 function formatLastRun(lastRun: string | null): string {
   if (!lastRun) return "never";
-  const diffMs = Date.now() - new Date(lastRun).getTime();
+  // Timestamps without timezone suffix are UTC — ensure proper parsing
+  const normalized = lastRun.includes("Z") || lastRun.includes("+") ? lastRun : lastRun.replace(" ", "T") + "Z";
+  const diffMs = Date.now() - new Date(normalized).getTime();
   const diffMin = diffMs / 60000;
   if (diffMin < 60) return `${Math.round(diffMin)}m ago`;
   if (diffMin < 1440) return `${Math.round(diffMin / 60)}h ago`;
@@ -770,7 +772,7 @@ export default function AutonomyPage() {
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 30_000);
+    const interval = setInterval(loadData, 5_000);
     return () => clearInterval(interval);
   }, [loadData]);
 
