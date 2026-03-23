@@ -1,0 +1,14 @@
+{
+  "reflection_pipeline": {
+    "last_run": null,
+    "last_session_mtime": null
+  },
+  "data_pipeline": {
+    "last_run": null,
+    "last_vault_commit": null
+  },
+  "memory_capture": {
+    "last_run": null,
+    "last_session_count": 0
+  }
+}
