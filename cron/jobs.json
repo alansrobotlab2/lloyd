@@ -7,7 +7,7 @@
       "name": "periodic-memory-capture",
       "enabled": true,
       "createdAtMs": 1772761670846,
-      "updatedAtMs": 1773884967313,
+      "updatedAtMs": 1774223381175,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -25,16 +25,14 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1773888567313,
-        "lastRunAtMs": 1773884910642,
-        "lastRunStatus": "error",
-        "lastStatus": "error",
-        "lastDurationMs": 56671,
+        "nextRunAtMs": 1774224244200,
+        "lastRunAtMs": 1774223344200,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 36975,
         "lastDeliveryStatus": "not-delivered",
-        "consecutiveErrors": 6,
-        "lastDelivered": false,
-        "lastDeliveryError": "⚠️ 🧩 Run Bash failed",
-        "lastError": "⚠️ 🧩 Run Bash failed"
+        "consecutiveErrors": 0,
+        "lastDelivered": false
       }
     },
     {
@@ -62,14 +60,15 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1773918000000,
+        "nextRunAtMs": 1774263600000,
         "lastRunAtMs": 1773875015006,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
         "lastDurationMs": 106861,
         "lastDelivered": false,
         "lastDeliveryStatus": "not-delivered",
-        "consecutiveErrors": 0
+        "consecutiveErrors": 0,
+        "runningAtMs": 1774223605638
       }
     },
     {
@@ -97,14 +96,15 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1773910800000,
+        "nextRunAtMs": 1774256400000,
         "lastRunAtMs": 1773879198348,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
         "lastDurationMs": 227835,
         "lastDelivered": false,
         "lastDeliveryStatus": "not-delivered",
-        "consecutiveErrors": 0
+        "consecutiveErrors": 0,
+        "runningAtMs": 1774223605638
       }
     },
     {
@@ -131,14 +131,15 @@
         "mode": "none"
       },
       "state": {
-        "nextRunAtMs": 1773914400000,
+        "nextRunAtMs": 1774260000000,
         "lastRunAtMs": 1773879426183,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
         "lastDurationMs": 407470,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0,
-        "lastDelivered": false
+        "lastDelivered": false,
+        "runningAtMs": 1774223605638
       }
     },
     {

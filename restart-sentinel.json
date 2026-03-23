@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "payload": {
+    "kind": "restart",
+    "status": "ok",
+    "ts": 1774224006536,
+    "sessionKey": "agent:main:mc-b0090b66-977f-459a-b95a-deb70378ed76",
+    "deliveryContext": {
+      "channel": "webchat"
+    },
+    "message": "Gateway restarted. MC extension now has the idler completion polling loop. Ready to test with idler.",
+    "doctorHint": "Run: openclaw doctor --non-interactive",
+    "stats": {
+      "mode": "gateway.restart",
+      "reason": "Clean restart with MC polling loop for idler task completion detection"
+    }
+  }
+}
