@@ -7,7 +7,7 @@
       "name": "periodic-memory-capture",
       "enabled": true,
       "createdAtMs": 1772761670846,
-      "updatedAtMs": 1774223381175,
+      "updatedAtMs": 1774226092284,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -25,11 +25,11 @@
         "channel": "last"
       },
       "state": {
-        "nextRunAtMs": 1774224244200,
-        "lastRunAtMs": 1774223344200,
+        "nextRunAtMs": 1774226871039,
+        "lastRunAtMs": 1774225971039,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 36975,
+        "lastDurationMs": 121245,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0,
         "lastDelivered": false
@@ -41,7 +41,7 @@
       "name": "nightly-reflection",
       "enabled": true,
       "createdAtMs": 1772766786499,
-      "updatedAtMs": 1773875121867,
+      "updatedAtMs": 1774224361307,
       "schedule": {
         "kind": "cron",
         "expr": "0 4 * * *",
@@ -61,14 +61,13 @@
       },
       "state": {
         "nextRunAtMs": 1774263600000,
-        "lastRunAtMs": 1773875015006,
+        "lastRunAtMs": 1774224211232,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 106861,
+        "lastDurationMs": 150075,
         "lastDelivered": false,
         "lastDeliveryStatus": "not-delivered",
-        "consecutiveErrors": 0,
-        "runningAtMs": 1774223605638
+        "consecutiveErrors": 0
       }
     },
     {
@@ -77,7 +76,7 @@
       "name": "daily-vault-maintenance",
       "enabled": true,
       "createdAtMs": 1772826031683,
-      "updatedAtMs": 1773879426183,
+      "updatedAtMs": 1774223882087,
       "schedule": {
         "kind": "cron",
         "expr": "0 2 * * *",
@@ -97,14 +96,13 @@
       },
       "state": {
         "nextRunAtMs": 1774256400000,
-        "lastRunAtMs": 1773879198348,
+        "lastRunAtMs": 1774223605661,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 227835,
+        "lastDurationMs": 276426,
         "lastDelivered": false,
         "lastDeliveryStatus": "not-delivered",
-        "consecutiveErrors": 0,
-        "runningAtMs": 1774223605638
+        "consecutiveErrors": 0
       }
     },
     {
@@ -113,7 +111,7 @@
       "name": "nightly-skills-management",
       "enabled": true,
       "createdAtMs": 1773118213958,
-      "updatedAtMs": 1773879833653,
+      "updatedAtMs": 1774224211232,
       "schedule": {
         "kind": "cron",
         "expr": "0 3 * * *",
@@ -132,14 +130,13 @@
       },
       "state": {
         "nextRunAtMs": 1774260000000,
-        "lastRunAtMs": 1773879426183,
+        "lastRunAtMs": 1774223882087,
         "lastRunStatus": "ok",
         "lastStatus": "ok",
-        "lastDurationMs": 407470,
+        "lastDurationMs": 329145,
         "lastDeliveryStatus": "not-delivered",
         "consecutiveErrors": 0,
-        "lastDelivered": false,
-        "runningAtMs": 1774223605638
+        "lastDelivered": false
       }
     },
     {
