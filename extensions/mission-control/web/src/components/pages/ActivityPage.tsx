@@ -684,7 +684,7 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
     refresh();
   }, [refresh]);
 
-  // Adaptive polling: 1.5s when active, 3s when idle
+  // Adaptive polling: 3s when active, 10s when idle — only when tab is visible
   useEffect(() => {
     const hasCcRunning = ccInstances.some((i) => i.status === "running");
     const hasGwActive = gatewaySessions.some((s) => s.state !== "idle");
@@ -694,8 +694,27 @@ export default function ActivityPage({ onNavigateToAgent }: { onNavigateToAgent?
       hasCcRunning ||
       hasGwActive;
 
-    const interval = setInterval(refresh, isActive ? 1500 : 3000);
-    return () => clearInterval(interval);
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    const start = () => {
+      if (interval) return;
+      interval = setInterval(refresh, isActive ? 3000 : 10_000);
+    };
+    const stop = () => {
+      if (interval) { clearInterval(interval); interval = null; }
+    };
+
+    // Only poll when the page/tab is visible
+    const onVisibility = () => {
+      if (document.hidden) stop(); else { refresh(); start(); }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    if (!document.hidden) start();
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [status, ccInstances, gatewaySessions, refresh]);
 
   const handleKill = useCallback(async (sessionKey: string) => {

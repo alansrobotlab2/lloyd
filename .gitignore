@@ -20,6 +20,7 @@ agents/*/qmd/
 # SQLite databases
 /memory/*.sqlite
 /memory/*.sqlite-*
+autonomy.db*
 
 # Logs
 /logs/
@@ -27,34 +28,22 @@ agents/*/qmd/
 # Runtime / generated
 /browser/
 /data/
+/state/
+update-check.json
+
+# Cron run logs
+/cron/runs/
+jobs.json
+
+# Extension build artifacts
+/extensions/*/web/node_modules/
 
 # Backup files
 *.bak
 *.bak.*
 *.bak-*
 
-# Extension build artifacts
-/extensions/*/web/node_modules/
-/extensions/clawdeck/
-
-# Node modules (except agent-orchestrator which has SDK)
-# extensions/*/node_modules/  # intentionally tracked for agent-orchestrator
-
-# Cron runs
-/cron/runs/*
-
 # Misc
 /canvas/
-update-check.json
-
-# Cron run logs (contain memory/conversation summaries)
-/cron/runs/
-
 /docs/archive/
-
 /delivery-queue/
-
-jobs.json
-
-# Runtime state (created by gateway)
-/state/

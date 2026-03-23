@@ -139,6 +139,10 @@ export function registerAgentRoutes(
     ctx.currentActivity.value = { type: "idle", startedAt: Date.now() };
   });
 
+  // ── Agents endpoint cache ────────────────────────────────────────
+  let agentsCache: { data: any; ts: number; configMtime: number } | null = null;
+  const AGENTS_CACHE_TTL = 30_000; // 30 seconds
+
   // ── GET /api/mc/tools ─────────────────────────────────────────────
 
   api.registerHttpRoute({
@@ -185,6 +189,15 @@ export function registerAgentRoutes(
     auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
+        // TTL cache — invalidate on config file mtime change or after 30s
+        const now = Date.now();
+        let configMtime = 0;
+        try { configMtime = statSync(configFile).mtimeMs; } catch { /* non-fatal */ }
+        if (agentsCache && (now - agentsCache.ts < AGENTS_CACHE_TTL) && agentsCache.configMtime === configMtime) {
+          jsonResponse(res, agentsCache.data);
+          return;
+        }
+
         const config = JSON.parse(readFileSync(configFile, "utf-8"));
         const agentList: any[] = config.agents?.list || [];
         const defaults = config.agents?.defaults || {};
@@ -277,7 +290,9 @@ export function registerAgentRoutes(
         const bdSkills = parseSkillDir(bundledSkillsDir, configFile, api.logger);
         const allSkillNames = [...wsSkills, ...bdSkills].map((s) => s.name);
 
-        jsonResponse(res, { agents, workspace, defaults, allToolGroups, allSkillNames });
+        const result = { agents, workspace, defaults, allToolGroups, allSkillNames };
+        agentsCache = { data: result, ts: Date.now(), configMtime };
+        jsonResponse(res, result);
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }

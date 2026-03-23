@@ -99,7 +99,14 @@ export function setupGateway(ctx: PluginContext): GatewayHandle {
   }
 
   const pendingSummaries = new Set<string>();
+  // Seed failures from persisted summaries — keys with "__failed" value won't be retried
   const summaryFailures = new Map<string, number>();
+  try {
+    const persisted = loadSummaries(summariesFile);
+    for (const [k, v] of Object.entries(persisted)) {
+      if (v === "__failed") summaryFailures.set(k, 3);
+    }
+  } catch { /* non-fatal */ }
 
   async function generateSummary(sessionKey: string): Promise<string | null> {
     try {
@@ -166,11 +173,32 @@ export function setupGateway(ctx: PluginContext): GatewayHandle {
         summaries[sessionKey] = summary;
         saveSummaries(summariesFile, summaries);
       } else {
-        summaryFailures.set(sessionKey, failures + 1);
+        const newCount = failures + 1;
+        summaryFailures.set(sessionKey, newCount);
+        // Persist failure so it survives gateway restarts
+        if (newCount >= 3) {
+          try {
+            const summaries = loadSummaries(summariesFile);
+            if (!summaries[sessionKey]) {
+              summaries[sessionKey] = "__failed";
+              saveSummaries(summariesFile, summaries);
+            }
+          } catch { /* non-fatal */ }
+        }
       }
     }).catch(() => {
       pendingSummaries.delete(sessionKey);
-      summaryFailures.set(sessionKey, failures + 1);
+      const newCount = failures + 1;
+      summaryFailures.set(sessionKey, newCount);
+      if (newCount >= 3) {
+        try {
+          const summaries = loadSummaries(summariesFile);
+          if (!summaries[sessionKey]) {
+            summaries[sessionKey] = "__failed";
+            saveSummaries(summariesFile, summaries);
+          }
+        } catch { /* non-fatal */ }
+      }
     });
   }
 

@@ -88,15 +88,25 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── Idler task completion polling ───────────────────────────────────
 
-  // Poll for completed idler tasks every 20 seconds.
+  // Poll for completed idler tasks every 60 seconds.
   // Session keys are normalized by the gateway as: agent:{targetAgentId}:hook:idler:task-{taskId}
   // where targetAgentId comes from task routing (e.g. "memory", "orchestrator", "researcher").
   // We scan agentSessionStates for any key containing "hook:idler:task-{taskId}" to be robust
   // against routing changes.
+  // Guard: only start one polling loop across plugin re-loads
+  const IDLER_POLL_KEY = Symbol.for("mission-control-idler-poll");
+  let _autonomySvc: typeof import("./autonomy-service.js") | null = null;
+  function getAutonomySvc() {
+    if (!_autonomySvc) _autonomySvc = require("./autonomy-service.js");
+    return _autonomySvc!;
+  }
+  if (!(globalThis as any)[IDLER_POLL_KEY]) {
+    (globalThis as any)[IDLER_POLL_KEY] = true;
   setInterval(async () => {
     try {
-      const { getInProgressTasks, completeActiveRun, completeTask } = await import("./autonomy-service.js");
-      const inProgressTasks = await getInProgressTasks();
+      const svc = getAutonomySvc();
+      const inProgressTasks = svc.getInProgressTasks();
+      if (inProgressTasks.length === 0) return; // Nothing to poll — skip Map iteration
 
       for (const task of inProgressTasks) {
         const taskId = task.id;
@@ -119,8 +129,8 @@ export default function register(api: OpenClawPluginApi) {
         // between LLM turns or during tool execution gaps.
         const idleAgeMs = Date.now() - (sessionState.lastUpdated ?? 0);
         if (sessionState.state === "idle" && (sessionState.queueDepth ?? 0) <= 0 && idleAgeMs >= 30_000) {
-          await completeActiveRun(taskId, "success", "Completed");
-          await completeTask(taskId);
+          await svc.completeActiveRun(taskId, "success", "Completed");
+          await svc.completeTask(taskId);
           api.logger.info?.(`[autonomy] Task #${taskId} completed via session state`);
           // Clean up tracked session state to avoid re-processing
           for (const [key] of agentSessionStates) {
@@ -134,7 +144,8 @@ export default function register(api: OpenClawPluginApi) {
     } catch (err: any) {
       api.logger.error?.(`[autonomy] Poll error: ${err.message}`);
     }
-  }, 20000);
+  }, 60_000);
+  } // end idler-poll guard
 
   // ── Wire up domain modules ────────────────────────────────────────
 

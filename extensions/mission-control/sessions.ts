@@ -201,14 +201,40 @@ export function registerSessionRoutes(
     },
   });
 
+  // ── Shared sessions.list cache (used by /sessions and /session-messages) ──
+  let sessionsListCache: { entries: any[]; ts: number } | null = null;
+  const SESSIONS_LIST_TTL = 15_000; // 15 seconds — sessions.list is expensive (~1.3s)
+
+  async function getCachedSessionsList(): Promise<any[]> {
+    const now = Date.now();
+    if (sessionsListCache && (now - sessionsListCache.ts < SESSIONS_LIST_TTL)) {
+      return sessionsListCache.entries;
+    }
+    const result = await gwWsSend("sessions.list", { agentId: "main" });
+    const entries: any[] = result?.entries || result?.sessions || [];
+    sessionsListCache = { entries, ts: Date.now() };
+    return entries;
+  }
+
+  // Persistent sessionKey→sessionId map (avoids sessions.list for known keys)
+  const sessionKeyToId = new Map<string, string>();
+
   // GET /api/mc/sessions
+  let sessionsCache: { data: any; ts: number } | null = null;
+  const SESSIONS_CACHE_TTL = 10_000; // 10 seconds — avoids hammering gateway WS
+
   api.registerHttpRoute({
     path: "/api/mc/sessions",
     auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
-        const result = await gwWsSend("sessions.list", { agentId: "main" });
-        const entries: any[] = result?.entries || result?.sessions || [];
+        const now = Date.now();
+        if (sessionsCache && (now - sessionsCache.ts < SESSIONS_CACHE_TTL)) {
+          jsonResponse(res, sessionsCache.data);
+          return;
+        }
+
+        const entries = await getCachedSessionsList();
         const sessions = entries
           .filter((e: any) => {
             const key = e.sessionKey || e.key || "";
@@ -230,14 +256,17 @@ export function registerSessionRoutes(
 
         const cachedSummaries = loadSummaries(summariesFile);
         for (const s of sessions) {
-          if (cachedSummaries[s.sessionKey]) {
-            s.summary = cachedSummaries[s.sessionKey];
-          } else {
+          const cached = cachedSummaries[s.sessionKey];
+          if (cached && cached !== "__failed") {
+            s.summary = cached;
+          } else if (!cached) {
             triggerSummaryGeneration(s.sessionKey);
           }
         }
 
-        jsonResponse(res, { sessions });
+        const responseData = { sessions };
+        sessionsCache = { data: responseData, ts: Date.now() };
+        jsonResponse(res, responseData);
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
@@ -258,10 +287,20 @@ export function registerSessionRoutes(
         let rawMessages: any[] = [];
         let fromJsonl = false;
         try {
-          const sessResult = await gwWsSend("sessions.list", { agentId: "main" });
-          const entries: any[] = sessResult?.entries || sessResult?.sessions || [];
-          const match = entries.find((e: any) => (e.sessionKey || e.key) === sessionKey);
-          const sessionId = match?.sessionId || match?.id;
+          // Try cached sessionKey→sessionId first to avoid sessions.list entirely
+          let sessionId = sessionKeyToId.get(sessionKey);
+          if (!sessionId) {
+            const entries = await getCachedSessionsList();
+            const match = entries.find((e: any) => (e.sessionKey || e.key) === sessionKey);
+            sessionId = match?.sessionId || match?.id;
+            if (sessionId) sessionKeyToId.set(sessionKey, sessionId);
+            // Populate map for all entries while we have them
+            for (const e of entries) {
+              const k = e.sessionKey || e.key;
+              const id = e.sessionId || e.id;
+              if (k && id) sessionKeyToId.set(k, id);
+            }
+          }
           if (sessionId) {
             const jsonlPath = join(sessionsDir, sessionId + ".jsonl");
             if (existsSync(jsonlPath)) {
@@ -521,14 +560,29 @@ export function registerSessionRoutes(
 
 // ── Subagent runs helper (used by agent-status and gateway-sessions) ──
 
+const STALE_RUN_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes — runs older than this without endedAt are stale
+
 function loadSubagentRuns(ctx: PluginContext): SubagentRunStatus[] {
   const subagentRunsFile = join(ctx.rootDir, "subagents/runs.json");
   try {
     if (!existsSync(subagentRunsFile)) return [];
     const raw = JSON.parse(readFileSync(subagentRunsFile, "utf-8"));
     if (raw.version !== 2 || !raw.runs) return [];
+    const now = Date.now();
     const runs: SubagentRunStatus[] = [];
     for (const [runId, record] of Object.entries<any>(raw.runs)) {
+      let endedAt = record.endedAt;
+      let outcome = typeof record.outcome === "object" && record.outcome !== null
+        ? record.outcome.status : record.outcome;
+      let endedReason = record.endedReason;
+
+      // Mark runs without endedAt as stale if they've exceeded the threshold
+      if (!endedAt && (now - (record.startedAt || record.createdAt)) > STALE_RUN_THRESHOLD_MS) {
+        endedAt = record.startedAt || record.createdAt;
+        outcome = outcome || "stale";
+        endedReason = endedReason || "marked stale (process likely died)";
+      }
+
       runs.push({
         runId,
         childSessionKey: record.childSessionKey,
@@ -539,11 +593,10 @@ function loadSubagentRuns(ctx: PluginContext): SubagentRunStatus[] {
         spawnMode: record.spawnMode,
         createdAt: record.createdAt,
         startedAt: record.startedAt,
-        endedAt: record.endedAt,
-        outcome: typeof record.outcome === "object" && record.outcome !== null
-          ? record.outcome.status : record.outcome,
-        endedReason: record.endedReason,
-        durationMs: record.endedAt && record.startedAt ? record.endedAt - record.startedAt : undefined,
+        endedAt,
+        outcome,
+        endedReason,
+        durationMs: endedAt && record.startedAt ? endedAt - record.startedAt : undefined,
       });
     }
     runs.sort((a, b) => {
