@@ -115,7 +115,10 @@ export default function register(api: OpenClawPluginApi) {
 
         // Session states are: "idle" | "processing" | "waiting"
         // A completed cron session transitions to "idle" with queueDepth 0.
-        if (sessionState.state === "idle" && (sessionState.queueDepth ?? 0) <= 0) {
+        // Debounce: require idle for 30+ seconds to avoid false positives
+        // between LLM turns or during tool execution gaps.
+        const idleAgeMs = Date.now() - (sessionState.lastUpdated ?? 0);
+        if (sessionState.state === "idle" && (sessionState.queueDepth ?? 0) <= 0 && idleAgeMs >= 30_000) {
           await completeActiveRun(taskId, "success", "Completed");
           await completeTask(taskId);
           api.logger.info?.(`[autonomy] Task #${taskId} completed via session state`);

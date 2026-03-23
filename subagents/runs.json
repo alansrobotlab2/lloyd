@@ -3197,6 +3197,38 @@
       "lastAnnounceRetryAt": 1774224341779,
       "endedHookEmittedAt": 1774224341783,
       "cleanupCompletedAt": 1774224341779
+    },
+    "152f7165-a731-46f8-a64b-d85cedab4fec": {
+      "runId": "152f7165-a731-46f8-a64b-d85cedab4fec",
+      "childSessionKey": "agent:orchestrator:subagent:3fb833b5-c154-4440-a5b2-0c43941bfba1",
+      "controllerSessionKey": "agent:main:mc-dcd2e06e-142b-4ac6-bd3d-ece5ee2e6f71",
+      "requesterSessionKey": "agent:main:mc-dcd2e06e-142b-4ac6-bd3d-ece5ee2e6f71",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:mc-dcd2e06e-142b-4ac6-bd3d-ece5ee2e6f71",
+      "task": "## Backlog #176: Idler Agent Task Completion Detection\n\nTwo surgical fixes needed. I've already done the full analysis — just implement these.\n\n### Fix 1: Idler `_check_completions()` in Python\n\n**File:** `~/agents/idler/main.py`\n\n**Problem:** `_check_completions()` at line 143 is a no-op (`pass`). The MC extension's polling interval in `~/.openclaw/extensions/mission-control/index.ts` (lines ~91-130) already detects completed hook sessions via diagnostic events and marks tasks complete in the SQLite DB (`~/.openclaw/autonomy.db`). But the idler's in-memory `in_flight` dict still holds the entry. When `_check_timeouts()` fires on the next poll cycle, it overwrites the DB — re-marking a successful run as `timeout`, incrementing failure count, and reverting task status.\n\n**Fix:** Replace the `_check_completions()` body to check the DB for tasks that MC already completed:\n\n```python\ndef _check_completions():\n    \"\"\"Check if in-flight tasks were completed externally (by MC polling).\"\"\"\n    global in_flight\n    \n    for task_id in list(in_flight.keys()):\n        task = get_task(task_id)\n        if not task:\n            # Task deleted from DB\n            logger.info(f\"Task #{task_id} no longer in DB, removing from in-flight\")\n            del in_flight[task_id]\n            continue\n        # If MC polling already moved it out of in_progress, clean up our tracking\n        if task.get(\"status\") != \"in_progress\":\n            info = in_flight[task_id]\n            dispatched_at = info.get(\"dispatched_at\", \"unknown\")\n            logger.info(f\"Task #{task_id} completed externally (status: {task.get('status')})\")\n            reset_failure_count(task_id)\n            del in_flight[task_id]\n            _log_metrics(\"complete\", task_id=task_id)\n```\n\n**Important:** The `get_task` function is already imported from `autonomy_db` at the top of the file. `reset_failure_count` is also already imported. Just replace the function body.\n\n### Fix 2: Suppress system events for `deliver: false` hooks  \n\n**File:** `~/Projects/openclaw/src/gateway/server/hooks.ts`\n\n**Problem:** Lines 90-95 in hooks.ts always enqueue a system event to the main session when `!result.delivered`. But when the idler explicitly passes `deliver: false`, these system events clutter the main session with `System: Hook idler-*:` messages.\n\n**Current code (around line 88-97):**\n```typescript\nif (!result.delivered) {\n  enqueueSystemEvent(`${prefix}: ${summary}`.trim(), {\n    sessionKey: mainSessionKey,\n  });\n  if (value.wakeMode === \"now\") {\n    requestHeartbeatNow({ reason: `hook:${jobId}` });\n  }\n}\n```\n\n**Fix:** Only enqueue the system event if `deliver` wasn't explicitly set to `false`:\n```typescript\nif (!result.delivered && value.deliver !== false) {\n  enqueueSystemEvent(`${prefix}: ${summary}`.trim(), {\n    sessionKey: mainSessionKey,\n  });\n  if (value.wakeMode === \"now\") {\n    requestHeartbeatNow({ reason: `hook:${jobId}` });\n  }\n}\n```\n\nThe `value.deliver` is already part of the `HookAgentDispatchPayload` type and is set by the idler's dispatch call. This is a one-line condition change.\n\n### Testing\n\nAfter both fixes:\n1. Run `python3 ~/agents/idler/main.py` (or restart via supervisor) — it should show \"completed externally\" logs instead of timeout warnings\n2. Verify no more `System: Hook idler-*:` system events appear in the main session\n3. Check the autonomy DB: `sqlite3 ~/.openclaw/autonomy.db \"SELECT id, status, summary FROM runs ORDER BY id DESC LIMIT 10\"` — should show `success` without subsequent `timeout` overwrites\n\n### Files to modify\n- `~/agents/idler/main.py` — replace `_check_completions()` body\n- `~/Projects/openclaw/src/gateway/server/hooks.ts` — add `&& value.deliver !== false` condition\n\nNo other files need changes. No gateway restart needed for the Python fix; the hooks.ts change will require a gateway restart after.",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "local-llm-120b/Qwen3.5-122B-A10B",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/orchestrator",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774226466403,
+      "startedAt": 1774226471280,
+      "sessionStartedAt": 1774226466403,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774226554846,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "Perfect! Both fixes are now applied correctly. Let me provide a summary:\n\n## Task Completed\n\nI've implemented both surgical fixes for Backlog #176:\n\n### Fix 1: Idler `_check_completions()` in Python\n**File:** `~/agents/idler/main.py`\n\nReplaced the no-op `_check_completions()` function (previously just `pass`) with logic that:\n- Iterates through in-flight tasks\n- Checks if each task still exists in the DB\n- Detects when MC polling has already completed a task (status != \"in_progress\")\n- Cleans up the in-flight tracking and resets failure counts\n- Logs metrics for completed tasks\n\nThis prevents `_check_timeouts()` from overwriting successful completions with timeout status.\n\n### Fix 2: Suppress system events for `deliver: false` hooks\n**File:** `~/Projects/openclaw/src/gateway/server/hooks.ts`\n\nChanged line 92 from:\n```typescript\nif (!result.delivered) {\n```\nto:\n```typescript\nif (!result.delivered && value.deliver !== false) {\n```\n\nThis prevents system events from being enqueued when the idler explicitly passes `deliver: false`, eliminating the clutter of `System: Hook idler-*:` messages in the main session.\n\n### Testing Instructions\n1. Restart the idler agent: `python3 ~/agents/idler/main.py` (or via supervisor)\n2. Verify logs show \"completed externally\" instead of timeout warnings\n3. Confirm no more `System: Hook idler-*:` system events in main session\n4. Check DB: `sqlite3 ~/.openclaw/autonomy.db \"SELECT id, status, summary FROM runs ORDER BY id DESC LIMIT 10\"` - should show `success` without subsequent `timeout` overwrites\n\n**Note:** The Python fix takes effect immediately. The hooks.ts change requires a gateway rebuild/restart.",
+      "frozenResultCapturedAt": 1774226555061,
+      "endedHookEmittedAt": 1774226580171,
+      "cleanupCompletedAt": 1774226580175
     }
   }
 }
