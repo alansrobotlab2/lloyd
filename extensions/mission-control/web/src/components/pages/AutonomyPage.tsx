@@ -53,11 +53,17 @@ function formatRunsPerDay(rpd: number | null): string {
   return `~${Math.round(intervalMin / 1440)}d`;
 }
 
+// Parse UTC timestamp, normalizing space-separated formats to ISO
+function parseUtcTimestamp(ts: string): number {
+  const normalized = ts.includes("Z") || ts.includes("+") ? ts : ts.replace(" ", "T") + "Z";
+  return new Date(normalized).getTime();
+}
+
 function formatLastRun(lastRun: string | null): string {
   if (!lastRun) return "never";
   // Timestamps without timezone suffix are UTC — ensure proper parsing
-  const normalized = lastRun.includes("Z") || lastRun.includes("+") ? lastRun : lastRun.replace(" ", "T") + "Z";
-  const diffMs = Date.now() - new Date(normalized).getTime();
+  const lastRunMs = parseUtcTimestamp(lastRun);
+  const diffMs = Date.now() - lastRunMs;
   const diffMin = diffMs / 60000;
   if (diffMin < 60) return `${Math.round(diffMin)}m ago`;
   if (diffMin < 1440) return `${Math.round(diffMin / 60)}h ago`;
@@ -67,7 +73,7 @@ function formatLastRun(lastRun: string | null): string {
 function calculateOverdueRatio(task: AutonomyTask): number | null {
   if (!task.runs_per_day || !task.last_run) return null;
   const now = Date.now();
-  const lastRunMs = new Date(task.last_run).getTime();
+  const lastRunMs = parseUtcTimestamp(task.last_run);
   const intervalMs = (86400 * 1000) / task.runs_per_day;
   const elapsedMs = now - lastRunMs;
   return elapsedMs / intervalMs;
