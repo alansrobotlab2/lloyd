@@ -4,12 +4,11 @@
 
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
-import { homedir } from "os";
 import type { PluginContext, GwState } from "./types.js";
 import { loadDeviceIdentity, buildDeviceAuthPayloadV3, signDevicePayload, base64UrlEncode, derivePublicKeyRaw } from "./device-auth.js";
 import { broadcastSse } from "./voice.js";
 
-const WS = require(join(homedir(), ".npm-global/lib/node_modules/openclaw/node_modules/ws"));
+const WS = require("ws");
 
 // ── Summary helpers ─────────────────────────────────────────────────
 

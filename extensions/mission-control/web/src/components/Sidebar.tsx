@@ -17,6 +17,8 @@ import {
   ChevronsRight,
   Briefcase,
   GitBranch,
+  Lightbulb,
+  Code2,
   Mic,
   MicOff,
   Power,
@@ -41,7 +43,9 @@ export type Page =
   | "cron"
   | "tools"
   | "activity"
-  | "settings";
+  | "settings"
+  | "autonomy"
+  | "architecture";
 
 interface NavItem {
   id: Page;
@@ -54,7 +58,9 @@ const NAV_ITEMS: NavItem[] = [
   { id: "activity", label: "Activity", icon: Activity },
   { id: "dashboard", label: "Usage", icon: ChartArea },
   { id: "backlog", label: "Backlog", icon: LayoutGrid },
+  { id: "autonomy", label: "Autonomy", icon: Lightbulb },
   { id: "memory", label: "Memory", icon: Brain },
+  { id: "architecture", label: "Architecture", icon: Code2 },
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "sessions", label: "Sessions", icon: Users },

@@ -15,6 +15,8 @@ import AgentsPage from "./pages/AgentsPage";
 import ActivityPage from "./pages/ActivityPage";
 import SettingsPage from "./pages/SettingsPage";
 import GraphPage from "./pages/GraphPage";
+import ArchitecturePage from "./pages/ArchitecturePage";
+import AutonomyPage from "./pages/AutonomyPage";
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -51,6 +53,8 @@ const PAGES: Record<string, React.ComponentType> = {
   cron: CronPage,
   tools: ToolsPage,
   settings: SettingsPage,
+  architecture: ArchitecturePage,
+  autonomy: AutonomyPage,
 };
 
 export default function Layout() {

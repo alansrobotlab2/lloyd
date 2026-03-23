@@ -9,7 +9,7 @@ import { homedir } from "os";
 import type { PluginContext, SkillInfo } from "./types.js";
 import { jsonResponse, readBody } from "./helpers.js";
 
-const YAML = require(join(homedir(), ".npm-global/lib/node_modules/openclaw/node_modules/yaml"));
+const YAML = require("yaml");
 
 // ── Skill directory resolution ──────────────────────────────────────
 

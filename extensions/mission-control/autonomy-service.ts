@@ -187,3 +187,38 @@ export async function getAllConfig(): Promise<Record<string, string>> {
   rows.forEach((row: any) => { result[row.key] = row.value; });
   return result;
 }
+
+/** Get all tasks currently in_progress (used by idler polling in index.ts). */
+export function getInProgressTasks(): any[] {
+  const db = getDb();
+  return db.prepare("SELECT * FROM tasks WHERE status = 'in_progress'").all();
+}
+
+/** Mark the active run for a task as completed. */
+export function completeActiveRun(taskId: number, status: string = "success", summary?: string): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const run = db.prepare(
+    "SELECT id, started FROM runs WHERE task_id = ? AND completed IS NULL ORDER BY id DESC LIMIT 1"
+  ).get(taskId) as any;
+  if (run) {
+    const startedAt = run.started ? new Date(run.started).getTime() : Date.now();
+    const durationSeconds = Math.round((Date.now() - startedAt) / 1000);
+    db.prepare(
+      "UPDATE runs SET status = ?, completed = ?, summary = ?, duration_seconds = ? WHERE id = ?"
+    ).run(status, now, summary || null, durationSeconds, run.id);
+  }
+  db.prepare("UPDATE tasks SET last_run = ?, updated_at = ? WHERE id = ?").run(now, now, taskId);
+}
+
+/** Mark a task as complete — move from in_progress to done (or up_next for recurring). */
+export function completeTask(taskId: number): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const task = db.prepare("SELECT frequency FROM tasks WHERE id = ?").get(taskId) as any;
+  if (task?.frequency && task.frequency !== "one-time") {
+    db.prepare("UPDATE tasks SET status = 'up_next', updated_at = ? WHERE id = ?").run(now, taskId);
+  } else {
+    db.prepare("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?").run(now, taskId);
+  }
+}

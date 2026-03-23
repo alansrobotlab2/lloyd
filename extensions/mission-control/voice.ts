@@ -5,10 +5,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PluginContext } from "./types.js";
 import { jsonResponse } from "./helpers.js";
-import { join } from "path";
-import { homedir } from "os";
 
-const WS = require(join(homedir(), ".npm-global/lib/node_modules/openclaw/node_modules/ws"));
+const WS = require("ws");
 
 // ── Voice Pipeline SSE Bridge ───────────────────────────────────────
 

@@ -8,7 +8,6 @@
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { onDiagnosticEvent, type DiagnosticEventPayload } from "openclaw/plugin-sdk";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, existsSync, writeFileSync, statSync } from "fs";
 import { join, extname } from "path";
@@ -23,6 +22,8 @@ import { registerMemoryRoutes } from "./memory.js";
 import { resolveSkillDirs, parseSkillDir, registerSkillRoutes } from "./skills.js";
 import { registerAgentRoutes } from "./agents.js";
 import { registerBacklogRoutes } from "./backlog.js";
+import { registerAutonomyRoutes } from "./autonomy.js";
+import { registerArchitectureRoutes } from "./architecture.js";
 
 export default function register(api: OpenClawPluginApi) {
   const rootDir = join(__dirname, "../..");
@@ -60,25 +61,30 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── Diagnostic event tracking ─────────────────────────────────────
 
-  onDiagnosticEvent((evt: DiagnosticEventPayload) => {
-    if (evt.type === "session.state") {
-      const key = evt.sessionKey ?? evt.sessionId ?? "unknown";
-      agentSessionStates.set(key, {
-        sessionKey: key,
-        sessionId: evt.sessionId,
-        state: evt.state,
-        reason: evt.reason,
-        queueDepth: evt.queueDepth ?? 0,
-        lastUpdated: Date.now(),
-      });
-      if (evt.state === "idle" && key.startsWith("agent:main:")) {
-        currentActivity.value = { type: "idle", startedAt: Date.now() };
+  try {
+    const { onDiagnosticEvent } = require("openclaw/plugin-sdk");
+    onDiagnosticEvent((evt: any) => {
+      if (evt.type === "session.state") {
+        const key = evt.sessionKey ?? evt.sessionId ?? "unknown";
+        agentSessionStates.set(key, {
+          sessionKey: key,
+          sessionId: evt.sessionId,
+          state: evt.state,
+          reason: evt.reason,
+          queueDepth: evt.queueDepth ?? 0,
+          lastUpdated: Date.now(),
+        });
+        if (evt.state === "idle" && key.startsWith("agent:main:")) {
+          currentActivity.value = { type: "idle", startedAt: Date.now() };
+        }
       }
-    }
-    if (evt.type === "diagnostic.heartbeat") {
-      lastHeartbeat.value = { active: evt.active, waiting: evt.waiting, queued: evt.queued };
-    }
-  });
+      if (evt.type === "diagnostic.heartbeat") {
+        lastHeartbeat.value = { active: evt.active, waiting: evt.waiting, queued: evt.queued };
+      }
+    });
+  } catch {
+    api.logger.info?.("mission-control: diagnostics-otel unavailable — session state tracking disabled");
+  }
 
   // ── Idler task completion polling ───────────────────────────────────
 
@@ -154,6 +160,12 @@ export default function register(api: OpenClawPluginApi) {
 
   // Backlog
   registerBacklogRoutes(ctx);
+
+  // Autonomy
+  registerAutonomyRoutes(ctx);
+
+  // Architecture
+  registerArchitectureRoutes(ctx);
 
   // ── Small endpoints (not worth a separate module) ─────────────────
 

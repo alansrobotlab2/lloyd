@@ -303,6 +303,62 @@ export interface BacklogTask {
   updated_at: string;
 }
 
+// ── Autonomy types ───────────────────────────────────────────────────
+
+export interface AutonomyTask {
+  id: number;
+  name: string;
+  description: string;
+  status: string;
+  priority: string;
+  scheduled_at: string | null;
+  next_run: string | null;
+  auto_advance: boolean;
+  preemptible: boolean;
+  board_id: number;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+  runs_per_day: number | null;
+  depends_on: number | null;
+  pipeline: string | null;
+  agent_id: string | null;
+  skill_path: string | null;
+  model: string | null;
+  timeout_seconds: number | null;
+  cron_id: string | null;
+  last_run: string | null;
+  runs?: Array<{
+    id: number;
+    started: string;
+    completed: string | null;
+    status: string;
+    summary: string;
+  }>;
+}
+
+// ── Architecture types ──────────────────────────────────────────────────
+
+export interface ArchitectureBrowseEntry {
+  name: string;
+  path: string;
+  type: "file" | "dir";
+  size?: number;
+  children?: number;
+}
+
+export interface ArchitectureBrowseResult {
+  path: string;
+  entries: ArchitectureBrowseEntry[];
+}
+
+export interface ArchitectureFileContent {
+  path: string;
+  content: string;
+  language: string;
+  lineCount: number;
+}
+
 // ── Command types ─────────────────────────────────────────────────────
 
 export interface CommandInfo {
@@ -693,6 +749,48 @@ export const api = {
     });
     return res.json();
   },
+
+  // Autonomy
+  autonomyTasks: () => fetchJson<{ tasks: AutonomyTask[] }>("/autonomy-tasks"),
+  autonomyWriteTask: async (data: Record<string, any>) => {
+    const res = await fetch(`${BASE}/autonomy-write-task`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    return res.json();
+  },
+  autonomyGetTask: (id: number) => fetchJson<{ task: AutonomyTask }>(`/autonomy-get-task?id=${id}`),
+  autonomyRunTask: async (id: number) => {
+    const res = await fetch(`${BASE}/autonomy-run-task`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    return res.json();
+  },
+  autonomyDeleteTask: async (id: number) => {
+    const res = await fetch(`${BASE}/autonomy-delete-task`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    return res.json();
+  },
+  autonomyConfig: (key?: string, value?: string) => {
+    const params = new URLSearchParams();
+    if (key) params.set("key", key);
+    if (value !== undefined) params.set("value", value);
+    return fetchJson<Record<string, string>>(`/autonomy-config?${params}`);
+  },
+  autonomyRuns: (taskId: number, limit = 20) =>
+    fetchJson<{ runs: any[] }>(`/autonomy-runs?task_id=${taskId}&limit=${limit}`),
+
+  // Architecture
+  architectureBrowse: (path = "") =>
+    fetchJson<ArchitectureBrowseResult>(`/architecture/browse?path=${encodeURIComponent(path)}`),
+  architectureRead: (path: string) =>
+    fetchJson<ArchitectureFileContent>(`/architecture/read?path=${encodeURIComponent(path)}`),
 };
 
 // ── Gateway Session Types ─────────────────────────────────────────────────
