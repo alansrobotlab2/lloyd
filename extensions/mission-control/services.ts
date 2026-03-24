@@ -18,10 +18,7 @@ const AGENT_DISPLAY_NAMES: Record<string, string> = {
   "agent-discord-voice-bridge.service": "Discord Voice Bridge",
   "agent-discord-voice-server.service": "Discord Voice Server",
   "agent-distrobox.service": "Distrobox (supervisord)",
-  "agent-llm.service": "LLM Service",
-  "agent-llm-0.8b.service": "LLM 0.8B",
-  "agent-llm-2.0b.service": "LLM 2.0B",
-  "agent-llm-4.0b.service": "LLM 4.0B",
+  "agent-llm.service": "LLM 35B (Qwen3.5-35B-A3B)",
   "agent-qmd-daemon.service": "QMD Daemon",
   "agent-qmd-watcher.service": "QMD Watcher",
   "agent-tool-mcp.service": "Tool Services MCP",
@@ -32,13 +29,11 @@ const AGENT_DISPLAY_NAMES: Record<string, string> = {
   "openclaw-dee.service": "OpenClaw DEE Gateway",
   "openclaw-lloyd.service": "OpenClaw LLOYD Gateway",
   "openclaw-trey.service": "OpenClaw TREY Gateway",
+  "openclaw-gateway.service": "OpenClaw Gateway",
 };
 
 export const AGENT_PORT_MAP: Record<string, number> = {
   "agent-llm.service": 8091,
-  "agent-llm-0.8b.service": 8098,
-  "agent-llm-2.0b.service": 8097,
-  "agent-llm-4.0b.service": 8099,
   "agent-tts.service": 8090,
   "agent-voice-mode.service": 8092,
   "agent-tool-mcp.service": 8093,
@@ -47,6 +42,7 @@ export const AGENT_PORT_MAP: Record<string, number> = {
   "openclaw-cert.service": 18790,
   "openclaw-dee.service": 19789,
   "openclaw-lloyd.service": 18789,
+  "openclaw-gateway.service": 18789,
 };
 
 const SUPERVISOR_LOGS_DIR = "/home/alansrobotlab/agents/agent-services-home/agent-services/logs";
@@ -410,7 +406,7 @@ export function registerServiceRoutes(ctx: PluginContext) {
         // Overlay supervisor-managed services
         const supervisorEntries = getSupervisorStatus();
         for (const sup of supervisorEntries) {
-          if (sup.name === "openclaw-gateway") continue;
+
           const unitName = `${sup.name}.service`;
           const existing = services.find((s: any) => s.unit === unitName);
           const activeState = sup.state === "RUNNING" ? "active" : sup.state === "FATAL" ? "failed" : "inactive";

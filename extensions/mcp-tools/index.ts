@@ -696,6 +696,235 @@ export default function register(api: OpenClawPluginApi) {
     },
   );
 
+  // ── Next-gen memory tools ───────────────────────────────────────────────
+
+  proxyTool(
+    "get_facts",
+    "Get Facts",
+    "Retrieve facts for an entity/category. Returns JSON with facts array.",
+    {
+      type: "object",
+      properties: {
+        entity: { type: "string", description: "Entity name" },
+        category: { type: "string", description: "Category (optional)" },
+        status: { type: "string", description: "Status filter (default: current)" },
+      },
+      required: ["entity"],
+    },
+  );
+
+  proxyTool(
+    "add_fact",
+    "Add Fact",
+    "Add or update a fact for an entity/category.",
+    {
+      type: "object",
+      properties: {
+        entity: { type: "string", description: "Entity name" },
+        category: { type: "string", description: "Category" },
+        fact: { type: "string", description: "Fact text" },
+        confidence: { type: "number", description: "Confidence (default: 0.9)" },
+      },
+      required: ["entity", "category", "fact"],
+    },
+  );
+
+  proxyTool(
+    "get_relations",
+    "Get Relations",
+    "Get relationships for a document. Returns JSON with matching relationships.",
+    {
+      type: "object",
+      properties: {
+        document_path: { type: "string", description: "Document path" },
+        relation_type: { type: "string", description: "Relation type (optional)" },
+      },
+      required: ["document_path"],
+    },
+  );
+
+  proxyTool(
+    "add_relation",
+    "Add Relation",
+    "Add relationship between documents.",
+    {
+      type: "object",
+      properties: {
+        source: { type: "string", description: "Source document path" },
+        target: { type: "string", description: "Target document path" },
+        rel_type: { type: "string", description: "Relationship type" },
+      },
+      required: ["source", "target", "rel_type"],
+    },
+  );
+
+  proxyTool(
+    "context_bundle",
+    "Context Bundle",
+    "Get relevant context for a query. Returns JSON with documents, facts, and query.",
+    {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        mode: { type: "string", description: "Mode (default: shallow)" },
+        limit: { type: "integer", description: "Result limit (default: 20)" },
+        include_facts: { type: "boolean", description: "Include facts (default: true)" },
+      },
+      required: ["query"],
+    },
+  );
+
+  proxyTool(
+    "get_profile",
+    "Get Profile",
+    "Get synthesized profile for an entity.",
+    {
+      type: "object",
+      properties: {
+        entity: { type: "string", description: "Entity name" },
+        include_summary: { type: "boolean", description: "Include summary (default: true)" },
+      },
+      required: ["entity"],
+    },
+  );
+
+  proxyTool(
+    "detect_contradictions",
+    "Detect Contradictions",
+    "Find contradictions in facts for an entity.",
+    {
+      type: "object",
+      properties: {
+        entity: { type: "string", description: "Entity name" },
+        category: { type: "string", description: "Category (optional)" },
+      },
+      required: ["entity"],
+    },
+  );
+
+  proxyTool(
+    "resolve_contradictions",
+    "Resolve Contradictions",
+    "Auto-resolve contradictions by keeping higher-confidence fact.",
+    {
+      type: "object",
+      properties: {
+        entity: { type: "string", description: "Entity name" },
+        auto_resolve: { type: "boolean", description: "Auto-resolve (default: true)" },
+      },
+      required: ["entity"],
+    },
+  );
+
+  proxyTool(
+    "rebuild_index",
+    "Rebuild Index",
+    "Rebuild memory system indexes.",
+    {
+      type: "object",
+      properties: {
+        index_type: { type: "string", description: "Index type (default: all)" },
+      },
+    },
+  );
+
+  proxyTool(
+    "skills_search",
+    "Skills Search",
+    "Search local and ClawhHub skills.",
+    {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        source: { type: "string", description: "Source filter (default: all)" },
+      },
+      required: ["query"],
+    },
+  );
+
+  proxyTool(
+    "skills_get",
+    "Skills Get",
+    "Get SKILL.md content by name. Prefix 'clawhub:' for catalog.",
+    {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Skill name" },
+      },
+      required: ["name"],
+    },
+  );
+
+  // ── Autonomy tools ─────────────────────────────────────────────────────
+
+  proxyTool(
+    "autonomy_tasks",
+    "Autonomy Tasks",
+    "List/filter autonomy tasks. Returns array of task objects.",
+    {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "Filter by status" },
+        tag: { type: "string", description: "Filter by tag" },
+        frequency: { type: "string", description: "Filter by frequency" },
+        agent_id: { type: "string", description: "Filter by agent ID" },
+      },
+    },
+    5_000,
+  );
+
+  proxyTool(
+    "autonomy_get_task",
+    "Autonomy Get Task",
+    "Get full task detail + recent runs. Required param: id (int).",
+    {
+      type: "object",
+      properties: {
+        id: { type: "integer", description: "Task ID" },
+      },
+      required: ["id"],
+    },
+    5_000,
+  );
+
+  proxyTool(
+    "autonomy_write_task",
+    "Autonomy Write Task",
+    "Create or update an autonomy task. Omit id to create; include id to update.",
+    {
+      type: "object",
+      properties: {
+        id: { type: "integer", description: "Task ID to update (omit to create)" },
+        name: { type: "string", description: "Task name" },
+        description: { type: "string", description: "Task description" },
+        status: { type: "string", description: "Task status" },
+        priority: { type: "string", description: "Task priority" },
+        frequency: { type: "string", description: "Execution frequency" },
+        skill_path: { type: "string", description: "Path to skill file" },
+        agent_id: { type: "string", description: "Agent ID to execute task" },
+        model: { type: "string", description: "Model override" },
+        timeout_seconds: { type: "integer", description: "Execution timeout" },
+        tags: { type: "string", description: "Comma-separated tags" },
+        scheduled_at: { type: "string", description: "ISO-8601 scheduled time" },
+      },
+    },
+    5_000,
+  );
+
+  proxyTool(
+    "autonomy_run_task",
+    "Autonomy Run Task",
+    "Trigger immediate execution of an autonomy task.",
+    {
+      type: "object",
+      properties: {
+        id: { type: "integer", description: "Task ID to run" },
+      },
+      required: ["id"],
+    },
+    15_000,
+  );
+
   // ── Web tools ─────────────────────────────────────────────────────────
 
   proxyTool(
@@ -1083,5 +1312,5 @@ export default function register(api: OpenClawPluginApi) {
     5_000,
   );
 
-  api.logger.info?.("mcp-tools: registered 23 tools + prefill hook via single MCP server");
+  api.logger.info?.("mcp-tools: registered 38 tools + prefill hook via single MCP server");
 }

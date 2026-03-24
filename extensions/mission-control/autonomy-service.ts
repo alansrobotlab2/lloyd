@@ -144,7 +144,8 @@ export async function writeTask(data: any): Promise<any> {
 
 export async function deleteTask(id: number): Promise<any> {
   const db = getDb();
-  db.prepare("UPDATE tasks SET status = 'done' WHERE id = ?").run(id);
+  db.prepare("DELETE FROM runs WHERE task_id = ?").run(id);
+  db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
   return { success: true, id };
 }
 

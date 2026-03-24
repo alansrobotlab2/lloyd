@@ -11,5 +11,7 @@
   "edit": false,
   "email_accounts": false,
   "email_folders": false,
-  "calendar_list": false
+  "calendar_list": false,
+  "gateway": false,
+  "tts": false
 }

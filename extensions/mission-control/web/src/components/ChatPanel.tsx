@@ -7,6 +7,7 @@ import SlashCommandPicker from "./SlashCommandPicker";
 import VoicePanel from "./VoicePanel";
 import { useVoiceContext } from "../contexts/VoiceContext";
 import { getLastTtsPlayedAt, setLastTtsPlayedAt } from "../hooks/useVoiceStream";
+import { useSessionActivity } from "../hooks/useSessionActivity";
 
 // Configure marked for safe, sane defaults
 marked.setOptions({ breaks: true, gfm: true });
@@ -159,6 +160,7 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded, onActi
   const isWorkingRef = useRef(false);
   const { voiceEnabled, ttsEnabled } = useVoiceContext();
   const spokenMsgIds = useRef<Set<string>>(new Set());
+  const { hasActivity, markSeen } = useSessionActivity(sessions, true, sessionKey);
 
   // Notify parent of active session key changes (for voice pipeline routing)
   useEffect(() => {
@@ -603,7 +605,10 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded, onActi
                 return (
                   <button
                     key={s.sessionKey}
-                    onClick={() => switchSession(s.sessionKey)}
+                    onClick={() => {
+                      switchSession(s.sessionKey);
+                      markSeen(s.sessionKey);
+                    }}
                     className={`w-full text-left px-3 py-2.5 text-sm border-b border-surface-3/20 transition-colors ${
                       sessionKey === s.sessionKey
                         ? "bg-brand-500/10 text-brand-400"
@@ -615,6 +620,9 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded, onActi
                         <SourceIcon className="w-3.5 h-3.5 inline-block mr-1 -mt-0.5" />{label}
                       </div>
                       <span className="text-[10px] text-slate-600 whitespace-nowrap shrink-0">{timeAgo(s.lastActivity)}</span>
+                      {hasActivity(s.sessionKey) && (
+                        <span className="w-2 h-2 flex-shrink-0 rounded-full bg-green-400" />
+                      )}
                     </div>
                     {(s.summary || formatSessionKey(s.sessionKey) !== label) && (
                       <div className="truncate text-[10px] text-slate-500 mt-0.5">

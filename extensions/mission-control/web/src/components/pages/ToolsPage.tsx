@@ -1,28 +1,28 @@
 import { useEffect, useState, useCallback } from "react";
-import { Wrench, Terminal, Mic, LayoutGrid, Box, GitFork, Clock } from "lucide-react";
+import { Wrench } from "lucide-react";
 import { api, ToolGroupData } from "../../api";
+import { getFuncGroups, getSourceMeta, getSourceKey, UNGROUPED_ICON } from "../../toolLayout";
 
-const SOURCE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
-  "openclaw — sessions & agents": GitFork,
-  "openclaw — files & runtime": Box,
-  "openclaw — web & memory": Box,
-  "openclaw — system & media": Clock,
-  "mcp-tools": Terminal,
-  "mcp-tools — backlog": LayoutGrid,
-  "voice-tools": Mic,
-  "agent-orchestrator": GitFork,
-};
+// ── Toggle Switch ────────────────────────────────────────────────────────
 
-const SOURCE_COLORS: Record<string, string> = {
-  "openclaw — sessions & agents": "text-cyan-400",
-  "openclaw — files & runtime": "text-sky-400",
-  "openclaw — web & memory": "text-violet-400",
-  "openclaw — system & media": "text-orange-400",
-  "mcp-tools": "text-indigo-400",
-  "mcp-tools — backlog": "text-emerald-400",
-  "voice-tools": "text-amber-400",
-  "agent-orchestrator": "text-rose-400",
-};
+function Toggle({ checked, onChange }: { checked: boolean; onChange: () => void }) {
+  return (
+    <button
+      onClick={onChange}
+      className={`relative w-8 h-[18px] rounded-full transition-colors flex-shrink-0 cursor-pointer ${
+        checked ? "bg-brand-600" : "bg-surface-3"
+      }`}
+    >
+      <span
+        className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-transform ${
+          checked ? "left-[14px]" : "left-[2px]"
+        }`}
+      />
+    </button>
+  );
+}
+
+// ── Main Page ────────────────────────────────────────────────────────────
 
 export default function ToolsPage() {
   const [groups, setGroups] = useState<ToolGroupData[]>([]);
@@ -31,82 +31,39 @@ export default function ToolsPage() {
     api.tools().then((d) => setGroups(d.groups || [])).catch(console.error);
   }, []);
 
-  useEffect(() => {
-    loadTools();
-  }, [loadTools]);
+  useEffect(() => { loadTools(); }, [loadTools]);
 
   const handleToggle = async (toolName: string, currentEnabled: boolean) => {
-    // Optimistic update
     setGroups((prev) =>
       prev.map((g) => ({
         ...g,
         tools: g.tools.map((t) =>
-          t.name === toolName ? { ...t, enabled: !currentEnabled } : t,
+          t.name === toolName ? { ...t, enabled: !currentEnabled } : t
         ),
-      })),
+      }))
     );
-
     try {
       await api.toolToggle(toolName, !currentEnabled);
     } catch (err) {
       console.error("Toggle failed:", err);
-      loadTools(); // revert on error
+      loadTools();
     }
   };
 
-  const totalTools = groups.reduce((sum, g) => sum + g.tools.length, 0);
-  const enabledTools = groups.reduce(
-    (sum, g) => sum + g.tools.filter((t) => t.enabled).length,
-    0,
-  );
-  const builtInGroups = groups.filter((g) => g.source.startsWith("openclaw"));
-  const extensionGroups = groups.filter((g) => !g.source.startsWith("openclaw"));
+  // Build tool status lookup
+  const toolMap = new Map<string, boolean>();
+  groups.forEach(g => g.tools.forEach(t => toolMap.set(t.name, t.enabled)));
 
-  const renderGroup = (group: ToolGroupData) => {
-    const Icon = SOURCE_ICONS[group.source] || Wrench;
-    const color = SOURCE_COLORS[group.source] || "text-slate-400";
-    const enabledCount = group.tools.filter((t) => t.enabled).length;
+  const totalTools = toolMap.size;
+  const enabledTools = [...toolMap.values()].filter(Boolean).length;
 
-    return (
-      <div key={group.source} className="space-y-3">
-        <div className="flex items-center gap-2">
-          <Icon className={`w-4 h-4 ${color}`} />
-          <h3 className="text-sm font-medium text-slate-300">{group.source}</h3>
-          <span className="text-[10px] text-slate-500">
-            {enabledCount}/{group.tools.length} enabled
-          </span>
-        </div>
-        <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
-          {group.tools.map((tool) => (
-            <div
-              key={tool.name}
-              className={`bg-surface-1 rounded-lg px-3 py-2.5 border transition-colors flex items-center gap-3 ${
-                tool.enabled
-                  ? "border-surface-3/50"
-                  : "border-surface-3/30 opacity-50"
-              }`}
-            >
-              <button
-                onClick={() => handleToggle(tool.name, tool.enabled)}
-                className={`relative w-8 h-[18px] rounded-full transition-colors flex-shrink-0 ${
-                  tool.enabled ? "bg-brand-600" : "bg-surface-3"
-                }`}
-              >
-                <span
-                  className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-transform ${
-                    tool.enabled ? "left-[14px]" : "left-[2px]"
-                  }`}
-                />
-              </button>
-              <div className="text-xs font-mono text-slate-300 truncate">
-                {tool.name}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  };
+  // Merge API groups by source prefix
+  const mergedSources = new Map<string, Set<string>>();
+  for (const g of groups) {
+    const key = getSourceKey(g.source);
+    if (!mergedSources.has(key)) mergedSources.set(key, new Set());
+    g.tools.forEach(t => mergedSources.get(key)!.add(t.name));
+  }
 
   return (
     <div className="p-6 space-y-6 overflow-auto">
@@ -114,33 +71,88 @@ export default function ToolsPage() {
         <Wrench className="w-5 h-5 text-brand-400" />
         <h2 className="text-lg font-semibold">Tools</h2>
         <span className="text-xs text-slate-500">
-          {enabledTools} enabled / {totalTools} total across {groups.length} providers
+          {enabledTools} enabled / {totalTools} total
         </span>
       </div>
 
-      {/* Extensions section */}
-      {extensionGroups.length > 0 && (
-        <div className="space-y-1">
-          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
-            Extensions
-          </div>
-          <div className="space-y-4">
-            {extensionGroups.map(renderGroup)}
-          </div>
-        </div>
-      )}
+      {[...mergedSources.entries()].map(([sourceKey, sourceTools]) => {
+        const meta = getSourceMeta(sourceKey);
+        const SourceIcon = meta.icon;
+        const funcGroups = getFuncGroups(sourceKey);
 
-      {/* Built-in section */}
-      {builtInGroups.length > 0 && (
-        <div className="space-y-1">
-          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
-            Built-in
+        const placed = new Set<string>();
+        const renderedGroups: { label: string; icon: React.ComponentType<{ className?: string }>; color: string; tools: string[] }[] = [];
+
+        if (funcGroups) {
+          for (const fg of funcGroups) {
+            const present = fg.tools.filter(t => sourceTools.has(t));
+            if (present.length > 0) {
+              present.forEach(t => placed.add(t));
+              renderedGroups.push({ label: fg.label, icon: fg.icon, color: fg.color, tools: present });
+            }
+          }
+        }
+
+        const ungrouped = [...sourceTools].filter(t => !placed.has(t));
+        const sourceEnabled = [...sourceTools].filter(t => toolMap.get(t)).length;
+
+        return (
+          <div key={sourceKey} className="space-y-4">
+            <div className="flex items-center gap-2">
+              <SourceIcon className={`w-4 h-4 ${meta.color}`} />
+              <span className="text-sm font-medium text-slate-200">{meta.label}</span>
+              <span className="text-[10px] text-slate-600 ml-1">{sourceEnabled}/{sourceTools.size} enabled</span>
+            </div>
+
+            {renderedGroups.map(({ label, icon: FgIcon, color, tools }) => {
+              const enabledCount = tools.filter(t => toolMap.get(t)).length;
+              return (
+                <div key={label} className="space-y-2 ml-2">
+                  <div className="flex items-center gap-2 px-1">
+                    <FgIcon className={`w-3.5 h-3.5 ${color}`} />
+                    <span className="text-[10px] text-slate-400 font-medium">{label}</span>
+                    <span className="text-[9px] text-slate-600">{enabledCount}/{tools.length}</span>
+                  </div>
+                  <div className="grid grid-cols-2 xl:grid-cols-3 gap-2 ml-5">
+                    {tools.map((toolName) => {
+                      const enabled = toolMap.get(toolName) ?? false;
+                      return (
+                        <div key={toolName} className={`bg-surface-0 rounded-lg px-3 py-2 border transition-colors flex items-center gap-3 ${enabled ? "border-surface-3/50" : "border-surface-3/30 opacity-50"}`}>
+                          <Toggle checked={enabled} onChange={() => handleToggle(toolName, enabled)} />
+                          <span className="text-[10px] font-mono text-slate-300 truncate">{toolName}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+
+            {ungrouped.length > 0 && (
+              <div className="space-y-2 ml-2">
+                <div className="flex items-center gap-2 px-1">
+                  <UNGROUPED_ICON className="w-3.5 h-3.5 text-slate-500" />
+                  <span className="text-[10px] text-slate-400 font-medium">Other</span>
+                  <span className="text-[9px] text-slate-600">{ungrouped.filter(t => toolMap.get(t)).length}/{ungrouped.length}</span>
+                </div>
+                <div className="grid grid-cols-2 xl:grid-cols-3 gap-2 ml-5">
+                  {ungrouped.map((toolName) => {
+                    const enabled = toolMap.get(toolName) ?? false;
+                    return (
+                      <div key={toolName} className={`bg-surface-0 rounded-lg px-3 py-2 border transition-colors flex items-center gap-3 ${enabled ? "border-surface-3/50" : "border-surface-3/30 opacity-50"}`}>
+                        <Toggle checked={enabled} onChange={() => handleToggle(toolName, enabled)} />
+                        <span className="text-[10px] font-mono text-slate-300 truncate">{toolName}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="border-b border-surface-3/20" />
           </div>
-          <div className="space-y-4">
-            {builtInGroups.map(renderGroup)}
-          </div>
-        </div>
-      )}
+        );
+      })}
     </div>
   );
 }

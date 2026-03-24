@@ -1,14 +1,6 @@
 {
-  "reflection_pipeline": {
-    "last_run": null,
-    "last_session_mtime": null
-  },
-  "data_pipeline": {
-    "last_run": null,
-    "last_vault_commit": null
-  },
-  "memory_capture": {
-    "last_run": null,
-    "last_session_count": 0
+  "self_improvement": {
+    "last_run": "2026-03-23T16:02:49.946382+00:00",
+    "last_session_mtime": 1774224122.845547
   }
 }
