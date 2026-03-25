@@ -88,7 +88,12 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── Idler task completion polling ───────────────────────────────────
 
-  // Poll for completed idler tasks every 60 seconds.
+  // Wiggam loop: track nudge state per task
+  const wiggamState = new Map<number, { nudgeCount: number; lastNudgeAt: number }>();
+  const MAX_NUDGES = 20;
+  const IDLE_BEFORE_NUDGE_MS = 30_000; // 30s idle before nudging
+
+  // Poll for completed idler tasks every 5 seconds.
   // Session keys are normalized by the gateway as: agent:{targetAgentId}:hook:idler:task-{taskId}
   // where targetAgentId comes from task routing (e.g. "memory", "orchestrator", "researcher").
   // We scan agentSessionStates for any key containing "hook:idler:task-{taskId}" to be robust
@@ -106,6 +111,13 @@ export default function register(api: OpenClawPluginApi) {
     try {
       const svc = getAutonomySvc();
       const inProgressTasks = svc.getInProgressTasks();
+      // Clean up wiggam state for tasks no longer in progress
+      for (const taskId of Array.from(wiggamState.keys())) {
+        if (!inProgressTasks.some((t: any) => t.id === taskId)) {
+          wiggamState.delete(taskId);
+        }
+      }
+
       if (inProgressTasks.length === 0) return; // Nothing to poll — skip Map iteration
 
       for (const task of inProgressTasks) {
@@ -114,9 +126,11 @@ export default function register(api: OpenClawPluginApi) {
 
         // Find matching session state by suffix — agent prefix varies by target agent
         let sessionState: AgentSessionStatus | undefined;
+        let matchingSessionKey: string | null = null;
         for (const [key, state] of agentSessionStates) {
           if (key.endsWith(suffix)) {
             sessionState = state;
+            matchingSessionKey = key;
             break;
           }
         }
@@ -125,18 +139,107 @@ export default function register(api: OpenClawPluginApi) {
 
         // Session states are: "idle" | "processing" | "waiting"
         // A completed cron session transitions to "idle" with queueDepth 0.
-        // Debounce: require idle for 30+ seconds to avoid false positives
-        // between LLM turns or during tool execution gaps.
+        // Debounce: require idle for 30+ seconds before nudging
         const idleAgeMs = Date.now() - (sessionState.lastUpdated ?? 0);
-        if (sessionState.state === "idle" && (sessionState.queueDepth ?? 0) <= 0 && idleAgeMs >= 30_000) {
+        
+        // Skip if not idle or idle for less than IDLE_BEFORE_NUDGE_MS
+        if (sessionState.state !== "idle" || (sessionState.queueDepth ?? 0) > 0 || idleAgeMs < IDLE_BEFORE_NUDGE_MS) {
+          continue;
+        }
+
+        // Non-wiggam tasks: complete on idle (original behavior)
+        const isWiggam = !!(task as any).wiggam;
+        if (!isWiggam) {
           await svc.completeActiveRun(taskId, "success", "Completed");
           await svc.completeTask(taskId);
           api.logger.info?.(`[autonomy] Task #${taskId} completed via session state`);
-          // Clean up tracked session state to avoid re-processing
           for (const [key] of agentSessionStates) {
             if (key.endsWith(suffix)) {
               agentSessionStates.delete(key);
               break;
+            }
+          }
+          continue;
+        }
+
+        // Wiggam tasks: check for TASK_COMPLETE signal
+        let taskCompleteFound = false;
+        try {
+          if (matchingSessionKey && gwWsSend) {
+            const history = await gwWsSend("chat.history", { sessionKey: matchingSessionKey, limit: 3 });
+            if (history && Array.isArray(history.messages)) {
+              for (const msg of history.messages) {
+                if (msg.role === "assistant" && msg.content) {
+                  const contentArr = Array.isArray(msg.content) ? msg.content : [msg.content];
+                  for (const block of contentArr) {
+                    const text = typeof block === "string" ? block : block?.text;
+                    if (typeof text === "string" && text.includes("TASK_COMPLETE")) {
+                      taskCompleteFound = true;
+                      break;
+                    }
+                  }
+                  if (taskCompleteFound) break;
+                }
+              }
+            }
+          }
+        } catch (err: any) {
+          // If chat.history fails (session closed, WS disconnected), fall back to "no TASK_COMPLETE found"
+          api.logger.warn?.(`[wiggam] chat.history failed for session ${matchingSessionKey}: ${err.message}`);
+        }
+
+        if (taskCompleteFound) {
+          // Agent signaled completion
+          await svc.completeActiveRun(taskId, "success", "Completed via TASK_COMPLETE signal");
+          await svc.completeTask(taskId);
+          wiggamState.delete(taskId);
+          // Clean up session state
+          for (const [key] of agentSessionStates) {
+            if (key.endsWith(suffix)) {
+              agentSessionStates.delete(key);
+              break;
+            }
+          }
+          api.logger.info?.(`[wiggam] Task #${taskId} completed (agent signaled TASK_COMPLETE)`);
+          continue;
+        }
+
+        // No TASK_COMPLETE found - nudge or give up
+        let wiggamEntry = wiggamState.get(taskId);
+        if (!wiggamEntry) {
+          wiggamEntry = { nudgeCount: 0, lastNudgeAt: 0 };
+          wiggamState.set(taskId, wiggamEntry);
+        }
+
+        if (wiggamEntry.nudgeCount >= MAX_NUDGES) {
+          // Max nudges exceeded - fail the task
+          await svc.completeActiveRun(taskId, "timeout", "Wiggam loop: max nudges exceeded");
+          await svc.completeTask(taskId);
+          wiggamState.delete(taskId);
+          // Clean up session state
+          for (const [key] of agentSessionStates) {
+            if (key.endsWith(suffix)) {
+              agentSessionStates.delete(key);
+              break;
+            }
+          }
+          api.logger.info?.(`[wiggam] Task #${taskId} failed — max nudges (${MAX_NUDGES}) exceeded`);
+        } else {
+          // Send nudge
+          wiggamEntry.nudgeCount++;
+          wiggamEntry.lastNudgeAt = Date.now();
+          
+          if (matchingSessionKey && gwWsSend) {
+            try {
+              await gwWsSend("chat.send", { 
+                sessionKey: matchingSessionKey, 
+                message: "You appear to have stalled. The task is not yet complete. Review where you are in the pipeline (plan → implement → review → test → commit → report) and continue to the next step. Delegate to subagents — do not do the work yourself. When ALL steps are complete and the build passes, include TASK_COMPLETE in your final message." 
+              });
+              api.logger.info?.(`[wiggam] Task #${taskId} nudge ${wiggamEntry.nudgeCount}/${MAX_NUDGES}`);
+            } catch (err: any) {
+              api.logger.error?.(`[wiggam] chat.send failed for task #${taskId}: ${err.message}`);
+              // Decrement nudge count on failure so we can retry
+              wiggamEntry.nudgeCount--;
             }
           }
         }
@@ -144,7 +247,7 @@ export default function register(api: OpenClawPluginApi) {
     } catch (err: any) {
       api.logger.error?.(`[autonomy] Poll error: ${err.message}`);
     }
-  }, 60_000);
+  }, 5_000);
   } // end idler-poll guard
 
   // ── Wire up domain modules ────────────────────────────────────────

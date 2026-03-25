@@ -90,6 +90,7 @@ export async function writeTask(data: any): Promise<any> {
     if (data.timeout_seconds !== undefined) { sets.push("timeout_seconds = ?"); params.push(data.timeout_seconds); }
     if (data.cron_id !== undefined) { sets.push("cron_id = ?"); params.push(data.cron_id); }
     if (data.last_run !== undefined) { sets.push("last_run = ?"); params.push(data.last_run); }
+    if (data.wiggam !== undefined) { sets.push("wiggam = ?"); params.push(data.wiggam ? 1 : 0); }
     
     if (data.activity_note !== undefined) {
       // Log activity note to runs table
@@ -113,7 +114,7 @@ export async function writeTask(data: any): Promise<any> {
     // INSERT
     const tags = data.tags ? JSON.stringify(data.tags) : "[]";
     const result = db.prepare(
-      "INSERT INTO tasks (name, description, status, priority, frequency, scheduled_at, next_run, auto_advance, tags, created_at, updated_at, runs_per_day, depends_on, pipeline, agent_id, skill_path, model, timeout_seconds, cron_id, last_run) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO tasks (name, description, status, priority, frequency, scheduled_at, next_run, auto_advance, tags, created_at, updated_at, runs_per_day, depends_on, pipeline, agent_id, skill_path, model, timeout_seconds, cron_id, last_run, wiggam) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ).run(
       data.name || "", 
       data.description || "", 
@@ -134,7 +135,8 @@ export async function writeTask(data: any): Promise<any> {
       data.model !== undefined ? data.model : null,
       data.timeout_seconds !== undefined ? data.timeout_seconds : null,
       data.cron_id !== undefined ? data.cron_id : null,
-      data.last_run !== undefined ? data.last_run : null
+      data.last_run !== undefined ? data.last_run : null,
+      data.wiggam ? 1 : 0
     );
     
     const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(result.lastInsertRowid);
