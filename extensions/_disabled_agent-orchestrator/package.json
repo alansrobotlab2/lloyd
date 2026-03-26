@@ -1,9 +1,0 @@
-{
-  "name": "openclaw-agent-orchestrator",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "latest"
-  }
-}
