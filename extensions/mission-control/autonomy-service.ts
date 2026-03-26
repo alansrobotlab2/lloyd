@@ -218,9 +218,11 @@ export function completeActiveRun(taskId: number, status: string = "success", su
 export function completeTask(taskId: number): void {
   const db = getDb();
   const now = new Date().toISOString();
-  const task = db.prepare("SELECT frequency FROM tasks WHERE id = ?").get(taskId) as any;
+  const task = db.prepare("SELECT frequency, wiggam FROM tasks WHERE id = ?").get(taskId) as any;
   if (task?.frequency && task.frequency !== "one-time") {
     db.prepare("UPDATE tasks SET status = 'up_next', updated_at = ? WHERE id = ?").run(now, taskId);
+  } else if (task?.wiggam) {
+    db.prepare("UPDATE tasks SET status = 'in_review', updated_at = ? WHERE id = ?").run(now, taskId);
   } else {
     db.prepare("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?").run(now, taskId);
   }

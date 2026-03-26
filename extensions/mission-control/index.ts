@@ -107,20 +107,27 @@ export default function register(api: OpenClawPluginApi) {
   }
   if (!(globalThis as any)[IDLER_POLL_KEY]) {
     (globalThis as any)[IDLER_POLL_KEY] = true;
+  // Persistent cache for idler poll's sessions.list — survives across poll cycles.
+  // Child session status changes slowly; 5 min TTL avoids hammering the gateway
+  // which takes 6-16s per sessions.list scan across ~1100 JSONL files.
+  let _idlerSessionsCache: { data: any[]; ts: number } | null = null;
+  const IDLER_SESSIONS_TTL = 300_000;
   setInterval(async () => {
     try {
-      // Cache sessions list once per poll cycle
-      let _sessionsListCache: any[] | null = null;
       const getSessionsList = async (): Promise<any[]> => {
-        if (_sessionsListCache !== null) return _sessionsListCache;
-        if (!gwWsSend) { _sessionsListCache = []; return _sessionsListCache; }
+        const now = Date.now();
+        if (_idlerSessionsCache && (now - _idlerSessionsCache.ts < IDLER_SESSIONS_TTL)) {
+          return _idlerSessionsCache.data;
+        }
+        if (!gwWsSend) return [];
         try {
           const result = await gwWsSend("sessions.list", { activeMinutes: 30, limit: 100 });
-          _sessionsListCache = result?.sessions || [];
+          const sessions = result?.sessions || [];
+          _idlerSessionsCache = { data: sessions, ts: now };
+          return sessions;
         } catch {
-          _sessionsListCache = [];
+          return _idlerSessionsCache?.data || [];
         }
-        return _sessionsListCache;
       };
 
       const hasActiveChildren = async (sessionKey: string): Promise<{ hasChildren: boolean; allChildrenDone: boolean }> => {
@@ -167,7 +174,50 @@ export default function register(api: OpenClawPluginApi) {
           }
         }
 
-        if (!sessionState) continue; // No OTel event yet — still running or not started
+        if (!sessionState) {
+          // Recovery: check if session already completed (e.g. after gateway restart)
+          if (!gwWsSend) continue;
+          const isWiggam = !!(task as any).wiggam;
+          const expectedKey = `agent:${(task as any).agent_id}:hook:idler:task-${taskId}`;
+          try {
+            const history = await gwWsSend("chat.history", { sessionKey: expectedKey, limit: 3 });
+            if (history && Array.isArray(history.messages) && history.messages.length > 0) {
+              // Session exists — check if it completed
+              if (isWiggam) {
+                // Check for TASK_COMPLETE signal
+                let found = false;
+                for (const msg of history.messages) {
+                  if (msg.role === "assistant" && msg.content) {
+                    const contentArr = Array.isArray(msg.content) ? msg.content : [msg.content];
+                    for (const block of contentArr) {
+                      const text = typeof block === "string" ? block : block?.text;
+                      if (typeof text === "string" && text.includes("TASK_COMPLETE")) { found = true; break; }
+                    }
+                    if (found) break;
+                  }
+                }
+                if (found) {
+                  await svc.completeActiveRun(taskId, "success", "Completed via TASK_COMPLETE (restart recovery)");
+                  await svc.completeTask(taskId);
+                  api.logger.info?.(`[wiggam] Task #${taskId} completed via restart recovery`);
+                  continue;
+                }
+              }
+              // Non-wiggam or no TASK_COMPLETE: check if session is done via sessions.list
+              const sessions = await getSessionsList();
+              const sessionEntry = sessions.find((s: any) => s.key === expectedKey);
+              if (sessionEntry && sessionEntry.status === "done") {
+                await svc.completeActiveRun(taskId, "success", "Completed (restart recovery — session done)");
+                await svc.completeTask(taskId);
+                api.logger.info?.(`[autonomy] Task #${taskId} completed via restart recovery (session done)`);
+                continue;
+              }
+            }
+          } catch (err: any) {
+            api.logger.warn?.(`[autonomy] Restart recovery check failed for task #${taskId}: ${err.message}`);
+          }
+          continue;
+        }
 
         // Session states are: "idle" | "processing" | "waiting"
         // A completed cron session transitions to "idle" with queueDepth 0.
