@@ -4,6 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
+import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 import type { PluginContext, SkillInfo } from "./types.js";
@@ -184,7 +185,7 @@ export function registerSkillRoutes(
         const body = JSON.parse(await readBody(req));
         const { skillName, enabled } = body;
         if (!skillName || typeof enabled !== "boolean") { jsonResponse(res, { error: "Missing skillName or enabled (boolean)" }, 400); return; }
-        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        const config = JSON.parse(await readFile(configFile, "utf-8"));
         if (!config.skills) config.skills = {};
         if (!config.skills.entries) config.skills.entries = {};
         if (enabled) {
@@ -198,7 +199,7 @@ export function registerSkillRoutes(
         }
         if (Object.keys(config.skills.entries).length === 0) delete config.skills.entries;
         if (Object.keys(config.skills).length === 0) delete config.skills;
-        writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n");
+        await writeFile(configFile, JSON.stringify(config, null, 2) + "\n");
         skillsCache = null;
         jsonResponse(res, { ok: true, skillName, enabled });
       } catch (err: any) {
@@ -218,7 +219,7 @@ export function registerSkillRoutes(
         if (!skillName) { jsonResponse(res, { error: "Missing name parameter" }, 400); return; }
         const skillFile = findSkillFile(skillName, workspaceSkillsDirs, bundledSkillsDir);
         if (!skillFile) { jsonResponse(res, { error: "Skill not found" }, 404); return; }
-        const raw = readFileSync(skillFile, "utf-8");
+        const raw = await readFile(skillFile, "utf-8");
         jsonResponse(res, { content: raw, location: skillFile });
         return;
       }
@@ -230,7 +231,7 @@ export function registerSkillRoutes(
           if (!skillName || typeof content !== "string") { jsonResponse(res, { error: "Missing skillName or content" }, 400); return; }
           const skillFile = findSkillFile(skillName, workspaceSkillsDirs, bundledSkillsDir);
           if (!skillFile) { jsonResponse(res, { error: "Skill not found" }, 404); return; }
-          writeFileSync(skillFile, content, "utf-8");
+          await writeFile(skillFile, content, "utf-8");
           skillsCache = null;
           jsonResponse(res, { ok: true });
         } catch (err: any) {

@@ -447,6 +447,58 @@ export interface TagGraphData {
   edges: TagGraphEdge[];
 }
 
+// -- Entity Graph types --
+
+export interface EntitySummary {
+  name: string;
+  factCount: number;
+  categories: string[];
+}
+
+export interface EntitiesListData {
+  entities: EntitySummary[];
+  total: number;
+}
+
+export interface EntityFact {
+  fact: string;
+  confidence: number;
+  category: string;
+  event_date?: string | null;
+  id?: string;
+}
+
+export interface EntityRelationship {
+  target: string;
+  type: string;
+  score: number;
+}
+
+export interface EntityDetailData {
+  name: string;
+  facts: EntityFact[];
+  relationships: EntityRelationship[];
+}
+
+export interface EntityGraphNode {
+  id: string;
+  label: string;
+  type: string;
+  factCount?: number;
+}
+
+export interface EntityGraphEdge {
+  source: string;
+  target: string;
+  type: string;
+  weight: number;
+}
+
+export interface EntityGraphData {
+  nodes: EntityGraphNode[];
+  edges: EntityGraphEdge[];
+}
+
 // ── Cron types ──────────────────────────────────────────────────────────
 
 export interface CronSchedule {
@@ -716,6 +768,11 @@ export const api = {
   // Vault graph
   vaultGraph: () => fetchJson<VaultGraphData>("/vault-graph"),
   tagGraph: () => fetchJson<TagGraphData>("/tag-graph"),
+
+  // Entity / knowledge graph
+  entityList: (limit = 500) => fetchJson<EntitiesListData>(`/entities?limit=${limit}`),
+  entityDetail: (name: string) => fetchJson<EntityDetailData>(`/entity?name=${encodeURIComponent(name)}`),
+  entityGraph: () => fetchJson<EntityGraphData>("/entity-graph"),
 
   // Commands (slash command picker)
   commands: () => fetchJson<{ commands: CommandInfo[] }>("/commands"),

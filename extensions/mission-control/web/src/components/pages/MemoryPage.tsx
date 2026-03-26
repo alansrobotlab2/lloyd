@@ -7,24 +7,27 @@ import {
   ChevronRight,
   ChevronDown,
   Tag,
-  Hash,
+  User,
   X,
   Pencil,
   Check,
+  Network,
 } from "lucide-react";
 import {
   api,
   type MemoryStats,
   type MemorySearchResult,
   type MemoryReadResult,
-  type TagEntry,
+  type EntitySummary,
+  type EntityDetailData,
+  type EntityFact,
 } from "../../api";
 import { sanitizeHtml } from "../../utils/sanitize";
-import TagGraph from "../TagGraph";
+import EntityGraph from "../EntityGraph";
 
-// ── Types ───────────────────────────────────────────────────────────────
+// -- Types --
 
-type SidebarTab = "tags" | "explorer";
+type SidebarTab = "entities" | "explorer";
 
 const TYPE_COLORS: Record<string, string> = {
   hub: "bg-amber-400/10 text-amber-400",
@@ -35,59 +38,142 @@ const TYPE_COLORS: Record<string, string> = {
   reference: "bg-purple-400/10 text-purple-400",
 };
 
-// ── Tag Sidebar ─────────────────────────────────────────────────────────
+const CATEGORY_COLORS: Record<string, string> = {
+  profile: "text-sky-400",
+  preference: "text-brand-400",
+  event: "text-emerald-400",
+  state: "text-amber-400",
+  relationship: "text-purple-400",
+  people: "text-pink-400",
+  project: "text-indigo-400",
+};
 
-function TagSidebar({
-  tags,
-  activeTag,
-  onSelectTag,
+// -- Entity Sidebar --
+
+function EntitySidebar({
+  entities,
+  activeEntity,
+  onSelectEntity,
 }: {
-  tags: TagEntry[];
-  activeTag: string | null;
-  onSelectTag: (tag: string | null) => void;
+  entities: EntitySummary[];
+  activeEntity: string | null;
+  onSelectEntity: (name: string | null) => void;
 }) {
   const activeRef = useRef<HTMLButtonElement>(null);
 
-  // Scroll active tag into view when it changes (e.g. from graph click)
   useEffect(() => {
-    if (activeTag && activeRef.current) {
+    if (activeEntity && activeRef.current) {
       activeRef.current.scrollIntoView({ block: "center", behavior: "smooth" });
     }
-  }, [activeTag]);
+  }, [activeEntity]);
 
   return (
-    <div className="space-y-1">
-      {activeTag && (
+    <div className="space-y-0.5">
+      {activeEntity && (
         <div className="flex items-center px-1 mb-1">
           <button
-            onClick={() => onSelectTag(null)}
+            onClick={() => onSelectEntity(null)}
             className="ml-auto text-[10px] text-brand-400 hover:text-brand-300"
           >
             clear
           </button>
         </div>
       )}
-      {tags.map(({ tag, count }) => (
+      {entities.map(({ name, factCount }) => (
         <button
-          key={tag}
-          ref={activeTag === tag ? activeRef : undefined}
-          onClick={() => onSelectTag(activeTag === tag ? null : tag)}
+          key={name}
+          ref={activeEntity === name ? activeRef : undefined}
+          onClick={() => onSelectEntity(activeEntity === name ? null : name)}
           className={`w-full flex items-center gap-2 px-2 py-1 rounded text-[11px] transition-colors ${
-            activeTag === tag
+            activeEntity === name
               ? "bg-brand-600/15 text-brand-400"
               : "text-slate-400 hover:text-slate-200 hover:bg-surface-2"
           }`}
         >
-          <Hash className="w-2.5 h-2.5 flex-shrink-0 opacity-50" />
-          <span className="flex-1 text-left truncate">{tag}</span>
-          <span className="text-[10px] text-slate-500 flex-shrink-0">{count}</span>
+          <User className="w-2.5 h-2.5 flex-shrink-0 opacity-50" />
+          <span className="flex-1 text-left truncate">{name}</span>
+          <span className="text-[10px] text-slate-500 flex-shrink-0">{factCount}</span>
         </button>
       ))}
     </div>
   );
 }
 
-// ── Vault Explorer (tree view) ──────────────────────────────────────────
+// -- Entity Detail Panel --
+
+function EntityDetailPanel({ detail }: { detail: EntityDetailData }) {
+  // Group facts by category
+  const byCategory = useMemo(() => {
+    const map = new Map<string, EntityFact[]>();
+    for (const f of detail.facts) {
+      const cat = f.category || "general";
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(f);
+    }
+    return map;
+  }, [detail.facts]);
+
+  const categories = Array.from(byCategory.keys()).sort();
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 border-b border-surface-3/30 pb-2">
+        <User className="w-3.5 h-3.5 text-brand-400 flex-shrink-0" />
+        <span className="text-xs font-semibold text-slate-200">{detail.name}</span>
+        <span className="ml-auto text-[10px] text-slate-500">{detail.facts.length} facts</span>
+      </div>
+
+      {categories.map((cat) => {
+        const facts = byCategory.get(cat)!;
+        const colorClass = CATEGORY_COLORS[cat] || "text-slate-400";
+        return (
+          <div key={cat}>
+            <div className={`text-[10px] font-semibold uppercase tracking-wider mb-1 ${colorClass}`}>
+              {cat}
+            </div>
+            <div className="space-y-1">
+              {facts.map((f, i) => (
+                <div
+                  key={f.id || i}
+                  className="text-[11px] text-slate-300 leading-relaxed bg-surface-2/40 rounded px-2 py-1"
+                >
+                  {f.fact}
+                  {f.confidence < 0.8 && (
+                    <span className="ml-1 text-[9px] text-slate-500 opacity-70">
+                      ({Math.round(f.confidence * 100)}%)
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      {detail.relationships.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider mb-1 text-slate-500">
+            Related docs
+          </div>
+          <div className="space-y-0.5">
+            {detail.relationships.slice(0, 10).map((r, i) => (
+              <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${
+                  r.type === "tag-cluster" ? "bg-amber-400/10 text-amber-500" : "bg-slate-400/10 text-slate-500"
+                }`}>
+                  {r.type}
+                </span>
+                <span className="truncate">{r.target.split("/").pop()?.replace(/\.md$/, "")}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// -- Vault Explorer (tree view) --
 
 interface TreeNode {
   name: string;
@@ -106,7 +192,6 @@ function VaultExplorer({ onOpenFile }: { onOpenFile: (path: string) => void }) {
   const treeRef = useRef<TreeNode[]>([]);
   treeRef.current = tree;
 
-  // Load root + auto-expand first-level dirs
   useEffect(() => {
     api.memoryBrowse("").then(async (root) => {
       const nodes: TreeNode[] = root.entries.map((e) => ({
@@ -116,7 +201,6 @@ function VaultExplorer({ onOpenFile }: { onOpenFile: (path: string) => void }) {
         expanded: false,
       }));
 
-      // Auto-expand each top-level directory (except "agents")
       const expanded = await Promise.all(
         nodes.map(async (node) => {
           if (node.type !== "dir") return node;
@@ -236,7 +320,7 @@ function VaultExplorer({ onOpenFile }: { onOpenFile: (path: string) => void }) {
   return <div className="space-y-0">{tree.map((node) => renderNode(node, 0))}</div>;
 }
 
-// ── Search Results (right panel listing) ────────────────────────────────
+// -- Search Results (right panel listing) --
 
 function SearchResults({
   results,
@@ -284,7 +368,7 @@ function SearchResults({
   );
 }
 
-// ── Document Modal ──────────────────────────────────────────────────────
+// -- Document Modal --
 
 function DocumentModal({
   doc,
@@ -470,26 +554,50 @@ function DocumentModal({
   );
 }
 
-// ── Main Page ───────────────────────────────────────────────────────────
+// -- Main Page --
 
 export default function MemoryPage() {
   const [stats, setStats] = useState<MemoryStats | null>(null);
-  const [tags, setTags] = useState<TagEntry[]>([]);
+  const [entities, setEntities] = useState<EntitySummary[]>([]);
+  const [entityTotal, setEntityTotal] = useState(0);
+  const [entityConnectionCount, setEntityConnectionCount] = useState(0);
+  const [entityDetail, setEntityDetail] = useState<EntityDetailData | null>(null);
+  const [loadingEntityDetail, setLoadingEntityDetail] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<MemorySearchResult | null>(null);
   const [doc, setDoc] = useState<MemoryReadResult | null>(null);
-  const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [activeEntity, setActiveEntity] = useState<string | null>(null);
+  const [selectedGraphNode, setSelectedGraphNode] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("tags");
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("entities");
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showRightPanel = !!(searchResults && searchResults.results.length > 0);
+  const showSearchResults = !!(searchResults && searchResults.results.length > 0);
+  const showEntityDetail = !!entityDetail && !showSearchResults;
 
-  // Load stats and tags on mount
+  // Load stats, entities, and graph connection count on mount
   useEffect(() => {
     api.memoryStats().then(setStats).catch(console.error);
-    api.memoryTags(500).then((d) => setTags(d.tags)).catch(console.error);
+    api.entityList(500).then((d) => {
+      setEntities(d.entities);
+      setEntityTotal(d.total);
+    }).catch(console.error);
+    api.entityGraph().then((g) => {
+      setEntityConnectionCount(g.edges.length);
+    }).catch(console.error);
   }, []);
+
+  // Load entity detail when activeEntity changes
+  useEffect(() => {
+    if (!activeEntity) {
+      setEntityDetail(null);
+      return;
+    }
+    setLoadingEntityDetail(true);
+    api.entityDetail(activeEntity).then((d) => {
+      setEntityDetail(d);
+    }).catch(console.error).finally(() => setLoadingEntityDetail(false));
+  }, [activeEntity]);
 
   // Debounced search
   const doSearch = useCallback((q: string) => {
@@ -517,14 +625,27 @@ export default function MemoryPage() {
     doSearch(q);
   };
 
-  const handleTagSelect = (tag: string | null) => {
-    setActiveTag(tag);
-    if (tag) {
-      setSearchQuery(tag);
-      doSearch(tag);
-    } else {
-      setSearchQuery("");
+  const handleEntitySelect = (name: string | null) => {
+    setActiveEntity(name);
+    setSelectedGraphNode(name);
+    // Don't trigger search when selecting entities — show facts in right panel instead
+    if (!name) {
       setSearchResults(null);
+      setSearchQuery("");
+    }
+  };
+
+  const handleGraphNodeClick = (nodeId: string | null) => {
+    setSelectedGraphNode(nodeId);
+    // If a node is clicked and it matches an entity, highlight it in sidebar
+    if (nodeId) {
+      const matchingEntity = entities.find((e) => nodeId.includes(e.name) || e.name.toLowerCase() === nodeId.toLowerCase());
+      if (matchingEntity) {
+        setActiveEntity(matchingEntity.name);
+        setSidebarTab("entities");
+      }
+    } else {
+      setActiveEntity(null);
     }
   };
 
@@ -543,7 +664,7 @@ export default function MemoryPage() {
 
   return (
     <div className="p-6 flex flex-col h-full min-h-0 gap-3">
-      {/* Header: search bar (left half) + stats (right half) */}
+      {/* Header: search bar + stats */}
       <div className="flex items-center gap-4 flex-shrink-0">
         <div className="relative flex-1">
           <Search className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -556,7 +677,7 @@ export default function MemoryPage() {
           />
           {searchQuery && (
             <button
-              onClick={() => { setSearchQuery(""); setSearchResults(null); setActiveTag(null); }}
+              onClick={() => { setSearchQuery(""); setSearchResults(null); setActiveEntity(null); }}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
             >
               <X className="w-4 h-4" />
@@ -568,36 +689,45 @@ export default function MemoryPage() {
             </div>
           )}
         </div>
-        {stats && (
-          <div className="flex items-center gap-4 text-[11px] text-slate-400 flex-shrink-0">
+        <div className="flex items-center gap-4 text-[11px] text-slate-400 flex-shrink-0">
+          {stats && (
             <span className="flex items-center gap-1.5">
               <FileText className="w-3.5 h-3.5 text-brand-400" />
               <span className="text-slate-200 font-medium">{stats.docCount}</span> documents
             </span>
+          )}
+          <span className="flex items-center gap-1.5">
+            <User className="w-3.5 h-3.5 text-sky-400" />
+            <span className="text-slate-200 font-medium">{entityTotal}</span> entities
+          </span>
+          <span className="flex items-center gap-1.5">
+            <Network className="w-3.5 h-3.5 text-purple-400" />
+            <span className="text-slate-200 font-medium">{entityConnectionCount}</span> connections
+          </span>
+          {stats && (
             <span className="flex items-center gap-1.5">
               <Tag className="w-3.5 h-3.5 text-amber-400" />
               <span className="text-slate-200 font-medium">{stats.tagCount}</span> tags
             </span>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
-      {/* 3-column layout: left sidebar | center | right results */}
+      {/* 3-column layout */}
       <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
-        {/* Left: Tags + Explorer */}
+        {/* Left: Entities + Explorer */}
         <div className="w-44 flex-shrink-0 flex flex-col min-h-0">
-          {/* Tab bar */}
           <div className="flex border-b border-surface-3/50 mb-2 flex-shrink-0">
             <button
-              onClick={() => setSidebarTab("tags")}
+              onClick={() => setSidebarTab("entities")}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider border-b-2 transition-colors ${
-                sidebarTab === "tags"
+                sidebarTab === "entities"
                   ? "border-brand-400 text-brand-400"
                   : "border-transparent text-slate-500 hover:text-slate-300"
               }`}
             >
-              <Tag className="w-3 h-3" />
-              Tags
+              <User className="w-3 h-3" />
+              Entities
             </button>
             <button
               onClick={() => setSidebarTab("explorer")}
@@ -612,10 +742,16 @@ export default function MemoryPage() {
             </button>
           </div>
 
-          {/* Tab content */}
           <div className="flex-1 overflow-y-auto pr-1">
-            {sidebarTab === "tags" && tags.length > 0 && (
-              <TagSidebar tags={tags} activeTag={activeTag} onSelectTag={handleTagSelect} />
+            {sidebarTab === "entities" && entities.length > 0 && (
+              <EntitySidebar
+                entities={entities}
+                activeEntity={activeEntity}
+                onSelectEntity={handleEntitySelect}
+              />
+            )}
+            {sidebarTab === "entities" && entities.length === 0 && (
+              <div className="text-[11px] text-slate-500 px-2 py-4">Loading entities...</div>
             )}
             {sidebarTab === "explorer" && (
               <VaultExplorer onOpenFile={handleOpenFile} />
@@ -623,34 +759,28 @@ export default function MemoryPage() {
           </div>
         </div>
 
-        {/* Center: Tag graph */}
+        {/* Center: Entity/Knowledge graph */}
         <div className="flex-1 min-w-0 min-h-0">
-          <TagGraph
-            selectedTag={activeTag}
-            onTagClick={(tag) => {
-              if (tag) {
-                setSearchQuery(tag);
-                setActiveTag(tag);
-                setSidebarTab("tags");
-                doSearch(tag);
-              } else {
-                // Only deselect the active tag — don't clear search results.
-                // The user may be clicking a search result while a graph node
-                // background-click fires simultaneously.
-                setActiveTag(null);
-              }
-            }}
+          <EntityGraph
+            selectedNode={selectedGraphNode}
+            onNodeClick={handleGraphNodeClick}
           />
         </div>
 
-        {/* Right: Document listing (always mounted to keep graph bounds stable) */}
+        {/* Right: Entity detail or search results */}
         <div className="w-72 flex-shrink-0 overflow-y-auto min-h-0 border-l border-surface-3/30 pl-4">
-          {showRightPanel && (
+          {showSearchResults && (
             <SearchResults
               results={searchResults!}
               query={searchQuery}
               onOpenFile={handleOpenFile}
             />
+          )}
+          {showEntityDetail && (
+            <EntityDetailPanel detail={entityDetail!} />
+          )}
+          {!showSearchResults && !showEntityDetail && activeEntity && loadingEntityDetail && (
+            <div className="text-[11px] text-slate-500 py-4">Loading facts...</div>
           )}
         </div>
       </div>

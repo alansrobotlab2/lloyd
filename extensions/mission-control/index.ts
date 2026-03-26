@@ -10,6 +10,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, existsSync, writeFileSync, statSync } from "fs";
+import { readFile as fsReadFile, access as fsAccess, stat as fsStat } from "fs/promises";
 import { join, extname } from "path";
 
 import type { PluginContext, AgentSessionStatus, AgentActivity, CommandInfo } from "./types.js";
@@ -112,7 +113,10 @@ export default function register(api: OpenClawPluginApi) {
   // which takes 6-16s per sessions.list scan across ~1100 JSONL files.
   let _idlerSessionsCache: { data: any[]; ts: number } | null = null;
   const IDLER_SESSIONS_TTL = 300_000;
-  setInterval(async () => {
+
+  // Adaptive poll: reschedule with setTimeout so interval can vary each cycle
+  async function runIdlerPoll() {
+    let nextInterval = 30_000; // default: nothing in progress → slow poll
     try {
       const getSessionsList = async (): Promise<any[]> => {
         const now = Date.now();
@@ -157,191 +161,190 @@ export default function register(api: OpenClawPluginApi) {
         }
       }
 
-      if (inProgressTasks.length === 0) return; // Nothing to poll — skip Map iteration
+      if (inProgressTasks.length === 0) {
+        // Nothing to poll — use slow interval
+        nextInterval = 30_000;
+      } else {
+        // Tasks in progress — use fast interval
+        nextInterval = 5_000;
 
-      for (const task of inProgressTasks) {
-        const taskId = task.id;
-        const suffix = `hook:idler:task-${taskId}`;
+        for (const task of inProgressTasks) {
+          const taskId = task.id;
+          const suffix = `hook:idler:task-${taskId}`;
 
-        // Find matching session state by suffix — agent prefix varies by target agent
-        let sessionState: AgentSessionStatus | undefined;
-        let matchingSessionKey: string | null = null;
-        for (const [key, state] of agentSessionStates) {
-          if (key.endsWith(suffix)) {
-            sessionState = state;
-            matchingSessionKey = key;
-            break;
-          }
-        }
-
-        if (!sessionState) {
-          continue; // No OTel event yet — still running or not started
-        }
-
-        // Session states are: "idle" | "processing" | "waiting"
-        // A completed cron session transitions to "idle" with queueDepth 0.
-        // Debounce: require idle for 30+ seconds before nudging
-        const idleAgeMs = Date.now() - (sessionState.lastUpdated ?? 0);
-        
-        // Skip if not idle or idle for less than IDLE_BEFORE_NUDGE_MS
-        if (sessionState.state !== "idle" || (sessionState.queueDepth ?? 0) > 0 || idleAgeMs < IDLE_BEFORE_NUDGE_MS) {
-          continue;
-        }
-
-        // Non-wiggam tasks: complete on idle (original behavior), but check for active children first
-        const isWiggam = !!(task as any).wiggam;
-        if (!isWiggam) {
-          if (matchingSessionKey) {
-            const { hasChildren, allChildrenDone } = await hasActiveChildren(matchingSessionKey);
-            if (hasChildren && !allChildrenDone) {
-              continue; // Children still working — don't complete prematurely
-            }
-            if (hasChildren && allChildrenDone) {
-              // Children done but parent is idle — completion event was lost, nudge to re-inject
-              if (!gwWsSend) continue;
-              try {
-                await gwWsSend("chat.send", {
-                  sessionKey: matchingSessionKey,
-                  message: "Your subagent(s) have completed but the completion event was not delivered. Check the results by reviewing your spawned sessions and continue the pipeline. When ALL steps are complete, include TASK_COMPLETE in your final message.",
-                });
-                api.logger.info?.(`[autonomy] Task #${taskId} — children done, parent stalled, nudging`);
-              } catch (err: any) {
-                api.logger.error?.(`[autonomy] Nudge failed for task #${taskId}: ${err.message}`);
-              }
-              continue; // Don't complete yet — let the nudge run
-            }
-          }
-          // No children (or no session key) — original behavior: complete on idle
-          await svc.completeActiveRun(taskId, "success", "Completed");
-          await svc.completeTask(taskId);
-          api.logger.info?.(`[autonomy] Task #${taskId} completed via session state`);
-          for (const [key] of agentSessionStates) {
+          // Find matching session state by suffix — agent prefix varies by target agent
+          let sessionState: AgentSessionStatus | undefined;
+          let matchingSessionKey: string | null = null;
+          for (const [key, state] of agentSessionStates) {
             if (key.endsWith(suffix)) {
-              agentSessionStates.delete(key);
+              sessionState = state;
+              matchingSessionKey = key;
               break;
             }
           }
-          continue;
-        }
 
-        // Wiggam tasks: check for active children before nudging or completing
-        if (matchingSessionKey) {
-          const { hasChildren: wigHasChildren, allChildrenDone: wigAllChildrenDone } = await hasActiveChildren(matchingSessionKey);
-          if (wigHasChildren && !wigAllChildrenDone) {
-            continue; // Children still working — don't nudge or complete
+          if (!sessionState) {
+            continue; // No OTel event yet — still running or not started
           }
-          if (wigHasChildren && wigAllChildrenDone) {
-            // Children done but parent stalled — nudge with context about lost completion event
-            if (!gwWsSend) continue;
-            let wigEntry = wiggamState.get(taskId);
-            if (!wigEntry) {
-              wigEntry = { nudgeCount: 0, lastNudgeAt: 0 };
-              wiggamState.set(taskId, wigEntry);
-            }
-            if (wigEntry.nudgeCount < MAX_NUDGES) {
-              try {
-                await gwWsSend("chat.send", {
-                  sessionKey: matchingSessionKey,
-                  message: "Your subagent(s) have completed but the completion event was not delivered. Check the results by reviewing your spawned sessions and continue the pipeline. When ALL steps are complete, include TASK_COMPLETE in your final message.",
-                });
-                wigEntry.nudgeCount++;
-                wigEntry.lastNudgeAt = Date.now();
-                api.logger.info?.(`[wiggam] Task #${taskId} — children done, parent stalled, nudging (${wigEntry.nudgeCount}/${MAX_NUDGES})`);
-              } catch (err: any) {
-                api.logger.error?.(`[wiggam] Children-done nudge failed for task #${taskId}: ${err.message}`);
+
+          // Session states are: "idle" | "processing" | "waiting"
+          // A completed cron session transitions to "idle" with queueDepth 0.
+          // Debounce: require idle for 30+ seconds before nudging
+          const idleAgeMs = Date.now() - (sessionState.lastUpdated ?? 0);
+          
+          // Skip if not idle or idle for less than IDLE_BEFORE_NUDGE_MS
+          if (sessionState.state !== "idle" || (sessionState.queueDepth ?? 0) > 0 || idleAgeMs < IDLE_BEFORE_NUDGE_MS) {
+            continue;
+          }
+
+          // Call hasActiveChildren once — reused across both wiggam and non-wiggam branches
+          const activeChildrenResult = matchingSessionKey
+            ? await hasActiveChildren(matchingSessionKey)
+            : { hasChildren: false, allChildrenDone: false };
+
+          // Non-wiggam tasks: complete on idle (original behavior), but check for active children first
+          const isWiggam = !!(task as any).wiggam;
+          if (!isWiggam) {
+            if (matchingSessionKey) {
+              const { hasChildren, allChildrenDone } = activeChildrenResult;
+              if (hasChildren && !allChildrenDone) {
+                continue; // Children still working — don't complete prematurely
+              }
+              if (hasChildren && allChildrenDone) {
+                // Children done but parent is idle — completion event was lost, nudge to re-inject
+                if (!gwWsSend) continue;
+                try {
+                  await gwWsSend("chat.send", {
+                    sessionKey: matchingSessionKey,
+                    message: "Your subagent(s) have completed but the completion event was not delivered. Check the results by reviewing your spawned sessions and continue the pipeline. When ALL steps are complete, include TASK_COMPLETE in your final message.",
+                  });
+                  api.logger.info?.(`[autonomy] Task #${taskId} — children done, parent stalled, nudging`);
+                } catch (err: any) {
+                  api.logger.error?.(`[autonomy] Nudge failed for task #${taskId}: ${err.message}`);
+                }
+                continue; // Don't complete yet — let the nudge run
               }
             }
-            continue; // Don't complete yet
+            // No children (or no session key) — original behavior: complete on idle
+            await svc.completeActiveRun(taskId, "success", "Completed");
+            await svc.completeTask(taskId);
+            api.logger.info?.(`[autonomy] Task #${taskId} completed via session state`);
+            if (matchingSessionKey) agentSessionStates.delete(matchingSessionKey);
+            continue;
           }
-          // No children — fall through to normal TASK_COMPLETE / nudge logic
-        }
 
-        // Wiggam tasks: check for TASK_COMPLETE signal
-        let taskCompleteFound = false;
-        try {
-          if (matchingSessionKey && gwWsSend) {
-            const history = await gwWsSend("chat.history", { sessionKey: matchingSessionKey, limit: 3 });
-            if (history && Array.isArray(history.messages)) {
-              for (const msg of history.messages) {
-                if (msg.role === "assistant" && msg.content) {
-                  const contentArr = Array.isArray(msg.content) ? msg.content : [msg.content];
-                  for (const block of contentArr) {
-                    const text = typeof block === "string" ? block : block?.text;
-                    if (typeof text === "string" && text.includes("TASK_COMPLETE")) {
-                      taskCompleteFound = true;
-                      break;
+          // Wiggam tasks: check for active children before nudging or completing
+          if (matchingSessionKey) {
+            const { hasChildren: wigHasChildren, allChildrenDone: wigAllChildrenDone } = activeChildrenResult;
+            if (wigHasChildren && !wigAllChildrenDone) {
+              continue; // Children still working — don't nudge or complete
+            }
+            if (wigHasChildren && wigAllChildrenDone) {
+              // Children done but parent stalled — nudge with context about lost completion event
+              if (!gwWsSend) continue;
+              let wigEntry = wiggamState.get(taskId);
+              if (!wigEntry) {
+                wigEntry = { nudgeCount: 0, lastNudgeAt: 0 };
+                wiggamState.set(taskId, wigEntry);
+              }
+              if (wigEntry.nudgeCount < MAX_NUDGES) {
+                try {
+                  await gwWsSend("chat.send", {
+                    sessionKey: matchingSessionKey,
+                    message: "Your subagent(s) have completed but the completion event was not delivered. Check the results by reviewing your spawned sessions and continue the pipeline. When ALL steps are complete, include TASK_COMPLETE in your final message.",
+                  });
+                  wigEntry.nudgeCount++;
+                  wigEntry.lastNudgeAt = Date.now();
+                  api.logger.info?.(`[wiggam] Task #${taskId} — children done, parent stalled, nudging (${wigEntry.nudgeCount}/${MAX_NUDGES})`);
+                } catch (err: any) {
+                  api.logger.error?.(`[wiggam] Children-done nudge failed for task #${taskId}: ${err.message}`);
+                }
+              }
+              continue; // Don't complete yet
+            }
+            // No children — fall through to normal TASK_COMPLETE / nudge logic
+          }
+
+          // Wiggam tasks: check for TASK_COMPLETE signal
+          let taskCompleteFound = false;
+          try {
+            if (matchingSessionKey && gwWsSend) {
+              const history = await gwWsSend("chat.history", { sessionKey: matchingSessionKey, limit: 3 });
+              if (history && Array.isArray(history.messages)) {
+                for (const msg of history.messages) {
+                  if (msg.role === "assistant" && msg.content) {
+                    const contentArr = Array.isArray(msg.content) ? msg.content : [msg.content];
+                    for (const block of contentArr) {
+                      const text = typeof block === "string" ? block : block?.text;
+                      if (typeof text === "string" && text.includes("TASK_COMPLETE")) {
+                        taskCompleteFound = true;
+                        break;
+                      }
                     }
+                    if (taskCompleteFound) break;
                   }
-                  if (taskCompleteFound) break;
                 }
               }
             }
+          } catch (err: any) {
+            // If chat.history fails (session closed, WS disconnected), fall back to "no TASK_COMPLETE found"
+            api.logger.warn?.(`[wiggam] chat.history failed for session ${matchingSessionKey}: ${err.message}`);
           }
-        } catch (err: any) {
-          // If chat.history fails (session closed, WS disconnected), fall back to "no TASK_COMPLETE found"
-          api.logger.warn?.(`[wiggam] chat.history failed for session ${matchingSessionKey}: ${err.message}`);
-        }
 
-        if (taskCompleteFound) {
-          // Agent signaled completion
-          await svc.completeActiveRun(taskId, "success", "Completed via TASK_COMPLETE signal");
-          await svc.completeTask(taskId);
-          wiggamState.delete(taskId);
-          // Clean up session state
-          for (const [key] of agentSessionStates) {
-            if (key.endsWith(suffix)) {
-              agentSessionStates.delete(key);
-              break;
-            }
+          if (taskCompleteFound) {
+            // Agent signaled completion
+            await svc.completeActiveRun(taskId, "success", "Completed via TASK_COMPLETE signal");
+            await svc.completeTask(taskId);
+            wiggamState.delete(taskId);
+            if (matchingSessionKey) agentSessionStates.delete(matchingSessionKey);
+            api.logger.info?.(`[wiggam] Task #${taskId} completed (agent signaled TASK_COMPLETE)`);
+            continue;
           }
-          api.logger.info?.(`[wiggam] Task #${taskId} completed (agent signaled TASK_COMPLETE)`);
-          continue;
-        }
 
-        // No TASK_COMPLETE found - nudge or give up
-        let wiggamEntry = wiggamState.get(taskId);
-        if (!wiggamEntry) {
-          wiggamEntry = { nudgeCount: 0, lastNudgeAt: 0 };
-          wiggamState.set(taskId, wiggamEntry);
-        }
-
-        if (wiggamEntry.nudgeCount >= MAX_NUDGES) {
-          // Max nudges exceeded - fail the task
-          await svc.completeActiveRun(taskId, "timeout", "Wiggam loop: max nudges exceeded");
-          await svc.completeTask(taskId);
-          wiggamState.delete(taskId);
-          // Clean up session state
-          for (const [key] of agentSessionStates) {
-            if (key.endsWith(suffix)) {
-              agentSessionStates.delete(key);
-              break;
-            }
+          // No TASK_COMPLETE found - nudge or give up
+          let wiggamEntry = wiggamState.get(taskId);
+          if (!wiggamEntry) {
+            wiggamEntry = { nudgeCount: 0, lastNudgeAt: 0 };
+            wiggamState.set(taskId, wiggamEntry);
           }
-          api.logger.info?.(`[wiggam] Task #${taskId} failed — max nudges (${MAX_NUDGES}) exceeded`);
-        } else {
-          // Send nudge
-          wiggamEntry.nudgeCount++;
-          wiggamEntry.lastNudgeAt = Date.now();
-          
-          if (matchingSessionKey && gwWsSend) {
-            try {
-              await gwWsSend("chat.send", { 
-                sessionKey: matchingSessionKey, 
-                message: "You appear to have stalled. The task is not yet complete. Review where you are in the pipeline (plan → implement → review → test → commit → report) and continue to the next step. Delegate to subagents — do not do the work yourself. When ALL steps are complete and the build passes, include TASK_COMPLETE in your final message." 
-              });
-              api.logger.info?.(`[wiggam] Task #${taskId} nudge ${wiggamEntry.nudgeCount}/${MAX_NUDGES}`);
-            } catch (err: any) {
-              api.logger.error?.(`[wiggam] chat.send failed for task #${taskId}: ${err.message}`);
-              // Decrement nudge count on failure so we can retry
-              wiggamEntry.nudgeCount--;
+
+          if (wiggamEntry.nudgeCount >= MAX_NUDGES) {
+            // Max nudges exceeded - fail the task
+            await svc.completeActiveRun(taskId, "timeout", "Wiggam loop: max nudges exceeded");
+            await svc.completeTask(taskId);
+            wiggamState.delete(taskId);
+            if (matchingSessionKey) agentSessionStates.delete(matchingSessionKey);
+            api.logger.info?.(`[wiggam] Task #${taskId} failed — max nudges (${MAX_NUDGES}) exceeded`);
+          } else {
+            // Send nudge
+            wiggamEntry.nudgeCount++;
+            wiggamEntry.lastNudgeAt = Date.now();
+            
+            if (matchingSessionKey && gwWsSend) {
+              try {
+                await gwWsSend("chat.send", { 
+                  sessionKey: matchingSessionKey, 
+                  message: "You appear to have stalled. The task is not yet complete. Review where you are in the pipeline (plan → implement → review → test → commit → report) and continue to the next step. Delegate to subagents — do not do the work yourself. When ALL steps are complete and the build passes, include TASK_COMPLETE in your final message." 
+                });
+                api.logger.info?.(`[wiggam] Task #${taskId} nudge ${wiggamEntry.nudgeCount}/${MAX_NUDGES}`);
+              } catch (err: any) {
+                api.logger.error?.(`[wiggam] chat.send failed for task #${taskId}: ${err.message}`);
+                // Decrement nudge count on failure so we can retry
+                wiggamEntry.nudgeCount--;
+              }
             }
           }
         }
       }
     } catch (err: any) {
       api.logger.error?.(`[autonomy] Poll error: ${err.message}`);
+    } finally {
+      // Reschedule next poll cycle (adaptive interval)
+      setTimeout(runIdlerPoll, nextInterval);
     }
-  }, 5_000);
+  }
+  // Kick off first poll cycle
+  setTimeout(runIdlerPoll, 5_000);
   } // end idler-poll guard
 
   // ── Wire up domain modules ────────────────────────────────────────
@@ -380,14 +383,19 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── Small endpoints (not worth a separate module) ─────────────────
 
+  // Async file helpers for HTTP handlers
+  async function fileExists(p: string): Promise<boolean> {
+    try { await fsAccess(p); return true; } catch { return false; }
+  }
+
   // GET /api/mc/models
   api.registerHttpRoute({
     path: "/api/mc/models",
     auth: "plugin",
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
-        if (!existsSync(configFile)) { jsonResponse(res, { providers: {} }); return; }
-        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        if (!await fileExists(configFile)) { jsonResponse(res, { providers: {} }); return; }
+        const config = JSON.parse(await fsReadFile(configFile, "utf-8"));
         const providers = config.models?.providers || {};
         const safe: any = { providers: {} };
         for (const [name, provider] of Object.entries<any>(providers)) {
@@ -420,8 +428,8 @@ export default function register(api: OpenClawPluginApi) {
         if (!providerName || !modelId || typeof enabled !== "boolean") {
           jsonResponse(res, { error: "Missing provider, modelId, or enabled (boolean)" }, 400); return;
         }
-        if (!existsSync(configFile)) { jsonResponse(res, { error: "openclaw.json not found" }, 404); return; }
-        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        if (!await fileExists(configFile)) { jsonResponse(res, { error: "openclaw.json not found" }, 404); return; }
+        const config = JSON.parse(await fsReadFile(configFile, "utf-8"));
         if (!config.models) config.models = {};
         if (!config.models.providers) config.models.providers = {};
         const provider = config.models.providers[providerName];
@@ -444,8 +452,8 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         let jobs: any[] = [];
-        if (existsSync(ctx.cronJobsFile)) {
-          const data = JSON.parse(readFileSync(ctx.cronJobsFile, "utf-8"));
+        if (await fileExists(ctx.cronJobsFile)) {
+          const data = JSON.parse(await fsReadFile(ctx.cronJobsFile, "utf-8"));
           jobs = data.jobs || [];
         }
         jsonResponse(res, { jobs });
@@ -467,8 +475,8 @@ export default function register(api: OpenClawPluginApi) {
         const limit = parseInt(url.searchParams.get("limit") || "20", 10);
         const runFile = join(rootDir, "cron/runs", `${jobId}.jsonl`);
         let runs: any[] = [];
-        if (existsSync(runFile)) {
-          const lines = readFileSync(runFile, "utf-8").trim().split("\n").filter(Boolean);
+        if (await fileExists(runFile)) {
+          const lines = (await fsReadFile(runFile, "utf-8")).trim().split("\n").filter(Boolean);
           const parsed: any[] = [];
           for (const line of lines) {
             try { const entry = JSON.parse(line); if (entry.action === "finished") parsed.push(entry); } catch { /* skip */ }
@@ -489,8 +497,8 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const health: any = { gateway: "up", timestamp: new Date().toISOString() };
-        if (existsSync(ctx.authFile)) {
-          const auth = JSON.parse(readFileSync(ctx.authFile, "utf-8"));
+        if (await fileExists(ctx.authFile)) {
+          const auth = JSON.parse(await fsReadFile(ctx.authFile, "utf-8"));
           health.auth = {};
           for (const [key, stats] of Object.entries<any>(auth.usageStats || {})) {
             health.auth[key] = {
@@ -499,8 +507,8 @@ export default function register(api: OpenClawPluginApi) {
             };
           }
         }
-        if (existsSync(ctx.cronJobsFile)) {
-          const cron = JSON.parse(readFileSync(ctx.cronJobsFile, "utf-8"));
+        if (await fileExists(ctx.cronJobsFile)) {
+          const cron = JSON.parse(await fsReadFile(ctx.cronJobsFile, "utf-8"));
           health.cron = (cron.jobs || []).map((j: any) => ({
             id: j.id, name: j.name, enabled: j.enabled,
             lastStatus: j.state?.lastStatus,
@@ -625,8 +633,8 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (_req: IncomingMessage, res: ServerResponse) => {
       try {
         const certPath = join(require("os").homedir(), ".openclaw", "certs", "mc.crt");
-        if (!existsSync(certPath)) { jsonResponse(res, { error: "Certificate not found" }, 404); return; }
-        const cert = readFileSync(certPath);
+        if (!await fileExists(certPath)) { jsonResponse(res, { error: "Certificate not found" }, 404); return; }
+        const cert = readFileSync(certPath); // binary read — keep sync
         res.writeHead(200, {
           "Content-Type": "application/x-x509-ca-cert",
           "Content-Disposition": 'attachment; filename="openclaw-mc.crt"',
@@ -649,7 +657,7 @@ export default function register(api: OpenClawPluginApi) {
       const url = new URL(req.url || "/", "http://localhost");
       const pathname = url.pathname;
 
-      if (!existsSync(distWebDir)) {
+      if (!await fileExists(distWebDir)) {
         res.writeHead(503, { "Content-Type": "text/html" });
         res.end("<h1>Mission Control</h1><p>Dashboard not built yet. Run <code>npm run build</code> in extensions/mission-control/web/</p>");
         return true;
@@ -659,7 +667,10 @@ export default function register(api: OpenClawPluginApi) {
       if (filePath.includes("..")) { res.writeHead(400); res.end("Bad request"); return true; }
 
       let fullPath = join(distWebDir, filePath);
-      if (!existsSync(fullPath) || statSync(fullPath).isDirectory()) {
+      try {
+        const st = await fsStat(fullPath);
+        if (st.isDirectory()) { fullPath = join(distWebDir, "index.html"); filePath = "index.html"; }
+      } catch {
         fullPath = join(distWebDir, "index.html");
         filePath = "index.html";
       }

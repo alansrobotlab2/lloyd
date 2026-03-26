@@ -4,6 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, existsSync, readdirSync, statSync } from "fs";
+import { readFile, access, readdir, stat } from "fs/promises";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import type { PluginContext, SessionMessage, TimingEntry, RoutingEntry, SubagentRunStatus, AgentSessionStatus } from "./types.js";
@@ -297,7 +298,7 @@ export function registerSessionRoutes(
             };
           });
 
-        const cachedSummaries = loadSummaries(summariesFile);
+        const cachedSummaries = await loadSummaries(summariesFile);
         for (const s of sessions) {
           const cached = cachedSummaries[s.sessionKey];
           if (cached && cached !== "__failed") {
@@ -350,9 +351,11 @@ export function registerSessionRoutes(
           }
           if (sessionId) {
             const jsonlPath = join(sessionsDir, sessionId + ".jsonl");
-            if (existsSync(jsonlPath)) {
+            let jsonlStat: import("fs").Stats | null = null;
+            try { jsonlStat = await stat(jsonlPath); } catch { /* file not found */ }
+            if (jsonlStat) {
               // Check mtime — skip re-parsing if file unchanged
-              jsonlMtime = statSync(jsonlPath).mtimeMs;
+              jsonlMtime = jsonlStat.mtimeMs;
               const cached = msgCache.get(sessionKey);
               if (cached && cached.mtimeMs === jsonlMtime && cached.includeTools === includeTools) {
                 jsonResponse(res, cached.response);
@@ -551,7 +554,7 @@ export function registerSessionRoutes(
           activityDetail = activity.model ?? null;
         }
 
-        const subagentRuns = loadSubagentRuns(ctx);
+        const subagentRuns = await loadSubagentRuns(ctx);
         const activeRuns = subagentRuns.filter((r) => !r.endedAt);
         const recentCompleted = subagentRuns.filter((r) => !!r.endedAt).slice(0, 10);
 
@@ -602,7 +605,7 @@ export function registerSessionRoutes(
           return b.lastUpdated - a.lastUpdated;
         });
 
-        const subagentRuns = loadSubagentRuns(ctx);
+        const subagentRuns = await loadSubagentRuns(ctx);
 
         jsonResponse(res, {
           sessions: gatewaySessions,
@@ -621,11 +624,12 @@ export function registerSessionRoutes(
 
 const STALE_RUN_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes — runs older than this without endedAt are stale
 
-function loadSubagentRuns(ctx: PluginContext): SubagentRunStatus[] {
+async function loadSubagentRuns(ctx: PluginContext): Promise<SubagentRunStatus[]> {
   const subagentRunsFile = join(ctx.rootDir, "subagents/runs.json");
   try {
-    if (!existsSync(subagentRunsFile)) return [];
-    const raw = JSON.parse(readFileSync(subagentRunsFile, "utf-8"));
+    let rawText: string;
+    try { rawText = await readFile(subagentRunsFile, "utf-8"); } catch { return []; }
+    const raw = JSON.parse(rawText);
     if (raw.version !== 2 || !raw.runs) return [];
     const now = Date.now();
     const runs: SubagentRunStatus[] = [];

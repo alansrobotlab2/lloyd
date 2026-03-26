@@ -1,5 +1,5 @@
 /**
- * memory.ts — Vault browsing, search, graphs, save, and frontmatter operations
+ * memory.ts - Vault browsing, search, graphs, save, and frontmatter operations
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -9,6 +9,105 @@ import { execSync, execFileSync } from "child_process";
 import { homedir } from "os";
 import type { PluginContext, VaultDoc } from "./types.js";
 import { jsonResponse, readBody, parseFrontmatter } from "./helpers.js";
+
+// -- Next-gen memory pipeline paths --
+
+const pipelineRoot = join(homedir(), "obsidian", "memory", "_pipeline");
+const factsIndexPath = join(pipelineRoot, "facts-index.json");
+const relationsIndexPath = join(pipelineRoot, "relations-index.json");
+const factsDir = join(pipelineRoot, "facts");
+
+// -- Entity/graph caches --
+
+interface EntitySummary {
+  name: string;
+  factCount: number;
+  categories: string[];
+}
+interface EntitiesCache { entities: EntitySummary[]; total: number; }
+
+let entitiesCache: EntitiesCache | null = null;
+let entitiesCacheTs = 0;
+
+interface GraphNode { id: string; label: string; type: string; factCount?: number; }
+interface GraphEdge { source: string; target: string; type: string; weight: number; }
+interface EntityGraphCache { nodes: GraphNode[]; edges: GraphEdge[]; }
+
+let entityGraphCache: EntityGraphCache | null = null;
+let entityGraphCacheTs = 0;
+
+const ENTITY_CACHE_MS = 60_000;
+
+function loadEntities(): EntitiesCache {
+  if (entitiesCache && Date.now() - entitiesCacheTs < ENTITY_CACHE_MS) return entitiesCache;
+  if (!existsSync(factsIndexPath)) return { entities: [], total: 0 };
+  const raw = JSON.parse(readFileSync(factsIndexPath, "utf-8"));
+  const byEntity = new Map<string, { factCount: number; categories: Set<string> }>();
+  for (const entry of (raw.facts || [])) {
+    const name: string = entry.entity;
+    if (!byEntity.has(name)) byEntity.set(name, { factCount: 0, categories: new Set() });
+    const e = byEntity.get(name)!;
+    e.factCount += entry.fact_count || 0;
+    if (entry.category) e.categories.add(entry.category);
+  }
+  const entities: EntitySummary[] = Array.from(byEntity.entries())
+    .map(([name, v]) => ({ name, factCount: v.factCount, categories: Array.from(v.categories) }))
+    .sort((a, b) => b.factCount - a.factCount);
+  entitiesCache = { entities, total: entities.length };
+  entitiesCacheTs = Date.now();
+  return entitiesCache;
+}
+
+function parseFactsFile(filePath: string): Array<{ fact: string; confidence: number; category: string; event_date?: string | null; id?: string }> {
+  if (!existsSync(filePath)) return [];
+  try {
+    const raw = readFileSync(filePath, "utf-8");
+    const fm = parseFrontmatter(raw);
+    if (!Array.isArray(fm.facts)) return [];
+    return fm.facts.map((f: any) => ({
+      fact: f.fact || "",
+      confidence: f.confidence ?? 1.0,
+      category: f.category || fm.category || "",
+      event_date: f.event_date ?? null,
+      id: f.id,
+    }));
+  } catch { return []; }
+}
+
+function loadEntityGraph(): EntityGraphCache {
+  if (entityGraphCache && Date.now() - entityGraphCacheTs < ENTITY_CACHE_MS) return entityGraphCache;
+  if (!existsSync(relationsIndexPath)) return { nodes: [], edges: [] };
+  const raw = JSON.parse(readFileSync(relationsIndexPath, "utf-8"));
+  const relationships: Array<{ source: string; target: string; type: string; reason?: string; score?: number }> = raw.relationships || [];
+
+  // Build unique nodes from all doc paths in the relations
+  const nodeSet = new Map<string, { id: string; label: string; type: string }>();
+  for (const rel of relationships) {
+    for (const p of [rel.source, rel.target]) {
+      if (!nodeSet.has(p)) {
+        const label = p.split("/").pop()?.replace(/\.md$/, "") || p;
+        nodeSet.set(p, { id: p, label, type: "document" });
+      }
+    }
+  }
+
+  // Deduplicate edges by source+target (keep highest score)
+  const edgeMap = new Map<string, GraphEdge>();
+  for (const rel of relationships) {
+    if (rel.source === rel.target) continue; // skip self-loops
+    const key = [rel.source, rel.target].sort().join("\x00");
+    const existing = edgeMap.get(key);
+    const weight = rel.score ?? 1;
+    if (!existing || weight > existing.weight) {
+      edgeMap.set(key, { source: rel.source, target: rel.target, type: rel.type || "wiki-link", weight });
+    }
+  }
+
+  entityGraphCache = { nodes: Array.from(nodeSet.values()), edges: Array.from(edgeMap.values()) };
+  entityGraphCacheTs = Date.now();
+  return entityGraphCache;
+}
+
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -275,24 +374,26 @@ export function registerMemoryRoutes(ctx: PluginContext) {
         const browsePath = (url.searchParams.get("path") || "").replace(/^\/+|\/+$/g, "");
         const fullPath = join(vaultRoot, browsePath);
         if (!fullPath.startsWith(vaultRoot)) { jsonResponse(res, { error: "Invalid path" }, 400); return; }
-        if (!existsSync(fullPath) || !statSync(fullPath).isDirectory()) { jsonResponse(res, { error: "Not a directory" }, 404); return; }
+        let dirSt: import("fs").Stats;
+        try { dirSt = await stat(fullPath); } catch { jsonResponse(res, { error: "Not a directory" }, 404); return; }
+        if (!dirSt.isDirectory()) { jsonResponse(res, { error: "Not a directory" }, 404); return; }
 
-        const names = readdirSync(fullPath);
+        const names = await readdir(fullPath);
         const entries: any[] = [];
         for (const name of names) {
           if (VAULT_EXCLUDED.has(name) || name.startsWith(".")) continue;
           const fp = join(fullPath, name);
-          let st;
-          try { st = statSync(fp); } catch { continue; }
+          let st: import("fs").Stats;
+          try { st = await stat(fp); } catch { continue; }
 
           if (st.isDirectory()) {
             let children = 0;
-            try { children = readdirSync(fp).filter(n => !n.startsWith(".")).length; } catch { /* ok */ }
+            try { children = (await readdir(fp)).filter((n: string) => !n.startsWith(".")).length; } catch { /* ok */ }
             entries.push({ name, type: "dir", children });
           } else if (name.endsWith(".md")) {
             let title = name.replace(/\.md$/, "");
             try {
-              const head = readFileSync(fp, "utf-8").slice(0, 500);
+              const head = (await readFile(fp, "utf-8")).slice(0, 500);
               const fm = parseFrontmatter(head);
               if (fm.title) title = fm.title;
             } catch { /* ok */ }
@@ -322,14 +423,21 @@ export function registerMemoryRoutes(ctx: PluginContext) {
         if (!fullPath.startsWith(vaultRoot)) { jsonResponse(res, { error: "Invalid path" }, 400); return; }
 
         let resolvedPath = fullPath;
-        if (!existsSync(resolvedPath) || statSync(resolvedPath).isDirectory()) {
+        let resolvedSt: import("fs").Stats | null = null;
+        try { resolvedSt = await stat(resolvedPath); } catch { /* not found */ }
+        if (!resolvedSt || resolvedSt.isDirectory()) {
           const dir = join(resolvedPath, "..");
           const base = resolvedPath.split("/").pop()!.toLowerCase();
           let found = false;
-          if (existsSync(dir)) {
-            for (const entry of readdirSync(dir)) {
-              if (entry.toLowerCase() === base) { resolvedPath = join(dir, entry); found = true; break; }
-            }
+          let dirSt2: import("fs").Stats | null = null;
+          try { dirSt2 = await stat(dir); } catch { /* ok */ }
+          if (dirSt2) {
+            try {
+              const dirEntries = await readdir(dir);
+              for (const entry of dirEntries) {
+                if (entry.toLowerCase() === base) { resolvedPath = join(dir, entry); found = true; break; }
+              }
+            } catch { /* ok */ }
           }
           if (!found) {
             try {
@@ -339,12 +447,12 @@ export function registerMemoryRoutes(ctx: PluginContext) {
               if (out && out.startsWith(vaultRoot)) { resolvedPath = out; found = true; }
             } catch {}
           }
-          if (!found || !existsSync(resolvedPath) || statSync(resolvedPath).isDirectory()) {
-            jsonResponse(res, { error: "File not found" }, 404); return;
-          }
+          if (!found) { jsonResponse(res, { error: "File not found" }, 404); return; }
+          try { resolvedSt = await stat(resolvedPath); } catch { jsonResponse(res, { error: "File not found" }, 404); return; }
+          if (!resolvedSt || resolvedSt.isDirectory()) { jsonResponse(res, { error: "File not found" }, 404); return; }
         }
 
-        const raw = readFileSync(resolvedPath, "utf-8");
+        const raw = await readFile(resolvedPath, "utf-8");
         const fm = parseFrontmatter(raw);
         let content = raw;
         if (raw.startsWith("---")) {
@@ -374,9 +482,9 @@ export function registerMemoryRoutes(ctx: PluginContext) {
         const cleanPath = filePath.replace(/^\/+/, "");
         const fullPath = join(vaultRoot, cleanPath);
         if (!fullPath.startsWith(vaultRoot)) { jsonResponse(res, { error: "Invalid path" }, 400); return; }
-        if (!existsSync(fullPath)) { jsonResponse(res, { error: "File not found" }, 404); return; }
+        try { await access(fullPath); } catch { jsonResponse(res, { error: "File not found" }, 404); return; }
 
-        const raw = readFileSync(fullPath, "utf-8");
+        const raw = await readFile(fullPath, "utf-8");
         let fmBlock = "";
         if (raw.startsWith("---")) {
           const end = raw.indexOf("\n---", 3);
@@ -424,4 +532,87 @@ export function registerMemoryRoutes(ctx: PluginContext) {
       }
     },
   });
+  // GET /api/mc/entities
+  api.registerHttpRoute({
+    path: "/api/mc/entities",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const url = new URL(req.url || "", "http://localhost");
+        const limit = Math.min(parseInt(url.searchParams.get("limit") || "500", 10), 1000);
+        const data = loadEntities();
+        jsonResponse(res, { entities: data.entities.slice(0, limit), total: data.total });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // GET /api/mc/entity?name=X
+  api.registerHttpRoute({
+    path: "/api/mc/entity",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const url = new URL(req.url || "", "http://localhost");
+        const name = url.searchParams.get("name") || "";
+        if (!name) { jsonResponse(res, { error: "Missing name parameter" }, 400); return; }
+
+        // Collect all facts for this entity
+        const entityDir = join(factsDir, name);
+        const allFacts: Array<{ fact: string; confidence: number; category: string; event_date?: string | null }> = [];
+
+        if (existsSync(entityDir) && statSync(entityDir).isDirectory()) {
+          const files = readdirSync(entityDir).filter((f) => f.endsWith(".md"));
+          for (const fname of files) {
+            const facts = parseFactsFile(join(entityDir, fname));
+            allFacts.push(...facts);
+          }
+        }
+
+        // Also check for lowercase entity dirs
+        const lowerName = name.toLowerCase();
+        const lowerEntityDir = join(factsDir, lowerName);
+        if (lowerName !== name && existsSync(lowerEntityDir) && statSync(lowerEntityDir).isDirectory()) {
+          const files = readdirSync(lowerEntityDir).filter((f) => f.endsWith(".md"));
+          for (const fname of files) {
+            const facts = parseFactsFile(join(lowerEntityDir, fname));
+            allFacts.push(...facts);
+          }
+        }
+
+        // Look up relationships from relations-index (entities are mentioned via doc paths)
+        const graph = loadEntityGraph();
+        const entityLower = name.toLowerCase();
+        const relatedEdges = graph.edges.filter((e) => {
+          const srcMatch = e.source.toLowerCase().includes(entityLower);
+          const tgtMatch = e.target.toLowerCase().includes(entityLower);
+          return srcMatch || tgtMatch;
+        }).slice(0, 50).map((e) => ({
+          target: e.source.toLowerCase().includes(entityLower) ? e.target : e.source,
+          type: e.type,
+          score: e.weight,
+        }));
+
+        jsonResponse(res, { name, facts: allFacts, relationships: relatedEdges });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // GET /api/mc/entity-graph
+  api.registerHttpRoute({
+    path: "/api/mc/entity-graph",
+    auth: "plugin",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const data = loadEntityGraph();
+        jsonResponse(res, data);
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
 }

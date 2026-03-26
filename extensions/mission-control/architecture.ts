@@ -5,6 +5,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, readdirSync, existsSync, statSync } from "fs";
+import { readFile, access, readdir, stat } from "fs/promises";
 import { join, extname } from "path";
 import { homedir } from "os";
 import type { PluginContext } from "./types.js";
@@ -103,28 +104,25 @@ export function registerArchitectureRoutes(ctx: PluginContext) {
           }
         }
 
-        if (!existsSync(fullPath)) {
-          return jsonResponse(res, { error: "Path not found" }, 404);
-        }
-
-        const st = statSync(fullPath);
-        if (!st.isDirectory()) {
+        let fullPathSt: import("fs").Stats;
+        try { fullPathSt = await stat(fullPath); } catch { return jsonResponse(res, { error: "Path not found" }, 404); }
+        if (!fullPathSt.isDirectory()) {
           return jsonResponse(res, { error: "Not a directory" }, 400);
         }
 
-        const names = readdirSync(fullPath);
+        const names = await readdir(fullPath);
         const entries: FileEntry[] = [];
         
         for (const name of names) {
           if (name.startsWith(".")) continue;
           const fp = join(fullPath, name);
-          let entrySt;
-          try { entrySt = statSync(fp); } catch { continue; }
+          let entrySt: import("fs").Stats;
+          try { entrySt = await stat(fp); } catch { continue; }
 
           if (entrySt.isDirectory()) {
             let children = 0;
             try { 
-              children = readdirSync(fp).filter(n => !n.startsWith(".")).length; 
+              children = (await readdir(fp)).filter((n: string) => !n.startsWith(".")).length; 
             } catch { /* ok */ }
             entries.push({ name, path: fp, type: "dir", children });
           } else if (entrySt.isFile() && entrySt.size < 1_000_000) { // Limit file size to 1MB
@@ -163,20 +161,17 @@ export function registerArchitectureRoutes(ctx: PluginContext) {
           return jsonResponse(res, { error: "Access denied: path not in allowed directories" }, 403);
         }
 
-        if (!existsSync(fullPath)) {
-          return jsonResponse(res, { error: "File not found" }, 404);
-        }
-
-        const st = statSync(fullPath);
-        if (!st.isFile()) {
+        let readSt: import("fs").Stats;
+        try { readSt = await stat(fullPath); } catch { return jsonResponse(res, { error: "File not found" }, 404); }
+        if (!readSt.isFile()) {
           return jsonResponse(res, { error: "Not a file" }, 400);
         }
 
-        if (st.size > 1_000_000) { // Limit to 1MB
+        if (readSt.size > 1_000_000) { // Limit to 1MB
           return jsonResponse(res, { error: "File too large (max 1MB)" }, 400);
         }
 
-        const content = readFileSync(fullPath, "utf-8");
+        const content = await readFile(fullPath, "utf-8");
         
         jsonResponse(res, {
           path: normalizedPath,

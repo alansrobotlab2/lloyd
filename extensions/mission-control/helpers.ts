@@ -3,7 +3,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, openSync, readSync, fstatSync, closeSync } from "fs";
 import type { CacheEntry } from "./types.js";
 
 // ── MIME types ──────────────────────────────────────────────────────
@@ -38,16 +38,67 @@ export function cached<T>(key: string, fn: () => T, ttl: number = CACHE_TTL): T 
 
 // ── JSONL parsing ───────────────────────────────────────────────────
 
+const TAIL_CHUNK_SIZE = 8192; // 8KB chunks for tail-read
+
+/**
+ * Parse a JSONL file. When `limit` is provided, reads only the last N lines
+ * using a backwards seek to avoid loading the entire file into memory.
+ */
 export function parseJsonl<T>(filePath: string, limit?: number): T[] {
   if (!existsSync(filePath)) return [];
+
+  if (limit && limit > 0) {
+    // Tail-read: seek backwards in chunks until we have enough newlines
+    let fd: number | null = null;
+    try {
+      fd = openSync(filePath, "r");
+      const fileSize = fstatSync(fd).size;
+      if (fileSize === 0) return [];
+
+      let pos = fileSize;
+      let collectedLines: string[] = [];
+      let leftover = "";
+
+      while (pos > 0 && collectedLines.length <= limit) {
+        const chunkSize = Math.min(TAIL_CHUNK_SIZE, pos);
+        pos -= chunkSize;
+        const buf = Buffer.allocUnsafe(chunkSize);
+        readSync(fd, buf, 0, chunkSize, pos);
+        const chunk = buf.toString("utf-8") + leftover;
+        const parts = chunk.split("\n");
+        // parts[0] may be a partial line — save for next iteration
+        leftover = parts[0];
+        // parts[1..] are complete lines (reversed order since we're going backwards)
+        for (let i = parts.length - 1; i >= 1; i--) {
+          const line = parts[i].trim();
+          if (line) collectedLines.push(line);
+          if (collectedLines.length > limit) break;
+        }
+      }
+      // Don't forget the leftover (start of file)
+      if (leftover.trim()) collectedLines.push(leftover.trim());
+
+      // collectedLines is newest-first; take last `limit` and reverse to oldest-first
+      const tail = collectedLines.slice(0, limit).reverse();
+      const items: T[] = [];
+      for (const line of tail) {
+        try { items.push(JSON.parse(line)); } catch { /* skip malformed */ }
+      }
+      return items;
+    } catch {
+      // Fall through to full-read on any error
+      if (fd !== null) { try { closeSync(fd); } catch { /* ignore */ } fd = null; }
+    } finally {
+      if (fd !== null) { try { closeSync(fd); } catch { /* ignore */ } }
+    }
+  }
+
+  // Full read (no limit, or tail-read failed)
   const content = readFileSync(filePath, "utf-8");
   const lines = content.trim().split("\n").filter(Boolean);
   const items: T[] = [];
-  const start = limit ? Math.max(0, lines.length - limit) : 0;
-  for (let i = start; i < lines.length; i++) {
-    try {
-      items.push(JSON.parse(lines[i]));
-    } catch { /* skip malformed JSONL line */ }
+  for (const line of lines) {
+    try { items.push(JSON.parse(line)); } catch { /* skip malformed JSONL line */ }
   }
   return items;
 }

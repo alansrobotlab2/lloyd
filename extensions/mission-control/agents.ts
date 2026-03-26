@@ -4,6 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from "fs";
+import { readFile, writeFile, access, stat } from "fs/promises";
 import { join, extname } from "path";
 import { homedir } from "os";
 import type { PluginContext, SkillInfo, SessionMessage, AgentCallLogEntry } from "./types.js";
@@ -193,17 +194,17 @@ export function registerAgentRoutes(
         // TTL cache — invalidate on config file mtime change or after 30s
         const now = Date.now();
         let configMtime = 0;
-        try { configMtime = statSync(configFile).mtimeMs; } catch { /* non-fatal */ }
+        try { configMtime = (await stat(configFile)).mtimeMs; } catch { /* non-fatal */ }
         if (agentsCache && (now - agentsCache.ts < AGENTS_CACHE_TTL) && agentsCache.configMtime === configMtime) {
           jsonResponse(res, agentsCache.data);
           return;
         }
 
-        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        const config = JSON.parse(await readFile(configFile, "utf-8"));
         const agentList: any[] = config.agents?.list || [];
         const defaults = config.agents?.defaults || {};
 
-        const agents = agentList.map((a: any) => {
+        const agents = await Promise.all(agentList.map(async (a: any) => {
           const id = a.id;
           const sessions = countSessions(id);
           const agentDir = join(rootDir, `agents/${id}/agent`);
@@ -213,23 +214,19 @@ export function registerAgentRoutes(
 
           const modelsPath = join(agentDir, "models.json");
           let modelCount = 0, enabledModels = 0;
-          if (existsSync(modelsPath)) {
-            try {
-              const m = JSON.parse(readFileSync(modelsPath, "utf-8"));
-              for (const p of Object.values<any>(m.providers || {})) {
-                for (const model of (p.models || [])) { modelCount++; if (model.enabled !== false) enabledModels++; }
-              }
-            } catch { /* non-fatal */ }
-          }
+          try {
+            const m = JSON.parse(await readFile(modelsPath, "utf-8"));
+            for (const p of Object.values<any>(m.providers || {})) {
+              for (const model of (p.models || [])) { modelCount++; if (model.enabled !== false) enabledModels++; }
+            }
+          } catch { /* non-fatal — file missing or parse error */ }
 
           const toolsPath = join(agentDir, "tools.json");
           let disabledTools = 0;
-          if (existsSync(toolsPath)) {
-            try {
-              const t = JSON.parse(readFileSync(toolsPath, "utf-8"));
-              disabledTools = Object.values(t).filter((v) => v === false).length;
-            } catch { /* non-fatal */ }
-          }
+          try {
+            const t = JSON.parse(await readFile(toolsPath, "utf-8"));
+            disabledTools = Object.values(t).filter((v) => v === false).length;
+          } catch { /* non-fatal */ }
 
           const agentWorkspaceDir = a.workspace
             ? a.workspace.replace(/^~/, homedir())
@@ -239,18 +236,23 @@ export function registerAgentRoutes(
 
           const agentWorkspace: Record<string, string | null> = {};
           const workspaceFiles: { name: string; key: string; content: string | null }[] = [];
-          if (existsSync(agentWorkspaceDir)) {
-            for (const entry of readdirSync(agentWorkspaceDir)) {
+          try {
+            const wsEntries = await readdir(agentWorkspaceDir);
+            for (const entry of wsEntries) {
               if (!entry.endsWith(".md") || entry.startsWith(".")) continue;
               const fullPath = join(agentWorkspaceDir, entry);
-              try { if (!statSync(fullPath).isFile()) continue; } catch { continue; }
+              try {
+                const entrySt = await stat(fullPath);
+                if (!entrySt.isFile()) continue;
+              } catch { continue; }
               const key = entry.replace(/\.md$/, "").toLowerCase();
-              const content = readFileOpt(fullPath);
+              let content: string | null = null;
+              try { content = await readFile(fullPath, "utf-8"); } catch { /* ok */ }
               agentWorkspace[key] = content;
               workspaceFiles.push({ name: entry, key, content });
             }
             workspaceFiles.sort((a, b) => a.name.localeCompare(b.name));
-          }
+          } catch { /* agentWorkspaceDir doesn't exist */ }
 
           const identityRaw = agentWorkspace.identity;
           let identity: string | null = null;
@@ -277,7 +279,7 @@ export function registerAgentRoutes(
             workspace: agentWorkspace, workspaceFiles,
             workspacePath: agentWorkspaceDir,
           };
-        });
+        }));
 
         const workspace: Record<string, string | null> = {
           soul: readFileOpt(join(workspaceDir, "SOUL.md")),
@@ -311,7 +313,7 @@ export function registerAgentRoutes(
         const { agentId, tools } = body;
         if (!agentId || typeof agentId !== "string") { jsonResponse(res, { error: "Missing agentId" }, 400); return; }
         if (tools !== null && !Array.isArray(tools)) { jsonResponse(res, { error: "tools must be string[] or null" }, 400); return; }
-        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        const config = JSON.parse(await readFile(configFile, "utf-8"));
         const agent = (config.agents?.list || []).find((a: any) => a.id === agentId);
         if (!agent) { jsonResponse(res, { error: `Agent '${agentId}' not found` }, 404); return; }
         if (tools === null) {
@@ -320,7 +322,7 @@ export function registerAgentRoutes(
           if (!agent.tools) agent.tools = {};
           agent.tools.allow = tools;
         }
-        writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n");
+        await writeFile(configFile, JSON.stringify(config, null, 2) + "\n");
         jsonResponse(res, { ok: true, agentId, tools });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
@@ -339,12 +341,12 @@ export function registerAgentRoutes(
         const { agentId, skills } = body;
         if (!agentId || typeof agentId !== "string") { jsonResponse(res, { error: "Missing agentId" }, 400); return; }
         if (skills !== null && !Array.isArray(skills)) { jsonResponse(res, { error: "skills must be string[] or null" }, 400); return; }
-        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        const config = JSON.parse(await readFile(configFile, "utf-8"));
         const agent = (config.agents?.list || []).find((a: any) => a.id === agentId);
         if (!agent) { jsonResponse(res, { error: `Agent '${agentId}' not found` }, 404); return; }
         if (skills === null) delete agent.skills;
         else agent.skills = skills;
-        writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n");
+        await writeFile(configFile, JSON.stringify(config, null, 2) + "\n");
         jsonResponse(res, { ok: true, agentId, skills });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
@@ -365,7 +367,7 @@ export function registerAgentRoutes(
         if (!fileName.endsWith(".md") || fileName.includes("/") || fileName.includes("\\") || fileName.includes("..")) {
           jsonResponse(res, { error: "Invalid fileName — must be a simple .md filename" }, 400); return;
         }
-        const config = JSON.parse(readFileSync(configFile, "utf-8"));
+        const config = JSON.parse(await readFile(configFile, "utf-8"));
         const agent = (config.agents?.list || []).find((a: any) => a.id === agentId);
         if (!agent) { jsonResponse(res, { error: `Agent '${agentId}' not found` }, 404); return; }
         const agentWorkspaceDir = agent.workspace
@@ -373,7 +375,7 @@ export function registerAgentRoutes(
           : join(rootDir, `workspaces/${agentId}`);
         const filePath = join(agentWorkspaceDir, fileName);
         if (!filePath.startsWith(agentWorkspaceDir)) { jsonResponse(res, { error: "Path traversal detected" }, 403); return; }
-        writeFileSync(filePath, content);
+        await writeFile(filePath, content);
         jsonResponse(res, { ok: true, agentId, fileName });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
@@ -394,12 +396,20 @@ export function registerAgentRoutes(
         if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) { jsonResponse(res, { error: "Invalid agentId" }, 400); return; }
 
         const agentSessionsDir = join(rootDir, "agents", agentId, "sessions");
-        if (!existsSync(agentSessionsDir)) { jsonResponse(res, { entries: [] }); return; }
+        try { await access(agentSessionsDir); } catch { jsonResponse(res, { entries: [] }); return; }
 
-        const sessionFiles = readdirSync(agentSessionsDir)
-          .filter((f: string) => f.endsWith(".jsonl"))
-          .map((f: string) => ({ name: f, mtime: statSync(join(agentSessionsDir, f)).mtimeMs }))
-          .sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime);
+        const rawFiles = await readdir(agentSessionsDir);
+        const sessionFilesWithMtime = await Promise.all(
+          rawFiles
+            .filter((f: string) => f.endsWith(".jsonl"))
+            .map(async (f: string) => {
+              try { return { name: f, mtime: (await stat(join(agentSessionsDir, f))).mtimeMs }; }
+              catch { return { name: f, mtime: 0 }; }
+            }),
+        );
+        const sessionFiles = sessionFilesWithMtime.sort(
+          (a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime,
+        );
 
         if (sessionFiles.length === 0) { jsonResponse(res, { entries: [] }); return; }
 

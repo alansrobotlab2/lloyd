@@ -103,7 +103,10 @@ export interface GwState {
   ready: boolean;
   reqId: number;
   pending: Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>;
-  streamTextAccum: string;
+  /** @deprecated use streamInSummary/streamSummaryBuf state machine instead */
+  streamTextAccum?: string;
+  streamInSummary: boolean;
+  streamSummaryBuf: string;
   streamTtsInFlight: boolean;
 }
 

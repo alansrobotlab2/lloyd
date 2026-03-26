@@ -3,6 +3,7 @@
  */
 
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
+import { readFile, writeFile, access, mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import type { PluginContext, GwState } from "./types.js";
 import { loadDeviceIdentity, buildDeviceAuthPayloadV3, signDevicePayload, base64UrlEncode, derivePublicKeyRaw } from "./device-auth.js";
@@ -12,15 +13,18 @@ const WS = require("ws");
 
 // ── Summary helpers ─────────────────────────────────────────────────
 
-export function loadSummaries(summariesFile: string): Record<string, string> {
+export async function loadSummaries(summariesFile: string): Promise<Record<string, string>> {
   try {
-    if (existsSync(summariesFile)) return JSON.parse(readFileSync(summariesFile, "utf-8"));
-  } catch { /* non-fatal */ }
+    return JSON.parse(await readFile(summariesFile, "utf-8"));
+  } catch { /* non-fatal — file missing or parse error */ }
   return {};
 }
 
-function saveSummaries(summariesFile: string, summaries: Record<string, string>) {
-  try { mkdirSync(dirname(summariesFile), { recursive: true }); writeFileSync(summariesFile, JSON.stringify(summaries, null, 2)); } catch { /* non-fatal */ }
+async function saveSummaries(summariesFile: string, summaries: Record<string, string>) {
+  try {
+    await mkdir(dirname(summariesFile), { recursive: true });
+    await writeFile(summariesFile, JSON.stringify(summaries, null, 2));
+  } catch { /* non-fatal */ }
 }
 
 export function stripInjectedContext(text: string): string {
@@ -76,7 +80,8 @@ export function setupGateway(ctx: PluginContext): GatewayHandle {
       ready: false,
       reqId: 0,
       pending: new Map(),
-      streamTextAccum: "",
+      streamInSummary: false,
+      streamSummaryBuf: "",
       streamTtsInFlight: false,
     } as GwState;
   }
@@ -101,12 +106,12 @@ export function setupGateway(ctx: PluginContext): GatewayHandle {
   const pendingSummaries = new Set<string>();
   // Seed failures from persisted summaries — keys with "__failed" value won't be retried
   const summaryFailures = new Map<string, number>();
-  try {
-    const persisted = loadSummaries(summariesFile);
+  // Async init — fire-and-forget; gateway WS starts after a 2s delay so this completes first
+  loadSummaries(summariesFile).then((persisted) => {
     for (const [k, v] of Object.entries(persisted)) {
       if (v === "__failed") summaryFailures.set(k, 3);
     }
-  } catch { /* non-fatal */ }
+  }).catch(() => { /* non-fatal */ });
 
   async function generateSummary(sessionKey: string): Promise<string | null> {
     try {
@@ -164,48 +169,46 @@ export function setupGateway(ctx: PluginContext): GatewayHandle {
     const failures = summaryFailures.get(sessionKey) || 0;
     if (failures >= 3) return;
     pendingSummaries.add(sessionKey);
-    generateSummary(sessionKey).then((summary) => {
+    generateSummary(sessionKey).then(async (summary) => {
       api.logger.info?.(`mc-summary: ${sessionKey} -> "${summary}"`);
       pendingSummaries.delete(sessionKey);
       if (summary) {
         summaryFailures.delete(sessionKey);
-        const summaries = loadSummaries(summariesFile);
+        const summaries = await loadSummaries(summariesFile);
         summaries[sessionKey] = summary;
-        saveSummaries(summariesFile, summaries);
+        await saveSummaries(summariesFile, summaries);
       } else {
         const newCount = failures + 1;
         summaryFailures.set(sessionKey, newCount);
         // Persist failure so it survives gateway restarts
         if (newCount >= 3) {
           try {
-            const summaries = loadSummaries(summariesFile);
+            const summaries = await loadSummaries(summariesFile);
             if (!summaries[sessionKey]) {
               summaries[sessionKey] = "__failed";
-              saveSummaries(summariesFile, summaries);
+              await saveSummaries(summariesFile, summaries);
             }
           } catch { /* non-fatal */ }
         }
       }
-    }).catch(() => {
+    }).catch(async () => {
       pendingSummaries.delete(sessionKey);
       const newCount = failures + 1;
       summaryFailures.set(sessionKey, newCount);
       if (newCount >= 3) {
         try {
-          const summaries = loadSummaries(summariesFile);
+          const summaries = await loadSummaries(summariesFile);
           if (!summaries[sessionKey]) {
             summaries[sessionKey] = "__failed";
-            saveSummaries(summariesFile, summaries);
+            await saveSummaries(summariesFile, summaries);
           }
         } catch { /* non-fatal */ }
       }
     });
   }
 
-  function triggerStreamTts(accum: string) {
-    const match = accum.match(/<summary>([\s\S]*?)<\/summary>/);
-    if (!match) return;
-    const summaryText = match[1].trim();
+  function triggerStreamTts(summaryText: string) {
+    summaryText = summaryText.trim();
     if (!summaryText) return;
 
     api.logger.info?.(`mc-stream-tts: firing TTS for summary (${summaryText.length} chars)`);
@@ -247,6 +250,21 @@ export function setupGateway(ctx: PluginContext): GatewayHandle {
         api.logger.error?.(`mc-stream-tts: error: ${err.message}`);
       }
     })();
+  }
+
+  // Exponential backoff for WS reconnection: 1s → 2s → 4s → ... → 30s cap
+  const MAX_RECONNECT_ATTEMPTS = 20;
+  let reconnectAttempts = 0;
+
+  function scheduleReconnect() {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      api.logger.error?.(`mission-control: gateway WS reconnect failed after ${MAX_RECONNECT_ATTEMPTS} attempts — giving up`);
+      return;
+    }
+    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30_000);
+    reconnectAttempts++;
+    api.logger.info?.(`mission-control: gateway WS reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
+    setTimeout(gwWsConnect, delay);
   }
 
   function gwWsConnect() {
@@ -323,39 +341,58 @@ export function setupGateway(ctx: PluginContext): GatewayHandle {
             return;
           }
 
-          // Accumulate streaming text for TTS detection
+          // State machine: track <summary>...</summary> across streaming deltas (O(1) per chunk)
           if (msg.type === "event") {
             const payload = msg.payload || {};
-            let delta: string | null = null;
 
             if (msg.event === "agent" && payload.stream === "assistant" && payload.data?.delta) {
-              delta = payload.data.delta;
-            }
-
-            if (delta) {
-              gwState.streamTextAccum += delta;
+              const delta: string = payload.data.delta;
+              if (!gwState.streamInSummary) {
+                const tagIdx = delta.indexOf("<summary>");
+                if (tagIdx !== -1) {
+                  gwState.streamInSummary = true;
+                  gwState.streamSummaryBuf = delta.slice(tagIdx + "<summary>".length);
+                  // Check if closing tag is already in same chunk
+                  const closeIdx = gwState.streamSummaryBuf.indexOf("</summary>");
+                  if (closeIdx !== -1) {
+                    const summaryText = gwState.streamSummaryBuf.slice(0, closeIdx);
+                    if (!gwState.streamTtsInFlight) {
+                      triggerStreamTts(summaryText);
+                      gwState.streamTtsInFlight = true;
+                    }
+                    gwState.streamInSummary = false;
+                    gwState.streamSummaryBuf = "";
+                  }
+                }
+              } else {
+                gwState.streamSummaryBuf += delta;
+                const closeIdx = gwState.streamSummaryBuf.indexOf("</summary>");
+                if (closeIdx !== -1) {
+                  const summaryText = gwState.streamSummaryBuf.slice(0, closeIdx);
+                  if (!gwState.streamTtsInFlight) {
+                    triggerStreamTts(summaryText);
+                    gwState.streamTtsInFlight = true;
+                  }
+                  gwState.streamInSummary = false;
+                  gwState.streamSummaryBuf = "";
+                }
+              }
             }
 
             if (msg.event === "agent" && payload.stream === "lifecycle") {
               const phase = payload.data?.phase;
               if (phase === "end" || phase === "complete" || phase === "done" || phase === "stop") {
-                if (!gwState.streamTtsInFlight) {
-                  triggerStreamTts(gwState.streamTextAccum);
-                }
-                gwState.streamTextAccum = "";
+                gwState.streamInSummary = false;
+                gwState.streamSummaryBuf = "";
                 gwState.streamTtsInFlight = false;
               }
-            }
-
-            if (!gwState.streamTtsInFlight && gwState.streamTextAccum.includes("</summary>")) {
-              triggerStreamTts(gwState.streamTextAccum);
-              gwState.streamTtsInFlight = true;
             }
           }
 
           if (msg.type === "res") {
             if (msg.payload?.type === "hello-ok") {
               gwState.ready = true;
+              reconnectAttempts = 0;
               api.logger.info?.("mission-control: gateway WS connected (device auth OK)");
             }
             const entry = gwState.pending.get(msg.id);
@@ -382,7 +419,7 @@ export function setupGateway(ctx: PluginContext): GatewayHandle {
           entry.reject(new Error("WebSocket closed"));
           gwState.pending.delete(id);
         }
-        setTimeout(gwWsConnect, 5000);
+        scheduleReconnect();
       });
 
       ws.on("error", (err: Error) => {
@@ -390,7 +427,7 @@ export function setupGateway(ctx: PluginContext): GatewayHandle {
       });
     } catch (err: any) {
       api.logger.error?.(`mission-control: gateway WS connect failed: ${err.message}`);
-      setTimeout(gwWsConnect, 5000);
+      scheduleReconnect();
     }
   }
 
