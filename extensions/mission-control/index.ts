@@ -109,6 +109,38 @@ export default function register(api: OpenClawPluginApi) {
     (globalThis as any)[IDLER_POLL_KEY] = true;
   setInterval(async () => {
     try {
+      // Cache sessions list once per poll cycle
+      let _sessionsListCache: any[] | null = null;
+      const getSessionsList = async (): Promise<any[]> => {
+        if (_sessionsListCache !== null) return _sessionsListCache;
+        if (!gwWsSend) { _sessionsListCache = []; return _sessionsListCache; }
+        try {
+          const result = await gwWsSend("sessions.list", { activeMinutes: 30, limit: 100 });
+          _sessionsListCache = result?.sessions || [];
+        } catch {
+          _sessionsListCache = [];
+        }
+        return _sessionsListCache;
+      };
+
+      const hasActiveChildren = async (sessionKey: string): Promise<{ hasChildren: boolean; allChildrenDone: boolean }> => {
+        const sessions = await getSessionsList();
+        const parentSession = sessions.find((s: any) => s.key === sessionKey);
+        if (!parentSession?.childSessions?.length) {
+          return { hasChildren: false, allChildrenDone: false };
+        }
+        const childKeys: string[] = parentSession.childSessions;
+        let allDone = true;
+        for (const childKey of childKeys) {
+          const childSession = sessions.find((s: any) => s.key === childKey);
+          // If child isn't in the list, it may be too old — treat as done
+          if (childSession && childSession.status !== "done") {
+            allDone = false;
+          }
+        }
+        return { hasChildren: true, allChildrenDone: allDone };
+      };
+
       const svc = getAutonomySvc();
       const inProgressTasks = svc.getInProgressTasks();
       // Clean up wiggam state for tasks no longer in progress
@@ -147,9 +179,30 @@ export default function register(api: OpenClawPluginApi) {
           continue;
         }
 
-        // Non-wiggam tasks: complete on idle (original behavior)
+        // Non-wiggam tasks: complete on idle (original behavior), but check for active children first
         const isWiggam = !!(task as any).wiggam;
         if (!isWiggam) {
+          if (matchingSessionKey) {
+            const { hasChildren, allChildrenDone } = await hasActiveChildren(matchingSessionKey);
+            if (hasChildren && !allChildrenDone) {
+              continue; // Children still working — don't complete prematurely
+            }
+            if (hasChildren && allChildrenDone) {
+              // Children done but parent is idle — completion event was lost, nudge to re-inject
+              if (!gwWsSend) continue;
+              try {
+                await gwWsSend("chat.send", {
+                  sessionKey: matchingSessionKey,
+                  message: "Your subagent(s) have completed but the completion event was not delivered. Check the results by reviewing your spawned sessions and continue the pipeline. When ALL steps are complete, include TASK_COMPLETE in your final message.",
+                });
+                api.logger.info?.(`[autonomy] Task #${taskId} — children done, parent stalled, nudging`);
+              } catch (err: any) {
+                api.logger.error?.(`[autonomy] Nudge failed for task #${taskId}: ${err.message}`);
+              }
+              continue; // Don't complete yet — let the nudge run
+            }
+          }
+          // No children (or no session key) — original behavior: complete on idle
           await svc.completeActiveRun(taskId, "success", "Completed");
           await svc.completeTask(taskId);
           api.logger.info?.(`[autonomy] Task #${taskId} completed via session state`);
@@ -160,6 +213,38 @@ export default function register(api: OpenClawPluginApi) {
             }
           }
           continue;
+        }
+
+        // Wiggam tasks: check for active children before nudging or completing
+        if (matchingSessionKey) {
+          const { hasChildren: wigHasChildren, allChildrenDone: wigAllChildrenDone } = await hasActiveChildren(matchingSessionKey);
+          if (wigHasChildren && !wigAllChildrenDone) {
+            continue; // Children still working — don't nudge or complete
+          }
+          if (wigHasChildren && wigAllChildrenDone) {
+            // Children done but parent stalled — nudge with context about lost completion event
+            if (!gwWsSend) continue;
+            let wigEntry = wiggamState.get(taskId);
+            if (!wigEntry) {
+              wigEntry = { nudgeCount: 0, lastNudgeAt: 0 };
+              wiggamState.set(taskId, wigEntry);
+            }
+            if (wigEntry.nudgeCount < MAX_NUDGES) {
+              try {
+                await gwWsSend("chat.send", {
+                  sessionKey: matchingSessionKey,
+                  message: "Your subagent(s) have completed but the completion event was not delivered. Check the results by reviewing your spawned sessions and continue the pipeline. When ALL steps are complete, include TASK_COMPLETE in your final message.",
+                });
+                wigEntry.nudgeCount++;
+                wigEntry.lastNudgeAt = Date.now();
+                api.logger.info?.(`[wiggam] Task #${taskId} — children done, parent stalled, nudging (${wigEntry.nudgeCount}/${MAX_NUDGES})`);
+              } catch (err: any) {
+                api.logger.error?.(`[wiggam] Children-done nudge failed for task #${taskId}: ${err.message}`);
+              }
+            }
+            continue; // Don't complete yet
+          }
+          // No children — fall through to normal TASK_COMPLETE / nudge logic
         }
 
         // Wiggam tasks: check for TASK_COMPLETE signal
