@@ -175,48 +175,7 @@ export default function register(api: OpenClawPluginApi) {
         }
 
         if (!sessionState) {
-          // Recovery: check if session already completed (e.g. after gateway restart)
-          if (!gwWsSend) continue;
-          const isWiggam = !!(task as any).wiggam;
-          const expectedKey = `agent:${(task as any).agent_id}:hook:idler:task-${taskId}`;
-          try {
-            const history = await gwWsSend("chat.history", { sessionKey: expectedKey, limit: 3 });
-            if (history && Array.isArray(history.messages) && history.messages.length > 0) {
-              // Session exists — check if it completed
-              if (isWiggam) {
-                // Check for TASK_COMPLETE signal
-                let found = false;
-                for (const msg of history.messages) {
-                  if (msg.role === "assistant" && msg.content) {
-                    const contentArr = Array.isArray(msg.content) ? msg.content : [msg.content];
-                    for (const block of contentArr) {
-                      const text = typeof block === "string" ? block : block?.text;
-                      if (typeof text === "string" && text.includes("TASK_COMPLETE")) { found = true; break; }
-                    }
-                    if (found) break;
-                  }
-                }
-                if (found) {
-                  await svc.completeActiveRun(taskId, "success", "Completed via TASK_COMPLETE (restart recovery)");
-                  await svc.completeTask(taskId);
-                  api.logger.info?.(`[wiggam] Task #${taskId} completed via restart recovery`);
-                  continue;
-                }
-              }
-              // Non-wiggam or no TASK_COMPLETE: check if session is done via sessions.list
-              const sessions = await getSessionsList();
-              const sessionEntry = sessions.find((s: any) => s.key === expectedKey);
-              if (sessionEntry && sessionEntry.status === "done") {
-                await svc.completeActiveRun(taskId, "success", "Completed (restart recovery — session done)");
-                await svc.completeTask(taskId);
-                api.logger.info?.(`[autonomy] Task #${taskId} completed via restart recovery (session done)`);
-                continue;
-              }
-            }
-          } catch (err: any) {
-            api.logger.warn?.(`[autonomy] Restart recovery check failed for task #${taskId}: ${err.message}`);
-          }
-          continue;
+          continue; // No OTel event yet — still running or not started
         }
 
         // Session states are: "idle" | "processing" | "waiting"
