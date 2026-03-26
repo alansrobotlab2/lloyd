@@ -201,19 +201,62 @@ export function registerSessionRoutes(
     },
   });
 
-  // ── Shared sessions.list cache (used by /sessions and /session-messages) ──
+  // ── Shared sessions.list cache with mtime-based invalidation ──
+  // Only calls the expensive gateway sessions.list RPC when session files
+  // have actually been modified (new file, deleted file, or content change).
   let sessionsListCache: { entries: any[]; ts: number } | null = null;
-  const SESSIONS_LIST_TTL = 15_000; // 15 seconds — sessions.list is expensive (~1.3s)
+  let sessionsListInflight: Promise<any[]> | null = null;
+  const sessionFileMtimes = new Map<string, number>(); // filename → mtimeMs
+
+  function sessionsChanged(): boolean {
+    try {
+      const files = readdirSync(sessionsDir)
+        .filter((f: string) => f.endsWith(".jsonl") && !f.includes(".reset."));
+
+      // Quick check: file count changed → something was added/removed
+      if (files.length !== sessionFileMtimes.size) return true;
+
+      for (const f of files) {
+        const st = statSync(join(sessionsDir, f));
+        const prev = sessionFileMtimes.get(f);
+        if (prev === undefined || prev !== st.mtimeMs) return true;
+      }
+      return false;
+    } catch {
+      return true; // err on the side of refreshing
+    }
+  }
+
+  function snapshotMtimes(): void {
+    try {
+      sessionFileMtimes.clear();
+      const files = readdirSync(sessionsDir)
+        .filter((f: string) => f.endsWith(".jsonl") && !f.includes(".reset."));
+      for (const f of files) {
+        sessionFileMtimes.set(f, statSync(join(sessionsDir, f)).mtimeMs);
+      }
+    } catch { /* ignore */ }
+  }
 
   async function getCachedSessionsList(): Promise<any[]> {
-    const now = Date.now();
-    if (sessionsListCache && (now - sessionsListCache.ts < SESSIONS_LIST_TTL)) {
+    // If we have a cache and nothing on disk changed, return it immediately
+    if (sessionsListCache && !sessionsChanged()) {
       return sessionsListCache.entries;
     }
-    const result = await gwWsSend("sessions.list", { agentId: "main" });
-    const entries: any[] = result?.entries || result?.sessions || [];
-    sessionsListCache = { entries, ts: Date.now() };
-    return entries;
+    // Deduplicate concurrent requests — return the same in-flight promise
+    if (sessionsListInflight) return sessionsListInflight;
+    sessionsListInflight = (async () => {
+      try {
+        const result = await gwWsSend("sessions.list", { agentId: "main" });
+        const entries: any[] = result?.entries || result?.sessions || [];
+        sessionsListCache = { entries, ts: Date.now() };
+        snapshotMtimes();
+        return entries;
+      } finally {
+        sessionsListInflight = null;
+      }
+    })();
+    return sessionsListInflight;
   }
 
   // Persistent sessionKey→sessionId map (avoids sessions.list for known keys)
@@ -221,7 +264,7 @@ export function registerSessionRoutes(
 
   // GET /api/mc/sessions
   let sessionsCache: { data: any; ts: number } | null = null;
-  const SESSIONS_CACHE_TTL = 10_000; // 10 seconds — avoids hammering gateway WS
+  const SESSIONS_CACHE_TTL = 10_000; // 10 seconds — light rate-limit; expensive RPC is mtime-gated
 
   api.registerHttpRoute({
     path: "/api/mc/sessions",
@@ -274,6 +317,9 @@ export function registerSessionRoutes(
   });
 
   // GET /api/mc/session-messages
+  // mtime-based cache: skip re-parsing JSONL if file hasn't changed
+  const msgCache = new Map<string, { mtimeMs: number; includeTools: boolean; response: any }>();
+
   api.registerHttpRoute({
     path: "/api/mc/session-messages",
     auth: "plugin",
@@ -286,6 +332,7 @@ export function registerSessionRoutes(
 
         let rawMessages: any[] = [];
         let fromJsonl = false;
+        let jsonlMtime = 0;
         try {
           // Try cached sessionKey→sessionId first to avoid sessions.list entirely
           let sessionId = sessionKeyToId.get(sessionKey);
@@ -304,6 +351,13 @@ export function registerSessionRoutes(
           if (sessionId) {
             const jsonlPath = join(sessionsDir, sessionId + ".jsonl");
             if (existsSync(jsonlPath)) {
+              // Check mtime — skip re-parsing if file unchanged
+              jsonlMtime = statSync(jsonlPath).mtimeMs;
+              const cached = msgCache.get(sessionKey);
+              if (cached && cached.mtimeMs === jsonlMtime && cached.includeTools === includeTools) {
+                jsonResponse(res, cached.response);
+                return;
+              }
               const allLines = parseJsonl<any>(jsonlPath);
               rawMessages = allLines
                 .filter((l: any) => l.type === "message" || l.type === "result")
@@ -371,7 +425,12 @@ export function registerSessionRoutes(
           messages.push(entry);
         }
 
-        jsonResponse(res, { sessionKey, messages });
+        const response = { sessionKey, messages };
+        // Cache response keyed by sessionKey if we read from JSONL
+        if (fromJsonl && jsonlMtime) {
+          msgCache.set(sessionKey, { mtimeMs: jsonlMtime, includeTools, response });
+        }
+        jsonResponse(res, response);
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }

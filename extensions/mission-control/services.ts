@@ -200,17 +200,21 @@ export function registerServiceRoutes(ctx: PluginContext) {
         const supEntries = getSupervisorStatus();
         if (supEntries.some(e => e.name === supervisorName)) {
           try {
-            if (action === "restart") {
-              try { callSupervisorXmlRpc("supervisor.stopProcess", supervisorName); } catch { /* may already be stopped */ }
-              callSupervisorXmlRpc("supervisor.startProcess", supervisorName);
-            } else if (action === "start") {
-              callSupervisorXmlRpc("supervisor.startProcess", supervisorName);
-            } else if (action === "stop") {
-              callSupervisorXmlRpc("supervisor.stopProcess", supervisorName);
-            }
+            // Use supervisorctl CLI instead of XML-RPC to avoid stop/start race condition.
+            // XML-RPC stopProcess returns before the process actually dies, so a subsequent
+            // startProcess gets "already running" and the process ends up STOPPED after SIGKILL.
+            execSync(
+              `supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf ${action} ${supervisorName}`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
             jsonResponse(res, { ok: true, serviceId, action, managedBy: "supervisor" });
           } catch (err: any) {
-            jsonResponse(res, { error: err.message }, 500);
+            // supervisorctl restart reports "ERROR (not running)" on stop phase if already stopped, but still starts — treat as success
+            if (action === "restart" && err.stdout?.includes("started")) {
+              jsonResponse(res, { ok: true, serviceId, action, managedBy: "supervisor" });
+            } else {
+              jsonResponse(res, { error: err.message }, 500);
+            }
           }
           return;
         }
