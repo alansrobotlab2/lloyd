@@ -8,6 +8,7 @@ import {
   Trash2,
   Save,
   Plus,
+  Search,
 } from "lucide-react";
 import { api, type BacklogBoard, type BacklogTask } from "../../api";
 
@@ -474,6 +475,7 @@ export default function BacklogPage() {
   const [loading, setLoading] = useState(true);
   const [editingTask, setEditingTask] = useState<BacklogTask | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const loadData = useCallback(async () => {
     try {
@@ -577,9 +579,15 @@ export default function BacklogPage() {
     setEditingTask(task);
   };
 
-  const filteredTasks = activeBoard
+  const filteredTasks = (activeBoard
     ? tasks.filter((t) => t.board_id === activeBoard)
-    : tasks;
+    : tasks
+  ).filter((t) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    return t.name.toLowerCase().includes(q) ||
+           (t.description && t.description.toLowerCase().includes(q));
+  });
 
   const tasksByStatus = STATUSES.reduce(
     (acc, status) => {
@@ -616,9 +624,29 @@ export default function BacklogPage() {
           ))}
         </div>
 
+        {/* Search input */}
+        <div className="ml-auto flex items-center gap-1.5 bg-surface-2 rounded-lg px-2.5 py-1.5 border border-surface-3/50 focus-within:border-brand-500/50 transition-colors">
+          <Search className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Filter tasks..."
+            className="bg-transparent text-xs text-slate-200 outline-none w-36 placeholder:text-slate-500"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery("")}
+              className="text-slate-500 hover:text-slate-300 transition-colors flex-shrink-0"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+
         <button
           onClick={() => setShowCreateModal(true)}
-          className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-brand-600 hover:bg-brand-500 text-white rounded-lg transition-colors"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-brand-600 hover:bg-brand-500 text-white rounded-lg transition-colors"
         >
           <Plus className="w-3.5 h-3.5" />
           New Task

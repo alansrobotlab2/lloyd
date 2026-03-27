@@ -145,14 +145,6 @@ export default function register(api: OpenClawPluginApi) {
   const wiggamState = new Map<number, { nudgeCount: number; lastNudgeAt: number }>();
   const MAX_NUDGES = 20;
 
-  // Pipeline stage runner: track per-task pipeline progress
-  interface PipelineState {
-    stages: string[];          // ordered stage names e.g. ["plan", "implement", "review"]
-    currentStageIndex: number; // which stage we're on (0-based)
-    nudgeCount: number;        // nudges within current stage
-    lastNudgeAt: number;
-  }
-  const pipelineState = new Map<number, PipelineState>();
   const IDLE_BEFORE_NUDGE_MS = 30_000; // 30s idle before nudging
 
   // Poll for completed idler tasks every 5 seconds.
@@ -221,13 +213,6 @@ export default function register(api: OpenClawPluginApi) {
           wiggamState.delete(taskId);
         }
       }
-      // Clean up pipeline state for tasks no longer in progress
-      for (const taskId of Array.from(pipelineState.keys())) {
-        if (!inProgressTasks.some((t: any) => t.id === taskId)) {
-          pipelineState.delete(taskId);
-        }
-      }
-
       if (inProgressTasks.length === 0) {
         // Nothing to poll — use slow interval
         nextInterval = 30_000;
@@ -332,136 +317,9 @@ export default function register(api: OpenClawPluginApi) {
             // No children — fall through to normal TASK_COMPLETE / nudge logic
           }
 
-          // ── Pipeline stage runner ──────────────────────────────────────────
-          // Initialize pipeline state on first encounter of a wiggam task with a pipeline
-          if (!pipelineState.has(taskId) && isWiggam) {
-            const pipeline = resolvePipeline(task);
-            if (pipeline) {
-              pipelineState.set(taskId, {
-                stages: pipeline,
-                currentStageIndex: 0,
-                nudgeCount: 0,
-                lastNudgeAt: 0,
-              });
-              // Send initial stage prompt (stage 0) — this kicks off the pipeline
-              const stagesDefs = loadStages();
-              const firstStage = stagesDefs.find(s => s.name === pipeline[0]);
-              if (firstStage && matchingSessionKey && gwWsSend) {
-                // Swap model for this stage
-                try {
-                  await gwWsSend("sessions.patch", { key: matchingSessionKey, model: firstStage.default_model });
-                } catch (err: any) {
-                  api.logger.warn?.(`[pipeline] Model swap failed for task #${taskId} stage ${firstStage.name}: ${err.message}`);
-                }
-                // Send stage prompt
-                await gwWsSend("chat.send", {
-                  sessionKey: matchingSessionKey,
-                  message: `## Stage: ${firstStage.name.toUpperCase()}\n\n${firstStage.content}\n\nBegin this stage now. Signal ${firstStage.signal} when complete.`,
-                });
-                api.logger.info?.(`[pipeline] Task #${taskId} — started pipeline, stage 0: ${firstStage.name} (${firstStage.default_model})`);
-              }
-              continue; // Don't process further this cycle — let the stage run
-            }
-          }
-
-          // Handle active pipeline state for staged tasks
-          const pState = pipelineState.get(taskId);
-          if (pState) {
-            const stagesDefs = loadStages();
-            const currentStageName = pState.stages[pState.currentStageIndex];
-            const currentStage = stagesDefs.find(s => s.name === currentStageName);
-            const expectedSignal = currentStage?.signal ?? "STAGE_COMPLETE";
-
-            // Check for stage/task completion signal
-            let stageSignalFound = false;
-            let stageTaskCompleteFound = false;
-            try {
-              if (matchingSessionKey && gwWsSend) {
-                const history = await gwWsSend("chat.history", { sessionKey: matchingSessionKey, limit: 5 });
-                if (history && Array.isArray(history.messages)) {
-                  for (const msg of history.messages) {
-                    if (msg.role === "assistant" && msg.content) {
-                      const contentArr = Array.isArray(msg.content) ? msg.content : [msg.content];
-                      for (const block of contentArr) {
-                        const text = typeof block === "string" ? block : block?.text;
-                        if (typeof text === "string") {
-                          if (text.includes("TASK_COMPLETE")) { stageTaskCompleteFound = true; stageSignalFound = true; break; }
-                          if (text.includes("STAGE_COMPLETE")) { stageSignalFound = true; break; }
-                        }
-                      }
-                      if (stageSignalFound) break;
-                    }
-                  }
-                }
-              }
-            } catch (err: any) {
-              api.logger.warn?.(`[pipeline] chat.history failed for task #${taskId}: ${err.message}`);
-            }
-
-            if (stageTaskCompleteFound || (stageSignalFound && pState.currentStageIndex >= pState.stages.length - 1)) {
-              // Pipeline complete
-              await svc.completeActiveRun(taskId, "success", `Pipeline complete (${pState.stages.join(" → ")})`);
-              await svc.completeTask(taskId);
-              pipelineState.delete(taskId);
-              wiggamState.delete(taskId);
-              if (matchingSessionKey) agentSessionStates.delete(matchingSessionKey);
-              api.logger.info?.(`[pipeline] Task #${taskId} completed — full pipeline: ${pState.stages.join(" → ")}`);
-              continue;
-            }
-
-            if (stageSignalFound) {
-              // Advance to next stage
-              pState.currentStageIndex++;
-              pState.nudgeCount = 0;
-              pState.lastNudgeAt = 0;
-              const nextStageName = pState.stages[pState.currentStageIndex];
-              const nextStage = stagesDefs.find(s => s.name === nextStageName);
-              if (nextStage && matchingSessionKey && gwWsSend) {
-                // Swap model
-                try {
-                  await gwWsSend("sessions.patch", { key: matchingSessionKey, model: nextStage.default_model });
-                } catch (err: any) {
-                  api.logger.warn?.(`[pipeline] Model swap failed for task #${taskId} stage ${nextStage.name}: ${err.message}`);
-                }
-                // Send next stage prompt
-                await gwWsSend("chat.send", {
-                  sessionKey: matchingSessionKey,
-                  message: `## Stage: ${nextStage.name.toUpperCase()}\n\n${nextStage.content}\n\nBegin this stage now. Signal ${nextStage.signal} when complete.`,
-                });
-                api.logger.info?.(`[pipeline] Task #${taskId} — advanced to stage ${pState.currentStageIndex}: ${nextStage.name} (${nextStage.default_model})`);
-              }
-              continue; // Let the new stage run
-            }
-
-            // No signal found — nudge within current stage
-            pState.nudgeCount++;
-            if (pState.nudgeCount >= MAX_NUDGES) {
-              // Max nudges in this stage — fail the task
-              await svc.completeActiveRun(taskId, "timeout", `Pipeline stalled at stage ${currentStageName} (${pState.nudgeCount} nudges)`);
-              await svc.completeTask(taskId);
-              pipelineState.delete(taskId);
-              wiggamState.delete(taskId);
-              if (matchingSessionKey) agentSessionStates.delete(matchingSessionKey);
-              api.logger.info?.(`[pipeline] Task #${taskId} failed — stalled at stage ${currentStageName}`);
-              continue;
-            }
-
-            pState.lastNudgeAt = Date.now();
-            if (matchingSessionKey && gwWsSend) {
-              try {
-                await gwWsSend("chat.send", {
-                  sessionKey: matchingSessionKey,
-                  message: `You appear to have stalled in the ${currentStageName} stage. Continue working. When this stage is complete, output ${expectedSignal} on its own line.`,
-                });
-                api.logger.info?.(`[pipeline] Task #${taskId} — nudge ${pState.nudgeCount}/${MAX_NUDGES} in stage ${currentStageName}`);
-              } catch (err: any) {
-                api.logger.error?.(`[pipeline] Nudge failed for task #${taskId}: ${err.message}`);
-                pState.nudgeCount--; // Retry on failure
-              }
-            }
-            continue; // Handled — skip the regular wiggam logic below
-          }
-          // ── End pipeline stage runner ──────────────────────────────────────
+          // NOTE: Pipeline stage runner removed — pipeline orchestration now lives
+          // in the idler's pipeline.py module (separate sessions per stage).
+          // The wiggam nudge/TASK_COMPLETE logic below remains as fallback.
 
           // Wiggam tasks: check for TASK_COMPLETE signal
           let taskCompleteFound = false;
@@ -544,6 +402,91 @@ export default function register(api: OpenClawPluginApi) {
   // Kick off first poll cycle
   setTimeout(runIdlerPoll, 5_000);
   } // end idler-poll guard
+
+  // ── MC HTTP API for pipeline orchestration ────────────────────────
+
+  // GET /api/mc/session-status?key=...
+  // Returns session state from OTel diagnostic events (agentSessionStates map).
+  // Used by idler pipeline.py to poll for stage completion.
+  api.registerHttpRoute({
+    path: "/api/mc/session-status",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      const url = new URL(req.url || "/", "http://localhost");
+      const key = url.searchParams.get("key");
+      if (!key) {
+        jsonResponse(res, { error: "Missing key parameter" }, 400);
+        return;
+      }
+
+      // Check OTel state — try exact match first
+      let state = agentSessionStates.get(key);
+
+      // If not found by exact key, try suffix match (session keys get prefixed by gateway)
+      if (!state) {
+        for (const [stateKey, stateVal] of agentSessionStates) {
+          if (stateKey.endsWith(key) || key.endsWith(stateKey)) {
+            state = stateVal;
+            break;
+          }
+        }
+      }
+
+      if (state) {
+        jsonResponse(res, {
+          status: state.state,  // "idle" | "processing" | "waiting"
+          lastUpdated: state.lastUpdated,
+          queueDepth: state.queueDepth,
+          sessionKey: state.sessionKey,  // resolved full key — useful for callers
+        });
+        return;
+      }
+      jsonResponse(res, { status: "unknown" });
+    },
+  });
+
+  // GET /api/mc/session-history?key=...&limit=N
+  // Proxies gateway's chat.history WebSocket command to HTTP.
+  // Used by idler pipeline.py to extract stage output.
+  api.registerHttpRoute({
+    path: "/api/mc/session-history",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      const url = new URL(req.url || "/", "http://localhost");
+      const key = url.searchParams.get("key");
+      const limit = parseInt(url.searchParams.get("limit") || "10", 10);
+      if (!key) {
+        jsonResponse(res, { error: "Missing key parameter" }, 400);
+        return;
+      }
+
+      // gwWsSend is defined later (after setupGateway) — but this handler
+      // is only called at runtime, not at registration time, so it's fine.
+      if (!gwWsSend) {
+        jsonResponse(res, { error: "Gateway WebSocket not connected" }, 503);
+        return;
+      }
+
+      // Resolve the full session key — gateway prefixes keys with "agent:{agentId}:"
+      // Try exact match first, then suffix match against agentSessionStates
+      let resolvedKey = key;
+      if (!agentSessionStates.has(key)) {
+        for (const stateKey of agentSessionStates.keys()) {
+          if (stateKey.endsWith(key) || key.endsWith(stateKey)) {
+            resolvedKey = stateKey;
+            break;
+          }
+        }
+      }
+
+      try {
+        const result = await gwWsSend("chat.history", { sessionKey: resolvedKey, limit });
+        jsonResponse(res, result);
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
 
   // ── Wire up domain modules ────────────────────────────────────────
 
