@@ -847,6 +847,19 @@ export default function MemoryPage() {
   }, []);
 
   // Graph node single-click handler
+  const handleOpenFile = useCallback(async (path: string) => {
+    try {
+      const result = await api.memoryRead(path);
+      setDoc(result);
+    } catch (err) {
+      console.error("Read failed:", err);
+    }
+  }, []);
+
+  const handleCloseDoc = useCallback(() => {
+    setDoc(null);
+  }, []);
+
   const handleGraphNodeClick = useCallback((nodeId: string | null) => {
     setSelectedGraphNode(nodeId);
 
@@ -868,12 +881,10 @@ export default function MemoryPage() {
       return;
     }
 
-    // Document node → fetch and show doc detail in right panel
+    // Document node → open document modal directly
     setActiveEntity(null);
-    api.memoryRead(nodeId).then((docResult) => {
-      setRightPanel({ kind: "doc-detail", doc: docResult });
-    }).catch(console.error);
-  }, []);
+    handleOpenFile(nodeId);
+  }, [handleOpenFile]);
 
   // Graph node double-click handler
   const handleGraphNodeDoubleClick = useCallback((nodeId: string) => {
@@ -909,19 +920,6 @@ export default function MemoryPage() {
         return { kind: "hover-node", node };
       });
     }, 50);
-  }, []);
-
-  const handleOpenFile = useCallback(async (path: string) => {
-    try {
-      const result = await api.memoryRead(path);
-      setDoc(result);
-    } catch (err) {
-      console.error("Read failed:", err);
-    }
-  }, []);
-
-  const handleCloseDoc = useCallback(() => {
-    setDoc(null);
   }, []);
 
   // Render the right panel content

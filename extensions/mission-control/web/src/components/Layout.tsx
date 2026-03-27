@@ -2,6 +2,8 @@ import React, { useState, useCallback, useEffect } from "react";
 import Sidebar, { type Page } from "./Sidebar";
 import ChatPanel from "./ChatPanel";
 import { VoiceProvider } from "../contexts/VoiceContext";
+import { ToastContainer } from "./Toast";
+import { useNotifications } from "../hooks/useNotifications";
 import ServicesPage from "./pages/ServicesPage";
 import DashboardPage from "./pages/DashboardPage";
 import BacklogPage from "./pages/BacklogPage";
@@ -54,6 +56,7 @@ const PAGES: Record<string, React.ComponentType> = {
 };
 
 export default function Layout() {
+  const { notifications, dismiss } = useNotifications();
   const [page, setPage] = useState<Page>("chat");
   const [collapsed, setCollapsed] = useState(false);
   const [chatSessionKey, setChatSessionKey] = useState<string | null>(null);
@@ -88,6 +91,7 @@ export default function Layout() {
 
   return (
     <ErrorBoundary>
+      <ToastContainer notifications={notifications} onDismiss={dismiss} />
       <VoiceProvider activeSessionKey={activeSessionKey}>
         <div className="h-screen flex bg-surface-0">
           <Sidebar

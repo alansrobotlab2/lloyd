@@ -1,0 +1,1 @@
+⚠️ GATEWAY RESTART NEEDED: ws module installed in ~/.openclaw/extensions/mission-control/node_modules/ — gateway must restart to reload the mission-control plugin.

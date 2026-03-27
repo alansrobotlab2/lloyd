@@ -73,9 +73,37 @@ function resolvePipeline(task: any): string[] | null {
       if (Array.isArray(parsed) && parsed.every((s: any) => typeof s === "string")) return parsed;
     } catch { /* fall through */ }
   }
-  // All wiggam tasks get the default pipeline — planner figures out the rest
-  if (task.wiggam) return DEFAULT_PIPELINE;
+  // All pipeline_mode tasks get the default pipeline — planner figures out the rest
+  if (task.pipeline_mode) return DEFAULT_PIPELINE;
   return null;
+}
+
+// ── Notification Store ───────────────────────────────────────────────
+interface Notification {
+  id: string;
+  text: string;
+  level: "info" | "success" | "warning" | "error";
+  timestamp: number;
+}
+
+const NOTIFICATION_MAX = 50;
+const NOTIFICATION_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const notificationStore: Notification[] = [];
+const notificationSseClients = new Set<ServerResponse>();
+
+function pruneNotifications(): void {
+  const cutoff = Date.now() - NOTIFICATION_TTL_MS;
+  let i = 0;
+  while (i < notificationStore.length && notificationStore[i].timestamp < cutoff) i++;
+  if (i > 0) notificationStore.splice(0, i);
+  while (notificationStore.length > NOTIFICATION_MAX) notificationStore.shift();
+}
+
+function broadcastNotification(notification: Notification): void {
+  const data = JSON.stringify(notification);
+  for (const res of notificationSseClients) {
+    try { res.write(`event: notification\ndata: ${data}\n\n`); } catch { /* client gone */ }
+  }
 }
 
 export default function register(api: OpenClawPluginApi) {
@@ -141,8 +169,8 @@ export default function register(api: OpenClawPluginApi) {
 
   // ── Idler task completion polling ───────────────────────────────────
 
-  // Wiggam loop: track nudge state per task
-  const wiggamState = new Map<number, { nudgeCount: number; lastNudgeAt: number }>();
+  // Pipeline mode: track nudge state per task
+  const pipelineState = new Map<number, { nudgeCount: number; lastNudgeAt: number }>();
   const MAX_NUDGES = 20;
 
   const IDLE_BEFORE_NUDGE_MS = 30_000; // 30s idle before nudging
@@ -207,10 +235,10 @@ export default function register(api: OpenClawPluginApi) {
 
       const svc = getAutonomySvc();
       const inProgressTasks = svc.getInProgressTasks();
-      // Clean up wiggam state for tasks no longer in progress
-      for (const taskId of Array.from(wiggamState.keys())) {
+      // Clean up pipeline state for tasks no longer in progress
+      for (const taskId of Array.from(pipelineState.keys())) {
         if (!inProgressTasks.some((t: any) => t.id === taskId)) {
-          wiggamState.delete(taskId);
+          pipelineState.delete(taskId);
         }
       }
       if (inProgressTasks.length === 0) {
@@ -249,14 +277,14 @@ export default function register(api: OpenClawPluginApi) {
             continue;
           }
 
-          // Call hasActiveChildren once — reused across both wiggam and non-wiggam branches
+          // Call hasActiveChildren once — reused across both pipeline and non-pipeline branches
           const activeChildrenResult = matchingSessionKey
             ? await hasActiveChildren(matchingSessionKey)
             : { hasChildren: false, allChildrenDone: false };
 
-          // Non-wiggam tasks: complete on idle (original behavior), but check for active children first
-          const isWiggam = !!(task as any).wiggam;
-          if (!isWiggam) {
+          // Non-pipeline tasks: complete on idle (original behavior), but check for active children first
+          const isPipeline = !!(task as any).pipeline_mode;
+          if (!isPipeline) {
             if (matchingSessionKey) {
               const { hasChildren, allChildrenDone } = activeChildrenResult;
               if (hasChildren && !allChildrenDone) {
@@ -285,31 +313,31 @@ export default function register(api: OpenClawPluginApi) {
             continue;
           }
 
-          // Wiggam tasks: check for active children before nudging or completing
+          // Pipeline tasks: check for active children before nudging or completing
           if (matchingSessionKey) {
-            const { hasChildren: wigHasChildren, allChildrenDone: wigAllChildrenDone } = activeChildrenResult;
-            if (wigHasChildren && !wigAllChildrenDone) {
+            const { hasChildren: pipeHasChildren, allChildrenDone: pipeAllChildrenDone } = activeChildrenResult;
+            if (pipeHasChildren && !pipeAllChildrenDone) {
               continue; // Children still working — don't nudge or complete
             }
-            if (wigHasChildren && wigAllChildrenDone) {
+            if (pipeHasChildren && pipeAllChildrenDone) {
               // Children done but parent stalled — nudge with context about lost completion event
               if (!gwWsSend) continue;
-              let wigEntry = wiggamState.get(taskId);
-              if (!wigEntry) {
-                wigEntry = { nudgeCount: 0, lastNudgeAt: 0 };
-                wiggamState.set(taskId, wigEntry);
+              let pipelineEntry = pipelineState.get(taskId);
+              if (!pipelineEntry) {
+                pipelineEntry = { nudgeCount: 0, lastNudgeAt: 0 };
+                pipelineState.set(taskId, pipelineEntry);
               }
-              if (wigEntry.nudgeCount < MAX_NUDGES) {
+              if (pipelineEntry.nudgeCount < MAX_NUDGES) {
                 try {
                   await gwWsSend("chat.send", {
                     sessionKey: matchingSessionKey,
                     message: "Your subagent(s) have completed but the completion event was not delivered. Check the results by reviewing your spawned sessions and continue the pipeline. When ALL steps are complete, include TASK_COMPLETE in your final message.",
                   });
-                  wigEntry.nudgeCount++;
-                  wigEntry.lastNudgeAt = Date.now();
-                  api.logger.info?.(`[wiggam] Task #${taskId} — children done, parent stalled, nudging (${wigEntry.nudgeCount}/${MAX_NUDGES})`);
+                  pipelineEntry.nudgeCount++;
+                  pipelineEntry.lastNudgeAt = Date.now();
+                  api.logger.info?.(`[pipeline] Task #${taskId} — children done, parent stalled, nudging (${pipelineEntry.nudgeCount}/${MAX_NUDGES})`);
                 } catch (err: any) {
-                  api.logger.error?.(`[wiggam] Children-done nudge failed for task #${taskId}: ${err.message}`);
+                  api.logger.error?.(`[pipeline] Children-done nudge failed for task #${taskId}: ${err.message}`);
                 }
               }
               continue; // Don't complete yet
@@ -319,7 +347,7 @@ export default function register(api: OpenClawPluginApi) {
 
           // NOTE: Pipeline stage runner removed — pipeline orchestration now lives
           // in the idler's pipeline.py module (separate sessions per stage).
-          // The wiggam nudge/TASK_COMPLETE logic below remains as fallback.
+          // The pipeline nudge/TASK_COMPLETE logic below remains as fallback.
 
           // Wiggam tasks: check for TASK_COMPLETE signal
           let taskCompleteFound = false;
@@ -344,37 +372,37 @@ export default function register(api: OpenClawPluginApi) {
             }
           } catch (err: any) {
             // If chat.history fails (session closed, WS disconnected), fall back to "no TASK_COMPLETE found"
-            api.logger.warn?.(`[wiggam] chat.history failed for session ${matchingSessionKey}: ${err.message}`);
+            api.logger.warn?.(`[pipeline] chat.history failed for session ${matchingSessionKey}: ${err.message}`);
           }
 
           if (taskCompleteFound) {
             // Agent signaled completion
             await svc.completeActiveRun(taskId, "success", "Completed via TASK_COMPLETE signal");
             await svc.completeTask(taskId);
-            wiggamState.delete(taskId);
+            pipelineState.delete(taskId);
             if (matchingSessionKey) agentSessionStates.delete(matchingSessionKey);
-            api.logger.info?.(`[wiggam] Task #${taskId} completed (agent signaled TASK_COMPLETE)`);
+            api.logger.info?.(`[pipeline] Task #${taskId} completed (agent signaled TASK_COMPLETE)`);
             continue;
           }
 
           // No TASK_COMPLETE found - nudge or give up
-          let wiggamEntry = wiggamState.get(taskId);
-          if (!wiggamEntry) {
-            wiggamEntry = { nudgeCount: 0, lastNudgeAt: 0 };
-            wiggamState.set(taskId, wiggamEntry);
+          let pipelineEntry = pipelineState.get(taskId);
+          if (!pipelineEntry) {
+            pipelineEntry = { nudgeCount: 0, lastNudgeAt: 0 };
+            pipelineState.set(taskId, pipelineEntry);
           }
 
-          if (wiggamEntry.nudgeCount >= MAX_NUDGES) {
+          if (pipelineEntry.nudgeCount >= MAX_NUDGES) {
             // Max nudges exceeded - fail the task
-            await svc.completeActiveRun(taskId, "timeout", "Wiggam loop: max nudges exceeded");
+            await svc.completeActiveRun(taskId, "timeout", "Pipeline: max nudges exceeded");
             await svc.completeTask(taskId);
-            wiggamState.delete(taskId);
+            pipelineState.delete(taskId);
             if (matchingSessionKey) agentSessionStates.delete(matchingSessionKey);
-            api.logger.info?.(`[wiggam] Task #${taskId} failed — max nudges (${MAX_NUDGES}) exceeded`);
+            api.logger.info?.(`[pipeline] Task #${taskId} failed — max nudges (${MAX_NUDGES}) exceeded`);
           } else {
             // Send nudge
-            wiggamEntry.nudgeCount++;
-            wiggamEntry.lastNudgeAt = Date.now();
+            pipelineEntry.nudgeCount++;
+            pipelineEntry.lastNudgeAt = Date.now();
             
             if (matchingSessionKey && gwWsSend) {
               try {
@@ -382,11 +410,11 @@ export default function register(api: OpenClawPluginApi) {
                   sessionKey: matchingSessionKey, 
                   message: "You appear to have stalled. The task is not yet complete. Review where you are in the pipeline (plan → implement → review → test → commit → report) and continue to the next step. Delegate to subagents — do not do the work yourself. When ALL steps are complete and the build passes, include TASK_COMPLETE in your final message." 
                 });
-                api.logger.info?.(`[wiggam] Task #${taskId} nudge ${wiggamEntry.nudgeCount}/${MAX_NUDGES}`);
+                api.logger.info?.(`[pipeline] Task #${taskId} nudge ${pipelineEntry.nudgeCount}/${MAX_NUDGES}`);
               } catch (err: any) {
-                api.logger.error?.(`[wiggam] chat.send failed for task #${taskId}: ${err.message}`);
+                api.logger.error?.(`[pipeline] chat.send failed for task #${taskId}: ${err.message}`);
                 // Decrement nudge count on failure so we can retry
-                wiggamEntry.nudgeCount--;
+                pipelineEntry.nudgeCount--;
               }
             }
           }
@@ -402,6 +430,69 @@ export default function register(api: OpenClawPluginApi) {
   // Kick off first poll cycle
   setTimeout(runIdlerPoll, 5_000);
   } // end idler-poll guard
+
+  // ── Notification endpoints ────────────────────────────────────────
+
+  // POST /api/mc/notify — store and broadcast a notification
+  api.registerHttpRoute({
+    path: "/api/mc/notify",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { jsonResponse(res, { error: "POST only" }, 405); return; }
+      try {
+        const body = JSON.parse(await readBody(req));
+        const { text, level = "info" } = body;
+        if (!text || typeof text !== "string") { jsonResponse(res, { error: "Missing text" }, 400); return; }
+        const validLevels = ["info", "success", "warning", "error"];
+        const safeLevel = validLevels.includes(level) ? level as Notification["level"] : "info";
+        pruneNotifications();
+        const notification: Notification = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          text,
+          level: safeLevel,
+          timestamp: Date.now(),
+        };
+        notificationStore.push(notification);
+        broadcastNotification(notification);
+        jsonResponse(res, { ok: true, id: notification.id });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // GET /api/mc/notifications — current non-expired notifications
+  api.registerHttpRoute({
+    path: "/api/mc/notifications",
+    auth: "plugin",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      pruneNotifications();
+      jsonResponse(res, { notifications: [...notificationStore] });
+    },
+  });
+
+  // GET /api/mc/notification-stream — SSE stream for real-time notifications
+  api.registerHttpRoute({
+    path: "/api/mc/notification-stream",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "GET") { jsonResponse(res, { error: "GET only" }, 405); return; }
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "http://localhost:5173",
+      });
+      res.write(":\n\n"); // SSE comment to establish connection
+      notificationSseClients.add(res);
+      // Send any recent notifications on connect (last 60s worth)
+      const recent = notificationStore.filter(n => Date.now() - n.timestamp < 60_000);
+      for (const n of recent) {
+        res.write(`event: notification\ndata: ${JSON.stringify(n)}\n\n`);
+      }
+      req.on("close", () => { notificationSseClients.delete(res); });
+    },
+  });
 
   // ── MC HTTP API for pipeline orchestration ────────────────────────
 

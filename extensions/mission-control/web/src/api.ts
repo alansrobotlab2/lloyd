@@ -327,6 +327,8 @@ export interface AutonomyTask {
   next_run: string | null;
   auto_advance: boolean;
   preemptible: boolean;
+  pipeline_mode: boolean;
+  notify_on_complete: boolean;
   board_id: number;
   tags: string[];
   created_at: string;
@@ -338,6 +340,9 @@ export interface AutonomyTask {
   skill_path: string | null;
   model: string | null;
   timeout_seconds: number | null;
+  max_retries: number | null;
+  preferred_hours: string | null;
+  frequency: string | null;
   cron_id: string | null;
   last_run: string | null;
   runs?: Array<{

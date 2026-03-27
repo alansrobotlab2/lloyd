@@ -10,7 +10,23 @@ function getDb() {
     _db = new DatabaseSync(AUTONOMY_DB);
     _db.exec("PRAGMA journal_mode=WAL");
     _db.exec("PRAGMA foreign_keys=ON");
-    
+
+    // Idempotent migration: rename wiggam → pipeline_mode
+    try {
+      const cols = (_db.prepare("PRAGMA table_info(tasks)").all() as any[]).map((r: any) => r.name);
+      if (!cols.includes("pipeline_mode")) {
+        if (cols.includes("wiggam")) {
+          _db.exec("ALTER TABLE tasks RENAME COLUMN wiggam TO pipeline_mode");
+          console.log("[autonomy] migration: renamed wiggam → pipeline_mode");
+        } else {
+          _db.exec("ALTER TABLE tasks ADD COLUMN pipeline_mode INTEGER DEFAULT 0");
+          console.log("[autonomy] migration: added pipeline_mode column");
+        }
+      }
+    } catch (err: any) {
+      console.error("[autonomy] migration error:", err.message);
+    }
+
     // Run reconciliation once on first DB access
     reconcileStuckTasks();
   }
@@ -90,8 +106,12 @@ export async function writeTask(data: any): Promise<any> {
     if (data.timeout_seconds !== undefined) { sets.push("timeout_seconds = ?"); params.push(data.timeout_seconds); }
     if (data.cron_id !== undefined) { sets.push("cron_id = ?"); params.push(data.cron_id); }
     if (data.last_run !== undefined) { sets.push("last_run = ?"); params.push(data.last_run); }
-    if (data.wiggam !== undefined) { sets.push("wiggam = ?"); params.push(data.wiggam ? 1 : 0); }
-    
+    if (data.pipeline_mode !== undefined) { sets.push("pipeline_mode = ?"); params.push(data.pipeline_mode ? 1 : 0); }
+    if (data.notify_on_complete !== undefined) { sets.push("notify_on_complete = ?"); params.push(data.notify_on_complete ? 1 : 0); }
+    if (data.max_retries !== undefined) { sets.push("max_retries = ?"); params.push(data.max_retries); }
+    if (data.preferred_hours !== undefined) { sets.push("preferred_hours = ?"); params.push(data.preferred_hours); }
+    if (data.preemptible !== undefined) { sets.push("preemptible = ?"); params.push(data.preemptible ? 1 : 0); }
+
     if (data.activity_note !== undefined) {
       // Log activity note to runs table
       db.prepare(
@@ -114,7 +134,7 @@ export async function writeTask(data: any): Promise<any> {
     // INSERT
     const tags = data.tags ? JSON.stringify(data.tags) : "[]";
     const result = db.prepare(
-      "INSERT INTO tasks (name, description, status, priority, frequency, scheduled_at, next_run, auto_advance, tags, created_at, updated_at, runs_per_day, depends_on, pipeline, agent_id, skill_path, model, timeout_seconds, cron_id, last_run, wiggam) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO tasks (name, description, status, priority, frequency, scheduled_at, next_run, auto_advance, tags, created_at, updated_at, runs_per_day, depends_on, pipeline, agent_id, skill_path, model, timeout_seconds, cron_id, last_run, pipeline_mode, notify_on_complete, max_retries, preferred_hours, preemptible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ).run(
       data.name || "", 
       data.description || "", 
@@ -136,7 +156,11 @@ export async function writeTask(data: any): Promise<any> {
       data.timeout_seconds !== undefined ? data.timeout_seconds : null,
       data.cron_id !== undefined ? data.cron_id : null,
       data.last_run !== undefined ? data.last_run : null,
-      data.wiggam ? 1 : 0
+      data.pipeline_mode ? 1 : 0,
+      data.notify_on_complete !== undefined ? (data.notify_on_complete ? 1 : 0) : 1,
+      data.max_retries !== undefined ? data.max_retries : null,
+      data.preferred_hours !== undefined ? data.preferred_hours : null,
+      data.preemptible !== undefined ? (data.preemptible ? 1 : 0) : null
     );
     
     const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(result.lastInsertRowid);
@@ -218,10 +242,10 @@ export function completeActiveRun(taskId: number, status: string = "success", su
 export function completeTask(taskId: number): void {
   const db = getDb();
   const now = new Date().toISOString();
-  const task = db.prepare("SELECT frequency, wiggam FROM tasks WHERE id = ?").get(taskId) as any;
+  const task = db.prepare("SELECT frequency, pipeline_mode FROM tasks WHERE id = ?").get(taskId) as any;
   if (task?.frequency && task.frequency !== "one-time") {
     db.prepare("UPDATE tasks SET status = 'up_next', updated_at = ? WHERE id = ?").run(now, taskId);
-  } else if (task?.wiggam) {
+  } else if (task?.pipeline_mode) {
     db.prepare("UPDATE tasks SET status = 'in_review', updated_at = ? WHERE id = ?").run(now, taskId);
   } else {
     db.prepare("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?").run(now, taskId);

@@ -43,7 +43,21 @@ const PRIORITY_COLORS: Record<string, string> = {
 
 const PRIORITIES = ["background", "low", "medium", "high", "critical"];
 
+const FREQUENCIES = ["one-time", "every-15min", "hourly", "daily", "weekly", "monthly"];
+
 // ── Helper Functions ────────────────────────────────────────────────────
+
+function parseTags(raw: any): string[] {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    } catch { /* not JSON, try comma-split */ }
+    return raw.split(",").map((t: string) => t.trim()).filter(Boolean);
+  }
+  return [];
+}
 
 function formatRunsPerDay(rpd: number | null): string {
   if (!rpd || rpd <= 0) return "manual";
@@ -112,6 +126,13 @@ function TaskModal({
   const [timeoutSeconds, setTimeoutSeconds] = useState(task?.timeout_seconds?.toString() || "");
   const [scheduledAt, setScheduledAt] = useState(task?.scheduled_at || "");
   const [autoAdvance, setAutoAdvance] = useState(task?.auto_advance || false);
+  const [pipelineMode, setPipelineMode] = useState(task?.pipeline_mode || false);
+  const [notifyOnComplete, setNotifyOnComplete] = useState(task?.notify_on_complete ?? true);
+  const [preemptible, setPreemptible] = useState(task?.preemptible ?? true);
+  const [frequency, setFrequency] = useState(task?.frequency || "");
+  const [tags, setTags] = useState(parseTags(task?.tags).join(", "));
+  const [maxRetries, setMaxRetries] = useState(task?.max_retries?.toString() || "");
+  const [preferredHours, setPreferredHours] = useState(task?.preferred_hours || "");
   const [runs, setRuns] = useState<Array<{id: number; started: string; completed: string | null; status: string; summary: string | null; activity_log: string | null; duration_seconds: number | null}>>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -150,6 +171,13 @@ function TaskModal({
         priority, 
         scheduled_at: scheduledAt || null, 
         auto_advance: autoAdvance,
+        pipeline_mode: pipelineMode,
+        notify_on_complete: notifyOnComplete,
+        preemptible: preemptible,
+        frequency: frequency || null,
+        tags: tags || null,
+        max_retries: maxRetries ? parseInt(maxRetries) : null,
+        preferred_hours: preferredHours || null,
         runs_per_day: runsPerDay ? parseFloat(runsPerDay) : null,
         pipeline: pipeline || null,
         depends_on: dependsOn ? parseInt(dependsOn) : null,
@@ -286,6 +314,38 @@ function TaskModal({
             </div>
           </div>
 
+          {/* Frequency + Max Retries row */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+                Frequency
+              </label>
+              <select
+                value={frequency}
+                onChange={(e) => setFrequency(e.target.value)}
+                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+              >
+                <option value="" className="bg-surface-2">— none —</option>
+                {FREQUENCIES.map((f) => (
+                  <option key={f} value={f} className="bg-surface-2">{f}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+                Max Retries
+              </label>
+              <input
+                type="number"
+                value={maxRetries}
+                onChange={(e) => setMaxRetries(e.target.value)}
+                placeholder="3"
+                min="0"
+                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+              />
+            </div>
+          </div>
+
           {/* Scheduled At row (without Frequency) */}
           {!isCreate && (
             <div>
@@ -332,6 +392,22 @@ function TaskModal({
               </div>
             </div>
           )}
+          {/* Preferred Hours */}
+          {!isCreate && (
+            <div>
+              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+                Preferred Hours (UTC)
+              </label>
+              <input
+                type="text"
+                value={preferredHours}
+                onChange={(e) => setPreferredHours(e.target.value)}
+                placeholder="e.g. [2,3,4] (UTC hours)"
+                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+              />
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
@@ -402,16 +478,59 @@ function TaskModal({
             />
           </div>
 
-          {/* Auto-advance toggle */}
-          <label className="flex items-center gap-2 cursor-pointer">
+          {/* Tags */}
+          <div>
+            <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              Tags
+            </label>
             <input
-              type="checkbox"
-              checked={autoAdvance}
-              onChange={(e) => setAutoAdvance(e.target.checked)}
-              className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+              type="text"
+              value={tags}
+              onChange={(e) => setTags(e.target.value)}
+              placeholder="comma, separated, tags"
+              className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
             />
-            <span className="text-xs text-slate-300">Auto-advance to done (no approval needed)</span>
-          </label>
+          </div>
+
+          {/* Toggles */}
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoAdvance}
+                onChange={(e) => setAutoAdvance(e.target.checked)}
+                className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+              />
+              <span className="text-xs text-slate-300">Auto-advance to done (no approval needed)</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={pipelineMode}
+                onChange={(e) => setPipelineMode(e.target.checked)}
+                className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+              />
+              <span className="text-xs text-slate-300">Pipeline mode (plan→implement→review)</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={notifyOnComplete}
+                onChange={(e) => setNotifyOnComplete(e.target.checked)}
+                className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+              />
+              <span className="text-xs text-slate-300">Notify on completion (toast)</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={preemptible}
+                onChange={(e) => setPreemptible(e.target.checked)}
+                className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+              />
+              <span className="text-xs text-slate-300">Preemptible by higher priority work</span>
+            </label>
+          </div>
 
             {/* Metadata */}
           {!isCreate && (
@@ -643,6 +762,11 @@ function TaskCard({
               </span>
             );
           })()}
+          {parseTags(task.tags).length > 0 && parseTags(task.tags).map((tag: string) => (
+            <span key={tag} className="text-[10px] text-teal-400 bg-teal-400/10 px-1.5 py-0.5 rounded">
+              {tag}
+            </span>
+          ))}
         </div>
       </div>
       {insertIndicator === "below" && (
