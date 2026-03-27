@@ -190,14 +190,17 @@ export function registerServiceRoutes(ctx: PluginContext) {
         const { serviceId, action } = body;
 
         const svc = MANAGED_SERVICES.find((s) => s.id === serviceId);
-        const agentUnit = !svc && (serviceId.startsWith("agent-") || serviceId.startsWith("openclaw-")) ? `${serviceId}.service` : null;
+        // Hoist supervisor check so supervisord-managed services (e.g. idler-agent) aren't
+        // rejected before we get a chance to route them through the supervisorctl path.
+        const supEntries = getSupervisorStatus();
+        const isSupervisorManaged = supEntries.some(e => e.name === serviceId);
+        const agentUnit = !svc && (serviceId.startsWith("agent-") || serviceId.startsWith("openclaw-") || isSupervisorManaged) ? `${serviceId}.service` : null;
         if (!svc && !agentUnit) { jsonResponse(res, { error: `Unknown service: ${serviceId}` }, 400); return; }
         const unitName = svc ? svc.unit : agentUnit!;
         if (!["start", "stop", "restart"].includes(action)) { jsonResponse(res, { error: `Invalid action: ${action}` }, 400); return; }
 
         // Check if supervisor-managed
         const supervisorName = unitName.replace(".service", "");
-        const supEntries = getSupervisorStatus();
         if (supEntries.some(e => e.name === supervisorName)) {
           // Detect self-restart: if restarting/stopping the gateway we're running inside,
           // send response first, then exit (supervisord autorestart will bring us back)
