@@ -4,7 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from "fs";
-import { readFile, writeFile, access, stat } from "fs/promises";
+import { readFile, writeFile, readdir, access, stat } from "fs/promises";
 import { join, extname } from "path";
 import { homedir } from "os";
 import type { PluginContext, SkillInfo, SessionMessage, AgentCallLogEntry } from "./types.js";
@@ -481,6 +481,107 @@ export function registerAgentRoutes(
         res.end(content);
       } catch {
         res.writeHead(500); res.end("Error reading avatar");
+      }
+    },
+  });
+
+  // Stage name → agent id mapping for avatar lookup
+  const STAGE_AVATAR_MAP: Record<string, string> = {
+    plan: "planner",
+    implement: "coder",
+    review: "reviewer",
+    test: "tester",
+    research: "researcher",
+    audit: "auditor",
+  };
+
+  const STAGES_DIR = join(homedir(), "obsidian", "agents", "worker", "stages");
+
+  function parseYamlFrontmatter(raw: string): { meta: Record<string, string>; content: string } {
+    const meta: Record<string, string> = {};
+    if (!raw.startsWith("---")) return { meta, content: raw };
+    const end = raw.indexOf("---", 3);
+    if (end === -1) return { meta, content: raw };
+    const frontmatter = raw.slice(3, end).trim();
+    const content = raw.slice(end + 3).trim();
+    for (const line of frontmatter.split("\n")) {
+      const colon = line.indexOf(":");
+      if (colon === -1) continue;
+      const key = line.slice(0, colon).trim();
+      const value = line.slice(colon + 1).trim();
+      meta[key] = value;
+    }
+    return { meta, content };
+  }
+
+  // GET /api/mc/stages
+  api.registerHttpRoute({
+    path: "/api/mc/stages",
+    auth: "plugin",
+    handler: async (_req: IncomingMessage, res: ServerResponse) => {
+      try {
+        let files: string[];
+        try { files = await readdir(STAGES_DIR); } catch { jsonResponse(res, { stages: [] }); return; }
+
+        const mdFiles = files.filter((f) => f.endsWith(".md") && f !== "index.md");
+        const stages = await Promise.all(mdFiles.map(async (f) => {
+          const stageName = f.replace(/\.md$/, "");
+          let raw = "";
+          try { raw = await readFile(join(STAGES_DIR, f), "utf-8"); } catch { /* skip */ }
+          const { meta, content } = parseYamlFrontmatter(raw);
+
+          const agentId = STAGE_AVATAR_MAP[stageName] ?? stageName;
+          const avatarPath = discoverAvatar(agentId);
+          const avatarUrl = avatarPath
+            ? `/api/mc/agent-avatar?id=${encodeURIComponent(agentId)}&name=${encodeURIComponent(agentId)}`
+            : null;
+
+          return {
+            name: meta.name ?? stageName,
+            default_model: meta.default_model ?? "",
+            signal: meta.signal ?? "STAGE_COMPLETE",
+            content,
+            avatar: avatarUrl,
+          };
+        }));
+
+        // Sort in a logical pipeline order
+        const ORDER = ["plan", "implement", "test", "review", "research", "audit"];
+        stages.sort((a, b) => {
+          const ai = ORDER.indexOf(a.name);
+          const bi = ORDER.indexOf(b.name);
+          if (ai === -1 && bi === -1) return a.name.localeCompare(b.name);
+          if (ai === -1) return 1;
+          if (bi === -1) return -1;
+          return ai - bi;
+        });
+
+        jsonResponse(res, { stages });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
+      }
+    },
+  });
+
+  // POST /api/mc/stage-save
+  api.registerHttpRoute({
+    path: "/api/mc/stage-save",
+    auth: "plugin",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== "POST") { jsonResponse(res, { error: "POST only" }, 405); return; }
+      try {
+        const body = JSON.parse(await readBody(req));
+        const { name, content } = body;
+        if (!name || typeof name !== "string") { jsonResponse(res, { error: "Missing name" }, 400); return; }
+        if (typeof content !== "string") { jsonResponse(res, { error: "Missing content" }, 400); return; }
+        // Validate: alphanumeric + hyphens only, no path traversal
+        if (!/^[a-zA-Z0-9-]+$/.test(name)) { jsonResponse(res, { error: "Invalid stage name — alphanumeric and hyphens only" }, 400); return; }
+        const filePath = join(STAGES_DIR, `${name}.md`);
+        if (!filePath.startsWith(STAGES_DIR)) { jsonResponse(res, { error: "Path traversal detected" }, 403); return; }
+        await writeFile(filePath, content);
+        jsonResponse(res, { ok: true, name });
+      } catch (err: any) {
+        jsonResponse(res, { error: err.message }, 500);
       }
     },
   });

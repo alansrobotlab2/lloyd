@@ -3,8 +3,8 @@
  * Claude Code instances, tools/skills editors, and work log viewer.
  */
 import { useEffect, useState, useCallback } from "react";
-import { Bot, ChevronLeft, ChevronDown, ChevronRight, Cpu, Wrench, Sparkles, Users, Layers, FileText, Pencil, X, Save } from "lucide-react";
-import { api, AgentInfo, AgentsData, AgentStatusData, SubagentRunInfo, ToolGroupInfo, WorkspaceFile, CallLogEntry, SdkAgentInfo, SdkAgentsData, CcInstanceInfo, CcInstanceMessage } from "../../api";
+import { Bot, ChevronLeft, ChevronDown, ChevronRight, Cpu, Wrench, Sparkles, Users, Layers, FileText, Pencil, X, Save, GitBranch } from "lucide-react";
+import { api, AgentInfo, AgentsData, AgentStatusData, SubagentRunInfo, ToolGroupInfo, WorkspaceFile, CallLogEntry, SdkAgentInfo, SdkAgentsData, CcInstanceInfo, CcInstanceMessage, StageDefinition, StagesData } from "../../api";
 import { sanitizeHtml } from "../../utils/sanitize";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1336,6 +1336,184 @@ function CcInstanceLogPanel({ instance, onBack }: { instance: CcInstanceInfo; on
   );
 }
 
+// ── Pipeline Stage Card ──────────────────────────────────────────────────
+
+function modelBadgeClass(model: string): string {
+  if (model.includes("opus")) return "bg-purple-500/20 text-purple-400 border-purple-500/30";
+  if (model.includes("sonnet")) return "bg-blue-500/20 text-blue-400 border-blue-500/30";
+  if (model.includes("haiku")) return "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
+  if (model.includes("qwen") || model.includes("122b") || model.includes("35b")) return "bg-cyan-500/20 text-cyan-400 border-cyan-500/30";
+  return "bg-slate-500/20 text-slate-400 border-slate-500/30";
+}
+
+function modelShortName(model: string): string {
+  // e.g. "anthropic/claude-opus-4-6" → "opus-4-6"
+  const parts = model.split("/");
+  const name = parts[parts.length - 1];
+  // Strip "claude-" prefix
+  return name.replace(/^claude-/, "");
+}
+
+function StageCard({ stage, onSaved }: { stage: StageDefinition; onSaved: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editContent, setEditContent] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const handleEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditContent(stage.content);
+    setEditing(true);
+    setExpanded(true);
+  };
+
+  const handleCancel = () => {
+    setEditing(false);
+    setEditContent("");
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await api.stageSave(stage.name, editContent);
+      setEditing(false);
+      onSaved();
+    } catch (err) {
+      console.error("Failed to save stage:", err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-surface-1 rounded-xl border border-surface-3/50 overflow-hidden flex-shrink-0 w-56 xl:w-auto">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full p-4 text-left hover:bg-surface-2/50 transition-colors"
+      >
+        <div className="flex items-center gap-3 mb-3">
+          {stage.avatar ? (
+            <img
+              src={stage.avatar}
+              alt={stage.name}
+              className="w-8 h-8 rounded-lg object-cover flex-shrink-0"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+            />
+          ) : (
+            <div className="w-8 h-8 rounded-lg bg-surface-2 flex items-center justify-center flex-shrink-0">
+              <GitBranch className="w-4 h-4 text-slate-500" />
+            </div>
+          )}
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-semibold text-slate-200 capitalize">{stage.name}</div>
+          </div>
+          {expanded ? (
+            <ChevronDown className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+          ) : (
+            <ChevronRight className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+          )}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {stage.default_model && (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono border ${modelBadgeClass(stage.default_model)}`}>
+              {modelShortName(stage.default_model)}
+            </span>
+          )}
+          <span className="text-[10px] text-slate-600 font-mono">{stage.signal}</span>
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-surface-3/30">
+          {editing ? (
+            <div className="p-3 space-y-2">
+              <textarea
+                value={editContent}
+                onChange={(e) => setEditContent(e.target.value)}
+                className="w-full h-64 bg-surface-0 text-slate-200 text-xs font-mono rounded-lg p-3 border border-surface-3/50 resize-y focus:outline-none focus:border-brand-500/50"
+                spellCheck={false}
+              />
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={handleCancel}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 bg-surface-2 rounded-lg transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-white bg-brand-600 hover:bg-brand-500 rounded-lg disabled:opacity-50 transition-colors"
+                >
+                  <Save className="w-3 h-3" />
+                  {saving ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="px-4 py-3 max-h-64 overflow-auto relative group">
+              <button
+                onClick={handleEdit}
+                className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 text-[10px] text-slate-400 hover:text-slate-200 bg-surface-2 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <Pencil className="w-2.5 h-2.5" />
+                Edit
+              </button>
+              <pre className="text-[11px] text-slate-400 whitespace-pre-wrap font-mono leading-relaxed">
+                {stage.content.slice(0, 400)}{stage.content.length > 400 ? "\u2026" : ""}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PipelineStagesSection() {
+  const [stagesData, setStagesData] = useState<StagesData | null>(null);
+
+  const load = useCallback(() => {
+    api.stages().then(setStagesData).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (!stagesData) {
+    return (
+      <div className="animate-pulse">
+        <div className="h-4 bg-surface-2 rounded w-32 mb-3" />
+        <div className="flex gap-3">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="h-24 w-48 bg-surface-1 rounded-xl border border-surface-3/50" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (stagesData.stages.length === 0) return null;
+
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-slate-500 font-medium mb-2 flex items-center gap-1.5">
+        <GitBranch className="w-3 h-3" />
+        Pipeline Stages
+        <span className="text-slate-600 font-mono">({stagesData.stages.length})</span>
+      </div>
+      {/* Horizontal scroll on small screens, grid on large */}
+      <div className="flex gap-3 overflow-x-auto pb-2 xl:grid xl:grid-cols-3 xl:overflow-visible xl:pb-0 2xl:grid-cols-6">
+        {stagesData.stages.map((stage) => (
+          <StageCard key={stage.name} stage={stage} onSaved={load} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ───────────────────────────────────────────────────────────
 
 export default function AgentsPage({
@@ -1414,6 +1592,9 @@ export default function AgentsPage({
           {agents.length} core · {sdkAgents.length} SDK · {ccInstances.length} cc
         </span>
       </div>
+
+      {/* Pipeline Stages */}
+      <PipelineStagesSection />
 
       {/* Core agents (from openclaw.json) */}
       <div>

@@ -219,6 +219,18 @@ export interface AgentsData {
   allSkillNames: string[];
 }
 
+export interface StageDefinition {
+  name: string;
+  default_model: string;
+  signal: string;
+  content: string;
+  avatar: string | null;
+}
+
+export interface StagesData {
+  stages: StageDefinition[];
+}
+
 // ── Agent Status types ────────────────────────────────────────────────────
 
 export interface SubagentRunInfo {
@@ -671,6 +683,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agentId, fileName, content }),
     });
+    return res.json();
+  },
+
+  // Pipeline stages
+  stages: () => fetchJson<StagesData>("/stages"),
+  stageSave: async (name: string, content: string): Promise<{ ok: boolean }> => {
+    const res = await fetch(`${BASE}/stage-save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, content }),
+    });
+    if (!res.ok) throw new Error(`Stage save failed: ${res.status}`);
     return res.json();
   },
 

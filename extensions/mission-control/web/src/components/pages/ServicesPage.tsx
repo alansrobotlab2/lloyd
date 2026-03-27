@@ -131,18 +131,40 @@ export default function ServicesPage() {
 
     if (serviceId === "gateway" && action === "restart") {
       setGatewayRestarting(true);
-      setCountdown(8);
+      setCountdown(0);
       api.serviceAction(serviceId, action).catch(() => {});
-      const tick = setInterval(() => {
-        setCountdown((c) => {
-          if (c <= 1) {
-            clearInterval(tick);
-            window.location.reload();
-            return 0;
-          }
-          return c - 1;
-        });
+
+      const startTime = Date.now();
+      const maxWaitMs = 60000;
+      const pollIntervalMs = 2000;
+      const initialDelayMs = 3000;
+
+      const showElapsed = setInterval(() => {
+        setCountdown(Math.floor((Date.now() - startTime) / 1000));
       }, 1000);
+
+      setTimeout(async () => {
+        const poll = setInterval(async () => {
+          try {
+            const res = await fetch(`${window.location.origin}/api/mc/services`, {
+              signal: AbortSignal.timeout(2000),
+            });
+            if (res.ok) {
+              clearInterval(poll);
+              clearInterval(showElapsed);
+              window.location.reload();
+            }
+          } catch {
+            // Gateway still down, keep polling
+          }
+          if (Date.now() - startTime > maxWaitMs) {
+            clearInterval(poll);
+            clearInterval(showElapsed);
+            window.location.reload();
+          }
+        }, pollIntervalMs);
+      }, initialDelayMs);
+
       return;
     }
 
@@ -174,21 +196,43 @@ export default function ServicesPage() {
   ) => {
     e.stopPropagation();
 
-    // Gateway restart: show overlay with countdown, fire-and-forget the API call
+    // Gateway restart: show overlay with elapsed timer, poll until gateway is back
     if ((serviceId === "openclaw-gateway" || serviceId === "openclaw-lloyd") && action === "restart") {
       setGatewayRestarting(true);
-      setCountdown(8);
+      setCountdown(0);
       api.lloydServiceAction(serviceId, action).catch(() => {});
-      const tick = setInterval(() => {
-        setCountdown((c) => {
-          if (c <= 1) {
-            clearInterval(tick);
-            window.location.reload();
-            return 0;
-          }
-          return c - 1;
-        });
+
+      const startTime = Date.now();
+      const maxWaitMs = 60000;
+      const pollIntervalMs = 2000;
+      const initialDelayMs = 3000;
+
+      const showElapsed = setInterval(() => {
+        setCountdown(Math.floor((Date.now() - startTime) / 1000));
       }, 1000);
+
+      setTimeout(async () => {
+        const poll = setInterval(async () => {
+          try {
+            const res = await fetch(`${window.location.origin}/api/mc/services`, {
+              signal: AbortSignal.timeout(2000),
+            });
+            if (res.ok) {
+              clearInterval(poll);
+              clearInterval(showElapsed);
+              window.location.reload();
+            }
+          } catch {
+            // Gateway still down, keep polling
+          }
+          if (Date.now() - startTime > maxWaitMs) {
+            clearInterval(poll);
+            clearInterval(showElapsed);
+            window.location.reload();
+          }
+        }, pollIntervalMs);
+      }, initialDelayMs);
+
       return;
     }
 
@@ -272,13 +316,10 @@ export default function ServicesPage() {
             <RefreshCw className="w-8 h-8 text-brand-400 animate-spin mx-auto" />
             <div className="text-base font-medium text-slate-200">Gateway Restarting</div>
             <div className="text-sm text-slate-400">
-              Refreshing in <span className="font-mono text-brand-400">{countdown}s</span>
+              Reconnecting... <span className="font-mono text-brand-400">{countdown}s</span>
             </div>
             <div className="w-full bg-surface-3/30 rounded-full h-1.5 overflow-hidden">
-              <div
-                className="bg-brand-400 h-full rounded-full transition-all duration-1000 ease-linear"
-                style={{ width: `${((8 - countdown) / 8) * 100}%` }}
-              />
+              <div className="bg-brand-400 h-full rounded-full animate-pulse" />
             </div>
           </div>
         </div>

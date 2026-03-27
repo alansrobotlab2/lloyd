@@ -206,7 +206,7 @@ export function registerServiceRoutes(ctx: PluginContext) {
           
           if (isSelfService) {
             jsonResponse(res, { ok: true, serviceId, action, managedBy: "supervisor", selfRestart: true });
-            setTimeout(() => process.exit(0), 500);
+            setTimeout(() => process.exit(1), 500);
             return;
           }
           
