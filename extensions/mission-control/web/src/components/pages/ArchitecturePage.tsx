@@ -409,16 +409,18 @@ function FileDetailsPanel({
       });
   }, [node]);
 
+  const getNodeId = (ref: any): string => typeof ref === "string" ? ref : ref?.id || "";
+
   // Get outgoing links (this node depends on others)
   const dependsOn = links
-    .filter(l => l.source === node.id)
-    .map(l => nodes.find(n => n.id === l.target))
+    .filter(l => getNodeId(l.source) === node.id)
+    .map(l => nodes.find(n => n.id === getNodeId(l.target)))
     .filter((n): n is GraphNode => n !== undefined);
 
   // Get incoming links (others depend on this node)
   const dependedOnBy = links
-    .filter(l => l.target === node.id)
-    .map(l => nodes.find(n => n.id === l.source))
+    .filter(l => getNodeId(l.target) === node.id)
+    .map(l => nodes.find(n => n.id === getNodeId(l.source)))
     .filter((n): n is GraphNode => n !== undefined);
 
   const formatFileSize = (bytes: number) => {
@@ -485,7 +487,7 @@ function FileDetailsPanel({
               <div>
                 <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
                   <ArrowRightLeft className="w-3 h-3" />
-                  Depends On
+                  Imports
                 </div>
                 <div className="space-y-1">
                   {dependsOn.map(dep => (
@@ -506,7 +508,7 @@ function FileDetailsPanel({
               <div>
                 <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
                   <Layers className="w-3 h-3" />
-                  Depended On By
+                  Imported By
                 </div>
                 <div className="space-y-1">
                   {dependedOnBy.map(dep => (
@@ -568,7 +570,7 @@ function GraphView({
           <ForceGraph2D
             ref={fgRef}
             graphData={{ nodes: graphData.nodes, links: graphData.links }}
-            nodeLabel="path"
+            nodeLabel={(node: any) => getFileName(node.path)}
             nodeColor={nodeColor}
             nodeRelSize={3}
             nodeVal="count"
@@ -576,8 +578,21 @@ function GraphView({
             linkColor={() => "rgba(148, 163, 184, 0.4)"}
             linkWidth={1}
             backgroundColor="transparent"
+            nodeCanvasObjectMode={() => "after"}
+            nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+              const label = getFileName(node.path || node.id);
+              const fontSize = Math.max(10 / globalScale, 2);
+              ctx.font = `${fontSize}px sans-serif`;
+              ctx.textAlign = "center";
+              ctx.textBaseline = "top";
+              ctx.fillStyle = "rgba(203, 213, 225, 0.8)";
+              ctx.fillText(label, node.x, node.y + 5);
+            }}
             onNodeClick={(node: GraphNode) => {
               onSelectNode(node.id);
+            }}
+            onNodeHover={(node: GraphNode | null) => {
+              if (node) onSelectNode(node.id);
             }}
             minZoom={0.2}
             maxZoom={4}
@@ -587,21 +602,6 @@ function GraphView({
             d3AlphaMin={0.001}
             d3VelocityDecay={0.3}
           />
-          {/* Node labels overlay */}
-          <div className="absolute inset-0 pointer-events-none overflow-hidden">
-            {graphData.nodes.map((node) => (
-              <div
-                key={node.id}
-                className="absolute text-[10px] text-slate-300 whitespace-nowrap pointer-events-auto"
-                style={{
-                  left: (node.x || 0) + 15,
-                  top: (node.y || 0) - 5,
-                }}
-              >
-                <span className="bg-surface-2/80 px-1 rounded">{getFileName(node.path)}</span>
-              </div>
-            ))}
-          </div>
           <div className="absolute top-2 right-2 bg-surface-2/90 px-3 py-2 rounded text-[11px] text-slate-500">
             {graphData.totalNodes} nodes · {graphData.totalLinks} links
           </div>
@@ -618,7 +618,9 @@ function GraphView({
 // ── Main Page ───────────────────────────────────────────────────────────
 
 export default function ArchitecturePage() {
-  const [currentPath, setCurrentPath] = useState<string>("/");
+  const [currentPath, setCurrentPath] = useState<string>(
+    "/home/alansrobotlab/.openclaw/extensions"
+  );
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [graphLoading, setGraphLoading] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);

@@ -19,17 +19,22 @@ The openclaw binary is at `/home/alansrobotlab/.npm-global/bin/openclaw` inside 
 
 ## Restarting the Gateway
 
-The gateway sometimes holds the port after a `systemctl restart`. Always kill the old process first:
+The gateway is managed by **supervisord** inside the `lloyd` distrobox container.
+
+- Config: `/home/alansrobotlab/agent-services/supervisor/supervisord.conf`
+- Program config: `/home/alansrobotlab/agent-services/supervisor/conf.d/openclaw-gateway.conf`
+- Logs: `/home/alansrobotlab/agent-services/logs/openclaw-gateway.log` (stderr: `.err`)
 
 ```bash
-# 1. Find and kill the old gateway process
-distrobox-enter lloyd -- bash -c "kill \$(lsof -ti :18789) 2>/dev/null; sleep 2"
+# Check status
+distrobox-enter lloyd -- supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf status openclaw-gateway
 
-# 2. Start the service
-distrobox-enter lloyd -- systemctl --user start openclaw-gateway.service
+# Restart (kill stale port holder first if needed)
+distrobox-enter lloyd -- bash -c "kill \$(lsof -ti :18789) 2>/dev/null; sleep 1"
+distrobox-enter lloyd -- supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf restart openclaw-gateway
 
-# 3. Confirm clean startup (look for memory-prefetch: active)
-distrobox-enter lloyd -- journalctl --user -u openclaw-gateway.service -n 20 --no-pager -o cat | tail -20
+# Watch logs
+distrobox-enter lloyd -- tail -f /home/alansrobotlab/agent-services/logs/openclaw-gateway.log
 ```
 
 ## Project Layout

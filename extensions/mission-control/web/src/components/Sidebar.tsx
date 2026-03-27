@@ -6,8 +6,6 @@ import {
   Brain,
   Sparkles,
   Users,
-  Cpu,
-  Clock,
   Wrench,
   LayoutGrid,
   Settings,
@@ -39,8 +37,6 @@ export type Page =
   | "skills"
   | "sessions"
   | "agents"
-  | "models"
-  | "cron"
   | "tools"
   | "activity"
   | "settings"
@@ -65,8 +61,6 @@ const NAV_ITEMS: NavItem[] = [
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "sessions", label: "Sessions", icon: Users },
   { id: "agents", label: "Agents", icon: Bot },
-  { id: "models", label: "Models", icon: Cpu },
-  { id: "cron", label: "Crontab", icon: Clock },
   { id: "services", label: "Services", icon: LayoutList },
 ];
 

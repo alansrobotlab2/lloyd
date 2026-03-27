@@ -6,7 +6,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, readdirSync, existsSync, statSync } from "fs";
 import { readFile, access, readdir, stat } from "fs/promises";
-import { join, extname } from "path";
+import { join, extname, resolve, relative, dirname } from "path";
 import { homedir } from "os";
 import type { PluginContext } from "./types.js";
 import { jsonResponse } from "./helpers.js";
@@ -88,20 +88,25 @@ export function registerArchitectureRoutes(ctx: PluginContext) {
           return jsonResponse(res, { path: "/", entries });
         }
 
-        // Normalize path and check if allowed
-        const normalizedPath = browsePath.replace(/^\/+|\/+$/g, "");
+        // Normalize and resolve path
         let fullPath: string;
+        let responsePath: string;
         
-        // Check if it's one of the allowed roots
-        const matchingRoot = ALLOWED_ROOTS.find(root => root.endsWith(normalizedPath) || root === normalizedPath);
-        if (matchingRoot) {
-          fullPath = matchingRoot;
+        // If it's an absolute path, use directly
+        if (browsePath.startsWith("/")) {
+          fullPath = browsePath;
+          responsePath = browsePath;
         } else {
-          // Try to find the root this path belongs to
-          fullPath = join(homedir(), normalizedPath);
-          if (!ALLOWED_ROOTS.some(root => fullPath.startsWith(root + "/") || fullPath === root)) {
-            return jsonResponse(res, { error: "Access denied: path not in allowed directories" }, 403);
-          }
+          // Relative path — try to match against allowed roots
+          const normalizedPath = browsePath.replace(/^\/+|\/+$/g, "");
+          const matchingRoot = ALLOWED_ROOTS.find(root => root.endsWith(normalizedPath) || root === normalizedPath);
+          fullPath = matchingRoot || join(homedir(), normalizedPath);
+          responsePath = normalizedPath;
+        }
+        
+        // Security check
+        if (!ALLOWED_ROOTS.some(root => fullPath.startsWith(root + "/") || fullPath === root)) {
+          return jsonResponse(res, { error: "Access denied: path not in allowed directories" }, 403);
         }
 
         let fullPathSt: import("fs").Stats;
@@ -136,7 +141,7 @@ export function registerArchitectureRoutes(ctx: PluginContext) {
           return a.name.localeCompare(b.name);
         });
 
-        jsonResponse(res, { path: normalizedPath, entries });
+        jsonResponse(res, { path: responsePath, entries });
       } catch (err: any) {
         jsonResponse(res, { error: err.message }, 500);
       }
@@ -152,11 +157,18 @@ export function registerArchitectureRoutes(ctx: PluginContext) {
         const url = new URL(req.url || "", "http://localhost");
         let filePath = url.searchParams.get("path") || "";
         
-        // Normalize path
-        const normalizedPath = filePath.replace(/^\/+|\/+$/g, "");
-        const fullPath = join(homedir(), normalizedPath);
+        let fullPath: string;
+        let responsePath: string;
+        if (filePath.startsWith("/")) {
+          fullPath = filePath;
+          responsePath = filePath;
+        } else {
+          const normalizedPath = filePath.replace(/^\/+|\/+$/g, "");
+          fullPath = join(homedir(), normalizedPath);
+          responsePath = normalizedPath;
+        }
         
-        // Check if path is allowed
+        // Security check
         if (!ALLOWED_ROOTS.some(root => fullPath.startsWith(root + "/") || fullPath === root)) {
           return jsonResponse(res, { error: "Access denied: path not in allowed directories" }, 403);
         }
@@ -174,7 +186,7 @@ export function registerArchitectureRoutes(ctx: PluginContext) {
         const content = await readFile(fullPath, "utf-8");
         
         jsonResponse(res, {
-          path: normalizedPath,
+          path: responsePath,
           content,
           language: getLanguage(filePath),
           lineCount: content.split("\n").length,
@@ -194,12 +206,116 @@ export function registerArchitectureRoutes(ctx: PluginContext) {
         const url = new URL(req.url || "", "http://localhost");
         const filterPath = url.searchParams.get("path") || "";
         
-        const graphUrl = `http://localhost:8100/graph${filterPath ? `?path=${encodeURIComponent(filterPath)}` : ""}`;
+        const extensionsRoot = join(homedir(), ".openclaw", "extensions", "mission-control");
         
-        const data = await fetch(graphUrl).then(r => r.json());
-        jsonResponse(res, data);
+        // Recursively find all .ts/.tsx files
+        const allFiles: string[] = [];
+        function walkDir(dir: string) {
+          let entries: string[];
+          try { entries = readdirSync(dir); } catch { return; }
+          for (const name of entries) {
+            if (name.startsWith(".") || name === "node_modules" || name === "dist-web" || name === "dist") continue;
+            const fp = join(dir, name);
+            let st: import("fs").Stats;
+            try { st = statSync(fp); } catch { continue; }
+            if (st.isDirectory()) {
+              walkDir(fp);
+            } else if (/\.(ts|tsx)$/.test(name) && !name.endsWith(".d.ts")) {
+              allFiles.push(fp);
+            }
+          }
+        }
+        walkDir(extensionsRoot);
+        
+        // Parse imports from each file
+        const importRegex = /import\s+(?:(?:type\s+)?(?:\{[^}]*\}|[\w*]+(?:\s*,\s*\{[^}]*\})?)\s+from\s+)?['"](\.\.?\/[^'"]+)['"]/g;
+        
+        interface NodeInfo { id: string; path: string; count: number; }
+        interface LinkInfo { source: string; target: string; }
+        
+        const nodesMap = new Map<string, NodeInfo>();
+        const links: LinkInfo[] = [];
+        
+        for (const filePath of allFiles) {
+          const relPath = relative(extensionsRoot, filePath);
+          let content: string;
+          try { content = readFileSync(filePath, "utf-8"); } catch { continue; }
+          
+          const imports: string[] = [];
+          let match: RegExpExecArray | null;
+          const regex = new RegExp(importRegex.source, importRegex.flags);
+          while ((match = regex.exec(content)) !== null) {
+            imports.push(match[1]);
+          }
+          
+          // Register node
+          if (!nodesMap.has(relPath)) {
+            nodesMap.set(relPath, { id: relPath, path: filePath, count: imports.length });
+          }
+          
+          // Resolve imports to actual files
+          for (const imp of imports) {
+            const importDir = dirname(filePath);
+            const resolved = resolve(importDir, imp);
+            
+            // Try extensions: .ts, .tsx, /index.ts, /index.tsx
+            const candidates = [
+              resolved + ".ts",
+              resolved + ".tsx",
+              join(resolved, "index.ts"),
+              join(resolved, "index.tsx"),
+              resolved, // exact match (rare)
+            ];
+            
+            let targetPath: string | null = null;
+            for (const c of candidates) {
+              if (existsSync(c)) {
+                targetPath = c;
+                break;
+              }
+            }
+            
+            if (targetPath && targetPath.startsWith(extensionsRoot)) {
+              const targetRel = relative(extensionsRoot, targetPath);
+              if (!nodesMap.has(targetRel)) {
+                nodesMap.set(targetRel, { id: targetRel, path: targetPath, count: 0 });
+              }
+              links.push({ source: relPath, target: targetRel });
+            }
+          }
+        }
+        
+        let nodes = Array.from(nodesMap.values());
+        let filteredLinks = links;
+        
+        // Apply path filter if provided
+        if (filterPath) {
+          const matchingNodeIds = new Set<string>();
+          for (const node of nodes) {
+            if (node.id.includes(filterPath) || node.path.includes(filterPath)) {
+              matchingNodeIds.add(node.id);
+            }
+          }
+          // Also include directly connected nodes
+          const connectedIds = new Set(matchingNodeIds);
+          for (const link of links) {
+            if (matchingNodeIds.has(link.source)) connectedIds.add(link.target);
+            if (matchingNodeIds.has(link.target)) connectedIds.add(link.source);
+          }
+          nodes = nodes.filter(n => connectedIds.has(n.id));
+          const nodeIdSet = new Set(nodes.map(n => n.id));
+          filteredLinks = links.filter(l => nodeIdSet.has(l.source) && nodeIdSet.has(l.target));
+        }
+        
+        jsonResponse(res, {
+          nodes,
+          links: filteredLinks,
+          totalImports: links.reduce((sum, _) => sum + 1, 0),
+          totalNodes: nodes.length,
+          totalLinks: filteredLinks.length,
+        });
       } catch (err: any) {
-        jsonResponse(res, { error: err.message || "Failed to fetch graph data" }, 500);
+        jsonResponse(res, { error: err.message || "Failed to build graph" }, 500);
       }
     },
   });

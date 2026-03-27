@@ -21,13 +21,21 @@ import {
   type EntitySummary,
   type EntityDetailData,
   type EntityFact,
+  type EntityGraphNode,
 } from "../../api";
 import { sanitizeHtml } from "../../utils/sanitize";
-import EntityGraph from "../EntityGraph";
+import EntityGraph, { type EntityGraphProps } from "../EntityGraph";
 
 // -- Types --
 
 type SidebarTab = "entities" | "explorer";
+
+// Re-export the GNode type from EntityGraph (same shape)
+interface GNode extends EntityGraphNode {
+  x?: number;
+  y?: number;
+  degree?: number;
+}
 
 const TYPE_COLORS: Record<string, string> = {
   hub: "bg-amber-400/10 text-amber-400",
@@ -47,6 +55,199 @@ const CATEGORY_COLORS: Record<string, string> = {
   people: "text-pink-400",
   project: "text-indigo-400",
 };
+
+// -- NodeQuickInfo Component --
+
+function NodeQuickInfo({
+  node,
+  graphData,
+}: {
+  node: GNode;
+  graphData: { nodes: EntityGraphNode[]; edges: { source: string | EntityGraphNode; target: string | EntityGraphNode; type: string }[] } | null;
+}) {
+  const getNodeId = (n: string | EntityGraphNode) => typeof n === "string" ? n : n.id;
+
+  const connectedNodes = useMemo(() => {
+    if (!graphData) return [];
+    return graphData.edges
+      .filter((e) => getNodeId(e.source) === node.id || getNodeId(e.target) === node.id)
+      .map((e) => {
+        const otherId = getNodeId(e.source) === node.id ? getNodeId(e.target) : getNodeId(e.source);
+        const otherNode = graphData.nodes.find((n) => n.id === otherId);
+        return { id: otherId, label: otherNode?.label || otherId.split("/").pop()?.replace(/\.md$/, "") || otherId, type: e.type };
+      })
+      .slice(0, 10);
+  }, [node, graphData]);
+
+  const connectionCount = useMemo(() => {
+    if (!graphData) return 0;
+    return graphData.edges.filter((e) => getNodeId(e.source) === node.id || getNodeId(e.target) === node.id).length;
+  }, [node, graphData]);
+
+  const vaultSection = useMemo(() => {
+    if (node.type === "entity") return "entity";
+    const id = node.id;
+    if (id.startsWith("memory/")) return "memory";
+    if (id.startsWith("projects/")) return "projects";
+    if (id.startsWith("knowledge/")) return "knowledge";
+    if (id.startsWith("agents/")) return "agents";
+    return "unknown";
+  }, [node]);
+
+  if (node.type === "entity") {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 border-b border-surface-3/30 pb-2">
+          <span className="inline-block w-2 h-2 rotate-45 flex-shrink-0" style={{background: "#F59E0B"}} />
+          <span className="text-xs font-semibold text-amber-400">{node.label}</span>
+          <span className="ml-auto text-[10px] text-slate-500">entity</span>
+        </div>
+        <div className="text-[10px] text-slate-500">
+          <span className="text-slate-400">{node.factCount || 0}</span> facts
+          {" · "}
+          <span className="text-slate-400">{connectionCount}</span> connections
+        </div>
+        {connectedNodes.length > 0 && (
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Connected docs</div>
+            <div className="space-y-0.5">
+              {connectedNodes.map((n, i) => (
+                <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+                  <FileText className="w-2.5 h-2.5 flex-shrink-0 opacity-40" />
+                  <span className="truncate">{n.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 border-b border-surface-3/30 pb-2">
+        <FileText className="w-3 h-3 text-slate-400 flex-shrink-0" />
+        <span className="text-xs font-semibold text-slate-200 truncate">{node.label}</span>
+      </div>
+      <div className="font-mono text-[9px] text-slate-500 break-all leading-relaxed">{node.id}</div>
+      <div className="flex flex-wrap gap-1.5 text-[10px]">
+        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{vaultSection}</span>
+        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{connectionCount} links</span>
+        {node.degree !== undefined && (
+          <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">deg {node.degree}</span>
+        )}
+      </div>
+      {connectedNodes.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Connected</div>
+          <div className="space-y-0.5">
+            {connectedNodes.map((n, i) => (
+              <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${
+                  n.type === "tag-cluster" ? "bg-amber-400/10 text-amber-500" : "bg-slate-400/10 text-slate-500"
+                }`}>{n.type}</span>
+                <span className="truncate">{n.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// -- DocNodeDetail Component (single-click sticky) --
+
+function DocNodeDetail({
+  doc,
+  graphData,
+}: {
+  doc: MemoryReadResult;
+  graphData: { nodes: EntityGraphNode[]; edges: { source: string | EntityGraphNode; target: string | EntityGraphNode; type: string }[] } | null;
+}) {
+  const fm = doc.frontmatter;
+  const typeClass = TYPE_COLORS[fm.type] || TYPE_COLORS.notes;
+
+  const getNodeId = (n: string | EntityGraphNode) => typeof n === "string" ? n : n.id;
+
+  const connectionCount = useMemo(() => {
+    if (!graphData) return 0;
+    return graphData.edges.filter((e) => getNodeId(e.source) === doc.path || getNodeId(e.target) === doc.path).length;
+  }, [doc.path, graphData]);
+
+  const connectedDocs = useMemo(() => {
+    if (!graphData) return [];
+    return graphData.edges
+      .filter((e) => getNodeId(e.source) === doc.path || getNodeId(e.target) === doc.path)
+      .map((e) => {
+        const otherId = getNodeId(e.source) === doc.path ? getNodeId(e.target) : getNodeId(e.source);
+        const otherNode = graphData.nodes.find((n) => n.id === otherId);
+        return { id: otherId, label: otherNode?.label || otherId.split("/").pop()?.replace(/\.md$/, "") || otherId, type: e.type };
+      })
+      .slice(0, 15);
+  }, [doc.path, graphData]);
+
+  const sizeKb = useMemo(() => {
+    const bytes = new Blob([doc.content]).size;
+    return bytes < 1024 ? `${bytes}B` : `${(bytes / 1024).toFixed(1)}K`;
+  }, [doc.content]);
+
+  const vaultSection = useMemo(() => {
+    const id = doc.path;
+    if (id.startsWith("memory/")) return "memory";
+    if (id.startsWith("projects/")) return "projects";
+    if (id.startsWith("knowledge/")) return "knowledge";
+    if (id.startsWith("agents/")) return "agents";
+    return "unknown";
+  }, [doc.path]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 border-b border-surface-3/30 pb-2">
+        <FileText className="w-3.5 h-3.5 text-brand-400 flex-shrink-0" />
+        <span className="text-xs font-semibold text-slate-200 truncate">{fm.title || doc.path}</span>
+      </div>
+      <div className="font-mono text-[9px] text-slate-500 break-all leading-relaxed">{doc.path}</div>
+      <div className="flex flex-wrap gap-1.5 text-[10px]">
+        {fm.type && <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${typeClass}`}>{fm.type}</span>}
+        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{vaultSection}</span>
+        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{sizeKb}</span>
+        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{doc.lineCount} lines</span>
+        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{connectionCount} links</span>
+      </div>
+      {fm.summary && (
+        <div className="text-[11px] text-slate-400 italic leading-relaxed bg-surface-2/40 rounded px-2 py-1">
+          {fm.summary}
+        </div>
+      )}
+      {Array.isArray(fm.tags) && fm.tags.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {fm.tags.map((tag: string) => (
+            <span key={tag} className="text-[10px] text-slate-400 bg-surface-2 px-1.5 py-0.5 rounded">#{tag}</span>
+          ))}
+        </div>
+      )}
+      {connectedDocs.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Connected docs</div>
+          <div className="space-y-0.5">
+            {connectedDocs.map((n, i) => (
+              <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${
+                  n.type === "tag-cluster" ? "bg-amber-400/10 text-amber-500" :
+                  n.type === "has-facts" ? "bg-orange-400/10 text-orange-500" :
+                  "bg-slate-400/10 text-slate-500"
+                }`}>{n.type}</span>
+                <span className="truncate">{n.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // -- Entity Sidebar --
 
@@ -554,6 +755,15 @@ function DocumentModal({
   );
 }
 
+// -- Right Panel state type --
+type RightPanelMode =
+  | { kind: "empty" }
+  | { kind: "loading-entity" }
+  | { kind: "entity-detail"; detail: EntityDetailData }
+  | { kind: "hover-node"; node: GNode }
+  | { kind: "doc-detail"; doc: MemoryReadResult }
+  | { kind: "search"; results: MemorySearchResult; query: string };
+
 // -- Main Page --
 
 export default function MemoryPage() {
@@ -561,19 +771,20 @@ export default function MemoryPage() {
   const [entities, setEntities] = useState<EntitySummary[]>([]);
   const [entityTotal, setEntityTotal] = useState(0);
   const [entityConnectionCount, setEntityConnectionCount] = useState(0);
-  const [entityDetail, setEntityDetail] = useState<EntityDetailData | null>(null);
-  const [loadingEntityDetail, setLoadingEntityDetail] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<MemorySearchResult | null>(null);
   const [doc, setDoc] = useState<MemoryReadResult | null>(null);
   const [activeEntity, setActiveEntity] = useState<string | null>(null);
   const [selectedGraphNode, setSelectedGraphNode] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("entities");
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showSearchResults = !!(searchResults && searchResults.results.length > 0);
-  const showEntityDetail = !!entityDetail && !showSearchResults;
+  // Right panel state
+  const [rightPanel, setRightPanel] = useState<RightPanelMode>({ kind: "empty" });
+
+  // Store graph edges data for connection counts (fetched once)
+  const [graphEdges, setGraphEdges] = useState<{ nodes: EntityGraphNode[]; edges: { source: string | EntityGraphNode; target: string | EntityGraphNode; type: string }[] } | null>(null);
 
   // Load stats, entities, and graph connection count on mount
   useEffect(() => {
@@ -584,33 +795,26 @@ export default function MemoryPage() {
     }).catch(console.error);
     api.entityGraph().then((g) => {
       setEntityConnectionCount(g.edges.length);
+      setGraphEdges(g as any);
     }).catch(console.error);
   }, []);
-
-  // Load entity detail when activeEntity changes
-  useEffect(() => {
-    if (!activeEntity) {
-      setEntityDetail(null);
-      return;
-    }
-    setLoadingEntityDetail(true);
-    api.entityDetail(activeEntity).then((d) => {
-      setEntityDetail(d);
-    }).catch(console.error).finally(() => setLoadingEntityDetail(false));
-  }, [activeEntity]);
 
   // Debounced search
   const doSearch = useCallback((q: string) => {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     if (!q || q.length < 2) {
-      setSearchResults(null);
+      setRightPanel((prev) => {
+        // Only clear search results, don't clear entity/doc detail
+        if (prev.kind === "search") return { kind: "empty" };
+        return prev;
+      });
       return;
     }
     searchTimerRef.current = setTimeout(async () => {
       setSearching(true);
       try {
         const results = await api.memorySearch(q, 15);
-        setSearchResults(results);
+        setRightPanel({ kind: "search", results, query: q });
       } catch (err) {
         console.error("Search failed:", err);
       } finally {
@@ -625,41 +829,129 @@ export default function MemoryPage() {
     doSearch(q);
   };
 
-  const handleEntitySelect = (name: string | null) => {
+  // Entity selection → set graph node + show entity detail
+  const handleEntitySelect = useCallback((name: string | null) => {
     setActiveEntity(name);
-    setSelectedGraphNode(name);
-    // Don't trigger search when selecting entities — show facts in right panel instead
+    // Map to entity:: node ID format
+    setSelectedGraphNode(name ? `entity::${name}` : null);
+
     if (!name) {
-      setSearchResults(null);
-      setSearchQuery("");
+      setRightPanel({ kind: "empty" });
+      return;
     }
-  };
 
-  const handleGraphNodeClick = (nodeId: string | null) => {
+    setRightPanel({ kind: "loading-entity" });
+    api.entityDetail(name).then((d) => {
+      setRightPanel({ kind: "entity-detail", detail: d });
+    }).catch(console.error);
+  }, []);
+
+  // Graph node single-click handler
+  const handleGraphNodeClick = useCallback((nodeId: string | null) => {
     setSelectedGraphNode(nodeId);
-    // If a node is clicked and it matches an entity, highlight it in sidebar
-    if (nodeId) {
-      const matchingEntity = entities.find((e) => nodeId.includes(e.name) || e.name.toLowerCase() === nodeId.toLowerCase());
-      if (matchingEntity) {
-        setActiveEntity(matchingEntity.name);
-        setSidebarTab("entities");
-      }
-    } else {
-      setActiveEntity(null);
-    }
-  };
 
-  const handleOpenFile = async (path: string) => {
+    if (!nodeId) {
+      setActiveEntity(null);
+      setRightPanel({ kind: "empty" });
+      return;
+    }
+
+    // Entity node → show entity detail
+    if (nodeId.startsWith("entity::")) {
+      const entityName = nodeId.slice("entity::".length);
+      setActiveEntity(entityName);
+      setSidebarTab("entities");
+      setRightPanel({ kind: "loading-entity" });
+      api.entityDetail(entityName).then((d) => {
+        setRightPanel({ kind: "entity-detail", detail: d });
+      }).catch(console.error);
+      return;
+    }
+
+    // Document node → fetch and show doc detail in right panel
+    setActiveEntity(null);
+    api.memoryRead(nodeId).then((docResult) => {
+      setRightPanel({ kind: "doc-detail", doc: docResult });
+    }).catch(console.error);
+  }, []);
+
+  // Graph node double-click handler
+  const handleGraphNodeDoubleClick = useCallback((nodeId: string) => {
+    if (nodeId.startsWith("entity::")) {
+      // No action for entity double-click (or could show entity detail)
+      return;
+    }
+    // Open document modal for document nodes
+    handleOpenFile(nodeId);
+  }, []);
+
+  // Graph hover handler (debounced at EntityGraph level, but extra guard here)
+  const handleGraphNodeHover = useCallback((node: GNode | null) => {
+    if (hoverDebounceRef.current) clearTimeout(hoverDebounceRef.current);
+
+    if (!node) {
+      // Revert to previous sticky state (entity detail or doc detail or empty)
+      hoverDebounceRef.current = setTimeout(() => {
+        setRightPanel((prev) => {
+          if (prev.kind === "hover-node") return { kind: "empty" };
+          return prev;
+        });
+      }, 50);
+      return;
+    }
+
+    hoverDebounceRef.current = setTimeout(() => {
+      setRightPanel((prev) => {
+        // Don't override sticky states with hover
+        if (prev.kind === "entity-detail" || prev.kind === "doc-detail" || prev.kind === "search") {
+          return prev;
+        }
+        return { kind: "hover-node", node };
+      });
+    }, 50);
+  }, []);
+
+  const handleOpenFile = useCallback(async (path: string) => {
     try {
       const result = await api.memoryRead(path);
       setDoc(result);
     } catch (err) {
       console.error("Read failed:", err);
     }
-  };
+  }, []);
 
-  const handleCloseDoc = () => {
+  const handleCloseDoc = useCallback(() => {
     setDoc(null);
+  }, []);
+
+  // Render the right panel content
+  const renderRightPanel = () => {
+    switch (rightPanel.kind) {
+      case "search":
+        return (
+          <SearchResults
+            results={rightPanel.results}
+            query={rightPanel.query}
+            onOpenFile={handleOpenFile}
+          />
+        );
+      case "entity-detail":
+        return <EntityDetailPanel detail={rightPanel.detail} />;
+      case "loading-entity":
+        return <div className="text-[11px] text-slate-500 py-4">Loading facts...</div>;
+      case "doc-detail":
+        return <DocNodeDetail doc={rightPanel.doc} graphData={graphEdges} />;
+      case "hover-node":
+        return (
+          <div>
+            <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-2">Hover preview</div>
+            <NodeQuickInfo node={rightPanel.node} graphData={graphEdges} />
+          </div>
+        );
+      case "empty":
+      default:
+        return null;
+    }
   };
 
   return (
@@ -677,7 +969,11 @@ export default function MemoryPage() {
           />
           {searchQuery && (
             <button
-              onClick={() => { setSearchQuery(""); setSearchResults(null); setActiveEntity(null); }}
+              onClick={() => {
+                setSearchQuery("");
+                setRightPanel({ kind: "empty" });
+                setActiveEntity(null);
+              }}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
             >
               <X className="w-4 h-4" />
@@ -764,24 +1060,14 @@ export default function MemoryPage() {
           <EntityGraph
             selectedNode={selectedGraphNode}
             onNodeClick={handleGraphNodeClick}
+            onNodeDoubleClick={handleGraphNodeDoubleClick}
+            onNodeHover={handleGraphNodeHover}
           />
         </div>
 
-        {/* Right: Entity detail or search results */}
+        {/* Right: dynamic panel */}
         <div className="w-72 flex-shrink-0 overflow-y-auto min-h-0 border-l border-surface-3/30 pl-4">
-          {showSearchResults && (
-            <SearchResults
-              results={searchResults!}
-              query={searchQuery}
-              onOpenFile={handleOpenFile}
-            />
-          )}
-          {showEntityDetail && (
-            <EntityDetailPanel detail={entityDetail!} />
-          )}
-          {!showSearchResults && !showEntityDetail && activeEntity && loadingEntityDetail && (
-            <div className="text-[11px] text-slate-500 py-4">Loading facts...</div>
-          )}
+          {renderRightPanel()}
         </div>
       </div>
 

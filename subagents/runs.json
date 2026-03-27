@@ -6790,39 +6790,6 @@
       "cleanupHandled": false,
       "retainAttachmentsOnKeep": false
     },
-    "3150253d-b049-4039-993e-e7ae4877e51d": {
-      "runId": "3150253d-b049-4039-993e-e7ae4877e51d",
-      "childSessionKey": "agent:orchestrator:subagent:d188507a-0073-4cf4-ac63-315237a00d7d",
-      "controllerSessionKey": "agent:main:mc-8fc37b29-1b5e-4ee3-a3b2-83890889e67d",
-      "requesterSessionKey": "agent:main:mc-8fc37b29-1b5e-4ee3-a3b2-83890889e67d",
-      "requesterOrigin": {
-        "channel": "webchat"
-      },
-      "requesterDisplayKey": "agent:main:mc-8fc37b29-1b5e-4ee3-a3b2-83890889e67d",
-      "task": "Implement Backlog #207: Mission Control Extension Efficiency Overhaul\n\nLocation: ~/.openclaw/extensions/mission-control/\n\n## All 7 changes to implement (priority order):\n\n### 1. Adaptive poll interval (index.ts)\nReplace the fixed 5s `setInterval` for the idler poll with dynamic scheduling:\n- When `inProgressTasks.length === 0`: poll every 30s (nothing to check)\n- When tasks exist: poll every 5s (current behavior)\n- Use `setTimeout` + reschedule pattern instead of `setInterval` so interval adapts each cycle\n\n### 2. Async file I/O (all handler modules)\nReplace synchronous `readFileSync`, `existsSync`, `readdirSync`, `statSync` with async equivalents from `fs/promises` (`readFile`, `access`, `readdir`, `stat`) **in HTTP route handlers only**. Leave synchronous reads in startup/init code (module-level, constructor, `register()` top-level) where blocking is fine. Every HTTP handler is already async, so this is straightforward.\n\nAffected files: `sessions.ts`, `services.ts`, `memory.ts`, `skills.ts`, `agents.ts`, `backlog.ts`, `autonomy.ts`, `architecture.ts`, `index.ts` (the small endpoints at bottom), `gateway.ts` (summary generation)\n\n### 3. Stream text accumulator → state machine (gateway.ts)\nCurrent code in the WebSocket message handler concatenates ALL streaming deltas into `gwState.streamTextAccum`, then regex-tests for `</summary>` on every chunk — O(n²).\n\nReplace with a state machine:\n- New state fields: `streamInSummary: boolean`, `streamSummaryBuf: string`\n- On delta: if not in summary, check if delta contains `<summary>` — if so, set flag, start buffering from after the tag\n- While in summary: append to summary buf, check for `</summary>` — if found, fire `triggerStreamTts` with the buffered summary, reset state\n- On lifecycle end: reset all state\n- This avoids buffering the entire response and makes per-chunk work O(1)\n\n### 4. Deduplicate `hasActiveChildren` calls (index.ts)\nIn the idler poll loop, `hasActiveChildren(matchingSessionKey)` is called in the non-wiggam branch, and then called AGAIN in the wiggam branch. Restructure:\n- Call `hasActiveChildren` once before the `if (!isWiggam)` branch\n- Pass the result into both branches\n\n### 5. `parseJsonl` tail-read for bounded queries (helpers.ts)\nWhen `limit` is provided, instead of reading the entire file and slicing:\n- Use `fs.open` + `fs.read` to seek to end of file\n- Read backwards in chunks (e.g. 8KB) until enough newlines found\n- Parse only the last N lines\n- Fall back to current behavior for no-limit case\n\n### 6. DRY session state cleanup (index.ts)\nThe idler poll has this exact loop copy-pasted 3 times:\n```typescript\nfor (const [key] of agentSessionStates) {\n  if (key.endsWith(suffix)) { agentSessionStates.delete(key); break; }\n}\n```\nBut we already resolved `matchingSessionKey` earlier in the loop. Replace all 3 instances with:\n```typescript\nif (matchingSessionKey) agentSessionStates.delete(matchingSessionKey);\n```\n\n### 7. WebSocket exponential backoff (gateway.ts)\nReplace the two `setTimeout(gwWsConnect, 5000)` calls (in `ws.on(\"close\")` and the catch block) with:\n- Track `reconnectAttempts` counter\n- Delay = `min(1000 * 2^attempts, 30000)` (1s → 2s → 4s → 8s → 16s → 30s cap)\n- Reset counter to 0 on successful `hello-ok` response\n- Optional: max attempts with error log (e.g. 20)\n\n## Constraints\n- **Branch first** (`git checkout -b feat/mc-efficiency-overhaul`)\n- Build with TypeScript and verify it compiles\n- Don't change any API contracts or HTTP response shapes\n- Preserve ALL existing caching logic — it's already well-optimized (mtime invalidation, sessions list dedup, request coalescing)\n- The idler poll must still correctly handle both wiggam and non-wiggam task completion flows\n- Build MC after changes: `/usr/bin/distrobox-host-exec docker exec lloyd bash -c \"cd /home/alansrobotlab/agents/lloyd-home/.openclaw/extensions/mission-control && npx tsc --noEmit\"`",
-      "cleanup": "delete",
-      "expectsCompletionMessage": true,
-      "spawnMode": "run",
-      "model": "anthropic/claude-opus-4-6",
-      "workspaceDir": "/home/alansrobotlab/obsidian/agents/orchestrator",
-      "runTimeoutSeconds": 1200,
-      "createdAt": 1774565909101,
-      "startedAt": 1774565912776,
-      "sessionStartedAt": 1774565909101,
-      "accumulatedRuntimeMs": 0,
-      "archiveAtMs": 1774569509101,
-      "cleanupHandled": false,
-      "wakeOnDescendantSettle": true,
-      "retainAttachmentsOnKeep": false,
-      "endedAt": 1774565952985,
-      "outcome": {
-        "status": "ok"
-      },
-      "endedReason": "subagent-complete",
-      "frozenResultText": "Coder agent dispatched. Waiting for completion.",
-      "frozenResultCapturedAt": 1774565953445,
-      "lastAnnounceRetryAt": 1774567084594
-    },
     "e1df2b6e-bcda-4855-a597-c9889290391e": {
       "runId": "e1df2b6e-bcda-4855-a597-c9889290391e",
       "childSessionKey": "agent:coder:subagent:e7824f30-7395-4281-9718-7c446a69173b",
@@ -6844,8 +6811,17 @@
       "startedAt": 1774565934835,
       "sessionStartedAt": 1774565933868,
       "accumulatedRuntimeMs": 0,
-      "cleanupHandled": false,
-      "retainAttachmentsOnKeep": false
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774567110511,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "All 7 changes are implemented and the TypeScript build compiles clean. Here's a summary of what was accomplished:\n\n## Summary\n\nAll 7 changes from Backlog #207 have been implemented on branch `feat/mc-efficiency-overhaul`:\n\n### 1. Adaptive Poll Interval (`index.ts`)\nReplaced `setInterval(..., 5000)` with a `setTimeout`-based recursive `runIdlerPoll()` function. Uses 30s interval when `inProgressTasks.length === 0`, 5s when tasks exist.\n\n### 2. Async File I/O (`agents.ts`, `architecture.ts`, `gateway.ts`, `helpers.ts`, `index.ts`, `memory.ts`, `sessions.ts`, `skills.ts`)\nReplaced all `readFileSync`/`existsSync`/`readdirSync`/`statSync` calls inside HTTP route handlers with `fs/promises` equivalents (`readFile`, `access`, `readdir`, `stat`). Init-level code (module-level, constructors, `resolveSkillDirs`) kept sync.\n\n### 3. Stream Text State Machine (`gateway.ts`)\nReplaced the O(n²) `streamTextAccum` string accumulation + regex test per chunk with a proper state machine (`streamInSummary: boolean`, `streamSummaryBuf: string`). Per-chunk work is now O(1). Also updated `GwState` type in `types.ts`.\n\n### 4. Deduplicate `hasActiveChildren` Calls (`index.ts`)\nCalled `hasActiveChildren` once before the `if (!isWiggam)` branch, stored result in `activeChildrenResult`, and reused in both branches.\n\n### 5. `parseJsonl` Tail-Read (`helpers.ts`)\nWhen `limit` is provided, uses `fs.open`/`fs.read` to seek backwards in 8KB chunks, collects the last N lines without loading the whole file. Falls back to full read on error or no limit.\n\n### 6. DRY Session State Cleanup (`index.ts`)\nReplaced 3 copy-pasted `for` loops searching for and deleting session keys with single `if (matchingSessionKey) agentSessionStates.delete(matchingSessionKey)` calls.\n\n### 7. WebSocket Exponential Backoff (`gateway.ts`)\nAdded `reconnectAttempts` counter and `scheduleReconnect()` function with delay formula `min(1000 * 2^n, 30000)`. Resets counter to 0 on `hello-ok`. Max 20 attempts before giving up with error log.\n\n**Build verification:** `npx tsc --noEmit` returns 0 errors both locally and in the docker container.",
+      "frozenResultCapturedAt": 1774567111029,
+      "endedHookEmittedAt": 1774567121103,
+      "cleanupCompletedAt": 1774567121111
     },
     "f7155dc0-4156-475f-808d-183766bb8b4a": {
       "runId": "f7155dc0-4156-475f-808d-183766bb8b4a",
@@ -6911,6 +6887,492 @@
       "frozenResultCapturedAt": 1774566786415,
       "endedHookEmittedAt": 1774566885908,
       "cleanupCompletedAt": 1774566885917
+    },
+    "f88999bd-94e6-4cbd-83e2-51c66ff6c1f6": {
+      "runId": "f88999bd-94e6-4cbd-83e2-51c66ff6c1f6",
+      "childSessionKey": "agent:coder:subagent:ba1a2157-7723-43a3-937b-126e17e7ac80",
+      "controllerSessionKey": "agent:orchestrator:subagent:d3ef552c-d4fb-4939-b034-7a26b8ce563b",
+      "requesterSessionKey": "agent:orchestrator:subagent:d3ef552c-d4fb-4939-b034-7a26b8ce563b",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:orchestrator:subagent:d3ef552c-d4fb-4939-b034-7a26b8ce563b",
+      "task": "## Memory Tab UX Enhancements — Graph Interactions + Right Panel + Document Modal\n\nMake all changes in `~/.openclaw/extensions/mission-control/web/src/` (frontend) and the backend file for the entity-graph endpoint.\n\n### Files to modify:\n- **Backend**: Find `memory.ts` in `~/.openclaw/extensions/mission-control/src/` — the `loadEntityGraph()` function\n- **Frontend**: `EntityGraph.tsx`, `MemoryPage.tsx`, and create any new components needed in the same directory\n\n### Task 1: Backend — Add Entity Nodes to Entity Graph\n\nIn `memory.ts`, `loadEntityGraph()` function:\n- After building doc nodes/edges from `relations-index.json`\n- Also read `facts-index.json` (same directory or nearby — find it)\n- For each entity with facts, add a node: `{id: \"entity::{EntityName}\", label: EntityName, type: \"entity\", factCount: N}`\n- Add edges from entity node to each of its fact document paths (edge type: \"has-facts\")\n- This enables direct entity selection → graph node mapping\n\n### Task 2: Frontend — EntityGraph.tsx Changes\n\n#### 2a. Node Sizing by Connection Degree\nReplace the fixed `nodeRadius()` function:\n- Calculate each node's degree (number of edges connected) during graph data load\n- Map degree to radius: `Math.max(2, Math.min(8, 2 + Math.sqrt(degree) * 0.6))`\n- Store degree in a Map or as a property on the node object\n\n#### 2b. Edge Type Filtering\nAdd toggle checkboxes in the graph controls area (bottom-right, next to existing Reset/Fit buttons):\n- \"wiki-link\" toggle (default: on)\n- \"tag-cluster\" toggle (default: on)  \n- \"has-facts\" toggle (default: on) — for the new entity edges\n- When toggled off, filter those edges from rendered graph data\n- Filter at component level — filter `graphData.links` before passing to ForceGraph2D\n- Also remove orphaned nodes (nodes with no remaining edges after filtering)\n\n#### 2c. Hover → Callback with Node Info\n- `onNodeHover` should call a new prop callback like `onNodeHover(node | null)` passing the hovered node info up to MemoryPage\n- Debounce ~150ms to avoid flicker\n\n#### 2d. Double-Click Detection\n- Check if `react-force-graph-2d` ForceGraph2D has a built-in `onNodeDoubleClick` or similar prop\n- If not, implement timestamp-based double-click detection (~300ms threshold) in the `onNodeClick` handler\n- Single click → call `onNodeClick(nodeId)` prop (existing)\n- Double click → call a new `onNodeDoubleClick(nodeId)` prop\n\n#### 2e. Entity Node Rendering\n- Entity nodes (type: \"entity\") should render differently — use a diamond or slightly larger circle with a distinct color (e.g., gold/amber `#F59E0B`)\n- Document nodes keep existing vault-section coloring\n\n#### 2f. Entity Selection → Graph Center + Highlight\nWhen `selectedNode` matches an entity node ID (format `entity::{Name}`):\n- Center the graph view on that node and its neighbors using `fgRef.current.centerAt()`\n- Highlight the entity node and all connected nodes/edges (dim everything else using existing `hasDimming` behavior)\n- Animate centering smoothly\n\n#### 2g. Vault Section Color Legend (merged)\n- Position: top-left of graph area\n- Show both edge type colors AND node section colors\n- Compact: colored dots/lines + labels\n- Include: memory, projects, knowledge, agents sections + entity node color + edge types (wiki-link, tag-cluster, has-facts)\n\n### Task 3: Frontend — MemoryPage.tsx Changes\n\n#### 3a. Hover → Right Panel Document Stats\n- Add a new lightweight component `NodeQuickInfo` (or similar) that shows:\n  - Document path, title, vault section, connection count (edges), related nodes list\n  - For entity nodes: entity name, fact count, connected documents\n- When `EntityGraph` reports a hovered node (via the new onNodeHover callback):\n  - Show NodeQuickInfo in the right panel\n  - Clear on mouse-out (revert to entity detail if one is selected)\n  - Debounce 150ms\n\n#### 3b. Single-Click Doc Node → Right Panel Stats  \nWhen single-clicking a document node:\n- Fetch full doc info via `api.memoryRead(path)`\n- Show detailed stats in right panel: path, title, type, size, line count, connection count, connected documents list\n- This replaces hover info (click is \"sticky\", hover is transient)\n\n#### 3c. Entity Selection → Graph Node Mapping (fix mismatch)\n- `handleEntitySelect(name)` should set `selectedGraphNode` to `entity::{name}` (matching the new entity node IDs)\n- `handleGraphNodeClick(nodeId)` — if nodeId starts with `entity::`, extract entity name and show EntityDetailPanel\n\n#### 3d. Double-Click Doc Node → Document Modal\n- Wire new `onNodeDoubleClick` callback from EntityGraph\n- When double-clicking a document node, call `handleOpenFile(path)` to open DocumentModal\n- Double-clicking an entity node: no action (or optionally show entity detail)\n\n#### 3e. Explorer Tab → Document Modal\n- Verify VaultExplorer's `onOpenFile(path)` → `handleOpenFile` → DocumentModal flow works\n- Fix if broken\n\n### Build Command\nAfter all changes, run:\n```\n/usr/bin/distrobox-host-exec docker exec lloyd bash -c \"cd /home/alansrobotlab/agents/lloyd-home/.openclaw/extensions/mission-control/web && /home/alansrobotlab/.bun/bin/bun run build\"\n```\n\n### Constraints\n- Don't break existing functionality (search, browse, document modal)\n- Keep the same dark theme and color palette\n- Performance: 1,664+ nodes. Debounce hover, don't re-render full graph on right panel changes\n- `react-force-graph-2d` is the graph library\n- TypeScript strict — ensure types are correct",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "memory-tab-ux-enhancements",
+      "model": "anthropic/claude-sonnet-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/coder",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774567898217,
+      "startedAt": 1774567899059,
+      "sessionStartedAt": 1774567898217,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568667766,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "All the key features are in place. Here's a summary of what was accomplished:\n\n---\n\n## Summary\n\n### Task 1: Backend — Entity Nodes in `memory.ts`\n- Modified `loadEntityGraph()` to read `facts-index.json` after building doc nodes\n- For each entity, adds a node `{id: \"entity::{Name}\", label, type: \"entity\", factCount: N}`\n- Adds `has-facts` edges from entity nodes to their fact document files in `memory/_pipeline/facts/{entity}/`\n\n### Task 2: Frontend — `EntityGraph.tsx` (full rewrite)\n- **2a. Node sizing by degree**: Degree calculated during data load via `degreeMap`; radius = `Math.max(2, Math.min(8, 2 + Math.sqrt(degree) * 0.6))`\n- **2b. Edge type filtering**: Added `EdgeFilters` state + checkboxes (wiki-link, tag-cluster, has-facts toggles) in bottom-right controls; orphaned nodes removed after filtering\n- **2c. Hover callback**: `onNodeHover` prop with 150ms debounce via `hoverTimerRef`\n- **2d. Double-click**: Timestamp-based detection (~300ms threshold) in `onNodeClick` handler; routes to `onNodeDoubleClick` prop\n- **2e. Entity node rendering**: Diamond shape + `#F59E0B` amber/gold color; bold label in `#FCD34D`\n- **2f. Entity selection → center + highlight**: Existing `selectedNode` → `centerAt()` logic works; entity nodes dim/highlight via existing `hasDimming` behavior\n- **2g. Merged legend**: Top-left panel shows vault section node colors (memory, projects, knowledge, agents, entity diamond) + edge type line colors\n\n### Task 3: Frontend — `MemoryPage.tsx`\n- **3a. `NodeQuickInfo`**: New component showing node path/section/connections/related nodes for doc nodes, or entity name/factCount/docs for entity nodes; shown in right panel on hover (non-sticky)\n- **3b. Single-click doc node → `DocNodeDetail`**: Fetches `api.memoryRead(path)`, shows path/type/size/lineCount/connections/tags/summary (sticky until overridden)\n- **3c. Entity selection fix**: `handleEntitySelect(name)` sets `selectedGraphNode` to `entity::${name}`; `handleGraphNodeClick` checks for `entity::` prefix and shows `EntityDetailPanel`\n- **3d. Double-click → DocumentModal**: `onNodeDoubleClick` wired to `handleOpenFile(path)` for doc nodes; entity double-click is a no-op\n- **3e. Explorer flow verified**: `VaultExplorer.onOpenFile` → `handleOpenFile` → `setDoc` → `DocumentModal` — flow intact, unchanged\n- Right panel uses a discriminated union (`RightPanelMode`) for clean state management; hover is transient, click is sticky\n\n**Build**: Passed cleanly (`tsc -b && vite build`, exit 0).",
+      "frozenResultCapturedAt": 1774568668175,
+      "endedHookEmittedAt": 1774568679581,
+      "cleanupCompletedAt": 1774568679588
+    },
+    "16954c00-f7dd-4310-af19-b617935c19a6": {
+      "runId": "16954c00-f7dd-4310-af19-b617935c19a6",
+      "childSessionKey": "agent:researcher:subagent:2f4cd62f-b489-4206-b836-33385ecd209c",
+      "controllerSessionKey": "agent:orchestrator:subagent:444cad6d-96fc-47fd-8647-d8cc5ffa20d2",
+      "requesterSessionKey": "agent:orchestrator:subagent:444cad6d-96fc-47fd-8647-d8cc5ffa20d2",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:orchestrator:subagent:444cad6d-96fc-47fd-8647-d8cc5ffa20d2",
+      "task": "Research this YouTube video and produce a comprehensive summary document.\n\n**Video URL:** https://www.youtube.com/watch?v=sXVbWkoCVaA\n\n## Instructions\n\n### Step 1: Fetch the Transcript\n\nRun this command to get the full transcript:\n\n```bash\n~/.local/bin/uv run --with youtube-transcript-api python3 -c \"\nfrom youtube_transcript_api import YouTubeTranscriptApi\nimport re, sys\nurl = sys.argv[1]\nm = re.search(r'(?:v=|youtu\\\\.be/|/embed/|/v/)([A-Za-z0-9_-]{11})', url)\nvid = m.group(1) if m else url\napi = YouTubeTranscriptApi()\nt = api.fetch(vid)\nprint(' '.join(s.text for s in t))\n\" \"https://www.youtube.com/watch?v=sXVbWkoCVaA\"\n```\n\n### Step 2: Analyze the Transcript\n\nRead the FULL transcript carefully. Identify:\n- Video title/topic and speaker(s)\n- Core argument and key themes\n- ALL projects, tools, companies, and products mentioned — with descriptions and why they were discussed\n- Key insights, findings, and takeaways\n\n### Step 3: Save the Summary\n\nWrite a comprehensive markdown document to `~/obsidian/lloyd/knowledge/` in the appropriate domain subfolder (ai/, robotics/, hardware/, software/, misc/). Use this frontmatter format:\n\n```yaml\n---\ntype: reference\ntags: [relevant, tags]\nsource: https://www.youtube.com/watch?v=sXVbWkoCVaA\ndate: 2026-03-26\nsummary: \"One sentence summary\"\n---\n```\n\nThe body should include:\n1. **Overview** — what the video covers, who presents it\n2. **Key Topics & Arguments** — detailed breakdown\n3. **Projects Mentioned** — a comprehensive list with descriptions and context for each\n4. **Key Takeaways** — main insights\n\n### Step 4: Report Back\n\nTell me:\n- The video title and speaker(s)\n- A brief summary\n- The full list of projects mentioned\n- The file path where you saved the document\n\n**IMPORTANT:** Pass the FULL transcript to your analysis — do not truncate it. Some videos are long.",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "local-llm-120b/Qwen3.5-122B-A10B",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/researcher",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568330215,
+      "startedAt": 1774568331085,
+      "sessionStartedAt": 1774568330215,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568409702,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Research Complete\n\n**Video Title:** \"4 Open Source AI Agent Projects That Show Where The World Is Heading\"  \n**Speaker:** Content creator (500K+ subscribers, unnamed in transcript)\n\n**Brief Summary:**\nThe video showcases four cutting-edge open source AI agent frameworks representing the evolution from individual coding assistants to complete business orchestration systems: GStack (YC process framework), Hermes Agent (self-improving OS), Superpowers (TDD-focused Claude plugin), and Paperclip (zero-human company orchestration).\n\n**Full List of Projects Mentioned:**\n\n| Project | Stars | Creator | Focus |\n|---------|-------|---------|-------|\n| **GStack** | ~50K | Gary Tan (YC President) | Process framework encoding YC expertise for solo developers |\n| **Hermes Agent** | ~13K | Nouse Research | Self-improving agent OS with closed learning loops |\n| **Superpowers** | ~115K | Yagy / Ora | Claude Code plugin for TDD-driven development |\n| **Paperclip** | ~33K | Unknown | Zero-human company orchestration platform |\n\n**Other Projects Referenced:**\n- OpenClaw (benchmark for comparison)\n- Andrej Karpathy's auto-research project (inspiration)\n- Pulsia (closed-source competitor to Paperclip)\n- Microsoft 365 Copilot Business (sponsored segment)\n\n**Document Saved:**\n`~/obsidian/lloyd/knowledge/ai/agent-architecture/open-source-ai-agent-frameworks-2026.md`\n\nThe summary includes detailed breakdowns of each project's features, installation methods, workflows, and relevance to current Wiggam Loop and Anthropic harness design work.",
+      "frozenResultCapturedAt": 1774568410325,
+      "endedHookEmittedAt": 1774568429135,
+      "cleanupCompletedAt": 1774568429150
+    },
+    "announce:v1:agent:researcher:subagent:2f4cd62f-b489-4206-b836-33385ecd209c:16954c00-f7dd-4310-af19-b617935c19a6": {
+      "runId": "announce:v1:agent:researcher:subagent:2f4cd62f-b489-4206-b836-33385ecd209c:16954c00-f7dd-4310-af19-b617935c19a6",
+      "childSessionKey": "agent:orchestrator:subagent:444cad6d-96fc-47fd-8647-d8cc5ffa20d2",
+      "controllerSessionKey": "agent:main:mc-e1cbeb9d-3b1c-4262-a392-30033fcf49aa",
+      "requesterSessionKey": "agent:main:mc-e1cbeb9d-3b1c-4262-a392-30033fcf49aa",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:mc-e1cbeb9d-3b1c-4262-a392-30033fcf49aa",
+      "task": "Research this YouTube video and produce a comprehensive summary document. Include all projects mentioned in the video.\n\n**Video URL:** https://www.youtube.com/watch?v=sXVbWkoCVaA\n\n**Instructions:**\n1. Use the YouTube transcript skill at `~/obsidian/skills/youtube-transcript/SKILL.md` to extract the transcript\n2. Analyze the full content — key topics, arguments, insights\n3. **List every project mentioned** with descriptions and context for why they were discussed\n4. Write the summary to an appropriate location in `knowledge/` based on the video's topic\n5. Report back: title, speaker(s), summary, projects list, and where you saved the doc",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/orchestrator",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568412762,
+      "startedAt": 1774568414040,
+      "sessionStartedAt": 1774568313159,
+      "accumulatedRuntimeMs": 19454,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568427397,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Report: YouTube Video Research Complete\n\n### Execution\n1. **Researcher** — Fetched transcript, analyzed content, wrote comprehensive summary (result: ✅ success)\n\n### Result\n\n**Video:** \"4 Open Source AI Agent Projects That Show Where The World Is Heading\"  \n**Speaker:** Content creator (500K+ subscribers, unnamed in transcript)\n\n**Summary:** The video showcases four open-source AI agent frameworks representing the evolution from individual coding assistants to complete business orchestration systems.\n\n**Projects Mentioned:**\n\n| Project | Stars | Focus |\n|---------|-------|-------|\n| **GStack** | ~50K | YC process framework by Gary Tan — encodes startup expertise for solo devs |\n| **Hermes Agent** | ~13K | Self-improving agent OS with closed learning loops (Nouse Research) |\n| **Superpowers** | ~115K | Claude Code plugin for TDD-driven development (Yagy/Ora) |\n| **Paperclip** | ~33K | Zero-human company orchestration platform |\n\n**Other projects referenced:** OpenClaw (benchmark comparison), Andrej Karpathy's auto-research project (inspiration), Pulsia (closed-source competitor), Microsoft 365 Copilot Business (sponsor)\n\n**Document saved to:** `~/obsidian/lloyd/knowledge/ai/agent-architecture/open-source-ai-agent-frameworks-2026.md`\n\nThe document includes detailed breakdowns of each project's features, installation methods, workflows, key takeaways, and relevance to current work (Wiggam Loop, multi-agent orchestration patterns).\n\n### Issues\nNone — transcript fetched cleanly and analysis is comprehensive.",
+      "frozenResultCapturedAt": 1774568428136,
+      "endedHookEmittedAt": 1774568445918,
+      "cleanupCompletedAt": 1774568445932
+    },
+    "136a928c-91c3-4c89-a139-12cfd60c075b": {
+      "runId": "136a928c-91c3-4c89-a139-12cfd60c075b",
+      "childSessionKey": "agent:coder:subagent:a3fd451f-8faf-471c-af86-d3ee38d1e13a",
+      "controllerSessionKey": "agent:orchestrator:subagent:de28d742-0371-44d2-b218-73d350e93478",
+      "requesterSessionKey": "agent:orchestrator:subagent:de28d742-0371-44d2-b218-73d350e93478",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:orchestrator:subagent:de28d742-0371-44d2-b218-73d350e93478",
+      "task": "## Task: Make Architecture Tab Functional for MC Extensions\n\n### Files to Edit\n1. `~/.openclaw/extensions/mission-control/architecture.ts`\n2. `~/.openclaw/extensions/mission-control/web/src/components/pages/ArchitecturePage.tsx`\n\n### Change 1: Fix browse/read path resolution bug in `architecture.ts`\n\nBoth the browse and read handlers have a path resolution bug for subdirectories. When the frontend sends an absolute path like `/home/alansrobotlab/.openclaw/extensions/mission-control/web`, the handler strips the leading `/` then prepends `homedir()`, creating `/home/alansrobotlab/home/alansrobotlab/...`.\n\n**In the browse handler** (~line 68), after `const normalizedPath = browsePath.replace(...)`:\n- Before the `matchingRoot` check, add: if `browsePath` starts with `/` and is directly under an allowed root, use `browsePath` as `fullPath` directly instead of `join(homedir(), normalizedPath)`.\n\nHere's the fix — replace the path resolution block (after the \"/\" root check, around lines 65-80) with:\n\n```typescript\n        // Normalize and resolve path\n        let fullPath: string;\n        \n        // If it's an absolute path, use directly\n        if (browsePath.startsWith(\"/\")) {\n          fullPath = browsePath;\n        } else {\n          // Relative path — try to match against allowed roots\n          const normalizedPath = browsePath.replace(/^\\/+|\\/+$/g, \"\");\n          const matchingRoot = ALLOWED_ROOTS.find(root => root.endsWith(normalizedPath) || root === normalizedPath);\n          fullPath = matchingRoot || join(homedir(), normalizedPath);\n        }\n        \n        // Security check\n        if (!ALLOWED_ROOTS.some(root => fullPath.startsWith(root + \"/\") || fullPath === root)) {\n          return jsonResponse(res, { error: \"Access denied: path not in allowed directories\" }, 403);\n        }\n```\n\n**In the read handler** (~line 109), apply the same fix:\n\n```typescript\n        let filePath = url.searchParams.get(\"path\") || \"\";\n        \n        let fullPath: string;\n        if (filePath.startsWith(\"/\")) {\n          fullPath = filePath;\n        } else {\n          const normalizedPath = filePath.replace(/^\\/+|\\/+$/g, \"\");\n          fullPath = join(homedir(), normalizedPath);\n        }\n        \n        // Security check\n        if (!ALLOWED_ROOTS.some(root => fullPath.startsWith(root + \"/\") || fullPath === root)) {\n          return jsonResponse(res, { error: \"Access denied: path not in allowed directories\" }, 403);\n        }\n```\n\n### Change 2: Replace the graph endpoint in `architecture.ts`\n\nReplace the entire `/api/mc/architecture/graph` handler (lines ~128-143) with an inline implementation. You'll also need to add `path` module imports — add `resolve, relative, dirname, basename` to the existing `import { join, extname } from \"path\"` line.\n\nAdd `import { readFile as readFileAsync } from \"fs/promises\";` — wait, `readFile` is already imported from `fs/promises` as `readFile`. Good.\n\nAlso add `import { readdirSync, statSync } from \"fs\";` — wait, those are already imported. Good.\n\nHere's the new graph handler:\n\n```typescript\n  // GET /api/mc/architecture/graph\n  api.registerHttpRoute({\n    path: \"/api/mc/architecture/graph\",\n    auth: \"plugin\",\n    handler: async (req: IncomingMessage, res: ServerResponse) => {\n      try {\n        const url = new URL(req.url || \"\", \"http://localhost\");\n        const filterPath = url.searchParams.get(\"path\") || \"\";\n        \n        const extensionsRoot = join(homedir(), \".openclaw\", \"extensions\", \"mission-control\");\n        \n        // Recursively find all .ts/.tsx files\n        const allFiles: string[] = [];\n        function walkDir(dir: string) {\n          let entries: string[];\n          try { entries = readdirSync(dir); } catch { return; }\n          for (const name of entries) {\n            if (name.startsWith(\".\") || name === \"node_modules\" || name === \"dist-web\" || name === \"dist\") continue;\n            const fp = join(dir, name);\n            let st: import(\"fs\").Stats;\n            try { st = statSync(fp); } catch { continue; }\n            if (st.isDirectory()) {\n              walkDir(fp);\n            } else if (/\\.(ts|tsx)$/.test(name) && !name.endsWith(\".d.ts\")) {\n              allFiles.push(fp);\n            }\n          }\n        }\n        walkDir(extensionsRoot);\n        \n        // Parse imports from each file\n        const importRegex = /import\\s+(?:(?:type\\s+)?(?:\\{[^}]*\\}|[\\w*]+(?:\\s*,\\s*\\{[^}]*\\})?)\\s+from\\s+)?['\"](\\.\\.?\\/[^'\"]+)['\"]/g;\n        \n        interface NodeInfo { id: string; path: string; count: number; }\n        interface LinkInfo { source: string; target: string; }\n        \n        const nodesMap = new Map<string, NodeInfo>();\n        const links: LinkInfo[] = [];\n        \n        for (const filePath of allFiles) {\n          const relPath = relative(extensionsRoot, filePath);\n          let content: string;\n          try { content = readFileSync(filePath, \"utf-8\"); } catch { continue; }\n          \n          const imports: string[] = [];\n          let match: RegExpExecArray | null;\n          const regex = new RegExp(importRegex.source, importRegex.flags);\n          while ((match = regex.exec(content)) !== null) {\n            imports.push(match[1]);\n          }\n          \n          // Register node\n          if (!nodesMap.has(relPath)) {\n            nodesMap.set(relPath, { id: relPath, path: filePath, count: imports.length });\n          }\n          \n          // Resolve imports to actual files\n          for (const imp of imports) {\n            const importDir = dirname(filePath);\n            const resolved = resolve(importDir, imp);\n            \n            // Try extensions: .ts, .tsx, /index.ts, /index.tsx\n            const candidates = [\n              resolved + \".ts\",\n              resolved + \".tsx\",\n              join(resolved, \"index.ts\"),\n              join(resolved, \"index.tsx\"),\n              resolved, // exact match (rare)\n            ];\n            \n            let targetPath: string | null = null;\n            for (const c of candidates) {\n              if (existsSync(c)) {\n                targetPath = c;\n                break;\n              }\n            }\n            \n            if (targetPath && targetPath.startsWith(extensionsRoot)) {\n              const targetRel = relative(extensionsRoot, targetPath);\n              if (!nodesMap.has(targetRel)) {\n                nodesMap.set(targetRel, { id: targetRel, path: targetPath, count: 0 });\n              }\n              links.push({ source: relPath, target: targetRel });\n            }\n          }\n        }\n        \n        let nodes = Array.from(nodesMap.values());\n        let filteredLinks = links;\n        \n        // Apply path filter if provided\n        if (filterPath) {\n          const matchingNodeIds = new Set<string>();\n          for (const node of nodes) {\n            if (node.id.includes(filterPath) || node.path.includes(filterPath)) {\n              matchingNodeIds.add(node.id);\n            }\n          }\n          // Also include directly connected nodes\n          const connectedIds = new Set(matchingNodeIds);\n          for (const link of links) {\n            if (matchingNodeIds.has(link.source)) connectedIds.add(link.target);\n            if (matchingNodeIds.has(link.target)) connectedIds.add(link.source);\n          }\n          nodes = nodes.filter(n => connectedIds.has(n.id));\n          const nodeIdSet = new Set(nodes.map(n => n.id));\n          filteredLinks = links.filter(l => nodeIdSet.has(l.source) && nodeIdSet.has(l.target));\n        }\n        \n        jsonResponse(res, {\n          nodes,\n          links: filteredLinks,\n          totalImports: links.reduce((sum, _) => sum + 1, 0),\n          totalNodes: nodes.length,\n          totalLinks: filteredLinks.length,\n        });\n      } catch (err: any) {\n        jsonResponse(res, { error: err.message || \"Failed to build graph\" }, 500);\n      }\n    },\n  });\n```\n\nMake sure to update the `path` import at top of file to include `resolve`, `relative`, `dirname`:\n```typescript\nimport { join, extname, resolve, relative, dirname } from \"path\";\n```\n\n### Change 3: Fix `ArchitecturePage.tsx`\n\n**a) Remove the broken node labels overlay.** In the `GraphView` component, delete this entire block (around line 340-355):\n```tsx\n          {/* Node labels overlay */}\n          <div className=\"absolute inset-0 pointer-events-none overflow-hidden\">\n            {graphData.nodes.map((node) => (\n              <div\n                key={node.id}\n                className=\"absolute text-[10px] text-slate-300 whitespace-nowrap pointer-events-auto\"\n                style={{\n                  left: (node.x || 0) + 15,\n                  top: (node.y || 0) - 5,\n                }}\n              >\n                <span className=\"bg-surface-2/80 px-1 rounded\">{getFileName(node.path)}</span>\n              </div>\n            ))}\n          </div>\n```\n\nThe `nodeLabel` prop already handles hover labels. Replace it with a function that returns the filename:\nChange `nodeLabel=\"path\"` to `nodeLabel={(node: any) => getFileName(node.path)}`.\n\n**b) Change the initial path for file tree.** In `ArchitecturePage`, change:\n```typescript\nconst [currentPath, setCurrentPath] = useState<string>(\"/\");\n```\nto:\n```typescript\nconst [currentPath, setCurrentPath] = useState<string>(\n  \"/home/alansrobotlab/.openclaw/extensions\"\n);\n```\n\nThis way the file tree opens directly to the extensions directory instead of showing the root navigation.\n\n### Change 4: Build the web UI\n\nAfter all file changes, run this build command:\n```bash\n/usr/bin/distrobox-host-exec docker exec lloyd bash -c \"cd /home/alansrobotlab/agents/lloyd-home/.openclaw/extensions/mission-control/web && /home/alansrobotlab/.bun/bin/bun run build\"\n```\n\nBuild output goes to `~/.openclaw/extensions/mission-control/dist-web/`.\n\n### Important Notes\n- Do NOT restart the gateway — the parent will handle that\n- The `jsonResponse`, `PluginContext`, `readFileSync`, `existsSync`, `readdirSync`, `statSync` are already imported in the file\n- The `ForceGraph2D` component uses `nodeLabel` for hover tooltips, so removing the overlay div is safe\n- The `nodeVal` prop controls node size based on `count` — this is the import count which will now be populated correctly",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "architecture-tab-fix",
+      "model": "anthropic/claude-sonnet-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/coder",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568417344,
+      "startedAt": 1774568418030,
+      "sessionStartedAt": 1774568417344,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568557131,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "Build succeeded. Here's what was accomplished:\n\n## Summary\n\nAll 4 changes applied successfully, build completed in 4.42s.\n\n### Changes Made\n\n**`architecture.ts`:**\n1. **Path imports** — Added `resolve`, `relative`, `dirname` to the `path` import\n2. **Browse handler fix** — Replaced buggy path resolution with absolute-path-aware logic that uses `browsePath` directly when it starts with `/`, avoiding the double-homedir bug\n3. **Read handler fix** — Same fix applied to the read handler\n4. **Graph handler replacement** — Replaced the broken `fetch(\"http://localhost:8100/graph\")` stub with a full inline implementation that:\n   - Walks the `~/.openclaw/extensions/mission-control` directory recursively\n   - Skips `node_modules`, `dist-web`, `dist`, and hidden dirs\n   - Parses `import` statements with a regex to find relative imports\n   - Resolves imports to actual files (trying `.ts`, `.tsx`, `/index.ts`, `/index.tsx`)\n   - Builds a nodes/links graph with import counts per node\n   - Supports optional path filtering\n\n**`ArchitecturePage.tsx`:**\n1. **Removed broken node labels overlay** — Deleted the absolute-positioned div that was using raw `node.x/y` coordinates before the simulation settled\n2. **Fixed `nodeLabel` prop** — Changed from `nodeLabel=\"path\"` to `nodeLabel={(node: any) => getFileName(node.path)}` for clean hover tooltips\n3. **Changed initial path** — Set default to `/home/alansrobotlab/.openclaw/extensions` so the file tree opens to the right place immediately\n\n**`EntityGraph.tsx`:** Fixed a pre-existing TypeScript error (`fx?: number | null` → `fx?: number`) that was blocking the build.",
+      "frozenResultCapturedAt": 1774568557368,
+      "endedHookEmittedAt": 1774568568319,
+      "cleanupCompletedAt": 1774568568326
+    },
+    "announce:v1:agent:coder:subagent:a3fd451f-8faf-471c-af86-d3ee38d1e13a:136a928c-91c3-4c89-a139-12cfd60c075b": {
+      "runId": "announce:v1:agent:coder:subagent:a3fd451f-8faf-471c-af86-d3ee38d1e13a:136a928c-91c3-4c89-a139-12cfd60c075b",
+      "childSessionKey": "agent:orchestrator:subagent:de28d742-0371-44d2-b218-73d350e93478",
+      "controllerSessionKey": "agent:main:mc-5c7aedd0-00ef-4433-b2c2-3e4689733d80",
+      "requesterSessionKey": "agent:main:mc-5c7aedd0-00ef-4433-b2c2-3e4689733d80",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:mc-5c7aedd0-00ef-4433-b2c2-3e4689733d80",
+      "task": "## Task: Make Architecture Tab Functional for MC Extensions (Backlog #160)\n\n### Context\nThe Mission Control Architecture tab exists (sidebar + page component) but nothing works because the graph endpoint proxies to `localhost:8100` — a service that was never built. The file tree browse/read APIs should work but may have path issues.\n\n### Scope: MC Extensions Only\nFocus on `~/.openclaw/extensions/mission-control/` — both the backend `.ts` files (15 files) and frontend `web/src/` React components. Do NOT try to scan `~/repos/openclaw/src/` yet.\n\n### What to Change\n\n#### 1. Backend: `~/.openclaw/extensions/mission-control/architecture.ts`\n\nReplace the `/api/mc/architecture/graph` handler. Instead of proxying to `localhost:8100`, build the graph inline:\n\n- **Scan** all `.ts` files in `~/.openclaw/extensions/mission-control/` and all `.tsx`/`.ts` files in `~/.openclaw/extensions/mission-control/web/src/` recursively\n- **Parse imports** with regex: extract `import ... from './foo'` and `import ... from '../bar'` statements\n- **Resolve** relative imports to actual file paths (try `.ts`, `.tsx`, `/index.ts` suffixes)\n- **Build graph**: Each file = a node (`{ id: relativePath, path: absolutePath, count: numberOfImports }`). Each resolved import = a link (`{ source: importer, target: imported }`)\n- **Return** `{ nodes, links, totalImports, totalNodes, totalLinks }`\n- Handle the `?path=` query param as an optional filter (only show subgraph containing that path)\n\nThe import regex should handle:\n```\nimport { X } from \"./foo\";\nimport X from \"../bar\";\nimport type { X } from \"./baz\";\nimport \"./side-effect\";\n```\n\n#### 2. Verify browse/read APIs work\nThe browse API uses `ALLOWED_ROOTS` which includes `join(homedir(), \".openclaw\", \"extensions\")`. The path handling is a bit convoluted — verify it works for browsing the extensions directory. The frontend passes paths through and the backend resolves them against allowed roots.\n\n#### 3. Frontend: `~/.openclaw/extensions/mission-control/web/src/components/pages/ArchitecturePage.tsx`\nThe page should mostly work as-is since it consumes the graph shape. But:\n- Verify the `api.fetchGraph()` call handles the response correctly\n- The `ForceGraph2D` node labels overlay uses absolute pixel positions (`node.x`, `node.y`) which won't work — those are canvas coordinates, not DOM coordinates. Remove or fix that overlay (the `nodeLabel` prop already handles hover labels)\n- Make sure the file tree's initial path loads the extensions directory, not \"/\"\n\n#### 4. Build\nAfter all changes, build the web UI:\n```bash\n/usr/bin/distrobox-host-exec docker exec lloyd bash -c \"cd /home/alansrobotlab/agents/lloyd-home/.openclaw/extensions/mission-control/web && /home/alansrobotlab/.bun/bin/bun run build\"\n```\nBuild output goes to `~/.openclaw/extensions/mission-control/dist-web/`.\n\n#### 5. No gateway restart needed\nThe TS backend is compiled at gateway startup. We'll need a gateway restart after changes, but I'll handle that — don't include `openclaw gateway restart` in your work.\n\n### Files to Read First\n- `~/.openclaw/extensions/mission-control/architecture.ts` (current backend)\n- `~/.openclaw/extensions/mission-control/web/src/components/pages/ArchitecturePage.tsx` (current frontend)\n- `~/.openclaw/extensions/mission-control/helpers.ts` (for `jsonResponse` and other shared utils)\n- `~/.openclaw/extensions/mission-control/types.ts` (for `PluginContext` type)\n\n### Success Criteria\n- `/api/mc/architecture/graph` returns real nodes and links from the MC extensions codebase\n- `/api/mc/architecture/browse` works for browsing the extensions file tree\n- `/api/mc/architecture/read` works for viewing file contents\n- The force-directed graph renders with real dependency data\n- Build completes with no errors",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/orchestrator",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568557831,
+      "startedAt": 1774568558474,
+      "sessionStartedAt": 1774568342974,
+      "accumulatedRuntimeMs": 76989,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568567523,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Report: Architecture Tab — Made Functional\n\n### Execution\n1. **coder** — Applied all changes to `architecture.ts` and `ArchitecturePage.tsx`, plus fixed a pre-existing TS build error in `EntityGraph.tsx`. Build succeeded. *(result: success, 2m19s)*\n\n### Result\nAll four objectives completed:\n\n- **`/api/mc/architecture/graph`** — Replaced dead `localhost:8100` proxy with inline graph builder that walks `~/.openclaw/extensions/mission-control/`, parses imports via regex, resolves to real files, and returns `{ nodes, links }` with path filtering support\n- **`/api/mc/architecture/browse`** — Fixed path resolution bug (absolute paths no longer get double-homedir'd)\n- **`/api/mc/architecture/read`** — Same path fix applied\n- **Frontend** — Removed broken canvas-coordinate label overlay, improved `nodeLabel` hover to show filenames, defaulted file tree to extensions directory\n- **Build** — Completed successfully (4.42s)\n\n### Remaining\n- **Gateway restart needed** to pick up the backend TS changes (as noted, left for you to handle)",
+      "frozenResultCapturedAt": 1774568567917,
+      "endedHookEmittedAt": 1774568771551,
+      "cleanupCompletedAt": 1774568771619
+    },
+    "9e8320a0-eec7-467b-a271-7b2a4bc23cfc": {
+      "runId": "9e8320a0-eec7-467b-a271-7b2a4bc23cfc",
+      "childSessionKey": "agent:researcher:subagent:a0862bdf-fb6d-4021-9221-932a15624b84",
+      "controllerSessionKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "requesterSessionKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "task": "Research the open-source project **GStack** (~50K GitHub stars) — a YC process framework by Gary Tan that encodes startup expertise for solo devs.\n\nSearch for: GStack GitHub repo, Gary Tan GStack, YC process framework AI agent, and any related articles/docs.\n\nThen write a comprehensive knowledge document covering:\n1. **What it is and who built it** — Gary Tan, YC connection, mission\n2. **Architecture / how it works** — technical design, agent patterns, how it encodes startup processes\n3. **Key features and differentiators** — what makes it unique vs other frameworks\n4. **Installation / getting started** — how to set it up\n5. **Relevance to our work** — connections to multi-agent orchestration, wiggam loop patterns (observe→orient→decide→act improvement cycles), autonomous task execution\n6. **Links** — repo URL, docs, demos, key articles\n\nSave the document to: `/home/alansrobotlab/obsidian/agents/orchestrator/knowledge/ai/agent-frameworks/gstack.md`\n\nMake sure to create any directories that don't exist. Format as clean Markdown with frontmatter.",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "research-gstack",
+      "model": "local-llm-120b/Qwen3.5-122B-A10B",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/researcher",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568611402,
+      "startedAt": 1774568612352,
+      "sessionStartedAt": 1774568611402,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568790335,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Research Complete: GStack Knowledge Document Created\n\n**Vault note:** `/home/alansrobotlab/obsidian/agents/orchestrator/knowledge/ai/agent-frameworks/gstack.md` (created)\n\n**Summary:** GStack is an open-source skill pack for Claude Code created by Garry Tan (YC CEO) that transforms a single AI assistant into a virtual engineering team of 15+ specialists. It reached ~50K GitHub stars and demonstrates 600K+ lines of production code shipped in 60 days using role-based workflows.\n\n**Key Findings:**\n\n1. **What it is:** Not true multi-agent orchestration, but human-mediated role-switching via SKILL.md standard. 15 specialist roles (CEO, Eng Manager, Staff Engineer, Designer, QA, Release Engineer, etc.) invoked as slash commands.\n\n2. **Architecture:** \n   - 7-phase loop: Think→Plan→Build→Review→Test→Ship→Reflect\n   - Persistent Chromium daemon for browser automation (~100ms/command)\n   - Cross-model second opinion via `/codex` (OpenAI Codex CLI)\n   - Greptile integration for PR review triage\n\n3. **Differentiators:**\n   - Explicit cognitive gears vs. omni-bot generic mode\n   - Real browser testing with eyes (not just code generation)\n   - Automated regression test generation\n   - Review Readiness Dashboard\n   - Parallelism via Conductor (10-15 sessions)\n\n4. **Installation:** 30-second setup via `git clone` + `./setup`, works on Claude Code, Codex, Cursor, Copilot\n\n5. **Relevance to our work:**\n   - **Wiggam loop parallels:** Structured improvement cycles, human-in-the-loop gating, role specialization\n   - **Anthropic harness research alignment:** Rubric-based prompts, structured handoff artifacts, context management\n   - **Opportunity:** GStack's skill-based architecture could inspire our subagent skill system\n   - **Key insight:** Role specialization delivers ROI before adding orchestration complexity\n\n**Sources:**\n- GitHub: https://github.com/garrytan/gstack\n- Docs: https://gstacks.org/, https://gstack.lol/\n- Analysis: https://agentscodex.com/posts/2026-03-20-garry-tan-gstack-agent-teams-claude-code/",
+      "frozenResultCapturedAt": 1774568791025,
+      "endedHookEmittedAt": 1774568807899,
+      "cleanupCompletedAt": 1774568807913
+    },
+    "71ebc1ea-ad4d-4927-9162-a19a21f39e91": {
+      "runId": "71ebc1ea-ad4d-4927-9162-a19a21f39e91",
+      "childSessionKey": "agent:researcher:subagent:6f44be5c-3837-46ba-8617-b5b65a24e57c",
+      "controllerSessionKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "requesterSessionKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "task": "Research the open-source project **Paperclip** (~33K GitHub stars) — a zero-human company orchestration platform.\n\nSearch for: Paperclip GitHub zero-human company, Paperclip AI orchestration platform, Paperclip autonomous company, and any related articles/docs.\n\nThen write a comprehensive knowledge document covering:\n1. **What it is and who built it** — who created it, the zero-human company concept\n2. **Architecture / how it works** — technical design, how it orchestrates a full company without humans\n3. **Key features and differentiators** — what makes it unique vs other agent orchestration platforms\n4. **Installation / getting started** — how to set it up\n5. **Relevance to our work** — connections to multi-agent orchestration, wiggam loop patterns (observe→orient→decide→act improvement cycles), autonomous task execution\n6. **Links** — repo URL, docs, demos, key articles\n\nSave the document to: `/home/alansrobotlab/obsidian/agents/orchestrator/knowledge/ai/agent-frameworks/paperclip.md`\n\nMake sure to create any directories that don't exist. Format as clean Markdown with frontmatter.",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "research-paperclip",
+      "model": "local-llm-120b/Qwen3.5-122B-A10B",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/researcher",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568611539,
+      "startedAt": 1774568612374,
+      "sessionStartedAt": 1774568611539,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568759148,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Research: Paperclip AI Orchestration Platform\n\n**Vault note:** `/home/alansrobotlab/obsidian/agents/orchestrator/knowledge/ai/agent-frameworks/paperclip.md` (created)\n\n**Summary:** Paperclip is an open-source control plane (~33K GitHub stars) for running autonomous AI companies. Created by CodingMatty (Matt), it orchestrates teams of AI agents with org charts, goals, budgets, governance, and audit trails—treating the human operator as the Board of Directors.\n\n**Key findings:**\n- **Architecture:** Node.js + React + PostgreSQL with heartbeat-driven agent execution via pluggable adapters (process, HTTP, Claude Code, OpenClaw gateway, etc.)\n- **Core differentiator:** Models companies (org charts, budgets, governance) rather than just workflows—prevents \"group project with root access\"\n- **Heartbeat system:** Agents wake on schedule, check work, act, report back; atomic task checkout prevents conflicts\n- **Board governance:** Human can approve hires, override strategy, pause/terminate agents, set budgets at any level\n- **Cost discipline:** Per-agent budgets with hard ceilings that auto-pause agents—spend is part of the OS, not analytics\n- **Task-based communication:** No chat system—all coordination flows through tasks + comments, keeping context attached to work\n- **Relevance to our work:** Direct parallels to wiggam loops (heartbeat→nudge patterns), intelligence funnel (Opus→Sonnet→local models), and need for cheap triage before expensive runtime invocation\n\n**Related vault notes:**\n- `knowledge/ai/agent-architecture/anthropic-harness-design-long-running-agents.md` (three-agent architecture patterns)\n- `projects/idler/wiggam-loop` (our heartbeat-based session management)\n\n**Recommendation:** Paperclip's governance model and cost discipline patterns are worth integrating into our autonomy task system—particularly the \"Board as oversight\" pattern and budget-based agent throttling. The heartbeat system mirrors our idler poll approach, validating the design direction.",
+      "frozenResultCapturedAt": 1774568759625,
+      "endedHookEmittedAt": 1774568784620,
+      "cleanupCompletedAt": 1774568784635
+    },
+    "c7219ce9-7f89-4b91-81bb-0c875813c102": {
+      "runId": "c7219ce9-7f89-4b91-81bb-0c875813c102",
+      "childSessionKey": "agent:researcher:subagent:109c3f05-a7d6-4446-a7e1-6cd79ab34ffc",
+      "controllerSessionKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "requesterSessionKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "task": "Research the open-source project **Hermes Agent** (~13K GitHub stars) — a self-improving agent OS with closed learning loops by Nouse Research.\n\nSearch for: Hermes Agent GitHub, Nouse Research Hermes, self-improving agent OS, Hermes closed learning loops, and any related articles/docs.\n\nThen write a comprehensive knowledge document covering:\n1. **What it is and who built it** — Nouse Research, the concept of a self-improving agent OS\n2. **Architecture / how it works** — technical design, closed learning loops, how self-improvement works\n3. **Key features and differentiators** — what makes it unique vs other agent frameworks\n4. **Installation / getting started** — how to set it up\n5. **Relevance to our work** — connections to multi-agent orchestration, wiggam loop patterns (observe→orient→decide→act improvement cycles), autonomous task execution\n6. **Links** — repo URL, docs, demos, key articles\n\nSave the document to: `/home/alansrobotlab/obsidian/agents/orchestrator/knowledge/ai/agent-frameworks/hermes-agent.md`\n\nMake sure to create any directories that don't exist. Format as clean Markdown with frontmatter.",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "research-hermes-agent",
+      "model": "local-llm-120b/Qwen3.5-122B-A10B",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/researcher",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568611626,
+      "startedAt": 1774568612364,
+      "sessionStartedAt": 1774568611626,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568758978,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Research Complete\n\n**Vault note:** `/home/alansrobotlab/obsidian/agents/orchestrator/knowledge/ai/agent-frameworks/hermes-agent.md` (created)\n\n**Summary:** Researched Hermes Agent by Nous Research — a self-improving agent OS with closed learning loops (~13K GitHub stars). Documented its architecture, multi-layer memory system, autonomous skill creation, and persistent terminal access. Found strong relevance to our wiggam loop implementation and multi-agent orchestration work.\n\n**Key findings:**\n- **Closed learning loops:** Agent-curated memory with periodic nudges, autonomous skill creation after complex tasks, skill self-improvement during use\n- **Multi-level memory:** MEMORY.md (2,200 chars) + USER.md (1,375 chars) + FTS5 session search + skills library + Honcho user modeling\n- **Persistent terminal access:** 6 backends (local/Docker/SSH/Daytona/Singularity/Modal) enable long-running tasks with state preservation\n- **Skill system:** Progressive disclosure pattern (~3k tokens for list, full content on demand), follows agentskills.io open standard\n- **Wiggam relevance:** Both use nudge-based persistence; Hermes treats learning as first-class architecture vs. our task-completion focus\n\n**Related vault notes:**\n- `work/projects/ai-initiatives/wiggam-loop` — Our wiggam loop implementation (15:28-16:29 PDT, 3/26)\n- `knowledge/ai/agent-architecture/anthropic-harness-design-long-running-agents.md` — Anthropic research (18:04-18:16 PDT, 3/26)\n- Backlog #204 — Implement Anthropic Harness Design Patterns (rubric-based review, context reset, generator-evaluator loop)\n\n**Recommendation:** Consider integrating Hermes skill format for our subagent skills and studying periodic nudge patterns for long-running wiggam sessions. The closed learning loop architecture is production-ready and directly applicable to our multi-agent orchestration work.",
+      "frozenResultCapturedAt": 1774568759525,
+      "endedHookEmittedAt": 1774568777939,
+      "cleanupCompletedAt": 1774568777952
+    },
+    "64c48cc1-6ef0-4689-8fa7-ff4948ce1a04": {
+      "runId": "64c48cc1-6ef0-4689-8fa7-ff4948ce1a04",
+      "childSessionKey": "agent:researcher:subagent:e266245a-960b-457a-9c8c-8885e8da6b61",
+      "controllerSessionKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "requesterSessionKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "task": "Research the open-source project **Superpowers** (~115K GitHub stars) — a Claude Code plugin for TDD-driven development, by Yagy/Ora.\n\nSearch for: Superpowers Claude Code plugin GitHub, Yagy Superpowers, Ora Superpowers TDD, Claude Code TDD plugin, and any related articles/docs.\n\nThen write a comprehensive knowledge document covering:\n1. **What it is and who built it** — Yagy/Ora, the TDD-driven development approach with Claude Code\n2. **Architecture / how it works** — how it integrates with Claude Code, TDD workflow, plugin architecture\n3. **Key features and differentiators** — what makes it unique vs other coding agent tools\n4. **Installation / getting started** — how to set it up\n5. **Relevance to our work** — connections to multi-agent orchestration, wiggam loop patterns (observe→orient→decide→act improvement cycles), autonomous task execution\n6. **Links** — repo URL, docs, demos, key articles\n\nSave the document to: `/home/alansrobotlab/obsidian/agents/orchestrator/knowledge/ai/agent-frameworks/superpowers.md`\n\nMake sure to create any directories that don't exist. Format as clean Markdown with frontmatter.",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "label": "research-superpowers",
+      "model": "local-llm-120b/Qwen3.5-122B-A10B",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/researcher",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568611991,
+      "startedAt": 1774568612386,
+      "sessionStartedAt": 1774568611991,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568722598,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Research Complete\n\n**Vault note:** `/home/alansrobotlab/obsidian/agents/orchestrator/knowledge/ai/agent-frameworks/superpowers.md` (created)\n\n**Summary:** Superpowers is a comprehensive TDD-driven development framework for Claude Code created by Jesse Vincent (Request Tracker creator, Perl project leader). With ~115K GitHub stars and official Anthropic Marketplace acceptance (Jan 2026), it enforces disciplined workflows through a lazy-loading skills system that activates only when relevant.\n\n**Key findings:**\n- **Architecture:** Plugin-based skills system with 7-stage pipeline (brainstorm → plan → subagents → TDD → review → merge)\n- **Differentiators:** Session-independent persistence via Git-tracked plan files, mandatory TDD (\"Iron Law\"), token-efficient lazy loading (~2K bootstrap + 30-50 tokens/skill vs. 15K+ for CLAUDE.md)\n- **Relevance to our work:** Validates multi-agent orchestration patterns, rubric-based reviewers, context reset vs. compaction, file-based handoff artifacts — all complementary to our wiggam loop implementation\n\n**Sources:** GitHub repo, Anthropic Marketplace, Jesse Vincent's blog, multiple technical analyses from Simon Willison, Colin McNamara, and community discussions.",
+      "frozenResultCapturedAt": 1774568722888,
+      "endedHookEmittedAt": 1774568730861,
+      "cleanupCompletedAt": 1774568730874
+    },
+    "announce:v1:agent:coder:subagent:ba1a2157-7723-43a3-937b-126e17e7ac80:f88999bd-94e6-4cbd-83e2-51c66ff6c1f6": {
+      "runId": "announce:v1:agent:coder:subagent:ba1a2157-7723-43a3-937b-126e17e7ac80:f88999bd-94e6-4cbd-83e2-51c66ff6c1f6",
+      "childSessionKey": "agent:orchestrator:subagent:d3ef552c-d4fb-4939-b034-7a26b8ce563b",
+      "controllerSessionKey": "agent:main:mc-3cc3148a-8c10-439b-aa57-f17b6c01cf8a",
+      "requesterSessionKey": "agent:main:mc-3cc3148a-8c10-439b-aa57-f17b6c01cf8a",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:mc-3cc3148a-8c10-439b-aa57-f17b6c01cf8a",
+      "task": "## Mission: Memory Tab UX Enhancements — Graph Interactions + Right Panel + Document Modal\n\n**Backlog #192 — Phase 3 continued**\n\nEnhance the Memory tab's entity graph and right panel with richer interactions. All changes are in `~/.openclaw/extensions/mission-control/web/src/`.\n\n### Requirements (7 items)\n\n#### 1. Hover → Right Panel Document Stats\nWhen hovering over a node in the graph, show document info in the right panel automatically. This should:\n- Show the document path, title, vault section, connection count (number of edges), and related nodes list\n- Use a lightweight component (not the full EntityDetailPanel) — more like a quick-info card\n- Clear on mouse-out (or revert to entity detail if one is selected)\n- Debounce slightly (~150ms) to avoid flicker on quick mouse movements\n\n#### 2. Entity Selection → Graph Center + Highlight\nWhen an entity is selected in the left sidebar:\n- Find all graph nodes whose paths contain facts for that entity (the entity's fact files live at `memory/_pipeline/facts/{EntityName}/`)\n- Center the graph view on those nodes and their neighbors\n- Highlight the subgraph (dim everything else, like the existing `hasDimming` behavior)\n- Animate the centering smoothly (the graph already has `fgRef.current.centerAt()`)\n\nCurrently `handleEntitySelect` sets `selectedGraphNode` to the entity name, but the graph nodes are document paths (not entity names). This mismatch needs fixing — either:\n- Map entity name → document paths that contain it, then highlight the cluster\n- OR add the entity name as a node to the graph data (probably cleaner: add a virtual \"entity\" node type)\n\n**Recommended approach:** Add entity nodes to the entity-graph endpoint response. Backend (`memory.ts`) should include entities from `facts-index.json` as nodes with `type: \"entity\"` and create edges between entity nodes and their fact document paths. Then sidebar selection maps directly to a graph node ID.\n\n#### 3. Single-Click Doc Node → Right Panel Stats\nWhen single-clicking a document node in the graph:\n- Show document stats in the right panel: path, title, type, size, line count, connection count, list of connected documents\n- Fetch via existing `api.memoryRead(path)` for full document info\n- This replaces the hover info (hover is transient, click is sticky)\n\n#### 4. Double-Click Doc Node → Document Modal\nWhen double-clicking a document node in the graph:\n- Open the full DocumentModal (edit/save/cancel) for that document\n- Use existing `handleOpenFile(path)` which calls `api.memoryRead(path)` and sets `doc` state\n- The DocumentModal component already exists and works\n\nCurrently `onNodeClick` is used for single-click. Add `onNodeDoubleClick` handler to `EntityGraph.tsx` via the `onNodeClick` prop with a double-click detector (timestamp-based, ~300ms threshold), or use the `ForceGraph2D` component's built-in handlers if available.\n\n#### 5. Explorer Tab → Click Opens Document Modal  \nIn the VaultExplorer component, clicking a file already calls `onOpenFile(path)` which calls `handleOpenFile`. Verify this actually opens the DocumentModal. Looking at the code, `handleOpenFile` sets `doc` state which renders `<DocumentModal>` — this should already work. **Test and confirm, fix if broken.**\n\n#### 6. Edge Type Filtering\nAdd toggle checkboxes in the graph controls area (bottom-right, next to existing Reset/Fit buttons):\n- \"wiki-link\" toggle (default: on)\n- \"tag-cluster\" toggle (default: on)\n- When a type is toggled off, filter those edges from the rendered graph data\n- Filter at the component level (not API level) — just filter `graphData.links` before passing to ForceGraph2D\n\n#### 7. Node Sizing by Connection Degree\nReplace the fixed `nodeRadius()` function in EntityGraph.tsx:\n- Calculate each node's degree (number of edges connected to it) during graph data load\n- Map degree to radius: `Math.max(2, Math.min(8, 2 + Math.sqrt(degree) * 0.6))`\n- More connected nodes render larger — gives visual weight to hub documents\n- Store degree in a Map or as a property on the GNode\n\n#### 8. Vault Section Color Legend\nThe graph already colors nodes by vault section (memory, projects, knowledge, agents). Add a small legend overlay:\n- Position: top-left of graph (where edge type legend currently is)\n- Merge with existing legend: show both edge types AND node section colors\n- Keep it compact: colored dots + section names\n\n### Current Code State (reference for coder)\n\n**EntityGraph.tsx** (384 lines):\n- `ForceGraph2D` with `onNodeClick`, `onNodeHover` handlers\n- `nodeCanvasObject` does custom node rendering\n- `highlightNodes`/`highlightLinks` sets for dimming\n- `selectedNode` prop syncs with external selection\n- Node colors already vary by vault section (`nodeColor()` function)\n- Fixed `nodeRadius()` returns 2.5\n\n**MemoryPage.tsx** (main page):\n- `handleEntitySelect(name)` → sets `activeEntity` + `selectedGraphNode` (currently mismatched — entity name vs doc path)\n- `handleGraphNodeClick(nodeId)` → tries to match entity by name\n- `handleOpenFile(path)` → fetches doc, sets `doc` state → renders DocumentModal\n- Right panel shows: SearchResults OR EntityDetailPanel OR loading state\n- Document modal renders when `doc` is set\n\n**api.ts entity types:**\n```typescript\ninterface EntityGraphNode { id: string; label: string; type: string; factCount?: number; }\ninterface EntityGraphEdge { source: string; target: string; type: string; weight: number; }\n```\n\n**Backend entity-graph endpoint** (`memory.ts`):\n- Reads `relations-index.json`, builds doc-level nodes + edges\n- Nodes are document paths, type is always \"document\"\n- Need to ADD entity nodes (type: \"entity\") with edges to their fact documents\n\n### Backend Change Needed\n\nIn `memory.ts`, `loadEntityGraph()` function:\n- After building doc nodes/edges from relations-index.json\n- Also read facts-index.json\n- For each entity with facts, add a node: `{id: \"entity::{EntityName}\", label: EntityName, type: \"entity\", factCount: N}`\n- Add edges from entity node to each of its fact document paths\n- This enables direct entity selection → graph node mapping\n\n### Build Command\n`/usr/bin/distrobox-host-exec docker exec lloyd bash -c \"cd /home/alansrobotlab/agents/lloyd-home/.openclaw/extensions/mission-control/web && /home/alansrobotlab/.bun/bin/bun run build\"`\n\n### Constraints\n- Don't break existing functionality (search, browse, document modal)\n- Keep the same dark theme and color palette\n- Performance: 1,664+ nodes. Debounce hover, don't re-render full graph on right panel changes\n- `react-force-graph-2d` is the graph library — check its API for double-click support before implementing custom detection",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/orchestrator",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568668647,
+      "startedAt": 1774568669117,
+      "sessionStartedAt": 1774567857291,
+      "accumulatedRuntimeMs": 45507,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568678780,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Report: Memory Tab UX Enhancements — Complete\n\n### Execution\n1. **coder** — Implemented all 8 requirements across backend and frontend (result: ✅ success, clean build)\n\n### Result\n\n**Backend (`memory.ts`):**\n- `loadEntityGraph()` now reads `facts-index.json` and adds entity nodes (`entity::{Name}`, type \"entity\") with `has-facts` edges to their fact document paths\n\n**Frontend (`EntityGraph.tsx`):**\n- Node sizing by connection degree (sqrt-scaled radius 2–8)\n- Edge type filtering toggles (wiki-link, tag-cluster, has-facts) with orphan node removal\n- Hover callback with 150ms debounce\n- Double-click detection (300ms threshold) via timestamp-based logic in `onNodeClick`\n- Entity nodes render as gold/amber diamonds, distinct from document nodes\n- Entity selection centers + highlights subgraph using existing dimming behavior\n- Merged legend (top-left): vault section colors + edge type colors\n\n**Frontend (`MemoryPage.tsx`):**\n- `NodeQuickInfo` component for hover → right panel (transient)\n- `DocNodeDetail` component for single-click → right panel with full doc stats via `api.memoryRead()` (sticky)\n- Entity selection mismatch fixed: `selectedGraphNode` now set to `entity::${name}`\n- Double-click doc node opens DocumentModal via `handleOpenFile`\n- Explorer → DocumentModal flow verified intact\n- Right panel state managed via discriminated union (`RightPanelMode`)\n\n**Build passed cleanly.**\n\n### Issues\nNone — all 8 items implemented and build succeeds.",
+      "frozenResultCapturedAt": 1774568679166,
+      "endedHookEmittedAt": 1774568742819,
+      "cleanupCompletedAt": 1774568742833
+    },
+    "announce:v1:agent:researcher:subagent:a0862bdf-fb6d-4021-9221-932a15624b84:9e8320a0-eec7-467b-a271-7b2a4bc23cfc": {
+      "runId": "announce:v1:agent:researcher:subagent:a0862bdf-fb6d-4021-9221-932a15624b84:9e8320a0-eec7-467b-a271-7b2a4bc23cfc",
+      "childSessionKey": "agent:orchestrator:subagent:88c712ed-a4ac-4e2f-8c66-fea731bc4c5d",
+      "controllerSessionKey": "agent:main:mc-e1cbeb9d-3b1c-4262-a392-30033fcf49aa",
+      "requesterSessionKey": "agent:main:mc-e1cbeb9d-3b1c-4262-a392-30033fcf49aa",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:mc-e1cbeb9d-3b1c-4262-a392-30033fcf49aa",
+      "task": "Create individual knowledge documents for each of these four open-source AI agent projects. For each one, research the project thoroughly (GitHub repo, docs, any available articles) and write a dedicated knowledge doc.\n\n**Projects:**\n1. **GStack** (~50K stars) — YC process framework by Gary Tan, encodes startup expertise for solo devs\n2. **Hermes Agent** (~13K stars) — Self-improving agent OS with closed learning loops by Nouse Research\n3. **Superpowers** (~115K stars) — Claude Code plugin for TDD-driven development (by Yagy/Ora)\n4. **Paperclip** (~33K stars) — Zero-human company orchestration platform\n\n**For each project, the doc should cover:**\n- What it is and who built it\n- Architecture / how it works\n- Key features and differentiators\n- Installation / getting started\n- Relevance to our work (multi-agent orchestration, wiggam loop patterns, autonomous task execution)\n- Links to repo, docs, demos\n\n**Save each doc to:** `knowledge/ai/agent-frameworks/` with a descriptive filename (e.g. `gstack.md`, `hermes-agent.md`, `superpowers.md`, `paperclip.md`)\n\nUse the researcher agent for each project. Parallelize where possible.",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/orchestrator",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774568792922,
+      "startedAt": 1774568793982,
+      "sessionStartedAt": 1774568590535,
+      "accumulatedRuntimeMs": 33224,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774568805884,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "All 4 researchers complete. Here's the final report.\n\n## Report: AI Agent Framework Knowledge Docs\n\n### Execution\n1. **researcher** (GStack) — Researched and wrote knowledge doc ✅\n2. **researcher** (Hermes Agent) — Researched and wrote knowledge doc ✅\n3. **researcher** (Superpowers) — Researched and wrote knowledge doc ✅\n4. **researcher** (Paperclip) — Researched and wrote knowledge doc ✅\n\nAll 4 ran in parallel; total wall-clock time ~3 minutes.\n\n### Result\n\nFour knowledge documents created in `knowledge/ai/agent-frameworks/`:\n\n| File | Project | Stars | Key Insight |\n|------|---------|-------|-------------|\n| `gstack.md` | GStack (Garry Tan) | ~50K | Role-based skill pack for Claude Code; 15 specialist roles, 7-phase loop, human-mediated role-switching. Shows role specialization delivers ROI before adding orchestration complexity. |\n| `hermes-agent.md` | Hermes Agent (Nous Research) | ~13K | Self-improving agent OS with closed learning loops, multi-layer memory, autonomous skill creation. Closest parallel to our wiggam loop nudge patterns. |\n| `superpowers.md` | Superpowers (Jesse Vincent) | ~115K | TDD-driven Claude Code plugin with 7-stage pipeline, lazy-loading skills (~2K bootstrap), Anthropic Marketplace listing. Validates rubric-based reviewers and file-based handoff artifacts. |\n| `paperclip.md` | Paperclip (CodingMatty) | ~33K | Zero-human company control plane with org charts, budgets, board governance, heartbeat-driven agents. Direct parallels to our autonomy task system and idler poll approach. |\n\n### Cross-Cutting Themes\n- **All four** use structured improvement cycles (aligning with wiggam loop patterns)\n- **Skill/role systems** are a recurring pattern (GStack roles, Hermes skills, Superpowers lazy-loading skills)\n- **Heartbeat/nudge patterns** validated by both Hermes and Paperclip\n- **Budget/cost discipline** (Paperclip) and **token efficiency** (Superpowers) are emerging concerns in production agent systems\n\n### Issues\nNone — all agents completed successfully.",
+      "frozenResultCapturedAt": 1774568806918,
+      "endedHookEmittedAt": 1774568818241,
+      "cleanupCompletedAt": 1774568818253
+    },
+    "f11ba1cf-cac3-4570-bcc7-a11576a09be9": {
+      "runId": "f11ba1cf-cac3-4570-bcc7-a11576a09be9",
+      "childSessionKey": "agent:coder:subagent:85b27cf9-376b-4f4f-be1e-226680f50aa4",
+      "controllerSessionKey": "agent:orchestrator:subagent:0e148391-a5d7-4917-882c-435d1239d5d4",
+      "requesterSessionKey": "agent:orchestrator:subagent:0e148391-a5d7-4917-882c-435d1239d5d4",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:orchestrator:subagent:0e148391-a5d7-4917-882c-435d1239d5d4",
+      "task": "## Architecture Tab UI Fixes — Surgical Bug Fixes\n\nYou need to modify two files to fix bugs in the Architecture tab of Mission Control.\n\n### Files to modify\n1. `~/.openclaw/extensions/mission-control/architecture.ts` — backend bug fixes\n2. `~/.openclaw/extensions/mission-control/web/src/components/pages/ArchitecturePage.tsx` — frontend fixes\n\nRead both files first, then apply ALL fixes below.\n\n---\n\n### Bug 1: Fix scoping bug in architecture.ts (browse + read handlers)\n\nIn the `/api/mc/architecture/browse` handler, when `browsePath.startsWith(\"/\")`, `normalizedPath` is never defined (it's `const` inside the `else` block). But the response uses `normalizedPath`, causing a ReferenceError crash.\n\n**Fix pattern for the browse handler:**\nReplace the path resolution logic with:\n```typescript\nlet fullPath: string;\nlet responsePath: string;\n\nif (browsePath.startsWith(\"/\")) {\n  fullPath = browsePath;\n  responsePath = browsePath;\n} else {\n  const normalizedPath = browsePath.replace(/^\\/+|\\/+$/g, \"\");\n  const matchingRoot = ALLOWED_ROOTS.find(root => root.endsWith(normalizedPath) || root === normalizedPath);\n  fullPath = matchingRoot || join(homedir(), normalizedPath);\n  responsePath = normalizedPath;\n}\n```\nThen replace any `normalizedPath` reference in the response with `responsePath`.\n\n**The same bug exists in the `/api/mc/architecture/read` handler** — fix identically. Introduce `fullPath` and `responsePath` variables, and replace `normalizedPath` in the response.\n\n---\n\n### Bug 2: Add persistent node labels on graph (ArchitecturePage.tsx)\n\nAdd these props to the `ForceGraph2D` component:\n\n```tsx\nnodeCanvasObjectMode={() => \"after\"}\nnodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {\n  const label = getFileName(node.path || node.id);\n  const fontSize = Math.max(10 / globalScale, 2);\n  ctx.font = `${fontSize}px sans-serif`;\n  ctx.textAlign = \"center\";\n  ctx.textBaseline = \"top\";\n  ctx.fillStyle = \"rgba(203, 213, 225, 0.8)\";\n  ctx.fillText(label, node.x, node.y + 5);\n}}\n```\n\nMake sure `getFileName` is available — it should already exist in the file (extracts filename from path). If not, add: `const getFileName = (path: string) => path.split(\"/\").pop() || path;`\n\n---\n\n### Bug 3: Fix dependency list filtering in FileDetailsPanel (ArchitecturePage.tsx)\n\nreact-force-graph mutates `link.source` and `link.target` from strings to node objects after rendering. The current code compares `l.source === node.id` which fails.\n\n**Fix:** Add a helper function and update the filtering:\n\n```tsx\nconst getNodeId = (ref: any): string => typeof ref === \"string\" ? ref : ref?.id || \"\";\n\nconst dependsOn = links\n  .filter(l => getNodeId(l.source) === node.id)\n  .map(l => nodes.find(n => n.id === getNodeId(l.target)))\n  .filter((n): n is GraphNode => n !== undefined);\n\nconst dependedOnBy = links\n  .filter(l => getNodeId(l.target) === node.id)\n  .map(l => nodes.find(n => n.id === getNodeId(l.source)))\n  .filter((n): n is GraphNode => n !== undefined);\n```\n\n---\n\n### Bug 4: Add onNodeHover to populate right panel (ArchitecturePage.tsx)\n\nAdd `onNodeHover` prop to `ForceGraph2D`:\n\n```tsx\nonNodeHover={(node: GraphNode | null) => {\n  if (node) onSelectNode(node.id);\n}}\n```\n\nKeep existing `onNodeClick` — hover just populates the details panel.\n\n---\n\n### Rename dependency section labels in FileDetailsPanel\n\n- \"Depends On\" → \"Imports\" (with ArrowRightLeft icon)\n- \"Depended On By\" → \"Imported By\" (with Layers icon)\n\n---\n\n### Build after ALL changes\n\nRun this exact command:\n```bash\n/usr/bin/distrobox-host-exec docker exec lloyd bash -c \"cd /home/alansrobotlab/agents/lloyd-home/.openclaw/extensions/mission-control/web && /home/alansrobotlab/.bun/bin/bun run build\"\n```\n\n### Do NOT restart gateway\n\n### Success criteria\n- All bugs fixed in both files\n- Build succeeds with no errors",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-sonnet-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/coder",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774569674184,
+      "startedAt": 1774569674321,
+      "sessionStartedAt": 1774569646716,
+      "accumulatedRuntimeMs": 26863,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774569838629,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "Build succeeded. Here's a summary of all changes made:\n\n**architecture.ts (Bug 1 — scoping fix):**\n- Browse handler: introduced `responsePath` alongside `fullPath`; absolute paths set both to `browsePath`, relative paths set `responsePath = normalizedPath`. Response now uses `responsePath` instead of the out-of-scope `normalizedPath`.\n- Read handler: same pattern applied identically.\n\n**ArchitecturePage.tsx:**\n- **Bug 2 (node labels):** Added `nodeCanvasObjectMode` and `nodeCanvasObject` props to `ForceGraph2D` — draws filename labels below each node at scale-aware font size.\n- **Bug 3 (dep filtering):** Added `getNodeId` helper to unwrap string-or-object link refs; updated `dependsOn`/`dependedOnBy` filters to use it.\n- **Bug 4 (hover → details panel):** Added `onNodeHover` prop that calls `onSelectNode` on hover.\n- **Label rename:** \"Depends On\" → \"Imports\", \"Depended On By\" → \"Imported By\".\n\n**Sidebar.tsx:**\n- Removed `Cpu` and `Clock` from lucide imports.\n- Removed `\"models\"` and `\"cron\"` from `Page` union type.\n- Removed Models and Crontab entries from `NAV_ITEMS`.\n\n**Layout.tsx:**\n- Removed `ModelsPage` and `CronPage` imports.\n- Removed `models` and `cron` entries from the `PAGES` map.",
+      "frozenResultCapturedAt": 1774569838963,
+      "endedHookEmittedAt": 1774569848993,
+      "cleanupCompletedAt": 1774569849000
+    },
+    "announce:v1:agent:coder:subagent:85b27cf9-376b-4f4f-be1e-226680f50aa4:f11ba1cf-cac3-4570-bcc7-a11576a09be9": {
+      "runId": "announce:v1:agent:coder:subagent:85b27cf9-376b-4f4f-be1e-226680f50aa4:f11ba1cf-cac3-4570-bcc7-a11576a09be9",
+      "childSessionKey": "agent:orchestrator:subagent:0e148391-a5d7-4917-882c-435d1239d5d4",
+      "controllerSessionKey": "agent:main:mc-5c7aedd0-00ef-4433-b2c2-3e4689733d80",
+      "requesterSessionKey": "agent:main:mc-5c7aedd0-00ef-4433-b2c2-3e4689733d80",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:mc-5c7aedd0-00ef-4433-b2c2-3e4689733d80",
+      "task": "## Task: Architecture Tab UI Fixes (Backlog #160, iteration 2)\n\n### Context\nThe Architecture tab is partially working after the first round of changes. The graph endpoint returns real data, but there are bugs preventing the UI from working properly. I've traced all root causes — this is a surgical fix task.\n\n### Files to modify\n1. `~/.openclaw/extensions/mission-control/architecture.ts` — backend bug fix\n2. `~/.openclaw/extensions/mission-control/web/src/components/pages/ArchitecturePage.tsx` — frontend fixes\n\n### Bug 1: File browser is empty (backend crash)\n\nIn `architecture.ts`, the `/api/mc/architecture/browse` handler has a scoping bug. When `browsePath.startsWith(\"/\")`, the code enters the `if` branch and `normalizedPath` is never defined (it's `const` inside the `else` block). But the response at line ~130 uses `normalizedPath`:\n\n```typescript\njsonResponse(res, { path: normalizedPath, entries });\n```\n\nThis throws a ReferenceError, crashing the handler.\n\n**Fix:** Move `normalizedPath` declaration to outer scope. When the path starts with \"/\", set `normalizedPath` to the path relative to the matching root, or just use `fullPath` as the response path. Here's the pattern:\n\n```typescript\nlet fullPath: string;\nlet responsePath: string;\n\nif (browsePath.startsWith(\"/\")) {\n  fullPath = browsePath;\n  responsePath = browsePath;\n} else {\n  const normalizedPath = browsePath.replace(/^\\/+|\\/+$/g, \"\");\n  const matchingRoot = ALLOWED_ROOTS.find(root => root.endsWith(normalizedPath) || root === normalizedPath);\n  fullPath = matchingRoot || join(homedir(), normalizedPath);\n  responsePath = normalizedPath;\n}\n// ... later:\njsonResponse(res, { path: responsePath, entries });\n```\n\n**Same bug exists in the `/api/mc/architecture/read` handler** — the response uses `normalizedPath` which is scoped inside the else block. Fix identically.\n\n### Bug 2: Add persistent node labels on graph\n\nIn `ArchitecturePage.tsx`, the `ForceGraph2D` only shows labels on hover via `nodeLabel`. Alan wants persistent visible labels on each node.\n\n**Fix:** Add `nodeCanvasObject` and `nodeCanvasObjectMode` props to draw the filename below each node circle:\n\n```tsx\nnodeCanvasObjectMode={() => \"after\"}\nnodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {\n  const label = getFileName(node.path || node.id);\n  const fontSize = Math.max(10 / globalScale, 2);\n  ctx.font = `${fontSize}px sans-serif`;\n  ctx.textAlign = \"center\";\n  ctx.textBaseline = \"top\";\n  ctx.fillStyle = \"rgba(203, 213, 225, 0.8)\"; // slate-300 with some transparency\n  ctx.fillText(label, node.x, node.y + 5);\n}}\n```\n\n### Bug 3: Right panel dependency lists are always empty\n\n`FileDetailsPanel` filters links with `links.filter(l => l.source === node.id)`. But react-force-graph **mutates link.source and link.target from strings to node objects** after rendering. So `l.source` is a node object, not a string ID.\n\n**Fix:** In the `dependsOn` and `dependedOnBy` computations, handle both cases:\n\n```tsx\nconst getNodeId = (ref: any): string => typeof ref === \"string\" ? ref : ref?.id || \"\";\n\nconst dependsOn = links\n  .filter(l => getNodeId(l.source) === node.id)\n  .map(l => nodes.find(n => n.id === getNodeId(l.target)))\n  .filter((n): n is GraphNode => n !== undefined);\n\nconst dependedOnBy = links\n  .filter(l => getNodeId(l.target) === node.id)\n  .map(l => nodes.find(n => n.id === getNodeId(l.source)))\n  .filter((n): n is GraphNode => n !== undefined);\n```\n\n### Bug 4: Right panel should populate on hover too\n\nCurrently `onNodeClick` is the only way to select a node and show the right panel. Add `onNodeHover` to also trigger it:\n\n```tsx\nonNodeHover={(node: GraphNode | null) => {\n  if (node) onSelectNode(node.id);\n}}\n```\n\nKeep `onNodeClick` too for selecting + centering. The hover just populates the details panel.\n\n### Bug 5: File tree click should open modal popup\n\nThis should already work — `handleOpenFile` calls `api.architectureRead` and sets `selectedFile`, which renders `FileViewerModal`. The issue is that Bug 1 (browse handler crash) prevents the file tree from loading at all. Once Bug 1 is fixed, file clicks should work. Just verify the modal renders.\n\n### Rename the dependency sections in FileDetailsPanel\n\n- \"Depends On\" → \"Imports\" (with ArrowRightLeft icon)\n- \"Depended On By\" → \"Imported By\" (with Layers icon)\n\nThese are clearer labels for what the sections actually show.\n\n### Build after changes\n```bash\n/usr/bin/distrobox-host-exec docker exec lloyd bash -c \"cd /home/alansrobotlab/agents/lloyd-home/.openclaw/extensions/mission-control/web && /home/alansrobotlab/.bun/bin/bun run build\"\n```\n\n### Do NOT restart gateway\nI'll handle the restart separately.\n\n### Success criteria\n- File browser populates with the extensions directory tree\n- Clicking a file opens the syntax-highlighted modal viewer\n- Graph shows persistent filename labels on each node\n- Hovering over a node shows stats + import/imported-by lists in the right panel\n- Clicking a node also selects it\n- Build succeeds with no errors",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/orchestrator",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774569839508,
+      "startedAt": 1774569839982,
+      "sessionStartedAt": 1774569627706,
+      "accumulatedRuntimeMs": 48800,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774569848386,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Report: Architecture Tab UI Fixes + Tab Removal\n\n### Execution\n1. **coder** — Applied all 6 changes across 4 files (2m44s, result: **success**)\n\n### Result\nAll changes applied and **build succeeded**:\n\n- **Bug 1 (backend crash):** Fixed `normalizedPath` scoping in both browse and read handlers — introduced `responsePath` variable at outer scope\n- **Bug 2 (graph labels):** Added persistent filename labels via `nodeCanvasObject` on `ForceGraph2D`\n- **Bug 3 (empty dep lists):** Added `getNodeId` helper to handle force-graph's string→object mutation on link refs\n- **Bug 4 (hover selection):** Added `onNodeHover` to populate the right panel details on hover\n- **Label renames:** \"Depends On\" → \"Imports\", \"Depended On By\" → \"Imported By\"\n- **Tab removal:** Models and Crontab removed from Sidebar.tsx (union type + nav items + unused icon imports) and Layout.tsx (imports + page map). Page files kept.\n\n### Issues\nNone — build clean. Gateway restart still needed (not done per instructions).",
+      "frozenResultCapturedAt": 1774569848801,
+      "endedHookEmittedAt": 1774569879609,
+      "cleanupCompletedAt": 1774569879616
+    },
+    "31e5a617-e3c9-4a1d-9f69-1fbfee7fbb52": {
+      "runId": "31e5a617-e3c9-4a1d-9f69-1fbfee7fbb52",
+      "childSessionKey": "agent:coder:subagent:0ac578e0-2b8b-4810-aa9a-a0c213afa5a6",
+      "controllerSessionKey": "agent:orchestrator:subagent:30b32071-2ed7-4700-bd97-1a4270eefe6b",
+      "requesterSessionKey": "agent:orchestrator:subagent:30b32071-2ed7-4700-bd97-1a4270eefe6b",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:orchestrator:subagent:30b32071-2ed7-4700-bd97-1a4270eefe6b",
+      "task": "## Fix Mission Control Services Page — Gateway Restart Never Recovers\n\nMake two code changes and build.\n\n### File 1: `~/.openclaw/extensions/mission-control/services.ts`\n\nIn the `/api/mc/services/action` handler, inside the supervisor-managed branch (around line 113-130), detect when the service being restarted/stopped is the gateway itself. The gateway service IDs are `openclaw-gateway` and `openclaw-lloyd` (both map to port 18789 in AGENT_PORT_MAP).\n\n**Current code** (the supervisor-managed block starting ~line 113):\n```typescript\n        if (supEntries.some(e => e.name === supervisorName)) {\n          try {\n            execSync(\n              `supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf ${action} ${supervisorName}`,\n              { encoding: \"utf-8\", timeout: 30000 },\n            );\n            jsonResponse(res, { ok: true, serviceId, action, managedBy: \"supervisor\" });\n          } catch (err: any) {\n            if (action === \"restart\" && err.stdout?.includes(\"started\")) {\n              jsonResponse(res, { ok: true, serviceId, action, managedBy: \"supervisor\" });\n            } else {\n              jsonResponse(res, { error: err.message }, 500);\n            }\n          }\n          return;\n        }\n```\n\n**Replace with:**\n```typescript\n        if (supEntries.some(e => e.name === supervisorName)) {\n          // Detect self-restart: if restarting/stopping the gateway we're running inside,\n          // send response first, then exit (supervisord autorestart will bring us back)\n          const isSelfService = (serviceId === \"openclaw-gateway\" || serviceId === \"openclaw-lloyd\") && \n            (action === \"restart\" || action === \"stop\");\n          \n          if (isSelfService) {\n            jsonResponse(res, { ok: true, serviceId, action, managedBy: \"supervisor\", selfRestart: true });\n            setTimeout(() => process.exit(0), 500);\n            return;\n          }\n          \n          try {\n            execSync(\n              `supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf ${action} ${supervisorName}`,\n              { encoding: \"utf-8\", timeout: 30000 },\n            );\n            jsonResponse(res, { ok: true, serviceId, action, managedBy: \"supervisor\" });\n          } catch (err: any) {\n            if (action === \"restart\" && err.stdout?.includes(\"started\")) {\n              jsonResponse(res, { ok: true, serviceId, action, managedBy: \"supervisor\" });\n            } else {\n              jsonResponse(res, { error: err.message }, 500);\n            }\n          }\n          return;\n        }\n```\n\n### File 2: `~/.openclaw/extensions/mission-control/web/src/components/pages/ServicesPage.tsx`\n\nIn the `handleLloydAction` function (around line 140-153), add gateway restart/stop handling BEFORE the existing `setLloydActionLoading` line. The function currently looks like:\n\n```typescript\n  const handleLloydAction = async (\n    e: React.MouseEvent,\n    serviceId: string,\n    action: \"start\" | \"stop\" | \"restart\",\n  ) => {\n    e.stopPropagation();\n    setLloydActionLoading(`${serviceId}-${action}`);\n    try {\n```\n\n**Replace the entire `handleLloydAction` function with:**\n```typescript\n  const handleLloydAction = async (\n    e: React.MouseEvent,\n    serviceId: string,\n    action: \"start\" | \"stop\" | \"restart\",\n  ) => {\n    e.stopPropagation();\n\n    // Gateway restart: show overlay with countdown, fire-and-forget the API call\n    if ((serviceId === \"openclaw-gateway\" || serviceId === \"openclaw-lloyd\") && action === \"restart\") {\n      setGatewayRestarting(true);\n      setCountdown(8);\n      api.lloydServiceAction(serviceId, action).catch(() => {});\n      const tick = setInterval(() => {\n        setCountdown((c) => {\n          if (c <= 1) {\n            clearInterval(tick);\n            window.location.reload();\n            return 0;\n          }\n          return c - 1;\n        });\n      }, 1000);\n      return;\n    }\n\n    // Gateway stop: confirm before proceeding\n    if ((serviceId === \"openclaw-gateway\" || serviceId === \"openclaw-lloyd\") && action === \"stop\") {\n      const ok = window.confirm(\n        \"Stopping the gateway will disconnect Mission Control and all services will become unreachable. Continue?\",\n      );\n      if (!ok) return;\n      api.lloydServiceAction(serviceId, action).catch(() => {});\n      return;\n    }\n\n    setLloydActionLoading(`${serviceId}-${action}`);\n    try {\n      await api.lloydServiceAction(serviceId, action);\n      await new Promise((r) => setTimeout(r, 1500));\n      await refreshLloyd();\n      if (lloydExpandedUnit) fetchLloydDetail(lloydExpandedUnit);\n    } catch {\n      await refreshLloyd();\n    }\n    setLloydActionLoading(null);\n  };\n```\n\n### Build\nAfter both changes, run:\n```bash\n/usr/bin/distrobox-host-exec docker exec lloyd bash -c \"cd /home/alansrobotlab/agents/lloyd-home/.openclaw/extensions/mission-control/web && /home/alansrobotlab/.bun/bin/bun run build\"\n```\n\nDo NOT restart any services. Just make the code changes and build.\n\n### Verification\n- Read back both modified files and confirm the changes are correct\n- Confirm the build succeeds with no errors",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-sonnet-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/coder",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774570495998,
+      "startedAt": 1774570496847,
+      "sessionStartedAt": 1774570495998,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774570564932,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "Build succeeded. Here's a summary of what was accomplished:\n\n## Completed\n\n**File 1: `services.ts`** — Modified the supervisor-managed branch in `/api/mc/services/action` to detect self-service restarts. When the gateway (`openclaw-gateway` or `openclaw-lloyd`) is being restarted or stopped, it now sends the response immediately, then calls `process.exit(0)` after 500ms. Supervisord's autorestart will bring the process back up cleanly instead of getting stuck.\n\n**File 2: `ServicesPage.tsx`** — Replaced the `handleLloydAction` function to add gateway-aware handling before the generic loading path:\n- **Restart**: Shows the existing overlay with an 8-second countdown, fires the API call fire-and-forget, then auto-reloads the page.\n- **Stop**: Prompts a confirmation dialog warning the user that Mission Control will become unreachable, then fires fire-and-forget.\n- All other services fall through to the existing behavior.\n\n**Build**: Succeeded in 3.39s with no errors (only a harmless chunk size warning about the bundle being >500KB, which is pre-existing).",
+      "frozenResultCapturedAt": 1774570565403,
+      "endedHookEmittedAt": 1774570576585,
+      "cleanupCompletedAt": 1774570576593
+    },
+    "announce:v1:agent:coder:subagent:0ac578e0-2b8b-4810-aa9a-a0c213afa5a6:31e5a617-e3c9-4a1d-9f69-1fbfee7fbb52": {
+      "runId": "announce:v1:agent:coder:subagent:0ac578e0-2b8b-4810-aa9a-a0c213afa5a6:31e5a617-e3c9-4a1d-9f69-1fbfee7fbb52",
+      "childSessionKey": "agent:orchestrator:subagent:30b32071-2ed7-4700-bd97-1a4270eefe6b",
+      "controllerSessionKey": "agent:main:mc-56749773-6ba3-4ff6-b2c7-e438419b1691",
+      "requesterSessionKey": "agent:main:mc-56749773-6ba3-4ff6-b2c7-e438419b1691",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:mc-56749773-6ba3-4ff6-b2c7-e438419b1691",
+      "task": "## Fix Mission Control Services Page — Gateway Restart Never Recovers\n\n### Problem\nClicking restart on `openclaw-gateway` from the Mission Control Services page kills the gateway mid-request. The HTTP response never makes it back, the frontend gets a network error, and the page stays stuck — it never reloads.\n\n### Root Cause\nThe gateway process IS supervisor-managed (`autorestart=true`), so killing it works fine — supervisord brings it back. But:\n\n1. **Backend** (`~/.openclaw/extensions/mission-control/services.ts`): The `/api/mc/services/action` handler for supervisor-managed services calls `supervisorctl restart` synchronously, which kills the gateway before the HTTP response can be sent.\n2. **Frontend** (`~/.openclaw/extensions/mission-control/web/src/components/pages/ServicesPage.tsx`): The `handleLloydAction` function (used for supervisor/systemd services) has NO special gateway restart handling. The nice restart overlay (countdown + `window.location.reload()`) only exists in `handleAction` for `MANAGED_SERVICES` — which is an empty array and never used.\n\n### Solution\n\n#### Backend Fix (services.ts)\nIn the `/api/mc/services/action` handler, inside the supervisor-managed branch, detect when the service being restarted is the gateway itself (the process we're running inside). For that case:\n1. Send the JSON success response FIRST: `jsonResponse(res, { ok: true, serviceId, action, managedBy: \"supervisor\", selfRestart: true })`\n2. THEN schedule the kill after a short delay: `setTimeout(() => process.exit(0), 500)` — supervisord's `autorestart=true` + `stopasgroup=true` + `killasgroup=true` will handle the restart cleanly.\n3. Only do this for restart/stop of `openclaw-gateway` (or any unit matching the current gateway's own identity). For other supervisor services, keep existing `supervisorctl` behavior.\n\nDetection: The service ID will be `openclaw-gateway` (or match `openclaw-lloyd` based on the AGENT_PORT_MAP). Check if `serviceId` matches any of: `openclaw-gateway`, `openclaw-lloyd`. These are the same service — look at AGENT_PORT_MAP which maps both to port 18789.\n\n#### Frontend Fix (ServicesPage.tsx)\nIn `handleLloydAction`, add the same gateway restart detection that `handleAction` has:\n```typescript\n// Before the try/catch in handleLloydAction:\nif ((serviceId === \"openclaw-gateway\" || serviceId === \"openclaw-lloyd\") && action === \"restart\") {\n  setGatewayRestarting(true);\n  setCountdown(8);\n  api.lloydServiceAction(serviceId, action).catch(() => {});\n  const tick = setInterval(() => {\n    setCountdown((c) => {\n      if (c <= 1) {\n        clearInterval(tick);\n        window.location.reload();\n        return 0;\n      }\n      return c - 1;\n    });\n  }, 1000);\n  return;\n}\n```\nAlso add a stop confirmation for gateway stop, same as in `handleAction`.\n\n### Files to Modify\n1. `~/.openclaw/extensions/mission-control/services.ts` — backend self-restart logic\n2. `~/.openclaw/extensions/mission-control/web/src/components/pages/ServicesPage.tsx` — frontend overlay for lloyd service gateway restart\n\n### Build & Deploy\nAfter changes, build the frontend:\n```bash\n/usr/bin/distrobox-host-exec docker exec lloyd bash -c \"cd /home/alansrobotlab/agents/lloyd-home/.openclaw/extensions/mission-control/web && /home/alansrobotlab/.bun/bin/bun run build\"\n```\n\nDo NOT run `openclaw gateway restart` or restart any services. Just make the code changes and build.\n\n### Verification\n- Read back both modified files and confirm the changes are correct\n- Confirm the build succeeds with no errors",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-opus-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/orchestrator",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774570565755,
+      "startedAt": 1774570566093,
+      "sessionStartedAt": 1774570460983,
+      "accumulatedRuntimeMs": 36105,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774570576037,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "## Report: Fix Mission Control Gateway Restart\n\n### Execution\n1. **coder** — Modified both files and built the frontend (result: success)\n\n### Result\nTwo changes deployed:\n\n- **Backend (`services.ts`)**: The supervisor-managed branch now detects when the service being restarted/stopped is the gateway itself (`openclaw-gateway` or `openclaw-lloyd`). For self-restart/stop, it sends the JSON response first, then schedules `process.exit(0)` after 500ms — letting supervisord's `autorestart=true` bring the process back cleanly. Other supervisor services keep existing `supervisorctl` behavior.\n\n- **Frontend (`ServicesPage.tsx`)**: `handleLloydAction` now has gateway-aware handling matching the pattern already in `handleAction`:\n  - **Restart**: Shows the restart overlay with 8-second countdown, fires API call fire-and-forget, auto-reloads the page.\n  - **Stop**: Shows confirmation dialog warning that Mission Control will become unreachable, fires fire-and-forget.\n  - All other services fall through to existing behavior.\n\n- **Build**: Frontend built successfully (3.39s, no errors).\n\n### Issues\nNone. No services were restarted — changes will take effect on next gateway restart.",
+      "frozenResultCapturedAt": 1774570576404,
+      "endedHookEmittedAt": 1774570586318,
+      "cleanupCompletedAt": 1774570586325
     }
   }
 }

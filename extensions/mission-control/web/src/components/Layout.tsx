@@ -8,8 +8,6 @@ import BacklogPage from "./pages/BacklogPage";
 import MemoryPage from "./pages/MemoryPage";
 import SkillsPage from "./pages/SkillsPage";
 import SessionsPage from "./pages/SessionsPage";
-import ModelsPage from "./pages/ModelsPage";
-import CronPage from "./pages/CronPage";
 import ToolsPage from "./pages/ToolsPage";
 import AgentsPage from "./pages/AgentsPage";
 import ActivityPage from "./pages/ActivityPage";
@@ -49,8 +47,6 @@ const PAGES: Record<string, React.ComponentType> = {
   memory: MemoryPage,
   graph: GraphPage,
   skills: SkillsPage,
-  models: ModelsPage,
-  cron: CronPage,
   tools: ToolsPage,
   settings: SettingsPage,
   architecture: ArchitecturePage,

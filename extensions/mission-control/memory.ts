@@ -81,7 +81,7 @@ function loadEntityGraph(): EntityGraphCache {
   const relationships: Array<{ source: string; target: string; type: string; reason?: string; score?: number }> = raw.relationships || [];
 
   // Build unique nodes from all doc paths in the relations
-  const nodeSet = new Map<string, { id: string; label: string; type: string }>();
+  const nodeSet = new Map<string, GraphNode>();
   for (const rel of relationships) {
     for (const p of [rel.source, rel.target]) {
       if (!nodeSet.has(p)) {
@@ -101,6 +101,46 @@ function loadEntityGraph(): EntityGraphCache {
     if (!existing || weight > existing.weight) {
       edgeMap.set(key, { source: rel.source, target: rel.target, type: rel.type || "wiki-link", weight });
     }
+  }
+
+  // Add entity nodes and has-facts edges from facts-index
+  if (existsSync(factsIndexPath)) {
+    try {
+      const factsRaw = JSON.parse(readFileSync(factsIndexPath, "utf-8"));
+      // Aggregate fact counts per entity
+      const byEntity = new Map<string, number>();
+      for (const entry of (factsRaw.facts || [])) {
+        const name: string = entry.entity;
+        byEntity.set(name, (byEntity.get(name) || 0) + (entry.fact_count || 0));
+      }
+
+      for (const [entityName, factCount] of byEntity.entries()) {
+        const entityId = `entity::${entityName}`;
+        nodeSet.set(entityId, { id: entityId, label: entityName, type: "entity", factCount });
+
+        // Add edges from entity node to each facts file in the entity's directory
+        const entityDir = join(factsDir, entityName);
+        let files: string[] = [];
+        try {
+          if (existsSync(entityDir) && statSync(entityDir).isDirectory()) {
+            files = readdirSync(entityDir).filter((f) => f.endsWith(".md"));
+          }
+        } catch { /* skip unreadable dirs */ }
+
+        for (const fname of files) {
+          const factsDocPath = `memory/_pipeline/facts/${entityName}/${fname}`;
+          // Ensure the doc node exists
+          if (!nodeSet.has(factsDocPath)) {
+            const label = fname.replace(/\.md$/, "");
+            nodeSet.set(factsDocPath, { id: factsDocPath, label, type: "document" });
+          }
+          const edgeKey = [entityId, factsDocPath].sort().join("\x00");
+          if (!edgeMap.has(edgeKey)) {
+            edgeMap.set(edgeKey, { source: entityId, target: factsDocPath, type: "has-facts", weight: 1 });
+          }
+        }
+      }
+    } catch { /* ignore errors reading facts-index */ }
   }
 
   entityGraphCache = { nodes: Array.from(nodeSet.values()), edges: Array.from(edgeMap.values()) };

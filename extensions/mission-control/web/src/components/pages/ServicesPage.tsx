@@ -173,6 +173,35 @@ export default function ServicesPage() {
     action: "start" | "stop" | "restart",
   ) => {
     e.stopPropagation();
+
+    // Gateway restart: show overlay with countdown, fire-and-forget the API call
+    if ((serviceId === "openclaw-gateway" || serviceId === "openclaw-lloyd") && action === "restart") {
+      setGatewayRestarting(true);
+      setCountdown(8);
+      api.lloydServiceAction(serviceId, action).catch(() => {});
+      const tick = setInterval(() => {
+        setCountdown((c) => {
+          if (c <= 1) {
+            clearInterval(tick);
+            window.location.reload();
+            return 0;
+          }
+          return c - 1;
+        });
+      }, 1000);
+      return;
+    }
+
+    // Gateway stop: confirm before proceeding
+    if ((serviceId === "openclaw-gateway" || serviceId === "openclaw-lloyd") && action === "stop") {
+      const ok = window.confirm(
+        "Stopping the gateway will disconnect Mission Control and all services will become unreachable. Continue?",
+      );
+      if (!ok) return;
+      api.lloydServiceAction(serviceId, action).catch(() => {});
+      return;
+    }
+
     setLloydActionLoading(`${serviceId}-${action}`);
     try {
       await api.lloydServiceAction(serviceId, action);

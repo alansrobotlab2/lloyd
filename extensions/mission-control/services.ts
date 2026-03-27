@@ -199,6 +199,17 @@ export function registerServiceRoutes(ctx: PluginContext) {
         const supervisorName = unitName.replace(".service", "");
         const supEntries = getSupervisorStatus();
         if (supEntries.some(e => e.name === supervisorName)) {
+          // Detect self-restart: if restarting/stopping the gateway we're running inside,
+          // send response first, then exit (supervisord autorestart will bring us back)
+          const isSelfService = (serviceId === "openclaw-gateway" || serviceId === "openclaw-lloyd") && 
+            (action === "restart" || action === "stop");
+          
+          if (isSelfService) {
+            jsonResponse(res, { ok: true, serviceId, action, managedBy: "supervisor", selfRestart: true });
+            setTimeout(() => process.exit(0), 500);
+            return;
+          }
+          
           try {
             // Use supervisorctl CLI instead of XML-RPC to avoid stop/start race condition.
             // XML-RPC stopProcess returns before the process actually dies, so a subsequent
