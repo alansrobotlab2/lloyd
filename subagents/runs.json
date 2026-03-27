@@ -7691,6 +7691,38 @@
       "frozenResultCapturedAt": 1774585431017,
       "endedHookEmittedAt": 1774585450829,
       "cleanupCompletedAt": 1774585450836
+    },
+    "75f9dcb5-bfe7-4a6c-8b5b-56032cb35814": {
+      "runId": "75f9dcb5-bfe7-4a6c-8b5b-56032cb35814",
+      "childSessionKey": "agent:worker:subagent:85082648-e1e5-4ff4-84a9-1f858b7ca36a",
+      "controllerSessionKey": "agent:main:mc-e516b688-0961-45b3-a3ca-76e8b154fb52",
+      "requesterSessionKey": "agent:main:mc-e516b688-0961-45b3-a3ca-76e8b154fb52",
+      "requesterOrigin": {
+        "channel": "webchat"
+      },
+      "requesterDisplayKey": "agent:main:mc-e516b688-0961-45b3-a3ca-76e8b154fb52",
+      "task": "## Task #208 Phase 9: Pipeline Output Delivery\n\n**Objective:** When an idler-dispatched pipeline completes (or fails/times out), deliver a structured summary notification to Lloyd's main session via wake event. Currently completion updates the DB silently — nothing surfaces to the user.\n\n**Codebase:** `~/obsidian/agents/idler/` — Python files only. No changes to openclaw or mission-control.\n\n### What to implement:\n\n#### 1. `gateway.py` — Add two new functions:\n\n**`get_session_history(session_key: str) -> Optional[List[Dict]]`**\n- Hit the MC HTTP endpoint for session history (already exists from Phase 3)\n- MC backend is at `http://127.0.0.1:8099` (check `config.py` for the actual URL)\n- Endpoint: `GET /api/mc/session-history?sessionKey={key}`\n- Return the messages list or None on failure\n- Use same auth pattern as existing `dispatch_agent()`\n\n**`send_wake(text: str) -> bool`**\n- `POST {GATEWAY_URL}/hooks/wake` with `{\"text\": text}` and auth header\n- Returns True on success, False on failure\n- This wakes Lloyd's main session with the notification text\n\n#### 2. `main.py` — Enhance `_handle_completion()`:\n\nAfter the existing DB updates, add:\n1. Call `get_session_history(f\"hook:idler:task-{task_id}\")` to fetch the completed session's output\n2. Extract a summary from the last assistant message (last 500 chars or so — don't send the whole thing)\n3. Build a structured notification:\n   - ✅ success: `\"✅ Pipeline complete: Task #{id} — {name}\\n{summary_excerpt}\\nDuration: {duration}\"`\n   - ❌ failure: `\"❌ Pipeline failed: Task #{id} — {name}\\nStatus: {status}\\n{summary_excerpt}\"`\n   - ⏰ timeout: `\"⏰ Pipeline timeout: Task #{id} — {name}\\nTimed out after {timeout}s\"`\n4. Call `send_wake(notification_text)`\n5. Also store the extracted summary in the run record via `complete_run()`\n\n#### 3. `main.py` — Also enhance `_check_timeouts()`:\n- After marking timeout in DB, send wake notification for timeouts too\n\n#### 4. `autonomy_db.py` — Add `notify_on_complete` column:\n- `ALTER TABLE tasks ADD COLUMN notify_on_complete INTEGER DEFAULT 1`\n- Add migration logic: check if column exists before ALTER (idempotent)\n- Add helper: `should_notify(task_id: int) -> bool`\n- Default True. Mechanical recurring tasks (fact extraction etc) can opt out.\n\n#### 5. Wire up the notify check:\n- In `_handle_completion()` and `_check_timeouts()`, check `should_notify(task_id)` before sending wake\n\n### Key details:\n- Session keys follow pattern `hook:idler:task-{task_id}`\n- `GATEWAY_URL` and `GATEWAY_HOOKS_TOKEN` are already in `config.py`\n- MC backend URL — check `config.py` for MC_URL or similar, or look at how other MC calls are made. If not configured, add it to `config.py` (default `http://127.0.0.1:8099`)\n- The wake text should be concise — Lloyd will read it and decide whether to surface it to Alan\n- Keep the summary extraction simple — grab the last assistant message's content, truncate to ~500 chars\n\n### Files to modify:\n- `~/obsidian/agents/idler/gateway.py` — add `get_session_history()` and `send_wake()`\n- `~/obsidian/agents/idler/main.py` — enhance `_handle_completion()` and `_check_timeouts()`\n- `~/obsidian/agents/idler/autonomy_db.py` — add migration + `should_notify()`\n- `~/obsidian/agents/idler/config.py` — add MC_URL if not present\n\n### Do NOT:\n- Modify any files outside `~/obsidian/agents/idler/`\n- Restart any services\n- Run `openclaw gateway restart`",
+      "cleanup": "keep",
+      "expectsCompletionMessage": true,
+      "spawnMode": "run",
+      "model": "anthropic/claude-sonnet-4-6",
+      "workspaceDir": "/home/alansrobotlab/obsidian/agents/worker",
+      "runTimeoutSeconds": 1200,
+      "createdAt": 1774636113983,
+      "startedAt": 1774636114956,
+      "sessionStartedAt": 1774636113983,
+      "accumulatedRuntimeMs": 0,
+      "cleanupHandled": true,
+      "retainAttachmentsOnKeep": false,
+      "endedAt": 1774636228867,
+      "outcome": {
+        "status": "ok"
+      },
+      "endedReason": "subagent-complete",
+      "frozenResultText": "Everything checks out. Here's a summary of what was implemented:\n\n## Phase 9: Pipeline Output Delivery — Complete\n\n### Files Modified\n\n**`config.py`**\n- Added `MC_URL = os.environ.get(\"MC_URL\", \"http://127.0.0.1:8099\")`\n\n**`gateway.py`**\n- Added `List` to typing imports\n- Added `get_session_history(session_key)` — GETs `/api/mc/session-history?sessionKey={key}` with auth, handles both list and dict response shapes\n- Added `send_wake(text)` — POSTs `{\"text\": text}` to `/hooks/wake` with auth, returns bool\n\n**`autonomy_db.py`**\n- Added `_migrate()` — idempotent ALTER TABLE adding `notify_on_complete INTEGER DEFAULT 1`; runs at import time\n- Added `should_notify(task_id)` — returns True by default, False only when explicitly set to 0\n- Migration already ran: column confirmed present in DB\n\n**`main.py`**\n- Added `should_notify` and `get_session_history`/`send_wake` to imports\n- Added `_extract_summary(messages, max_chars=500)` — walks backward through session history, extracts last assistant message content, handles structured content blocks, truncates cleanly\n- Enhanced `_handle_completion()`:\n  - Fetches session history for `hook:idler:task-{task_id}`\n  - Extracts summary excerpt\n  - Uses session summary as run summary if none provided\n  - Builds ✅ success or ❌ failure notification\n  - Calls `send_wake()` if `should_notify(task_id)` is True\n- Enhanced `_check_timeouts()`:\n  - After existing timeout handling, sends ⏰ timeout notification if `should_notify(task_id)` is True",
+      "frozenResultCapturedAt": 1774636229055,
+      "endedHookEmittedAt": 1774636324315,
+      "cleanupCompletedAt": 1774636324322
     }
   }
 }

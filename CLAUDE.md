@@ -37,6 +37,8 @@ distrobox-enter lloyd -- supervisorctl -c /home/alansrobotlab/agent-services/sup
 distrobox-enter lloyd -- tail -f /home/alansrobotlab/agent-services/logs/openclaw-gateway.log
 ```
 
+**WARNING:** Do NOT run `openclaw doctor --fix` — it installs a systemd user service that conflicts with the supervisord setup, causing crash loops on port 18789.
+
 ## Project Layout
 
 - `openclaw.json` — main config (models, plugins, memory backend, gateway)
