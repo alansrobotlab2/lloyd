@@ -1,253 +1,468 @@
-import os from "node:os";
-import { DatabaseSync } from "node:sqlite";
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import yaml from 'yaml';
 
-const AUTONOMY_DB = os.homedir() + "/.openclaw/autonomy.db";
+const HOME = process.env.HOME || os.homedir();
+const AUTONOMY_DIR = path.join(HOME, 'obsidian', 'autonomy');
+const TASKS_DIR = AUTONOMY_DIR;
+const RUNS_DIR = path.join(AUTONOMY_DIR, 'runs');
+const CONFIG_FILE = path.join(AUTONOMY_DIR, '_config.md');
 
-let _db: DatabaseSync | null = null;
-
-function getDb() {
-  if (!_db) {
-    _db = new DatabaseSync(AUTONOMY_DB);
-    _db.exec("PRAGMA journal_mode=WAL");
-    _db.exec("PRAGMA foreign_keys=ON");
-
-    // Idempotent migration: rename wiggam → pipeline_mode
-    try {
-      const cols = (_db.prepare("PRAGMA table_info(tasks)").all() as any[]).map((r: any) => r.name);
-      if (!cols.includes("pipeline_mode")) {
-        if (cols.includes("wiggam")) {
-          _db.exec("ALTER TABLE tasks RENAME COLUMN wiggam TO pipeline_mode");
-          console.log("[autonomy] migration: renamed wiggam → pipeline_mode");
-        } else {
-          _db.exec("ALTER TABLE tasks ADD COLUMN pipeline_mode INTEGER DEFAULT 0");
-          console.log("[autonomy] migration: added pipeline_mode column");
-        }
-      }
-    } catch (err: any) {
-      console.error("[autonomy] migration error:", err.message);
-    }
-
-    // Run reconciliation once on first DB access
-    reconcileStuckTasks();
+// Ensure directories exist
+function ensureDirs() {
+  if (!fs.existsSync(AUTONOMY_DIR)) {
+    fs.mkdirSync(AUTONOMY_DIR, { recursive: true });
   }
-  return _db;
+  if (!fs.existsSync(RUNS_DIR)) {
+    fs.mkdirSync(RUNS_DIR, { recursive: true });
+  }
 }
 
+// Helper: slugify name for filename
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .substring(0, 50);
+}
+
+// Helper: parse YAML frontmatter from markdown file
+function parseFrontmatter(content: string): { frontmatter: any; body: string } {
+  const parts = content.split(/^---\s*$/m);
+  if (parts.length < 3) {
+    // No frontmatter, return empty object
+    return { frontmatter: {}, body: content.trim() };
+  }
+  try {
+    const fm = yaml.parse(parts[1]);
+    const body = parts.slice(2).join('\n').trim();
+    return { frontmatter: fm || {}, body };
+  } catch (err) {
+    console.error('[autonomy-service] frontmatter parse error:', err);
+    return { frontmatter: {}, body: content };
+  }
+}
+
+// Helper: write object as markdown with frontmatter
+function stringifyWithFrontmatter(frontmatter: any, body?: string): string {
+  const fm = yaml.stringify(frontmatter).trim();
+  return `---\n${fm}\n---\n\n${body || ''}`;
+}
+
+// Helper: find task file by ID
+function findTaskFile(id: number): string | null {
+  ensureDirs();
+  const pattern = `${id}-*.md`;
+  const files = fs.readdirSync(TASKS_DIR).filter(f => f.startsWith(`${id}-`) && f.endsWith('.md'));
+  if (files.length === 0) return null;
+  return path.join(TASKS_DIR, files[0]);
+}
+
+// Helper: parse task file
+function parseTaskFile(filePath: string): any {
+  const content = fs.readFileSync(filePath, 'utf8');
+  const { frontmatter, body } = parseFrontmatter(content);
+  return { ...frontmatter, body };
+}
+
+// Helper: write task file
+function writeTaskFile(task: any, body?: string): void {
+  ensureDirs();
+  const slug = slugify(task.name || 'task');
+  const filePath = path.join(TASKS_DIR, `${task.id}-${slug}.md`);
+  const content = stringifyWithFrontmatter(task, body || task.body || '');
+  fs.writeFileSync(filePath, content, 'utf8');
+}
+
+// Helper: parse run file
+function parseRunFile(filePath: string): any {
+  const content = fs.readFileSync(filePath, 'utf8');
+  const { frontmatter, body } = parseFrontmatter(content);
+  return { ...frontmatter, body };
+}
+
+// Helper: write run file
+function writeRunFile(run: any, body?: string): void {
+  ensureDirs();
+  const taskDir = path.join(RUNS_DIR, String(run.task_id));
+  if (!fs.existsSync(taskDir)) {
+    fs.mkdirSync(taskDir, { recursive: true });
+  }
+  const filePath = path.join(taskDir, `${run.run_id}.md`);
+  const content = stringifyWithFrontmatter(run, body || run.body || '');
+  fs.writeFileSync(filePath, content, 'utf8');
+}
+
+// Helper: get next available task ID
+function getNextTaskId(): number {
+  ensureDirs();
+  const files = fs.readdirSync(TASKS_DIR).filter(f => f.endsWith('.md') && f !== '_config.md');
+  let maxId = 0;
+  for (const f of files) {
+    const match = f.match(/^(\d+)-/);
+    if (match) {
+      const id = parseInt(match[1], 10);
+      if (id > maxId) maxId = id;
+    }
+  }
+  return maxId + 1;
+}
+
+// Helper: parse priority for sorting
+function priorityValue(priority: string): number {
+  switch (priority) {
+    case 'critical': return 4;
+    case 'high': return 3;
+    case 'medium': return 2;
+    case 'low': return 1;
+    default: return 0;
+  }
+}
+
+// Helper: calculate overdue score (replicates SQL logic)
+function overdueScore(task: any): number {
+  if (!task.last_run) return 999999;
+  const now = Date.now();
+  const lastRun = new Date(task.last_run).getTime();
+  const runsPerDay = task.runs_per_day || 1.0;
+  const secondsPerRun = 86400.0 / runsPerDay;
+  const secondsSinceLastRun = (now - lastRun) / 1000;
+  return secondsSinceLastRun / secondsPerRun;
+}
+
+// Exported Functions
+
 export function reconcileStuckTasks(): void {
-  const db = getDb();
+  ensureDirs();
   
   // Find and reset stuck tasks (status = 'in_progress')
-  const tasksStmt = db.prepare("SELECT id FROM tasks WHERE status = 'in_progress'");
-  const stuckTasks = tasksStmt.all() as any[];
-  const taskCount = stuckTasks.length;
+  const files = fs.readdirSync(TASKS_DIR).filter(f => f.endsWith('.md') && f !== '_config.md');
+  const stuckCount = files.filter(f => {
+    const task = parseTaskFile(path.join(TASKS_DIR, f));
+    return task.status === 'in_progress';
+  }).length;
   
-  if (taskCount > 0) {
-    db.prepare("UPDATE tasks SET status = 'up_next' WHERE status = 'in_progress'").run();
+  if (stuckCount > 0) {
+    for (const f of files) {
+      const task = parseTaskFile(path.join(TASKS_DIR, f));
+      if (task.status === 'in_progress') {
+        task.status = 'up_next';
+        task.updated = new Date().toISOString();
+        writeTaskFile(task);
+      }
+    }
   }
   
   // Find and mark orphaned runs (status = 'running')
-  const runsStmt = db.prepare("SELECT id FROM runs WHERE status = 'running'");
-  const orphanedRuns = runsStmt.all() as any[];
-  const runCount = orphanedRuns.length;
-  
-  if (runCount > 0) {
-    const now = new Date().toISOString();
-    db.prepare(
-      "UPDATE runs SET status = 'failed', completed = ?, summary = ? WHERE status = 'running'"
-    ).run(now, 'Interrupted by gateway restart');
+  let orphanedCount = 0;
+  const runDirs = fs.readdirSync(RUNS_DIR);
+  for (const taskDir of runDirs) {
+    const taskRunDir = path.join(RUNS_DIR, taskDir);
+    if (!fs.statSync(taskRunDir).isDirectory()) continue;
+    const runFiles = fs.readdirSync(taskRunDir).filter(f => f.endsWith('.md'));
+    for (const rf of runFiles) {
+      const run = parseRunFile(path.join(taskRunDir, rf));
+      if (run.status === 'running') {
+        run.status = 'failed';
+        run.completed = new Date().toISOString();
+        run.body = run.body || 'Interrupted by gateway restart';
+        writeRunFile(run);
+        orphanedCount++;
+      }
+    }
   }
   
-  console.log(`[autonomy] reconciled ${taskCount} stuck tasks, ${runCount} orphaned runs`);
+  console.log(`[autonomy] reconciled ${stuckCount} stuck tasks, ${orphanedCount} orphaned runs`);
 }
 
 export async function getRuns(taskId: number, limit = 20): Promise<any[]> {
-  const db = getDb();
-  const stmt = db.prepare("SELECT * FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT ?");
-  return stmt.all(taskId, limit);
+  ensureDirs();
+  const taskRunDir = path.join(RUNS_DIR, String(taskId));
+  if (!fs.existsSync(taskRunDir)) return [];
+  
+  const files = fs.readdirSync(taskRunDir).filter(f => f.endsWith('.md'));
+  const runs = files.map(f => parseRunFile(path.join(taskRunDir, f)));
+  
+  // Sort by started_at desc
+  runs.sort((a, b) => {
+    const aTime = a.started_at ? new Date(a.started_at).getTime() : 0;
+    const bTime = b.started_at ? new Date(b.started_at).getTime() : 0;
+    return bTime - aTime;
+  });
+  
+  return runs.slice(0, limit);
 }
 
 export async function getTasks(): Promise<any[]> {
-  const db = getDb();
-  const stmt = db.prepare("SELECT * FROM tasks ORDER BY CASE WHEN last_run IS NULL THEN 999999 ELSE (julianday('now') - julianday(last_run)) * 86400.0 / (86400.0 / COALESCE(runs_per_day, 1.0)) END DESC, priority, next_run, id");
-  return stmt.all();
+  ensureDirs();
+  const files = fs.readdirSync(TASKS_DIR).filter(f => f.endsWith('.md') && f !== '_config.md');
+  const tasks = files.map(f => parseTaskFile(path.join(TASKS_DIR, f)));
+  
+  // Sort by overdue priority (replicate SQL ORDER BY)
+  tasks.sort((a, b) => {
+    const overdueA = overdueScore(a);
+    const overdueB = overdueScore(b);
+    // Primary: overdue desc
+    if (overdueA !== overdueB) return overdueB - overdueA;
+    // Secondary: priority desc
+    const priA = priorityValue(a.priority);
+    const priB = priorityValue(b.priority);
+    if (priA !== priB) return priB - priA;
+    // Tertiary: next_run asc
+    if (a.next_run && b.next_run) {
+      const aTime = new Date(a.next_run).getTime();
+      const bTime = new Date(b.next_run).getTime();
+      if (aTime !== bTime) return aTime - bTime;
+    }
+    // Quaternary: id asc
+    return (a.id || 0) - (b.id || 0);
+  });
+  
+  return tasks;
 }
 
 export async function getTask(id: number): Promise<any | null> {
-  const db = getDb();
-  const stmt = db.prepare("SELECT * FROM tasks WHERE id = ?");
-  const row = stmt.get(id);
-  return row || null;
+  const filePath = findTaskFile(id);
+  if (!filePath) return null;
+  return parseTaskFile(filePath);
 }
 
 export async function writeTask(data: any): Promise<any> {
-  const db = getDb();
+  ensureDirs();
   const now = new Date().toISOString();
   
   if (data.id) {
-    // UPDATE
-    const sets: string[] = [];
-    const params: any[] = [];
-    
-    if (data.name !== undefined) { sets.push("name = ?"); params.push(data.name); }
-    if (data.description !== undefined) { sets.push("description = ?"); params.push(data.description); }
-    if (data.status !== undefined) { sets.push("status = ?"); params.push(data.status); }
-    if (data.priority !== undefined) { sets.push("priority = ?"); params.push(data.priority); }
-    if (data.frequency !== undefined) { sets.push("frequency = ?"); params.push(data.frequency); }
-    if (data.scheduled_at !== undefined) { sets.push("scheduled_at = ?"); params.push(data.scheduled_at); }
-    if (data.next_run !== undefined) { sets.push("next_run = ?"); params.push(data.next_run); }
-    if (data.auto_advance !== undefined) { sets.push("auto_advance = ?"); params.push(data.auto_advance ? 1 : 0); }
-    if (data.tags !== undefined) { sets.push("tags = ?"); params.push(JSON.stringify(data.tags)); }
-    if (data.runs_per_day !== undefined) { sets.push("runs_per_day = ?"); params.push(data.runs_per_day); }
-    if (data.depends_on !== undefined) { sets.push("depends_on = ?"); params.push(data.depends_on); }
-    if (data.pipeline !== undefined) { sets.push("pipeline = ?"); params.push(data.pipeline); }
-    if (data.agent_id !== undefined) { sets.push("agent_id = ?"); params.push(data.agent_id); }
-    if (data.skill_path !== undefined) { sets.push("skill_path = ?"); params.push(data.skill_path); }
-    if (data.model !== undefined) { sets.push("model = ?"); params.push(data.model); }
-    if (data.timeout_seconds !== undefined) { sets.push("timeout_seconds = ?"); params.push(data.timeout_seconds); }
-    if (data.cron_id !== undefined) { sets.push("cron_id = ?"); params.push(data.cron_id); }
-    if (data.last_run !== undefined) { sets.push("last_run = ?"); params.push(data.last_run); }
-    if (data.pipeline_mode !== undefined) { sets.push("pipeline_mode = ?"); params.push(data.pipeline_mode ? 1 : 0); }
-    if (data.notify_on_complete !== undefined) { sets.push("notify_on_complete = ?"); params.push(data.notify_on_complete ? 1 : 0); }
-    if (data.max_retries !== undefined) { sets.push("max_retries = ?"); params.push(data.max_retries); }
-    if (data.preferred_hours !== undefined) { sets.push("preferred_hours = ?"); params.push(data.preferred_hours); }
-    if (data.preemptible !== undefined) { sets.push("preemptible = ?"); params.push(data.preemptible ? 1 : 0); }
-
-    if (data.activity_note !== undefined) {
-      // Log activity note to runs table
-      db.prepare(
-        "INSERT INTO runs (task_id, started, completed, status, summary) VALUES (?, ?, ?, 'success', ?)"
-      ).run(data.id, now, now, data.activity_note);
+    // UPDATE existing task
+    const filePath = findTaskFile(data.id);
+    if (!filePath) {
+      throw new Error(`Task ${data.id} not found`);
     }
     
-    if (sets.length > 0) {
-      sets.push("updated_at = ?");
-      params.push(now);
-      params.push(data.id);
-      db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...params);
-      const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(data.id);
-      return row;
-    } else {
-      // Nothing to update, just return current
-      return db.prepare("SELECT * FROM tasks WHERE id = ?").get(data.id);
+    const existing = parseTaskFile(filePath);
+    // Merge updates
+    for (const key of Object.keys(data)) {
+      if (key !== 'id' && key !== 'body') {
+        existing[key] = data[key];
+      }
     }
+    existing.updated = now;
+    
+    // Handle activity_note
+    if (data.activity_note) {
+      // Append to body's Activity Log section
+      let body = existing.body || '';
+      if (!body.includes('## Activity Log')) {
+        body += '\n\n## Activity Log\n';
+      }
+      const logLine = `\n- **${now.slice(0, 16).replace('T', ' ')}** — ${data.activity_note}`;
+      body += logLine;
+      existing.body = body;
+      
+      // Also create a run file
+      const run = {
+        type: 'autonomy-run',
+        task_id: data.id,
+        run_id: Date.now(),
+        status: 'success',
+        duration_seconds: 0,
+        started_at: now,
+        completed_at: now,
+        body: data.activity_note
+      };
+      writeRunFile(run);
+    }
+    
+    writeTaskFile(existing);
+    return existing;
   } else {
-    // INSERT
-    const tags = data.tags ? JSON.stringify(data.tags) : "[]";
-    const result = db.prepare(
-      "INSERT INTO tasks (name, description, status, priority, frequency, scheduled_at, next_run, auto_advance, tags, created_at, updated_at, runs_per_day, depends_on, pipeline, agent_id, skill_path, model, timeout_seconds, cron_id, last_run, pipeline_mode, notify_on_complete, max_retries, preferred_hours, preemptible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(
-      data.name || "", 
-      data.description || "", 
-      data.status || "inbox", 
-      data.priority || "medium", 
-      data.frequency || null, 
-      data.scheduled_at || null, 
-      data.next_run || null, 
-      data.auto_advance ? 1 : 0, 
-      tags, 
-      now, 
-      now,
-      data.runs_per_day !== undefined ? data.runs_per_day : null,
-      data.depends_on !== undefined ? data.depends_on : null,
-      data.pipeline !== undefined ? data.pipeline : null,
-      data.agent_id !== undefined ? data.agent_id : null,
-      data.skill_path !== undefined ? data.skill_path : null,
-      data.model !== undefined ? data.model : null,
-      data.timeout_seconds !== undefined ? data.timeout_seconds : null,
-      data.cron_id !== undefined ? data.cron_id : null,
-      data.last_run !== undefined ? data.last_run : null,
-      data.pipeline_mode ? 1 : 0,
-      data.notify_on_complete !== undefined ? (data.notify_on_complete ? 1 : 0) : 1,
-      data.max_retries !== undefined ? data.max_retries : null,
-      data.preferred_hours !== undefined ? data.preferred_hours : null,
-      data.preemptible !== undefined ? (data.preemptible ? 1 : 0) : null
-    );
-    
-    const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(result.lastInsertRowid);
-    return row;
+    // INSERT new task
+    const newId = getNextTaskId();
+    const task = {
+      type: 'autonomy',
+      id: newId,
+      name: data.name || '',
+      description: data.description || '',
+      status: data.status || 'inbox',
+      priority: data.priority || 'medium',
+      frequency: data.frequency || null,
+      scheduled_at: data.scheduled_at || null,
+      next_run: data.next_run || null,
+      auto_advance: data.auto_advance || false,
+      tags: data.tags || [],
+      runs_per_day: data.runs_per_day || null,
+      depends_on: data.depends_on || null,
+      pipeline: data.pipeline || null,
+      agent_id: data.agent_id || null,
+      skill_path: data.skill_path || null,
+      model: data.model || null,
+      timeout_seconds: data.timeout_seconds || null,
+      cron_id: data.cron_id || null,
+      last_run: data.last_run || null,
+      pipeline_mode: data.pipeline_mode || false,
+      notify_on_complete: data.notify_on_complete !== false,
+      max_retries: data.max_retries || null,
+      preferred_hours: data.preferred_hours || null,
+      preemptible: data.preemptible || false,
+      created: now,
+      updated: now,
+      body: data.description || ''
+    };
+    writeTaskFile(task);
+    return task;
   }
 }
 
 export async function deleteTask(id: number): Promise<any> {
-  const db = getDb();
-  db.prepare("DELETE FROM runs WHERE task_id = ?").run(id);
-  db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+  ensureDirs();
+  const filePath = findTaskFile(id);
+  if (filePath) {
+    fs.unlinkSync(filePath);
+  }
+  
+  // Delete runs directory
+  const taskRunDir = path.join(RUNS_DIR, String(id));
+  if (fs.existsSync(taskRunDir)) {
+    fs.rmSync(taskRunDir, { recursive: true });
+  }
+  
   return { success: true, id };
 }
 
 export async function runTask(id: number): Promise<any> {
-  const db = getDb();
+  const task = await getTask(id);
+  if (!task) throw new Error(`Task ${id} not found`);
+  
   const now = new Date().toISOString();
   
-  // Get task
-  const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
-  if (!row) throw new Error(`Task ${id} not found`);
-  
-  // Record run start
-  db.prepare(
-    "INSERT INTO runs (task_id, started, status) VALUES (?, ?, 'success')"
-  ).run(id, now);
+  // Create run file with status='running'
+  const run = {
+    type: 'autonomy-run',
+    task_id: id,
+    run_id: Date.now(),
+    status: 'running',
+    duration_seconds: null,
+    started_at: now,
+    completed_at: null,
+    body: ''
+  };
+  writeRunFile(run);
   
   return {
-    run_id: `run-${id}-${Date.now()}`,
+    run_id: run.run_id,
     task_id: id,
-    status: "triggered",
-    summary: `Task '${row.name}' triggered for execution`,
+    status: 'triggered',
+    summary: `Task '${task.name}' triggered for execution`,
   };
 }
 
 export async function getConfig(key: string): Promise<string | null> {
-  const db = getDb();
-  const row = db.prepare("SELECT value FROM config WHERE key = ?").get(key);
-  return row ? row.value : null;
+  ensureDirs();
+  if (!fs.existsSync(CONFIG_FILE)) return null;
+  
+  const content = fs.readFileSync(CONFIG_FILE, 'utf8');
+  const { frontmatter } = parseFrontmatter(content);
+  return frontmatter[key] || null;
 }
 
 export async function setConfig(key: string, value: string): Promise<void> {
-  const db = getDb();
-  db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)").run(key, value);
+  ensureDirs();
+  let frontmatter: any = {};
+  
+  if (fs.existsSync(CONFIG_FILE)) {
+    const content = fs.readFileSync(CONFIG_FILE, 'utf8');
+    const parsed = parseFrontmatter(content);
+    frontmatter = parsed.frontmatter;
+  }
+  
+  frontmatter[key] = value;
+  fs.writeFileSync(CONFIG_FILE, stringifyWithFrontmatter(frontmatter, ''), 'utf8');
 }
 
 export async function getAllConfig(): Promise<Record<string, string>> {
-  const db = getDb();
-  const rows = db.prepare("SELECT key, value FROM config").all();
-  const result: Record<string, string> = {};
-  rows.forEach((row: any) => { result[row.key] = row.value; });
-  return result;
+  ensureDirs();
+  if (!fs.existsSync(CONFIG_FILE)) return {};
+  
+  const content = fs.readFileSync(CONFIG_FILE, 'utf8');
+  const { frontmatter } = parseFrontmatter(content);
+  return frontmatter;
 }
 
 /** Get all tasks currently in_progress (used by idler polling in index.ts). */
 export function getInProgressTasks(): any[] {
-  const db = getDb();
-  return db.prepare("SELECT * FROM tasks WHERE status = 'in_progress'").all();
+  ensureDirs();
+  const files = fs.readdirSync(TASKS_DIR).filter(f => f.endsWith('.md') && f !== '_config.md');
+  const tasks: any[] = [];
+  for (const f of files) {
+    const task = parseTaskFile(path.join(TASKS_DIR, f));
+    if (task.status === 'in_progress') {
+      tasks.push(task);
+    }
+  }
+  return tasks;
 }
 
 /** Mark the active run for a task as completed. */
-export function completeActiveRun(taskId: number, status: string = "success", summary?: string): void {
-  const db = getDb();
-  const now = new Date().toISOString();
-  const run = db.prepare(
-    "SELECT id, started FROM runs WHERE task_id = ? AND completed IS NULL ORDER BY id DESC LIMIT 1"
-  ).get(taskId) as any;
-  if (run) {
-    const startedAt = run.started ? new Date(run.started).getTime() : Date.now();
-    const durationSeconds = Math.round((Date.now() - startedAt) / 1000);
-    db.prepare(
-      "UPDATE runs SET status = ?, completed = ?, summary = ?, duration_seconds = ? WHERE id = ?"
-    ).run(status, now, summary || null, durationSeconds, run.id);
+export function completeActiveRun(taskId: number, status: string = 'success', summary?: string): void {
+  ensureDirs();
+  const taskRunDir = path.join(RUNS_DIR, String(taskId));
+  if (!fs.existsSync(taskRunDir)) return;
+  
+  // Find most recent run without completed_at
+  const files = fs.readdirSync(taskRunDir).filter(f => f.endsWith('.md'));
+  let activeRun: any | null = null;
+  let activeRunFile: string | null = null;
+  
+  for (const f of files) {
+    const run = parseRunFile(path.join(taskRunDir, f));
+    if (!run.completed_at) {
+      if (!activeRun || new Date(run.started_at || 0).getTime() > new Date(activeRun.started_at || 0).getTime()) {
+        activeRun = run;
+        activeRunFile = f;
+      }
+    }
   }
-  db.prepare("UPDATE tasks SET last_run = ?, updated_at = ? WHERE id = ?").run(now, now, taskId);
+  
+  if (!activeRun || !activeRunFile) return;
+  
+  const now = new Date().toISOString();
+  const startedAt = activeRun.started_at ? new Date(activeRun.started_at).getTime() : Date.now();
+  const durationSeconds = Math.round((Date.now() - startedAt) / 1000);
+  
+  activeRun.status = status;
+  activeRun.completed_at = now;
+  activeRun.duration_seconds = durationSeconds;
+  if (summary) activeRun.body = summary;
+  
+  writeRunFile(activeRun);
+  
+  // Update task's last_run on success
+  const task = getTask(taskId);
+  if (task) {
+    if (status === 'success') {
+      task.last_run = now;
+    }
+    task.updated = now;
+    writeTaskFile(task);
+  }
 }
 
 /** Mark a task as complete — move from in_progress to done (or up_next for recurring). */
 export function completeTask(taskId: number): void {
-  const db = getDb();
+  const task = getTask(taskId);
+  if (!task) return;
+  
   const now = new Date().toISOString();
-  const task = db.prepare("SELECT frequency, pipeline_mode FROM tasks WHERE id = ?").get(taskId) as any;
-  if (task?.frequency && task.frequency !== "one-time") {
-    db.prepare("UPDATE tasks SET status = 'up_next', updated_at = ? WHERE id = ?").run(now, taskId);
-  } else if (task?.pipeline_mode) {
-    db.prepare("UPDATE tasks SET status = 'in_review', updated_at = ? WHERE id = ?").run(now, taskId);
+  
+  if (task.frequency && task.frequency !== 'one-time') {
+    task.status = 'up_next';
+  } else if (task.pipeline_mode) {
+    task.status = 'in_review';
   } else {
-    db.prepare("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?").run(now, taskId);
+    task.status = 'done';
   }
+  
+  task.updated = now;
+  writeTaskFile(task);
 }
