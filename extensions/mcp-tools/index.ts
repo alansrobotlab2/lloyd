@@ -5,7 +5,7 @@
  * transport at http://127.0.0.1:8093. The server runs as a systemd service
  * (lloyd-tool-mcp.service).
  *
- * Tools (19): tag_search, tag_explore, vault_overview, mem_search,
+ * Tools (18): tag_explore, vault_overview, mem_search,
  *   mem_get, mem_write, prefill_context, http_search, http_fetch,
  *   http_request, file_read, file_write, file_edit, file_patch, file_glob,
  *   file_grep, run_bash, bg_exec, bg_process
@@ -15,12 +15,10 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { McpSseClient } from "./mcp-sse-client.js";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import os from "os";
 
 const TOOL_MCP_URL = "http://127.0.0.1:8093";
 
-const PREFILL_HOOK_TIMEOUT_MS = 5_000;
-const PREFILL_MAX_FAILURES = 3; // skip prefill after this many consecutive errors
-const PREFILL_SKIP_COOLDOWN_MS = 120_000; // 2 min before retrying prefill
 const RUN_BASH_TIMEOUT_MS = 120_000;
 const WEB_TIMEOUT_MS = 20_000;
 const MIN_QUERY_LENGTH = 12;
@@ -167,13 +165,8 @@ export default function register(api: OpenClawPluginApi) {
   // By turn 5+ the conversation history already embeds the relevant vault docs
   // from earlier turns, so additional prefill produces diminishing returns.
 
-  let prefillConsecutiveFailures = 0;
-  let prefillSkipUntil = 0;
-
   // Per-session prefill state (in-process, cleared on session_end)
   const dailyNotesInjected = new Set<string>(); // sessions where turn-1 daily notes ran
-  const semanticPrefillDone = new Set<string>(); // sessions where turn-2 semantic prefill ran
-  const firstUserPrompt = new Map<string, string>(); // turn-1 prompt → used as turn-2 search query
 
   // Agents that don't need vault recall in their prefill
   const SKIP_PREFILL_AGENTS = new Set([
@@ -185,7 +178,7 @@ export default function register(api: OpenClawPluginApi) {
 
   const CHAT_RE = /^(hey|hi|hello|yo|sup|thanks|thank you|ok|sure|yes|no|yep|nah|nope|got it|cool|nice|great|perfect|sounds good|go ahead|do it|lol|haha|hmm|good morning|good night|gm|gn|👍|❤️|😂|💀)[\.\!\?]?$/i;
   const MEMORY_RE = /\b(remember|what did (?:we|i)|recall|last (?:time|session|week)|diary|journal|daily note|MEMORY\.md|vault (?:search|notes?))\b/i;
-  const CODE_RE = /\b(implement|debug|refactor|fix (?:the |this )?(?:bug|error|code)|write (?:a |the )?(?:function|class|method|test|script)|add (?:a |the )?(?:feature|endpoint|method)|create (?:a |the )?(?:file|component|module))\b/i;
+  const CODE_RE = /\b(debug|refactor|fix (?:the |this )?(?:bug|error|code)|write (?:a |the )?(?:function|class|method|test|script)|add (?:a |the )?(?:feature|endpoint|method)|create (?:a |the )?(?:file|component|module)|implement (?:a |the )?(?:function|class|method|feature|endpoint|module))\b/i;
   const CODE_BLOCK_RE = /```/;
   const RESEARCH_RE = /\b(search for|look up|what is|what are|who is|find (?:out|info)|latest on|news about|how does .{3,} work)\b/i;
   const OPS_RE = /\b(restart|deploy|service|systemctl|docker|git (?:push|pull|merge|rebase)|backlog|task (?:board|backlog)|CI\/CD|build|release)\b/i;
@@ -338,15 +331,11 @@ export default function register(api: OpenClawPluginApi) {
     const profile = classifyProfile(prompt);
     if (profile === "heartbeat") return; // automated prompts never get prefill
 
-    const isStartup = STARTUP_RE.test(prompt);
     const sessionId = ctx?.sessionId ?? "";
 
     // ── Turn 1: inject daily memory files + active mode ──────────────────
     if (!dailyNotesInjected.has(sessionId)) {
       dailyNotesInjected.add(sessionId);
-      // Save the first substantive prompt for semantic search on turn 2.
-      // Startup prompts are boilerplate — don't use them as search queries.
-      if (!isStartup && profile !== "chat") firstUserPrompt.set(sessionId, prompt);
 
       const dailyContext = await fetchDailyNotes();
       const mode = getCurrentMode();
@@ -355,55 +344,240 @@ export default function register(api: OpenClawPluginApi) {
       return;
     }
 
-    // ── Turn 2: semantic prefill using the turn-1 query ───────────────────
-    if (!semanticPrefillDone.has(sessionId)) {
-      semanticPrefillDone.add(sessionId);
+    // Turn 2+: semantic retrieval handled by context hook (ephemeral)
+  });
 
-      const searchQuery = firstUserPrompt.get(sessionId);
-      if (!searchQuery) return; // turn-1 was chat/too-short — skip semantic prefill
+  // ── Agent subliminal.md loading ──────────────────────────────────────
+  //
+  // Load the agent's subliminal.md as raw directives (not wrapped in
+  // vault_context tags). Cached with 60s TTL, matching pipeline-hooks.
 
-      const now = Date.now();
-      if (prefillSkipUntil > now) return;
-      if (prefillSkipUntil > 0 && prefillSkipUntil <= now) {
-        prefillSkipUntil = 0;
-        prefillConsecutiveFailures = 0;
+  const AGENTS_DIR = join(os.homedir(), "obsidian", "agents");
+  const _subliminalFileCache = new Map<string, { content: string | null; ts: number }>();
+  const SUBLIMINAL_FILE_CACHE_TTL = 60_000;
+
+  function loadAgentSubliminal(agentId: string): string | null {
+    const now = Date.now();
+    const cached = _subliminalFileCache.get(agentId);
+    if (cached && now - cached.ts < SUBLIMINAL_FILE_CACHE_TTL) return cached.content;
+
+    let content: string | null = null;
+    try {
+      const raw = readFileSync(join(AGENTS_DIR, agentId, "subliminal.md"), "utf-8");
+      const fmMatch = raw.match(/^---\n[\s\S]*?\n---\n([\s\S]*)$/);
+      const stripped = fmMatch ? fmMatch[1].trim() : raw.trim();
+      if (stripped) content = stripped;
+    } catch { /* file doesn't exist — fine */ }
+    _subliminalFileCache.set(agentId, { content, ts: now });
+    return content;
+  }
+
+  // ── Subliminal context (context hook) ────────────────────────────────
+  //
+  // Ephemeral semantic retrieval injected before every LLM call.
+  // The LLM sees it, but the session transcript is untouched.
+  // This replaces the turn-2 semantic prefill in before_prompt_build.
+  //
+  // Gating: only fetch when the last user message changes (not on
+  // tool-loop iterations within the same turn).
+
+  // Noise words to strip before context_bundle query
+  const NOISE_WORDS = new Set([
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "must",
+    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
+    "they", "them", "their", "its", "his", "her",
+    "this", "that", "these", "those", "what", "which", "who", "whom",
+    "how", "when", "where", "why",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "about",
+    "into", "through", "during", "before", "after", "between",
+    "and", "or", "but", "not", "no", "nor", "so", "if", "then",
+    "just", "also", "very", "really", "quite", "too", "much",
+    "ok", "okay", "yeah", "yes", "no", "nah", "sure", "right",
+    "lets", "let", "let's", "go", "going", "get", "got", "getting",
+    "want", "wants", "wanted", "know", "knows", "knew",
+    "think", "thinks", "thought", "look", "looking", "looked",
+    "take", "takes", "took", "make", "makes", "made",
+    "now", "some", "any", "all", "each", "every", "both",
+    "up", "out", "over", "down", "off", "away",
+    "here", "there", "thing", "things", "stuff",
+    "left", "done", "next", "back", "ready", "still", "already",
+    "tell", "show", "give", "put", "run", "running", "ran",
+    "come", "came", "see", "saw", "seen", "say", "said",
+    "try", "tried", "use", "used", "using", "work", "working", "worked",
+    "start", "started", "stop", "stopped", "keep", "kept",
+    "set", "check", "handle", "update", "updated",
+  ]);
+
+  function extractKeywords(text: string): string {
+    // The user message contains envelope metadata prepended by OpenClaw:
+    //   <vault_context>...</vault_context>
+    //   <daily_notes>...</daily_notes>
+    //   <active_mode>...</active_mode>
+    //   Sender (untrusted metadata): ```json ... ```
+    //   [Sat 2026-03-28 09:11 PDT] actual user text here
+    //
+    // Strategy: find the last timestamp bracket and take everything after it.
+    // This reliably isolates the user's actual words from all envelope noise.
+    const timestampMatch = text.match(/.*\[\w{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2} \w+\]\s*/s);
+    let cleaned = timestampMatch
+      ? text.slice(timestampMatch[0].length)
+      : text;
+    // Fallback: if no timestamp found, strip known blocks
+    cleaned = cleaned
+      .replace(/<daily_notes>[\s\S]*?<\/daily_notes>/g, "")
+      .replace(/<vault_context>[\s\S]*?<\/vault_context>/g, "")
+      .replace(/<active_mode>[\s\S]*?<\/active_mode>/g, "")
+      .replace(/```[\s\S]*?```/g, "")
+      .trim();
+    const words = cleaned
+      .toLowerCase()
+      .replace(/[^a-z0-9\s\-_\.]/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length > 1 && !NOISE_WORDS.has(w));
+    // Deduplicate while preserving order
+    return [...new Set(words)].join(" ");
+  }
+
+  // Simple string hash for gating
+  function simpleHash(str: string): string {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash |= 0;
+    }
+    return hash.toString(36);
+  }
+
+  // Clone messages and inject subliminal context before the last user message.
+  // Uses a user-role message to preserve Anthropic cache on the contiguous prefix.
+  function injectSubliminal(messages: any[], context: string): any[] {
+    const cloned = messages.map((m: any) => ({ ...m }));
+
+    // Find the index of the last user message
+    let lastUserIdx = -1;
+    for (let i = cloned.length - 1; i >= 0; i--) {
+      if (cloned[i].role === "user") {
+        lastUserIdx = i;
+        break;
       }
-
-      const modeScope = MODE_SCOPE[getCurrentMode()];
-      const profileScope = PROFILE_SCOPE[classifyProfile(searchQuery)] ?? "";
-      // Mode scope is the primary filter; fall back to profile scope in general mode
-      const prefillScope = modeScope || profileScope;
-
-      try {
-        const content = await mcpClient.callTool(
-          "prefill_context",
-          { prompt: searchQuery, session_id: sessionId, scope: prefillScope },
-          PREFILL_HOOK_TIMEOUT_MS,
-        );
-
-        prefillConsecutiveFailures = 0;
-
-        const text = content
-          .filter((b: any) => b.type === "text")
-          .map((b: any) => b.text)
-          .join("")
-          .trim();
-        if (text) return { prependContext: text };
-      } catch (err: any) {
-        prefillConsecutiveFailures++;
-        if (prefillConsecutiveFailures >= PREFILL_MAX_FAILURES) {
-          prefillSkipUntil = Date.now() + PREFILL_SKIP_COOLDOWN_MS;
-          api.logger.warn?.(
-            `mcp-tools prefill: ${prefillConsecutiveFailures} consecutive failures, skipping for ${PREFILL_SKIP_COOLDOWN_MS / 1000}s`,
-          );
-        } else {
-          api.logger.warn?.(`mcp-tools prefill: ${err?.message}`);
-        }
-      }
-      return;
     }
 
-    // Turn 3+: no prefill — conversation history carries sufficient context
+    if (lastUserIdx === -1) return cloned;
+
+    // Insert a user-role message with subliminal context right before the last user message.
+    // This preserves cache for everything before it.
+    const subliminalMsg = {
+      role: "user" as const,
+      content: `<vault_context>\n${context}\n</vault_context>`,
+    };
+
+    cloned.splice(lastUserIdx, 0, subliminalMsg);
+    return cloned;
+  }
+
+  // Inject agent subliminal.md content after vault_context, before last user message.
+  function injectAgentSubliminal(messages: any[], agentId: string): any[] {
+    const content = loadAgentSubliminal(agentId);
+    if (!content) return messages;
+
+    // Find the last user message index
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") { lastUserIdx = i; break; }
+    }
+    if (lastUserIdx === -1) return messages;
+
+    const cloned = [...messages];
+    cloned.splice(lastUserIdx, 0, { role: "user" as const, content });
+    return cloned;
+  }
+
+  // Per-session subliminal cache
+  const subliminalCache = new Map<string, { messageHash: string; context: string }>();
+
+  api.on("context", async (event: any, ctx: any) => {
+    const agentId = ctx?.agentId;
+    if (agentId && SKIP_PREFILL_AGENTS.has(agentId)) return undefined;
+    const resolvedAgentId = agentId ?? "lloyd";
+
+    const messages: any[] = event.messages;
+    if (!messages || messages.length === 0) return undefined;
+
+    // Find the last user message
+    const lastUserMsg = [...messages].reverse().find((m: any) => m.role === "user");
+    if (!lastUserMsg) return undefined;
+
+    // Extract text from the user message
+    const userText = typeof lastUserMsg.content === "string"
+      ? lastUserMsg.content
+      : Array.isArray(lastUserMsg.content)
+        ? (lastUserMsg.content as any[]).filter((b: any) => b.type === "text").map((b: any) => b.text ?? "").join("")
+        : "";
+
+    if (!userText || userText.length < 10) return undefined;
+
+    const profile = classifyProfile(userText);
+    if (profile === "heartbeat" || profile === "chat") return undefined;
+
+    // Check if this is a startup prompt — skip subliminal for session startup
+    if (STARTUP_RE.test(userText)) return undefined;
+
+    // Gate: only fetch once per user message (not on tool-loop iterations)
+    const sessionId = ctx?.sessionId ?? "default";
+    const messageHash = simpleHash(userText);
+    const cached = subliminalCache.get(sessionId);
+    if (cached && cached.messageHash === messageHash) {
+      // Same user message as last time — return cached context
+      const hasVault = !!cached.context;
+      const hasAgent = !!loadAgentSubliminal(resolvedAgentId);
+      if (!hasVault && !hasAgent) return undefined;
+      let result = hasVault ? injectSubliminal(messages, cached.context) : [...messages];
+      if (hasAgent) result = injectAgentSubliminal(result, resolvedAgentId);
+      return { messages: result };
+    }
+
+    // New user message — fetch semantic context via context_bundle
+    const keywords = extractKeywords(userText);
+    if (!keywords) {
+      subliminalCache.set(sessionId, { messageHash, context: "" });
+      const withAgent = injectAgentSubliminal([...messages], resolvedAgentId);
+      if (withAgent.length !== messages.length) return { messages: withAgent };
+      return undefined;
+    }
+
+    try {
+      const content = await mcpClient.callTool(
+        "context_bundle",
+        { query: keywords, mode: "shallow", limit: 10, include_facts: true },
+        1000,  // 1s timeout (avg ~120ms after #216 optimizations)
+      );
+
+      const text = content
+        .filter((b: any) => b.type === "text")
+        .map((b: any) => b.text)
+        .join("")
+        .trim();
+
+      // Cache result (even empty, to avoid re-fetching)
+      subliminalCache.set(sessionId, { messageHash, context: text });
+
+      if (!text) {
+        const withAgent = injectAgentSubliminal([...messages], resolvedAgentId);
+        if (withAgent.length !== messages.length) return { messages: withAgent };
+        return undefined;
+      }
+      return { messages: injectAgentSubliminal(injectSubliminal(messages, text), resolvedAgentId) };
+    } catch (err: any) {
+      api.logger.warn?.(`mcp-tools subliminal: ${err?.message}`);
+      // Cache empty to avoid hammering on errors
+      subliminalCache.set(sessionId, { messageHash, context: "" });
+      const withAgent = injectAgentSubliminal([...messages], resolvedAgentId);
+      if (withAgent.length !== messages.length) return { messages: withAgent };
+      return undefined;
+    }
   });
 
   // ── Subagent delivery: suppress channel forwarding ─────────────────────
@@ -442,12 +616,11 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   api.on("session_end", async (event: any, ctx: any) => {
-    // Clean up per-session prefill state
+    // Clean up per-session state
     const sid = event?.sessionId ?? ctx?.sessionId ?? "";
     if (sid) {
       dailyNotesInjected.delete(sid);
-      semanticPrefillDone.delete(sid);
-      firstUserPrompt.delete(sid);
+      subliminalCache.delete(sid);
     }
 
     // Only create daily files for the main agent
@@ -522,7 +695,7 @@ export default function register(api: OpenClawPluginApi) {
   // This makes mode boundaries transparent — the LLM just calls
   // mem_search("query") and gets mode-appropriate results.
 
-  const MODE_SCOPED_TOOLS = new Set(["mem_search", "tag_search", "prefill_context"]);
+  const MODE_SCOPED_TOOLS = new Set(["mem_search", "prefill_context"]);
 
   api.on("before_tool_call", (event: any, _ctx: any) => {
     const mode = getCurrentMode();
@@ -568,39 +741,6 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   // ── Memory & vault tools ──────────────────────────────────────────────
-
-  proxyTool(
-    "tag_search",
-    "Tag Search",
-    "Search the Obsidian knowledge vault by tags. Returns documents matching the specified tag(s) " +
-      "with their title, summary, tags, type, and status. Use AND mode to find documents at the " +
-      "intersection of multiple topics, OR mode for broader searches. " +
-      "Examples: tag_search([\"alfie\"]), tag_search([\"ai\", \"rag\"], \"and\"), tag_search([\"robotics\"], type=\"hub\").",
-    {
-      type: "object",
-      properties: {
-        tags: {
-          type: "array",
-          items: { type: "string" },
-          description: "One or more tags to search for (without # prefix)",
-        },
-        mode: {
-          type: "string",
-          enum: ["and", "or"],
-          description: "Match mode: 'and' = docs must have ALL tags, 'or' = docs with ANY tag (default: 'or')",
-        },
-        type: {
-          type: "string",
-          description: "Filter by document type: hub, notes, project-notes, work-notes, talk, or 'any' (default: 'any')",
-        },
-        limit: {
-          type: "integer",
-          description: "Max results to return (default: 10, max: 25)",
-        },
-      },
-      required: ["tags"],
-    },
-  );
 
   proxyTool(
     "tag_explore",
@@ -1325,4 +1465,5 @@ export default function register(api: OpenClawPluginApi) {
   );
 
   api.logger.info?.("mcp-tools: registered 38 tools + prefill hook via single MCP server");
+}
 }

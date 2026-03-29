@@ -18,7 +18,7 @@ const TOOL_GROUPS = [
   { source: "openclaw — files & runtime", tools: ["read", "write", "edit", "apply_patch", "exec", "process"] },
   { source: "openclaw — web & memory", tools: ["web_search", "web_fetch", "memory_search", "memory_get"] },
   { source: "openclaw — system & media", tools: ["cron", "gateway", "nodes", "browser", "canvas", "image", "tts"] },
-  { source: "mcp-tools", tools: ["mem_search", "mem_get", "mem_write", "tag_search", "tag_explore", "vault_overview", "prefill_context", "http_search", "http_fetch", "http_request", "file_read", "file_write", "file_edit", "file_patch", "file_glob", "file_grep", "run_bash", "bg_exec", "bg_process", "skills_search", "skills_get"] },
+  { source: "mcp-tools", tools: ["mem_search", "mem_get", "mem_write", "tag_explore", "vault_overview", "prefill_context", "http_search", "http_fetch", "http_request", "file_read", "file_write", "file_edit", "file_patch", "file_glob", "file_grep", "run_bash", "bg_exec", "bg_process", "skills_search", "skills_get"] },
   { source: "mcp-tools — backlog", tools: ["backlog_boards", "backlog_tasks", "backlog_get_task", "backlog_write_task"] },
   { source: "mcp-tools — memory", tools: ["context_bundle", "get_profile", "get_facts", "add_fact", "get_relations", "add_relation", "detect_contradictions", "resolve_contradictions", "rebuild_index"] },
   { source: "mcp-tools — autonomy", tools: ["autonomy_tasks", "autonomy_get_task", "autonomy_write_task", "autonomy_run_task"] },

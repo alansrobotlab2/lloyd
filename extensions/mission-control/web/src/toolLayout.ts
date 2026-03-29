@@ -32,7 +32,7 @@ export const OPENCLAW_FUNC_GROUPS: FuncGroup[] = [
 
 export const MCP_FUNC_GROUPS: FuncGroup[] = [
   { label: "Memory (Next-Gen)", icon: Brain, color: "text-violet-400", tools: ["get_facts", "add_fact", "get_relations", "add_relation", "context_bundle", "get_profile", "detect_contradictions", "resolve_contradictions", "rebuild_index"] },
-  { label: "Memory (Vault)", icon: Database, color: "text-indigo-400", tools: ["mem_search", "mem_get", "mem_write", "tag_search", "tag_explore", "vault_overview", "prefill_context", "work_mode"] },
+  { label: "Memory (Vault)", icon: Database, color: "text-indigo-400", tools: ["mem_search", "mem_get", "mem_write", "tag_explore", "vault_overview", "prefill_context", "work_mode"] },
   { label: "Backlog", icon: CheckSquare, color: "text-emerald-400", tools: ["backlog_boards", "backlog_tasks", "backlog_get_task", "backlog_write_task"] },
   { label: "Files", icon: FolderOpen, color: "text-sky-400", tools: ["file_read", "file_write", "file_edit", "file_patch", "file_glob", "file_grep"] },
   { label: "Shell", icon: Terminal, color: "text-green-400", tools: ["run_bash", "bg_exec", "bg_process"] },

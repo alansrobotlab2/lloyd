@@ -25,6 +25,7 @@ import { registerAgentRoutes } from "./agents.js";
 import { registerBacklogRoutes } from "./backlog.js";
 import { registerAutonomyRoutes } from "./autonomy.js";
 import { registerArchitectureRoutes } from "./architecture.js";
+import { registerPipelineHooks } from "./pipeline-hooks.js";
 
 // ── Stage definitions ────────────────────────────────────────────────
 interface StageDefinition {
@@ -352,6 +353,9 @@ export default function register(api: OpenClawPluginApi) {
 
   // Architecture
   registerArchitectureRoutes(ctx);
+
+  // Pipeline hooks (stage transitions, model swaps, completion detection)
+  registerPipelineHooks(ctx);
 
   // ── Small endpoints (not worth a separate module) ─────────────────
 

@@ -333,6 +333,8 @@ export interface AutonomyTask {
   tags: string[];
   created_at: string;
   updated_at: string;
+  created?: string;
+  updated?: string;
   runs_per_day: number | null;
   depends_on: number | null;
   pipeline: string | null;
@@ -348,7 +350,9 @@ export interface AutonomyTask {
   runs?: Array<{
     id: number;
     started: string;
+    started_at?: string;
     completed: string | null;
+    completed_at?: string;
     status: string;
     summary: string;
   }>;

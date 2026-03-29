@@ -133,7 +133,7 @@ function TaskModal({
   const [tags, setTags] = useState(parseTags(task?.tags).join(", "));
   const [maxRetries, setMaxRetries] = useState(task?.max_retries?.toString() || "");
   const [preferredHours, setPreferredHours] = useState(task?.preferred_hours || "");
-  const [runs, setRuns] = useState<Array<{id: number; started: string; completed: string | null; status: string; summary: string | null; activity_log: string | null; duration_seconds: number | null}>>([]);
+  const [runs, setRuns] = useState<Array<{id: number; started: string; started_at?: string; completed: string | null; completed_at?: string; status: string; summary: string | null; activity_log: string | null; duration_seconds: number | null}>>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -536,10 +536,10 @@ function TaskModal({
           {!isCreate && (
             <div className="grid grid-cols-2 gap-3 text-[10px] text-slate-500 pt-2 border-t border-surface-3/30">
               <div>
-                Created: {new Date(task.created_at).toLocaleDateString()}
+                Created: {new Date(task.created || task.created_at).toLocaleDateString()}
               </div>
               <div>
-                Updated: {new Date(task.updated_at).toLocaleDateString()}
+                Updated: {new Date(task.updated || task.updated_at).toLocaleDateString()}
               </div>
               {task.next_run && (
                 <div className="col-span-2 flex items-center gap-1 text-sky-400">
@@ -583,7 +583,7 @@ function TaskModal({
                             <div key={run.id} className="bg-black/30 rounded p-2 space-y-1">
                               <div className="flex items-center gap-2">
                                 <span className={`text-[10px] font-semibold uppercase ${statusColor}`}>{run.status}</span>
-                                <span className="text-[10px] text-slate-500">{new Date(run.started).toLocaleString()}</span>
+                                <span className="text-[10px] text-slate-500">{new Date(run.started_at || run.started).toLocaleString()}</span>
                                 {run.duration_seconds && (
                                   <span className="text-[10px] text-slate-600">{run.duration_seconds}s</span>
                                 )}
@@ -955,7 +955,7 @@ export default function AutonomyPage() {
           const priorityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, background: 4 };
           const priDiff = (priorityOrder[a.priority] ?? 2) - (priorityOrder[b.priority] ?? 2);
           if (priDiff !== 0) return priDiff;
-          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+          return new Date(a.created || a.created_at).getTime() - new Date(b.created || b.created_at).getTime();
         });
       return acc;
     },

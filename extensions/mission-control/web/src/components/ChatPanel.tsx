@@ -131,6 +131,7 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded, onActi
   const [messages, setMessages] = useState<MessageEntry[]>([]);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
+  const [agentBusy, setAgentBusy] = useState(false);
   const [activityType, setActivityType] = useState<"thinking" | "working" | null>(null);
   const [activityDetail, setActivityDetail] = useState<string | null>(null);
   const [awaitingReset, setAwaitingReset] = useState(false);
@@ -312,6 +313,11 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded, onActi
               }
             }
           }
+
+          // Maintain agentBusy as independent safety net for stop button
+          api.agentStatus().then((status) => {
+            setAgentBusy(status.mainAgent.state !== "idle");
+          }).catch(() => {});
         })
         .catch(() => {
           setMessages([]);
@@ -478,6 +484,7 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded, onActi
     try {
       await api.chatAbort(sessionKey);
       setThinking(false);
+      setAgentBusy(false);
     } catch (err) {
       console.error("Stop failed:", err);
     }
@@ -907,7 +914,7 @@ export default function ChatPanel({ requestedSessionKey, onSessionLoaded, onActi
                 </button>
                 <button
                   onClick={handleStop}
-                  disabled={!thinking}
+                  disabled={!thinking && !agentBusy}
                   title="Stop"
                   className="bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
                 >
