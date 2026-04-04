@@ -388,6 +388,13 @@ async def post_message_stream(request: Request):
         persisted_tool_ids: set[str] = set()  # call_ids already written to disk
         final_persisted = False    # True once ResultMessage has been persisted
         first_event = True
+        # Token stats captured from streaming events (fallback when ResultMessage is absent)
+        stream_stats: dict = {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_create": 0, "cache_read": 0,
+            "cost_usd": None, "duration_ms": None, "num_turns": None,
+            "model": model,
+        }
 
         # Persist user message immediately so it survives a mid-stream disconnect.
         now_ts = datetime.now().isoformat()
@@ -420,7 +427,15 @@ async def post_message_stream(request: Request):
                                     logger.info(f"[TIMING] first text token after {time.perf_counter() - t_query_start:.3f}s (model TTFT)")
                                 full_response += delta_text
                                 yield f"event: text_delta\ndata: {json.dumps({'text': delta_text})}\n\n"
-                    # Skip other stream events (message_start, content_block_start/stop, etc.)
+                    elif etype == "message_start":
+                        # Capture input token counts early (before ResultMessage may be skipped)
+                        msg_usage = evt.get("message", {}).get("usage", {})
+                        stream_stats["input_tokens"] = msg_usage.get("input_tokens", 0)
+                        stream_stats["cache_create"] = msg_usage.get("cache_creation_input_tokens", 0)
+                        stream_stats["cache_read"] = msg_usage.get("cache_read_input_tokens", 0)
+                    elif etype == "message_delta":
+                        # Capture output token count
+                        stream_stats["output_tokens"] = evt.get("usage", {}).get("output_tokens", 0)
                     continue
 
                 if isinstance(message, SystemMessage):
@@ -529,15 +544,25 @@ async def post_message_stream(request: Request):
                             tail.append({"id": f"msg_{cid}_result", "role": "tool",
                                          "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
                                          "tool_call_id": cid, "timestamp": end_ts})
+                    stream_stats.update({
+                        "input_tokens":  usage.get("input_tokens", 0) or stream_stats["input_tokens"],
+                        "output_tokens": usage.get("output_tokens", 0) or stream_stats["output_tokens"],
+                        "cache_create":  usage.get("cache_creation_input_tokens", 0),
+                        "cache_read":    usage.get("cache_read_input_tokens", 0),
+                        "cost_usd":      getattr(message, "total_cost_usd", None),
+                        "duration_ms":   getattr(message, "duration_ms", None),
+                        "num_turns":     getattr(message, "num_turns", None),
+                    })
+                    stats_dict = stream_stats
                     if result_text.strip():
                         tail.append({"id": uuid.uuid4().hex[:8], "role": "assistant",
                                      "content": [{"type": "text", "text": result_text}],
-                                     "timestamp": end_ts})
+                                     "timestamp": end_ts, "stats": stats_dict})
                     if tail:
                         _append_messages(session_id, tail)
                     final_persisted = True
 
-                    yield f"event: done\ndata: {json.dumps({'response': result_text, 'session_id': session_id})}\n\n"
+                    yield f"event: done\ndata: {json.dumps({'response': result_text, 'session_id': session_id, 'stats': stats_dict})}\n\n"
 
         except Exception as e:
             if not final_persisted:
@@ -558,10 +583,23 @@ async def post_message_stream(request: Request):
                                          "tool_call_id": cid, "timestamp": err_ts})
                     if full_response.strip():
                         tail.append({"id": uuid.uuid4().hex[:8], "role": "assistant",
-                                     "content": [{"type": "text", "text": full_response}], "timestamp": err_ts})
+                                     "content": [{"type": "text", "text": full_response}],
+                                     "timestamp": err_ts, "stats": stream_stats})
                     if tail:
                         _append_messages(session_id, tail)
-                    yield f"event: done\ndata: {json.dumps({'response': full_response, 'session_id': session_id})}\n\n"
+                    try:
+                        if stream_stats["input_tokens"] or stream_stats["output_tokens"]:
+                            usage_store.record_usage(
+                                session_id=session_id,
+                                model=model,
+                                input_tokens=stream_stats["input_tokens"],
+                                output_tokens=stream_stats["output_tokens"],
+                                cache_create=stream_stats["cache_create"],
+                                cache_read=stream_stats["cache_read"],
+                            )
+                    except Exception as ue:
+                        logger.warning(f"Failed to record usage (exception path): {ue}")
+                    yield f"event: done\ndata: {json.dumps({'response': full_response, 'session_id': session_id, 'stats': stream_stats})}\n\n"
                 else:
                     logger.error(f"Stream error: {e}")
                     yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
@@ -646,6 +684,7 @@ async def post_message(request: Request):
 
     try:
         full_response = ""
+        turn_stats: dict | None = None
         async for message in query(prompt=text, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -654,25 +693,35 @@ async def post_message(request: Request):
             elif isinstance(message, ResultMessage):
                 if hasattr(message, "result") and message.result:
                     full_response = message.result
+                usage = getattr(message, "usage", None) or {}
+                turn_stats = {
+                    "input_tokens":  usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                    "cache_create":  usage.get("cache_creation_input_tokens", 0),
+                    "cache_read":    usage.get("cache_read_input_tokens", 0),
+                    "cost_usd":      getattr(message, "total_cost_usd", None),
+                    "duration_ms":   getattr(message, "duration_ms", None),
+                    "num_turns":     getattr(message, "num_turns", None),
+                    "model":         model,
+                }
                 # Record token usage
                 try:
-                    usage = getattr(message, "usage", None) or {}
                     usage_store.record_usage(
                         session_id=session_id,
                         model=model,
-                        input_tokens=usage.get("input_tokens", 0),
-                        output_tokens=usage.get("output_tokens", 0),
-                        cache_create=usage.get("cache_creation_input_tokens", 0),
-                        cache_read=usage.get("cache_read_input_tokens", 0),
-                        cost_usd=getattr(message, "total_cost_usd", None),
-                        duration_ms=getattr(message, "duration_ms", None),
+                        input_tokens=turn_stats["input_tokens"],
+                        output_tokens=turn_stats["output_tokens"],
+                        cache_create=turn_stats["cache_create"],
+                        cache_read=turn_stats["cache_read"],
+                        cost_usd=turn_stats["cost_usd"],
+                        duration_ms=turn_stats["duration_ms"],
                         duration_api_ms=getattr(message, "duration_api_ms", None),
-                        num_turns=getattr(message, "num_turns", None),
+                        num_turns=turn_stats["num_turns"],
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
 
-        return JSONResponse({"success": True, "response": full_response, "session_id": session_id})
+        return JSONResponse({"success": True, "response": full_response, "session_id": session_id, "stats": turn_stats})
 
     except Exception as e:
         logger.error(f"Message error: {e}")
@@ -1001,11 +1050,16 @@ def _autonomy_parse(path: Path) -> dict | None:
                 return val.strftime("%Y-%m-%dT%H:%M:%SZ")
             return str(val) if val else None
 
+        raw_id = fm.get("id", 0)
+        try:
+            id_val = int(raw_id)
+        except (ValueError, TypeError):
+            id_val = 0
         return {
-            "id": fm.get("id", 0),
+            "id": id_val,
             "name": fm.get("name", ""),
             "description": fm.get("description", ""),
-            "status": fm.get("status", "inbox"),
+            "status": fm.get("status", "draft"),
             "priority": fm.get("priority", "medium"),
             "frequency": fm.get("frequency") or None,
             "scheduled_at": _to_iso(fm.get("scheduled_at")),
@@ -1121,7 +1175,7 @@ async def autonomy_task_write(request: Request):
             "id": new_id,
             "name": name,
             "description": data.get("description", ""),
-            "status": data.get("status") or "inbox",
+            "status": data.get("status") or "draft",
             "priority": data.get("priority") or "medium",
             "frequency": data.get("frequency", ""),
             "skill_path": data.get("skill_path", ""),
@@ -1633,7 +1687,7 @@ import re as _re
 _BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 _BACKLOG_PATTERN = _re.compile(r"^(\d+)[-_].*\.md$")
 _BOARD_COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7"]
-_BOARD_ICONS = ["📋", "🚀", "🎯", "📌", "⭐"]
+_BOARD_ICONS = ["📋", "📋", "📋", "📋", "📋"]
 
 
 def _backlog_parse_fm(content: str) -> tuple:
@@ -1751,7 +1805,7 @@ async def backlog_tasks(board_id: str = "", status: str = ""):
                 "id": tid,
                 "name": name,
                 "description": description,
-                "status": fm.get("status", "inbox"),
+                "status": fm.get("status", "draft"),
                 "priority": fm.get("priority", "none"),
                 "blocked": fm.get("blocked", False),
                 "tags": fm.get("tags", []),
@@ -1843,7 +1897,7 @@ async def backlog_task_create(request: Request):
     board_name = id_to_name.get(data.get("board_id"), "default")
     now = datetime.now().isoformat()
     fm = {
-        "status": data.get("status", "inbox"),
+        "status": data.get("status", "draft"),
         "priority": data.get("priority", "none"),
         "board": board_name,
         "blocked": False,
