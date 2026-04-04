@@ -40,9 +40,10 @@ def build_system_prompt(include_skills_index: bool = True) -> str:
         if skills:
             parts.append(f"<available_skills>\n{skills}\n</available_skills>")
 
-    # Platform hints
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    platform = f"Platform: Lloyd (Claude Agent SDK). Time: {now}. Home: {LLOYD_HOME}"
+    # Platform hints — NOTE: no timestamp here; a per-minute timestamp busts
+    # vLLM's prefix cache, forcing full re-prefill of the system prompt every turn.
+    # The model gets the current time via tool calls or conversation context instead.
+    platform = f"Platform: Lloyd (Claude Agent SDK). Home: {LLOYD_HOME}"
     parts.append(platform)
 
     return "\n\n".join(parts)

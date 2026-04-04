@@ -9,11 +9,12 @@ import SkillsPage from './pages/SkillsPage'
 import ToolsPage from './pages/ToolsPage'
 import ArchitecturePageFull from './pages/ArchitecturePage'
 import AutonomyPage from './pages/AutonomyPage'
+import UsagePage from './pages/UsagePage'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
 import { api, type ModelInfo } from '../api'
 
-const DashboardPage = () => <div className="p-6"><h2 className="text-xl font-bold text-slate-200">Dashboard</h2><p className="text-slate-400 mt-2">Coming soon...</p></div>
+const DashboardPage = UsagePage
 const GraphPage = () => <div className="p-6"><h2 className="text-xl font-bold">Graph</h2><p className="text-slate-400 mt-2">Coming soon...</p></div>
 const SettingsPage = () => <div className="p-6"><h2 className="text-xl font-bold">Settings</h2><p className="text-slate-400 mt-2">Coming soon...</p></div>
 

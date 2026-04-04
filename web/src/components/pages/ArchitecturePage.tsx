@@ -66,57 +66,88 @@ interface GraphData {
 
 // ── Utility Functions ───────────────────────────────────────────────────
 
+// Dark-mode safe color tokens
+const HC = {
+  keyword: "#c084fc",
+  literal: "#fb923c",
+  number:  "#60a5fa",
+  string:  "#4ade80",
+  comment: "#64748b",
+  type:    "#facc15",
+};
+
 function highlightCode(code: string, language: string): string {
-  let escaped = code
+  const escaped = code
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
-  const patterns: Record<string, Array<{ regex: RegExp; cls: string }>> = {
+  const patterns: Record<string, Array<{ regex: RegExp; color: string }>> = {
     typescript: [
-      { regex: /\b(const|let|var|function|class|import|export|from|return|if|else|for|while|switch|case|break|continue|async|await|new|this|extends|implements|interface|type|namespace|enum)\b/g, cls: "text-purple-400" },
-      { regex: /\b(true|false|null|undefined)\b/g, cls: "text-orange-400" },
-      { regex: /\b(\d+)\b/g, cls: "text-blue-400" },
-      { regex: /".*?"|'.*?'|`.*?`/g, cls: "text-green-400" },
-      { regex: /(\/\/.*$)/gm, cls: "text-slate-500" },
-      { regex: /\b([A-Z][a-zA-Z0-9]*)\b/g, cls: "text-yellow-400" },
+      { regex: /(\/\/.*$)/gm, color: HC.comment },
+      { regex: /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, color: HC.string },
+      { regex: /\b(const|let|var|function|class|import|export|from|return|if|else|for|while|switch|case|break|continue|async|await|new|this|extends|implements|interface|type|namespace|enum)\b/g, color: HC.keyword },
+      { regex: /\b(true|false|null|undefined)\b/g, color: HC.literal },
+      { regex: /\b([A-Z][a-zA-Z0-9]*)\b/g, color: HC.type },
+      { regex: /\b(\d+)\b/g, color: HC.number },
     ],
     javascript: [
-      { regex: /\b(const|let|var|function|class|import|export|from|return|if|else|for|while|switch|case|break|continue|async|await|new|this|extends|implements|interface|type|namespace|enum)\b/g, cls: "text-purple-400" },
-      { regex: /\b(true|false|null|undefined)\b/g, cls: "text-orange-400" },
-      { regex: /\b(\d+)\b/g, cls: "text-blue-400" },
-      { regex: /".*?"|'.*?'|`.*?`/g, cls: "text-green-400" },
-      { regex: /(\/\/.*$)/gm, cls: "text-slate-500" },
+      { regex: /(\/\/.*$)/gm, color: HC.comment },
+      { regex: /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, color: HC.string },
+      { regex: /\b(const|let|var|function|class|import|export|from|return|if|else|for|while|switch|case|break|continue|async|await|new|this|extends|implements|interface|type|namespace|enum)\b/g, color: HC.keyword },
+      { regex: /\b(true|false|null|undefined)\b/g, color: HC.literal },
+      { regex: /\b(\d+)\b/g, color: HC.number },
     ],
     python: [
-      { regex: /\b(def|class|import|from|return|if|elif|else|for|while|try|except|finally|with|as|async|await|lambda|yield|global|nonlocal)\b/g, cls: "text-purple-400" },
-      { regex: /\b(True|False|None)\b/g, cls: "text-orange-400" },
-      { regex: /\b(\d+)\b/g, cls: "text-blue-400" },
-      { regex: /".*?"|'.*?'/g, cls: "text-green-400" },
-      { regex: /(#.*$)/gm, cls: "text-slate-500" },
+      { regex: /(#.*$)/gm, color: HC.comment },
+      { regex: /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, color: HC.string },
+      { regex: /\b(def|class|import|from|return|if|elif|else|for|while|try|except|finally|with|as|async|await|lambda|yield|global|nonlocal)\b/g, color: HC.keyword },
+      { regex: /\b(True|False|None)\b/g, color: HC.literal },
+      { regex: /\b(\d+)\b/g, color: HC.number },
     ],
     markdown: [
-      { regex: /^#{1,6}\s.*$/gm, cls: "text-purple-400 font-bold" },
-      { regex: /\*\*.*?\*\*/g, cls: "text-yellow-400 font-bold" },
-      { regex: /\*.*?\*/g, cls: "text-yellow-400 italic" },
-      { regex: /\[.*?\]\(.*?\)/g, cls: "text-blue-400 underline" },
+      { regex: /^(#{1,6}\s.*)$/gm, color: HC.keyword },
+      { regex: /(\*\*.*?\*\*)/g, color: HC.type },
+      { regex: /(\[.*?\]\(.*?\))/g, color: HC.number },
     ],
     json: [
-      { regex: /"(.*?)":/g, cls: "text-blue-400" },
-      { regex: /:\s*"(.*?)"/g, cls: "text-green-400" },
-      { regex: /:\s*(\d+)/g, cls: "text-orange-400" },
-      { regex: /:\s*(true|false|null)/g, cls: "text-purple-400" },
+      { regex: /("(?:[^"\\]|\\.)*"\s*)(?=:)/g, color: HC.type },
+      { regex: /(?<=:\s*)("(?:[^"\\]|\\.)*")/g, color: HC.string },
+      { regex: /(?<=:\s*)(\d+)/g, color: HC.number },
+      { regex: /(?<=:\s*)(true|false|null)\b/g, color: HC.literal },
     ],
   };
 
   const langPatterns = patterns[language] || patterns.python;
-  let highlighted = escaped;
 
-  for (const { regex, cls } of langPatterns) {
-    highlighted = highlighted.replace(regex, (match) => `<span class="${cls}">${match}</span>`);
+  // Single-pass: collect all non-overlapping matches sorted by position,
+  // then build the output string with spans only around matched ranges.
+  type Match = { start: number; end: number; color: string; text: string };
+  const matches: Match[] = [];
+
+  for (const { regex, color } of langPatterns) {
+    let m: RegExpExecArray | null;
+    regex.lastIndex = 0;
+    while ((m = regex.exec(escaped)) !== null) {
+      matches.push({ start: m.index, end: m.index + m[0].length, color, text: m[0] });
+      if (m[0].length === 0) { regex.lastIndex++; }
+    }
   }
 
-  return highlighted;
+  // Sort by start position; earlier wins, ties broken by longer match
+  matches.sort((a, b) => a.start - b.start || b.end - a.end);
+
+  // Build output, skipping overlapping matches
+  let result = "";
+  let pos = 0;
+  for (const { start, end, color, text } of matches) {
+    if (start < pos) continue; // overlaps a prior match — skip
+    result += escaped.slice(pos, start);
+    result += `<span style="color:${color}">${text}</span>`;
+    pos = end;
+  }
+  result += escaped.slice(pos);
+  return result;
 }
 
 function getColorFromPath(path: string): string {
@@ -312,7 +343,7 @@ function FileViewerModal({
               ))}
             </div>
             <div className="flex-1 p-2 overflow-x-auto">
-              <pre className="leading-5 whitespace-pre-wrap break-words">
+              <pre className="leading-5 whitespace-pre-wrap break-words text-slate-300">
                 <code dangerouslySetInnerHTML={{ __html: highlightCode(file.content, file.language) }} />
               </pre>
             </div>
@@ -558,6 +589,7 @@ function GraphView({
             nodeRelSize={3}
             nodeVal="count"
             linkDirectionalArrowLength={5}
+            linkCurvature={0.3}
             linkColor={() => "rgba(148, 163, 184, 0.4)"}
             linkWidth={1}
             backgroundColor="transparent"
@@ -598,13 +630,13 @@ function GraphView({
 // ── Main Page ───────────────────────────────────────────────────────────
 
 const BROWSER_TABS = [
-  { id: "hermes", label: ".hermes", path: "/home/alansrobotlab/.hermes" },
-  { id: "hermes-agent", label: "hermes-agent", path: "/home/alansrobotlab/Projects/hermes-agent" },
+  { id: "lloyd", label: "lloyd", path: "/home/alansrobotlab/lloyd" },
+  { id: "lloyd-web", label: "web", path: "/home/alansrobotlab/lloyd/web/src" },
 ] as const;
 type BrowserTab = typeof BROWSER_TABS[number]["id"];
 
 export default function ArchitecturePage() {
-  const [browserTab, setBrowserTab] = useState<BrowserTab>("hermes");
+  const [browserTab, setBrowserTab] = useState<BrowserTab>("lloyd");
   const currentPath = BROWSER_TABS.find(t => t.id === browserTab)!.path;
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [graphLoading, setGraphLoading] = useState(true);
@@ -658,7 +690,7 @@ export default function ArchitecturePage() {
           <h1 className="text-lg font-bold text-slate-200">Architecture</h1>
         </div>
         <div className="text-[11px] text-slate-500">
-          Browse source: <code className="bg-surface-2 px-1 rounded">~/.hermes/</code> and <code className="bg-surface-2 px-1 rounded">~/Projects/hermes-agent/</code>
+          Browse source: <code className="bg-surface-2 px-1 rounded">~/lloyd/</code> and <code className="bg-surface-2 px-1 rounded">~/lloyd/web/src/</code>
         </div>
       </div>
 

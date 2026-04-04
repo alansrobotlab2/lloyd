@@ -291,7 +291,57 @@ export default function ServicesPage() {
 
       {/* Service cards */}
       <div className="space-y-2">
-        {/* Gateway managed services */}
+        {/* Lloyd (agent) services — shown first */}
+        {[...lloydServices].sort((a, b) => {
+          const aGw = a.unit.startsWith("openclaw-") && !a.unit.includes("cert") ? 0 : 1;
+          const bGw = b.unit.startsWith("openclaw-") && !b.unit.includes("cert") ? 0 : 1;
+          return aGw - bGw;
+        }).map((svc) => {
+          const isExpanded = lloydExpandedUnit === svc.unit;
+          return (
+            <div key={svc.unit} className="rounded-xl border border-surface-3/50 overflow-hidden">
+              <div
+                onClick={() => toggleLloydExpand(svc.unit)}
+                className={`bg-surface-1 px-5 py-4 flex items-center gap-4 cursor-pointer transition-colors ${
+                  isExpanded ? "border-b border-surface-3/50" : "hover:border-surface-3/80"
+                }`}
+              >
+                <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${healthDot(svc.health)}`} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-slate-200">{svc.name}</div>
+                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                    {svc.unit}{svc.port ? ` · :${svc.port}` : ""}
+                  </div>
+                </div>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono border ${stateBadge(svc.activeState)}`}>
+                  {svc.activeState}
+                </span>
+                <span className={`text-[10px] w-14 text-right px-1.5 py-0.5 rounded font-mono tabular-nums ${svc.port && svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}>
+                  :{svc.port ? String(svc.port).padStart(4, "0") : "0000"}
+                </span>
+                <div className="flex gap-1">
+                  <button onClick={(e) => handleLloydAction(e, svc.id, "start")} disabled={lloydActionLoading !== null} title="Start" className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50"><Play className="w-3.5 h-3.5" /></button>
+                  <button onClick={(e) => handleLloydAction(e, svc.id, "stop")} disabled={lloydActionLoading !== null} title="Stop" className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"><Square className="w-3.5 h-3.5" /></button>
+                  <button onClick={(e) => handleLloydAction(e, svc.id, "restart")} disabled={lloydActionLoading !== null} title="Restart" className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50 ${lloydActionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}><RotateCcw className="w-3.5 h-3.5" /></button>
+                </div>
+                <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+              </div>
+              {isExpanded && (
+                <div className="bg-surface-0 px-5 py-4 space-y-4">
+                  {lloydDetailLoading && !lloydDetail ? (
+                    <div className="text-xs text-slate-500 text-center py-4">Loading service details...</div>
+                  ) : lloydDetail ? (
+                    <LloydDetailView detail={lloydDetail} />
+                  ) : (
+                    <div className="text-xs text-red-400 text-center py-4">Failed to load service details</div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Infrastructure services */}
         {services.map((svc) => {
           const isExpanded = expandedId === svc.id;
           return (
@@ -313,10 +363,10 @@ export default function ServicesPage() {
                   {svc.systemdState}
                 </span>
                 <span
-                  className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}
-                  title={svc.portHealthy ? "Port responding" : "Port not responding"}
+                  className={`text-[10px] w-14 text-right px-1.5 py-0.5 rounded font-mono tabular-nums ${svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}
+                  title={svc.portHealthy ? "Port responding" : svc.port ? "Port not responding" : "No port"}
                 >
-                  :{svc.port}
+                  :{svc.port ? String(svc.port).padStart(4, "0") : "0000"}
                 </span>
                 <div className="flex gap-1">
                   <button onClick={(e) => handleAction(e, svc.id, "start")} disabled={actionLoading !== null} title="Start" className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50">
@@ -347,70 +397,6 @@ export default function ServicesPage() {
           );
         })}
 
-        {/* Lloyd (agent) services */}
-        {[...lloydServices].sort((a, b) => {
-          const aGw = a.unit.startsWith("openclaw-") && !a.unit.includes("cert") ? 0 : 1;
-          const bGw = b.unit.startsWith("openclaw-") && !b.unit.includes("cert") ? 0 : 1;
-          return aGw - bGw;
-        }).map((svc) => {
-          const isExpanded = lloydExpandedUnit === svc.unit;
-          return (
-            <div key={svc.unit} className="rounded-xl border border-surface-3/50 overflow-hidden">
-              <div
-                onClick={() => toggleLloydExpand(svc.unit)}
-                className={`bg-surface-1 px-5 py-4 flex items-center gap-4 cursor-pointer transition-colors ${
-                  isExpanded ? "border-b border-surface-3/50" : "hover:border-surface-3/80"
-                }`}
-              >
-                <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${healthDot(svc.health)}`} />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-slate-200">{svc.name}</div>
-                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">
-                    {svc.unit}{svc.port ? ` · :${svc.port}` : ""}
-                  </div>
-                </div>
-                {svc.uptime && (
-                  <span className="text-[10px] text-slate-500 font-mono flex-shrink-0">{svc.uptime}</span>
-                )}
-                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono border ${stateBadge(svc.activeState)}`}>
-                  {svc.activeState}
-                </span>
-                {svc.port !== null && (
-                  <span
-                    className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}
-                    title={svc.portHealthy === true ? "Port responding" : svc.portHealthy === false ? "Port not responding" : "No port check"}
-                  >
-                    :{svc.port}
-                  </span>
-                )}
-                <div className="flex gap-1">
-                  <button onClick={(e) => handleLloydAction(e, svc.id, "start")} disabled={lloydActionLoading !== null} title="Start" className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50">
-                    <Play className="w-3.5 h-3.5" />
-                  </button>
-                  <button onClick={(e) => handleLloydAction(e, svc.id, "stop")} disabled={lloydActionLoading !== null} title="Stop" className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50">
-                    <Square className="w-3.5 h-3.5" />
-                  </button>
-                  <button onClick={(e) => handleLloydAction(e, svc.id, "restart")} disabled={lloydActionLoading !== null} title="Restart" className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50 ${lloydActionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}>
-                    <RotateCcw className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
-              </div>
-
-              {isExpanded && (
-                <div className="bg-surface-0 px-5 py-4 space-y-4">
-                  {lloydDetailLoading && !lloydDetail ? (
-                    <div className="text-xs text-slate-500 text-center py-4">Loading service details...</div>
-                  ) : lloydDetail && lloydDetail.unit === svc.unit ? (
-                    <LloydDetailView detail={lloydDetail} />
-                  ) : (
-                    <div className="text-xs text-red-400 text-center py-4">Failed to load service details</div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
 
         {!loading && !lloydLoading && services.length === 0 && lloydServices.length === 0 && (
           <div className="text-sm text-slate-600 text-center py-4 italic">

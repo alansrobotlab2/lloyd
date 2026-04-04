@@ -86,7 +86,11 @@ def _ensure_bridge() -> subprocess.Popen:
         },
     }
     _bridge_send(init_msg)
-    time.sleep(1)  # Wait for init
+    # Consume the init response so it doesn't pollute subsequent _bridge_receive() calls
+    try:
+        _bridge_receive(timeout=5.0)
+    except Exception:
+        pass
     return _bridge_proc
 
 

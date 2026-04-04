@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""
+Fact Extraction Pipeline - Next-Gen Memory System
+
+Extracts atomic facts from documents using the local 2B LLM.
+Integrates with periodic-memory-capture system.
+"""
+
+import json
+import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+# Constants
+HOME = Path.home()
+VAULT = HOME / "obsidian"
+FACTS_DIR = VAULT / "memory" / "_pipeline" / "facts"
+EXTRACTION_PROMPT = """You are a fact extraction engine. Analyze the following content and extract
+atomic facts about entities mentioned.
+
+Rules:
+1. Each fact must be a single, unambiguous statement
+2. Include temporal context if mentioned ("moved last week" → event_date)
+3. Identify the entity each fact is about (person, project, system)
+4. Categorize: preference, relationship, event, state, skill, goal, temporary
+5. Note confidence level (0.0-1.0)
+6. If a fact contradicts a known fact, flag it as an update
+
+Content:
+{content}
+
+Known facts about relevant entities:
+{existing_facts}
+
+Extract facts as structured JSON with the following format:
+{{
+  "entity": "entity_name",
+  "category": "category_name",
+  "source": "document_path",
+  "document_date": "YYYY-MM-DD",
+  "facts": [
+    {{
+      "fact": "Fact statement",
+      "confidence": 0.95,
+      "event_date": null,
+      "category": "preference"
+    }}
+  ]
+}}
+"""
+
+class FactExtractor:
+    """Extracts facts from documents using LLM."""
+    
+    def __init__(self, model_port: int = 8096):
+        self.model_port = model_port
+        self.facts_dir = FACTS_DIR
+    
+    def extract_from_document(self, doc_path: Path, content: str, 
+                              existing_facts: str = "") -> dict:
+        """Extract facts from a document."""
+        # Build prompt
+        prompt = EXTRACTION_PROMPT.format(
+            content=content[:3000],  # Limit context
+            existing_facts=existing_facts[:1000] if existing_facts else "None"
+        )
+        
+        # Call local LLM (122B model on port 8096)
+        response = self._call_llm(prompt)
+        
+        # Parse JSON response
+        try:
+            # Strip markdown code blocks if present
+            if response.startswith("```"):
+                # Remove ```json and ``` markers
+                response = re.sub(r'^```\w*\n?', '', response)
+                response = re.sub(r'\n?```$', '', response)
+            result = json.loads(response)
+            # Handle array responses
+            if isinstance(result, list):
+                if not result:
+                    return {"entity": None, "category": None, "facts": []}
+                # Take first element as base, merge facts from remaining
+                base = result[0] if isinstance(result[0], dict) else {"entity": None, "category": None, "facts": []}
+                for extra in result[1:]:
+                    if isinstance(extra, dict) and extra.get("facts"):
+                        base.setdefault("facts", []).extend(extra["facts"])
+                result = base
+            elif not isinstance(result, dict):
+                return {"entity": None, "category": None, "facts": []}
+            
+            # Sanitize entity to prevent nested path creation
+            if result.get("entity"):
+                result["entity"] = self._sanitize_entity(result["entity"])
+            if result.get("category"):
+                result["category"] = self._sanitize_entity(result["category"])
+            
+            return result
+        except json.JSONDecodeError:
+            print(f"Failed to parse LLM response as JSON: {response[:200]}")
+            return {"entity": None, "category": None, "facts": []}
+    
+    def _call_llm(self, prompt: str) -> str:
+        """Call the local 2B model."""
+        import httpx
+        
+        url = f"http://localhost:{self.model_port}/v1/chat/completions"
+        payload = {
+            "model": "Qwen3.5-122B-A10B",
+            "messages": [
+                {"role": "system", "content": "You are a fact extraction engine."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 4000,
+            "chat_template_kwargs": {"enable_thinking": False}
+        }
+        
+        response_text = None
+        try:
+            response = httpx.post(url, json=payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            response_text = data["choices"][0]["message"]["content"]
+            return response_text
+        except Exception as e:
+            print(f"LLM call failed: {e}")
+            # Fallback: try to extract first complete JSON object from truncated response
+            if response_text:
+                match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text)
+                if match:
+                    try:
+                        return match.group()
+                    except Exception:
+                        pass
+            
+            # Return empty extraction
+            return json.dumps({
+                "entity": "unknown",
+                "category": "general",
+                "facts": []
+            })
+    
+    def get_existing_facts(self, entity: str, category: str) -> str:
+        """Load existing facts for an entity/category."""
+        # Sanitize entity and category to prevent nested path creation
+        entity = self._sanitize_entity(entity)
+        category = self._sanitize_entity(category)
+        fact_file = self.facts_dir / entity / f"{entity}-{category}.md"
+        if not fact_file.exists():
+            return ""
+        
+        content = fact_file.read_text()
+        # Extract YAML frontmatter
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 2:
+                return parts[1].strip()
+        return ""
+    
+    def _sanitize_entity(self, entity: str) -> str:
+        """Sanitize entity name to prevent nested path creation."""
+        if not entity:
+            return "general"
+        # Take last path component if slashes present
+        entity = entity.strip().split("/")[-1].split("\\")[-1]
+        # Remove any remaining path-unsafe characters
+        entity = re.sub(r'[<>:"|?*]', '', entity)
+        # Collapse whitespace
+        entity = re.sub(r'\s+', ' ', entity).strip()
+        return entity if entity else "general"
+    
+    def write_fact_file(self, entity: str, category: str, facts_data: dict) -> Path:
+        """Write or update a fact file."""
+        # Sanitize entity and category to prevent nested path creation
+        entity = self._sanitize_entity(entity)
+        category = self._sanitize_entity(category)
+        
+        entity_dir = self.facts_dir / entity
+        entity_dir.mkdir(parents=True, exist_ok=True)
+        
+        fact_file = entity_dir / f"{entity}-{category}.md"
+        
+        # Load existing facts if file exists
+        existing_facts = []
+        if fact_file.exists():
+            content = fact_file.read_text()
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) >= 2:
+                    try:
+                        frontmatter = yaml.safe_load(parts[1])
+                        existing_facts = frontmatter.get("facts", [])
+                    except:
+                        pass
+        
+        # Merge new facts with existing
+        new_facts = facts_data.get("facts", [])
+        merged_facts = self._merge_facts(existing_facts, new_facts)
+        
+        # Generate sequential IDs
+        merged_facts = self._assign_ids(merged_facts, category)
+        
+        # Build frontmatter
+        frontmatter = {
+            "type": "facts",
+            "entity": entity,
+            "category": category,
+            "facts": merged_facts,
+            "last_extracted": datetime.now().isoformat(),
+            "last_updated": datetime.now().isoformat(),
+            "relationships": []
+        }
+        
+        # Write file
+        yaml_content = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
+        markdown_body = self._generate_markdown_body(entity, category, merged_facts)
+        
+        full_content = f"---\n{yaml_content}---\n\n{markdown_body}"
+        fact_file.write_text(full_content)
+        
+        return fact_file
+    
+    def _merge_facts(self, existing: list, new: list) -> list:
+        """Merge new facts with existing, avoiding duplicates."""
+        # Simple dedup by fact text similarity
+        existing_texts = {f.get("fact", "") for f in existing}
+        merged = existing.copy()
+        
+        for fact in new:
+            fact_text = fact.get("fact", "")
+            # Simple duplicate check
+            if fact_text not in existing_texts:
+                merged.append(fact)
+                existing_texts.add(fact_text)
+        
+        return merged
+    
+    def _assign_ids(self, facts: list, category: str) -> list:
+        """Assign sequential IDs to facts."""
+        # Get next ID based on existing facts
+        prefix_map = {
+            "preferences": "pref",
+            "configuration": "conf", 
+            "hardware": "hard",
+            "status": "status",
+            "relationships": "rel",
+            "events": "event",
+            "skills": "skill",
+            "goals": "goal",
+            "general": "fact"
+        }
+        prefix = prefix_map.get(category, "fact")
+        
+        # Sort by ID if exists
+        facts_with_id = []
+        next_id = 1
+        for fact in facts:
+            if "id" in fact:
+                facts_with_id.append(fact)
+            else:
+                fact["id"] = f"{prefix}-{next_id:03d}"
+                next_id += 1
+                facts_with_id.append(fact)
+        
+        return facts_with_id
+    
+    def _generate_markdown_body(self, entity: str, category: str, 
+                                facts: list) -> str:
+        """Generate human-readable markdown body for fact file."""
+        lines = [
+            f"# {entity.title()} - {category.title()}",
+            "",
+            f"**Entity:** {entity}",
+            f"**Category:** {category}",
+            f"**Fact Count:** {len(facts)}",
+            "",
+            "## Facts",
+            ""
+        ]
+        
+        for fact in facts:
+            fact_id = fact.get("id", "unknown")
+            fact_text = fact.get("fact", "")
+            confidence = fact.get("confidence", 0.0)
+            status = fact.get("status", "current")
+            
+            lines.extend([
+                f"### {fact_id}",
+                "",
+                f"**Fact:** {fact_text}",
+                f"**Confidence:** {confidence}",
+                f"**Status:** {status}",
+                ""
+            ])
+        
+        return "\n".join(lines)
+
+
+def extract_from_daily_notes():
+    """Extract facts from recent daily notes."""
+    extractor = FactExtractor()
+    
+    # Get recent daily notes
+    memory_dir = VAULT / "memory"
+    daily_notes = sorted(memory_dir.glob("2026-*.md"))[-7:]  # Last 7 days
+    
+    for note in daily_notes:
+        print(f"Processing: {note.name}")
+        content = note.read_text()
+        
+        # Extract date from filename
+        date_match = re.match(r"(\d{4}-\d{2}-\d{2})", note.name)
+        doc_date = date_match.group(1) if date_match else None
+        
+        # Extract facts
+        result = extractor.extract_from_document(
+            note, 
+            content,
+            existing_facts=""
+        )
+        
+        if result.get("facts"):
+            # Write to appropriate fact file
+            entity = result.get("entity", "general")
+            category = result.get("category", "events")
+            
+            fact_file = extractor.write_fact_file(
+                entity, category, result
+            )
+            print(f"  → Wrote {len(result['facts'])} facts to {fact_file.name}")
+
+
+if __name__ == "__main__":
+    print("Fact Extraction Pipeline - Next-Gen Memory")
+    print("=" * 50)
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "--daily-notes":
+        extract_from_daily_notes()
+    else:
+        print("Usage: fact_extractor.py [--daily-notes]")
+        print("\nExtracts facts from documents using the 2B LLM.")

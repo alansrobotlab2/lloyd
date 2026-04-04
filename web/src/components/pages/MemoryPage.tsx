@@ -848,8 +848,10 @@ export default function MemoryPage() {
     }
 
     // Entity node → show entity detail
-    if (nodeId.startsWith("entity::")) {
-      const entityName = nodeId.slice("entity::".length);
+    // Support both "entity::Name" prefix and plain entity names (no "/" means not a file path)
+    const isEntity = nodeId.startsWith("entity::") || !nodeId.includes("/");
+    if (isEntity) {
+      const entityName = nodeId.startsWith("entity::") ? nodeId.slice("entity::".length) : nodeId;
       setActiveEntity(entityName);
       setSidebarTab("entities");
       setRightPanel({ kind: "loading-entity" });
@@ -866,13 +868,11 @@ export default function MemoryPage() {
 
   // Graph node double-click handler
   const handleGraphNodeDoubleClick = useCallback((nodeId: string) => {
-    if (nodeId.startsWith("entity::")) {
-      // No action for entity double-click (or could show entity detail)
+    if (nodeId.startsWith("entity::") || !nodeId.includes("/")) {
       return;
     }
-    // Open document modal for document nodes
     handleOpenFile(nodeId);
-  }, []);
+  }, [handleOpenFile]);
 
   // Graph hover handler (debounced at EntityGraph level, but extra guard here)
   const handleGraphNodeHover = useCallback((node: GNode | null) => {

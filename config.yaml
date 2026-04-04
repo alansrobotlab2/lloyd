@@ -90,6 +90,10 @@ skills:
     - ~/obsidian/skills
     - ~/lloyd/skills
 
+# ── Usage ────────────────────────────────────────────────────────────────────
+# The Usage tab pings Anthropic (tiny haiku call) to get real rate-limit
+# utilization from the API response headers. No manual allocation config needed.
+
 # ── Display ───────────────────────────────────────────────────────────────────
 display:
   personality: kawaii
