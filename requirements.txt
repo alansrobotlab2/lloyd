@@ -4,6 +4,9 @@
 # Claude Agent SDK
 claude-code-sdk>=0.0.25
 
+# Anthropic SDK (for usage ping / rate-limit headers)
+anthropic>=0.89.0
+
 # FastAPI server
 fastapi>=0.115.0
 uvicorn>=0.34.0

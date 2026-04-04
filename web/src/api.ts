@@ -146,9 +146,24 @@ export interface ToolEntry {
   enabled: boolean
 }
 
+export interface McpTool {
+  name: string
+  description: string
+  enabled: boolean
+}
+
+export interface McpServer {
+  name: string
+  label: string
+  description: string
+  enabled: boolean
+  tools: McpTool[]
+  error?: string
+}
+
 export interface ToolsData {
   builtin: ToolEntry[]
-  plugins: ToolEntry[]
+  servers: McpServer[]
 }
 
 export interface LloydServiceDetail {
@@ -251,6 +266,87 @@ export interface EntityGraphEdge {
 export interface EntityGraphData {
   nodes: EntityGraphNode[];
   edges: EntityGraphEdge[];
+}
+
+// ── Usage types ─────────────────────────────────────────────────────────
+
+export interface UsageSummary {
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_create: number
+  cache_read: number
+  cost_usd: number
+  duration_ms: number
+  duration_api_ms: number
+}
+
+export interface UsageBucket {
+  bucket: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_create: number
+  cache_read: number
+  cost_usd: number
+}
+
+export interface UsageAllocation {
+  tokens: number
+  cost_usd: number
+}
+
+export interface UsageRateLimits {
+  '5h-utilization'?: number
+  '5h-status'?: string
+  '5h-reset'?: number
+  '7d-utilization'?: number
+  '7d-status'?: string
+  '7d-reset'?: number
+  'fallback-percentage'?: number
+  'overage-status'?: string
+  [key: string]: string | number | undefined
+}
+
+export interface UsagePing {
+  rate_limits: UsageRateLimits
+  local_5h: UsageSummary
+  local_7d: UsageSummary
+  pinged_at: string
+  error?: string
+}
+
+export interface UsageWindows {
+  four_hour: UsageSummary
+  seven_day: UsageSummary
+  allocations: {
+    '4h': UsageAllocation
+    '7d': UsageAllocation
+  }
+}
+
+export interface UsageModelBreakdown {
+  model: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_create: number
+  cache_read: number
+  cost_usd: number
+}
+
+export interface UsageRecord {
+  id: number
+  ts: string
+  session_id: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+  cache_create: number
+  cache_read: number
+  cost_usd: number | null
+  duration_ms: number | null
+  num_turns: number | null
 }
 
 // ── Autonomy types ──────────────────────────────────────────────────────
@@ -469,15 +565,20 @@ export const api = {
   tools(): Promise<ToolsData> {
     return fetch(`${API_BASE}/tools`).then(r => r.json()).then(d => ({
       builtin: Array.isArray(d?.builtin) ? d.builtin : [],
-      plugins: Array.isArray(d?.plugins) ? d.plugins : [],
+      servers: Array.isArray(d?.servers) ? d.servers : [],
     }))
   },
 
-  async toolToggle(toolName: string, enabled: boolean): Promise<void> {
+  async toolToggle(
+    payload:
+      | { type: 'server'; server: string; enabled: boolean }
+      | { type: 'tool'; server: string; tool: string; enabled: boolean }
+      | { type: 'builtin'; tool: string; enabled: boolean }
+  ): Promise<void> {
     await fetch(`${API_BASE}/tool-toggle`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ toolName, enabled }),
+      body: JSON.stringify(payload),
     })
   },
 
@@ -575,6 +676,22 @@ export const api = {
   },
   autonomyRuns: (taskId: number, limit = 20): Promise<{ runs: any[] }> =>
     fetch(`${API_BASE}/autonomy/runs?task_id=${taskId}&limit=${limit}`).then(r => r.json()),
+
+  // Usage
+  usagePing: (): Promise<UsagePing> =>
+    fetch(`${API_BASE}/usage/ping`).then(r => r.json()),
+  usageWindows: (): Promise<UsageWindows> =>
+    fetch(`${API_BASE}/usage/windows`).then(r => r.json()),
+  usageHistory: (period: '4h' | '24h' | '7d' | '30d' = '4h'): Promise<{ period: string; buckets: UsageBucket[] }> =>
+    fetch(`${API_BASE}/usage/history?period=${period}`).then(r => r.json()),
+  usageModels: (hours?: number, days?: number): Promise<{ models: UsageModelBreakdown[] }> => {
+    const params = new URLSearchParams()
+    if (hours) params.set('hours', String(hours))
+    if (days) params.set('days', String(days))
+    return fetch(`${API_BASE}/usage/models?${params}`).then(r => r.json())
+  },
+  usageRecent: (limit = 20): Promise<{ records: UsageRecord[] }> =>
+    fetch(`${API_BASE}/usage/recent?limit=${limit}`).then(r => r.json()),
 
   // Autonomy Scheduler
   autonomySchedulerStatus: (): Promise<{ enabled: boolean; running: boolean; last_tick: number; current_task_id: number | null }> =>

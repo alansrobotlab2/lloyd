@@ -71,15 +71,15 @@ function nodeRadius(node: GNode): number {
 }
 
 function edgeColor(type: string, highlighted: boolean, dimmed: boolean): string {
-  if (dimmed) return "rgba(71,85,105,0.04)";
+  if (dimmed) return "rgba(71,85,105,0.06)";
   if (highlighted) {
-    if (type === "tag-cluster") return "rgba(251,191,36,0.85)";
-    if (type === "has-facts") return "rgba(245,158,11,0.85)";
-    return "rgba(148,163,184,0.85)";
+    if (type === "tag-cluster") return "rgba(251,191,36,0.9)";
+    if (type === "has-facts") return "rgba(245,158,11,0.9)";
+    return "rgba(148,163,184,0.9)";
   }
-  if (type === "tag-cluster") return "rgba(251,191,36,0.15)";
-  if (type === "has-facts") return "rgba(245,158,11,0.20)";
-  return "rgba(100,116,139,0.22)";
+  if (type === "tag-cluster") return "rgba(251,191,36,0.35)";
+  if (type === "has-facts") return "rgba(245,158,11,0.40)";
+  return "rgba(100,116,139,0.40)";
 }
 
 // -- Component --
@@ -435,6 +435,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
             nodePointerAreaPaint={nodePointerAreaPaint}
             linkColor={linkColorFn}
             linkWidth={linkWidthFn}
+            linkCurvature={0.2}
             backgroundColor="transparent"
             onNodeHover={handleNodeHover}
             onNodeClick={handleNodeClick}

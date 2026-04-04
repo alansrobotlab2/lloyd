@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Sparkles, Package, Pencil, X, Save, Search, RefreshCw } from "lucide-react";
+import { Sparkles, Pencil, X, Save, Search, RefreshCw } from "lucide-react";
 import { api, type SkillInfo } from "../../api";
 import { sanitizeHtml } from "../../utils/sanitize";
 
@@ -23,8 +23,7 @@ function ToggleSwitch({ enabled, onToggle, disabled }: { enabled: boolean; onTog
 }
 
 export default function SkillsPage() {
-  const [workspace, setWorkspace] = useState<SkillInfo[]>([]);
-  const [bundled, setBundled] = useState<SkillInfo[]>([]);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [selectedSkill, setSelectedSkill] = useState<SkillInfo | null>(null);
   const [content, setContent] = useState<string | null>(null);
   const [loadingContent, setLoadingContent] = useState(false);
@@ -32,28 +31,17 @@ export default function SkillsPage() {
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeTab, setActiveTab] = useState<"skills" | "builtin">("skills");
 
   const loadSkills = useCallback(() => {
     api.skills()
       .then((d) => {
         const ws = d.workspace || [];
-        const bd = d.bundled || [];
-        setWorkspace(ws);
-        setBundled(bd);
-        setSelectedSkill((prev) => {
-          if (!prev) {
-            if (ws.length === 0 && bd.length > 0) setActiveTab("builtin");
-            else if (ws.length > 0) setActiveTab("skills");
-          }
-          return prev;
-        });
+        setSkills(ws);
         setSelectedSkill((prev) => {
           if (prev) {
-            const updated = [...ws, ...bd].find((s) => s.name === prev.name);
-            return updated ?? prev;
+            return ws.find((s) => s.name === prev.name) ?? prev;
           }
-          return ws[0] ?? bd[0] ?? null;
+          return ws[0] ?? null;
         });
       })
       .catch(console.error);
@@ -79,16 +67,14 @@ export default function SkillsPage() {
     const newEnabled = !skill.enabled;
     const patch = (list: SkillInfo[]) =>
       list.map((s) => (s.name === skill.name ? { ...s, enabled: newEnabled } : s));
-    setWorkspace((prev) => patch(prev));
-    setBundled((prev) => patch(prev));
+    setSkills((prev) => patch(prev));
     setSelectedSkill((prev) => (prev?.name === skill.name ? { ...prev, enabled: newEnabled } : prev));
     try {
       await api.skillToggle(skill.name, newEnabled);
     } catch {
       const revert = (list: SkillInfo[]) =>
         list.map((s) => (s.name === skill.name ? { ...s, enabled: skill.enabled } : s));
-      setWorkspace((prev) => revert(prev));
-      setBundled((prev) => revert(prev));
+      setSkills((prev) => revert(prev));
       setSelectedSkill((prev) => (prev?.name === skill.name ? { ...prev, enabled: skill.enabled } : prev));
     }
   };
@@ -112,8 +98,7 @@ export default function SkillsPage() {
     loadSkills();
   };
 
-  const activeList = activeTab === "skills" ? workspace : bundled;
-  const filtered = activeList.filter(
+  const filtered = skills.filter(
     (s) =>
       !searchQuery ||
       s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -133,29 +118,9 @@ export default function SkillsPage() {
     <div className="flex h-full overflow-hidden">
       {/* Sidebar */}
       <div className="w-64 flex-shrink-0 border-r border-slate-700 flex flex-col">
-        <div className="flex border-b border-slate-700">
-          <button
-            onClick={() => setActiveTab("skills")}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors ${
-              activeTab === "skills"
-                ? "text-brand-400 border-b-2 border-brand-400"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <Sparkles size={13} />
-            Skills
-          </button>
-          <button
-            onClick={() => setActiveTab("builtin")}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors ${
-              activeTab === "builtin"
-                ? "text-brand-400 border-b-2 border-brand-400"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <Package size={13} />
-            Builtin
-          </button>
+        <div className="flex items-center gap-1.5 px-3 py-2.5 border-b border-slate-700">
+          <Sparkles size={13} className="text-brand-400" />
+          <span className="text-xs font-medium text-slate-200">Skills</span>
         </div>
 
         <div className="px-3 py-2 border-b border-slate-700">

@@ -1,16 +1,30 @@
 import { useEffect, useState } from "react";
-import { Wrench } from "lucide-react";
-import { api, type ToolEntry, type ToolsData } from "../../api";
+import { Wrench, ChevronDown, ChevronRight, AlertCircle } from "lucide-react";
+import { api, type ToolEntry, type McpTool, type McpServer, type ToolsData } from "../../api";
 
-function ToggleSwitch({ enabled, onToggle, disabled }: { enabled: boolean; onToggle: () => void; disabled?: boolean }) {
+// ── Primitives ─────────────────────────────────────────────────────────────
+
+function Toggle({
+  enabled,
+  onToggle,
+  disabled,
+}: {
+  enabled: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       onClick={onToggle}
       disabled={disabled}
-      className={`relative w-8 h-[18px] rounded-full transition-colors flex-shrink-0 ${
-        disabled ? "bg-surface-2 opacity-40 cursor-not-allowed" : enabled ? "bg-brand-600" : "bg-surface-3"
+      className={`relative flex-shrink-0 w-8 h-[18px] rounded-full transition-colors ${
+        disabled
+          ? "bg-surface-2 opacity-40 cursor-not-allowed"
+          : enabled
+          ? "bg-brand-600 hover:bg-brand-500"
+          : "bg-surface-3 hover:bg-surface-2"
       }`}
-      aria-label={enabled ? "Disable tool" : "Enable tool"}
+      aria-label={enabled ? "Disable" : "Enable"}
     >
       <span
         className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-transform ${
@@ -21,127 +35,427 @@ function ToggleSwitch({ enabled, onToggle, disabled }: { enabled: boolean; onTog
   );
 }
 
-function ToolRow({ tool, onToggle, toggling }: { tool: ToolEntry; onToggle: (tool: ToolEntry) => void; toggling: boolean }) {
+// ── Individual tool row (inside a server group) ────────────────────────────
+
+function ToolRow({
+  tool,
+  serverEnabled,
+  toggling,
+  onToggle,
+}: {
+  tool: McpTool;
+  serverEnabled: boolean;
+  toggling: boolean;
+  onToggle: () => void;
+}) {
+  const inactive = !serverEnabled || toggling;
   return (
-    <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-surface-1 rounded-lg group">
-      <ToggleSwitch enabled={tool.enabled} onToggle={() => onToggle(tool)} disabled={toggling} />
+    <div className="flex items-center gap-3 pl-10 pr-4 py-2 hover:bg-surface-1 rounded-lg group">
+      <Toggle enabled={tool.enabled} onToggle={onToggle} disabled={inactive} />
       <div className="flex-1 min-w-0">
-        <span className="text-sm font-medium text-slate-200">{tool.label}</span>
+        <span
+          className={`text-sm font-mono ${
+            serverEnabled && tool.enabled ? "text-slate-200" : "text-slate-500"
+          }`}
+        >
+          {tool.name}
+        </span>
         {tool.description && (
-          <span className="ml-2 text-xs text-slate-400">{tool.description}</span>
+          <span className="ml-2 text-xs text-slate-500 truncate">{tool.description}</span>
         )}
       </div>
-      <span className="text-xs font-mono text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
+    </div>
+  );
+}
+
+// ── Builtin tool row ───────────────────────────────────────────────────────
+
+function BuiltinRow({
+  tool,
+  toggling,
+  onToggle,
+}: {
+  tool: ToolEntry;
+  toggling: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-surface-1 rounded-lg group">
+      <Toggle enabled={tool.enabled} onToggle={onToggle} disabled={toggling} />
+      <div className="flex-1 min-w-0">
+        <span
+          className={`text-sm font-medium ${tool.enabled ? "text-slate-200" : "text-slate-500"}`}
+        >
+          {tool.label}
+        </span>
+        {tool.description && (
+          <span className="ml-2 text-xs text-slate-500">{tool.description}</span>
+        )}
+      </div>
+      <span className="text-xs font-mono text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity">
         {tool.name}
       </span>
     </div>
   );
 }
 
-function ToolGroup({ title, tools, onToggle, togglingName }: {
-  title: string;
-  tools: ToolEntry[];
-  onToggle: (tool: ToolEntry) => void;
-  togglingName: string | null;
+// ── Server group (collapsible) ─────────────────────────────────────────────
+
+function ServerGroup({
+  server,
+  expanded,
+  onExpandToggle,
+  togglingKey,
+  onServerToggle,
+  onToolToggle,
+}: {
+  server: McpServer;
+  expanded: boolean;
+  onExpandToggle: () => void;
+  togglingKey: string | null;
+  onServerToggle: () => void;
+  onToolToggle: (toolName: string) => void;
 }) {
-  if (tools.length === 0) return null;
-  const enabledCount = tools.filter(t => t.enabled).length;
+  const enabledCount = server.tools.filter((t) => t.enabled).length;
+  const toolCount = server.tools.length;
+  const serverToggling = togglingKey === `server:${server.name}`;
+
   return (
-    <div className="mb-6">
-      <div className="flex items-center justify-between mb-2 px-1">
-        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{title}</h3>
-        <span className="text-xs text-slate-400">{enabledCount} / {tools.length} enabled</span>
+    <div className="mb-3">
+      {/* Server header row */}
+      <div
+        className={`flex items-center gap-2 px-4 py-2.5 rounded-lg cursor-pointer hover:bg-surface-1 ${
+          server.enabled ? "" : "opacity-60"
+        }`}
+      >
+        <Toggle
+          enabled={server.enabled}
+          onToggle={onServerToggle}
+          disabled={serverToggling}
+        />
+        <button
+          className="flex items-center gap-2 flex-1 min-w-0 text-left"
+          onClick={onExpandToggle}
+        >
+          <span
+            className={`text-sm font-semibold ${
+              server.enabled ? "text-slate-200" : "text-slate-500"
+            }`}
+          >
+            {server.label}
+          </span>
+          {server.description && (
+            <span className="text-xs text-slate-500 hidden sm:inline">{server.description}</span>
+          )}
+          <span className="ml-auto flex items-center gap-2 flex-shrink-0">
+            {server.error && (
+              <span title={server.error}>
+                <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
+              </span>
+            )}
+            {toolCount > 0 && (
+              <span className="text-xs text-slate-500">
+                {server.enabled ? `${enabledCount} / ${toolCount}` : toolCount}
+              </span>
+            )}
+            {toolCount === 0 && !server.error && (
+              <span className="text-xs text-slate-600 italic">no tools</span>
+            )}
+            <span className="text-slate-600">
+              {expanded ? (
+                <ChevronDown className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronRight className="w-3.5 h-3.5" />
+              )}
+            </span>
+          </span>
+        </button>
       </div>
-      <div className="bg-surface-0 rounded-xl border border-slate-700 overflow-hidden">
-        {tools.map((tool) => (
-          <ToolRow
-            key={tool.name}
-            tool={tool}
-            onToggle={onToggle}
-            toggling={togglingName === tool.name}
-          />
-        ))}
-      </div>
+
+      {/* Expanded tool list */}
+      {expanded && (
+        <div className="mt-0.5">
+          {server.error && server.tools.length === 0 && (
+            <div className="pl-10 pr-4 py-2 text-xs text-amber-500/80 italic">
+              {server.error}
+            </div>
+          )}
+          {server.tools.map((tool) => (
+            <ToolRow
+              key={tool.name}
+              tool={tool}
+              serverEnabled={server.enabled}
+              toggling={togglingKey === `tool:${server.name}:${tool.name}`}
+              onToggle={() => onToolToggle(tool.name)}
+            />
+          ))}
+          {server.tools.length === 0 && !server.error && (
+            <div className="pl-10 pr-4 py-2 text-xs text-slate-600 italic">
+              {server.enabled ? "No tools discovered" : "Enable server to discover tools"}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
+// ── Main page ──────────────────────────────────────────────────────────────
+
 export default function ToolsPage() {
-  const [data, setData] = useState<ToolsData>({ builtin: [], plugins: [] });
-  const [togglingName, setTogglingName] = useState<string | null>(null);
+  const [data, setData] = useState<ToolsData>({ builtin: [], servers: [] });
+  const [loading, setLoading] = useState(true);
+  const [togglingKey, setTogglingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [showBuiltin, setShowBuiltin] = useState(false);
 
   useEffect(() => {
-    api.tools()
-      .then(setData)
-      .catch((e) => setError(String(e)));
+    api
+      .tools()
+      .then((d) => {
+        setData(d);
+        // Expand all servers that have tools by default
+        setExpanded(new Set(d.servers.filter((s) => s.tools.length > 0).map((s) => s.name)));
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
   }, []);
 
-  const handleToggle = async (tool: ToolEntry) => {
-    const newEnabled = !tool.enabled;
-    setTogglingName(tool.name);
+  const toggleExpand = (name: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+  };
 
-    // Optimistic update
-    const patch = (list: ToolEntry[]) =>
-      list.map(t => t.name === tool.name ? { ...t, enabled: newEnabled } : t);
-    setData(prev => ({ builtin: patch(prev.builtin), plugins: patch(prev.plugins) }));
+  const expandAll = () => setExpanded(new Set(data.servers.map((s) => s.name)));
+  const collapseAll = () => setExpanded(new Set());
+
+  // ── Optimistic toggle helpers ──────────────────────────────────────────
+
+  const handleServerToggle = async (serverName: string) => {
+    const server = data.servers.find((s) => s.name === serverName);
+    if (!server) return;
+    const newEnabled = !server.enabled;
+    const key = `server:${serverName}`;
+    setTogglingKey(key);
+
+    // Optimistic
+    setData((prev) => ({
+      ...prev,
+      servers: prev.servers.map((s) =>
+        s.name === serverName ? { ...s, enabled: newEnabled } : s
+      ),
+    }));
 
     try {
-      await api.toolToggle(tool.name, newEnabled);
-    } catch (e) {
-      // Revert on failure
-      const revert = (list: ToolEntry[]) =>
-        list.map(t => t.name === tool.name ? { ...t, enabled: tool.enabled } : t);
-      setData(prev => ({ builtin: revert(prev.builtin), plugins: revert(prev.plugins) }));
-      setError(`Failed to toggle ${tool.name}`);
+      await api.toolToggle({ type: "server", server: serverName, enabled: newEnabled });
+    } catch {
+      // Revert
+      setData((prev) => ({
+        ...prev,
+        servers: prev.servers.map((s) =>
+          s.name === serverName ? { ...s, enabled: server.enabled } : s
+        ),
+      }));
+      setError(`Failed to toggle ${serverName}`);
     } finally {
-      setTogglingName(null);
+      setTogglingKey(null);
     }
   };
 
-  const totalEnabled = data.builtin.filter(t => t.enabled).length + data.plugins.filter(t => t.enabled).length;
-  const total = data.builtin.length + data.plugins.length;
+  const handleToolToggle = async (serverName: string, toolName: string) => {
+    const server = data.servers.find((s) => s.name === serverName);
+    const tool = server?.tools.find((t) => t.name === toolName);
+    if (!tool) return;
+    const newEnabled = !tool.enabled;
+    const key = `tool:${serverName}:${toolName}`;
+    setTogglingKey(key);
+
+    // Optimistic
+    setData((prev) => ({
+      ...prev,
+      servers: prev.servers.map((s) =>
+        s.name === serverName
+          ? {
+              ...s,
+              tools: s.tools.map((t) =>
+                t.name === toolName ? { ...t, enabled: newEnabled } : t
+              ),
+            }
+          : s
+      ),
+    }));
+
+    try {
+      await api.toolToggle({ type: "tool", server: serverName, tool: toolName, enabled: newEnabled });
+    } catch {
+      setData((prev) => ({
+        ...prev,
+        servers: prev.servers.map((s) =>
+          s.name === serverName
+            ? {
+                ...s,
+                tools: s.tools.map((t) =>
+                  t.name === toolName ? { ...t, enabled: tool.enabled } : t
+                ),
+              }
+            : s
+        ),
+      }));
+      setError(`Failed to toggle ${toolName}`);
+    } finally {
+      setTogglingKey(null);
+    }
+  };
+
+  const handleBuiltinToggle = async (toolName: string) => {
+    const tool = data.builtin.find((t) => t.name === toolName);
+    if (!tool) return;
+    const newEnabled = !tool.enabled;
+    const key = `builtin:${toolName}`;
+    setTogglingKey(key);
+
+    setData((prev) => ({
+      ...prev,
+      builtin: prev.builtin.map((t) => (t.name === toolName ? { ...t, enabled: newEnabled } : t)),
+    }));
+
+    try {
+      await api.toolToggle({ type: "builtin", tool: toolName, enabled: newEnabled });
+    } catch {
+      setData((prev) => ({
+        ...prev,
+        builtin: prev.builtin.map((t) => (t.name === toolName ? { ...t, enabled: tool.enabled } : t)),
+      }));
+      setError(`Failed to toggle ${toolName}`);
+    } finally {
+      setTogglingKey(null);
+    }
+  };
+
+  // ── Counts ────────────────────────────────────────────────────────────
+
+  const totalTools = data.servers.reduce((n, s) => n + s.tools.length, 0) + data.builtin.length;
+  const totalEnabled =
+    data.servers.reduce((n, s) => n + (s.enabled ? s.tools.filter((t) => t.enabled).length : 0), 0) +
+    data.builtin.filter((t) => t.enabled).length;
+
+  // ── Render ────────────────────────────────────────────────────────────
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
+      {/* Header */}
       <div className="flex-shrink-0 px-6 pt-5 pb-4 border-b border-slate-700">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Wrench className="w-5 h-5 text-brand-400" />
             <h2 className="text-lg font-semibold text-slate-200">Tools</h2>
           </div>
-          {total > 0 && (
-            <span className="text-sm text-slate-400">{totalEnabled} / {total} enabled</span>
+          {!loading && totalTools > 0 && (
+            <span className="text-sm text-slate-400">
+              {totalEnabled} / {totalTools} enabled
+            </span>
           )}
         </div>
-        <p className="text-xs text-slate-400 mt-1">
-          Enable or disable toolsets for the CLI platform. Changes persist to config.yaml.
+        <p className="text-xs text-slate-500 mt-1">
+          Enable or disable MCP servers and individual tools. Changes take effect on the next session.
         </p>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 py-4">
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto px-4 py-4">
         {error && (
-          <div className="mb-4 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-400">
-            {error}
+          <div className="mb-4 mx-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-400 flex items-center justify-between">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} className="ml-3 text-red-400/60 hover:text-red-400">✕</button>
           </div>
         )}
 
-        {total === 0 && !error && (
-          <div className="text-sm text-slate-400">Loading...</div>
+        {loading && (
+          <div className="text-sm text-slate-500 px-4 py-8 text-center">
+            Discovering tools...
+          </div>
         )}
 
-        <ToolGroup
-          title="Built-in"
-          tools={data.builtin}
-          onToggle={handleToggle}
-          togglingName={togglingName}
-        />
-        <ToolGroup
-          title="Plugins"
-          tools={data.plugins}
-          onToggle={handleToggle}
-          togglingName={togglingName}
-        />
+        {!loading && (
+          <>
+            {/* MCP Servers section */}
+            <div className="mb-2">
+              <div className="flex items-center justify-between px-4 mb-2">
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  MCP Servers
+                </h3>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={expandAll}
+                    className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                  >
+                    expand all
+                  </button>
+                  <span className="text-slate-700">·</span>
+                  <button
+                    onClick={collapseAll}
+                    className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                  >
+                    collapse all
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-surface-0 rounded-xl border border-slate-700 overflow-hidden px-1 py-1">
+                {data.servers.map((server) => (
+                  <ServerGroup
+                    key={server.name}
+                    server={server}
+                    expanded={expanded.has(server.name)}
+                    onExpandToggle={() => toggleExpand(server.name)}
+                    togglingKey={togglingKey}
+                    onServerToggle={() => handleServerToggle(server.name)}
+                    onToolToggle={(toolName) => handleToolToggle(server.name, toolName)}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Built-in tools section (collapsible) */}
+            <div className="mt-4">
+              <button
+                className="flex items-center justify-between w-full px-4 mb-2"
+                onClick={() => setShowBuiltin((v) => !v)}
+              >
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  Built-in Tools
+                </h3>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-500">
+                    {data.builtin.filter((t) => t.enabled).length} / {data.builtin.length}
+                  </span>
+                  {showBuiltin ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                </div>
+              </button>
+
+              {showBuiltin && (
+                <div className="bg-surface-0 rounded-xl border border-slate-700 overflow-hidden">
+                  {data.builtin.map((tool) => (
+                    <BuiltinRow
+                      key={tool.name}
+                      tool={tool}
+                      toggling={togglingKey === `builtin:${tool.name}`}
+                      onToggle={() => handleBuiltinToggle(tool.name)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
