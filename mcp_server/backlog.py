@@ -7,7 +7,6 @@ Data: ~/obsidian/backlog/ (markdown files with YAML frontmatter)
 Tools: backlog_boards, backlog_tasks, backlog_get_task, backlog_write_task
 """
 
-import asyncio
 import json
 import re
 from datetime import datetime
@@ -15,7 +14,6 @@ from pathlib import Path
 
 import yaml
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
@@ -294,11 +292,3 @@ def _handle_write(args: dict) -> str:
         return json.dumps({"success": False, "error": "Failed to save task"})
     return json.dumps({"success": True, "task_id": task_id, "message": "Task updated"})
 
-
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

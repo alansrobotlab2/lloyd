@@ -8,7 +8,6 @@ discovers tools via tools/list, and re-exports them as Lloyd MCP tools.
 Requires Thunderbird running with the MCP extension (localhost:8765).
 """
 
-import asyncio
 import json
 import logging
 import subprocess
@@ -17,7 +16,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 BRIDGE_PATH = Path.home() / "agent-services" / "services" / "thunderbird-mcp" / "mcp-bridge.cjs"
@@ -198,11 +196,3 @@ async def call_tool(name: str, arguments: dict):
     except Exception as e:
         return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
 
-
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

@@ -53,30 +53,9 @@ agent:
 
 # ── MCP servers ───────────────────────────────────────────────────────────────
 mcp_servers:
-  autonomy:
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/autonomy.py"]
-  backlog:
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/backlog.py"]
-  memory:
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/memory.py"]
-  mission-control:
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/mission_control.py"]
-  subliminal:
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/subliminal.py"]
-  http-tools:
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/http_tools.py"]
-  thunderbird:
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/thunderbird.py"]
-  pipeline:
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/pipeline.py"]
+  lloyd:
+    type: sse
+    url: http://127.0.0.1:8500/sse
 
 # ── Autonomy ──────────────────────────────────────────────────────────────────
 autonomy:

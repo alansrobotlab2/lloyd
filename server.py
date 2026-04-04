@@ -85,10 +85,14 @@ def _get_mcp_servers() -> dict[str, dict]:
     for name, cfg in CONFIG.get("mcp_servers", {}).items():
         if not cfg.get("enabled", True):
             continue
-        servers[name] = {
-            "command": cfg.get("command", "python"),
-            "args": cfg.get("args", []),
-        }
+        server_type = cfg.get("type", "stdio")
+        if server_type in ("sse", "http"):
+            servers[name] = {"type": server_type, "url": cfg["url"]}
+        else:
+            servers[name] = {
+                "command": cfg.get("command", "python"),
+                "args": cfg.get("args", []),
+            }
     return servers
 
 MCP_SERVERS = _get_mcp_servers()
@@ -120,14 +124,7 @@ _BUILTIN_TOOLS = [
 ]
 
 _MCP_SERVER_META: dict[str, dict] = {
-    "autonomy":        {"label": "Autonomy",        "description": "Task scheduling and execution"},
-    "backlog":         {"label": "Backlog",          "description": "Kanban board management"},
-    "memory":          {"label": "Memory",           "description": "Knowledge graph and facts"},
-    "mission-control": {"label": "Mission Control",  "description": "Session management"},
-    "subliminal":      {"label": "Subliminal",       "description": "Vault recall and context injection"},
-    "http-tools":      {"label": "HTTP Tools",       "description": "Web search and content extraction"},
-    "thunderbird":     {"label": "Thunderbird",      "description": "Email and calendar"},
-    "pipeline":        {"label": "Pipeline",         "description": "Multi-stage worker coordination"},
+    "lloyd": {"label": "Lloyd", "description": "Autonomy, backlog, memory, mission control, subliminal, HTTP tools, Thunderbird, pipeline"},
 }
 
 _tools_cache: dict[str, dict] = {}  # {server_name: {tools, error, ts}}
@@ -135,7 +132,23 @@ _TOOLS_CACHE_TTL = 300.0  # 5 minutes
 
 
 async def _discover_mcp_tools(server_name: str, cfg: dict) -> tuple[list[dict], str | None]:
-    """Spawn an MCP server, query tools/list, return (tools, error). Kills process after."""
+    """Discover tools from an MCP server. Supports SSE and stdio transports."""
+    server_type = cfg.get("type", "stdio")
+
+    if server_type in ("sse", "http"):
+        from mcp.client.sse import sse_client
+        from mcp import ClientSession
+        url = cfg.get("url", "")
+        try:
+            async with sse_client(url) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
+                    return [{"name": t.name, "description": t.description or ""} for t in result.tools], None
+        except Exception as e:
+            return [], str(e)
+
+    # stdio fallback
     command = cfg.get("command", "python")
     args = cfg.get("args", [])
     proc = None
@@ -158,7 +171,6 @@ async def _discover_mcp_tools(server_name: str, cfg: dict) -> tuple[list[dict], 
         proc.stdin.write(init_msg)
         await proc.stdin.drain()
 
-        # Consume init response
         await asyncio.wait_for(proc.stdout.readline(), timeout=15.0)
 
         tools_msg = (json.dumps({
@@ -721,28 +733,35 @@ async def usage_windows():
     })
 
 
+def _local_models() -> list[str]:
+    return [name for name, cfg in MODEL_CONFIGS.items() if cfg.get("base_url")]
+
+
 @app.get("/api/usage/history")
 async def usage_history(period: str = "4h"):
     """Time-series data for charts. period: 4h, 24h, 7d, 30d."""
+    excl = _local_models()
     if period == "4h":
-        data = usage_store.history_buckets(hours=4, bucket_minutes=15)
+        data = usage_store.history_buckets(hours=4, bucket_minutes=15, exclude_models=excl)
     elif period == "24h":
-        data = usage_store.history_buckets(hours=24, bucket_minutes=60)
+        data = usage_store.history_buckets(hours=24, bucket_minutes=60, exclude_models=excl)
     elif period == "7d":
-        data = usage_store.history_daily(days=7)
+        data = usage_store.history_daily(days=7, exclude_models=excl)
     elif period == "30d":
-        data = usage_store.history_daily(days=30)
+        data = usage_store.history_daily(days=30, exclude_models=excl)
     else:
-        data = usage_store.history_buckets(hours=4, bucket_minutes=15)
+        data = usage_store.history_buckets(hours=4, bucket_minutes=15, exclude_models=excl)
     return JSONResponse({"period": period, "buckets": data})
 
 
 @app.get("/api/usage/models")
 async def usage_models(hours: float = 0, days: float = 0):
-    """Per-model breakdown."""
+    """Per-model breakdown (Anthropic models only)."""
+    excl = _local_models()
     data = usage_store.model_breakdown(
         hours=hours if hours > 0 else None,
         days=days if days > 0 else None,
+        exclude_models=excl,
     )
     return JSONResponse({"models": data})
 
@@ -792,11 +811,14 @@ async def usage_ping():
         return JSONResponse({"error": "No Anthropic credentials found"}, status_code=401)
 
     try:
-        client = _anthropic_sdk.Anthropic(api_key=api_key)
+        client = _anthropic_sdk.Anthropic(
+            api_key=api_key,
+            base_url="https://api.anthropic.com",  # Never use local model URL for ping
+        )
         resp = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: client.messages.with_raw_response.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-3-haiku-20240307",
                 max_tokens=1,
                 messages=[{"role": "user", "content": "hi"}],
             ),
@@ -818,7 +840,7 @@ async def usage_ping():
         msg = resp.parse()
         usage_store.record_usage(
             session_id="__ping__",
-            model="claude-haiku-4-5-20251001",
+            model="claude-3-haiku-20240307",
             input_tokens=msg.usage.input_tokens,
             output_tokens=msg.usage.output_tokens,
             cost_usd=None,
@@ -1947,6 +1969,7 @@ _INFRA_SERVICES = {
 _LLOYD_SERVICES = {
     "lloyd-backend":    ("Lloyd Backend",  8080),
     "lloyd-frontend":   ("Lloyd Frontend", 5173),
+    "lloyd-mcp":        ("Lloyd MCP",      8500),
 }
 
 

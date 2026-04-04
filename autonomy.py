@@ -358,10 +358,13 @@ def run_task(task_id) -> dict:
         config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
         mcp_servers = []
         for name, cfg in config.get("mcp_servers", {}).items():
-            command = cfg.get("command", "python")
-            args = cfg.get("args", [])
-            resolved_args = [str(LLOYD_HOME / a) if a.startswith("mcp-servers/") else a for a in args]
-            mcp_servers.append({"type": "stdio", "command": command, "args": resolved_args})
+            server_type = cfg.get("type", "stdio")
+            if server_type in ("sse", "http"):
+                mcp_servers.append({"type": server_type, "url": cfg["url"]})
+            else:
+                command = cfg.get("command", "python")
+                args = cfg.get("args", [])
+                mcp_servers.append({"type": "stdio", "command": command, "args": args})
 
         options = ClaudeCodeOptions(
             system_prompt=system_prompt,

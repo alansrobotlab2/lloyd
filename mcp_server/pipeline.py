@@ -12,7 +12,6 @@ Run state:   ~/lloyd/pipeline-runs/<run_id>.json
 Tools: pipeline_dispatch, pipeline_status, pipeline_abort
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -24,7 +23,6 @@ from typing import Optional
 
 import yaml
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 logger = logging.getLogger(__name__)
@@ -444,11 +442,3 @@ def _handle_abort(params: dict) -> str:
         _save_run(run)
     return json.dumps({"success": True, "run_id": run_id})
 
-
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
