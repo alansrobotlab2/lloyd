@@ -1,7 +1,7 @@
 # Browser Control: Analysis & Implementation Gameplan
 
 > **Date**: 2026-04-04  
-> **Status**: Proposal  
+> **Status**: Implemented (all phases)  
 > **References**: `~/Projects/openclaw`, `~/Projects/hermes-agent`
 
 ---
@@ -130,9 +130,9 @@ agent-browser CLI (subprocess per action)
 
 2. **No CLI wrapper needed.** Hermes uses `agent-browser` CLI because it predates MCP and needed a stable subprocess interface. Lloyd's MCP server IS the subprocess interface — Playwright calls go directly inside it.
 
-3. **Simpler dependency chain.** One `pip install playwright` into the existing venv, plus `playwright install chromium`. No npm packages, no Node.js runtime dependency for this feature.
+3. **Simpler dependency chain.** One `pip install playwright` into the existing venv, using the system Chromium (`/usr/bin/chromium`) already installed in the lloyd distrobox. No npm packages, no Node.js runtime dependency, no Playwright-bundled browser download.
 
-4. **Python accessibility API.** Playwright Python exposes `page.accessibility.snapshot()` for the text-based trees that local Qwen models need. The same core API that OpenClaw uses (via JS bindings) is available natively.
+4. **Python accessibility API.** Playwright Python exposes `page.locator("body").aria_snapshot()` for YAML-like accessibility trees that local Qwen models need. (Note: `page.accessibility.snapshot()` was removed in Playwright 1.47+; `aria_snapshot()` lives on `Locator`, not `Page`.)
 
 5. **First-class async.** Lloyd's MCP servers are async Python. Playwright's async API (`async_playwright`) integrates naturally without thread pools or subprocess overhead.
 
@@ -144,8 +144,9 @@ With the persistent MCP server architecture (see [doc 08](08-mcp-persistent-serv
 supervisord
 ├── lloyd-backend (server.py)
 ├── lloyd-frontend (vite)
-└── lloyd-mcp-browser (browser.py on port 8509)
-    └── Playwright Chromium (launched once, stays alive)
+└── lloyd-mcp (mcp_server/main.py on port 8500)
+    ├── all other tool modules (memory, backlog, http_tools, etc.)
+    └── browser module → Playwright Chromium (launched on first use, stays alive)
         └── tabs, cookies, localStorage all persist across sessions
 
 SDK query() connects via SSE → uses browser tools → disconnects
@@ -203,32 +204,34 @@ These cover the core browse-read-interact loop:
 
 Every `browser_snapshot` call assigns sequential ref IDs (`e1`, `e2`, `e3`...) to interactive elements. The ref map is maintained in-memory for the MCP server's lifetime (the full SDK session). Actions use these refs to target elements.
 
-**Snapshot output format** (text-based, optimized for LLMs):
+**Snapshot output format** (Playwright `aria_snapshot()` YAML annotated with refs):
 ```
-[Page] My Website - https://example.com
-  [navigation] Main Menu
-    [link e1] Home
-    [link e2] Products
-    [link e3] Contact
-  [main]
-    [heading] Welcome
-    [paragraph] Some descriptive text about the page...
-    [form]
-      [textbox e4 "Email"] user@example.com
-      [textbox e5 "Password"]
-      [button e6] Sign In
-    [list]
-      [listitem] [link e7] First item
-      [listitem] [link e8] Second item
-  [footer]
-    [link e9] Privacy Policy
+[Page] My Website — https://example.com
+- navigation
+  - link "Home" [e1]
+  - link "Products" [e2]
+  - link "Contact" [e3]
+- main
+  - heading "Welcome" [level=1]
+  - paragraph: Some descriptive text about the page...
+  - form
+    - textbox "Email" [e4]: user@example.com
+    - textbox "Password" [e5]
+    - button "Sign In" [e6]
+  - list
+    - listitem
+      - link "First item" [e7]
+    - listitem
+      - link "Second item" [e8]
+- contentinfo
+  - link "Privacy Policy" [e9]
 ```
 
 **Ref lifecycle**:
 - Refs are scoped to the most recent snapshot
 - Calling `browser_snapshot` resets the ref map
-- Page navigation invalidates refs — using a stale ref returns an error prompting a new snapshot
-- Refs map to Playwright locators (not element handles) for stability
+- Page navigation clears the ref map — using a stale ref returns an error prompting a new snapshot
+- Refs are reconstructed as Playwright locators via `page.get_by_role(role, name=name, exact=True).nth(occurrence)` — only named interactive elements get refs
 
 ### 4.5 Interaction Workflow Example
 
@@ -247,131 +250,36 @@ Every `browser_snapshot` call assigns sequential ref IDs (`e1`, `e2`, `e3`...) t
 
 ## 5. Implementation Details
 
-### 5.1 New File: `mcp-servers/browser.py`
+### 5.1 Implemented: `mcp_server/browser.py`
 
-Follows the established MCP server pattern. Key structure:
+The browser module lives inside the unified MCP server (`mcp_server/main.py`), not as a standalone SSE server. It follows the same pattern as `http_tools.py` and other modules — exporting `list_tools()` and `call_tool()` functions that `main.py` dispatches to.
 
-```python
-#!/usr/bin/env python3
-"""Lloyd MCP Server: Browser — full browser control via Playwright.
+Key implementation details:
 
-Runs as a persistent SSE server (see doc 08). Playwright launches
-Chromium once on first use; the browser stays alive across sessions.
-"""
-
-import asyncio, json, re
-import uvicorn
-from starlette.applications import Starlette
-from starlette.routing import Route, Mount
-from starlette.responses import Response
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
-from mcp.types import Tool, TextContent
-
-PORT = 8509
-CHROME_PROFILE = "/home/alansrobotlab/lloyd/.chrome-profile"
-
-app = Server("lloyd-browser")
-
-# State persists for the server's lifetime (across all sessions)
-_pw = None           # Playwright instance
-_browser = None      # Browser instance (launched once)
-_context = None      # BrowserContext (with persistent profile)
-_active_page = None  # Currently focused Page
-_ref_map = {}        # "e1" -> Locator
-_ref_counter = 0     # Auto-incrementing ref ID
-
-async def _ensure_browser():
-    """Launch browser on first call. Relaunch if crashed."""
-    global _pw, _browser, _context
-    if _browser and _browser.is_connected():
-        return _browser
-    _pw = await async_playwright().start()
-    _browser = await _pw.chromium.launch(headless=True)
-    _context = await _browser.new_context()
-    return _browser
-
-async def _get_active_page() -> Page:
-    """Get or discover the active page (tab)."""
-    global _active_page
-    await _ensure_browser()
-    pages = _context.pages
-    if not pages:
-        _active_page = await _context.new_page()
-    elif _active_page not in pages:
-        _active_page = pages[-1]
-    return _active_page
-
-def _build_snapshot(node, depth=0) -> str:
-    """Walk accessibility tree, assign refs to interactive elements."""
-    global _ref_counter
-    # ... recursive tree walk, format as indented text
-    # Interactive roles (link, button, textbox, etc.) get ref IDs
-    pass
-
-@app.list_tools()
-async def list_tools():
-    return [
-        Tool(name="browser_navigate", description="...", inputSchema={...}),
-        Tool(name="browser_snapshot", description="...", inputSchema={...}),
-        # ... all tools
-    ]
-
-@app.call_tool()
-async def call_tool(name: str, arguments: dict):
-    # Dispatch to handler functions
-    # All return [TextContent(type="text", text=json.dumps(result))]
-    pass
-
-# --- SSE transport (persistent server) ---
-sse = SseServerTransport("/messages/")
-
-async def handle_sse(request):
-    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-        await app.run(streams[0], streams[1], app.create_initialization_options())
-    return Response()
-
-starlette_app = Starlette(routes=[
-    Route("/sse", handle_sse, methods=["GET"]),
-    Mount("/messages/", app=sse.handle_post_message),
-])
-
-if __name__ == "__main__":
-    uvicorn.run(starlette_app, host="127.0.0.1", port=PORT)
-```
+- **System Chromium**: Uses `/usr/bin/chromium` (already installed in the lloyd distrobox) via `executable_path=` — no Playwright-bundled browser needed.
+- **Headed mode**: Runs with `headless=False` so the browser is visible. The `lloyd-mcp` supervisord config passes `DISPLAY=:1` and `WAYLAND_DISPLAY=wayland-1` for host display forwarding.
+- **Accessibility snapshots**: Uses `page.locator("body").aria_snapshot()` which returns a YAML-like string. A regex parser (`_ARIA_LINE_RE`) walks the output and injects `[eN]` ref IDs next to interactive elements.
+- **Ref map**: `_ref_map` stores `{ref_id: {role, name, occurrence}}`. Locators are reconstructed via `page.get_by_role(role, name=name, exact=True).nth(occurrence)`.
+- **No SSRF protection**: Removed since Lloyd is a personal agent that needs local network access.
+- **No separate process**: The browser module runs inside the existing `lloyd-mcp` process (port 8500), not as a separate SSE server on port 8509 as originally proposed.
 
 ### 5.2 Config Registration
 
-Add to `config.yaml`:
-```yaml
-mcp_servers:
-  browser:
-    type: sse
-    url: http://127.0.0.1:8509/sse
-    enabled: true
-    # command/args retained for process management
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/browser.py"]
-```
-
-Add to `_MCP_SERVER_META` in `server.py`:
-```python
-"browser": {"label": "Browser", "description": "Web browser control"},
-```
+No separate `config.yaml` entry needed — the browser module runs inside the existing `lloyd` unified MCP server. The `_MCP_SERVER_META` description in `server.py` was updated to include "browser" in the tool list.
 
 ### 5.3 Supervisord Entry
 
-The browser MCP server runs as a persistent process under supervisord:
+No separate supervisord entry needed — the browser module runs inside `lloyd-mcp`. The existing config was updated with display env vars for headed mode:
 
 ```ini
-[program:lloyd-mcp-browser]
-command=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    /home/alansrobotlab/lloyd/mcp-servers/browser.py
+[program:lloyd-mcp]
+command=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python -m mcp_server.main
+directory=/home/alansrobotlab/lloyd
+environment=DISPLAY=":1",WAYLAND_DISPLAY="wayland-1",XDG_RUNTIME_DIR="/run/user/1000"
 autostart=true
 autorestart=true
-stdout_logfile=/home/alansrobotlab/lloyd/logs/mcp-browser.log
-stderr_logfile=/home/alansrobotlab/lloyd/logs/mcp-browser.err
+stdout_logfile=/home/alansrobotlab/lloyd/logs/mcp.log
+stderr_logfile=/home/alansrobotlab/lloyd/logs/mcp.err
 ```
 
 Chromium is launched by Playwright inside the server process on first tool use. If the server restarts, Playwright relaunches Chromium automatically.
@@ -379,12 +287,11 @@ Chromium is launched by Playwright inside the server process on first tool use. 
 ### 5.4 Dependencies
 
 ```bash
-# In Lloyd's venv
-.venvs/lloyd/bin/pip install playwright
-.venvs/lloyd/bin/python -m playwright install chromium
+# In Lloyd's venv — only pip install needed, no browser download
+.venvs/lloyd/bin/python -m pip install playwright
 ```
 
-Playwright bundles its own Chromium, but we can also point it at the system Chromium (`/usr/bin/chromium`) that's already installed. Using the system Chromium for the persistent instance and Playwright's CDP connector is the lightest path.
+Uses system Chromium at `/usr/bin/chromium` (v146, already in the lloyd distrobox) via Playwright's `executable_path=` parameter. No `playwright install chromium` needed.
 
 ---
 
@@ -420,21 +327,7 @@ for c in block.content:
 
 ### 7.1 SSRF Protection
 
-Reuse the `_is_private_host()` pattern from `mcp-servers/http_tools.py`:
-
-```python
-_PRIVATE_IP_PATTERNS = [
-    re.compile(r"^127\."), re.compile(r"^10\."),
-    re.compile(r"^172\.(1[6-9]|2\d|3[01])\."),
-    re.compile(r"^192\.168\."), re.compile(r"^0\."),
-    re.compile(r"^169\.254\."), re.compile(r"^::1$"),
-    re.compile(r"^fc00:", re.IGNORECASE),
-    re.compile(r"^fd", re.IGNORECASE),
-    re.compile(r"^fe80:", re.IGNORECASE),
-]
-```
-
-Apply in `browser_navigate` before loading the URL. Consider a config override (`browser.allow_private_urls`) for local development use cases.
+**Decision: Removed.** Lloyd is a personal agent that needs local network access (e.g. navigating to `http://192.168.50.108:5173/` for Mission Control). The SSRF patterns from `http_tools.py` were initially included but removed after testing. Only the `http/https` scheme check remains.
 
 ### 7.2 JavaScript Execution
 
@@ -466,41 +359,31 @@ Apply in `browser_navigate` before loading the URL. Consider a config override (
 | Local model struggles with browser tools | Poor tool-calling accuracy | Detailed tool descriptions with usage examples in schema; limit tool count in Phase 1 |
 | Page requires JavaScript rendering | Snapshot shows empty/incomplete page | Playwright waits for load by default; `wait_until=networkidle` option for SPAs |
 | Bot detection / CAPTCHAs | Cannot interact with protected sites | Basic mitigations: realistic user agent, viewport size, webdriver flag removal. Advanced anti-bot is out of scope (would need cloud providers). |
-| Distrobox display access for headed mode | Cannot see browser visually | Use `--headless=new` by default. If headed mode needed, distrobox can forward host X11/Wayland display. |
+| Distrobox display access for headed mode | Cannot see browser visually | Solved: supervisord config passes `DISPLAY=:1` and `WAYLAND_DISPLAY=wayland-1` env vars. Browser runs headed by default. |
 
 ---
 
 ## 9. Phased Delivery
 
 ### Phase 0: Persistent MCP migration
-**Prerequisite** — see [doc 08](08-mcp-persistent-servers.md). Migrate existing MCP servers from stdio to SSE transport so the SDK connects to persistent processes. This must land first.
+**Status**: Complete — see [doc 08](08-mcp-persistent-servers.md).
 
-### Phase 1: MVP
-**Scope**: 7 tools, text-only output, persistent browser MCP server  
-**Files**:
-- `mcp-servers/browser.py` (new, ~300 lines, SSE transport)
-- `config.yaml` (add browser server entry with `type: sse`)
-- `server.py` (add `_MCP_SERVER_META` entry)
-- Supervisor config (add `lloyd-mcp-browser` program)
+### Phase 1: MVP — COMPLETE
+**Scope**: 7 tools, text-only output  
+**Files changed**:
+- `mcp_server/browser.py` (new, ~380 lines, integrated into unified server)
+- `mcp_server/main.py` (added browser to imports and MODULES)
+- `server.py` (updated `_MCP_SERVER_META` description)
+- `requirements.txt` (added `playwright>=1.58.0`)
+- Supervisor config (added display env vars to `lloyd-mcp`)
 
-**Validates**: Can Lloyd navigate, read, and interact with web pages using accessibility trees?
+### Phase 2: Screenshots + JS — COMPLETE
+**Scope**: `browser_screenshot`, `browser_evaluate`, `browser_fill`, `browser_wait`  
+Implemented in same `mcp_server/browser.py`. Screenshots return base64 PNG and save to `logs/screenshots/`. SSE image content handling (server.py + frontend) deferred — not needed for local Qwen models which use text-based snapshots.
 
-### Phase 2: Screenshots + JS
-**Scope**: Add `browser_screenshot`, `browser_evaluate`, `browser_fill`, `browser_wait`  
-**Files**:
-- `mcp-servers/browser.py` (extend)
-- `server.py` (SSE image content handling)
-- `web/src/components/` (image rendering in tool results)
-
-**Validates**: Can Lloyd take and display screenshots? Can it execute JS for data extraction?
-
-### Phase 3: Polish
-**Scope**: Add `browser_select`, `browser_drag`, `browser_cookies`. Session cleanup, bot detection, config options.  
-**Files**:
-- `mcp-servers/browser.py` (extend)
-- `config.yaml` (browser-specific options)
-
-**Validates**: Full browser control parity with Hermes reference implementation.
+### Phase 3: Polish — COMPLETE
+**Scope**: `browser_select`, `browser_drag`, `browser_cookies`  
+Implemented in same `mcp_server/browser.py`. All 14 tools shipped in a single pass.
 
 ---
 
@@ -508,9 +391,11 @@ Apply in `browser_navigate` before loading the URL. Consider a config override (
 
 | Decision | Chosen | Rejected | Rationale |
 |----------|--------|----------|-----------|
-| Browser library | Playwright Python | agent-browser CLI, raw CDP, Selenium | Native Python async, built-in a11y tree, no Node.js dep |
-| Session persistence | Persistent MCP server (always running) | SDK-managed subprocess, state serialization | Browser stays alive across sessions; tabs, cookies, state all persist naturally |
-| Page representation | Text accessibility tree | Screenshots-first, DOM HTML | Local Qwen models need text; vision is Phase 2 fallback |
+| Browser library | Playwright Python 1.58 | agent-browser CLI, raw CDP, Selenium | Native Python async, built-in a11y tree, no Node.js dep |
+| Browser binary | System Chromium v146 (`/usr/bin/chromium`) | Playwright-bundled, downloaded browser | Already installed in distrobox; no download needed |
+| Session persistence | Unified MCP server (always running) | SDK-managed subprocess, state serialization | Browser stays alive across sessions; tabs, cookies, state all persist naturally |
+| Page representation | `aria_snapshot()` YAML with injected refs | `page.accessibility.snapshot()` dict, screenshots-first | `page.accessibility` removed in PW 1.47+; `aria_snapshot()` on Locator is the current API |
 | Element targeting | Ref IDs from snapshots | CSS selectors, XPath, pixel coords | Matches both reference impls; LLM-friendly |
-| Deployment | Persistent MCP server via supervisord | Docker, SDK-spawned subprocess | Consistent with all other MCP servers; browser stays alive independently |
-| Security model | SSRF block + headless | Full sandbox (Docker) | Proportionate to risk; Lloyd is a personal agent |
+| Deployment | Module inside unified `lloyd-mcp` server | Separate SSE server, Docker, SDK-spawned subprocess | Simpler than a separate process; browser shares the existing port 8500 |
+| Display mode | Headed (`headless=False`) | Headless by default | Visible browser is useful for debugging and user verification |
+| Security model | Scheme check only (no SSRF block) | Full sandbox (Docker) | Lloyd is a personal agent that needs local network access |

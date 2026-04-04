@@ -53,7 +53,7 @@ agent:
 
 # ── MCP servers ───────────────────────────────────────────────────────────────
 mcp_servers:
-  lloyd:
+  "":
     type: sse
     url: http://127.0.0.1:8500/sse
 
@@ -72,6 +72,18 @@ skills:
 # ── Usage ────────────────────────────────────────────────────────────────────
 # The Usage tab pings Anthropic (tiny haiku call) to get real rate-limit
 # utilization from the API response headers. No manual allocation config needed.
+
+# ── Discord ───────────────────────────────────────────────────────────────────
+discord:
+  token: "${DISCORD_BOT_TOKEN}"        # Bot token from Discord Developer Portal
+  owner_id: "${DISCORD_OWNER_ID}"      # Your Discord user ID — gets full capabilities
+  allowed_users: []                    # Other permitted users (reduced capabilities)
+  require_mention: true                # Guild channels require @mention
+  free_response_channels: []           # Channel IDs that need no mention
+  reactions: true                      # 👀/✅/❌ feedback reactions
+  auto_thread: true                    # Create thread per conversation in guilds
+  auto_thread_archive_duration: 1440   # Minutes before thread auto-archives (24h)
+  home_channel: null                   # Set via /sethome or directly
 
 # ── Display ───────────────────────────────────────────────────────────────────
 display:

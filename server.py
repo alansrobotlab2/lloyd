@@ -28,6 +28,22 @@ from claude_code_sdk import (
 )
 from claude_code_sdk import TextBlock, ToolUseBlock, ToolResultBlock
 from claude_code_sdk.types import StreamEvent
+from claude_code_sdk._internal import client as _sdk_client
+from claude_code_sdk._internal.message_parser import parse_message as _sdk_parse_original
+
+# Patch: SDK 0.0.25 doesn't handle rate_limit_event or other new Anthropic API
+# message types — they raise MessageParseError and kill the stream mid-turn.
+# Must patch the reference in client.py (which imported parse_message by-name).
+def _sdk_parse_patched(data):
+    try:
+        return _sdk_parse_original(data)
+    except Exception:
+        return StreamEvent(
+            uuid=data.get("uuid", ""),
+            session_id=data.get("session_id", ""),
+            event=data,
+        )
+_sdk_client.parse_message = _sdk_parse_patched
 
 from prompt_builder import build_system_prompt
 import usage_store
@@ -59,16 +75,49 @@ CONFIG = _load_config()
 
 MODEL_CONFIGS = CONFIG.get("models", {})
 
+_LOCAL_MODEL_VARS = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+]
+
 def _get_model_env(model_name: str) -> dict:
-    """Get environment variable overrides for a model."""
-    # Check by name
+    """Get environment variable overrides for a model.
+
+    If the model doesn't set ANTHROPIC_BASE_URL (i.e. it's a real Anthropic
+    model, not a local one), clear any inherited local-model vars so the
+    subprocess doesn't accidentally hit the Qwen server.
+    """
+    cfg: dict = {}
     if model_name in MODEL_CONFIGS:
-        return MODEL_CONFIGS[model_name].get("env", {})
-    # Check by alias
-    for name, cfg in MODEL_CONFIGS.items():
-        if cfg.get("alias") == model_name:
-            return cfg.get("env", {})
-    return {}
+        cfg = MODEL_CONFIGS[model_name]
+    else:
+        for name, c in MODEL_CONFIGS.items():
+            if c.get("alias") == model_name:
+                cfg = c
+                break
+
+    model_env = dict(cfg.get("env", {}))
+
+    # Clear inherited local-model vars for non-local models
+    if "ANTHROPIC_BASE_URL" not in model_env:
+        for var in _LOCAL_MODEL_VARS:
+            if var not in model_env:
+                model_env[var] = ""
+
+    return model_env
+
+def _model_base_url(model_name: str) -> str:
+    """Return the ANTHROPIC_BASE_URL for a model, or '' for real Anthropic models."""
+    cfg: dict = MODEL_CONFIGS.get(model_name, {})
+    if not cfg:
+        for name, c in MODEL_CONFIGS.items():
+            if c.get("alias") == model_name:
+                cfg = c
+                break
+    return cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")
+
 
 def _resolve_model_name(model_input: str) -> str:
     """Resolve alias to full model name."""
@@ -124,7 +173,7 @@ _BUILTIN_TOOLS = [
 ]
 
 _MCP_SERVER_META: dict[str, dict] = {
-    "lloyd": {"label": "Lloyd", "description": "Autonomy, backlog, memory, mission control, subliminal, HTTP tools, Thunderbird, pipeline"},
+    "": {"label": "Tools", "description": "Autonomy, backlog, browser, memory, mission control, subliminal, HTTP tools, Thunderbird, pipeline"},
 }
 
 _tools_cache: dict[str, dict] = {}  # {server_name: {tools, error, ts}}
@@ -292,18 +341,30 @@ async def post_message_stream(request: Request):
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
-            resume_id = existing.get("sdk_session_id")
+            session_model = _resolve_model_name(existing.get("model", ""))
+            # Only resume if both models use the same API endpoint.
+            # Thinking block signatures are tied to the originating endpoint,
+            # so crossing local↔remote boundaries causes a 400.
+            if _model_base_url(session_model) == _model_base_url(model):
+                resume_id = existing.get("sdk_session_id")
         except Exception:
             pass
+
+    # Extra disallowed tools and permission mode can be supplied by callers (e.g. Discord bot tier check)
+    extra_disallowed: list[str] = data.get("extra_disallowed", [])
+    permission_mode: str = (
+        data.get("permission_mode")
+        or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
+    )
 
     # Build SDK options
     options = ClaudeCodeOptions(
         model=model,
         system_prompt=system_prompt,
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
-        permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
+        permission_mode=permission_mode,
         mcp_servers=MCP_SERVERS,
-        disallowed_tools=_get_disallowed_tools(),
+        disallowed_tools=_get_disallowed_tools() + extra_disallowed,
         env=model_env,
         resume=resume_id,
         include_partial_messages=True,
@@ -558,17 +619,25 @@ async def post_message(request: Request):
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
-            resume_id = existing.get("sdk_session_id")
+            session_model = _resolve_model_name(existing.get("model", ""))
+            if _model_base_url(session_model) == _model_base_url(model):
+                resume_id = existing.get("sdk_session_id")
         except Exception:
             pass
+
+    sync_extra_disallowed: list[str] = data.get("extra_disallowed", [])
+    sync_permission_mode: str = (
+        data.get("permission_mode")
+        or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
+    )
 
     options = ClaudeCodeOptions(
         model=model,
         system_prompt=system_prompt,
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
-        permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
+        permission_mode=sync_permission_mode,
         mcp_servers=MCP_SERVERS,
-        disallowed_tools=_get_disallowed_tools(),
+        disallowed_tools=_get_disallowed_tools() + sync_extra_disallowed,
         env=model_env,
         resume=resume_id,
     )
@@ -2271,6 +2340,44 @@ async def toggle_tool(request: Request):
     return JSONResponse({"success": True})
 
 
+# ── Discord notify helper (Phase 5) ──────────────────────────────────────────
+
+def _discord_token() -> str:
+    """Read DISCORD_BOT_TOKEN from config, expanding ${VAR} placeholders."""
+    import re as _re
+    raw = CONFIG.get("discord", {}).get("token", "")
+    if not isinstance(raw, str):
+        return ""
+    return _re.sub(r"\$\{([^}]+)\}", lambda m: os.environ.get(m.group(1), ""), raw)
+
+
+async def _discord_notify_task_complete(task_id: int, task_name: str, response_preview: str) -> None:
+    """Post an autonomy task-completion embed to the Discord home channel."""
+    home_channel = CONFIG.get("discord", {}).get("home_channel")
+    token = _discord_token()
+    if not home_channel or not token:
+        return
+    if not response_preview or response_preview.strip() == "[SILENT]":
+        return
+    embed = {
+        "title": f"Task Complete: {task_name}",
+        "description": response_preview[:2000],
+        "color": 5763719,  # green
+        "timestamp": datetime.utcnow().isoformat(),
+        "footer": {"text": f"Task #{task_id}"},
+    }
+    try:
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"https://discord.com/api/v10/channels/{home_channel}/messages",
+                headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
+                json={"embeds": [embed]},
+            )
+    except Exception as e:
+        logger.warning("Discord notify failed: %s", e)
+
+
 # ── Autonomy scheduler background ticker ─────────────────────────────────────
 
 @app.on_event("startup")
@@ -2284,10 +2391,27 @@ async def _start_autonomy_ticker():
         while True:
             await asyncio.sleep(tick_interval)
             try:
-                from autonomy import autonomy_tick
+                from autonomy import autonomy_tick, _find_task_file, _parse_task_file
                 result = await asyncio.get_event_loop().run_in_executor(None, autonomy_tick)
                 if result and result.get("success"):
-                    logger.info("Autonomy tick: ran task #%s", result.get("task_id"))
+                    task_id = result.get("task_id")
+                    logger.info("Autonomy tick: ran task #%s", task_id)
+                    # Phase 5: notify Discord home channel if configured
+                    preview = result.get("response_preview", "")
+                    if task_id and preview and "[SILENT]" not in preview:
+                        try:
+                            path = _find_task_file(task_id)
+                            task_name = "Autonomy Task"
+                            if path:
+                                task = _parse_task_file(path)
+                                if task:
+                                    task_name = task.get("name", task_name)
+                                    if not task.get("notify_on_complete", True):
+                                        task_name = None  # skip notification
+                            if task_name:
+                                await _discord_notify_task_complete(task_id, task_name, preview)
+                        except Exception as ne:
+                            logger.warning("Discord notify error: %s", ne)
             except Exception as e:
                 logger.error("Autonomy ticker error: %s", e)
 

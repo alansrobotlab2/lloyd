@@ -20,3 +20,9 @@ ddgs>=6.0.0
 
 # Data handling
 pyyaml>=6.0.0
+
+# Browser control
+playwright>=1.58.0
+
+# Discord bot
+discord.py>=2.3.0
