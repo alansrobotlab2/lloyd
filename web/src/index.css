@@ -210,3 +210,24 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+
+/* Mobile slide-in animation */
+@keyframes slide-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+.animate-slide-in-left {
+  animation: slide-in-left 0.2s ease-out;
+}
+
+/* Mobile-specific tweaks */
+@media (max-width: 767px) {
+  /* Make chat input area more thumb-friendly */
+  textarea {
+    font-size: 16px !important; /* Prevents iOS zoom on focus */
+  }
+  /* Full-bleed scrollable pages */
+  .page-scroll {
+    -webkit-overflow-scrolling: touch;
+  }
+}

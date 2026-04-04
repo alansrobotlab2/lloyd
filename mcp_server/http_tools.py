@@ -5,7 +5,6 @@ Lloyd MCP Server: HTTP Tools — web search, fetch, and generic requests.
 Tools: http_search, http_fetch, http_request
 """
 
-import asyncio
 import json
 import re
 import urllib.parse
@@ -14,7 +13,6 @@ from html.parser import HTMLParser
 import httpx
 from ddgs import DDGS
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 WEB_USER_AGENT = (
@@ -211,11 +209,3 @@ async def call_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=_http_request(arguments.get("method", "GET"), arguments.get("url", ""), arguments.get("headers"), arguments.get("body", ""), arguments.get("timeout", 30)))]
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
-
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

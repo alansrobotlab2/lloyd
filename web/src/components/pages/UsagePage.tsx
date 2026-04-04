@@ -21,13 +21,13 @@ function fmtCost(n: number): string {
 
 function bucketLabel(bucket: string, period: string): string {
   if (period === '7d' || period === '30d') {
-    // "2026-04-03" → "Apr 3"
-    const d = new Date(bucket + 'T00:00:00')
+    // "2026-04-03" — use noon UTC to avoid date shifting across timezones
+    const d = new Date(bucket + 'T12:00:00Z')
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
   }
-  // "2026-04-03T14:30:00" → "14:30"
-  const m = bucket.match(/T(\d{2}:\d{2})/)
-  return m ? m[1] : bucket
+  // "2026-04-03T14:30:00" stored as UTC — convert to local time
+  const d = new Date(bucket + 'Z')
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 const MODEL_COLORS = [

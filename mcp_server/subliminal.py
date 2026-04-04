@@ -12,13 +12,11 @@ provides the retrieval mechanism.
 Tools: subliminal_recall
 """
 
-import asyncio
 import json
 import re
 from pathlib import Path
 
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 LLOYD_HOME = Path.home() / "lloyd"
@@ -106,11 +104,3 @@ async def call_tool(name: str, arguments: dict):
 
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
-
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

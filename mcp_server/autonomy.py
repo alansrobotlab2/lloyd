@@ -9,7 +9,6 @@ Tools: autonomy_tasks, autonomy_write_task, autonomy_get_task,
        autonomy_delete_task, autonomy_config, autonomy_run_task
 """
 
-import asyncio
 import datetime
 import json
 import re
@@ -18,7 +17,6 @@ from pathlib import Path
 
 import yaml
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
@@ -457,11 +455,3 @@ def _handle_run(params: dict) -> str:
     except Exception as exc:
         return json.dumps({"error": str(exc), "task_id": task_id})
 
-
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

@@ -113,10 +113,24 @@ def summary(
     return dict(row) if row else {}
 
 
-def history_buckets(hours: float, bucket_minutes: int = 15) -> list[dict]:
-    """Time-series buckets for charting. Returns [{bucket, input_tokens, output_tokens, ...}]."""
+def _excl_clause(exclude_models: Optional[list[str]], existing_where: bool = False) -> tuple[str, list]:
+    """Return (sql_fragment, params) for model exclusion."""
+    if not exclude_models:
+        return "", []
+    placeholders = ",".join("?" for _ in exclude_models)
+    prefix = " AND " if existing_where else " WHERE "
+    return f"{prefix}model NOT IN ({placeholders})", list(exclude_models)
+
+
+def history_buckets(
+    hours: float,
+    bucket_minutes: int = 15,
+    exclude_models: Optional[list[str]] = None,
+) -> list[dict]:
+    """Time-series buckets for charting."""
     conn = _conn()
     since = _since(hours=hours)
+    excl_sql, excl_params = _excl_clause(exclude_models, existing_where=True)
     rows = conn.execute(
         f"""SELECT
               strftime('%Y-%m-%dT%H:', ts) ||
@@ -129,20 +143,24 @@ def history_buckets(hours: float, bucket_minutes: int = 15) -> list[dict]:
               COALESCE(SUM(cache_read), 0)    AS cache_read,
               COALESCE(SUM(cost_usd), 0)      AS cost_usd
             FROM usage
-            WHERE ts >= ?
+            WHERE ts >= ?{excl_sql}
             GROUP BY bucket
             ORDER BY bucket""",
-        (since,),
+        [since] + excl_params,
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def history_daily(days: int = 7) -> list[dict]:
+def history_daily(
+    days: int = 7,
+    exclude_models: Optional[list[str]] = None,
+) -> list[dict]:
     """Daily buckets for 7-day view."""
     conn = _conn()
     since = _since(days=days)
+    excl_sql, excl_params = _excl_clause(exclude_models, existing_where=True)
     rows = conn.execute(
-        """SELECT
+        f"""SELECT
              strftime('%Y-%m-%d', ts) AS bucket,
              COUNT(*)                        AS requests,
              COALESCE(SUM(input_tokens), 0)  AS input_tokens,
@@ -151,45 +169,44 @@ def history_daily(days: int = 7) -> list[dict]:
              COALESCE(SUM(cache_read), 0)    AS cache_read,
              COALESCE(SUM(cost_usd), 0)      AS cost_usd
            FROM usage
-           WHERE ts >= ?
+           WHERE ts >= ?{excl_sql}
            GROUP BY bucket
            ORDER BY bucket""",
-        (since,),
+        [since] + excl_params,
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def model_breakdown(hours: Optional[float] = None, days: Optional[float] = None) -> list[dict]:
+def model_breakdown(
+    hours: Optional[float] = None,
+    days: Optional[float] = None,
+    exclude_models: Optional[list[str]] = None,
+) -> list[dict]:
     """Per-model breakdown for a time window."""
     conn = _conn()
+    where: list[str] = []
+    params: list = []
     if hours or days:
-        since = _since(hours=hours, days=days)
-        rows = conn.execute(
-            """SELECT
-                 model,
-                 COUNT(*)                        AS requests,
-                 COALESCE(SUM(input_tokens), 0)  AS input_tokens,
-                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                 COALESCE(SUM(cache_create), 0)  AS cache_create,
-                 COALESCE(SUM(cache_read), 0)    AS cache_read,
-                 COALESCE(SUM(cost_usd), 0)      AS cost_usd
-               FROM usage WHERE ts >= ?
-               GROUP BY model ORDER BY cost_usd DESC""",
-            (since,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """SELECT
-                 model,
-                 COUNT(*)                        AS requests,
-                 COALESCE(SUM(input_tokens), 0)  AS input_tokens,
-                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                 COALESCE(SUM(cache_create), 0)  AS cache_create,
-                 COALESCE(SUM(cache_read), 0)    AS cache_read,
-                 COALESCE(SUM(cost_usd), 0)      AS cost_usd
-               FROM usage
-               GROUP BY model ORDER BY cost_usd DESC"""
-        ).fetchall()
+        where.append("ts >= ?")
+        params.append(_since(hours=hours, days=days))
+    if exclude_models:
+        placeholders = ",".join("?" for _ in exclude_models)
+        where.append(f"model NOT IN ({placeholders})")
+        params.extend(exclude_models)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    rows = conn.execute(
+        f"""SELECT
+               model,
+               COUNT(*)                        AS requests,
+               COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+               COALESCE(SUM(output_tokens), 0) AS output_tokens,
+               COALESCE(SUM(cache_create), 0)  AS cache_create,
+               COALESCE(SUM(cache_read), 0)    AS cache_read,
+               COALESCE(SUM(cost_usd), 0)      AS cost_usd
+             FROM usage{where_sql}
+             GROUP BY model ORDER BY cost_usd DESC""",
+        params,
+    ).fetchall()
     return [dict(r) for r in rows]
 
 

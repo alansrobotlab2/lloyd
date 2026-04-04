@@ -25,7 +25,6 @@ from typing import Optional
 
 import yaml
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -725,11 +724,3 @@ async def call_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=handler(arguments))]
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
-
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
