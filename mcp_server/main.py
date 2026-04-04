@@ -7,6 +7,7 @@ Endpoint:  http://127.0.0.1:8500/sse
 """
 
 import json
+from contextlib import asynccontextmanager
 
 import uvicorn
 from mcp.server import Server
@@ -19,10 +20,13 @@ from starlette.routing import Mount, Route
 from mcp_server import (
     autonomy,
     backlog,
+    browser,
+    discord_bot,
     http_tools,
     memory,
     mission_control,
     pipeline,
+    skills,
     subliminal,
     thunderbird,
 )
@@ -32,8 +36,11 @@ PORT = 8500
 MODULES = [
     autonomy,
     backlog,
+    browser,
+    discord_bot,
     memory,
     mission_control,
+    skills,
     subliminal,
     http_tools,
     thunderbird,
@@ -77,10 +84,20 @@ async def handle_sse(request):
     return Response()
 
 
-starlette_app = Starlette(routes=[
-    Route("/sse", handle_sse, methods=["GET"]),
-    Mount("/messages/", app=transport.handle_post_message),
-])
+@asynccontextmanager
+async def lifespan(app):
+    await discord_bot.start_bot_task()
+    yield
+    await discord_bot.stop_bot()
+
+
+starlette_app = Starlette(
+    routes=[
+        Route("/sse", handle_sse, methods=["GET"]),
+        Mount("/messages/", app=transport.handle_post_message),
+    ],
+    lifespan=lifespan,
+)
 
 if __name__ == "__main__":
     uvicorn.run(starlette_app, host="127.0.0.1", port=PORT)

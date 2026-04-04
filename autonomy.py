@@ -356,21 +356,25 @@ def run_task(task_id) -> dict:
 
         # Get MCP server configs
         config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
-        mcp_servers = []
+        mcp_servers = {}
+        disallowed_tools = list(config.get("tools", {}).get("disabled_builtin", []))
         for name, cfg in config.get("mcp_servers", {}).items():
+            if not cfg.get("enabled", True):
+                continue
             server_type = cfg.get("type", "stdio")
             if server_type in ("sse", "http"):
-                mcp_servers.append({"type": server_type, "url": cfg["url"]})
+                mcp_servers[name] = {"type": server_type, "url": cfg["url"]}
             else:
-                command = cfg.get("command", "python")
-                args = cfg.get("args", [])
-                mcp_servers.append({"type": "stdio", "command": command, "args": args})
+                mcp_servers[name] = {"command": cfg.get("command", "python"), "args": cfg.get("args", [])}
+            for tool_name in cfg.get("disabled_tools", []):
+                disallowed_tools.append(f"mcp__{name}__{tool_name}")
 
         options = ClaudeCodeOptions(
             system_prompt=system_prompt,
             max_turns=config.get("agent", {}).get("max_turns", 60),
             permission_mode="bypassPermissions",
             mcp_servers=mcp_servers,
+            disallowed_tools=disallowed_tools,
         )
 
         # Set model env
