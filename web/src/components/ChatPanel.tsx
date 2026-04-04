@@ -1,0 +1,680 @@
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench } from 'lucide-react'
+import { marked } from 'marked'
+import { api, type MessageEntry as ApiMessage, type ModelInfo } from '../api'
+
+// Configure marked
+marked.setOptions({ breaks: true, gfm: true })
+
+interface ChatPanelProps {
+  requestedSessionKey?: string | null
+  onSessionLoaded?: () => void
+  onActiveSessionChange?: (key: string | null) => void
+  onModelSwitch?: (modelName: string) => void
+  showAgentDetails?: boolean
+  currentSessionKey?: string | null
+  pendingModel?: string
+}
+
+// Mock slash commands (will be replaced with actual backend fetch)
+const SLASH_COMMANDS = [
+  { name: 'new', desc: 'Start a new session' },
+  { name: 'clear', desc: 'Clear screen and start new session' },
+  { name: 'history', desc: 'Show conversation history' },
+  { name: 'retry', desc: 'Retry the last message' },
+  { name: 'undo', desc: 'Remove last exchange' },
+  { name: 'title', desc: 'Set session title' },
+  { name: 'compress', desc: 'Compress conversation context' },
+  { name: 'stop', desc: 'Kill background processes' },
+  { name: 'background', desc: 'Run prompt in background', alias: 'bg' },
+  { name: 'btw', desc: 'Ephemeral side question' },
+  { name: 'queue', desc: 'Queue prompt for next turn', alias: 'q' },
+  { name: 'profile', desc: 'Show active profile' },
+  { name: 'config', desc: 'Show configuration' },
+  { name: 'provider', desc: 'Show available providers' },
+  { name: 'prompt', desc: 'View/set system prompt' },
+  { name: 'personality', desc: 'Set predefined personality' },
+  { name: 'statusbar', desc: 'Toggle status bar', alias: 'sb' },
+  { name: 'verbose', desc: 'Toggle verbose mode' },
+  { name: 'yolo', desc: 'Toggle YOLO mode' },
+  { name: 'reasoning', desc: 'Manage reasoning display' },
+  { name: 'skin', desc: 'Show/change theme' },
+  { name: 'voice', desc: 'Toggle voice mode' },
+  { name: 'tools', desc: 'Manage tools' },
+  { name: 'toolsets', desc: 'List toolsets' },
+  { name: 'skills', desc: 'Search/manage skills' },
+  { name: 'cron', desc: 'Manage scheduled tasks' },
+  { name: 'reload-mcp', desc: 'Reload MCP servers', alias: 'reload_mcp' },
+  { name: 'browser', desc: 'Connect browser tools' },
+  { name: 'plugins', desc: 'List plugins' },
+  { name: 'commands', desc: 'Browse all commands' },
+  { name: 'help', desc: 'Show available commands' },
+  { name: 'usage', desc: 'Show token usage' },
+  { name: 'insights', desc: 'Show usage insights' },
+  { name: 'platforms', desc: 'Show gateway status', alias: 'gateway' },
+  { name: 'paste', desc: 'Check clipboard for image' },
+  { name: 'update', desc: 'Update Lloyd' },
+  { name: 'quit', desc: 'Exit CLI', alias: 'exit q' },
+  { name: 'model', desc: 'Switch or list models', alias: 'switch' },
+]
+
+export default function ChatPanel({
+  requestedSessionKey,
+  onSessionLoaded,
+  onActiveSessionChange,
+  onModelSwitch,
+  showAgentDetails = false,
+  currentSessionKey = null,
+  pendingModel,
+}: ChatPanelProps = {}) {
+  const [sessionKey, setSessionKey] = useState<string | null>(null)
+  const [messages, setMessages] = useState<ApiMessage[]>([])
+  const [input, setInput] = useState('')
+  const [thinking, setThinking] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [showCommands, setShowCommands] = useState(false)
+  const [commandFilter, setCommandFilter] = useState('')
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  // Sessions are now shown in the sidebar panel
+  
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const isNearBottom = useRef<boolean>(true)
+  const clientId = useRef<string>(localStorage.getItem('mc_client_id') || `client_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`)
+
+  useEffect(() => {
+    localStorage.setItem('mc_client_id', clientId.current)
+  }, [])
+
+  // Load models
+  useEffect(() => {
+    api.getModels().then(result => {
+      if (result.models) {
+        setModels(result.models)
+      }
+    }).catch(err => {
+      console.warn('Failed to load models:', err)
+    })
+  }, [])
+
+  // Load messages when currentSessionKey changes (from parent)
+  useEffect(() => {
+    const activeKey = currentSessionKey || requestedSessionKey
+    if (activeKey) {
+      loadMessages(activeKey, onSessionLoaded)
+    } else if (!activeKey && messages.length > 0) {
+      // Clear messages if no session is active
+      setMessages([])
+      setSessionKey(null)
+    }
+  }, [currentSessionKey, requestedSessionKey])
+
+  const handleScroll = useCallback(() => {
+    const el = messagesContainerRef.current
+    if (!el) return
+    isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }, [])
+
+  useEffect(() => {
+    const el = messagesContainerRef.current
+    if (el) {
+      el.addEventListener('scroll', handleScroll)
+      return () => el.removeEventListener('scroll', handleScroll)
+    }
+  }, [handleScroll])
+
+  // Poll messages for current session (skip while streaming or sending)
+  useEffect(() => {
+    if (!sessionKey || sending || thinking) return
+    const load = async () => {
+      try {
+        const result = await api.loadMessages(sessionKey)
+        if (result.messages) {
+          setMessages(result.messages as ApiMessage[])
+        }
+      } catch (err) {
+        console.error('Failed to load messages:', err)
+      }
+    }
+
+    load()
+    const interval = setInterval(load, 5000)
+    return () => clearInterval(interval)
+  }, [sessionKey, thinking, sending])
+
+  // Scroll to bottom when messages change, always while thinking (agent is actively responding)
+  useEffect(() => {
+    if (messages.length === 0) return
+    const el = messagesContainerRef.current
+    if (!el) return
+    if (thinking) {
+      // Always scroll while agent is working so new tool calls / text stay in view
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    } else {
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200
+      if (nearBottom) {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      }
+    }
+  }, [messages, thinking])
+
+  const loadMessages = async (key: string, onLoaded?: () => void) => {
+    if (!key) return
+    try {
+      const result = await api.loadMessages(key)
+      if (result.messages) {
+        setMessages(result.messages as ApiMessage[])
+        setSessionKey(key) // Update local state so polling works
+        onActiveSessionChange?.(key) // Notify parent of active session
+        if (result.model) onModelSwitch?.(result.model) // Sync model dropdown to session's model
+        onLoaded?.() // Clear requestedSessionKey only after activeSessionKey is set
+        // Scroll to bottom after loading
+        isNearBottom.current = true
+        setTimeout(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+        }, 100)
+      }
+    } catch (err) {
+      console.error('Failed to load messages:', err)
+    }
+  }
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value
+    setInput(value)
+    
+    // Check if we have a complete model switch command like "/model 122b"
+    const match = value.match(/^\/(model|switch)\s+(\w+)$/)
+    if (match) {
+      // Auto-execute the model switch
+      const modelAlias = match[2]
+      const targetModel = models.find(m => 
+        m.alias === modelAlias || m.name === modelAlias
+      )
+      if (targetModel) {
+        handleModelSwitch(targetModel.name)
+        setInput('')
+        setShowCommands(false)
+        return
+      }
+    }
+    
+    // Show command dropdown when input starts with /
+    if (value.startsWith('/')) {
+      const filter = value.slice(1).toLowerCase()
+      setCommandFilter(filter)
+      setShowCommands(true)
+    } else {
+      setShowCommands(false)
+    }
+  }
+
+  const handleModelSwitch = async (modelName: string) => {
+    // Use the session key from props (always up-to-date from parent)
+    const activeSession = currentSessionKey
+    if (!activeSession) {
+      // No active session, just update global config
+      try {
+        const result = await api.switchModel(modelName)
+        if (result.success) {
+          onModelSwitch?.(modelName)
+          setMessages(prev => [...prev, {
+            id: `msg_${Date.now()}_switch`,
+            role: 'assistant',
+            content: [{ type: 'text', text: `Switched to **${modelName}** (will apply to new sessions)` }],
+            timestamp: new Date().toISOString(),
+          }])
+        }
+      } catch (err) {
+        console.error('Failed to switch model:', err)
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_err`,
+          role: 'tool',
+          content: [{ type: 'text', text: `Error switching model: ${err}` }],
+          timestamp: new Date().toISOString(),
+        }])
+      }
+      return
+    }
+    
+    try {
+      // Switch model for current session
+      const result = await api.switchModel(modelName, activeSession)
+      if (result.success) {
+        onModelSwitch?.(modelName)
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_switch`,
+          role: 'assistant',
+          content: [{ type: 'text', text: `Switched to **${modelName}** for this session` }],
+          timestamp: new Date().toISOString(),
+        }])
+      }
+    } catch (err) {
+      console.error('Failed to switch model:', err)
+      setMessages(prev => [...prev, {
+        id: `msg_${Date.now()}_err`,
+        role: 'tool',
+        content: [{ type: 'text', text: `Error switching model: ${err}` }],
+        timestamp: new Date().toISOString(),
+      }])
+    }
+  }
+
+  const handleCommandSelect = async (cmd: string) => {
+    // Special handling for /model command
+    if (cmd === 'model') {
+      // Show models in chat
+      try {
+        const result = await api.getModels()
+        const modelText = result.models?.length 
+          ? result.models.map(m => 
+              `**/${m.alias}** - ${m.name}\n   ${m.provider} (context: ${m.context_length})`
+            ).join('\n\n')
+          : 'No models available'
+        
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_model`,
+          role: 'assistant',
+          content: [{ type: 'text', text: `Available models:\n\n${modelText}\n\nType **/model <alias>** to switch (e.g., /model 122b)` }],
+          timestamp: new Date().toISOString(),
+        }])
+        setInput('')
+        setShowCommands(false)
+        inputRef.current?.focus()
+        return
+      } catch (err) {
+        console.error('Failed to get models:', err)
+      }
+    }
+    
+    setInput('/' + cmd + ' ')
+    setShowCommands(false)
+    inputRef.current?.focus()
+  }
+
+  const filteredCommands = useMemo(() => {
+    if (!showCommands || !commandFilter) {
+      setSelectedCommandIndex(0)
+      return SLASH_COMMANDS.slice(0, 8)
+    }
+    // Check if we're typing a model switch command like "/model 122b"
+    if (commandFilter.startsWith('model ') || commandFilter.startsWith('switch ')) {
+      // Show model names as completions
+      const modelArg = commandFilter.split(' ')[1] || ''
+      return models.filter(m => 
+        m.alias.includes(modelArg) || m.name.includes(modelArg)
+      ).map(m => ({
+        name: `model ${m.alias}`,
+        desc: m.name,
+        alias: m.alias
+      })).slice(0, 8)
+    }
+    const filtered = SLASH_COMMANDS.filter(cmd => 
+      cmd.name.includes(commandFilter) || 
+      (cmd.alias && cmd.alias.includes(commandFilter))
+    ).slice(0, 8)
+    setSelectedCommandIndex(0)
+    return filtered
+  }, [showCommands, commandFilter, models])
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const text = input.trim()
+    if (!text || sending || thinking) return
+
+    // Handle /new command locally
+    if (text === '/new' || text === '/reset') {
+      setMessages([])
+      setInput('')
+      setSending(false)
+      setThinking(false)
+      // Also clear session key to force new session on next message
+      setSessionKey(null)
+      onActiveSessionChange?.(null)
+      localStorage.removeItem('mc_session_id')
+      return
+    }
+
+    setInput('')
+    setSending(true)
+
+    // Add user message
+    setMessages(prev => [...prev, {
+      id: `msg_${Date.now()}`,
+      role: 'user',
+      content: [{ type: 'text', text }],
+      timestamp: new Date().toISOString(),
+    }])
+
+    setThinking(true)
+
+    // Streaming assistant message ID — used to accumulate text deltas
+    const assistantMsgId = `msg_${Date.now()}_resp`
+    let streamingStarted = false
+
+    void api.streamMessage(text, clientId.current, sessionKey || undefined, {
+      onSession: (sid) => {
+        if (!sessionKey) {
+          setSessionKey(sid)
+          localStorage.setItem('mc_session_id', sid)
+          onActiveSessionChange?.(sid)
+        }
+      },
+      onToolStart: (callId, name, args) => {
+        // Add an assistant message with the tool_call, then a pending tool result message
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `msg_${callId}_tc`,
+            role: 'assistant' as const,
+            content: [{ type: 'text' as const, text: '' }],
+            tool_calls: [{ id: callId, call_id: callId, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+            timestamp: new Date().toISOString(),
+          },
+          {
+            id: `msg_${callId}_result`,
+            role: 'tool' as const,
+            content: [{ type: 'text' as const, text: '⏳ Running...' }],
+            tool_call_id: callId,
+            timestamp: new Date().toISOString(),
+          },
+        ])
+      },
+      onToolComplete: (callId, _name, result) => {
+        setMessages(prev => prev.map(m =>
+          m.id === `msg_${callId}_result`
+            ? { ...m, content: [{ type: 'text' as const, text: result }] }
+            : m
+        ))
+      },
+      onTextDelta: (delta) => {
+        if (!streamingStarted) {
+          streamingStarted = true
+          setMessages(prev => [...prev, {
+            id: assistantMsgId,
+            role: 'assistant' as const,
+            content: [{ type: 'text' as const, text: delta }],
+            timestamp: new Date().toISOString(),
+          }])
+        } else {
+          setMessages(prev => prev.map(m =>
+            m.id === assistantMsgId
+              ? { ...m, content: [{ type: 'text' as const, text: m.content[0].text + delta }] }
+              : m
+          ))
+        }
+      },
+      onDone: (response, _sid) => {
+        // If no streaming deltas were received, add the final response as a message
+        if (!streamingStarted && response) {
+          setMessages(prev => [...prev, {
+            id: assistantMsgId,
+            role: 'assistant' as const,
+            content: [{ type: 'text' as const, text: response }],
+            timestamp: new Date().toISOString(),
+          }])
+        }
+        setThinking(false)
+        setSending(false)
+        inputRef.current?.focus()
+      },
+      onError: (detail) => {
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_err`,
+          role: 'tool' as const,
+          content: [{ type: 'text' as const, text: `Error: ${detail}` }],
+          timestamp: new Date().toISOString(),
+        }])
+        setThinking(false)
+        setSending(false)
+        inputRef.current?.focus()
+      },
+    }, !sessionKey ? pendingModel : undefined)
+  }
+
+  const timeStr = (iso: string) => {
+    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Messages */}
+      <main ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3">
+        {messages.length === 0 && (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center text-slate-500">
+              <MessageCircle className="w-10 h-10 mx-auto mb-3 opacity-30" />
+              <p className="text-sm">Welcome to Lloyd Mission Control</p>
+              <p className="text-xs mt-1 text-slate-600">Send a message to get started</p>
+            </div>
+          </div>
+        )}
+        
+        {messages.map((msg) => {
+          // Skip messages with empty content
+          const hasContent = msg.content?.some(c => c.text?.trim())
+          if (!hasContent) return null
+          
+          // Hide tool messages when details hidden, but always show error messages
+          const isError = msg.role === 'tool' && msg.content?.some(c => c.text?.startsWith('Error:'))
+          const hideToolMessage = !showAgentDetails && msg.role === 'tool' && !isError
+          if (hideToolMessage) return null
+          
+          return (
+            <div key={msg.id} className={msg.role === 'user' ? 'pl-[1cm]' : 'pr-[1cm]'}>
+            <div className="w-full">
+              <div
+                className={`p-3 rounded-lg ${
+                  msg.role === 'user'
+                    ? 'bg-brand-600/20 border border-brand-500/30 text-white'
+                    : msg.role === 'tool'
+                    ? 'bg-slate-800/40 border border-slate-600/30 text-slate-200'
+                    : 'bg-surface-2 border border-surface-3/30 text-slate-200'
+                }`}
+              >
+                <div className="flex items-start gap-2 mb-2">
+                  <div className="flex items-center gap-2">
+                    {msg.role === 'user' ? (
+                      <User className="w-3 h-3" />
+                    ) : msg.role === 'tool' ? (
+                      <Wrench className="w-3 h-3 text-slate-400" />
+                    ) : (
+                      <Brain className="w-3 h-3" />
+                    )}
+                    <span className="text-[10px] font-semibold uppercase tracking-wide">
+                      {msg.role === 'user' ? 'You' : msg.role === 'tool' ? 'Tool' : 'Lloyd'}
+                    </span>
+                    {msg.role === 'tool' && msg.tool_call_id && (
+                      <span className="text-[10px] text-slate-500 truncate max-w-[150px]">
+                        {(() => {
+                          const toolCall = messages.find(m => 
+                            m.role === 'assistant' && 
+                            m.tool_calls?.some(tc => tc.call_id === msg.tool_call_id)
+                          )?.tool_calls?.find(tc => tc.call_id === msg.tool_call_id)
+                          return toolCall?.function?.name || ''
+                        })()}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="prose-chat text-sm leading-relaxed">
+                  {msg.role === 'assistant' ? (
+                    <>
+                      {/* Reasoning (if available) - only shown when Agent Details is enabled */}
+                      {showAgentDetails && msg.reasoning && (
+                        <details className="group mb-3">
+                          <summary className="cursor-pointer list-none flex items-center gap-1 text-xs text-slate-400 hover:text-slate-300 transition-colors">
+                            <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
+                            <span className="font-semibold">Thinking</span>
+                          </summary>
+                          <div className="mt-2 p-3 bg-surface-3/30 rounded text-xs text-slate-300 whitespace-pre-wrap">
+                            {msg.reasoning}
+                          </div>
+                        </details>
+                      )}
+                      <div dangerouslySetInnerHTML={{ __html: marked.parse(msg.content.map(c => c.text).join('\n')) }} />
+                    </>
+                  ) : msg.role === 'tool' ? (
+                    // Tool call rendering - show arguments and response - only when Agent Details is enabled
+                    showAgentDetails ? (() => {
+                    const assistantMsg = messages.find(m => 
+                      m.role === 'assistant' && 
+                      m.tool_calls?.some(tc => tc.call_id === msg.tool_call_id)
+                    )
+                    const toolCall = assistantMsg?.tool_calls?.find(tc => tc.call_id === msg.tool_call_id)
+                    const toolArgs = toolCall?.function?.arguments || '{}'
+                    
+                    let argsDisplay = toolArgs
+                    try {
+                      const parsed = JSON.parse(toolArgs)
+                      argsDisplay = JSON.stringify(parsed, null, 2)
+                    } catch (e) {
+                      // Keep raw string if not valid JSON
+                    }
+                    
+                    const responseText = msg.content.map(c => c.text).join('\n')
+                    return (
+                      <div className="space-y-2">
+                        {/* Tool Arguments - collapsible */}
+                        {argsDisplay !== '{}' && (
+                          <details className="group">
+                            <summary className="cursor-pointer list-none flex items-center gap-1 text-xs text-slate-400 hover:text-slate-300 transition-colors">
+                              <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
+                              <span className="font-semibold">Arguments</span>
+                            </summary>
+                            <pre className="mt-1 ml-4 p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono">
+                              {argsDisplay}
+                            </pre>
+                          </details>
+                        )}
+
+                        {/* Tool Response - collapsible */}
+                        <details className="group">
+                          <summary className="cursor-pointer list-none flex items-center gap-1 text-xs text-slate-400 hover:text-slate-300 transition-colors">
+                            <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
+                            <span className="font-semibold">Response</span>
+                          </summary>
+                          <pre className="mt-1 ml-4 p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">
+                            {responseText || '⏳ Running...'}
+                          </pre>
+                        </details>
+                      </div>
+                    )
+                  })() : null
+                ) : (
+                  <pre className="whitespace-pre-wrap font-mono text-xs">
+                    {msg.content.map(c => c.text).join('\n')}
+                  </pre>
+                )}
+              </div>
+              <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/10 text-[10px] text-slate-400">
+                <span className="font-mono">{timeStr(msg.timestamp)}</span>
+                {msg.role === 'assistant' && (
+                  <span className="flex items-center gap-3">
+                    <span className="flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+                      {msg.model ? msg.model : 'model'}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+                      ~0 tokens
+                    </span>
+                  </span>
+                )}
+                {msg.role === 'user' && (
+                  <span className="flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+                    {msg.content.map(c => c.text).join('').length} chars
+                  </span>
+                )}
+              </div>
+            </div>
+            </div>
+          </div>
+        )}
+      )}
+
+        {thinking && (
+          <div className="max-w-3xl">
+            <div className="bg-surface-2 border border-surface-3/30 p-3 rounded-lg">
+              <div className="flex items-center gap-2">
+                <Loader2 className="w-3 h-3 animate-spin text-brand-400" />
+                <span className="text-xs text-slate-400">Thinking...</span>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        <div ref={messagesEndRef} />
+      </main>
+
+      {/* Input */}
+      <footer className="p-3 border-t border-surface-3/50 relative">
+        <form onSubmit={handleSubmit} className="flex gap-2">
+          <input
+            ref={inputRef}
+            type="text"
+            value={input}
+            onChange={handleInputChange}
+            onKeyDown={(e) => {
+              if (!showCommands) return
+              
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setSelectedCommandIndex((prev) => 
+                  prev < filteredCommands.length - 1 ? prev + 1 : prev
+                )
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setSelectedCommandIndex((prev) => prev > 0 ? prev - 1 : 0)
+              } else if (e.key === 'Enter') {
+                e.preventDefault()
+                if (filteredCommands.length > 0) {
+                  handleCommandSelect(filteredCommands[selectedCommandIndex].name)
+                }
+              } else if (e.key === 'Escape') {
+                setShowCommands(false)
+              }
+            }}
+            placeholder="Talk to Lloyd... (use / for commands)"
+            className="flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3.5 py-2.5 border border-surface-3/50 outline-none focus:border-brand-500/50 placeholder:text-slate-500 transition-colors disabled:opacity-50"
+            disabled={sending || thinking}
+          />
+          <button
+            type="submit"
+            disabled={sending || thinking || !input.trim()}
+            className="bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
+          >
+            {sending || thinking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+          </button>
+        </form>
+        
+        {/* Command dropdown */}
+        {showCommands && filteredCommands.length > 0 && (
+          <div className="absolute bottom-full left-0 right-0 mb-1 bg-surface-1 border border-surface-3/50 rounded-lg shadow-lg max-h-60 overflow-y-auto z-50">
+            {filteredCommands.map((cmd, idx) => (
+              <button
+                key={cmd.name}
+                onClick={() => handleCommandSelect(cmd.name)}
+                className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center justify-between ${
+                  idx === selectedCommandIndex 
+                    ? 'bg-brand-500/20 text-brand-400' 
+                    : 'hover:bg-surface-2 text-slate-200'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-brand-400">/{cmd.name}</span>
+                  {cmd.alias && <span className="text-xs text-slate-500">({cmd.alias.split(' ')[0]})</span>}
+                </div>
+                <span className="text-xs text-slate-400 truncate max-w-[200px]">{cmd.desc}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </footer>
+      {/* Session list moved to sidebar SessionsPanel */}
+    </div>
+  )
+}

@@ -1,0 +1,25 @@
+# Python
+.venv/
+.venvs/
+__pycache__/
+*.pyc
+
+# Node
+web/node_modules/
+web/dist/
+
+# Logs
+logs/*.log
+logs/*.err
+
+# Sessions (runtime state)
+sessions/
+
+# Pipeline runs (runtime state)
+pipeline-runs/
+
+# Environment
+.env
+
+# OS
+.DS_Store

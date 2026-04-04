@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""
+Lloyd MCP Server: Backlog — Kanban board and task management.
+
+Data: ~/obsidian/backlog/ (markdown files with YAML frontmatter)
+
+Tools: backlog_boards, backlog_tasks, backlog_get_task, backlog_write_task
+"""
+
+import asyncio
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+
+import yaml
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
+
+BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+
+app = Server("lloyd-backlog")
+
+
+def parse_frontmatter(content: str) -> tuple:
+    if not content.startswith("---"):
+        return {}, content
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return {}, content
+    try:
+        frontmatter = yaml.safe_load(parts[1]) or {}
+    except Exception:
+        frontmatter = {}
+    return frontmatter, parts[2].strip()
+
+
+def load_task(task_id: int) -> dict | None:
+    if not BACKLOG_DIR.exists():
+        return None
+    pattern = re.compile(r"^(\d+)[-_].*\.md$")
+    for f in BACKLOG_DIR.glob("*.md"):
+        match = pattern.match(f.name)
+        if match and int(match.group(1)) == task_id:
+            content = f.read_text()
+            frontmatter, body = parse_frontmatter(content)
+            frontmatter["id"] = int(match.group(1))
+            frontmatter["filename"] = f.name
+            frontmatter["body"] = body
+            return frontmatter
+    return None
+
+
+def save_task(task: dict) -> bool:
+    if "filename" not in task:
+        return False
+    filepath = BACKLOG_DIR / task["filename"]
+    fm_lines = ["---"]
+    for key, value in task.items():
+        if key in ("id", "filename", "body"):
+            continue
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            fm_lines.append(f"{key}: {str(value).lower()}")
+        elif isinstance(value, list):
+            fm_lines.append(f"{key}: {value}")
+        elif isinstance(value, datetime):
+            fm_lines.append(f"{key}: {value.isoformat()}")
+        else:
+            fm_lines.append(f"{key}: {value}")
+    fm_lines.append("---")
+    body = task.get("body", "")
+    filepath.write_text("\n".join(fm_lines) + "\n\n" + body)
+    return True
+
+
+def add_activity(task: dict, message: str) -> dict:
+    now = datetime.now().isoformat()
+    activity = task.get("activity_log", [])
+    activity.append(f"- **{now}** — {message}")
+    task["activity_log"] = activity
+    task["updated"] = now
+    return task
+
+
+def _serialize_datetime(val):
+    if isinstance(val, datetime):
+        return val.isoformat()
+    return val
+
+
+@app.list_tools()
+async def list_tools():
+    return [
+        Tool(name="backlog_boards", description="List kanban boards with task counts", inputSchema={
+            "type": "object", "properties": {},
+        }),
+        Tool(name="backlog_tasks", description="List tasks with filters (status, board, tag, blocked, assigned)", inputSchema={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "description": "Filter by status"},
+                "board": {"type": "string", "description": "Filter by board name"},
+                "tag": {"type": "string", "description": "Filter by tag"},
+                "blocked": {"type": "boolean", "description": "Filter by blocked state"},
+                "assigned": {"type": "boolean", "description": "Filter by assigned state"},
+            },
+        }),
+        Tool(name="backlog_get_task", description="Get task details by ID", inputSchema={
+            "type": "object",
+            "properties": {"task_id": {"type": "integer", "description": "Task ID to retrieve"}},
+            "required": ["task_id"],
+        }),
+        Tool(name="backlog_write_task", description="Create or update a task. Provide task_id to update, omit to create new.", inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "Task ID to update (omit for new task)"},
+                "name": {"type": "string", "description": "Task name/title"},
+                "description": {"type": "string", "description": "Task description"},
+                "status": {"type": "string", "description": "Task status"},
+                "priority": {"type": "string", "description": "Task priority"},
+                "board": {"type": "string", "description": "Board name"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "blocked": {"type": "boolean"},
+                "assigned": {"type": "boolean"},
+                "activity": {"type": "string", "description": "Activity log message"},
+            },
+        }),
+    ]
+
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict):
+    if name == "backlog_boards":
+        return [TextContent(type="text", text=_handle_boards(arguments))]
+    elif name == "backlog_tasks":
+        return [TextContent(type="text", text=_handle_tasks(arguments))]
+    elif name == "backlog_get_task":
+        return [TextContent(type="text", text=_handle_get(arguments))]
+    elif name == "backlog_write_task":
+        return [TextContent(type="text", text=_handle_write(arguments))]
+    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+
+
+def _handle_boards(args: dict) -> str:
+    if not BACKLOG_DIR.exists():
+        return json.dumps({"success": False, "error": "Backlog directory not found"})
+    boards = {}
+    pattern = re.compile(r"^(\d+)[-_].*\.md$")
+    for f in BACKLOG_DIR.glob("*.md"):
+        if not pattern.match(f.name):
+            continue
+        try:
+            content = f.read_text()
+            frontmatter, _ = parse_frontmatter(content)
+            board = frontmatter.get("board", "default")
+            boards[board] = boards.get(board, 0) + 1
+        except Exception:
+            continue
+    return json.dumps({"success": True, "boards": [{"name": k, "task_count": v} for k, v in boards.items()]})
+
+
+def _handle_tasks(args: dict) -> str:
+    if not BACKLOG_DIR.exists():
+        return json.dumps({"success": False, "error": "Backlog directory not found"})
+    status = args.get("status")
+    board = args.get("board")
+    tag = args.get("tag")
+    blocked = args.get("blocked")
+    assigned = args.get("assigned")
+    tasks = []
+    pattern = re.compile(r"^(\d+)[-_].*\.md$")
+    for f in BACKLOG_DIR.glob("*.md"):
+        match = pattern.match(f.name)
+        if not match:
+            continue
+        try:
+            content = f.read_text()
+            frontmatter, body = parse_frontmatter(content)
+            tid = int(match.group(1))
+            if status and frontmatter.get("status") != status:
+                continue
+            if board and frontmatter.get("board") != board:
+                continue
+            if blocked is not None and frontmatter.get("blocked") != blocked:
+                continue
+            if assigned is not None and frontmatter.get("assigned") != assigned:
+                continue
+            if tag:
+                task_tags = frontmatter.get("tags", [])
+                if isinstance(task_tags, str):
+                    task_tags = [task_tags]
+                if tag not in task_tags:
+                    continue
+            title = f"Task {tid}"
+            heading_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
+            if heading_match:
+                title = heading_match.group(1).strip()
+            tasks.append({
+                "id": tid, "title": title,
+                "status": frontmatter.get("status", "todo"),
+                "board": frontmatter.get("board", "default"),
+                "priority": frontmatter.get("priority", "medium"),
+                "tags": frontmatter.get("tags", []),
+                "blocked": frontmatter.get("blocked", False),
+                "assigned": frontmatter.get("assigned", False),
+            })
+        except Exception:
+            continue
+    return json.dumps({"success": True, "tasks": tasks, "count": len(tasks)})
+
+
+def _handle_get(args: dict) -> str:
+    task_id = args.get("task_id")
+    if not task_id:
+        return json.dumps({"success": False, "error": "task_id required"})
+    task = load_task(task_id)
+    if not task:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+    return json.dumps({"success": True, "task": {
+        "id": task.get("id"),
+        "board": task.get("board"),
+        "status": task.get("status"),
+        "priority": task.get("priority"),
+        "tags": task.get("tags", []),
+        "blocked": task.get("blocked", False),
+        "assigned": task.get("assigned", False),
+        "created": _serialize_datetime(task.get("created")),
+        "updated": _serialize_datetime(task.get("updated")),
+        "completed": _serialize_datetime(task.get("completed")),
+        "title": task.get("body", "").split("\n")[0].replace("# ", "") if task.get("body") else f"Task {task_id}",
+        "description": task.get("body", ""),
+        "activity_log": task.get("activity_log", []),
+    }})
+
+
+def _handle_write(args: dict) -> str:
+    task_id = args.get("task_id")
+    now = datetime.now().isoformat()
+    if task_id is not None:
+        task = load_task(task_id)
+        if not task:
+            return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+    else:
+        max_id = 0
+        pattern = re.compile(r"^(\d+)[-_].*\.md$")
+        if BACKLOG_DIR.exists():
+            for f in BACKLOG_DIR.glob("*.md"):
+                match = pattern.match(f.name)
+                if match:
+                    max_id = max(max_id, int(match.group(1)))
+        task_id = max_id + 1
+        task = {"id": task_id, "filename": f"{task_id}-new-task.md", "created": now}
+
+    name = args.get("name")
+    description = args.get("description")
+    if name:
+        current_body = task.get("body", "")
+        if current_body:
+            current_body = re.sub(r"^#\s+.+", f"# {name}", current_body, count=1, flags=re.MULTILINE)
+        else:
+            current_body = f"# {name}"
+        task["body"] = current_body
+    if description:
+        current_body = task.get("body", "")
+        task["body"] = (current_body + "\n\n" + description) if current_body else description
+
+    for key in ("status", "priority", "board"):
+        if args.get(key):
+            task[key] = args[key]
+    if args.get("tags") is not None:
+        task["tags"] = args["tags"]
+    if args.get("blocked") is not None:
+        task["blocked"] = args["blocked"]
+    if args.get("assigned") is not None:
+        task["assigned"] = args["assigned"]
+
+    activity = args.get("activity")
+    if activity:
+        task = add_activity(task, activity)
+    elif any(args.get(k) for k in ("name", "description", "status", "priority", "board")):
+        changes = []
+        if name: changes.append("name")
+        if description: changes.append("description")
+        if args.get("status"): changes.append(f"status to {args['status']}")
+        if args.get("priority"): changes.append(f"priority to {args['priority']}")
+        if args.get("board"): changes.append(f"board to {args['board']}")
+        if changes:
+            task = add_activity(task, f"Updated: {', '.join(changes)}")
+
+    task["updated"] = now
+    if not save_task(task):
+        return json.dumps({"success": False, "error": "Failed to save task"})
+    return json.dumps({"success": True, "task_id": task_id, "message": "Task updated"})
+
+
+async def main():
+    async with stdio_server() as (read_stream, write_stream):
+        await app.run(read_stream, write_stream, app.create_initialization_options())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
