@@ -11,7 +11,45 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import yaml
+# Try to import yaml, provide fallback if not available
+try:
+    import yaml
+except ImportError:
+    # Simple YAML parser for frontmatter
+    class yaml:
+        @staticmethod
+        def safe_load(text):
+            """Minimal YAML parser for frontmatter."""
+            result = {}
+            current_key = None
+            current_list = False
+            for line in text.strip().split('\n'):
+                line = line.rstrip()
+                if not line or line.startswith('#'):
+                    continue
+                if line.startswith('- '):
+                    if current_key and current_list:
+                        item = line[2:].strip().strip('"').strip("'")
+                        result[current_key].append(item)
+                elif ':' in line:
+                    key, _, value = line.partition(':')
+                    key = key.strip()
+                    value = value.strip()
+                    if value == '':
+                        result[key] = []
+                        current_key = key
+                        current_list = True
+                    elif value.startswith('[') and value.endswith(']'):
+                        # Inline list
+                        items = value[1:-1].split(',')
+                        result[key] = [item.strip().strip('"').strip("'") for item in items if item.strip()]
+                        current_key = None
+                        current_list = False
+                    else:
+                        result[key] = value.strip('"').strip("'")
+                        current_key = None
+                        current_list = False
+            return result
 
 VAULT = Path.home() / "obsidian"
 MEMORY_DIR = VAULT / "memory"

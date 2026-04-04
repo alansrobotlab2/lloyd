@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Extract clean user+assistant transcript from Hermes session JSON files.
+Extract clean user+assistant transcript from session JSON files.
 Uses a watermark (state.json) to only output new content since last run.
 Exits with empty output if nothing new.
+
+Supports two instances:
+  --instance lloyd   (default) reads ~/lloyd/sessions/*.json
+  --instance hermes  reads ~/.hermes/sessions/session_*.json
 
 Output format (stdout):
 ---
@@ -18,7 +22,8 @@ import sys
 import glob
 from datetime import datetime, timezone
 
-SESSIONS_DIR = os.path.expanduser("~/.hermes/sessions")
+LLOYD_SESSIONS_DIR = os.path.expanduser("~/lloyd/sessions")
+HERMES_SESSIONS_DIR = os.path.expanduser("~/.hermes/sessions")
 STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "state.json")
 
 
@@ -45,11 +50,25 @@ def format_time(ts_str):
         return "??"
 
 
-def process_session_file(filepath, last_run_ts):
+def _extract_text_from_content(content) -> str:
+    """Extract plain text from content (string or list of blocks)."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "").strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts)
+    return ""
+
+
+def process_lloyd_session(filepath, last_run_ts):
     """
-    Process a single Hermes session JSON file.
-    Returns list of (timestamp, role, text) tuples.
-    Also returns session_id and session_ts.
+    Process a Lloyd session JSON file (~/lloyd/sessions/*.json).
+    Returns (session_id, session_ts, entries).
     """
     try:
         with open(filepath) as f:
@@ -58,9 +77,8 @@ def process_session_file(filepath, last_run_ts):
         return None, None, []
 
     session_id = data.get("session_id", "unknown")
-    session_ts = data.get("session_start", "")
+    session_ts = data.get("created_at", "")
 
-    # Use file mtime to check if session is newer than watermark
     file_mtime = os.path.getmtime(filepath)
     if file_mtime <= last_run_ts and last_run_ts > 0:
         return session_id, session_ts, []
@@ -71,35 +89,64 @@ def process_session_file(filepath, last_run_ts):
         if role not in ("user", "assistant"):
             continue
 
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            # Extract text blocks from structured content
-            parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text", "").strip()
-                    if text:
-                        parts.append(text)
-            text = "\n".join(parts)
-        elif isinstance(content, str):
-            text = content.strip()
-        else:
-            continue
-
+        text = _extract_text_from_content(msg.get("content", ""))
         if not text:
             continue
 
-        # Skip very short assistant messages
+        # Skip short assistant messages
         if role == "assistant" and len(text) < 10:
             continue
 
-        # Skip system-injected user messages
+        # Skip injected system context in user messages
+        if role == "user":
+            stripped = text.strip()
+            if stripped.startswith("[cron:") or stripped.startswith("[System Message]"):
+                continue
+            # Skip large context injections (daily notes, system context blocks)
+            if stripped.startswith("<daily_notes>") or stripped.startswith("<memory>"):
+                continue
+
+        msg_ts = msg.get("timestamp", session_ts)
+        entries.append((msg_ts, role, text))
+
+    return session_id, session_ts, entries
+
+
+def process_hermes_session(filepath, last_run_ts):
+    """
+    Process a Hermes session JSON file (~/.hermes/sessions/session_*.json).
+    """
+    try:
+        with open(filepath) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None, None, []
+
+    session_id = data.get("session_id", "unknown")
+    session_ts = data.get("session_start", "")
+
+    file_mtime = os.path.getmtime(filepath)
+    if file_mtime <= last_run_ts and last_run_ts > 0:
+        return session_id, session_ts, []
+
+    entries = []
+    for msg in data.get("messages", []):
+        role = msg.get("role", "")
+        if role not in ("user", "assistant"):
+            continue
+
+        text = _extract_text_from_content(msg.get("content", ""))
+        if not text:
+            continue
+
+        if role == "assistant" and len(text) < 10:
+            continue
+
         if role == "user":
             stripped = text.strip()
             if stripped.startswith("[cron:") or stripped.startswith("[System Message]"):
                 continue
 
-        # Hermes sessions don't have per-message timestamps; use session_ts
         entries.append((session_ts, role, text))
 
     return session_id, session_ts, entries
@@ -107,34 +154,40 @@ def process_session_file(filepath, last_run_ts):
 
 def main():
     dry_run = '--dry-run' in sys.argv
+    instance = "lloyd"
+    for i, arg in enumerate(sys.argv[1:]):
+        if arg == "--instance" and i + 2 < len(sys.argv):
+            instance = sys.argv[i + 2]
+
+    if instance == "hermes":
+        sessions_dir = HERMES_SESSIONS_DIR
+        pattern = os.path.join(sessions_dir, "session_*.json")
+        process_fn = process_hermes_session
+    else:
+        sessions_dir = LLOYD_SESSIONS_DIR
+        pattern = os.path.join(sessions_dir, "*.json")
+        process_fn = process_lloyd_session
+
     state = load_state()
     last_run_ts = state.get("lastRunTs", 0)
     now_ts = datetime.now(timezone.utc).timestamp()
 
-    # Find all Hermes session files
-    pattern = os.path.join(SESSIONS_DIR, "session_*.json")
     all_files = glob.glob(pattern)
-
     if not all_files:
         if not dry_run:
             save_state({"lastRunTs": now_ts})
         sys.exit(0)
 
-    # Filter to files modified after last run
-    if last_run_ts > 0:
-        recent_files = [f for f in all_files if os.path.getmtime(f) > last_run_ts]
-    else:
-        recent_files = all_files
+    recent_files = [f for f in all_files if os.path.getmtime(f) > last_run_ts] if last_run_ts > 0 else all_files
 
     if not recent_files:
         if not dry_run:
             save_state({"lastRunTs": now_ts})
         sys.exit(0)
 
-    # Process each file
     output_blocks = []
     for filepath in sorted(recent_files):
-        session_id, session_ts, entries = process_session_file(filepath, last_run_ts)
+        session_id, session_ts, entries = process_fn(filepath, last_run_ts)
         if not entries:
             continue
 
@@ -142,7 +195,6 @@ def main():
         for ts, role, text in entries:
             time_str = format_time(ts)
             role_label = "USER" if role == "user" else "ASSISTANT"
-            # Truncate very long messages
             if len(text) > 2000:
                 text = text[:2000] + "... [truncated]"
             lines.append(f"[{time_str}] {role_label}: {text}")
@@ -153,7 +205,6 @@ def main():
             save_state({"lastRunTs": now_ts})
         sys.exit(0)
 
-    # Output the transcript with 50KB safety cap
     separator = "\n---\n"
     full_output = separator.join(output_blocks)
     output_bytes = full_output.encode("utf-8")
@@ -162,7 +213,6 @@ def main():
         full_output = "[WARNING: transcript truncated to 50KB — oldest content dropped]\n" + output_bytes[-51200:].decode("utf-8", errors="replace")
     print(full_output)
 
-    # Update watermark only after successful output
     if not dry_run:
         save_state({"lastRunTs": now_ts})
 

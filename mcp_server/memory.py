@@ -29,6 +29,18 @@ from mcp.types import Tool, TextContent
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
+MEMORIES_ROOT = Path.home() / "lloyd" / "memories"
+MEMORY_FILES = {"MEMORY.md", "USER.md"}
+
+_INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.I),
+    re.compile(r"you\s+are\s+now\s+a", re.I),
+    re.compile(r"disregard\s+(your\s+)?(previous\s+)?instructions", re.I),
+    re.compile(r"new\s+system\s+prompt", re.I),
+    re.compile(r"pretend\s+you\s+are", re.I),
+    re.compile(r"\x00|\u200b|\u200c|\u200d|\u2060|\ufeff", re.I),
+]
+
 VAULT = Path.home() / "obsidian"
 FACTS_ROOT = VAULT / "memory" / "_pipeline" / "facts"
 AUDIT_LOG_DIR = VAULT / "memory" / "audit"
@@ -683,6 +695,84 @@ def _vault_recall(params: dict) -> str:
         return json.dumps({"error": str(exc), "documents": [], "facts": []})
 
 
+# ── Session memory tools ─────────────────────────────────────────────────────
+
+def _check_injection(text: str) -> Optional[str]:
+    for pat in _INJECTION_PATTERNS:
+        if pat.search(text):
+            return f"Potential prompt injection detected in entry"
+    return None
+
+
+def _memory_read(params: dict) -> str:
+    file = params.get("file", "MEMORY.md").strip()
+    if file not in MEMORY_FILES:
+        return json.dumps({"error": f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}"})
+    filepath = MEMORIES_ROOT / file
+    if not filepath.exists():
+        return json.dumps({"content": "", "file": file})
+    return json.dumps({"content": filepath.read_text(encoding="utf-8"), "file": file})
+
+
+def _memory_add(params: dict) -> str:
+    file = params.get("file", "MEMORY.md").strip()
+    entry = params.get("entry", "").strip()
+    if file not in MEMORY_FILES:
+        return json.dumps({"error": f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}"})
+    if not entry:
+        return json.dumps({"error": "entry is required"})
+    err = _check_injection(entry)
+    if err:
+        return json.dumps({"error": err})
+    MEMORIES_ROOT.mkdir(parents=True, exist_ok=True)
+    filepath = MEMORIES_ROOT / file
+    existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    filepath.write_text(existing + entry + "\n", encoding="utf-8")
+    return json.dumps({"success": True, "file": file})
+
+
+def _memory_replace(params: dict) -> str:
+    file = params.get("file", "MEMORY.md").strip()
+    old_text = params.get("old_text", "")
+    new_text = params.get("new_text", "")
+    if file not in MEMORY_FILES:
+        return json.dumps({"error": f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}"})
+    if not old_text:
+        return json.dumps({"error": "old_text is required"})
+    err = _check_injection(new_text)
+    if err:
+        return json.dumps({"error": err})
+    filepath = MEMORIES_ROOT / file
+    if not filepath.exists():
+        return json.dumps({"error": f"{file} does not exist"})
+    content = filepath.read_text(encoding="utf-8")
+    if old_text not in content:
+        return json.dumps({"error": "old_text not found in file", "matched": False})
+    filepath.write_text(content.replace(old_text, new_text, 1), encoding="utf-8")
+    return json.dumps({"success": True, "file": file})
+
+
+def _memory_remove(params: dict) -> str:
+    file = params.get("file", "MEMORY.md").strip()
+    entry = params.get("entry", "").strip()
+    if file not in MEMORY_FILES:
+        return json.dumps({"error": f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}"})
+    if not entry:
+        return json.dumps({"error": "entry is required"})
+    filepath = MEMORIES_ROOT / file
+    if not filepath.exists():
+        return json.dumps({"error": f"{file} does not exist"})
+    content = filepath.read_text(encoding="utf-8")
+    if entry not in content:
+        return json.dumps({"error": "entry not found in file", "matched": False})
+    updated = content.replace(entry, "", 1)
+    updated = re.sub(r"\n{3,}", "\n\n", updated)
+    filepath.write_text(updated, encoding="utf-8")
+    return json.dumps({"success": True, "file": file})
+
+
 # ── MCP registration ─────────────────────────────────────────────────────────
 
 @app.list_tools()
@@ -708,6 +798,14 @@ async def list_tools():
             "type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}, "min_score": {"type": "number"}, "scope": {"type": "string"}, "consolidate": {"type": "boolean"}}, "required": ["query"]}),
         Tool(name="vault_recall", description="Combined recall: vault search + entity fact retrieval in parallel.", inputSchema={
             "type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "include_facts": {"type": "boolean"}}, "required": ["query"]}),
+        Tool(name="memory_read", description="Read MEMORY.md or USER.md session memory files.", inputSchema={
+            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "Which file to read"}}, "required": []}),
+        Tool(name="memory_add", description="Append an entry to MEMORY.md or USER.md.", inputSchema={
+            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"]}, "entry": {"type": "string", "description": "Text to append"}}, "required": ["entry"]}),
+        Tool(name="memory_replace", description="Replace text in MEMORY.md or USER.md (substring match).", inputSchema={
+            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"]}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["old_text", "new_text"]}),
+        Tool(name="memory_remove", description="Remove an entry from MEMORY.md or USER.md (substring match).", inputSchema={
+            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"]}, "entry": {"type": "string", "description": "Text to remove"}}, "required": ["entry"]}),
     ]
 
 
@@ -718,6 +816,8 @@ async def call_tool(name: str, arguments: dict):
         "fact_check": _fact_check, "fact_resolve": _fact_resolve,
         "vault_get": _vault_get, "vault_write": _vault_write, "vault_overview": _vault_overview,
         "vault_search": _vault_search, "vault_recall": _vault_recall,
+        "memory_read": _memory_read, "memory_add": _memory_add,
+        "memory_replace": _memory_replace, "memory_remove": _memory_remove,
     }
     handler = handlers.get(name)
     if handler:

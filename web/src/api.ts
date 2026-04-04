@@ -1,3 +1,14 @@
+export interface TurnStats {
+  input_tokens: number
+  output_tokens: number
+  cache_create: number
+  cache_read: number
+  cost_usd: number | null
+  duration_ms: number | null
+  num_turns: number | null
+  model: string
+}
+
 export interface MessageEntry {
   id: string
   role: 'user' | 'assistant' | 'tool'
@@ -6,6 +17,7 @@ export interface MessageEntry {
   session_key?: string
   model?: string
   reasoning?: string
+  stats?: TurnStats
   tool_calls?: Array<{
     id: string
     call_id: string
@@ -404,7 +416,7 @@ export const api = {
       onToolComplete?: (callId: string, name: string, result: string) => void
       onToolProgress?: (name: string, preview: string) => void
       onTextDelta?: (text: string) => void
-      onDone?: (response: string, sessionId: string) => void
+      onDone?: (response: string, sessionId: string, stats?: TurnStats) => void
       onError?: (detail: string) => void
     },
     model?: string,
@@ -450,7 +462,7 @@ export const api = {
               case 'tool_complete': callbacks.onToolComplete?.(payload.call_id, payload.name, payload.result); break
               case 'tool_progress': callbacks.onToolProgress?.(payload.name, payload.preview); break
               case 'text_delta': callbacks.onTextDelta?.(payload.text); break
-              case 'done': callbacks.onDone?.(payload.response, payload.session_id); break
+              case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats); break
               case 'error': callbacks.onError?.(payload.detail); break
             }
           } catch { /* skip malformed */ }

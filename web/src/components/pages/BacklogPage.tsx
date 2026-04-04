@@ -12,21 +12,19 @@ import {
 } from "lucide-react";
 import { api, type BacklogBoard, type BacklogTask } from "../../api";
 
-const STATUSES = ["inbox", "up_next", "in_progress", "in_review", "done"] as const;
+const STATUSES = ["draft", "up_next", "in_progress", "done"] as const;
 
 const STATUS_LABELS: Record<string, string> = {
-  inbox: "Inbox",
+  draft: "Draft",
   up_next: "Up Next",
   in_progress: "In Progress",
-  in_review: "In Review",
   done: "Done",
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  inbox: "bg-slate-500/20 text-slate-400 border-slate-500/30",
+  draft: "bg-slate-500/20 text-slate-400 border-slate-500/30",
   up_next: "bg-sky-500/20 text-sky-400 border-sky-500/30",
   in_progress: "bg-amber-500/20 text-amber-400 border-amber-500/30",
-  in_review: "bg-indigo-500/20 text-indigo-400 border-indigo-500/30",
   done: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
 };
 
@@ -59,7 +57,7 @@ function TaskModal({
   const isCreate = !task;
   const [name, setName] = useState(task?.name || "");
   const [description, setDescription] = useState(task?.description || "");
-  const [status, setStatus] = useState(task?.status || "inbox");
+  const [status, setStatus] = useState(task?.status || "draft");
   const [priority, setPriority] = useState(task?.priority || "none");
   const [blocked, setBlocked] = useState(task?.blocked || false);
   const [saving, setSaving] = useState(false);

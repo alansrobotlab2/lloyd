@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench } from 'lucide-react'
 import { marked } from 'marked'
-import { api, type MessageEntry as ApiMessage, type ModelInfo } from '../api'
+import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats } from '../api'
 
 // Configure marked
 marked.setOptions({ breaks: true, gfm: true })
@@ -406,15 +406,19 @@ export default function ChatPanel({
           ))
         }
       },
-      onDone: (response, _sid) => {
-        // If no streaming deltas were received, add the final response as a message
+      onDone: (response, _sid, stats) => {
         if (!streamingStarted && response) {
           setMessages(prev => [...prev, {
             id: assistantMsgId,
             role: 'assistant' as const,
             content: [{ type: 'text' as const, text: response }],
             timestamp: new Date().toISOString(),
+            stats,
           }])
+        } else if (stats) {
+          setMessages(prev => prev.map(m =>
+            m.id === assistantMsgId ? { ...m, stats } : m
+          ))
         }
         setThinking(false)
         setSending(false)
@@ -566,8 +570,27 @@ export default function ChatPanel({
                   <div dangerouslySetInnerHTML={{ __html: marked.parse(msg.content.map(c => c.text).join('\n')) }} />
                 )}
               </div>
-              <div className="mt-1.5 text-[10px] text-slate-600 font-mono">
-                {timeStr(msg.timestamp)}
+              <div className="mt-1.5 text-[10px] text-slate-600 font-mono flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+                <span>{timeStr(msg.timestamp)}</span>
+                {msg.stats && msg.role === 'assistant' && (() => {
+                  const s = msg.stats as TurnStats
+                  return (<>
+                    <span className="text-slate-600">in: {s.input_tokens.toLocaleString()}</span>
+                    <span className="text-slate-600">out: {s.output_tokens.toLocaleString()}</span>
+                    {s.cache_read > 0 && (
+                      <span className="text-emerald-700">cache↑: {s.cache_read.toLocaleString()}</span>
+                    )}
+                    {s.cache_create > 0 && (
+                      <span className="text-amber-700">cache✎: {s.cache_create.toLocaleString()}</span>
+                    )}
+{s.duration_ms != null && (
+                      <span className="text-slate-600">time: {(s.duration_ms / 1000).toFixed(1)}s</span>
+                    )}
+                    {s.num_turns != null && s.num_turns > 1 && (
+                      <span className="text-slate-600">turns: {s.num_turns}</span>
+                    )}
+                  </>)
+                })()}
               </div>
             </div>
             </div>
