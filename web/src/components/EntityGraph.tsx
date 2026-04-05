@@ -53,7 +53,7 @@ interface EdgeFilters {
 function nodeColor(node: GNode): string {
   if (node.type === "entity") return "#F59E0B"; // gold/amber for entity nodes
   const id = node.id;
-  if (id.startsWith("memory/_pipeline/facts/")) return "hsl(200, 50%, 55%)";
+  if (id.startsWith("facts/")) return "hsl(200, 50%, 55%)";
   if (id.startsWith("memory/")) return "hsl(160, 35%, 50%)";
   if (id.startsWith("projects/")) return "hsl(270, 35%, 55%)";
   if (id.startsWith("knowledge/")) return "hsl(45, 45%, 55%)";

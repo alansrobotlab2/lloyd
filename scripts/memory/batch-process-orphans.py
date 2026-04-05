@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 
 # Read queue
-with open('/home/alansrobotlab/obsidian/memory/_pipeline/groundskeeper-queue.json', 'r') as f:
+with open('/home/alansrobotlab/lloyd/_pipeline/groundskeeper-queue.json', 'r') as f:
     queue = json.load(f)
 
 # Process up to 25 pending ORPHAN_FILE items
@@ -31,7 +31,7 @@ for item in queue['items']:
 queue['items_processed'] = processed
 
 # Write updated queue
-with open('/home/alansrobotlab/obsidian/memory/_pipeline/groundskeeper-queue.json', 'w') as f:
+with open('/home/alansrobotlab/lloyd/_pipeline/groundskeeper-queue.json', 'w') as f:
     json.dump(queue, f, indent=2)
 
 print(f'Processed {processed} items')

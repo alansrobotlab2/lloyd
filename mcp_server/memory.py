@@ -5,7 +5,7 @@ Lloyd MCP Server: Memory — knowledge graph, facts, and vault tools.
 Fact tools: fact_get, fact_add, fact_profile, fact_check, fact_resolve
 Vault tools: vault_get, vault_write, vault_overview, vault_search, vault_recall
 
-Facts data: ~/obsidian/memory/_pipeline/facts/
+Facts data: ~/obsidian/facts/
 Vault root: ~/obsidian/
 QMD daemon: http://localhost:8181/query
 """
@@ -42,14 +42,14 @@ _INJECTION_PATTERNS = [
 ]
 
 VAULT = Path.home() / "obsidian"
-FACTS_ROOT = VAULT / "memory" / "_pipeline" / "facts"
+FACTS_ROOT = Path.home() / "obsidian" / "facts"
 AUDIT_LOG_DIR = VAULT / "memory" / "audit"
 AUDIT_LOG_FILE = AUDIT_LOG_DIR / "writes.jsonl"
 QMD_BIN = Path.home() / ".bun" / "bin" / "qmd"
 QMD_DAEMON_URL = "http://localhost:8181/query"
 
-VAULT_SEGMENTS = ["memory", "knowledge", "projects", "agents", "personal", "work", "skills"]
-VAULT_EXCLUDE_DIRS = {"templates", "images", "_pipeline"}
+VAULT_SEGMENTS = ["facts", "memory", "knowledge", "projects", "agents", "personal", "work", "skills"]
+VAULT_EXCLUDE_DIRS = {"templates", "images"}
 VAULT_EXCLUDE_FILES = {"tags.md"}
 
 CONSOLIDATION_ENDPOINT = "http://localhost:8091/v1/chat/completions"

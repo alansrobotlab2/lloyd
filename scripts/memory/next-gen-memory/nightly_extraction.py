@@ -56,8 +56,8 @@ except ImportError:
 
 VAULT = Path.home() / "obsidian"
 MEMORY_DIR = VAULT / "memory"
-FACTS_DIR = MEMORY_DIR / "_pipeline" / "facts"
-INDEX_FILE = MEMORY_DIR / "_pipeline" / "relations-index.json"
+FACTS_DIR = Path.home() / "obsidian" / "facts"
+INDEX_FILE = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
 
 # Import local modules
 sys.path.insert(0, str(VAULT / "agents" / "memory" / "scripts" / "next-gen-memory"))
@@ -72,7 +72,7 @@ class NightlyExtraction:
     def __init__(self):
         self.extractor = FactExtractor(model_port=8096)  # Uses 122B for deep extraction
         self.rel_generator = RelationsIndexGenerator()
-        self.log_file = MEMORY_DIR / "_pipeline" / "nightly-extraction.log"
+        self.log_file = Path.home() / "lloyd" / "_pipeline" / "nightly-extraction.log"
         # Thread-safe locks per entity for parallel processing
         self.entity_locks = {}
         self.locks_lock = threading.Lock()
@@ -97,7 +97,7 @@ class NightlyExtraction:
         Returns:
             Canonical entity name or original if not in registry
         """
-        registry_path = Path("/home/alansrobotlab/obsidian/memory/_pipeline/facts/entity-registry.json")
+        registry_path = Path("/home/alansrobotlab/obsidian/facts/entity-registry.json")
         
         if not registry_path.exists():
             # Fallback to no normalization if registry missing
@@ -138,7 +138,7 @@ class NightlyExtraction:
         from collections import defaultdict
         
         # Load entity registry
-        registry_path = Path("/home/alansrobotlab/obsidian/memory/_pipeline/facts/entity-registry.json")
+        registry_path = Path("/home/alansrobotlab/obsidian/facts/entity-registry.json")
         canonical_mapping = {}
         
         if registry_path.exists():

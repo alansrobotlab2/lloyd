@@ -27,7 +27,7 @@ import yaml
 logger = logging.getLogger("lloyd-autonomy")
 
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
-AUTONOMY_RUNS_DIR = AUTONOMY_DIR / "runs"
+AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
 LLOYD_HOME = Path(__file__).parent
 
 # ── State ─────────────────────────────────────────────────────────────────────

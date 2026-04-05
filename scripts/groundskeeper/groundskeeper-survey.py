@@ -25,8 +25,8 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
-QUEUE_OUTPUT = os.path.join(VAULT_ROOT, "memory/_pipeline/groundskeeper-queue.json")
-FACTS_DIR = os.path.join(VAULT_ROOT, "memory/_pipeline/facts")
+QUEUE_OUTPUT = os.path.expanduser("~/lloyd/_pipeline/groundskeeper-queue.json")
+FACTS_DIR = os.path.expanduser("~/obsidian/facts")
 MEMORY_MD = os.path.join(VAULT_ROOT, "lloyd/MEMORY.md")
 
 
@@ -144,14 +144,12 @@ def check_broken_links(existing_queue, basenames, rel_paths, all_files):
     
     Excludes transcript/log directories that contain code syntax (not real wiki-links):
     - agents/main/sessions/ (session transcripts)
-    - autonomy/runs/ (autonomy run logs)
     """
     broken = []
-    
+
     # Directories to exclude from broken-link scanning
     exclude_patterns = [
         'sessions/',
-        'autonomy/runs/',
     ]
     
     for filepath in all_files:
@@ -404,13 +402,11 @@ def check_orphan_files(existing_queue, all_files, basenames, rel_paths):
     
     Excludes:
     - sessions/ (auto-generated session transcripts)
-    - autonomy/runs/ (auto-generated run logs)
-    - memory/_pipeline/ (auto-generated data)
     """
     orphans = []
     wiki_inbound = build_inbound_links(all_files, basenames, rel_paths)
     relation_inbound = build_relation_inbound(all_files)
-    
+
     # Build a set of all file paths for quick lookup
     all_file_paths = set(os.path.relpath(f, VAULT_ROOT) for f in all_files)
     
@@ -479,8 +475,6 @@ def check_orphan_files(existing_queue, all_files, basenames, rel_paths):
     # Excluded directories from orphan scanning
     excluded_prefixes = (
         'sessions/',
-        'autonomy/runs/',
-        'memory/_pipeline/',
     )
     
     for filepath in all_files:
@@ -867,18 +861,15 @@ def check_large_docs(existing_queue, all_files):
     """Find .md files over 300 lines that may need splitting.
     
     Excludes:
-    - memory/_pipeline/ (data files)
     - Files matching *-log.jsonl or *-log.md
     - MEMORY.md files (curated, expected to grow)
     """
     large_docs = []
-    
+
     for filepath in all_files:
         rel_path = os.path.relpath(filepath, VAULT_ROOT)
-        
+
         # Skip excluded patterns
-        if rel_path.startswith('memory/_pipeline/'):
-            continue
         if rel_path.endswith('-log.jsonl') or rel_path.endswith('-log.md'):
             continue
         if rel_path.endswith('MEMORY.md'):

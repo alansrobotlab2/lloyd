@@ -100,7 +100,8 @@ class RelationsIndexGenerator:
     
     def __init__(self):
         self.vault = Path.home() / "obsidian"
-        self.index_file = Path.home() / "obsidian" / "memory" / "_pipeline" / "relations-index.json"
+        self.index_file = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
+        self.proposals_file = Path.home() / "lloyd" / "_pipeline" / "conversation-relation-proposals.json"
         self.index_data: Dict[str, Any] = {
             "edges": [],
             "stale": [],
@@ -197,21 +198,93 @@ class RelationsIndexGenerator:
                 continue
         
         self.index_data["stale"] = sorted(list(stale_set))
-        
+
+        # Merge approved conversation-derived proposals
+        merged = self._merge_approved_proposals(edge_set)
+
         # Write index file
         self.index_file.parent.mkdir(parents=True, exist_ok=True)
         self.index_file.write_text(json.dumps(self.index_data, indent=2))
-        
+
         total_edges = len(self.index_data["edges"])
-        print(f"  → Built index with {total_edges} edges ({len(stale_set)} stale docs)")
-        
+        print(f"  → Built index with {total_edges} edges ({len(stale_set)} stale docs, {merged} from conversation proposals)")
+
         return {
             "total_relationships": total_edges,
             "stale_documents": len(stale_set),
+            "conversation_proposals_merged": merged,
             "status": "rebuilt",
             "built_at": self.index_data["built_at"]
         }
     
+    def _merge_approved_proposals(self, edge_set: set) -> int:
+        """Merge approved conversation-derived proposals into the index.
+
+        Reads conversation-relation-proposals.json and adds any proposal with
+        status "approved" as edges with origin "conversation".  Deduplicates
+        against edge_set (modified in-place so subsequent calls stay clean).
+
+        Returns:
+            Number of new edges added from proposals.
+        """
+        if not self.proposals_file.exists():
+            return 0
+
+        try:
+            data = json.loads(self.proposals_file.read_text())
+        except Exception as e:
+            print(f"  ⚠️ Could not read proposals file: {e}")
+            return 0
+
+        proposals = data.get("proposals", [])
+        added = 0
+
+        for p in proposals:
+            if p.get("status") != "approved":
+                continue
+
+            source = self._normalize_path(p.get("source", ""), "")
+            target = self._normalize_path(p.get("target", ""), "")
+            rel_type = p.get("type", "")
+
+            if not source or not target or rel_type not in VALID_RELATION_TYPES:
+                continue
+
+            edge_key = (source, target, rel_type)
+            if edge_key in edge_set:
+                continue
+
+            edge_set.add(edge_key)
+            self.index_data["edges"].append({
+                "source": source,
+                "target": target,
+                "type": rel_type,
+                "origin": "conversation",
+                "reason": p.get("reason", ""),
+                "confidence": p.get("confidence", 0.0),
+            })
+            added += 1
+
+            # Add inverse unless symmetric
+            inverse_type = INVERSE_RELATIONS.get(rel_type)
+            if inverse_type and inverse_type != rel_type:
+                inv_key = (target, source, inverse_type)
+                if inv_key not in edge_set:
+                    edge_set.add(inv_key)
+                    self.index_data["edges"].append({
+                        "source": target,
+                        "target": source,
+                        "type": inverse_type,
+                        "origin": "conversation-inverse",
+                        "reason": p.get("reason", ""),
+                        "confidence": p.get("confidence", 0.0),
+                    })
+
+        if added:
+            print(f"  → Merged {added} approved conversation proposals")
+
+        return added
+
     def _parse_relations(self, content: str) -> Optional[Dict[str, List[str]]]:
         """Parse relations frontmatter block from document content.
         
