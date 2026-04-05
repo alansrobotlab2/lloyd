@@ -3,6 +3,15 @@ import { Sparkles, Pencil, X, Save, Search, RefreshCw } from "lucide-react";
 import { api, type SkillInfo } from "../../api";
 import { sanitizeHtml } from "../../utils/sanitize";
 
+function formatFrontmatter(content: string): string {
+  if (!content.startsWith("---")) return content;
+  const end = content.indexOf("\n---", 3);
+  if (end === -1) return content;
+  const yaml = content.slice(3, end).trim();
+  const body = content.slice(end + 4).trimStart();
+  return "```yaml\n" + yaml + "\n```\n\n" + body;
+}
+
 function ToggleSwitch({ enabled, onToggle, disabled }: { enabled: boolean; onToggle: () => void; disabled?: boolean }) {
   return (
     <button
@@ -139,7 +148,7 @@ export default function SkillsPage() {
         <div className="flex-1 overflow-y-auto py-1">
           {categories.map((cat) => (
             <div key={cat}>
-              <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+              <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-300 uppercase tracking-wider bg-surface-2 border-y border-slate-700/50 mt-1 first:mt-0">
                 {cat}
               </div>
               {grouped[cat].map((skill) => (
@@ -147,10 +156,9 @@ export default function SkillsPage() {
                   key={skill.name}
                   onClick={() => setSelectedSkill(skill)}
                   className={`w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-surface-1 transition-colors ${
-                    selectedSkill?.name === skill.name ? "bg-surface-1 text-slate-200" : "text-slate-300"
+                    selectedSkill?.name === skill.name ? "bg-surface-1 text-slate-200" : skill.enabled ? "text-slate-300" : "text-slate-500"
                   }`}
                 >
-                  <span className="text-sm">{skill.emoji ?? "📦"}</span>
                   <span className="text-xs flex-1 truncate">{skill.name}</span>
                   <span
                     className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${skill.enabled ? "bg-green-400" : "bg-surface-3"}`}
@@ -181,7 +189,6 @@ export default function SkillsPage() {
           <div className="flex-shrink-0 px-6 py-4 border-b border-slate-700 flex items-start justify-between gap-4">
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
-                <span className="text-xl">{selectedSkill.emoji ?? "📦"}</span>
                 <h2 className="text-base font-semibold text-slate-200 truncate">{selectedSkill.name}</h2>
               </div>
               {selectedSkill.description && (
@@ -246,7 +253,7 @@ export default function SkillsPage() {
             {!loadingContent && content !== null && !isEditing && (
               <div
                 className="prose-doc"
-                dangerouslySetInnerHTML={{ __html: sanitizeHtml(content) }}
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(formatFrontmatter(content)) }}
               />
             )}
           </div>

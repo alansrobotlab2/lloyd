@@ -128,11 +128,16 @@ class SemanticRelationshipDiscoverer:
                     # Extract entities from path (skip common dirs)
                     entities = self._extract_entities_from_path(rel_path)
                     
+                    raw_tags = frontmatter.get("tags", [])
+                    if isinstance(raw_tags, str):
+                        raw_tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+                    elif not isinstance(raw_tags, list):
+                        raw_tags = []
                     self.documents.append({
                         "path": rel_path,
                         "size": md_file.stat().st_size,
                         "type": frontmatter.get("type", "unknown"),
-                        "tags": frontmatter.get("tags", []),
+                        "tags": raw_tags,
                         "entities": entities,
                         "wiki_links": wiki_links,
                         "frontmatter": frontmatter

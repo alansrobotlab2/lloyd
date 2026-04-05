@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { MessageCircle, Clock, Loader2 } from 'lucide-react'
 import { api } from '../api'
 import { useSessionActivity } from '../hooks/useSessionActivity'
+import RunningAgentsPanel from './RunningAgentsPanel'
 
 interface Session {
   id: string
@@ -143,6 +144,9 @@ export default function SessionsPanel({ onSwitchSession, currentSessionKey, refr
           {sessions.length} session{sessions.length !== 1 ? 's' : ''}
         </div>
       </div>
+
+      {/* Running pipelines / subagents */}
+      <RunningAgentsPanel />
     </div>
   )
 }

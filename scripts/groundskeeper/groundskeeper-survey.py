@@ -25,9 +25,9 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
-QUEUE_OUTPUT = os.path.join(VAULT_ROOT, "agents/lloyd/groundskeeper-queue.json")
+QUEUE_OUTPUT = os.path.join(VAULT_ROOT, "memory/_pipeline/groundskeeper-queue.json")
 FACTS_DIR = os.path.join(VAULT_ROOT, "memory/_pipeline/facts")
-MEMORY_MD = os.path.join(VAULT_ROOT, "agents/lloyd/MEMORY.md")
+MEMORY_MD = os.path.join(VAULT_ROOT, "lloyd/MEMORY.md")
 
 
 def load_existing_queue():
@@ -277,7 +277,7 @@ def check_memory_hygiene(existing_queue):
                 'id': item_id,
                 'type': 'MEMORY_HYGIENE',
                 'priority': 'medium',
-                'source_file': 'agents/lloyd/MEMORY.md',
+                'source_file': 'lloyd/MEMORY.md',
                 'target': check_ref,
                 'status': 'pending',
                 'detail': f'Referenced file `{ref}` not found in vault'

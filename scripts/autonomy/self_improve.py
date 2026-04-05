@@ -56,13 +56,9 @@ WORKSPACE_FILES = [
 
 # Files to read for judge evaluation
 JUDGE_FILES = [
-    os.path.expanduser("~/obsidian/agents/lloyd/SOUL.md"),
-    os.path.expanduser("~/obsidian/agents/lloyd/AGENTS.md"),
-    os.path.expanduser("~/obsidian/agents/lloyd/TOOLS.md"),
-    os.path.expanduser("~/obsidian/agents/lloyd/MEMORY.md"),
-    os.path.expanduser("~/obsidian/agents/lloyd/HEARTBEAT.md"),
-    os.path.expanduser("~/obsidian/agents/lloyd/USER.md"),
-    os.path.expanduser("~/obsidian/agents/lloyd/IDENTITY.md"),
+    os.path.expanduser("~/obsidian/lloyd/SOUL.md"),
+    os.path.expanduser("~/obsidian/lloyd/MEMORY.md"),
+    os.path.expanduser("~/obsidian/lloyd/USER.md"),
 ]
 
 

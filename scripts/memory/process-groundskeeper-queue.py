@@ -3,7 +3,7 @@
 import json
 from datetime import datetime, timezone
 
-queue_path = "/home/alansrobotlab/obsidian/agents/lloyd/groundskeeper-queue.json"
+queue_path = "/home/alansrobotlab/obsidian/memory/_pipeline/groundskeeper-queue.json"
 log_path = "/home/alansrobotlab/obsidian/memory/_pipeline/groundskeeper-log.jsonl"
 
 # Read queue

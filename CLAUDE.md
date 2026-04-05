@@ -32,7 +32,6 @@ After editing frontend files, Vite HMR usually picks up changes automatically (n
 ├── server.py            # FastAPI backend — all API endpoints + SSE bridge
 ├── config.yaml          # Model configs, MCP server list, agent settings
 ├── prompt_builder.py    # System prompt assembly (SOUL.md + memories + skills)
-├── SOUL.md              # Agent identity
 ├── autonomy.py          # Task scheduler
 ├── usage_store.py       # SQLite usage tracking
 │

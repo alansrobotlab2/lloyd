@@ -1,73 +1,70 @@
+agent:
+  max_turns: 60
+  permission_mode: bypassPermissions
+autonomy:
+  enabled: false
+  task_dir: ~/obsidian/autonomy
+  tick_interval: 60
+discord:
+  allowed_users: []
+  auto_thread: true
+  auto_thread_archive_duration: 1440
+  free_response_channels: []
+  home_channel: null
+  owner_id: ${DISCORD_OWNER_ID}
+  reactions: true
+  require_mention: true
+  token: ${DISCORD_BOT_TOKEN}
+display:
+  personality: kawaii
+  streaming: true
+mcp_servers:
+  ? ''
+  : disabled_tools: []
+    type: sse
+    url: http://127.0.0.1:8500/sse
 model:
   default: Qwen3.5-122B-A10B
 models:
   Qwen3.5-122B-A10B:
     alias: 122b
-    display_name: Qwen 122B Local
     base_url: http://127.0.0.1:8096
     context_length: 262144
+    display_name: Qwen 122B Local
     env:
-      ANTHROPIC_BASE_URL: http://127.0.0.1:8096
       ANTHROPIC_API_KEY: no-key-required
+      ANTHROPIC_BASE_URL: http://127.0.0.1:8096
       ANTHROPIC_CUSTOM_MODEL_OPTION: Qwen3.5-122B-A10B
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Qwen 122B
   Qwen3.5-35B-A3B:
     alias: 35b
-    display_name: Qwen 35B Local
     base_url: http://127.0.0.1:8091
     context_length: 262144
+    display_name: Qwen 35B Local
     env:
-      ANTHROPIC_BASE_URL: http://127.0.0.1:8091
       ANTHROPIC_API_KEY: no-key-required
+      ANTHROPIC_BASE_URL: http://127.0.0.1:8091
       ANTHROPIC_CUSTOM_MODEL_OPTION: Qwen3.5-35B-A3B
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Qwen 35B
-  claude-sonnet-4-6:
-    alias: sonnet
-    display_name: Claude Sonnet 4.6
+  claude-haiku-4-5-20251001:
+    alias: haiku
     context_length: 200000
+    display_name: Claude Haiku 4.5
     env: {}
   claude-opus-4-6:
     alias: opus
+    context_length: 200000
     display_name: Claude Opus 4.6
-    context_length: 200000
     env: {}
-  claude-haiku-4-5-20251001:
-    alias: haiku
-    display_name: Claude Haiku 4.5
+  claude-sonnet-4-6:
+    alias: sonnet
     context_length: 200000
+    display_name: Claude Sonnet 4.6
     env: {}
-agent:
-  max_turns: 60
-  permission_mode: bypassPermissions
-mcp_servers:
-  ? ''
-  : type: sse
-    url: http://127.0.0.1:8500/sse
-    disabled_tools:
-    - pipeline_dispatch
-    - pipeline_status
-    - pipeline_abort
-autonomy:
-  enabled: false
-  tick_interval: 60
-  task_dir: ~/obsidian/autonomy
+server:
+  host: 0.0.0.0
+  port: 8080
 skills:
   directories:
   - ~/obsidian/skills
   - ~/lloyd/skills
-discord:
-  token: ${DISCORD_BOT_TOKEN}
-  owner_id: ${DISCORD_OWNER_ID}
-  allowed_users: []
-  require_mention: true
-  free_response_channels: []
-  reactions: true
-  auto_thread: true
-  auto_thread_archive_duration: 1440
-  home_channel: null
-display:
-  personality: kawaii
-  streaming: true
-server:
-  host: 0.0.0.0
-  port: 8080

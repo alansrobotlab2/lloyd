@@ -54,6 +54,29 @@ except ImportError:
                         current_list = False
             return result
 
+        @staticmethod
+        def dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True):
+            """Simple YAML dumper for frontmatter."""
+            lines = []
+            for key, value in data.items():
+                if isinstance(value, list):
+                    lines.append(f"{key}:")
+                    for item in value:
+                        if isinstance(item, dict):
+                            lines.append(f"- id: {item.get('id', '')}")
+                            for k, v in item.items():
+                                if k != 'id':
+                                    lines.append(f"  {k}: {v}")
+                        else:
+                            lines.append(f"- {item}")
+                elif isinstance(value, dict):
+                    lines.append(f"{key}:")
+                    for k, v in value.items():
+                        lines.append(f"  {k}: {v}")
+                else:
+                    lines.append(f"{key}: {value}")
+            return '\n'.join(lines) + '\n'
+
 # Constants
 HOME = Path.home()
 VAULT = HOME / "obsidian"
@@ -145,8 +168,8 @@ class FactExtractor:
     
     def _call_llm(self, prompt: str) -> str:
         """Call the local 2B model."""
-        import httpx
-        
+        import urllib.request
+
         url = f"http://localhost:{self.model_port}/v1/chat/completions"
         payload = {
             "model": "Qwen3.5-122B-A10B",
@@ -158,14 +181,19 @@ class FactExtractor:
             "max_tokens": 4000,
             "chat_template_kwargs": {"enable_thinking": False}
         }
-        
+
         response_text = None
         try:
-            response = httpx.post(url, json=payload, timeout=120)
-            response.raise_for_status()
-            data = response.json()
-            response_text = data["choices"][0]["message"]["content"]
-            return response_text
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            with urllib.request.urlopen(req, timeout=120) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                response_text = data["choices"][0]["message"]["content"]
+                return response_text
         except Exception as e:
             print(f"LLM call failed: {e}")
             # Fallback: try to extract first complete JSON object from truncated response
@@ -176,7 +204,7 @@ class FactExtractor:
                         return match.group()
                     except Exception:
                         pass
-            
+
             # Return empty extraction
             return json.dumps({
                 "entity": "unknown",

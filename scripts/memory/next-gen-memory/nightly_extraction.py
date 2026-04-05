@@ -299,7 +299,7 @@ class NightlyExtraction:
         try:
             mtime = datetime.fromtimestamp(md_file.stat().st_mtime)
             # Skip if not modified in 24h and not full mode
-            if not full_mode and (datetime.now() - mtime).total_seconds() < 86400:
+            if not full_mode and (datetime.now() - mtime).total_seconds() > 86400:
                 return 0, 0
             
             content = md_file.read_text()

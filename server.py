@@ -388,6 +388,8 @@ async def post_message_stream(request: Request):
         persisted_tool_ids: set[str] = set()  # call_ids already written to disk
         final_persisted = False    # True once ResultMessage has been persisted
         first_event = True
+        # Track pipeline_dispatch calls to auto-wire requester_session_id
+        pending_pipeline_wires: dict[str, str] = {}  # call_id -> session_id
         # Token stats captured from streaming events (fallback when ResultMessage is absent)
         stream_stats: dict = {
             "input_tokens": 0, "output_tokens": 0,
@@ -459,6 +461,10 @@ async def post_message_stream(request: Request):
                             args_str = json.dumps(block.input) if isinstance(block.input, dict) else str(block.input)
                             tool_calls_log.append({"id": block.id, "call_id": block.id, "type": "function", "function": {"name": block.name, "arguments": args_str}})
                             yield f"event: tool_start\ndata: {json.dumps({'call_id': block.id, 'name': block.name, 'args': args_str, 'context_tokens': last_turn_input})}\n\n"
+                            # Track pipeline_dispatch calls so we can link back the caller session
+                            if block.name.endswith("pipeline_dispatch"):
+                                pending_pipeline_wires[block.id] = session_id
+                                logger.info(f"Tracking pipeline_dispatch call {block.id!r} for session {session_id}")
 
                 elif isinstance(message, UserMessage):
                     for block in message.content:
@@ -476,6 +482,38 @@ async def post_message_stream(request: Request):
                             call_id = getattr(block, 'tool_use_id', '')
                             tool_results_log.append({"call_id": call_id, "result": result_str})
                             yield f"event: tool_complete\ndata: {json.dumps({'call_id': call_id, 'name': '', 'result': result_str})}\n\n"
+                            # Auto-wire requester_session_id into the pipeline run
+                            if call_id in pending_pipeline_wires:
+                                req_session = pending_pipeline_wires.pop(call_id)
+                                try:
+                                    # result_str may be JSON or str() of a dict (single-quote repr)
+                                    import ast as _ast
+                                    try:
+                                        res_data = json.loads(result_str)
+                                    except json.JSONDecodeError:
+                                        res_data = _ast.literal_eval(result_str)
+                                    # Unwrap if result_str was str({'type':'text','text':'{...}'})
+                                    if isinstance(res_data, dict) and "text" in res_data:
+                                        inner = res_data["text"]
+                                        if isinstance(inner, str):
+                                            try:
+                                                res_data = json.loads(inner)
+                                            except Exception:
+                                                pass
+                                    run_id = res_data.get("run_id")
+                                    if run_id:
+                                        run_path = _PIPELINE_RUNS_DIR / f"{run_id}.json"
+                                        if run_path.exists():
+                                            run_json = json.loads(run_path.read_text(encoding="utf-8"))
+                                            run_json["requester_session_id"] = req_session
+                                            run_path.write_text(json.dumps(run_json, indent=2), encoding="utf-8")
+                                            logger.info(f"Linked pipeline run #{run_id} → session {req_session}")
+                                        else:
+                                            logger.warning(f"Pipeline run file {run_id}.json not found for wiring")
+                                    else:
+                                        logger.warning(f"No run_id in pipeline_dispatch result: {result_str[:200]}")
+                                except Exception as _we:
+                                    logger.warning(f"Failed to wire pipeline session: {_we} | result={result_str[:200]}")
 
                             # Eagerly persist each completed tool call pair so a
                             # mid-stream disconnect doesn't lose tool history.
@@ -1001,6 +1039,7 @@ async def usage_ping():
 # ── Autonomy endpoints ───────────────────────────────────────────────────────
 
 @app.get("/api/autonomy/status")
+@app.get("/api/autonomy/scheduler/status")
 async def autonomy_status():
     try:
         from autonomy import get_status
@@ -1010,11 +1049,23 @@ async def autonomy_status():
 
 
 @app.post("/api/autonomy/enable")
+@app.post("/api/autonomy/scheduler/enable")
 async def autonomy_enable(request: Request):
     try:
         from autonomy import set_enabled
-        data = await request.json()
-        set_enabled(data.get("enabled", False))
+        body = await request.body()
+        data = json.loads(body) if body else {}
+        set_enabled(data.get("enabled", True))
+        return JSONResponse({"success": True})
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Autonomy module not available")
+
+
+@app.post("/api/autonomy/scheduler/disable")
+async def autonomy_disable():
+    try:
+        from autonomy import set_enabled
+        set_enabled(False)
         return JSONResponse({"success": True})
     except ImportError:
         raise HTTPException(status_code=501, detail="Autonomy module not available")
@@ -1320,7 +1371,6 @@ async def get_skills():
                 skills.append({
                     "name": entry.name,
                     "description": fm.get("description") or hermes_meta.get("description", ""),
-                    "emoji": openclaw_meta.get("emoji") or hermes_meta.get("emoji", ""),
                     "category": fm.get("category") or hermes_meta.get("category", ""),
                     "enabled": True,
                     "configured": True,
@@ -2444,15 +2494,25 @@ async def _discord_notify_task_complete(task_id: int, task_name: str, response_p
 @app.on_event("startup")
 async def _start_autonomy_ticker():
     tick_interval = CONFIG.get("autonomy", {}).get("tick_interval", 60)
-    if not CONFIG.get("autonomy", {}).get("enabled", False):
-        logger.info("Autonomy ticker disabled in config")
-        return
+    # Initialize runtime flag from config so enable/disable persists across restarts
+    initial_enabled = CONFIG.get("autonomy", {}).get("enabled", False)
+    try:
+        from autonomy import set_enabled, recover_stuck_tasks
+        if initial_enabled:
+            set_enabled(True)
+        recovered = recover_stuck_tasks()
+        if recovered:
+            logger.info("Autonomy startup: recovered %d stuck task(s): %s", len(recovered), recovered)
+    except ImportError:
+        pass
 
     async def _ticker_loop():
         while True:
             await asyncio.sleep(tick_interval)
             try:
-                from autonomy import autonomy_tick, _find_task_file, _parse_task_file
+                from autonomy import autonomy_tick, _find_task_file, _parse_task_file, _ticker_enabled
+                if not _ticker_enabled:
+                    continue
                 result = await asyncio.get_event_loop().run_in_executor(None, autonomy_tick)
                 if result and result.get("success"):
                     task_id = result.get("task_id")
@@ -2478,6 +2538,130 @@ async def _start_autonomy_ticker():
 
     asyncio.create_task(_ticker_loop())
     logger.info("Autonomy ticker started (interval=%ds)", tick_interval)
+
+
+# ── Pipeline endpoints ────────────────────────────────────────────────────────
+
+_PIPELINE_RUNS_DIR = Path.home() / "lloyd" / "pipeline-runs"
+
+
+def _pipeline_summary(run: dict) -> dict:
+    """Reduce a full pipeline run to the fields needed by the UI."""
+    task = run.get("task", "")
+    # First non-empty line of the task as a short label
+    task_preview = next((l.strip() for l in task.splitlines() if l.strip()), task[:80])
+    stages = run.get("stages", [])
+    idx = run.get("current_stage_index", 0)
+    return {
+        "run_id": run.get("run_id"),
+        "status": run.get("status", "unknown"),
+        "task_preview": task_preview[:120],
+        "current_stage": run.get("current_stage", stages[idx] if idx < len(stages) else ""),
+        "stage_index": idx,
+        "stage_count": len(stages),
+        "stages": stages,
+        "model": run.get("model", ""),
+        "created_at": run.get("created_at", ""),
+        "updated_at": run.get("updated_at", ""),
+        "completed_at": run.get("completed_at", ""),
+        "blocked_reason": run.get("blocked_reason", ""),
+    }
+
+
+@app.get("/api/pipelines")
+async def list_pipelines(status: str = ""):
+    """List pipeline runs, optionally filtered by status."""
+    if not _PIPELINE_RUNS_DIR.exists():
+        return JSONResponse({"runs": []})
+    runs = []
+    for p in sorted(_PIPELINE_RUNS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True):
+        try:
+            run = json.loads(p.read_text(encoding="utf-8"))
+            if status and run.get("status") != status:
+                continue
+            runs.append(_pipeline_summary(run))
+        except Exception:
+            pass
+    return JSONResponse({"runs": runs[:50]})
+
+
+@app.get("/api/pipelines/{run_id}")
+async def get_pipeline(run_id: int, log_tail: int = 8000):
+    """Get full details for a pipeline run, including live log tail."""
+    run_path = _PIPELINE_RUNS_DIR / f"{run_id}.json"
+    if not run_path.exists():
+        raise HTTPException(status_code=404, detail=f"Pipeline run {run_id} not found")
+    try:
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Read live log if present
+    log_path = _PIPELINE_RUNS_DIR / f"{run_id}.log"
+    log_content = ""
+    if log_path.exists():
+        try:
+            raw = log_path.read_text(encoding="utf-8", errors="replace")
+            log_content = raw[-log_tail:] if len(raw) > log_tail else raw
+        except Exception:
+            pass
+
+    summary = _pipeline_summary(run)
+    summary["task"] = run.get("task", "")
+    summary["stage_outputs"] = run.get("stage_outputs", {})
+    summary["skills"] = [s.get("name", "") for s in run.get("skills", [])]
+    summary["live_log"] = log_content
+    return JSONResponse(summary)
+
+
+@app.post("/api/pipelines/{run_id}/abort")
+async def abort_pipeline(run_id: int):
+    """Mark a pipeline run as aborted and kill its claude subprocess."""
+    run_path = _PIPELINE_RUNS_DIR / f"{run_id}.json"
+    if not run_path.exists():
+        raise HTTPException(status_code=404, detail=f"Pipeline run {run_id} not found")
+
+    # 1. Cooperative abort — the pipeline thread checks this flag between stages
+    try:
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        if run.get("status") not in ("running", "blocked"):
+            return JSONResponse({"success": True, "message": f"Run already {run.get('status')}"})
+        run["status"] = "aborted"
+        run["completed_at"] = datetime.now().isoformat()
+        run_path.write_text(json.dumps(run, indent=2), encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update run file: {e}")
+
+    # 2. Hard kill — find claude subprocesses spawned by the MCP server process
+    killed_pids = []
+    try:
+        import psutil
+        # Find the lloyd-mcp supervisor process by looking for pipeline.py in cmdline
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                cmdline = " ".join(proc.info["cmdline"] or [])
+                if "pipeline" not in cmdline and "mcp_server" not in cmdline:
+                    continue
+                # Walk children looking for claude CLI processes
+                for child in proc.children(recursive=True):
+                    try:
+                        child_cmd = " ".join(child.cmdline())
+                        if "claude" in child_cmd and "vscode" not in child_cmd:
+                            child.terminate()
+                            killed_pids.append(child.pid)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception as e:
+        logger.warning(f"Failed to kill claude subprocesses for run {run_id}: {e}")
+
+    return JSONResponse({
+        "success": True,
+        "run_id": run_id,
+        "killed_pids": killed_pids,
+        "message": f"Aborted. Killed {len(killed_pids)} subprocess(es).",
+    })
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
