@@ -35,11 +35,11 @@ if not logger.handlers:
 # Constants
 SESSIONS_DIR = os.path.expanduser("~/.hermes/sessions/")
 CORRECTIONS_FILE = os.path.expanduser("~/obsidian/memory/corrections.md")
-METRICS_DIR = os.path.expanduser("~/obsidian/memory/_pipeline/metrics/")
+METRICS_DIR = os.path.expanduser("~/lloyd/_pipeline/metrics/")
 QUALITY_SCORE_FILE = os.path.join(METRICS_DIR, "quality-score.jsonl")
-WATERMARKS_FILE = os.path.expanduser("~/obsidian/memory/_pipeline/autonomy-watermarks.json")
+WATERMARKS_FILE = os.path.expanduser("~/lloyd/_pipeline/autonomy-watermarks.json")
 OBSIDIAN_DIR = os.path.expanduser("~/obsidian")
-PENDING_IMPROVEMENTS_FILE = os.path.expanduser("~/obsidian/memory/_pipeline/metrics/pending-improvements.jsonl")
+PENDING_IMPROVEMENTS_FILE = os.path.expanduser("~/lloyd/_pipeline/metrics/pending-improvements.jsonl")
 
 # Local LLM config
 LLM_ENDPOINT = "http://127.0.0.1:8096/v1/chat/completions"

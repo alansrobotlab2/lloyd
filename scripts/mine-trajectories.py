@@ -21,8 +21,8 @@ from typing import Any
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-TRAJECTORY_DIR = Path.home() / "obsidian" / "memory" / "_pipeline" / "trajectories"
-OUTPUT_DIR = Path.home() / "obsidian" / "memory" / "_pipeline" / "skills" / "candidates"
+TRAJECTORY_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
+OUTPUT_DIR = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
 
 
 def set_trajectory_dir(path: Path) -> None:

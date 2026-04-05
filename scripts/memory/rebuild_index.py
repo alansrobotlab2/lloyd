@@ -56,9 +56,9 @@ except ImportError:
 HOME = Path.home()
 VAULT = HOME / "obsidian"
 MEMORY_DIR = VAULT / "memory"
-RELATIONS_INDEX = MEMORY_DIR / "_pipeline" / "relations-index.json"
-FACTS_INDEX = MEMORY_DIR / "_pipeline" / "facts-index.json"
-FACTS_DIR = MEMORY_DIR / "_pipeline" / "facts"
+RELATIONS_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
+FACTS_INDEX = Path.home() / "lloyd" / "_pipeline" / "facts-index.json"
+FACTS_DIR = Path.home() / "obsidian" / "facts"
 
 
 def rebuild_relations_index() -> dict:

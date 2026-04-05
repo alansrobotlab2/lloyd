@@ -75,8 +75,8 @@ class RelationshipProposalGenerator:
         
         # Get existing relationships
         existing_rels = set()
-        if (MEMORY_DIR / "_pipeline" / "relations-index.json").exists():
-            index = json.loads((MEMORY_DIR / "_pipeline" / "relations-index.json").read_text())
+        if (Path.home() / "lloyd" / "_pipeline" / "relations-index.json").exists():
+            index = json.loads((Path.home() / "lloyd" / "_pipeline" / "relations-index.json").read_text())
             for rel in index.get("relationships", []):
                 existing_rels.add((rel["source"], rel["target"], rel["type"]))
         

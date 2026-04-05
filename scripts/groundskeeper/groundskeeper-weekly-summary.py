@@ -11,9 +11,9 @@ import glob
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-LOG_FILE = "/home/alansrobotlab/obsidian/memory/_pipeline/groundskeeper-log.jsonl"
-OUTPUT_FILE = "/home/alansrobotlab/obsidian/memory/_pipeline/groundskeeper-weekly-summary.md"
-QUEUE_FILE = "/home/alansrobotlab/obsidian/memory/_pipeline/groundskeeper-queue.json"
+LOG_FILE = "/home/alansrobotlab/lloyd/_pipeline/groundskeeper-log.jsonl"
+OUTPUT_FILE = "/home/alansrobotlab/lloyd/_pipeline/groundskeeper-weekly-summary.md"
+QUEUE_FILE = "/home/alansrobotlab/lloyd/_pipeline/groundskeeper-queue.json"
 
 def parse_log_entries():
     """Read and parse the JSONL log file."""

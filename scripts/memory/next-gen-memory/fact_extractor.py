@@ -80,7 +80,7 @@ except ImportError:
 # Constants
 HOME = Path.home()
 VAULT = HOME / "obsidian"
-FACTS_DIR = VAULT / "memory" / "_pipeline" / "facts"
+FACTS_DIR = Path.home() / "obsidian" / "facts"
 EXTRACTION_PROMPT = """You are a fact extraction engine. Analyze the following content and extract
 atomic facts about entities mentioned.
 

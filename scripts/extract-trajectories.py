@@ -4,8 +4,8 @@ extract-trajectories.py — Parse session files into structured trajectory logs.
 
 Reads Hermes session JSON files from ~/.hermes/sessions/session_*.json
 
-Output: ~/obsidian/memory/_pipeline/trajectories/YYYY-MM-DD.jsonl
-State:  ~/obsidian/memory/_pipeline/trajectories/.watermark.json
+Output: ~/lloyd/_pipeline/trajectories/YYYY-MM-DD.jsonl
+State:  ~/lloyd/_pipeline/trajectories/.watermark.json
 """
 
 import argparse
@@ -20,7 +20,8 @@ from pathlib import Path
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 HERMES_SESSIONS = Path.home() / ".hermes" / "sessions"
-OUTPUT_DIR = Path.home() / "obsidian" / "memory" / "_pipeline" / "trajectories"
+LLOYD_SESSIONS = Path.home() / "lloyd" / "sessions"
+OUTPUT_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
 WATERMARK_PATH = OUTPUT_DIR / ".watermark.json"
 
 # ── Sensitive data patterns ───────────────────────────────────────────────────
@@ -166,8 +167,14 @@ def parse_hermes_session(path: Path) -> dict | None:
         return None
 
     session_id = data.get("session_id", path.stem)
-    session_ts = data.get("session_start", "")
+    session_ts = data.get("session_start", "") or data.get("created_at", "")
     messages = data.get("messages", [])
+
+    # Detect agent_id from source path
+    if path.parent == LLOYD_SESSIONS:
+        agent_id = "autonomy" if path.stem.startswith("autonomy_") else "lloyd"
+    else:
+        agent_id = "hermes"
 
     # Build call_id → tool_call map from assistant messages
     call_map: dict[str, dict] = {}
@@ -204,18 +211,17 @@ def parse_hermes_session(path: Path) -> dict | None:
         call_id = msg.get("tool_call_id", "")
         if call_id:
             content = msg.get("content", "")
-            # Hermes tool results are plain strings (often JSON-encoded)
+            # Normalize content to string (lloyd sessions use [{type,text}] blocks)
+            content_text = extract_result_text(content)
             is_error = False
-            if isinstance(content, str):
-                # Check for error indicators in the content
-                try:
-                    parsed = json.loads(content)
-                    if isinstance(parsed, dict) and parsed.get("error"):
-                        is_error = True
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            try:
+                parsed = json.loads(content_text)
+                if isinstance(parsed, dict) and parsed.get("error"):
+                    is_error = True
+            except (json.JSONDecodeError, TypeError):
+                pass
             result_map[call_id] = {
-                "content": content,
+                "content": content_text,
                 "isError": is_error,
             }
 
@@ -278,7 +284,7 @@ def parse_hermes_session(path: Path) -> dict | None:
     seen: set[str] = set()
     for msg in messages:
         content = msg.get("content", "")
-        text = content if isinstance(content, str) else ""
+        text = extract_result_text(content)
         for match in SIGNAL_RE.finditer(text):
             sig = match.group(1)
             if sig not in seen:
@@ -287,7 +293,7 @@ def parse_hermes_session(path: Path) -> dict | None:
 
     return {
         "session_key": session_id,
-        "agent_id": "hermes",
+        "agent_id": agent_id,
         "timestamp": session_ts,
         "tool_count": len(tools),
         "error_count": error_count,
@@ -320,10 +326,13 @@ def save_watermark(state: dict) -> None:
 # ── Session discovery ─────────────────────────────────────────────────────────
 
 def discover_sessions(agent_filter: str | None = None) -> list[Path]:
-    """Return sorted list of Hermes session JSON paths."""
+    """Return sorted list of session JSON paths (hermes + lloyd)."""
     paths: list[Path] = []
     if HERMES_SESSIONS.exists():
         for p in HERMES_SESSIONS.glob("session_*.json"):
+            paths.append(p)
+    if LLOYD_SESSIONS.exists():
+        for p in LLOYD_SESSIONS.glob("*.json"):
             paths.append(p)
     return sorted(paths, key=lambda p: p.stat().st_mtime)
 

@@ -1088,6 +1088,7 @@ async def autonomy_run(request: Request):
 # ── Autonomy task CRUD (delegates to file-based store) ────────────────────────
 
 _AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+_AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
 
 
 def _autonomy_parse(path: Path) -> dict | None:
@@ -1299,7 +1300,7 @@ async def autonomy_runs(task_id: int = 0, limit: int = 20):
     """Get recent runs for an autonomy task."""
     if not task_id:
         return JSONResponse({"runs": []})
-    runs_dir = _AUTONOMY_DIR / "runs" / str(task_id)
+    runs_dir = _AUTONOMY_RUNS_DIR / str(task_id)
     if not runs_dir.exists():
         return JSONResponse({"runs": []})
     runs = []
@@ -2001,7 +2002,7 @@ async def backlog_task_delete(request: Request):
 
 @app.get("/api/entities")
 async def list_entities():
-    facts_root = Path.home() / "obsidian" / "memory" / "_pipeline" / "facts"
+    facts_root = Path.home() / "obsidian" / "facts"
     if not facts_root.exists():
         return JSONResponse({"entities": [], "total": 0})
     entities = []
@@ -2014,8 +2015,8 @@ async def list_entities():
     return JSONResponse({"entities": entities, "total": len(entities)})
 
 
-_FACTS_ROOT = Path.home() / "obsidian" / "memory" / "_pipeline" / "facts"
-_RELATIONS_INDEX = Path.home() / "obsidian" / "memory" / "_pipeline" / "relations-index.json"
+_FACTS_ROOT = Path.home() / "obsidian" / "facts"
+_RELATIONS_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
 
 
 @app.get("/api/entity")
