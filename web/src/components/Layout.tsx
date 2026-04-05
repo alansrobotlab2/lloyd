@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import Sidebar, { type Page } from './Sidebar'
 import ChatPanel from './ChatPanel'
 import SessionsPanel from './SessionsPanel'
@@ -14,6 +14,15 @@ import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu,
 import { MessageProvider } from '../contexts/MessageContext'
 import { api, type ModelInfo } from '../api'
 import { useIsMobile } from '../hooks/useIsMobile'
+
+interface Slot {
+  slotId: string
+  sessionKey: string | null
+  model: string
+}
+
+let slotCounter = 0
+const nextSlotId = () => `slot_${Date.now()}_${++slotCounter}`
 
 const DashboardPage = UsagePage
 const GraphPage = () => <div className="p-6"><h2 className="text-xl font-bold">Graph</h2><p className="text-slate-400 mt-2">Coming soon...</p></div>
@@ -36,30 +45,29 @@ export default function Layout() {
   const isMobile = useIsMobile()
   const [page, setPage] = useState<Page>('chat')
   const [collapsed, setCollapsed] = useState(false)
-  const [chatSessionKey, setChatSessionKey] = useState<string | null>(null)
-  const [activeSessionKey, setActiveSessionKey] = useState<string | null>(null)
-  const [showSessions, setShowSessions] = useState(true) // Show sessions panel by default
+  const [slots, setSlots] = useState<Slot[]>([])
+  const [visibleSlotId, setVisibleSlotId] = useState<string | null>(null)
+  const [activeSessions, setActiveSessions] = useState<Set<string>>(new Set())
+  const [showSessions, setShowSessions] = useState(true)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const [currentModel, setCurrentModel] = useState<string>('')
   const [showModelDropdown, setShowModelDropdown] = useState(false)
   const [showAgentDetails, setShowAgentDetails] = useState(false)
-  const [sessionRefreshTrigger, setSessionRefreshTrigger] = useState(0)
-  const [isNewSession, setIsNewSession] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false)
 
-  const formatSessionKey = (key: string) => {
-    const parts = key.split(':')
-    const name = parts[parts.length - 1]
-    if (name === 'main') return 'Main'
-    return name.length > 12 ? name.slice(0, 12) + '...' : name
-  }
+  const visibleSlot = useMemo(() => slots.find(s => s.slotId === visibleSlotId) ?? null, [slots, visibleSlotId])
+  const currentModel = visibleSlot?.model ?? ''
+  const sessionsPanelRefreshTrigger = useMemo(() => slots.map(s => s.sessionKey ?? 'null').join(','), [slots])
 
   const handleNewSession = () => {
-    setChatSessionKey(null)
-    setActiveSessionKey(null)
-    setIsNewSession(true)
-    localStorage.removeItem('mc_session_id')
+    const existingBlank = slots.find(s => s.sessionKey === null)
+    if (existingBlank) {
+      setVisibleSlotId(existingBlank.slotId)
+      return
+    }
+    const id = nextSlotId()
+    setSlots(prev => [...prev, { slotId: id, sessionKey: null, model: currentModel }])
+    setVisibleSlotId(id)
   }
 
   // Auto-load session from URL query param ?session=<key>
@@ -67,19 +75,40 @@ export default function Layout() {
     const params = new URLSearchParams(window.location.search)
     const sessionKey = params.get('session')
     if (sessionKey) {
-      setChatSessionKey(sessionKey)
-      setPage('chat')
+      handleOpenSession(sessionKey)
     }
   }, [])
 
   const handleOpenSession = useCallback((sessionKey: string) => {
-    setChatSessionKey(sessionKey)
-    setIsNewSession(false)
+    setSlots(prev => {
+      const existing = prev.find(s => s.sessionKey === sessionKey)
+      if (existing) {
+        setVisibleSlotId(existing.slotId)
+        return prev
+      }
+      const id = nextSlotId()
+      setVisibleSlotId(id)
+      return [...prev, { slotId: id, sessionKey, model: '' }]
+    })
     setPage('chat')
   }, [])
 
-  const handleSessionLoaded = useCallback(() => {
-    setChatSessionKey(null)
+  const handleActiveSessionChange = useCallback((slotId: string, key: string | null) => {
+    setSlots(prev => prev.map(s => s.slotId === slotId ? { ...s, sessionKey: key } : s))
+  }, [])
+
+  const handleThinkingChange = useCallback((sessionKey: string | null, thinking: boolean) => {
+    if (!sessionKey) return
+    setActiveSessions(prev => {
+      const next = new Set(prev)
+      if (thinking) next.add(sessionKey)
+      else next.delete(sessionKey)
+      return next
+    })
+  }, [])
+
+  const handleSlotModelSwitch = useCallback((slotId: string, model: string) => {
+    setSlots(prev => prev.map(s => s.slotId === slotId ? { ...s, model } : s))
   }, [])
 
   // Load models on mount
@@ -87,33 +116,26 @@ export default function Layout() {
     api.getModels().then(result => {
       if (result.models) {
         setModels(result.models)
-        // Try to get current model from config
-        // For now, default to first model if available
-        if (result.models.length > 0) {
-          setCurrentModel(result.models[0].name)
-        }
       }
     }).catch(err => {
       console.warn('Failed to load models:', err)
     })
   }, [])
 
-  // Auto-load most recent session when on chat page with no session loaded
-  // (skip if user explicitly clicked New Session)
+  // Initialize first slot when on chat page with no slots yet
   useEffect(() => {
-    if (page === 'chat' && !chatSessionKey && !activeSessionKey && !isNewSession) {
-      api.listSessions().then(result => {
-        if (result.sessions && result.sessions.length > 0) {
-          const mostRecent = result.sessions[0]
-          if (mostRecent.session_key) {
-            setChatSessionKey(mostRecent.session_key)
-          }
-        }
-      }).catch(err => {
-        console.warn('Failed to load sessions for auto-load:', err)
-      })
-    }
-  }, [page, chatSessionKey, activeSessionKey, isNewSession])
+    if (page !== 'chat' || slots.length > 0) return
+    api.listSessions().then(result => {
+      const mostRecent = result.sessions?.[0]
+      const id = nextSlotId()
+      setSlots([{ slotId: id, sessionKey: mostRecent?.session_key ?? null, model: '' }])
+      setVisibleSlotId(id)
+    }).catch(() => {
+      const id = nextSlotId()
+      setSlots([{ slotId: id, sessionKey: null, model: '' }])
+      setVisibleSlotId(id)
+    })
+  }, [page, slots.length])
 
   const PageComponent = PAGES[page]
 
@@ -133,7 +155,7 @@ export default function Layout() {
             onNavigate={setPage}
             collapsed={collapsed}
             onToggleCollapse={() => setCollapsed((c) => !c)}
-            sessionKey={chatSessionKey || activeSessionKey}
+            sessionKey={visibleSlot?.sessionKey}
           />
         )}
 
@@ -181,19 +203,18 @@ export default function Layout() {
                         <button
                           key={model.name}
                           onClick={async () => {
-                            const currentSession = chatSessionKey || activeSessionKey
-                            if (currentSession) {
+                            if (visibleSlot?.sessionKey) {
                               try {
-                                const result = await api.switchModel(model.name, currentSession)
-                                if (result.success) {
-                                  setCurrentModel(model.name)
+                                const result = await api.switchModel(model.name, visibleSlot.sessionKey)
+                                if (result.success && visibleSlotId) {
+                                  handleSlotModelSwitch(visibleSlotId, model.name)
                                   setShowModelDropdown(false)
                                 }
                               } catch (err) {
                                 console.error('Failed to switch model:', err)
                               }
-                            } else {
-                              setCurrentModel(model.name)
+                            } else if (visibleSlotId) {
+                              handleSlotModelSwitch(visibleSlotId, model.name)
                               setShowModelDropdown(false)
                             }
                           }}
@@ -237,7 +258,7 @@ export default function Layout() {
                 onNavigate={handleMobileNavigate}
                 collapsed={false}
                 onToggleCollapse={() => {}}
-                sessionKey={chatSessionKey || activeSessionKey}
+                sessionKey={visibleSlot?.sessionKey}
                 isMobile
               />
             </div>
@@ -258,8 +279,9 @@ export default function Layout() {
               <div className="flex-1 overflow-y-auto">
                 <SessionsPanel
                   onSwitchSession={(key) => { handleOpenSession(key); setMobileSessionsOpen(false) }}
-                  currentSessionKey={chatSessionKey || activeSessionKey}
-                  refreshTrigger={sessionRefreshTrigger}
+                  currentSessionKey={visibleSlot?.sessionKey ?? null}
+                  activeSessions={activeSessions}
+                  refreshTrigger={sessionsPanelRefreshTrigger}
                 />
               </div>
             </div>
@@ -297,19 +319,18 @@ export default function Layout() {
                           <button
                             key={model.name}
                             onClick={async () => {
-                              const currentSession = chatSessionKey || activeSessionKey
-                              if (currentSession) {
+                              if (visibleSlot?.sessionKey) {
                                 try {
-                                  const result = await api.switchModel(model.name, currentSession)
-                                  if (result.success) {
-                                    setCurrentModel(model.name)
+                                  const result = await api.switchModel(model.name, visibleSlot.sessionKey)
+                                  if (result.success && visibleSlotId) {
+                                    handleSlotModelSwitch(visibleSlotId, model.name)
                                     setShowModelDropdown(false)
                                   }
                                 } catch (err) {
                                   console.error('Failed to switch model:', err)
                                 }
-                              } else {
-                                setCurrentModel(model.name)
+                              } else if (visibleSlotId) {
+                                handleSlotModelSwitch(visibleSlotId, model.name)
                                 setShowModelDropdown(false)
                               }
                             }}
@@ -359,24 +380,33 @@ export default function Layout() {
                   <div className="w-64 border-r border-surface-3/30 flex-shrink-0">
                     <SessionsPanel
                       onSwitchSession={(key) => handleOpenSession(key)}
-                      currentSessionKey={chatSessionKey || activeSessionKey}
-                      refreshTrigger={sessionRefreshTrigger}
+                      currentSessionKey={visibleSlot?.sessionKey ?? null}
+                      activeSessions={activeSessions}
+                      refreshTrigger={sessionsPanelRefreshTrigger}
                     />
                   </div>
                 )}
 
-                {/* Chat panel */}
-                <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                  <ChatPanel
-                    key={chatSessionKey || activeSessionKey || 'new'}
-                    requestedSessionKey={chatSessionKey}
-                    onSessionLoaded={handleSessionLoaded}
-                    onActiveSessionChange={(key) => { setActiveSessionKey(key); setIsNewSession(false); setSessionRefreshTrigger(n => n + 1) }}
-                    onModelSwitch={setCurrentModel}
-                    currentSessionKey={chatSessionKey || activeSessionKey}
-                    showAgentDetails={showAgentDetails}
-                    pendingModel={currentModel}
-                  />
+                {/* Chat panels — one per slot, only visible one shown */}
+                <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+                  {slots.map(slot => (
+                    <div
+                      key={slot.slotId}
+                      className={`absolute inset-0 flex flex-col ${slot.slotId === visibleSlotId ? '' : 'hidden'}`}
+                    >
+                      <ChatPanel
+                        requestedSessionKey={slot.sessionKey}
+                        onSessionLoaded={() => {}}
+                        onActiveSessionChange={(key) => handleActiveSessionChange(slot.slotId, key)}
+                        onThinkingChange={(thinking, _toolName) => handleThinkingChange(slot.sessionKey, thinking)}
+                        onModelSwitch={(model) => handleSlotModelSwitch(slot.slotId, model)}
+                        currentSessionKey={slot.sessionKey}
+                        showAgentDetails={showAgentDetails}
+                        pendingModel={slot.model || models[0]?.name}
+                        visible={slot.slotId === visibleSlotId}
+                      />
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>

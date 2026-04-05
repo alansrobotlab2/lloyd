@@ -395,6 +395,10 @@ async def post_message_stream(request: Request):
             "cost_usd": None, "duration_ms": None, "num_turns": None,
             "model": model,
         }
+        # Track the last turn's input tokens separately (= actual peak context window usage).
+        # stream_stats["input_tokens"] gets overwritten per turn, but ResultMessage later
+        # replaces it with the cumulative total.  We need both values.
+        last_turn_input: int = 0
 
         # Persist user message immediately so it survives a mid-stream disconnect.
         now_ts = datetime.now().isoformat()
@@ -431,6 +435,7 @@ async def post_message_stream(request: Request):
                         # Capture input token counts early (before ResultMessage may be skipped)
                         msg_usage = evt.get("message", {}).get("usage", {})
                         stream_stats["input_tokens"] = msg_usage.get("input_tokens", 0)
+                        last_turn_input = stream_stats["input_tokens"]
                         stream_stats["cache_create"] = msg_usage.get("cache_creation_input_tokens", 0)
                         stream_stats["cache_read"] = msg_usage.get("cache_read_input_tokens", 0)
                     elif etype == "message_delta":
@@ -453,7 +458,7 @@ async def post_message_stream(request: Request):
                         if isinstance(block, ToolUseBlock):
                             args_str = json.dumps(block.input) if isinstance(block.input, dict) else str(block.input)
                             tool_calls_log.append({"id": block.id, "call_id": block.id, "type": "function", "function": {"name": block.name, "arguments": args_str}})
-                            yield f"event: tool_start\ndata: {json.dumps({'call_id': block.id, 'name': block.name, 'args': args_str})}\n\n"
+                            yield f"event: tool_start\ndata: {json.dumps({'call_id': block.id, 'name': block.name, 'args': args_str, 'context_tokens': last_turn_input})}\n\n"
 
                 elif isinstance(message, UserMessage):
                     for block in message.content:
@@ -552,6 +557,7 @@ async def post_message_stream(request: Request):
                         "cost_usd":      getattr(message, "total_cost_usd", None),
                         "duration_ms":   getattr(message, "duration_ms", None),
                         "num_turns":     getattr(message, "num_turns", None),
+                        "peak_input_tokens": last_turn_input,
                     })
                     stats_dict = stream_stats
                     if result_text.strip():
@@ -581,6 +587,7 @@ async def post_message_stream(request: Request):
                             tail.append({"id": f"msg_{cid}_result", "role": "tool",
                                          "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
                                          "tool_call_id": cid, "timestamp": err_ts})
+                    stream_stats["peak_input_tokens"] = last_turn_input
                     if full_response.strip():
                         tail.append({"id": uuid.uuid4().hex[:8], "role": "assistant",
                                      "content": [{"type": "text", "text": full_response}],

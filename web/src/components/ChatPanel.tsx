@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench } from 'lucide-react'
+import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench, Square } from 'lucide-react'
 import { marked } from 'marked'
 import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats } from '../api'
 
@@ -14,6 +14,8 @@ interface ChatPanelProps {
   showAgentDetails?: boolean
   currentSessionKey?: string | null
   pendingModel?: string
+  visible?: boolean
+  onThinkingChange?: (thinking: boolean, toolName: string | null) => void
 }
 
 // Mock slash commands (will be replaced with actual backend fetch)
@@ -66,6 +68,8 @@ export default function ChatPanel({
   showAgentDetails = false,
   currentSessionKey = null,
   pendingModel,
+  visible = true,
+  onThinkingChange,
 }: ChatPanelProps = {}) {
   const [sessionKey, setSessionKey] = useState<string | null>(null)
   const [messages, setMessages] = useState<ApiMessage[]>([])
@@ -76,12 +80,13 @@ export default function ChatPanel({
   const [commandFilter, setCommandFilter] = useState('')
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
   const [models, setModels] = useState<ModelInfo[]>([])
-  // Sessions are now shown in the sidebar panel
-  
+  const [activeToolName, setActiveToolName] = useState<string | null>(null)
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const isNearBottom = useRef<boolean>(true)
+  const abortControllerRef = useRef<AbortController | null>(null)
   const clientId = useRef<string>(localStorage.getItem('mc_client_id') || `client_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`)
 
   useEffect(() => {
@@ -125,9 +130,15 @@ export default function ChatPanel({
     }
   }, [handleScroll])
 
-  // Poll messages for current session (skip while streaming or sending)
+  // Notify parent of thinking/tool state changes
+  useEffect(() => {
+    onThinkingChange?.(thinking, thinking ? activeToolName : null)
+  }, [thinking, activeToolName])
+
+  // Poll messages for current session (skip while streaming or sending, or hidden idle)
   useEffect(() => {
     if (!sessionKey || sending || thinking) return
+    if (visible === false) return
     const load = async () => {
       try {
         const result = await api.loadMessages(sessionKey)
@@ -142,7 +153,7 @@ export default function ChatPanel({
     load()
     const interval = setInterval(load, 5000)
     return () => clearInterval(interval)
-  }, [sessionKey, thinking, sending])
+  }, [sessionKey, thinking, sending, visible])
 
   // Scroll to bottom when messages change, always while thinking (agent is actively responding)
   useEffect(() => {
@@ -353,8 +364,9 @@ export default function ChatPanel({
     // Streaming assistant message ID — used to accumulate text deltas
     const assistantMsgId = `msg_${Date.now()}_resp`
     let streamingStarted = false
+    let settled = false
 
-    void api.streamMessage(text, clientId.current, sessionKey || undefined, {
+    const controller = api.streamMessage(text, clientId.current, sessionKey || undefined, {
       onSession: (sid) => {
         if (!sessionKey) {
           setSessionKey(sid)
@@ -362,7 +374,8 @@ export default function ChatPanel({
           onActiveSessionChange?.(sid)
         }
       },
-      onToolStart: (callId, name, args) => {
+      onToolStart: (callId, name, args, contextTokens) => {
+        setActiveToolName(name)
         // Add an assistant message with the tool_call, then a pending tool result message
         setMessages(prev => [
           ...prev,
@@ -378,16 +391,22 @@ export default function ChatPanel({
             role: 'tool' as const,
             content: [{ type: 'text' as const, text: '⏳ Running...' }],
             tool_call_id: callId,
+            context_tokens: contextTokens,
             timestamp: new Date().toISOString(),
           },
         ])
       },
       onToolComplete: (callId, _name, result) => {
-        setMessages(prev => prev.map(m =>
-          m.id === `msg_${callId}_result`
-            ? { ...m, content: [{ type: 'text' as const, text: result }] }
-            : m
-        ))
+        setMessages(prev => {
+          const updated = prev.map(m =>
+            m.id === `msg_${callId}_result`
+              ? { ...m, content: [{ type: 'text' as const, text: result }] }
+              : m
+          )
+          const stillPending = updated.find(m => m.role === 'tool' && m.content[0]?.text === '⏳ Running...')
+          if (!stillPending) setActiveToolName(null)
+          return updated
+        })
       },
       onTextDelta: (delta) => {
         if (!streamingStarted) {
@@ -407,6 +426,8 @@ export default function ChatPanel({
         }
       },
       onDone: (response, _sid, stats) => {
+        if (settled) return
+        settled = true
         if (!streamingStarted && response) {
           setMessages(prev => [...prev, {
             id: assistantMsgId,
@@ -420,22 +441,44 @@ export default function ChatPanel({
             m.id === assistantMsgId ? { ...m, stats } : m
           ))
         }
+        abortControllerRef.current = null
+        setActiveToolName(null)
         setThinking(false)
         setSending(false)
         inputRef.current?.focus()
       },
       onError: (detail) => {
+        if (settled) return
+        settled = true
         setMessages(prev => [...prev, {
           id: `msg_${Date.now()}_err`,
           role: 'tool' as const,
           content: [{ type: 'text' as const, text: `Error: ${detail}` }],
           timestamp: new Date().toISOString(),
         }])
+        abortControllerRef.current = null
+        setActiveToolName(null)
         setThinking(false)
         setSending(false)
         inputRef.current?.focus()
       },
+      onAborted: () => {
+        if (settled) return
+        settled = true
+        abortControllerRef.current = null
+        setActiveToolName(null)
+        setThinking(false)
+        setSending(false)
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_interrupted`,
+          role: 'assistant' as const,
+          content: [{ type: 'text' as const, text: '*[Interrupted]*' }],
+          timestamp: new Date().toISOString(),
+        }])
+        inputRef.current?.focus()
+      },
     }, !sessionKey ? pendingModel : undefined)
+    abortControllerRef.current = controller
   }
 
   const timeStr = (iso: string) => {
@@ -574,22 +617,27 @@ export default function ChatPanel({
                 <span>{timeStr(msg.timestamp)}</span>
                 {msg.stats && msg.role === 'assistant' && (() => {
                   const s = msg.stats as TurnStats
+                  const peak = s.peak_input_tokens ?? s.input_tokens
+                  const pct = (peak / 262144 * 100).toFixed(1)
                   return (<>
-                    <span className="text-slate-600">in: {s.input_tokens.toLocaleString()}</span>
-                    <span className="text-slate-600">out: {s.output_tokens.toLocaleString()}</span>
+                    <span className="text-slate-600">ctx: {peak.toLocaleString()} ({pct}%)</span>
                     {s.cache_read > 0 && (
                       <span className="text-emerald-700">cache↑: {s.cache_read.toLocaleString()}</span>
                     )}
                     {s.cache_create > 0 && (
                       <span className="text-amber-700">cache✎: {s.cache_create.toLocaleString()}</span>
                     )}
-{s.duration_ms != null && (
+                    {s.duration_ms != null && (
                       <span className="text-slate-600">time: {(s.duration_ms / 1000).toFixed(1)}s</span>
                     )}
                     {s.num_turns != null && s.num_turns > 1 && (
                       <span className="text-slate-600">turns: {s.num_turns}</span>
                     )}
                   </>)
+                })()}
+                {msg.context_tokens != null && msg.context_tokens > 0 && msg.role === 'tool' && (() => {
+                  const pct = (msg.context_tokens / 262144 * 100).toFixed(1)
+                  return <span className="text-slate-600">ctx: {msg.context_tokens.toLocaleString()} ({pct}%)</span>
                 })()}
               </div>
             </div>
@@ -611,7 +659,10 @@ export default function ChatPanel({
             <div className="bg-surface-2 border border-surface-3/50 px-3.5 py-2.5 rounded-xl">
               <div className="flex items-center gap-2 text-sm text-slate-400">
                 <Loader2 className="w-4 h-4 animate-spin text-brand-400" />
-                <span>Thinking...</span>
+                {activeToolName
+                  ? <span>Working: <span className="font-mono text-brand-300">{activeToolName}</span>...</span>
+                  : <span>Thinking...</span>
+                }
               </div>
             </div>
           </div>
@@ -652,13 +703,24 @@ export default function ChatPanel({
             className="flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3.5 py-2.5 border border-surface-3/50 outline-none focus:border-brand-500/50 placeholder:text-slate-500 transition-colors disabled:opacity-50"
             disabled={sending || thinking}
           />
-          <button
-            type="submit"
-            disabled={sending || thinking || !input.trim()}
-            className="bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
-          >
-            {sending || thinking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-          </button>
+          {(sending || thinking) ? (
+            <button
+              type="button"
+              onClick={() => abortControllerRef.current?.abort()}
+              className="bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 text-red-400 rounded-lg px-3 transition-colors"
+              title="Stop"
+            >
+              <Square className="w-4 h-4" />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!input.trim()}
+              className="bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
+            >
+              <Send className="w-4 h-4" />
+            </button>
+          )}
         </form>
         
         {/* Command dropdown */}

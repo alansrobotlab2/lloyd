@@ -169,6 +169,38 @@ def _detect_signal(output: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _run_stage_sdk(prompt: str, system_prompt: str, model: str, timeout: int) -> str:
+    """Run a single stage via Claude Agent SDK (called from background thread)."""
+    import asyncio
+    import claude_code_sdk._internal.transport.subprocess_cli as _cli_transport
+    from claude_code_sdk import query, ClaudeCodeOptions
+
+    # The SDK's subprocess transport buffers stdout line-by-line and enforces a 1MB
+    # limit per JSON message. Large tool results (e.g. WebFetch on a big page) can
+    # exceed this. Raise the limit to 32MB — it's just a runaway-buffer guard.
+    _cli_transport._MAX_BUFFER_SIZE = 32 * 1024 * 1024
+
+    env_vars = _get_model_env(model)
+    options = ClaudeCodeOptions(
+        system_prompt=system_prompt,
+        max_turns=80,
+        permission_mode="bypassPermissions",
+        model=model or None,
+        env=env_vars,
+    )
+
+    async def _inner():
+        result_text = ""
+        async for msg in query(prompt=prompt, options=options):
+            if hasattr(msg, "content"):
+                for block in msg.content:
+                    if hasattr(block, "text"):
+                        result_text += block.text + "\n"
+        return result_text
+
+    return asyncio.run(_inner())
+
+
 def _run_pipeline(run_id: int) -> None:
     """Background thread: execute all stages via Claude Agent SDK."""
     run = _load_run(run_id)
@@ -205,47 +237,10 @@ def _run_pipeline(run_id: int) -> None:
 
         prompt = _build_initial_prompt(task, skills)
         stage_content = stage_def.get("content", "").strip()
-
-        # Build system prompt with stage instructions
         system_prompt = f"You are executing a pipeline stage.\n\nStage: {stage_def['name']}\n\n{stage_content}"
 
-        # Execute via Claude Agent SDK query()
         try:
-            import subprocess as sp
-            # Use SDK via subprocess to avoid event loop conflicts
-            sdk_script = f"""
-import asyncio, os, json
-from claude_code_sdk import query, ClaudeCodeOptions
-
-env_overrides = json.loads('{json.dumps(_get_model_env(model))}')
-for k, v in env_overrides.items():
-    os.environ[k] = v
-
-options = ClaudeCodeOptions(
-    system_prompt={json.dumps(system_prompt)},
-    max_turns=80,
-    permission_mode="bypassPermissions",
-)
-
-async def run():
-    result_text = ""
-    async for msg in query(prompt={json.dumps(prompt)}, options=options):
-        if hasattr(msg, 'content'):
-            for block in msg.content:
-                if hasattr(block, 'text'):
-                    result_text += block.text + "\\n"
-    print(result_text[-2000:])
-
-asyncio.run(run())
-"""
-            proc = sp.run(
-                [str(Path.home() / "lloyd" / ".venv" / "bin" / "python"), "-c", sdk_script],
-                capture_output=True, text=True, timeout=timeout,
-                cwd=str(Path.home()),
-            )
-            output = proc.stdout
-            if proc.stderr.strip():
-                output += "\n" + proc.stderr
+            output = _run_stage_sdk(prompt, system_prompt, model, timeout)
         except Exception as exc:
             with _runs_lock:
                 run = _load_run(run_id) or run

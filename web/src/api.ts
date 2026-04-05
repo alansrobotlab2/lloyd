@@ -7,6 +7,7 @@ export interface TurnStats {
   duration_ms: number | null
   num_turns: number | null
   model: string
+  peak_input_tokens?: number
 }
 
 export interface MessageEntry {
@@ -18,6 +19,7 @@ export interface MessageEntry {
   model?: string
   reasoning?: string
   stats?: TurnStats
+  context_tokens?: number
   tool_calls?: Array<{
     id: string
     call_id: string
@@ -412,12 +414,13 @@ export const api = {
     sessionId: string | undefined,
     callbacks: {
       onSession?: (sessionId: string) => void
-      onToolStart?: (callId: string, name: string, args: Record<string, unknown>) => void
+      onToolStart?: (callId: string, name: string, args: Record<string, unknown>, contextTokens?: number) => void
       onToolComplete?: (callId: string, name: string, result: string) => void
       onToolProgress?: (name: string, preview: string) => void
       onTextDelta?: (text: string) => void
       onDone?: (response: string, sessionId: string, stats?: TurnStats) => void
       onError?: (detail: string) => void
+      onAborted?: () => void
     },
     model?: string,
   ): AbortController {
@@ -458,7 +461,7 @@ export const api = {
             const payload = JSON.parse(data)
             switch (eventType) {
               case 'session': callbacks.onSession?.(payload.session_id); break
-              case 'tool_start': callbacks.onToolStart?.(payload.call_id, payload.name, payload.args); break
+              case 'tool_start': callbacks.onToolStart?.(payload.call_id, payload.name, payload.args, payload.context_tokens); break
               case 'tool_complete': callbacks.onToolComplete?.(payload.call_id, payload.name, payload.result); break
               case 'tool_progress': callbacks.onToolProgress?.(payload.name, payload.preview); break
               case 'text_delta': callbacks.onTextDelta?.(payload.text); break
@@ -469,7 +472,8 @@ export const api = {
         }
       }
     }).catch((err) => {
-      if (err.name !== 'AbortError') callbacks.onError?.(err.message)
+      if (err.name === 'AbortError') callbacks.onAborted?.()
+      else callbacks.onError?.(err.message)
     })
     return controller
   },
