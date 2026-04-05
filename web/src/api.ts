@@ -62,7 +62,6 @@ export interface ApiResponse {
 export interface SkillInfo {
   name: string
   description: string
-  emoji?: string
   category?: string
   requires?: {
     bins?: string[]
@@ -396,6 +395,21 @@ export interface AutonomyTask {
   last_run: string | null;
 }
 
+export interface PipelineRun {
+  run_id: number
+  status: 'running' | 'complete' | 'aborted' | 'blocked' | string
+  task_preview: string
+  current_stage: string
+  stage_index: number
+  stage_count: number
+  stages: string[]
+  model: string
+  created_at: string
+  updated_at: string
+  completed_at: string
+  blocked_reason: string
+}
+
 const API_BASE = '/api'
 
 export const api = {
@@ -716,4 +730,12 @@ export const api = {
     fetch(`${API_BASE}/autonomy/scheduler/enable`, { method: 'POST' }).then(r => r.json()),
   autonomySchedulerDisable: (): Promise<{ enabled: boolean }> =>
     fetch(`${API_BASE}/autonomy/scheduler/disable`, { method: 'POST' }).then(r => r.json()),
+
+  // Pipeline runs
+  listPipelines: (status?: string): Promise<{ runs: PipelineRun[] }> =>
+    fetch(`${API_BASE}/pipelines${status ? `?status=${status}` : ''}`).then(r => r.json()),
+  getPipeline: (runId: number): Promise<PipelineRun & { task: string; stage_outputs: Record<string, string>; skills: string[]; live_log: string }> =>
+    fetch(`${API_BASE}/pipelines/${runId}`).then(r => r.json()),
+  abortPipeline: (runId: number): Promise<{ success: boolean; message: string; killed_pids: number[] }> =>
+    fetch(`${API_BASE}/pipelines/${runId}/abort`, { method: 'POST' }).then(r => r.json()),
 }

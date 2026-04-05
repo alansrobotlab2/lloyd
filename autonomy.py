@@ -38,6 +38,30 @@ _last_tick_time: float = 0.0
 _current_task_id: Optional[int] = None
 
 
+def recover_stuck_tasks() -> list:
+    """Reset any tasks stuck in_progress longer than their timeout. Called on startup."""
+    recovered = []
+    if not AUTONOMY_DIR.exists():
+        return recovered
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for path in AUTONOMY_DIR.glob("*.md"):
+        if path.name == "_config.md":
+            continue
+        task = _parse_task_file(path)
+        if not task or str(task.get("status", "")).strip() != "in_progress":
+            continue
+        timeout = int(task.get("timeout_seconds") or 1800)
+        updated = _parse_iso(task.get("updated") or task.get("last_run"))
+        stuck_seconds = (now - updated).total_seconds() if updated else timeout + 1
+        if stuck_seconds >= timeout:
+            task_id = task.get("id")
+            _update_task_field(task_id, status="up_next", updated=now.isoformat())
+            _append_activity_log(task_id, f"Recovered from in_progress after {stuck_seconds:.0f}s (timeout={timeout}s)")
+            logger.warning("Recovered stuck task #%s (%s) after %.0fs", task_id, task.get("name"), stuck_seconds)
+            recovered.append(task_id)
+    return recovered
+
+
 def get_status() -> dict:
     return {
         "enabled": _ticker_enabled,
@@ -51,6 +75,13 @@ def set_enabled(enabled: bool) -> None:
     global _ticker_enabled
     _ticker_enabled = enabled
     logger.info("Autonomy scheduler %s", "enabled" if enabled else "disabled")
+    try:
+        config_path = LLOYD_HOME / "config.yaml"
+        config = yaml.safe_load(config_path.read_text()) or {}
+        config.setdefault("autonomy", {})["enabled"] = enabled
+        config_path.write_text(yaml.dump(config, default_flow_style=False, allow_unicode=True))
+    except Exception as e:
+        logger.warning("Failed to persist autonomy enabled state: %s", e)
 
 
 # ── Task file I/O ─────────────────────────────────────────────────────────────
@@ -370,6 +401,7 @@ def run_task(task_id) -> dict:
                 disallowed_tools.append(f"mcp__{name}__{tool_name}")
 
         options = ClaudeCodeOptions(
+            model=task_model,
             system_prompt=system_prompt,
             max_turns=config.get("agent", {}).get("max_turns", 60),
             permission_mode="bypassPermissions",

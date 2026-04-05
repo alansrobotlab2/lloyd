@@ -54,6 +54,29 @@ except ImportError:
                         current_list = False
             return result
 
+        @staticmethod
+        def dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True):
+            """Simple YAML dumper for frontmatter."""
+            lines = []
+            for key, value in data.items():
+                if isinstance(value, list):
+                    lines.append(f"{key}:")
+                    for item in value:
+                        if isinstance(item, dict):
+                            lines.append(f"- id: {item.get('id', '')}")
+                            for k, v in item.items():
+                                if k != 'id':
+                                    lines.append(f"  {k}: {v}")
+                        else:
+                            lines.append(f"- {item}")
+                elif isinstance(value, dict):
+                    lines.append(f"{key}:")
+                    for k, v in value.items():
+                        lines.append(f"  {k}: {v}")
+                else:
+                    lines.append(f"{key}: {value}")
+            return '\n'.join(lines) + '\n'
+
 
 # Relation type inverses (bidirectional mapping)
 INVERSE_RELATIONS = {

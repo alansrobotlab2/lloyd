@@ -8,11 +8,23 @@ summary: "AutoAgent applies the Auto Research pattern to agent harness optimizat
 
 # AutoAgent & Self-Improving Agents
 
+---
+
+## Attribution Note
+
+⚠️ **Video Attribution Discrepancy:** The YouTube video attributes the project to "Kevin Guo" on X, but the actual public AutoAgent repository is by **Jiabin Tang, Tianyu Fan, Chao Huang** (HKUDS organization). The Kevin Guo attribution could not be verified and may be incorrect or refer to a different project.
+
+- **Official Repository:** [HKUDS/AutoAgent](https://github.com/HKUDS/AutoAgent) (~8,769 stars)
+- **Paper:** [arxiv.org/abs/2502.05957](https://arxiv.org/abs/2502.05957)
+- **License:** MIT
+
+---
+
 ## Overview
 
-**AutoAgent** is a project that applies the "Auto Research" pattern to **agent harness optimization**. Instead of optimizing ML training code (like Karpathy's Auto Research), it optimizes the agent harness itself - prompts, tools, and orchestration logic.
+**AutoAgent** (HKUDS) is a framework that enables users to create and deploy LLM agents through natural language alone. The video discusses applying the "Auto Research" pattern to agent harness optimization - instead of optimizing ML training code (like Karpathy's Auto Research), it optimizes the agent harness itself - prompts, tools, and orchestration logic.
 
-The core insight: **Every domain needs a different harness**, and harness engineering can be automated through meta-agent experimentation.
+**Core Insight:** Every domain needs a different harness, and harness engineering can be automated through meta-agent experimentation.
 
 ---
 
@@ -145,6 +157,7 @@ From Meta-Harness research [[Paper](https://arxiv.org/abs/2603.28052)]:
 - **HGM (Huxley-Godel Machine)** - Self-improvement for coding agents [[GitHub](https://github.com/metauto-ai/hgm)]
 - **GEPA** (ICLR 2026 Oral) - Genetic-Pareto for prompt evolution [[GitHub](https://github.com/gepa-ai/gepa)]
 - **AI-Scientist** - Full automated scientific discovery [[GitHub](https://github.com/SakanaAI/AI-Scientist)]
+- **AutoResearch Pattern (Karpathy-style):** [ChrisGoesGolfing](https://github.com/chrispyspearbit/ChrisGoesGolfing) - Autonomous code iteration with feedback loops
 
 ---
 
@@ -243,22 +256,34 @@ Thread 4: Benchmark Research
 
 ## Sources Consulted
 
-1. https://www.youtube.com/watch?v=RoaPvj9Ovug - "Self Improving Agents in 5 Minutes" (Primary source, transcript fetched)
-2. https://arxiv.org/abs/2603.28052 - Meta-Harness paper
-3. https://yoonholee.com/meta-harness/ - Meta-Harness project page
-4. https://github.com/stanford-iris-lab/meta-harness-tbench2-artifact - Meta-Harness artifact
-5. https://github.com/karpathy/autoresearch - Karpathy's Auto Research
-6. https://github.com/zou-group/sirius - SiriuS (NeurIPS 2025)
-7. https://arxiv.org/pdf/2502.04780 - SiriuS paper
-8. https://github.com/kayba-ai/recursive-improve - Recursive improve framework
-9. https://github.com/raphaelchristi/harness-evolver - Harness Evolver
-10. https://github.com/shengranhu/ADAS - ADAS (ICLR 2025)
-11. https://github.com/MaximeRobeyns/self_improving_coding_agent - SICA
-12. https://github.com/metauto-ai/hgm - Huxley-Godel Machine
-13. https://github.com/gepa-ai/gepa - GEPA (ICLR 2026 Oral)
-14. https://github.com/SakanaAI/AI-Scientist - AI-Scientist
+1. https://www.youtube.com/watch?v=RoaPvj9Ovug - "Self Improving Agents in 5 Minutes" by Developers Digest (Primary source, transcript fetched)
+2. https://github.com/HKUDS/AutoAgent - AutoAgent (HKUDS) - Official repository (~8,769 stars)
+3. https://arxiv.org/abs/2502.05957 - AutoAgent paper (HKUDS)
+4. https://arxiv.org/abs/2603.28052 - Meta-Harness paper (Lee et al., March 2026)
+5. https://yoonholee.com/meta-harness/ - Meta-Harness project page
+6. https://github.com/stanford-iris-lab/meta-harness-tbench2-artifact - Meta-Harness artifact
+7. https://github.com/karpathy/autoresearch - Karpathy's Auto Research
+8. https://github.com/chrispyspearbit/ChrisGoesGolfing - AutoResearch pattern implementation
+9. https://github.com/zou-group/sirius - SiriuS (NeurIPS 2025)
+10. https://arxiv.org/pdf/2502.04780 - SiriuS paper
+11. https://github.com/kayba-ai/recursive-improve - Recursive improve framework
+12. https://github.com/raphaelchristi/harness-evolver - Harness Evolver
+13. https://github.com/shengranhu/ADAS - ADAS (ICLR 2025)
+14. https://github.com/MaximeRobeyns/self_improving_coding_agent - SICA
+15. https://github.com/metauto-ai/hgm - Huxley-Godel Machine
+16. https://github.com/gepa-ai/gepa - GEPA (ICLR 2026 Oral)
+17. https://github.com/SakanaAI/AI-Scientist - AI-Scientist
+
+---
+
+## Research Notes
+
+**Attribution Correction:** The video mentions "Kevin Guo" as the creator of AutoAgent, but the public repository is by Jiabin Tang, Tianyu Fan, Chao Huang (HKUDS). This attribution discrepancy could not be resolved.
+
+**Video Content:** The transcript describes a meta-agent architecture that optimizes agent harnesses (prompts, tools, orchestration) rather than ML training code, applying the Auto Research pattern to a different domain.
 
 ---
 
 *Research conducted: 2026-04-04*
+*Note updated: 2026-04-04*
 *Note written by: Lloyd Research Agent*

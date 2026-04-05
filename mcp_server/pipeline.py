@@ -5,7 +5,7 @@ Lloyd MCP Server: Pipeline — multi-stage worker coordination.
 Dispatches multi-stage pipeline runs where each stage runs as a
 claude subprocess via the Claude Agent SDK.
 
-Stage files: ~/obsidian/agents/worker/stages/<name>.md
+Stage files: ~/obsidian/lloyd/stages/<name>.md
 Skills dir:  ~/obsidian/skills/
 Run state:   ~/lloyd/pipeline-runs/<run_id>.json
 
@@ -28,7 +28,8 @@ from mcp.types import Tool, TextContent
 logger = logging.getLogger(__name__)
 
 PIPELINE_RUNS_DIR = Path.home() / "lloyd" / "pipeline-runs"
-STAGES_DIR = Path.home() / "obsidian" / "agents" / "worker" / "stages"
+SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
+STAGES_DIR = Path.home() / "obsidian" / "lloyd" / "stages"
 SKILLS_DIR = Path.home() / "obsidian" / "skills"
 
 _runs_lock = threading.Lock()
@@ -42,6 +43,37 @@ MODEL_ALIASES: dict[str, str] = {
 }
 
 SIGNAL_RE = re.compile(r"\bSIGNAL:(STAGE_COMPLETE|TASK_COMPLETE|BLOCKED(?::.+)?)\b")
+
+# ── Output contract injected into every stage system prompt ───────────────────
+_STAGE_CONTRACT = """
+---
+
+## Pipeline Output Contract
+
+Every response must end with a tool call OR a signal. No text-only final responses.
+
+**Signals — exact syntax, on their own line:**
+- `SIGNAL:STAGE_COMPLETE` — this stage is done, pass to next stage
+- `SIGNAL:TASK_COMPLETE` — all pipeline work is done (final stage only)
+- `SIGNAL:BLOCKED:<reason>` — genuinely stuck, cannot proceed
+
+**For `SIGNAL:TASK_COMPLETE` only**, include a result block directly before the signal:
+
+```
+## Pipeline Result
+{
+  "status": "success",
+  "summary": "One paragraph: what was accomplished, key decisions, outcome. Max 500 chars.",
+  "artifacts": [{"path": "path/to/file", "type": "created|modified|deleted"}],
+  "confidence": 0.9
+}
+```
+
+- `status`: `"success"` | `"partial"` (some work done but incomplete) | `"failed"` (nothing useful produced)
+- `artifacts`: every file created, modified, or deleted — empty list if none
+- `confidence`: your honest self-assessment (0.0–1.0)
+- For failures add: `"error": {"code": "PLAN_WRONG|EXEC_FAILED|TIMEOUT", "message": "...", "remediation": "..."}`
+"""
 
 _NOISE = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "have", "has",
@@ -169,11 +201,51 @@ def _detect_signal(output: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _run_stage_sdk(prompt: str, system_prompt: str, model: str, timeout: int) -> str:
+_RESULT_BLOCK_RE = re.compile(
+    r"##\s*Pipeline\s+Result\s*\n\s*```[^\n]*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
+_RESULT_BLOCK_BARE_RE = re.compile(
+    r"##\s*Pipeline\s+Result\s*\n(\{.*?\})",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _parse_result_block(output: str) -> Optional[dict]:
+    """Extract and parse the structured ## Pipeline Result JSON block from stage output."""
+    m = _RESULT_BLOCK_RE.search(output) or _RESULT_BLOCK_BARE_RE.search(output)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1).strip())
+        # Normalize fields
+        result = {
+            "status": data.get("status", "success"),
+            "summary": str(data.get("summary", ""))[:500],
+            "artifacts": data.get("artifacts", []),
+            "confidence": float(data.get("confidence", 1.0)),
+        }
+        if "error" in data:
+            result["error"] = data["error"]
+        return result
+    except Exception:
+        return None
+
+
+def _run_stage_sdk(
+    prompt: str,
+    system_prompt: str,
+    model: str,
+    timeout: int,
+    log_path: Optional[Path] = None,
+    stage_name: str = "",
+) -> str:
     """Run a single stage via Claude Agent SDK (called from background thread)."""
     import asyncio
     import claude_code_sdk._internal.transport.subprocess_cli as _cli_transport
     from claude_code_sdk import query, ClaudeCodeOptions
+    from claude_code_sdk import AssistantMessage, UserMessage
+    from claude_code_sdk.types import TextBlock, ToolUseBlock, ToolResultBlock
 
     # The SDK's subprocess transport buffers stdout line-by-line and enforces a 1MB
     # limit per JSON message. Large tool results (e.g. WebFetch on a big page) can
@@ -187,18 +259,147 @@ def _run_stage_sdk(prompt: str, system_prompt: str, model: str, timeout: int) ->
         permission_mode="bypassPermissions",
         model=model or None,
         env=env_vars,
+        include_partial_messages=True,
     )
+
+    def _log(text: str) -> None:
+        if log_path:
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(text)
+            except Exception:
+                pass
 
     async def _inner():
         result_text = ""
+        current_tool: Optional[str] = None
         async for msg in query(prompt=prompt, options=options):
-            if hasattr(msg, "content"):
+            from claude_code_sdk.types import StreamEvent
+            if isinstance(msg, StreamEvent):
+                evt = msg.event
+                if evt.get("type") == "content_block_delta":
+                    delta = evt.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        chunk = delta.get("text", "")
+                        if chunk:
+                            result_text += chunk
+                            _log(chunk)
+            elif isinstance(msg, AssistantMessage):
                 for block in msg.content:
-                    if hasattr(block, "text"):
-                        result_text += block.text + "\n"
+                    if isinstance(block, ToolUseBlock):
+                        current_tool = block.name
+                        args_preview = str(block.input)[:120].replace("\n", " ")
+                        _log(f"\n[tool: {block.name}] {args_preview}\n")
+            elif isinstance(msg, UserMessage):
+                for block in msg.content:
+                    if isinstance(block, ToolResultBlock):
+                        result_str = ""
+                        if hasattr(block, "content"):
+                            if isinstance(block.content, str):
+                                result_str = block.content[:200]
+                            elif isinstance(block.content, list):
+                                result_str = " ".join(getattr(c, "text", str(c)) for c in block.content)[:200]
+                        _log(f"[result] {result_str.strip()}\n\n")
+                        current_tool = None
         return result_text
 
     return asyncio.run(_inner())
+
+
+def _log_path(run_id: int) -> Path:
+    return PIPELINE_RUNS_DIR / f"{run_id}.log"
+
+
+def _notify_requester_session(run: dict) -> None:
+    """Deliver a pipeline completion/block notification to the requester session via HTTP POST.
+
+    Posts as a user message to /api/message so the agent receives it and responds.
+    Uses a dedup marker in the run JSON to prevent double-firing.
+    """
+    import urllib.request
+
+    session_id = run.get("requester_session_id", "")
+    if not session_id:
+        return
+
+    run_id = run.get("run_id")
+    status = run.get("status", "unknown")
+
+    # Dedup: only notify once per run
+    run_path = _run_path(run_id)
+    try:
+        current = json.loads(run_path.read_text(encoding="utf-8"))
+        if current.get("notified"):
+            return
+        current["notified"] = True
+        run_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    task = run.get("task", "")
+    task_preview = next((l.strip() for l in task.splitlines() if l.strip()), task[:80])[:120]
+    stages = run.get("stages", [])
+    structured = run.get("structured_result")
+
+    if status == "complete":
+        if structured:
+            s_status = structured.get("status", "success")
+            summary = structured.get("summary", "")
+            confidence = structured.get("confidence")
+            artifacts = structured.get("artifacts", [])
+            icon = "✓" if s_status == "success" else ("⚠" if s_status == "partial" else "✗")
+            body = f"[Pipeline #{run_id} complete {icon}]\n\nStages: {' → '.join(stages)}\nTask: {task_preview}"
+            if summary:
+                body += f"\n\nSummary: {summary}"
+            if artifacts:
+                artifact_lines = "\n".join(
+                    f"- {a.get('path', '?')} ({a.get('type', 'modified')})" for a in artifacts[:20]
+                )
+                body += f"\n\nArtifacts:\n{artifact_lines}"
+            if confidence is not None:
+                body += f"\n\nConfidence: {confidence:.0%}"
+            err = structured.get("error")
+            if err:
+                body += f"\n\nError: {err.get('message', '')} [{err.get('code', '')}]"
+                if err.get("remediation"):
+                    body += f"\nRemediation: {err['remediation']}"
+        else:
+            stage_outputs = run.get("stage_outputs", {})
+            last_stage = stages[-1] if stages else ""
+            last_output = stage_outputs.get(last_stage, "").strip()
+            body = f"[Pipeline #{run_id} complete ✓]\n\nStages: {' → '.join(stages)}\nTask: {task_preview}"
+            if last_output:
+                snippet = last_output[:1500]
+                if len(last_output) > 1500:
+                    snippet += "\n...(truncated)"
+                body += f"\n\n{last_stage} output:\n{snippet}"
+    elif status == "blocked":
+        reason = run.get("blocked_reason") or "Unknown reason"
+        current_stage = run.get("current_stage", "")
+        body = f"[Pipeline #{run_id} blocked ⚠]\n\nStage: {current_stage}\nReason: {reason}\nTask: {task_preview}"
+        if structured and structured.get("error"):
+            err = structured["error"]
+            body += f"\n\nError: {err.get('message', '')} [{err.get('code', '')}]"
+            if err.get("remediation"):
+                body += f"\nRemediation: {err['remediation']}"
+    else:
+        body = f"[Pipeline #{run_id} ended — status: {status}]\n\nTask: {task_preview}"
+
+    try:
+        payload = json.dumps({"text": body, "session_id": session_id}).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:8080/api/message/stream",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        # Drain the SSE stream — the streaming endpoint saves messages as it goes
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            while resp.read(4096):
+                pass
+        logger.info(f"Pipeline #{run_id} notification delivered to session {session_id} ({status})")
+    except Exception as e:
+        logger.warning(f"Failed to deliver pipeline #{run_id} notification to session {session_id}: {e}")
 
 
 def _run_pipeline(run_id: int) -> None:
@@ -206,6 +407,13 @@ def _run_pipeline(run_id: int) -> None:
     run = _load_run(run_id)
     if not run:
         return
+
+    log_path = _log_path(run_id)
+    # Clear any previous log for this run
+    try:
+        log_path.write_text("", encoding="utf-8")
+    except Exception:
+        pass
 
     skills = run.get("skills", [])
     task = run["task"]
@@ -230,6 +438,7 @@ def _run_pipeline(run_id: int) -> None:
                 run["status"] = "blocked"
                 run["blocked_reason"] = f"Stage file not found: {stage_name}"
                 _save_run(run)
+            _notify_requester_session(run)
             return
 
         raw_model = run.get("model") or stage_def.get("default_model", "")
@@ -237,30 +446,42 @@ def _run_pipeline(run_id: int) -> None:
 
         prompt = _build_initial_prompt(task, skills)
         stage_content = stage_def.get("content", "").strip()
-        system_prompt = f"You are executing a pipeline stage.\n\nStage: {stage_def['name']}\n\n{stage_content}"
+        system_prompt = f"You are executing a pipeline stage.\n\nStage: {stage_def['name']}\n\n{stage_content}{_STAGE_CONTRACT}"
+
+        # Write stage header to log
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*60}\n[Stage: {stage_name}]\n{'='*60}\n\n")
+        except Exception:
+            pass
 
         try:
-            output = _run_stage_sdk(prompt, system_prompt, model, timeout)
+            output = _run_stage_sdk(prompt, system_prompt, model, timeout, log_path=log_path, stage_name=stage_name)
         except Exception as exc:
             with _runs_lock:
                 run = _load_run(run_id) or run
                 run["status"] = "blocked"
                 run["blocked_reason"] = f"Stage '{stage_name}' error: {exc}"
                 _save_run(run)
+            _notify_requester_session(run)
             return
 
         signal = _detect_signal(output)
+        structured = _parse_result_block(output)
 
         with _runs_lock:
             run = _load_run(run_id) or run
             if run["status"] != "running":
                 return
             run.setdefault("stage_outputs", {})[stage_name] = output[-2000:].strip()
+            if structured:
+                run["structured_result"] = structured
             if signal and signal.startswith("BLOCKED"):
                 reason = signal[8:] if ":" in signal else "stage signaled BLOCKED"
                 run["status"] = "blocked"
                 run["blocked_reason"] = reason
                 _save_run(run)
+                _notify_requester_session(run)
                 return
             run["current_stage_index"] = idx + 1
             _save_run(run)
@@ -271,6 +492,7 @@ def _run_pipeline(run_id: int) -> None:
             run["status"] = "complete"
             run["completed_at"] = _now_iso()
             _save_run(run)
+    _notify_requester_session(run)
 
 
 def _get_model_env(model: str) -> dict:

@@ -12,8 +12,8 @@ import datetime
 from pathlib import Path
 
 LLOYD_HOME = Path(__file__).parent
-SOUL_PATH = LLOYD_HOME / "SOUL.md"
-MEMORIES_DIR = LLOYD_HOME / "memories"
+SOUL_PATH = Path.home() / "obsidian" / "lloyd" / "SOUL.md"
+MEMORIES_DIR = Path.home() / "obsidian" / "lloyd"
 SKILLS_DIRS = [
     Path.home() / "obsidian" / "skills",
     LLOYD_HOME / "skills",

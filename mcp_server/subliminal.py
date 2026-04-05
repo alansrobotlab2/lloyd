@@ -20,7 +20,7 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 
 LLOYD_HOME = Path.home() / "lloyd"
-SUBLIMINAL_PATH = LLOYD_HOME / "SOUL.md"
+SUBLIMINAL_PATH = Path.home() / "obsidian" / "lloyd" / "SOUL.md"
 
 _NOISE_WORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",

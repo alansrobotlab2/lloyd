@@ -29,7 +29,7 @@ from mcp.types import Tool, TextContent
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MEMORIES_ROOT = Path.home() / "lloyd" / "memories"
+MEMORIES_ROOT = Path.home() / "obsidian" / "lloyd"
 MEMORY_FILES = {"MEMORY.md", "USER.md"}
 
 _INJECTION_PATTERNS = [
