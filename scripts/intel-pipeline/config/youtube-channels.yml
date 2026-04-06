@@ -1,0 +1,218 @@
+# YouTube Channel Subscriptions for Intelligence Pipeline
+# RSS feed URL: https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}
+# Extracted from Alan's YouTube subscriptions 2026-03-23
+
+channels:
+  # AI / LLM / Agent
+  - handle: DaveShap
+    name: David Shapiro
+    channel_id: UCvKRFNawVcuz4b9ihUTApCg
+  - handle: NateBJones
+    name: AI News & Strategy Daily | Nate B Jones
+    channel_id: UC0C-17n9iuUQPylguM1d-lQ
+  - handle: AZisk
+    name: Alex Ziskind
+    channel_id: UCajiMK_CY9icRhLepS8_3ug
+  - handle: theAIsearch
+    name: AI Search
+    channel_id: UCIgnGlGkVRhd4qNFcEwLL4A
+  - handle: TheAiGrid
+    name: TheAIGRID
+    channel_id: UCbY9xX3_jW5c2fjlZVBI4cg
+  - handle: WesRoth
+    name: Wes Roth
+    channel_id: UCqcbQf6yw5KzRoDDcZ_wBSw
+  - handle: code4AI
+    name: code4AI
+    channel_id: UCfOvNb3xj28SNqPQ_JIbumg
+  - handle: jamesbriggs
+    name: James Briggs
+    channel_id: UCv83tO5cePwHMt1952IVVHw
+  - handle: MachineLearningStreetTalk
+    name: Machine Learning Street Talk
+    channel_id: UCMLtBahI5DMrt0NPvDSoIRQ
+  - handle: anthropic-ai
+    name: Anthropic
+    channel_id: UCrDwWp7EBBv4NwvScIpBDOA
+  - handle: airevolutionx
+    name: AI Revolution
+    channel_id: UC5l7RouTQ60oUjLjt1Nh-UQ
+  - handle: aiDotEngineer
+    name: AI Engineer
+    channel_id: UCLKPca3kwwd-B59HNr-_lvA
+  - handle: HeavyMetalLearning
+    name: Heavy Metal Learning
+    channel_id: UCge3wm7sYHXKRRqRsLySzkw
+
+  # Robotics
+  - handle: BostonDynamics
+    name: Boston Dynamics
+    channel_id: UC7vVhkEfw4nOGp8TyDk7RcQ
+  - handle: rai-inst
+    name: RAI Institute
+    channel_id: UCoDHD54yRJR8o4YQMz3G6wg
+  - handle: figureai
+    name: Figure AI
+    channel_id: UCYlq-KmwPjc1DtsGmthFqSQ
+  - handle: LimXDynamics
+    name: LimX Dynamics
+    channel_id: UCsEQoUjBn7QDk8vWWbRmJkQ
+  - handle: AheadForm
+    name: AheadForm
+    channel_id: UCNejxfQovjCZboAASPTf65A
+  - handle: ArticulatedRobotics
+    name: Articulated Robotics
+    channel_id: UCx9vSJTSZGFrErfPtut5GNQ
+  - handle: FaunaRobotics
+    name: Fauna Robotics
+    channel_id: UCLcYVpBD0O8NkQI-A8qAvfQ
+  - handle: sheenrobotics
+    name: Sheen Robotics
+    channel_id: UC4w9c62YARISDdsrfoEhZKg
+  - handle: westwoodrobotics
+    name: Westwood Robotics
+    channel_id: UCsRQA6mOmJdXjpii218aCeg
+  - handle: microbots_io
+    name: Microbots
+    channel_id: UCLZFgWn6LxmLAdzxh4R8Z7w
+  - handle: PaulGouldRobotics
+    name: Paul Gould Robotics
+    channel_id: UC_tBakbmdudCiTy3rP6Zp5A
+  - handle: PrimeBOT-SWQY
+    name: PrimeBOT
+    channel_id: UCESic8kSUBM4js6X98te12Q
+
+  # Humanoid / Robot Builds
+  - handle: WillCogley
+    name: Will Cogley
+    channel_id: UCkUD_8b1JoTL2ipOVtxfNKw
+  - handle: ALEXLAB
+    name: ALEX LAB
+    channel_id: UCEVelHmwuCqyje6YTAP2UIA
+  - handle: jamesbruton
+    name: James Bruton
+    channel_id: UCUbDcUPed50Y_7KmfCXKohA
+  - handle: Skyentific
+    name: Skyentific
+    channel_id: UCcgqJ1blFKqbC2bWGY4Opmg
+  - handle: hairygael
+    name: Hairy Gael (InMoov)
+    channel_id: UC474MrHL4fR-fXR1JUbMlPw
+  - handle: aaedmusa
+    name: aaedmusa
+    channel_id: UCX981hh-RI_L1QOwV08osNA
+  - handle: jimdinunzio
+    name: Jim DiNunzio
+    channel_id: UCwVtKMkv51A4G7efLuwZzxQ
+  - handle: taehyun-212
+    name: Taehyun
+    channel_id: UCluRkWJ3RobuEI59ejDcVxA
+  - handle: jakexie6057
+    name: Jake Xie
+    channel_id: UCR9wuv-z8-fZEOQcWrIjZVw
+  - handle: martintriendl4453
+    name: Martin Triendl
+    channel_id: UClIHBZNAdeVpHsAlYC1lJfg
+  - handle: matsonnerby
+    name: Mats Önnerby
+    channel_id: UC2MACEOri3LL-2lJNRWiluw
+  - handle: mattz6113
+    name: Matt Z
+    channel_id: UCjfp16AUvBHRCCZkfoOzOvg
+  - handle: bobhouston2755
+    name: Bob Houston
+    channel_id: UC_-qYC4JOgUpOkYupb1Da6g
+  - handle: LeviJanssen
+    name: Levi Janssen
+    channel_id: UCtKfv-cquuKDFje61-B6oeQ
+  - handle: my2be4me
+    name: my2be4me
+    channel_id: UCMn6fVB8HUM3U1-AyPQ5tTA
+  - handle: MarkusOrngren
+    name: Markus Örngren
+    channel_id: UCSTDC2d6Xdj6mjo2B3RB6uw
+
+  # 3D Printing
+  - handle: slant3d
+    name: Slant 3D
+    channel_id: UC6QNjBn6KMq5-pe3OE11zZg
+  - handle: Engineezy
+    name: Engineezy
+    channel_id: UCSksodwjNeOQ3Oywr1G4Nag
+  - handle: CNCKitchen
+    name: CNC Kitchen
+    channel_id: UCiczXOhGpvoQGhOL16EZiTg
+  - handle: deltahedra3D
+    name: Deltahedra 3D
+    channel_id: UC_C4cvvObxHSAX-mEGjtP2w
+  - handle: 3DPI67
+    name: 3DPI67
+    channel_id: UC_SwkOUxFPn5Bm2FyD56Bmw
+  - handle: deezmaker
+    name: Deezmaker
+    channel_id: UCphdPizgecGKYGyBUFKPKRQ
+  - handle: gameyybuilds
+    name: Gameyy Builds
+    channel_id: UCHEuA8AXgS_MN5B0pr3TaLg
+
+  # Tech / Engineering
+  - handle: CoreMemoryVideos
+    name: Core Memory
+    channel_id: UCzWnSedVeqUyze_R6M5BqwA
+  - handle: UndecidedTechnology
+    name: Undecided with Matt Ferrell
+    channel_id: UCjtUS7-SZTi6pXjUbzGHQCg
+  - handle: JerryRigEverything
+    name: JerryRigEverything
+    channel_id: UCWFKCr40YwOZQx8FHU_ZqqQ
+  - handle: PlaywithJunk
+    name: Play with Junk
+    channel_id: UCf98WFQLzORUfCinbycwXXQ
+  - handle: typecraft_dev
+    name: typecraft
+    channel_id: UCo71RUe6DX4w-Vd47rFLXPg
+  - handle: danielowentech
+    name: Daniel Owen Tech
+    channel_id: UC_ozUuauyPf1CgXztIWTOGA
+  - handle: kylecampbellweb
+    name: Kyle Campbell
+    channel_id: UCq3HiItVzO_ciszaiF5nnuw
+
+  # Construction / Heavy Equipment
+  - handle: Earthmovers_media
+    name: Earthmovers Media
+    channel_id: UCWXkLQOjyidqLVaB3qBrS7A
+  - handle: GWAStech
+    name: GWAS Tech
+    channel_id: UCaXmnaJZ7xxr2fklxs3E5Yg
+  - handle: buildwitt
+    name: BuildWitt
+    channel_id: UCKqKiBDpq9j29bXbBx0cfOw
+
+  # Entertainment / Other
+  - handle: Nerdist
+    name: Nerdist
+    channel_id: UCTAgbu2l6_rBKdbTvEodEDw
+  - handle: KazeN64
+    name: Kaze Emanuar
+    channel_id: UCuvSqzfO_LV_QzHdmEj84SQ
+  - handle: totaleclips
+    name: Total Eclips
+    channel_id: UCz5I2vnChu9BMdTkkr8FWgw
+  - handle: awesjosh
+    name: Awes Josh
+    channel_id: UCw-W0M0_jcu6OtyUmN0Gejw
+  - handle: BoWilderStories
+    name: Bo Wilder Stories
+    channel_id: UC7AmpcfPhHDODvRdu5gU0vw
+
+  # Finance / Investing
+  - handle: TickerSymbolYOU
+    name: Ticker Symbol YOU
+    channel_id: UC7kCeZ53sli_9XwuQeFxLqw
+  - handle: overthehorizon
+    name: Over the Horizon
+    channel_id: UCNA9ph14moX5Ywxk9Y1qEJA
+  - handle: envion-algoscore
+    name: Envion AlgoScore
+    channel_id: UCcyoXr73cdMEyg-w4oMksdw

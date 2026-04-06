@@ -38,7 +38,7 @@ def build_system_prompt(include_skills_index: bool = True) -> str:
     if include_skills_index:
         skills = _load_skills_index()
         if skills:
-            parts.append(f"<available_skills>\n{skills}\n</available_skills>")
+            parts.append(f"<available_skills>\n{skills}\n</available_skills>\nNote: relevant skill content is automatically injected into each user message as <context> when matched.")
 
     # Platform hints — NOTE: no timestamp here; a per-minute timestamp busts
     # vLLM's prefix cache, forcing full re-prefill of the system prompt every turn.

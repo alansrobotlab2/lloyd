@@ -1,0 +1,16 @@
+# GitHub Repositories for Intelligence Pipeline
+# Monitored for releases, commits, and issues
+
+repos:
+  - owner: NVIDIA
+    repo: Isaac-GR00T
+    track: [releases, commits, issues]
+  - owner: isaac-sim
+    repo: IsaacLab
+    track: [releases, commits, issues]
+  - owner: openclaw
+    repo: openclaw
+    track: [releases, commits, issues]
+  - owner: tobi
+    repo: qmd
+    track: [releases, commits, issues]

@@ -46,6 +46,7 @@ def _sdk_parse_patched(data):
 _sdk_client.parse_message = _sdk_parse_patched
 
 from prompt_builder import build_system_prompt
+from prefetch import prefetch_context
 import usage_store
 
 try:
@@ -335,6 +336,10 @@ async def post_message_stream(request: Request):
     system_prompt = build_system_prompt()
     t_prompt = time.perf_counter()
 
+    # Prefetch relevant skill/fact context and inject into user message
+    prefetched_text = prefetch_context(text)
+    t_prefetch = time.perf_counter()
+
     # Check if resuming an existing session
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     resume_id = None
@@ -379,6 +384,7 @@ async def post_message_stream(request: Request):
         t_query_start = time.perf_counter()
         logger.info(
             f"[TIMING] pre-query overhead: prompt={t_prompt - t0:.3f}s  "
+            f"prefetch={t_prefetch - t_prompt:.3f}s  "
             f"total={t_query_start - t0:.3f}s  resume={'yes' if resume_id else 'no'}"
         )
 
@@ -413,7 +419,7 @@ async def post_message_stream(request: Request):
 
         try:
             async for message in query(
-                prompt=text,
+                prompt=prefetched_text,
                 options=options,
             ):
                 if first_event:
@@ -695,6 +701,7 @@ async def post_message(request: Request):
         session_id = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
 
     system_prompt = build_system_prompt()
+    prefetched_text = prefetch_context(text)
 
     # Check for resume
     resume_id = None
@@ -730,7 +737,7 @@ async def post_message(request: Request):
     try:
         full_response = ""
         turn_stats: dict | None = None
-        async for message in query(prompt=text, options=options):
+        async for message in query(prompt=prefetched_text, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
