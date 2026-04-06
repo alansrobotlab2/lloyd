@@ -893,8 +893,8 @@ async def usage_windows():
     four_h = usage_store.summary(hours=4)
     seven_d = usage_store.summary(days=7)
     alloc = {
-        "4h": USAGE_ALLOCATIONS.get("4h", {}),
-        "7d": USAGE_ALLOCATIONS.get("7d", {}),
+        "4h": {"tokens": 0, "cost_usd": 0},
+        "7d": {"tokens": 0, "cost_usd": 0},
     }
     return JSONResponse({
         "four_hour": four_h,
@@ -955,8 +955,60 @@ def _get_anthropic_api_key() -> str | None:
         return None
     try:
         creds = json.loads(creds_path.read_text())
-        return creds.get("claudeAiOauth", {}).get("accessToken")
+        oauth = creds.get("claudeAiOauth", {})
+        # If token is expired, try to refresh it first
+        expires_at = oauth.get("expiresAt", 0)
+        if expires_at and time.time() * 1000 > expires_at - 60_000:  # 1min buffer
+            refreshed = _refresh_oauth_token(creds_path, creds)
+            if refreshed:
+                return refreshed
+        return oauth.get("accessToken")
     except Exception:
+        return None
+
+
+_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+
+
+def _refresh_oauth_token(creds_path: Path, creds: dict) -> str | None:
+    """Use the refresh token to get a new access token, update credentials file."""
+    import urllib.request
+    oauth = creds.get("claudeAiOauth", {})
+    refresh_token = oauth.get("refreshToken")
+    if not refresh_token:
+        return None
+    try:
+        payload = json.dumps({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": _OAUTH_CLIENT_ID,
+        }).encode()
+        req = urllib.request.Request(
+            _OAUTH_TOKEN_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        new_access = data.get("access_token")
+        new_refresh = data.get("refresh_token")
+        new_expires = data.get("expires_in")  # seconds
+        if not new_access:
+            return None
+        # Update credentials file
+        oauth["accessToken"] = new_access
+        if new_refresh:
+            oauth["refreshToken"] = new_refresh
+        if new_expires:
+            oauth["expiresAt"] = int((time.time() + new_expires) * 1000)
+        creds["claudeAiOauth"] = oauth
+        creds_path.write_text(json.dumps(creds))
+        logger.info("Refreshed OAuth access token successfully")
+        return new_access
+    except Exception as e:
+        logger.warning(f"OAuth token refresh failed: {e}")
         return None
 
 
@@ -980,12 +1032,12 @@ async def usage_ping():
     if not api_key:
         return JSONResponse({"error": "No Anthropic credentials found"}, status_code=401)
 
-    try:
+    async def _do_ping(key: str):
         client = _anthropic_sdk.Anthropic(
-            api_key=api_key,
-            base_url="https://api.anthropic.com",  # Never use local model URL for ping
+            api_key=key,
+            base_url="https://api.anthropic.com",
         )
-        resp = await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: client.messages.with_raw_response.create(
                 model="claude-3-haiku-20240307",
@@ -994,13 +1046,25 @@ async def usage_ping():
             ),
         )
 
+    try:
+        try:
+            resp = await _do_ping(api_key)
+        except _anthropic_sdk.AuthenticationError:
+            # Token rejected — force a refresh and retry once
+            logger.info("Ping got 401, attempting OAuth token refresh...")
+            creds_path = Path.home() / ".claude" / ".credentials.json"
+            creds = json.loads(creds_path.read_text())
+            new_key = _refresh_oauth_token(creds_path, creds)
+            if not new_key:
+                return JSONResponse({"error": "OAuth token expired and refresh failed"}, status_code=401)
+            api_key = new_key
+            resp = await _do_ping(api_key)
+
         # Extract rate-limit headers
         rl = {}
         for k, v in resp.headers.items():
             if "ratelimit" in k.lower():
-                # Strip prefix, convert to clean keys
                 key = k.replace("anthropic-ratelimit-unified-", "")
-                # Try to parse numeric values
                 try:
                     rl[key] = float(v) if "." in v else int(v)
                 except ValueError:
