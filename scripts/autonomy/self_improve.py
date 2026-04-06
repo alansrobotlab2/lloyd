@@ -48,9 +48,9 @@ LLM_API_KEY = os.environ.get("OPENCLAW_LOCAL_LLM_KEY", "dummy")
 
 # Workspace files for context
 WORKSPACE_FILES = [
-    os.path.expanduser("~/obsidian/agents/lloyd/SOUL.md"),
-    os.path.expanduser("~/obsidian/agents/lloyd/AGENTS.md"),
-    os.path.expanduser("~/obsidian/agents/lloyd/TOOLS.md"),
+    os.path.expanduser("~/obsidian/lloyd/SOUL.md"),
+    os.path.expanduser("~/obsidian/lloyd/MEMORY.md"),
+    os.path.expanduser("~/obsidian/lloyd/USER.md"),
     os.path.expanduser("~/obsidian/memory/corrections.md"),
 ]
 
@@ -570,10 +570,15 @@ If no improvement is needed, return: {{"reason": "no improvement needed"}}
             required = ["file", "original_text", "replacement_text", "hypothesis", "target_metric"]
             if all(k in data for k in required):
                 # Normalize file path
-                if data["file"].startswith("agents/lloyd/"):
+                if data["file"].startswith("lloyd/"):
                     data["file"] = os.path.expanduser(f"~/obsidian/{data['file']}")
+                elif data["file"].startswith("agents/lloyd/"):
+                    # Remap legacy agents/lloyd/ paths to lloyd/
+                    data["file"] = os.path.expanduser(f"~/obsidian/lloyd/{data['file'][len('agents/lloyd/'):]}")
+                elif data["file"].startswith("~/"):
+                    data["file"] = os.path.expanduser(data["file"])
                 elif not data["file"].startswith("/"):
-                    data["file"] = os.path.expanduser(f"~/obsidian/agents/lloyd/{data['file']}")
+                    data["file"] = os.path.expanduser(f"~/obsidian/lloyd/{data['file']}")
                 
                 # Verify original_text actually exists in the file on disk
                 if os.path.exists(data["file"]):
@@ -904,7 +909,9 @@ Reply ONLY "A" or "B". /no_think"""
             else:
                 logger.info("Change committed to current branch (skip_branch=True)")
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to commit/merge: {e}")
+            stdout = e.stdout.decode(errors="replace").strip() if e.stdout else ""
+            stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
+            logger.error(f"Failed to commit/merge: {e}\n  stdout: {stdout}\n  stderr: {stderr}")
             if not skip_branch:
                 # Try to recover
                 subprocess.run(
