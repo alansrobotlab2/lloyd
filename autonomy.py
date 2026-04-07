@@ -336,6 +336,23 @@ def _get_model_env(model_name: str) -> dict:
     return {}
 
 
+# Autonomy tasks are background work — route them through the priority proxy
+# so interactive sessions preempt them in vLLM's scheduler.
+_BG_URL_MAP = {
+    "http://127.0.0.1:8096": "http://127.0.0.1:8097",  # 122B → proxy
+    "http://127.0.0.1:8091": "http://127.0.0.1:8093",  # 35B → proxy
+}
+
+
+def _to_bg_url(env: dict) -> dict:
+    """Rewrite local vLLM URLs to use the priority-injecting proxy."""
+    base_url = env.get("ANTHROPIC_BASE_URL", "")
+    if base_url in _BG_URL_MAP:
+        env = dict(env)
+        env["ANTHROPIC_BASE_URL"] = _BG_URL_MAP[base_url]
+    return env
+
+
 def run_task(task_id) -> dict:
     """Execute a single autonomy task via Claude Agent SDK."""
     global _current_task_id
@@ -368,7 +385,7 @@ def run_task(task_id) -> dict:
         except Exception:
             pass
 
-    model_env = _get_model_env(task_model)
+    model_env = _to_bg_url(_get_model_env(task_model))
     timeout = int(task.get("timeout_seconds") or 1800)
 
     now = datetime.datetime.now(datetime.timezone.utc)

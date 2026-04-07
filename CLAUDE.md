@@ -12,12 +12,12 @@ Lloyd is a clean-slate AI agent built on the **Claude Agent SDK** (`claude-code-
 
 ## Service Management
 
-Lloyd runs under **supervisord inside the `lloyd` distrobox container**. To restart services:
+Lloyd runs under **supervisord inside the `lloyd` distrobox container**. We are already inside the container — use supervisorctl directly:
 
 ```bash
-distrobox enter lloyd -- supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-backend
-distrobox enter lloyd -- supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-frontend
-distrobox enter lloyd -- supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf status
+/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-backend
+/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-frontend
+/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf status
 ```
 
 The process group is `lloyd-mc`, not `lloyd-backend` bare. Always use `lloyd-mc:lloyd-backend` and `lloyd-mc:lloyd-frontend`.
