@@ -33,7 +33,7 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 # Constants
-SESSIONS_DIR = os.path.expanduser("~/.hermes/sessions/")
+SESSIONS_DIR = os.path.expanduser("~/lloyd/sessions/")
 CORRECTIONS_FILE = os.path.expanduser("~/obsidian/memory/corrections.md")
 METRICS_DIR = os.path.expanduser("~/lloyd/_pipeline/metrics/")
 QUALITY_SCORE_FILE = os.path.join(METRICS_DIR, "quality-score.jsonl")
@@ -44,7 +44,7 @@ PENDING_IMPROVEMENTS_FILE = os.path.expanduser("~/lloyd/_pipeline/metrics/pendin
 # Local LLM config
 LLM_ENDPOINT = "http://127.0.0.1:8096/v1/chat/completions"
 LLM_MODEL = "Qwen3.5-122B-A10B"
-LLM_API_KEY = os.environ.get("OPENCLAW_LOCAL_LLM_KEY", "dummy")
+LLM_API_KEY = os.environ.get("LOCAL_LLM_KEY", "dummy")
 
 # Workspace files for context
 WORKSPACE_FILES = [
@@ -153,9 +153,8 @@ def get_recent_sessions(days: int = 7) -> list[str]:
     cutoff_date = (datetime.now() - timedelta(days=days)).date()
     sessions = []
 
-    # Support both .json (Hermes) and .jsonl (legacy) formats
     session_dir = Path(SESSIONS_DIR)
-    for f in list(session_dir.glob("session_*.json")) + list(session_dir.glob("*.jsonl")):
+    for f in list(session_dir.glob("*.json")) + list(session_dir.glob("*.jsonl")):
         session_date = get_session_date(str(f))
         if session_date:
             try:
@@ -176,7 +175,7 @@ def get_sessions_for_date(date_str: str) -> list[str]:
 
     sessions = []
     session_dir = Path(SESSIONS_DIR)
-    for f in list(session_dir.glob("session_*.json")) + list(session_dir.glob("*.jsonl")):
+    for f in list(session_dir.glob("*.json")) + list(session_dir.glob("*.jsonl")):
         session_date = get_session_date(str(f))
         if session_date == date_str:
             sessions.append(str(f))
