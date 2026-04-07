@@ -131,10 +131,11 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker") -> list[dict]
         if not re.match(r'^\d{4}-\d{2}-\d{2}\.jsonl$', jsonl_file.name):
             continue
         
-        # Check date filter
+        # Check date filter — compare by date only so that e.g. 2026-04-06.jsonl
+        # is included when --days 1 is used at any time on 2026-04-07.
         try:
-            file_date = datetime.strptime(jsonl_file.stem, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            if file_date < cutoff:
+            file_date = datetime.strptime(jsonl_file.stem, "%Y-%m-%d").date()
+            if file_date < cutoff.date():
                 continue
         except ValueError:
             continue
