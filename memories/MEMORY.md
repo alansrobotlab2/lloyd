@@ -1,1 +1,0 @@
-System prompt files for Lloyd live at ~/obsidian/lloyd/ — contains SOUL.md, MEMORY.md, USER.md, and stages/ directory with pipeline stage prompts (plan.md, implement.md, review.md, test.md, research.md, audit.md).

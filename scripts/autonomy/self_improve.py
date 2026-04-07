@@ -575,6 +575,9 @@ If no improvement is needed, return: {{"reason": "no improvement needed"}}
                 elif data["file"].startswith("agents/lloyd/"):
                     # Remap legacy agents/lloyd/ paths to lloyd/
                     data["file"] = os.path.expanduser(f"~/obsidian/lloyd/{data['file'][len('agents/lloyd/'):]}")
+                elif data["file"].startswith("home/"):
+                    # LLM returned absolute path without leading slash
+                    data["file"] = "/" + data["file"]
                 elif data["file"].startswith("~/"):
                     data["file"] = os.path.expanduser(data["file"])
                 elif not data["file"].startswith("/"):

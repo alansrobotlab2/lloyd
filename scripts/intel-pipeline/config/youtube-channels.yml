@@ -86,9 +86,6 @@ channels:
   - handle: WillCogley
     name: Will Cogley
     channel_id: UCkUD_8b1JoTL2ipOVtxfNKw
-  - handle: ALEXLAB
-    name: ALEX LAB
-    channel_id: UCEVelHmwuCqyje6YTAP2UIA
   - handle: jamesbruton
     name: James Bruton
     channel_id: UCUbDcUPed50Y_7KmfCXKohA
@@ -110,9 +107,6 @@ channels:
   - handle: jakexie6057
     name: Jake Xie
     channel_id: UCR9wuv-z8-fZEOQcWrIjZVw
-  - handle: martintriendl4453
-    name: Martin Triendl
-    channel_id: UClIHBZNAdeVpHsAlYC1lJfg
   - handle: matsonnerby
     name: Mats Önnerby
     channel_id: UC2MACEOri3LL-2lJNRWiluw
