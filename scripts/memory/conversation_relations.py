@@ -36,7 +36,6 @@ TRAJECTORY_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
 PROPOSALS_FILE = Path.home() / "lloyd" / "_pipeline" / "conversation-relation-proposals.json"
 RELATIONS_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
 LLOYD_SESSIONS = Path.home() / "lloyd" / "sessions"
-HERMES_SESSIONS = Path.home() / ".hermes" / "sessions"
 
 LLM_ENDPOINT = "http://127.0.0.1:8096/v1/chat/completions"
 LLM_MODEL = "Qwen3.5-122B-A10B"
@@ -325,22 +324,14 @@ Respond ONLY with a JSON object, no other text:
 
 
 def find_session_file(session_key: str) -> Optional[Path]:
-    """Resolve session_key to raw session JSON path."""
-    # Lloyd sessions: YYYYMMDD_HHMMSS_XXXXXX.json
+    """Resolve session_key to raw session JSON path.
+
+    Lloyd sessions: YYYYMMDD_HHMMSS_XXXXXX.json
+    Autonomy sessions: autonomy_NN_YYYYMMDD.json
+    """
     candidate = LLOYD_SESSIONS / f"{session_key}.json"
     if candidate.exists():
         return candidate
-
-    # Hermes sessions: session_YYYYMMDD_HHMMSS_XXXXXX.json
-    # Trajectory keys omit the "session_" prefix
-    if HERMES_SESSIONS.exists():
-        candidate = HERMES_SESSIONS / f"session_{session_key}.json"
-        if candidate.exists():
-            return candidate
-        # Autonomy sessions: autonomy_NN_YYYYMMDD_HHMMSS.json
-        candidate = HERMES_SESSIONS / f"{session_key}.json"
-        if candidate.exists():
-            return candidate
 
     return None
 

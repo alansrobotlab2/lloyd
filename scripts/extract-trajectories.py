@@ -2,7 +2,10 @@
 """
 extract-trajectories.py — Parse session files into structured trajectory logs.
 
-Reads Hermes session JSON files from ~/.hermes/sessions/session_*.json
+Reads Lloyd session JSON files from ~/lloyd/sessions/*.json
+
+Use --agent worker to process only autonomy sessions (autonomy_*.json)
+Use --agent main  to process only interactive sessions (non-autonomy *.json)
 
 Output: ~/lloyd/_pipeline/trajectories/YYYY-MM-DD.jsonl
 State:  ~/lloyd/_pipeline/trajectories/.watermark.json
@@ -19,7 +22,6 @@ from pathlib import Path
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-HERMES_SESSIONS = Path.home() / ".hermes" / "sessions"
 LLOYD_SESSIONS = Path.home() / "lloyd" / "sessions"
 OUTPUT_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
 WATERMARK_PATH = OUTPUT_DIR / ".watermark.json"
@@ -150,7 +152,7 @@ SIGNAL_RE = re.compile(r"SIGNAL:([A-Z_]+)")
 
 # ── Session parsing ──────────────────────────────────────────────────────────
 
-def parse_hermes_session(path: Path) -> dict | None:
+def parse_session(path: Path) -> dict | None:
     """
     Parse a single Hermes session JSON file.
 
@@ -171,10 +173,7 @@ def parse_hermes_session(path: Path) -> dict | None:
     messages = data.get("messages", [])
 
     # Detect agent_id from source path
-    if path.parent == LLOYD_SESSIONS:
-        agent_id = "autonomy" if path.stem.startswith("autonomy_") else "lloyd"
-    else:
-        agent_id = "hermes"
+    agent_id = "autonomy" if path.stem.startswith("autonomy_") else "lloyd"
 
     # Build call_id → tool_call map from assistant messages
     call_map: dict[str, dict] = {}
@@ -189,7 +188,7 @@ def parse_hermes_session(path: Path) -> dict | None:
             call_id = tc.get("id") or tc.get("call_id", "")
             if not call_id:
                 continue
-            # Normalize to OpenClaw-like structure for shared processing
+            # Normalize to shared structure
             raw_args = func.get("arguments", "{}")
             if isinstance(raw_args, str):
                 try:
@@ -326,14 +325,25 @@ def save_watermark(state: dict) -> None:
 # ── Session discovery ─────────────────────────────────────────────────────────
 
 def discover_sessions(agent_filter: str | None = None) -> list[Path]:
-    """Return sorted list of session JSON paths (hermes + lloyd)."""
+    """Return sorted list of session JSON paths from ~/lloyd/sessions/.
+
+    agent_filter:
+      'worker' / 'autonomy' → only autonomy_*.json files
+      'main'   / 'lloyd'    → only non-autonomy *.json files
+      None                  → all sessions
+    """
     paths: list[Path] = []
-    if HERMES_SESSIONS.exists():
-        for p in HERMES_SESSIONS.glob("session_*.json"):
-            paths.append(p)
     if LLOYD_SESSIONS.exists():
         for p in LLOYD_SESSIONS.glob("*.json"):
-            paths.append(p)
+            is_autonomy = p.stem.startswith("autonomy_")
+            if agent_filter in ("worker", "autonomy"):
+                if is_autonomy:
+                    paths.append(p)
+            elif agent_filter in ("main", "lloyd"):
+                if not is_autonomy:
+                    paths.append(p)
+            else:
+                paths.append(p)
     return sorted(paths, key=lambda p: p.stat().st_mtime)
 
 
@@ -493,7 +503,7 @@ def print_stats() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract trajectory logs from OpenClaw session JSONL files."
+        description="Extract trajectory logs from Lloyd session JSON files."
     )
     parser.add_argument(
         "--full", action="store_true",
@@ -551,7 +561,7 @@ def main() -> None:
 
     for path in sessions_to_process:
         try:
-            traj = parse_hermes_session(path)
+            traj = parse_session(path)
             if traj is None:
                 skipped += 1
                 continue

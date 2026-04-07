@@ -384,6 +384,10 @@ def run_task(task_id) -> dict:
             task_model = cfg.get("model", {}).get("default", "")
         except Exception:
             pass
+    # Ensure we have a valid model - fallback to empty string if nothing found
+    # (the SDK will use its own default if model is empty)
+    if not task_model:
+        task_model = ""
 
     model_env = _to_bg_url(_get_model_env(task_model))
     timeout = int(task.get("timeout_seconds") or 1800)
