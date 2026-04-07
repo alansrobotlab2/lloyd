@@ -77,7 +77,8 @@ def _search_facts(query: str) -> list[str]:
 
 # ── Context block formatting ──────────────────────────────────────────────────
 
-def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str]) -> str:
+def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
+                    had_query: bool = True) -> str:
     parts = []
 
     # First skill: full body
@@ -98,6 +99,15 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str]) -> 
 
     if fact_lines:
         parts.append("<facts>\n" + "\n".join(fact_lines) + "\n</facts>")
+
+    # No skill matched but the message was long enough to warrant a search —
+    # nudge the agent to consider an explicit skills_search call.
+    if not skills and had_query:
+        parts.append(
+            "<skill-hint>No skills matched automatically. "
+            "If this task involves a repeatable workflow, consider calling "
+            "skills_search to check for applicable skills.</skill-hint>"
+        )
 
     if not parts:
         return ""
@@ -134,7 +144,7 @@ def prefetch_context(text: str) -> str:
             except Exception:
                 pass  # Prefetch failures are non-fatal
 
-    context = _format_context(skills_result, facts_result)
+    context = _format_context(skills_result, facts_result, had_query=True)
     if not context:
         return text
 

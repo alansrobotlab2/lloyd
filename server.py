@@ -2520,6 +2520,9 @@ async def toggle_tool(request: Request):
     with open(config_path, "w") as f:
         yaml.dump(CONFIG, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
+    # Clear the tools cache so next /api/tools call re-reads the updated config
+    _tools_cache.clear()
+
     return JSONResponse({"success": True})
 
 

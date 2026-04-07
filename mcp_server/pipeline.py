@@ -496,22 +496,28 @@ def _run_pipeline(run_id: int) -> None:
 
 
 def _get_model_env(model: str) -> dict:
-    """Get environment variables for a model."""
+    """Get environment variables for a model.
+
+    Pipeline stages are always background work, so local models are routed
+    through the priority proxy (ports 8097/8092) instead of the direct vLLM
+    endpoints (8096/8091).  The proxy injects priority=1 into every request so
+    interactive sessions (priority 0) preempt pipeline calls in vLLM's scheduler.
+    """
     if model in ("Qwen3.5-122B-A10B", "122b"):
         return {
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8096",
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8097",  # priority proxy
             "ANTHROPIC_API_KEY": "no-key-required",
             "ANTHROPIC_CUSTOM_MODEL_OPTION": "Qwen3.5-122B-A10B",
             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Qwen 122B",
         }
     elif model in ("Qwen3.5-35B-A3B", "35b"):
         return {
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8091",
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8093",  # priority proxy
             "ANTHROPIC_API_KEY": "no-key-required",
             "ANTHROPIC_CUSTOM_MODEL_OPTION": "Qwen3.5-35B-A3B",
             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Qwen 35B",
         }
-    # Claude models use default ANTHROPIC env
+    # Claude/Anthropic models — no env override needed
     return {}
 
 
