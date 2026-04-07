@@ -5,17 +5,22 @@ __pycache__/
 *.pyc
 
 # Node
-web/node_modules/
-web/dist/
+/web/node_modules/
+/web/dist/
 
 # Logs
-logs/
+/logs/
 
 # Sessions (runtime state)
-sessions/
+/sessions/
 
 # Pipeline runs (runtime state)
-pipeline-runs/
+/pipeline-runs/
+
+/autonomy-runs/
+
+/_pipeline/
+
 
 # Environment
 .env

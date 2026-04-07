@@ -108,3 +108,11 @@ def keyword_score(text: str, profile: dict) -> float:
 def get_interest_profile() -> dict:
     """Get the full interest profile."""
     return load_profile()
+
+
+def get_all_projects(profile: dict) -> List[str]:
+    """Get all projects from the profile."""
+    projects = []
+    for topic in profile.get("topics", []):
+        projects.extend(topic.get("projects", []))
+    return projects

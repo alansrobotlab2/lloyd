@@ -148,9 +148,20 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker") -> list[dict]
                     try:
                         traj = json.loads(line)
                         # Apply agent filter
+                        # agent_id values from extract-trajectories.py:
+                        #   "autonomy" → worker/autonomy sessions
+                        #   "lloyd"    → interactive/main sessions
                         if agent_filter != "all":
-                            if traj.get("agent_id") != agent_filter:
-                                continue
+                            aid = traj.get("agent_id", "")
+                            if agent_filter in ("worker", "autonomy"):
+                                if aid not in ("worker", "autonomy"):
+                                    continue
+                            elif agent_filter in ("main", "lloyd"):
+                                if aid not in ("main", "lloyd"):
+                                    continue
+                            else:
+                                if aid != agent_filter:
+                                    continue
                         trajectories.append(traj)
                     except json.JSONDecodeError:
                         # Skip malformed lines

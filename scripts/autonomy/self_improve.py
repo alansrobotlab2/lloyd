@@ -104,10 +104,11 @@ def get_session_date(session_file: str) -> str | None:
         timestamps = []
 
         if session_file.endswith('.json'):
-            # New Hermes format: single JSON object with messages array
+            # Lloyd format: single JSON object with messages array
             try:
                 data = json.loads(content)
-                # Check top-level timestamps (Hermes uses session_start, last_updated)
+                # Check top-level timestamps
+
                 for key in ('last_updated', 'session_start', 'created_at', 'started_at', 'timestamp'):
                     ts = data.get(key)
                     if ts and isinstance(ts, str) and 'T' in ts:
