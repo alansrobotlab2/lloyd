@@ -612,6 +612,9 @@ async def post_message_stream(request: Request):
                         _append_messages(session_id, tail)
                     final_persisted = True
 
+                    # Fire background post-session capture (35b summary → daily note)
+                    asyncio.ensure_future(_post_session_capture(session_id))
+
                     yield f"event: done\ndata: {json.dumps({'response': result_text, 'session_id': session_id, 'stats': stats_dict})}\n\n"
 
         except Exception as e:
@@ -2737,6 +2740,169 @@ async def abort_pipeline(run_id: int):
         "killed_pids": killed_pids,
         "message": f"Aborted. Killed {len(killed_pids)} subprocess(es).",
     })
+
+
+# ── Post-session capture ─────────────────────────────────────────────────────
+# After a session completes, fire a background task that calls the 35b model
+# (separate GPU, port 8091) to extract a summary and append it to today's daily
+# note.  This closes the latency gap between conversation events and their
+# availability in the memory store.  Facts are NOT written here — inline
+# fact_add during conversation (Phase 1) and nightly 122B extraction handle
+# structured facts.
+
+_POST_CAPTURE_MODEL_URL = "http://127.0.0.1:8091/v1/chat/completions"
+_POST_CAPTURE_MODEL_NAME = "Qwen3.5-35B-A3B"
+
+
+def _build_capture_transcript(messages: list, max_chars: int = 4000) -> str:
+    """Extract user/assistant text from messages, truncate to max_chars."""
+    lines: list[str] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        if role not in ("user", "assistant"):
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            text_parts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            text = "\n".join(t for t in text_parts if t)
+        elif isinstance(content, str):
+            text = content
+        else:
+            continue
+        if not text.strip():
+            continue
+        # Skip injected system context
+        stripped = text.strip()
+        if any(stripped.startswith(p) for p in (
+            "<daily_notes>", "<memory>", "<context>", "<system-reminder>",
+            "[cron:", "[System Message]", "[autonomy:",
+        )):
+            continue
+        label = "USER" if role == "user" else "ASSISTANT"
+        lines.append(f"{label}: {text[:600]}")
+
+    result = "\n".join(lines)
+    if len(result) > max_chars:
+        half = max_chars // 2
+        result = result[:half] + "\n[...truncated...]\n" + result[-half:]
+    return result
+
+
+def _sync_35b_capture_call(transcript: str) -> Optional[str]:
+    """Call 35b model synchronously for post-session summary extraction."""
+    import urllib.request as _urllib_request
+
+    prompt = (
+        "Analyze this conversation transcript and produce a concise summary "
+        "(2-4 sentences) of what was discussed, decided, or accomplished. "
+        "Focus on outcomes: decisions made, problems solved, preferences expressed, "
+        "system changes, and action items. If the conversation is trivial "
+        "(greetings, small talk, no substantive content), return exactly: TRIVIAL\n\n"
+        f"Transcript:\n{transcript}"
+    )
+
+    payload = {
+        "model": _POST_CAPTURE_MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "You are a concise conversation summarizer. Return only the summary text, no JSON or formatting."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 500,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    try:
+        req = _urllib_request.Request(
+            _POST_CAPTURE_MODEL_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urllib_request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.warning(f"35b capture call failed: {e}")
+        return None
+
+
+def _append_daily_note(session_id: str, summary: str):
+    """Append session summary to today's daily note (PST)."""
+    from zoneinfo import ZoneInfo
+
+    pst = ZoneInfo("America/Los_Angeles")
+    today = datetime.now(pst).strftime("%Y-%m-%d")
+    now_time = datetime.now(pst).strftime("%H:%M")
+    daily_path = Path.home() / "obsidian" / "memory" / f"{today}.md"
+
+    entry = f"\n---\n\n### Session {now_time} PDT — Auto-captured\n\n{summary}\n"
+
+    if not daily_path.exists():
+        daily_path.write_text(
+            f"---\nsegment: agents\n---\n\n# {today} Daily Notes\n\n## Sessions\n{entry}"
+        )
+    else:
+        with open(daily_path, "a") as f:
+            f.write(entry)
+
+
+async def _post_session_capture(session_id: str):
+    """Background task: extract summary from completed session via 35b model."""
+    try:
+        meta_path = SESSIONS_DIR / f"{session_id}.json"
+        if not meta_path.exists():
+            return
+
+        data = json.loads(meta_path.read_text())
+
+        # Skip autonomy sessions
+        if data.get("platform") == "autonomy":
+            return
+        # Skip already-captured sessions
+        if data.get("captured"):
+            return
+
+        # Need at least one user message with real content
+        user_msgs = [
+            m for m in data.get("messages", [])
+            if m.get("role") == "user"
+        ]
+        if not user_msgs:
+            return
+
+        # Build transcript
+        transcript = _build_capture_transcript(data.get("messages", []))
+        if len(transcript.strip()) < 50:
+            return
+
+        # Call 35b model (runs on separate GPU — non-blocking for main model)
+        summary = await asyncio.get_event_loop().run_in_executor(
+            None, _sync_35b_capture_call, transcript
+        )
+
+        if not summary or summary.strip().upper() == "TRIVIAL":
+            logger.info(f"Post-session capture: {session_id} — trivial, skipped")
+            # Still mark as captured so periodic capture can skip it
+            data["captured"] = True
+            meta_path.write_text(json.dumps(data, indent=2))
+            return
+
+        # Append to daily note
+        _append_daily_note(session_id, summary)
+
+        # Mark session as captured
+        data["captured"] = True
+        meta_path.write_text(json.dumps(data, indent=2))
+
+        logger.info(f"Post-session capture: {session_id} — summary written to daily note")
+
+    except Exception as e:
+        logger.warning(f"Post-session capture failed for {session_id}: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
