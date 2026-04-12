@@ -210,18 +210,13 @@ def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
     dep_id = task.get("depends_on")
     if not dep_id or str(dep_id).strip().lower() in ("null", "none", ""):
         return True
-    try:
-        dep_id = int(dep_id)
-    except (TypeError, ValueError):
-        return True
+    # Normalize to string for comparison so alphanumeric IDs work too
+    dep_id = str(dep_id).strip()
     dep_task = None
     for t in all_tasks:
-        try:
-            if int(t.get("id", 0)) == dep_id:
-                dep_task = t
-                break
-        except (TypeError, ValueError):
-            continue
+        if str(t.get("id", "")).strip() == dep_id:
+            dep_task = t
+            break
     if not dep_task:
         return True
     dep_last_run = _parse_iso(dep_task.get("last_run"))
@@ -525,7 +520,7 @@ def autonomy_tick() -> dict:
         task = due[0]
         task_id = task.get("id")
         logger.info("Tick: running task #%s (%s) — %d due total", task_id, task.get("name"), len(due))
-        result = run_task(int(task_id))
+        result = run_task(task_id)
         result["tasks_due"] = len(due)
         return result
 
