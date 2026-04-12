@@ -446,12 +446,14 @@ def _handle_run(params: dict) -> str:
         return json.dumps({"error": "id is required"})
     # Delegate to autonomy.py scheduler (imported at runtime)
     try:
-        sys.path.insert(0, str(Path.home() / "lloyd"))
+        lloyd_home = Path.home() / "lloyd"
+        if str(lloyd_home) not in sys.path:
+            sys.path.insert(0, str(lloyd_home))
         from autonomy import run_task
         result = run_task(task_id)
         return json.dumps(result)
-    except ImportError:
-        return json.dumps({"error": "autonomy scheduler module not available"})
+    except ImportError as e:
+        return json.dumps({"error": f"autonomy scheduler module not available: {e}"})
     except Exception as exc:
         return json.dumps({"error": str(exc), "task_id": task_id})
 
