@@ -2,7 +2,7 @@
 """
 Lloyd unified MCP server — all 51 tools in one Server("lloyd") over SSE.
 
-Run with:  python -m mcp_server.main  (from ~/lloyd directory)
+Run with:  python -m agent_mcp.main  (from ~/lloyd directory)
 Endpoint:  http://127.0.0.1:8500/sse
 """
 
@@ -17,7 +17,7 @@ from starlette.applications import Starlette
 from starlette.responses import Response
 from starlette.routing import Mount, Route
 
-from mcp_server import (
+from agent_mcp import (
     autonomy,
     backlog,
     browser,

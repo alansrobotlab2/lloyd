@@ -1338,7 +1338,7 @@ async def autonomy_task_write(request: Request):
         for key in ("name", "description", "status", "priority", "frequency", "skill_path",
                      "agent_id", "model", "scheduled_at", "pipeline", "auto_advance",
                      "preemptible", "pipeline_mode", "notify_on_complete", "timeout_seconds",
-                     "max_retries", "depends_on", "preferred_hours", "cron_id"):
+                     "max_retries", "depends_on", "preferred_hours", "cron_id", "runs_per_day"):
             if key in data:
                 task[key] = data[key]
         if "tags" in data:

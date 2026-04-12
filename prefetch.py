@@ -9,16 +9,11 @@ skill content and facts without needing to call skills_search first.
 Called by server.py before every query() invocation.
 """
 
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 
-# Add mcp_server to path so we can import helpers directly
-sys.path.insert(0, str(Path(__file__).parent / "mcp_server"))
-
-from skills import _iter_skills, _score_skill, _tokenize  # noqa: E402
-from memory import _extract_entities_from_query, _get_facts_sync  # noqa: E402
+from agent_mcp.skills import _iter_skills, _score_skill, _tokenize
+from agent_mcp.memory import _extract_entities_from_query, _get_facts_sync
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
 
