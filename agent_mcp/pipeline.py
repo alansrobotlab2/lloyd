@@ -38,6 +38,7 @@ DEFAULT_STAGE_TIMEOUT = 1800
 MODEL_ALIASES: dict[str, str] = {
     "122b": "Qwen3.5-122B-A10B",
     "35b": "Qwen3.5-35B-A3B",
+    "m2.7": "MiniMax-M2.7",
     "opus": "claude-opus-4-6",
     "sonnet": "claude-sonnet-4-6",
 }
@@ -271,9 +272,24 @@ def _run_stage_sdk(
                 pass
 
     async def _inner():
+        from claude_code_sdk._errors import MessageParseError
         result_text = ""
         current_tool: Optional[str] = None
-        async for msg in query(prompt=prompt, options=options):
+
+        # The SDK's query() generator can raise MessageParseError on unknown
+        # message types (e.g. rate_limit_event). We need to catch these per-message
+        # rather than letting them kill the entire stage. Since async generators
+        # don't support try/except around individual yields, we wrap the iteration.
+        stream = query(prompt=prompt, options=options).__aiter__()
+        while True:
+            try:
+                msg = await stream.__anext__()
+            except StopAsyncIteration:
+                break
+            except MessageParseError as e:
+                _log(f"\n[sdk: skipped unknown message: {e}]\n")
+                continue
+
             from claude_code_sdk.types import StreamEvent
             if isinstance(msg, StreamEvent):
                 evt = msg.event
@@ -286,7 +302,11 @@ def _run_stage_sdk(
                             _log(chunk)
             elif isinstance(msg, AssistantMessage):
                 for block in msg.content:
-                    if isinstance(block, ToolUseBlock):
+                    if isinstance(block, TextBlock):
+                        if block.text:
+                            result_text += block.text
+                            _log(block.text)
+                    elif isinstance(block, ToolUseBlock):
                         current_tool = block.name
                         args_preview = str(block.input)[:120].replace("\n", " ")
                         _log(f"\n[tool: {block.name}] {args_preview}\n")
@@ -445,6 +465,17 @@ def _run_pipeline(run_id: int) -> None:
         model = _resolve_model(raw_model) if raw_model else ""
 
         prompt = _build_initial_prompt(task, skills)
+
+        # Inject previous stage outputs so downstream stages have context
+        prev_outputs = run.get("stage_outputs", {})
+        if prev_outputs:
+            prev_parts = []
+            for prev_stage in stages[:idx]:
+                if prev_stage in prev_outputs:
+                    prev_parts.append(f"### {prev_stage} stage output\n{prev_outputs[prev_stage]}")
+            if prev_parts:
+                prompt += "\n\n## Previous Stage Outputs\n\n" + "\n\n---\n\n".join(prev_parts)
+
         stage_content = stage_def.get("content", "").strip()
         system_prompt = f"You are executing a pipeline stage.\n\nStage: {stage_def['name']}\n\n{stage_content}{_STAGE_CONTRACT}"
 
@@ -484,6 +515,8 @@ def _run_pipeline(run_id: int) -> None:
                 _notify_requester_session(run)
                 return
             run["current_stage_index"] = idx + 1
+            if idx + 1 < len(stages):
+                run["current_stage"] = stages[idx + 1]
             _save_run(run)
 
     with _runs_lock:

@@ -109,7 +109,7 @@ function TaskModal({
       onClick={handleBackdropClick}
       className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
     >
-      <div className="bg-surface-1 rounded-xl border border-surface-3/50 w-full max-w-lg max-h-[80vh] flex flex-col shadow-2xl">
+      <div className="bg-surface-1 rounded-xl border border-surface-3/50 w-[90vw] h-[90vh] flex flex-col shadow-2xl">
         {/* Header */}
         <div className="flex items-center gap-3 px-5 py-4 border-b border-surface-3/50">
           {isCreate ? (
@@ -133,9 +133,9 @@ function TaskModal({
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        <div className="flex-1 flex flex-col overflow-y-auto px-5 py-4">
           {/* Name */}
-          <div>
+          <div className="mb-4">
             <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
               Title
             </label>
@@ -150,18 +150,20 @@ function TaskModal({
           </div>
 
           {/* Description */}
-          <div>
+          <div className="flex-1 min-h-0 flex flex-col">
             <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
               Description
             </label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              rows={4}
-              className="w-full bg-surface-2 text-sm text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50 resize-none"
+              className="w-full flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50 resize-none"
             />
           </div>
+        </div>
 
+        {/* Additional fields section */}
+        <div className="px-5 py-3 border-t border-surface-3/50 space-y-3">
           {/* Status + Priority row */}
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -213,7 +215,7 @@ function TaskModal({
 
           {/* Metadata */}
           {!isCreate && (
-            <div className="grid grid-cols-2 gap-3 text-[10px] text-slate-500 pt-2 border-t border-surface-3/30">
+            <div className="grid grid-cols-2 gap-3 text-[10px] text-slate-500">
               <div>
                 Created: {new Date(task.created_at).toLocaleDateString()}
               </div>
