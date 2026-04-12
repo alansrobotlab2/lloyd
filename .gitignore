@@ -27,3 +27,11 @@ __pycache__/
 
 # OS
 .DS_Store
+
+/_pipeline/
+
+/usage.db
+/usage.db-shm
+/usage.db-wal
+
+state.json
