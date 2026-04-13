@@ -404,6 +404,7 @@ export default function Layout() {
                         showAgentDetails={showAgentDetails}
                         pendingModel={slot.model || models[0]?.name}
                         visible={slot.slotId === visibleSlotId}
+                        isMobile={isMobile}
                       />
                     </div>
                   ))}

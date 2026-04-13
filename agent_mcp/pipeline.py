@@ -504,7 +504,11 @@ def _run_pipeline(run_id: int) -> None:
             run = _load_run(run_id) or run
             if run["status"] != "running":
                 return
-            run.setdefault("stage_outputs", {})[stage_name] = output[-2000:].strip()
+            # Keep full stage output for downstream context (assistant text only,
+            # tool results are not accumulated).  Soft cap at 32K to guard against
+            # runaway stages blowing up the run-state JSON and downstream prompts.
+            _MAX_STAGE_OUTPUT = 32_000
+            run.setdefault("stage_outputs", {})[stage_name] = output[-_MAX_STAGE_OUTPUT:].strip()
             if structured:
                 run["structured_result"] = structured
             if signal and signal.startswith("BLOCKED"):

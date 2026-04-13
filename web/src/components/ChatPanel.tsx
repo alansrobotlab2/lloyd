@@ -16,6 +16,7 @@ interface ChatPanelProps {
   pendingModel?: string
   visible?: boolean
   onThinkingChange?: (thinking: boolean, toolName: string | null) => void
+  isMobile?: boolean
 }
 
 // Mock slash commands (will be replaced with actual backend fetch)
@@ -70,6 +71,7 @@ export default function ChatPanel({
   pendingModel,
   visible = true,
   onThinkingChange,
+  isMobile = false,
 }: ChatPanelProps = {}) {
   const [sessionKey, setSessionKey] = useState<string | null>(null)
   const [messages, setMessages] = useState<ApiMessage[]>([])
@@ -511,8 +513,8 @@ export default function ChatPanel({
           
           return (
             <div key={msg.id} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}>
-            {msg.role !== 'user' && (
-              <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden">
+            {msg.role !== 'user' && !isMobile && (
+              <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
                 {msg.role === 'tool'
                   ? <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Wrench className="w-3.5 h-3.5 text-slate-400" /></div>
                   : <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
@@ -642,8 +644,8 @@ export default function ChatPanel({
               </div>
             </div>
             </div>
-            {msg.role === 'user' && (
-              <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5">
+            {msg.role === 'user' && !isMobile && (
+              <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5 hidden sm:flex">
                 <User className="w-3.5 h-3.5 text-slate-300" />
               </div>
             )}
@@ -653,7 +655,7 @@ export default function ChatPanel({
 
         {thinking && (
           <div className="flex gap-3">
-            <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden">
+            <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
               <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
             </div>
             <div className="bg-surface-2 border border-surface-3/50 px-3.5 py-2.5 rounded-xl">
