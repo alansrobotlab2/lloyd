@@ -2,7 +2,7 @@ agent:
   max_turns: 60
   permission_mode: bypassPermissions
 autonomy:
-  enabled: false
+  enabled: true
   task_dir: ~/obsidian/autonomy
   tick_interval: 60
 discord:

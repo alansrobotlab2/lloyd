@@ -110,20 +110,21 @@ async def list_tools():
             "properties": {"task_id": {"type": "integer", "description": "Task ID to retrieve"}},
             "required": ["task_id"],
         }),
-        Tool(name="backlog_write_task", description="Create or update a task. Provide task_id to update, omit to create new.", inputSchema={
+        Tool(name="backlog_write_task", description="Create or update a task. Provide task_id to update, omit to create new. For new tasks, name/description/board are required.", inputSchema={
             "type": "object",
             "properties": {
                 "task_id": {"type": "integer", "description": "Task ID to update (omit for new task)"},
-                "name": {"type": "string", "description": "Task name/title"},
-                "description": {"type": "string", "description": "Task description"},
+                "name": {"type": "string", "description": "Task name/title (required for new tasks)"},
+                "description": {"type": "string", "description": "Task description (required for new tasks)"},
                 "status": {"type": "string", "description": "Task status"},
                 "priority": {"type": "string", "description": "Task priority"},
-                "board": {"type": "string", "description": "Board name"},
+                "board": {"type": "string", "description": "Board name (required for new tasks)"},
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "blocked": {"type": "boolean"},
                 "assigned": {"type": "boolean"},
                 "activity": {"type": "string", "description": "Activity log message"},
             },
+            "required": ["name", "description", "board"],
         }),
     ]
 
@@ -236,6 +237,16 @@ def _handle_get(args: dict) -> str:
 def _handle_write(args: dict) -> str:
     task_id = args.get("task_id")
     now = datetime.now().isoformat()
+
+    # Validate required fields for new tasks
+    if task_id is None:
+        missing = []
+        if not args.get("name"): missing.append("name")
+        if not args.get("description"): missing.append("description")
+        if not args.get("board"): missing.append("board")
+        if missing:
+            return json.dumps({"success": False, "error": f"Missing required fields for new task: {', '.join(missing)}"})
+
     if task_id is not None:
         task = load_task(task_id)
         if not task:
@@ -262,6 +273,11 @@ def _handle_write(args: dict) -> str:
         task["body"] = current_body
     if description:
         current_body = task.get("body", "")
+        # Ensure body has a title heading if it doesn't already
+        if current_body and not re.match(r"^#\s+", current_body, re.MULTILINE):
+            # No heading found, prepend one based on task name or ID
+            title = name if name else f"Task {task.get('id', 'unknown')}"
+            current_body = f"# {title}\n\n{current_body}"
         task["body"] = (current_body + "\n\n" + description) if current_body else description
 
     for key in ("status", "priority", "board"):
