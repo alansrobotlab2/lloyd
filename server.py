@@ -359,15 +359,17 @@ async def post_message_stream(request: Request):
     t_prompt = time.perf_counter()
 
     # Prefetch relevant skill/fact context and inject into user message
-    prefetched_text = prefetch_context(text)
+    prefetched_text = prefetch_context(text, session_id=session_id)
     t_prefetch = time.perf_counter()
 
     # Check if resuming an existing session
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     resume_id = None
+    session_turn_count = 0
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
+            session_turn_count = sum(1 for m in existing.get("messages", []) if m.get("role") == "user")
             session_model = _resolve_model_name(existing.get("model", ""))
             # Only resume if both models use the same API endpoint.
             # Thinking block signatures are tied to the originating endpoint,
@@ -376,6 +378,17 @@ async def post_message_stream(request: Request):
                 resume_id = existing.get("sdk_session_id")
         except Exception:
             pass
+
+    # Memory preservation nudge: every 20 turns, remind agent to capture durable context
+    if session_turn_count > 0 and session_turn_count % 20 == 0:
+        nudge = (
+            f"<system-reminder>This session has {session_turn_count} turns. "
+            "If any important decisions, preferences, system changes, or facts from "
+            "earlier in this conversation haven't been captured yet, consider calling "
+            "memory_add or fact_add now before context compaction loses them."
+            "</system-reminder>\n"
+        )
+        prefetched_text = nudge + prefetched_text
 
     # Extra disallowed tools and permission mode can be supplied by callers (e.g. Discord bot tier check)
     extra_disallowed: list[str] = data.get("extra_disallowed", [])
@@ -665,6 +678,9 @@ async def post_message_stream(request: Request):
                     # Fire background post-session capture (35b summary → daily note)
                     asyncio.ensure_future(_post_session_capture(session_id))
 
+                    # Fire background focus extraction if due (every 5 turns)
+                    asyncio.ensure_future(_maybe_extract_focus(session_id))
+
                     done_payload: dict = {'response': result_text, 'session_id': session_id, 'stats': stats_dict}
                     if accumulated_thinking:
                         done_payload['reasoning'] = accumulated_thinking
@@ -760,7 +776,7 @@ async def post_message(request: Request):
         session_id = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
 
     system_prompt = build_system_prompt()
-    prefetched_text = prefetch_context(text)
+    prefetched_text = prefetch_context(text, session_id=session_id)
 
     # Check for resume
     resume_id = None
@@ -2888,6 +2904,99 @@ def _sync_35b_capture_call(transcript: str) -> Optional[str]:
         return None
 
 
+_FACT_EXTRACTION_PROMPT = """\
+Analyze this conversation transcript and extract 3-5 durable facts worth \
+remembering across sessions. Focus ONLY on:
+- User preferences or decisions ("prefers X over Y", "decided to use X")
+- System/project state changes ("switched X to Y", "port N now runs Z")
+- Technical decisions ("using asyncio for X", "chose library Y because Z")
+- Project milestones ("Phase 2 started", "feature X shipped")
+
+Skip: greetings, transient debug output, questions without answers, opinions \
+about things outside the user's control.
+
+Return one fact per line, prefixed with the entity name in brackets. Example:
+[Lloyd] Vault search added to prefetch pipeline
+[Alfie] Switched from ROS1 to ROS2 for motor control
+[vLLM] Running on GPU1 (RTX PRO 6000)
+
+If no durable facts exist, return exactly: NONE
+
+Transcript:
+"""
+
+
+def _sync_35b_fact_extraction(transcript: str) -> list[dict]:
+    """Call 35b model to extract durable facts from a session transcript."""
+    import urllib.request as _urllib_request
+
+    payload = {
+        "model": _POST_CAPTURE_MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "You extract durable facts from conversations. Return only fact lines, no commentary."},
+            {"role": "user", "content": _FACT_EXTRACTION_PROMPT + transcript},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 400,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    try:
+        req = _urllib_request.Request(
+            _POST_CAPTURE_MODEL_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urllib_request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            text = data["choices"][0]["message"]["content"].strip()
+
+        if text.upper() == "NONE":
+            return []
+
+        facts = []
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Parse "[Entity] fact text" format
+            if line.startswith("[") and "]" in line:
+                bracket_end = line.index("]")
+                entity = line[1:bracket_end].strip()
+                fact_text = line[bracket_end + 1:].strip().lstrip("- :")
+                if entity and fact_text:
+                    facts.append({"entity": entity, "fact": fact_text})
+            else:
+                # Unbracketed line — attribute to "Lloyd" as default
+                fact_text = line.lstrip("- ")
+                if fact_text:
+                    facts.append({"entity": "Lloyd", "fact": fact_text})
+        return facts[:5]  # Hard cap at 5
+
+    except Exception as e:
+        logger.warning(f"35b fact extraction call failed: {e}")
+        return []
+
+
+def _write_extracted_facts(facts: list[dict], session_id: str):
+    """Write extracted facts to the fact store via direct file append."""
+    from agent_mcp.memory import _fact_add
+
+    for f in facts:
+        try:
+            _fact_add({
+                "entity": f["entity"],
+                "category": "session-extracted",
+                "fact": f["fact"],
+                "confidence": 0.75,
+                "provenance": "EXTRACTED",
+                "source_doc": f"sessions/{session_id}",
+            })
+        except Exception as e:
+            logger.warning(f"Failed to write fact '{f['fact'][:40]}...': {e}")
+
+
 def _append_daily_note(session_id: str, summary: str):
     """Append session summary to today's daily note (PST)."""
     from zoneinfo import ZoneInfo
@@ -2906,6 +3015,95 @@ def _append_daily_note(session_id: str, summary: str):
     else:
         with open(daily_path, "a") as f:
             f.write(entry)
+
+
+async def _maybe_extract_focus(session_id: str):
+    """Background: extract conversation topics via 35B every N turns for focus tracking."""
+    try:
+        from prefetch import _get_session_focus, FOCUS_EXTRACT_INTERVAL
+
+        focus = _get_session_focus(session_id)
+        if not focus or not focus.needs_topic_extraction():
+            return
+
+        # Build a lightweight transcript from recent messages
+        meta_path = SESSIONS_DIR / f"{session_id}.json"
+        if not meta_path.exists():
+            return
+        data = json.loads(meta_path.read_text())
+        messages = data.get("messages", [])
+
+        # Take last 10 messages for topic extraction
+        recent = [m for m in messages[-10:] if m.get("role") in ("user", "assistant")]
+        if len(recent) < 3:
+            return
+
+        lines = []
+        for m in recent:
+            content = m.get("content", "")
+            if isinstance(content, list):
+                text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                text = " ".join(t for t in text_parts if t)
+            elif isinstance(content, str):
+                text = content
+            else:
+                continue
+            # Skip injected context
+            stripped = text.strip()
+            if any(stripped.startswith(p) for p in ("<context>", "<system-reminder>", "<memory>", "<daily_notes>")):
+                continue
+            role = "USER" if m.get("role") == "user" else "ASSISTANT"
+            lines.append(f"{role}: {text[:200]}")
+
+        transcript = "\n".join(lines)
+        if len(transcript) < 50:
+            return
+
+        # Call 35B to extract topic phrases
+        topics = await asyncio.get_event_loop().run_in_executor(
+            None, _sync_35b_focus_extraction, transcript
+        )
+
+        if topics:
+            focus.set_topics(topics)
+            logger.info(f"Focus extraction for {session_id}: {topics}")
+
+    except Exception as e:
+        logger.debug(f"Focus extraction failed for {session_id}: {e}")
+
+
+def _sync_35b_focus_extraction(transcript: str) -> list[str]:
+    """Call 35B model to extract 3-5 topic phrases from recent conversation."""
+    import urllib.request as _urllib_request
+
+    payload = {
+        "model": _POST_CAPTURE_MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "Extract the main topics from this conversation. Return 3-5 short topic phrases (2-4 words each), one per line. No numbering, no explanation."},
+            {"role": "user", "content": transcript},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 100,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    try:
+        req = _urllib_request.Request(
+            _POST_CAPTURE_MODEL_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urllib_request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            text = data["choices"][0]["message"]["content"].strip()
+
+        topics = [line.strip().lstrip("0123456789.-) ") for line in text.splitlines() if line.strip()]
+        return [t for t in topics if 2 <= len(t.split()) <= 6][:5]
+
+    except Exception as e:
+        logger.debug(f"35B focus extraction call failed: {e}")
+        return []
 
 
 async def _post_session_capture(session_id: str):
@@ -2951,6 +3149,19 @@ async def _post_session_capture(session_id: str):
 
         # Append to daily note
         _append_daily_note(session_id, summary)
+
+        # Extract durable facts from non-trivial sessions with enough content
+        user_msg_count = len([m for m in data.get("messages", []) if m.get("role") == "user"])
+        if user_msg_count >= 3:
+            try:
+                facts = await asyncio.get_event_loop().run_in_executor(
+                    None, _sync_35b_fact_extraction, transcript
+                )
+                if facts:
+                    _write_extracted_facts(facts, session_id)
+                    logger.info(f"Post-session capture: {session_id} — {len(facts)} facts extracted")
+            except Exception as fe:
+                logger.warning(f"Post-session fact extraction failed for {session_id}: {fe}")
 
         # Mark session as captured
         data["captured"] = True
