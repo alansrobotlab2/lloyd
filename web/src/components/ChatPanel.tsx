@@ -32,6 +32,7 @@ const SLASH_COMMANDS = [
   { name: 'background', desc: 'Run prompt in background', alias: 'bg' },
   { name: 'btw', desc: 'Ephemeral side question' },
   { name: 'queue', desc: 'Queue prompt for next turn', alias: 'q' },
+  { name: 'think', desc: 'Toggle extended thinking (off/low/medium/high)' },
   { name: 'profile', desc: 'Show active profile' },
   { name: 'config', desc: 'Show configuration' },
   { name: 'provider', desc: 'Show available providers' },
@@ -83,6 +84,7 @@ export default function ChatPanel({
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [activeToolName, setActiveToolName] = useState<string | null>(null)
+  const [thinkLevel, setThinkLevel] = useState<string>(() => localStorage.getItem('mc_think_level') || 'off')
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -350,6 +352,38 @@ export default function ChatPanel({
       return
     }
 
+    // Handle /think command locally
+    if (text.startsWith('/think')) {
+      const arg = text.split(/\s+/)[1]?.toLowerCase() || ''
+      const validLevels = ['off', 'low', 'medium', 'high']
+      let newLevel: string
+      if (arg && validLevels.includes(arg)) {
+        newLevel = arg
+      } else if (!arg) {
+        // Toggle: off → high, anything else → off
+        newLevel = thinkLevel === 'off' ? 'high' : 'off'
+      } else {
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_think`,
+          role: 'assistant',
+          content: [{ type: 'text', text: `Invalid think level **"${arg}"**. Valid: off, low, medium, high` }],
+          timestamp: new Date().toISOString(),
+        }])
+        setInput('')
+        return
+      }
+      setThinkLevel(newLevel)
+      localStorage.setItem('mc_think_level', newLevel)
+      setMessages(prev => [...prev, {
+        id: `msg_${Date.now()}_think`,
+        role: 'assistant',
+        content: [{ type: 'text', text: newLevel === 'off' ? '🧠 Extended thinking **off**' : `🧠 Extended thinking set to **${newLevel}**` }],
+        timestamp: new Date().toISOString(),
+      }])
+      setInput('')
+      return
+    }
+
     setInput('')
     setSending(true)
 
@@ -367,6 +401,7 @@ export default function ChatPanel({
     const assistantMsgId = `msg_${Date.now()}_resp`
     let streamingStarted = false
     let settled = false
+    let accumulatedThinking = ''
 
     const controller = api.streamMessage(text, clientId.current, sessionKey || undefined, {
       onSession: (sid) => {
@@ -410,6 +445,13 @@ export default function ChatPanel({
           return updated
         })
       },
+      onThinkingDelta: (delta) => {
+        accumulatedThinking += delta
+      },
+      onThinkingDone: (fullText) => {
+        // Finalize thinking — use full text from server (more reliable than accumulated deltas)
+        accumulatedThinking = fullText || accumulatedThinking
+      },
       onTextDelta: (delta) => {
         if (!streamingStarted) {
           streamingStarted = true
@@ -418,18 +460,24 @@ export default function ChatPanel({
             role: 'assistant' as const,
             content: [{ type: 'text' as const, text: delta }],
             timestamp: new Date().toISOString(),
+            ...(accumulatedThinking ? { reasoning: accumulatedThinking } : {}),
           }])
         } else {
           setMessages(prev => prev.map(m =>
             m.id === assistantMsgId
-              ? { ...m, content: [{ type: 'text' as const, text: m.content[0].text + delta }] }
+              ? {
+                  ...m,
+                  content: [{ type: 'text' as const, text: m.content[0].text + delta }],
+                  ...(accumulatedThinking && !m.reasoning ? { reasoning: accumulatedThinking } : {}),
+                }
               : m
           ))
         }
       },
-      onDone: (response, _sid, stats) => {
+      onDone: (response, _sid, stats, reasoning) => {
         if (settled) return
         settled = true
+        const finalReasoning = accumulatedThinking || reasoning || ''
         if (!streamingStarted && response) {
           setMessages(prev => [...prev, {
             id: assistantMsgId,
@@ -437,10 +485,13 @@ export default function ChatPanel({
             content: [{ type: 'text' as const, text: response }],
             timestamp: new Date().toISOString(),
             stats,
+            ...(finalReasoning ? { reasoning: finalReasoning } : {}),
           }])
-        } else if (stats) {
+        } else if (stats || finalReasoning) {
           setMessages(prev => prev.map(m =>
-            m.id === assistantMsgId ? { ...m, stats } : m
+            m.id === assistantMsgId
+              ? { ...m, ...(stats ? { stats } : {}), ...(finalReasoning ? { reasoning: finalReasoning } : {}) }
+              : m
           ))
         }
         abortControllerRef.current = null
@@ -479,7 +530,7 @@ export default function ChatPanel({
         }])
         inputRef.current?.focus()
       },
-    }, !sessionKey ? pendingModel : undefined)
+    }, !sessionKey ? pendingModel : undefined, thinkLevel !== 'off' ? thinkLevel : undefined)
     abortControllerRef.current = controller
   }
 
@@ -551,14 +602,16 @@ export default function ChatPanel({
                 <div className="prose-chat text-sm leading-relaxed">
                   {msg.role === 'assistant' ? (
                     <>
-                      {/* Reasoning (if available) - only shown when Agent Details is enabled */}
-                      {showAgentDetails && msg.reasoning && (
+                      {/* Reasoning — always shown when thinking mode produced it, or when Agent Details is on */}
+                      {msg.reasoning && (showAgentDetails || thinkLevel !== 'off') && (
                         <details className="group mb-3">
-                          <summary className="cursor-pointer list-none flex items-center gap-1 text-xs text-slate-400 hover:text-slate-300 transition-colors">
+                          <summary className="cursor-pointer list-none flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition-colors">
+                            <Brain className="w-3 h-3" />
                             <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
                             <span className="font-semibold">Thinking</span>
+                            <span className="text-slate-500 font-normal ml-1">({msg.reasoning.length.toLocaleString()} chars)</span>
                           </summary>
-                          <div className="mt-2 p-3 bg-surface-3/30 rounded text-xs text-slate-300 whitespace-pre-wrap">
+                          <div className="mt-2 p-3 bg-purple-900/10 border border-purple-500/10 rounded text-xs text-slate-300 whitespace-pre-wrap max-h-96 overflow-y-auto">
                             {msg.reasoning}
                           </div>
                         </details>
@@ -675,7 +728,7 @@ export default function ChatPanel({
 
       {/* Input */}
       <footer className="p-3 border-t border-surface-3/50 relative">
-        <form onSubmit={handleSubmit} className="flex gap-2">
+        <form onSubmit={handleSubmit} className="flex gap-2 items-center">
           <input
             ref={inputRef}
             type="text"
@@ -683,10 +736,10 @@ export default function ChatPanel({
             onChange={handleInputChange}
             onKeyDown={(e) => {
               if (!showCommands) return
-              
+
               if (e.key === 'ArrowDown') {
                 e.preventDefault()
-                setSelectedCommandIndex((prev) => 
+                setSelectedCommandIndex((prev) =>
                   prev < filteredCommands.length - 1 ? prev + 1 : prev
                 )
               } else if (e.key === 'ArrowUp') {
@@ -701,15 +754,40 @@ export default function ChatPanel({
                 setShowCommands(false)
               }
             }}
-            placeholder="Talk to Lloyd... (use / for commands)"
+            placeholder={thinkLevel !== 'off' ? `Talk to Lloyd... (thinking: ${thinkLevel})` : 'Talk to Lloyd... (use / for commands)'}
             className="flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3.5 py-2.5 border border-surface-3/50 outline-none focus:border-brand-500/50 placeholder:text-slate-500 transition-colors disabled:opacity-50"
             disabled={sending || thinking}
           />
+          {/* Think level toggle — always visible, cycles off→low→medium→high→off */}
+          {(() => {
+            const levels = ['off', 'low', 'medium', 'high'] as const
+            const idx = levels.indexOf(thinkLevel as typeof levels[number])
+            const nextLevel = levels[(idx + 1) % levels.length]
+            const isActive = thinkLevel !== 'off'
+            return (
+              <button
+                type="button"
+                onClick={() => {
+                  setThinkLevel(nextLevel)
+                  localStorage.setItem('mc_think_level', nextLevel)
+                }}
+                className={`w-[38px] h-[38px] flex items-center justify-center rounded-lg shrink-0 transition-colors ${
+                  isActive
+                    ? 'bg-purple-600/20 border border-purple-500/30 text-purple-400 hover:bg-purple-600/30'
+                    : 'bg-surface-2 border border-surface-3/50 text-slate-500 hover:text-slate-400 hover:bg-surface-3/30'
+                }`}
+                title={`Extended thinking: ${thinkLevel} (click → ${nextLevel})`}
+              >
+                <Brain className="w-4 h-4" />
+              </button>
+            )
+          })()}
+          {/* Submit / Cancel */}
           {(sending || thinking) ? (
             <button
               type="button"
               onClick={() => abortControllerRef.current?.abort()}
-              className="bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 text-red-400 rounded-lg px-3 transition-colors"
+              className="w-[38px] h-[38px] flex items-center justify-center bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 text-red-400 rounded-lg shrink-0 transition-colors"
               title="Stop"
             >
               <Square className="w-4 h-4" />
@@ -718,7 +796,7 @@ export default function ChatPanel({
             <button
               type="submit"
               disabled={!input.trim()}
-              className="bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg px-3 transition-colors"
+              className="w-[38px] h-[38px] flex items-center justify-center bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg shrink-0 transition-colors"
             >
               <Send className="w-4 h-4" />
             </button>

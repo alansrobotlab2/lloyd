@@ -26,7 +26,7 @@ from claude_code_sdk import (
     query, ClaudeCodeOptions,
     SystemMessage, AssistantMessage, UserMessage, ResultMessage,
 )
-from claude_code_sdk import TextBlock, ToolUseBlock, ToolResultBlock
+from claude_code_sdk import TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock
 from claude_code_sdk.types import StreamEvent
 from claude_code_sdk._internal import client as _sdk_client
 from claude_code_sdk._internal.message_parser import parse_message as _sdk_parse_original
@@ -83,6 +83,16 @@ _LOCAL_MODEL_VARS = [
     "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
 ]
 
+def _get_model_cfg(model_name: str) -> dict:
+    """Resolve the full model config dict for a model name or alias."""
+    if model_name in MODEL_CONFIGS:
+        return MODEL_CONFIGS[model_name]
+    for _name, c in MODEL_CONFIGS.items():
+        if c.get("alias") == model_name:
+            return c
+    return {}
+
+
 def _get_model_env(model_name: str) -> dict:
     """Get environment variable overrides for a model.
 
@@ -90,15 +100,7 @@ def _get_model_env(model_name: str) -> dict:
     model, not a local one), clear any inherited local-model vars so the
     subprocess doesn't accidentally hit the Qwen server.
     """
-    cfg: dict = {}
-    if model_name in MODEL_CONFIGS:
-        cfg = MODEL_CONFIGS[model_name]
-    else:
-        for name, c in MODEL_CONFIGS.items():
-            if c.get("alias") == model_name:
-                cfg = c
-                break
-
+    cfg = _get_model_cfg(model_name)
     model_env = dict(cfg.get("env", {}))
 
     # Clear inherited local-model vars for non-local models
@@ -108,6 +110,25 @@ def _get_model_env(model_name: str) -> dict:
                 model_env[var] = ""
 
     return model_env
+
+
+def _get_sdk_extra_args(model_name: str) -> dict:
+    """Build extra CLI args for the SDK query (effort level, etc.).
+
+    Effort level controls extended thinking. Works for both Anthropic models
+    (via thinking API) and local Qwen models (via vLLM thinking support).
+    Resolution order: per-model config > global agent config > 'medium' default.
+    """
+    cfg = _get_model_cfg(model_name)
+    extra: dict[str, str | None] = {}
+
+    effort = (
+        cfg.get("effort")
+        or CONFIG.get("agent", {}).get("effort", "medium")
+    )
+    extra["effort"] = effort
+
+    return extra
 
 def _model_base_url(model_name: str) -> str:
     """Return the ANTHROPIC_BASE_URL for a model, or '' for real Anthropic models."""
@@ -308,6 +329,7 @@ async def post_message_stream(request: Request):
     text = data.get("text", "").strip()
     session_id = data.get("session_id", "")
     model_override = data.get("model", "")
+    think_level = data.get("think", "")  # off/low/medium/high or empty
 
     if not text:
         raise HTTPException(status_code=400, detail="Message text required")
@@ -363,6 +385,20 @@ async def post_message_stream(request: Request):
     )
 
     # Build SDK options
+    sdk_extra = _get_sdk_extra_args(model)
+
+    # Apply /think override — maps think level to effort
+    if think_level and think_level != "off":
+        is_local = bool(_model_base_url(model))
+        if is_local:
+            # Qwen/local models: thinking is binary (on/off via effort=high)
+            sdk_extra["effort"] = "high"
+        else:
+            # Anthropic models: granular effort levels
+            sdk_extra["effort"] = think_level  # low/medium/high pass through
+    elif think_level == "off":
+        sdk_extra["effort"] = "low"  # minimal thinking
+
     options = ClaudeCodeOptions(
         model=model,
         system_prompt=system_prompt,
@@ -371,6 +407,7 @@ async def post_message_stream(request: Request):
         mcp_servers=MCP_SERVERS,
         disallowed_tools=_get_disallowed_tools() + extra_disallowed,
         env=model_env,
+        extra_args=sdk_extra,
         resume=resume_id,
         include_partial_messages=True,
     )
@@ -389,6 +426,7 @@ async def post_message_stream(request: Request):
         )
 
         full_response = ""
+        accumulated_thinking = ""  # Extended thinking content for current turn
         tool_calls_log = []        # {call_id, name, args_str}
         tool_results_log = []      # {call_id, result_str}
         persisted_tool_ids: set[str] = set()  # call_ids already written to disk
@@ -439,6 +477,11 @@ async def post_message_stream(request: Request):
                                     logger.info(f"[TIMING] first text token after {time.perf_counter() - t_query_start:.3f}s (model TTFT)")
                                 full_response += delta_text
                                 yield f"event: text_delta\ndata: {json.dumps({'text': delta_text})}\n\n"
+                        elif dtype == "thinking_delta":
+                            thinking_text = delta.get("thinking", "")
+                            if thinking_text:
+                                accumulated_thinking += thinking_text
+                                yield f"event: thinking_delta\ndata: {json.dumps({'text': thinking_text})}\n\n"
                     elif etype == "message_start":
                         # Capture input token counts early (before ResultMessage may be skipped)
                         msg_usage = evt.get("message", {}).get("usage", {})
@@ -461,9 +504,13 @@ async def post_message_stream(request: Request):
 
                 elif isinstance(message, AssistantMessage):
                     # With streaming enabled, text arrives via StreamEvent deltas above.
-                    # AssistantMessage still carries tool_use blocks.
+                    # AssistantMessage still carries tool_use and thinking blocks.
                     for block in message.content:
-                        if isinstance(block, ToolUseBlock):
+                        if isinstance(block, ThinkingBlock):
+                            # Full thinking block — use as authoritative source
+                            accumulated_thinking = block.thinking
+                            yield f"event: thinking_done\ndata: {json.dumps({'text': block.thinking})}\n\n"
+                        elif isinstance(block, ToolUseBlock):
                             args_str = json.dumps(block.input) if isinstance(block.input, dict) else str(block.input)
                             tool_calls_log.append({"id": block.id, "call_id": block.id, "type": "function", "function": {"name": block.name, "arguments": args_str}})
                             yield f"event: tool_start\ndata: {json.dumps({'call_id': block.id, 'name': block.name, 'args': args_str, 'context_tokens': last_turn_input})}\n\n"
@@ -605,9 +652,12 @@ async def post_message_stream(request: Request):
                     })
                     stats_dict = stream_stats
                     if result_text.strip():
-                        tail.append({"id": uuid.uuid4().hex[:8], "role": "assistant",
+                        msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
                                      "content": [{"type": "text", "text": result_text}],
-                                     "timestamp": end_ts, "stats": stats_dict})
+                                     "timestamp": end_ts, "stats": stats_dict}
+                        if accumulated_thinking:
+                            msg_entry["reasoning"] = accumulated_thinking
+                        tail.append(msg_entry)
                     if tail:
                         _append_messages(session_id, tail)
                     final_persisted = True
@@ -615,7 +665,10 @@ async def post_message_stream(request: Request):
                     # Fire background post-session capture (35b summary → daily note)
                     asyncio.ensure_future(_post_session_capture(session_id))
 
-                    yield f"event: done\ndata: {json.dumps({'response': result_text, 'session_id': session_id, 'stats': stats_dict})}\n\n"
+                    done_payload: dict = {'response': result_text, 'session_id': session_id, 'stats': stats_dict}
+                    if accumulated_thinking:
+                        done_payload['reasoning'] = accumulated_thinking
+                    yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
 
         except Exception as e:
             if not final_persisted:
@@ -636,9 +689,12 @@ async def post_message_stream(request: Request):
                                          "tool_call_id": cid, "timestamp": err_ts})
                     stream_stats["peak_input_tokens"] = last_turn_input
                     if full_response.strip():
-                        tail.append({"id": uuid.uuid4().hex[:8], "role": "assistant",
+                        err_msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
                                      "content": [{"type": "text", "text": full_response}],
-                                     "timestamp": err_ts, "stats": stream_stats})
+                                     "timestamp": err_ts, "stats": stream_stats}
+                        if accumulated_thinking:
+                            err_msg_entry["reasoning"] = accumulated_thinking
+                        tail.append(err_msg_entry)
                     if tail:
                         _append_messages(session_id, tail)
                     try:
@@ -732,6 +788,7 @@ async def post_message(request: Request):
         mcp_servers=MCP_SERVERS,
         disallowed_tools=_get_disallowed_tools() + sync_extra_disallowed,
         env=model_env,
+        extra_args=_get_sdk_extra_args(model),
         resume=resume_id,
     )
 

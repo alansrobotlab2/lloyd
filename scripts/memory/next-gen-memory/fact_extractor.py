@@ -265,8 +265,11 @@ class FactExtractor:
                     except:
                         pass
         
-        # Merge new facts with existing
+        # Merge new facts with existing — tag provenance on new LLM-extracted facts
         new_facts = facts_data.get("facts", [])
+        for nf in new_facts:
+            if "provenance" not in nf:
+                nf["provenance"] = "EXTRACTED"
         merged_facts = self._merge_facts(existing_facts, new_facts)
         
         # Generate sequential IDs

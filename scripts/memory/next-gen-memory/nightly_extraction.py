@@ -14,6 +14,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+# Content hashing for incremental processing
+sys.path.insert(0, str(Path.home() / "lloyd" / "scripts" / "memory"))
+try:
+    from content_hasher import ContentHasher
+    _HAS_HASHER = True
+except ImportError:
+    _HAS_HASHER = False
+
 # Try to import yaml, provide fallback if not available
 try:
     import yaml
@@ -368,7 +376,17 @@ class NightlyExtraction:
         
         total_files = len(eligible_files)
         print(f"Found {total_files} eligible files")
-        
+
+        # Filter by content hash - skip files unchanged since last extraction
+        skipped_unchanged = 0
+        if _HAS_HASHER and not full_mode:
+            hasher = ContentHasher()
+            changed_files = hasher.get_changed_files(eligible_files)
+            skipped_unchanged = len(eligible_files) - len(changed_files)
+            eligible_files = changed_files
+            if skipped_unchanged > 0:
+                print(f"Skipped {skipped_unchanged} unchanged files (content hash match)")
+
         if workers == 1:
             # Sequential processing (default)
             for index, md_file in enumerate(eligible_files, 1):
@@ -396,6 +414,17 @@ class NightlyExtraction:
                         print(f"Error processing {md_file}: {e}")
         
         print(f"Processed {processed} documents, extracted {total_facts} facts")
+
+        # Update content hashes for processed files
+        if _HAS_HASHER:
+            try:
+                hasher = ContentHasher()
+                hasher.update_hashes(eligible_files)
+                hasher.save()
+                print(f"Updated content hashes for {len(eligible_files)} files")
+            except Exception as e:
+                print(f"Warning: Failed to update content hashes: {e}")
+
         return total_facts
     
     def _infer_derives_relationships(self) -> int:
