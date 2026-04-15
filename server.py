@@ -3173,6 +3173,73 @@ async def _post_session_capture(session_id: str):
         logger.warning(f"Post-session capture failed for {session_id}: {e}")
 
 
+# ── Voice Mode proxy (port 8092) ─────────────────────────────────────────────
+
+VOICE_API = "http://127.0.0.1:8092"
+
+
+@app.get("/api/voice/status")
+async def voice_status():
+    """Proxy to voice mode status."""
+    try:
+        import httpx as _hx
+        async with _hx.AsyncClient() as client:
+            r = await client.get(f"{VOICE_API}/v1/status", timeout=5.0)
+            return JSONResponse(r.json())
+    except Exception:
+        return JSONResponse({"state": "OFFLINE", "voice_enabled": False, "last_transcript": ""})
+
+
+@app.post("/api/voice/toggle")
+async def voice_toggle():
+    """Proxy to voice mode toggle."""
+    try:
+        import httpx as _hx
+        async with _hx.AsyncClient() as client:
+            r = await client.post(f"{VOICE_API}/v1/voice/toggle", json={}, timeout=5.0)
+            return JSONResponse(r.json())
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Voice mode not available: {e}")
+
+
+@app.post("/api/voice/say")
+async def voice_say(request: Request):
+    """Proxy to voice mode TTS."""
+    try:
+        import httpx as _hx
+        body = await request.json()
+        async with _hx.AsyncClient() as client:
+            r = await client.post(f"{VOICE_API}/v1/say", json=body, timeout=60.0)
+            return JSONResponse(r.json())
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Voice mode not available: {e}")
+
+
+@app.get("/api/voice/config")
+async def voice_config():
+    """Proxy to voice mode config."""
+    try:
+        import httpx as _hx
+        async with _hx.AsyncClient() as client:
+            r = await client.get(f"{VOICE_API}/v1/config", timeout=5.0)
+            return JSONResponse(r.json())
+    except Exception:
+        return JSONResponse({"error": "Voice mode not available"})
+
+
+@app.post("/api/voice/config")
+async def voice_set_config(request: Request):
+    """Proxy to voice mode config update."""
+    try:
+        import httpx as _hx
+        body = await request.json()
+        async with _hx.AsyncClient() as client:
+            r = await client.post(f"{VOICE_API}/v1/config", json=body, timeout=5.0)
+            return JSONResponse(r.json())
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Voice mode not available: {e}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
