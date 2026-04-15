@@ -743,4 +743,12 @@ export const api = {
     fetch(`${API_BASE}/pipelines/${runId}`).then(r => r.json()),
   abortPipeline: (runId: number): Promise<{ success: boolean; message: string; killed_pids: number[] }> =>
     fetch(`${API_BASE}/pipelines/${runId}/abort`, { method: 'POST' }).then(r => r.json()),
+
+  // Voice Mode
+  voiceStatus: (): Promise<{ state: string; voice_enabled: boolean; last_transcript: string }> =>
+    fetch(`${API_BASE}/voice/status`).then(r => r.json()),
+  voiceToggle: (): Promise<{ voice_enabled: boolean }> =>
+    fetch(`${API_BASE}/voice/toggle`, { method: 'POST' }).then(r => r.json()),
+  voiceSay: (text: string): Promise<{ text: string; duration_s: number; elapsed_s: number }> =>
+    fetch(`${API_BASE}/voice/say`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }).then(r => r.json()),
 }

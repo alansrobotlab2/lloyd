@@ -64,18 +64,41 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
   void sessionKey
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft
   const [workMode, setWorkMode] = useState(false)
-  // Voice state stubs - will be wired up later
+  // Voice state — polls voice mode HTTP API via backend proxy
   const [isListening, setIsListening] = useState(false)
   const [voiceEnabled, setVoiceEnabled] = useState(false)
-  const _wsAvailable = false
-  const _statusLoaded = false
-  const _pipelineState: 'LISTENING' | 'ACTIVE_LISTEN' | 'PROCESSING' | 'SPEAKING' = 'IDLE' as never
+  const [voiceOnline, setVoiceOnline] = useState(false)
+  const [_pipelineState, setPipelineState] = useState<string>('IDLE')
+  const _wsAvailable = voiceOnline
+  const _statusLoaded = voiceOnline
 
-  // Voice toggle handlers (stub)
-  const handleVoiceToggle = () => setVoiceEnabled(!voiceEnabled)
-  const startMic = () => setIsListening(true)
-  const stopMic = () => setIsListening(false)
-  const handleTtsToggle = () => {} // stub
+  const pollVoiceStatus = useCallback(() => {
+    api.voiceStatus()
+      .then(s => {
+        const online = s.state !== 'OFFLINE'
+        setVoiceOnline(online)
+        setVoiceEnabled(s.voice_enabled ?? false)
+        setPipelineState(s.state ?? 'IDLE')
+        setIsListening(s.state === 'LISTENING' || s.state === 'ACTIVE_LISTEN')
+      })
+      .catch(() => setVoiceOnline(false))
+  }, [])
+
+  useEffect(() => {
+    pollVoiceStatus()
+    const interval = setInterval(pollVoiceStatus, 5000)
+    return () => clearInterval(interval)
+  }, [pollVoiceStatus])
+
+  const handleVoiceToggle = async () => {
+    try {
+      const r = await api.voiceToggle()
+      setVoiceEnabled(r.voice_enabled ?? !voiceEnabled)
+    } catch {
+      // ignore
+    }
+  }
+  const handleTtsToggle = () => {} // stub — no TTS mute endpoint yet
 
   // Autonomy scheduler state
   const [schedulerEnabled, setSchedulerEnabled] = useState(false)
@@ -188,22 +211,20 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
             </div>
           )}
 
-          {/* Row 3 — Mic toggle */}
-          <button
-            onClick={_wsAvailable && _statusLoaded ? () => (isListening ? stopMic() : startMic()) : undefined}
-            disabled={!_wsAvailable || !_statusLoaded}
+          {/* Row 3 — Mic status (read-only indicator) */}
+          <div
             title={collapsed ? (isListening ? 'Mic Active' : 'Mic Inactive') : undefined}
-            className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-              !_wsAvailable || !_statusLoaded
-                ? 'text-slate-600 cursor-not-allowed opacity-50'
+            className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium ${
+              !_statusLoaded
+                ? 'text-slate-600 opacity-50'
                 : isListening
-                  ? 'text-green-400 bg-green-600/10 hover:bg-green-600/20'
-                  : 'text-red-400 bg-red-600/10 hover:bg-red-600/20'
+                  ? 'text-green-400 bg-green-600/10'
+                  : 'text-slate-500'
             }`}
           >
             {isListening ? <Mic className={`w-4 h-4 flex-shrink-0 ${_pipelineState === 'LISTENING' || _pipelineState === 'ACTIVE_LISTEN' ? 'animate-pulse' : ''}`} /> : <MicOff className="w-4 h-4 flex-shrink-0" />}
-            {!collapsed && <span className="truncate">{isListening ? 'Active' : 'Inactive'}</span>}
-          </button>
+            {!collapsed && <span className="truncate">{isListening ? 'Listening' : 'Mic Off'}</span>}
+          </div>
 
           {/* Row 3.5 — Speaker toggle */}
           <button
