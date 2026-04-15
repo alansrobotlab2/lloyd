@@ -432,17 +432,20 @@ export const api = {
       onToolComplete?: (callId: string, name: string, result: string) => void
       onToolProgress?: (name: string, preview: string) => void
       onTextDelta?: (text: string) => void
-      onDone?: (response: string, sessionId: string, stats?: TurnStats) => void
+      onThinkingDelta?: (text: string) => void
+      onThinkingDone?: (fullText: string) => void
+      onDone?: (response: string, sessionId: string, stats?: TurnStats, reasoning?: string) => void
       onError?: (detail: string) => void
       onAborted?: () => void
     },
     model?: string,
+    think?: string,
   ): AbortController {
     const controller = new AbortController()
     fetch(`${API_BASE}/message/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, client_id: clientId, session_id: sessionId, ...(model ? { model } : {}) }),
+      body: JSON.stringify({ text, client_id: clientId, session_id: sessionId, ...(model ? { model } : {}), ...(think ? { think } : {}) }),
       signal: controller.signal,
     }).then(async (response) => {
       if (!response.ok || !response.body) {
@@ -479,7 +482,9 @@ export const api = {
               case 'tool_complete': callbacks.onToolComplete?.(payload.call_id, payload.name, payload.result); break
               case 'tool_progress': callbacks.onToolProgress?.(payload.name, payload.preview); break
               case 'text_delta': callbacks.onTextDelta?.(payload.text); break
-              case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats); break
+              case 'thinking_delta': callbacks.onThinkingDelta?.(payload.text); break
+              case 'thinking_done': callbacks.onThinkingDone?.(payload.text); break
+              case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats, payload.reasoning); break
               case 'error': callbacks.onError?.(payload.detail); break
             }
           } catch { /* skip malformed */ }

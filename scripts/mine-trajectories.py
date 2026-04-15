@@ -65,6 +65,86 @@ def categorize_result_summary(result_summary: str) -> str:
     return "logic"
 
 
+# ── Tool name normalization (for sequence mining) ────────────────────────────
+
+BASH_CMD_CATEGORIES = {
+    "explore": {"ls", "find", "cat", "head", "tail", "wc", "file", "stat", "du", "tree"},
+    "modify": {"sed", "awk"},
+    "git": {"git"},
+    "python": {"python3", "python", "pip", "uv"},
+    "http": {"curl", "wget"},
+    "container": {"docker", "podman"},
+    "service": {"supervisorctl", "systemctl", "journalctl"},
+    "fs": {"cd", "mkdir", "rm", "mv", "cp", "chmod", "chown", "ln", "touch"},
+}
+
+MCP_PREFIX_MAP = {
+    "mcp____vault_": "mcp:vault",
+    "mcp____fact_": "mcp:fact",
+    "mcp____backlog_": "mcp:backlog",
+    "mcp____autonomy_": "mcp:autonomy",
+    "mcp____http_": "mcp:http",
+    "mcp____browser_": "mcp:browser",
+    "mcp____email_": "mcp:email",
+    "mcp____skills_": "mcp:skills",
+    "mcp____pipeline_": "mcp:pipeline",
+    "mcp____memory_": "mcp:memory",
+    "mcp____chat_": "mcp:chat",
+    "mcp____calendar_": "mcp:calendar",
+    "mcp____discord_": "mcp:discord",
+    "mcp____subliminal_": "mcp:subliminal",
+}
+
+BUILTIN_TOOLS = {
+    "Read": "read", "Edit": "edit", "Write": "write",
+    "Glob": "glob", "Grep": "grep", "Agent": "agent",
+    "ToolSearch": "toolsearch", "Skill": "skill",
+    "WebFetch": "webfetch", "WebSearch": "websearch",
+    "TodoWrite": "todowrite", "NotebookEdit": "notebook",
+}
+
+
+def normalize_tool_name(tool: dict) -> str:
+    """
+    Produce a semantic label for a tool call.
+    Bash commands are sub-categorized by command type.
+    MCP tools are grouped by server prefix.
+    Error state is appended as :ERR.
+    """
+    name = tool.get("name", "unknown")
+    is_error = tool.get("is_error", False)
+
+    # Built-in tools
+    if name in BUILTIN_TOOLS:
+        label = BUILTIN_TOOLS[name]
+    elif name == "Bash":
+        cmd = tool.get("params_summary", {}).get("command", "")
+        first_word = cmd.split()[0] if cmd and cmd.split() else ""
+        # Strip path prefix (e.g., /usr/bin/python3 -> python3)
+        first_word = first_word.rsplit("/", 1)[-1]
+        label = "bash:other"
+        for category, commands in BASH_CMD_CATEGORIES.items():
+            if first_word in commands:
+                label = f"bash:{category}"
+                break
+    else:
+        # MCP tools
+        label = None
+        for prefix, mapped in MCP_PREFIX_MAP.items():
+            if name.startswith(prefix):
+                label = mapped
+                break
+        if label is None:
+            if name.startswith("mcp____"):
+                label = "mcp:other"
+            else:
+                label = name.lower()
+
+    if is_error:
+        label += ":ERR"
+    return label
+
+
 # ── Pattern matching ─────────────────────────────────────────────────────────
 
 def normalize_params_signature(params_summary: dict) -> str:
@@ -113,6 +193,79 @@ def slugify(text: str) -> str:
     text = re.sub(r'-+', '-', text)
     text = text.strip('-')
     return text[:50]  # Limit length
+
+
+# ── Tool name normalization (for sequence mining) ────────────────────────────
+
+_BASH_CMD_CATEGORIES = {
+    "bash:explore": {"ls", "find", "cat", "head", "tail", "wc"},
+    "bash:modify": {"sed", "awk"},
+    "bash:git": {"git"},
+    "bash:python": {"python3", "python", "pip", "uv"},
+    "bash:http": {"curl", "wget"},
+    "bash:container": {"docker", "podman"},
+    "bash:service": {"supervisorctl", "systemctl"},
+    "bash:fs": {"cd", "mkdir", "rm", "mv", "cp", "chmod"},
+}
+
+_MCP_PREFIX_MAP = {
+    "mcp____vault_": "mcp:vault",
+    "mcp____fact_": "mcp:fact",
+    "mcp____backlog_": "mcp:backlog",
+    "mcp____autonomy_": "mcp:autonomy",
+    "mcp____http_": "mcp:http",
+    "mcp____browser_": "mcp:browser",
+    "mcp____email_": "mcp:email",
+    "mcp____skills_": "mcp:skills",
+    "mcp____pipeline_": "mcp:pipeline",
+    "mcp____memory_": "mcp:memory",
+}
+
+_SIMPLE_TOOL_MAP = {
+    "Read": "read",
+    "Edit": "edit",
+    "Write": "write",
+    "Glob": "glob",
+    "Grep": "grep",
+    "Agent": "agent",
+    "ToolSearch": "toolsearch",
+    "Skill": "skill",
+    "WebFetch": "webfetch",
+    "WebSearch": "websearch",
+}
+
+
+def normalize_tool_name(tool: dict) -> str:
+    """
+    Produce a semantic label for a tool call, used for sequence mining.
+    Includes error state: appends ':ERR' if is_error is true.
+    """
+    name = tool.get("name", "unknown")
+    is_error = tool.get("is_error", False)
+
+    # Simple direct mappings
+    if name in _SIMPLE_TOOL_MAP:
+        label = _SIMPLE_TOOL_MAP[name]
+    elif name == "Bash":
+        cmd = tool.get("params_summary", {}).get("command", "")
+        first_word = cmd.split()[0] if cmd.split() else ""
+        label = "bash:other"
+        for category, keywords in _BASH_CMD_CATEGORIES.items():
+            if first_word in keywords:
+                label = category
+                break
+    elif name.startswith("mcp____"):
+        label = "mcp:other"
+        for prefix, mapped in _MCP_PREFIX_MAP.items():
+            if name.startswith(prefix):
+                label = mapped
+                break
+    else:
+        label = name.lower()
+
+    if is_error:
+        label += ":ERR"
+    return label
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
@@ -334,6 +487,121 @@ def mine_success_patterns(trajectories: list[dict], threshold: int = 2) -> list[
     return qualifying_patterns
 
 
+def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list[dict]:
+    """
+    Mine repeating tool-call sequences (bigrams and trigrams) across sessions.
+    Normalizes tool names, collapses consecutive duplicates, then extracts
+    n-grams. Returns patterns appearing in >= threshold distinct sessions.
+    """
+    # {ngram_tuple: {sessions, examples, dates}}
+    pattern_data: dict[tuple[str, ...], dict] = defaultdict(lambda: {
+        "sessions": set(),
+        "examples": [],
+        "dates": set(),
+    })
+
+    for traj in trajectories:
+        session_key = traj.get("session_key", "unknown")
+        timestamp = traj.get("timestamp", "")
+
+        try:
+            if timestamp:
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                date_str = dt.strftime("%Y-%m-%d")
+            else:
+                date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        except (ValueError, AttributeError):
+            date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+
+        tools = traj.get("tools", [])
+        if len(tools) < 2:
+            continue
+
+        # Sort by sequence number
+        sorted_tools = sorted(tools, key=lambda t: t.get("sequence", 0))
+
+        # Normalize labels
+        labels = [normalize_tool_name(t) for t in sorted_tools]
+
+        # Collapse consecutive identical labels (keep first tool of each run)
+        collapsed_labels: list[str] = []
+        collapsed_tools: list[dict] = []
+        for label, tool in zip(labels, sorted_tools):
+            if not collapsed_labels or label != collapsed_labels[-1]:
+                collapsed_labels.append(label)
+                collapsed_tools.append(tool)
+
+        # Track which ngrams we've already counted for this session (dedup within session)
+        seen_in_session: set[tuple[str, ...]] = set()
+
+        for n in (2, 3):
+            for i in range(len(collapsed_labels) - n + 1):
+                ngram = tuple(collapsed_labels[i : i + n])
+                if ngram in seen_in_session:
+                    continue
+                seen_in_session.add(ngram)
+
+                pd = pattern_data[ngram]
+                pd["sessions"].add(session_key)
+                pd["dates"].add(date_str)
+
+                # Store up to 3 concrete examples
+                if len(pd["examples"]) < 3:
+                    example_steps = []
+                    for j in range(n):
+                        t = collapsed_tools[i + j]
+                        example_steps.append({
+                            "tool": t.get("name", "unknown"),
+                            "label": collapsed_labels[i + j],
+                            "params_summary": t.get("params_summary", {}),
+                            "result_summary": t.get("result_summary", ""),
+                            "is_error": t.get("is_error", False),
+                        })
+                    pd["examples"].append({
+                        "session_key": session_key,
+                        "date": date_str,
+                        "steps": example_steps,
+                    })
+
+    # Boring sequences that every agent session produces — filter these out
+    # to focus on genuinely interesting multi-step patterns
+    BORING_LABELS = {"read", "glob", "grep", "bash:explore", "bash:other", "toolsearch"}
+
+    # Filter by threshold
+    qualifying: list[dict] = []
+    for ngram, data in pattern_data.items():
+        if len(data["sessions"]) < threshold:
+            continue
+
+        has_error_recovery = False
+        for idx in range(len(ngram) - 1):
+            if ngram[idx].endswith(":ERR") and not ngram[idx + 1].endswith(":ERR"):
+                has_error_recovery = True
+                break
+
+        # Skip sequences composed entirely of boring labels (no :ERR, no MCP, no edit/write)
+        base_labels = {lbl.split(":ERR")[0] for lbl in ngram}
+        if base_labels.issubset(BORING_LABELS) and not has_error_recovery:
+            continue
+
+        qualifying.append({
+            "type": "sequence",
+            "sequence": ngram,
+            "sequence_str": " → ".join(ngram),
+            "ngram_size": len(ngram),
+            "sessions": data["sessions"],
+            "examples": data["examples"],
+            "dates": data["dates"],
+            "has_error_recovery": has_error_recovery,
+            "first_seen": min(data["dates"]) if data["dates"] else datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
+            "last_seen": max(data["dates"]) if data["dates"] else datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
+        })
+
+    # Sort by session count descending, then by ngram size descending
+    qualifying.sort(key=lambda x: (-len(x["sessions"]), -x["ngram_size"]))
+    return qualifying
+
+
 # ── Output generation ────────────────────────────────────────────────────────
 
 def generate_mitigation(tool_name: str, error_type: str) -> str:
@@ -379,6 +647,8 @@ def generate_title(pattern: dict) -> str:
         tool_name = pattern["tool_name"]
         error_type = pattern["error_type"]
         return f"Handle {tool_name} {error_type} errors"
+    elif pattern["type"] == "sequence":
+        return f"Sequence: {pattern['sequence_str']}"
     else:
         tool_name = pattern["tool_name"]
         return f"Pattern: {tool_name} usage"
@@ -389,17 +659,19 @@ def write_candidate_file(pattern: dict, output_dir: Path) -> str:
     # Generate filename
     if pattern["type"] == "error":
         pattern_slug = f"{pattern['tool_name']}/{pattern['error_type']}"
+    elif pattern["type"] == "sequence":
+        pattern_slug = f"seq-{pattern['ngram_size']}-{slugify(pattern['sequence_str'])}"
     else:
         pattern_slug = f"{pattern['tool_name']}/{pattern['params_signature']}"
-    
+
     slug = slugify(pattern_slug)
     today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
     filename = f"candidate-{slug}-{today}.md"
     filepath = output_dir / filename
-    
+
     # Generate content
     title = generate_title(pattern)
-    
+
     if pattern["type"] == "error":
         error_rate = pattern["total_calls"] / len(pattern["sessions"]) if pattern["sessions"] else 0
         content = f"""---
@@ -441,7 +713,61 @@ These errors occur across {len(pattern["sessions"])} distinct sessions, indicati
 """
         for session in sorted(pattern["sessions"]):
             content += f"- {session}\n"
+    elif pattern["type"] == "sequence":
+        seq_str = pattern["sequence_str"]
+        recovery_flag = "true" if pattern["has_error_recovery"] else "false"
+        content = f"""---
+candidate: true
+pattern: {pattern_slug}
+type: sequence
+ngram_size: {pattern["ngram_size"]}
+sessions: {len(pattern["sessions"])}
+first_seen: {pattern["first_seen"]}
+last_seen: {pattern["last_seen"]}
+has_error_recovery: {recovery_flag}
+status: pending_review
+---
+
+# Skill Candidate: {title}
+
+## Pattern Summary
+This {pattern["ngram_size"]}-step tool sequence appears across {len(pattern["sessions"])} distinct sessions: `{seq_str}`.
+"""
+        if pattern["has_error_recovery"]:
+            content += "This pattern includes **error recovery** — the agent encounters an error and then recovers in a subsequent step.\n"
+
+        content += "\n## Concrete Examples\n"
+        for i, example in enumerate(pattern["examples"], 1):
+            content += f"""### Example {i} (session: {example["session_key"]}, {example["date"]})
+"""
+            for step_idx, step in enumerate(example["steps"], 1):
+                params = step.get("params_summary", {})
+                params_str = str(params) if params else "N/A"
+                if len(params_str) > 200:
+                    params_str = params_str[:200] + "..."
+                status = "ERROR" if step.get("is_error") else "OK"
+                result = step.get("result_summary", "N/A")
+                if len(result) > 80:
+                    result = result[:80] + "..."
+                content += f"""- **Step {step_idx}** (`{step["label"]}`): `{step["tool"]}` [{status}]
+  - Input: `{params_str}`
+  - Result: {result}
+"""
+            content += "\n"
+
+        content += f"""## Suggested Skill Encoding
+This recurring sequence suggests a multi-step procedure that could be encoded as a single skill:
+- Combine the {pattern["ngram_size"]} steps into one atomic operation
+- Add pre-condition validation before the first step
+- {"Include error recovery logic based on the observed retry pattern" if pattern["has_error_recovery"] else "Add error handling between steps to prevent cascading failures"}
+
+## Sessions Affected
+"""
+        for session in sorted(pattern["sessions"]):
+            content += f"- {session}\n"
+
     else:
+        # Success patterns
         content = f"""---
 candidate: true
 pattern: {pattern_slug}
@@ -475,7 +801,7 @@ This represents a candidate for skill encoding to improve efficiency and consist
 - **Result:** {example.get("result_summary", "N/A")[:50]}
 
 """
-        
+
         content += f"""## Suggested Skill Encoding
 This pattern should be encoded as a skill with:
 - Pre-condition checks for required resources
@@ -486,7 +812,7 @@ This pattern should be encoded as a skill with:
 """
         for session in sorted(pattern["sessions"]):
             content += f"- {session}\n"
-    
+
     # Write file
     filepath.write_text(content, encoding="utf-8")
     return str(filepath)
@@ -510,12 +836,14 @@ Generated by `mine-trajectories.py`.
 
 """
     
-    error_count = sum(1 for c in candidates if "error" in c)
-    success_count = len(candidates) - error_count
-    
+    error_count = sum(1 for c in candidates if "error" in c and "seq-" not in c)
+    sequence_count = sum(1 for c in candidates if c.startswith("candidate-seq-"))
+    success_count = len(candidates) - error_count - sequence_count
+
     content += f"""- **Total candidates:** {len(candidates)}
 - **Error patterns:** {error_count}
 - **Success patterns:** {success_count}
+- **Sequence patterns:** {sequence_count}
 - **Last updated:** {datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}
 
 ## Candidates
@@ -672,9 +1000,17 @@ def main() -> None:
     print("Mining success patterns...", file=sys.stderr)
     success_patterns = mine_success_patterns(trajectories, threshold=args.threshold)
     print(f"  Found {len(success_patterns)} qualifying success pattern(s)", file=sys.stderr)
-    
+
+    print("Mining sequence patterns...", file=sys.stderr)
+    # Sequences need a higher threshold than individual tools — basic tool
+    # combos (read→edit, glob→read) are inherently frequent but boring.
+    # Use max(3, threshold) to filter noise while still respecting --threshold.
+    seq_threshold = max(3, args.threshold)
+    sequence_patterns = mine_sequence_patterns(trajectories, threshold=seq_threshold)
+    print(f"  Found {len(sequence_patterns)} qualifying sequence pattern(s)", file=sys.stderr)
+
     # Write candidates
-    all_patterns = error_patterns + success_patterns
+    all_patterns = error_patterns + success_patterns + sequence_patterns
     candidate_files = []
     
     for pattern in all_patterns:
@@ -694,6 +1030,7 @@ def main() -> None:
     print(f"  Trajectories read:    {len(trajectories)}")
     print(f"  Error patterns:       {len(error_patterns)}")
     print(f"  Success patterns:     {len(success_patterns)}")
+    print(f"  Sequence patterns:    {len(sequence_patterns)}")
     print(f"  Candidates written:   {len(candidate_files)}")
     print(f"  Output directory:     {output_dir}")
     print("=" * 60)

@@ -260,7 +260,12 @@ def _handle_write(args: dict) -> str:
                 if match:
                     max_id = max(max_id, int(match.group(1)))
         task_id = max_id + 1
-        task = {"id": task_id, "filename": f"{task_id}-new-task.md", "created": now}
+        # Slugify name for filename (match server.py behavior)
+        task_name = args.get("name", "new-task")
+        slug = re.sub(r"[^a-z0-9]+", "-", task_name.lower()).strip("-")[:50] or "new-task"
+        task = {"id": task_id, "filename": f"{task_id}-{slug}.md", "created": now,
+                "status": "draft", "priority": "medium", "blocked": False,
+                "assigned": False, "position": task_id * 1000}
 
     name = args.get("name")
     description = args.get("description")

@@ -220,7 +220,8 @@ def _generate_fact_id(category: str) -> str:
     return f"{category[:4]}-{uuid.uuid4().hex[:4]}"
 
 
-def _get_facts_sync(entity: str, category: str = None) -> dict:
+def _get_facts_sync(entity: str, category: str = None, as_of: str = None,
+                     include_expired: bool = False) -> dict:
     resolved, _ = _resolve_entity(entity)
     entity_dir = _find_entity_dir(resolved)
     if not entity_dir:
@@ -237,7 +238,16 @@ def _get_facts_sync(entity: str, category: str = None) -> dict:
         for fact_file in entity_dir.glob("*.md"):
             frontmatter = _parse_fact_frontmatter(fact_file.read_text(encoding="utf-8"))
             facts.extend(frontmatter.get("facts", []))
-    facts = [f for f in facts if not f.get("expired_at") and not f.get("invalid_at")]
+    if not include_expired:
+        if as_of:
+            # Return facts valid at a specific point in time
+            facts = [f for f in facts
+                     if (not f.get("valid_at") or f["valid_at"] <= as_of)
+                     and (not f.get("expired_at") or f["expired_at"] > as_of)
+                     and (not f.get("invalid_at") or f["invalid_at"] > as_of)]
+        else:
+            # Default: only current facts
+            facts = [f for f in facts if not f.get("expired_at") and not f.get("invalid_at")]
     return {"entity": resolved, "category": category, "facts": facts}
 
 
@@ -469,8 +479,11 @@ def _fact_get(params: dict) -> str:
     if not entity:
         return json.dumps({"error": "entity is required", "facts": []})
     category = params.get("category") or None
+    as_of = params.get("as_of") or None
+    include_expired = bool(params.get("include_expired", False))
     try:
-        return json.dumps(_get_facts_sync(entity, category))
+        return json.dumps(_get_facts_sync(entity, category, as_of=as_of,
+                                          include_expired=include_expired))
     except Exception as exc:
         return json.dumps({"error": str(exc), "facts": []})
 
@@ -495,7 +508,10 @@ def _fact_add(params: dict) -> str:
         else:
             frontmatter = {"type": "facts", "entity": entity, "category": category, "facts": []}
         fact_id = _generate_fact_id(category)
-        new_fact = {"fact": fact_text, "confidence": confidence, "category": category, "id": fact_id, "created_at": now_iso, "valid_at": params.get("valid_at"), "invalid_at": None, "expired_at": None, "source_doc": params.get("source_doc")}
+        provenance = params.get("provenance", "STATED")
+        if provenance not in ("STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"):
+            provenance = "STATED"
+        new_fact = {"fact": fact_text, "confidence": confidence, "category": category, "id": fact_id, "created_at": now_iso, "valid_at": params.get("valid_at"), "invalid_at": None, "expired_at": None, "provenance": provenance, "source_doc": params.get("source_doc")}
         frontmatter.setdefault("facts", []).append(new_fact)
         frontmatter["last_updated"] = now_iso
         body = f"\n# {entity} - {category}\n\n**Entity:** {entity}\n**Category:** {category}\n**Fact Count:** {len(frontmatter['facts'])}\n"
@@ -579,6 +595,230 @@ def _fact_resolve(params: dict) -> str:
         return json.dumps({"error": str(exc)})
 
 
+def _fact_invalidate(params: dict) -> str:
+    """Expire facts that are no longer current (were true, now outdated)."""
+    entity = params.get("entity", "").strip()
+    ended = params.get("ended", "").strip()
+    if not entity or not ended:
+        return json.dumps({"error": "entity and ended (ISO date) are required"})
+    category = params.get("category") or None
+    fact_substring = params.get("fact_substring", "").strip().lower()
+    reason = params.get("reason", "").strip()
+    try:
+        resolved, _ = _resolve_entity(entity)
+        entity_dir = _find_entity_dir(resolved)
+        if not entity_dir:
+            return json.dumps({"error": f"Entity not found: {entity}", "expired_count": 0})
+        expired_count = 0
+        matched_facts = []
+        files_to_scan = []
+        if category:
+            fact_file = entity_dir / f"{resolved}-{category}.md"
+            if not fact_file.exists():
+                fact_file = entity_dir / f"{entity}-{category}.md"
+            if fact_file.exists():
+                files_to_scan.append(fact_file)
+        else:
+            files_to_scan = list(entity_dir.glob("*.md"))
+        for fact_file in files_to_scan:
+            content = fact_file.read_text(encoding="utf-8")
+            frontmatter = _parse_fact_frontmatter(content)
+            if "facts" not in frontmatter:
+                continue
+            changed = False
+            for f in frontmatter["facts"]:
+                # Skip already expired/invalid facts
+                if f.get("expired_at") or f.get("invalid_at"):
+                    continue
+                # Match by substring if provided, otherwise match all
+                if fact_substring and fact_substring not in f.get("fact", "").lower():
+                    continue
+                f["expired_at"] = ended
+                if reason:
+                    f["expired_reason"] = reason
+                changed = True
+                expired_count += 1
+                matched_facts.append({"id": f.get("id"), "fact": f.get("fact", "")[:80]})
+            if changed:
+                body_start = content.find("---", 3)
+                body = content[body_start + 3:] if body_start != -1 else ""
+                fact_file.write_text(_write_fact_frontmatter(frontmatter) + body, encoding="utf-8")
+        return json.dumps({"success": True, "entity": resolved, "expired_count": expired_count, "matched_facts": matched_facts})
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "expired_count": 0})
+
+
+# ── Relationship helpers ─────────────────────────────────────────────────────
+
+RELATIONSHIPS_PATH = FACTS_ROOT / "_relationships.json"
+
+
+def _load_relationships() -> dict:
+    if not RELATIONSHIPS_PATH.exists():
+        return {"edges": [], "schema_version": 1}
+    try:
+        return json.loads(RELATIONSHIPS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"edges": [], "schema_version": 1}
+
+
+def _save_relationships(data: dict) -> None:
+    RELATIONSHIPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RELATIONSHIPS_PATH.write_text(json.dumps(data, indent=2, sort_keys=False), encoding="utf-8")
+
+
+def _fact_relate(params: dict) -> str:
+    """Add a typed relationship edge between two entities."""
+    source = params.get("source", "").strip()
+    target = params.get("target", "").strip()
+    rel_type = params.get("type", "").strip()
+    if not source or not target or not rel_type:
+        return json.dumps({"error": "source, target, and type are required"})
+    confidence = float(params.get("confidence", 0.9))
+    provenance = params.get("provenance", "STATED")
+    if provenance not in ("STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"):
+        provenance = "STATED"
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        # Resolve entity names
+        src_resolved, _ = _resolve_entity(source, auto_create=True)
+        tgt_resolved, _ = _resolve_entity(target, auto_create=True)
+        data = _load_relationships()
+        # Check for duplicate
+        for edge in data["edges"]:
+            if (edge["source"] == src_resolved and edge["target"] == tgt_resolved
+                    and edge["type"] == rel_type and not edge.get("expired_at")):
+                return json.dumps({"success": True, "action": "already_exists",
+                                   "source": src_resolved, "target": tgt_resolved, "type": rel_type})
+        new_edge = {
+            "source": src_resolved, "target": tgt_resolved, "type": rel_type,
+            "confidence": confidence, "provenance": provenance,
+            "created_at": now_iso, "expired_at": None,
+            "source_doc": params.get("source_doc"),
+        }
+        data["edges"].append(new_edge)
+        _save_relationships(data)
+        return json.dumps({"success": True, "action": "created",
+                           "source": src_resolved, "target": tgt_resolved, "type": rel_type})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def _fact_relationships(params: dict) -> str:
+    """Get all relationships for an entity (inbound + outbound)."""
+    entity = params.get("entity", "").strip()
+    if not entity:
+        return json.dumps({"error": "entity is required", "edges": []})
+    direction = params.get("direction", "both")  # "in", "out", "both"
+    rel_type = params.get("type") or None
+    try:
+        resolved, _ = _resolve_entity(entity)
+        data = _load_relationships()
+        edges = []
+        for edge in data["edges"]:
+            if edge.get("expired_at"):
+                continue
+            match = False
+            if direction in ("out", "both") and edge["source"] == resolved:
+                match = True
+            if direction in ("in", "both") and edge["target"] == resolved:
+                match = True
+            if match and rel_type and edge["type"] != rel_type:
+                match = False
+            if match:
+                edges.append(edge)
+        return json.dumps({"entity": resolved, "edges": edges, "count": len(edges)})
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "edges": []})
+
+
+def _fact_path(params: dict) -> str:
+    """Find shortest path between two entities via BFS on relationship graph."""
+    source = params.get("source", "").strip()
+    target = params.get("target", "").strip()
+    max_hops = int(params.get("max_hops", 3))
+    if not source or not target:
+        return json.dumps({"error": "source and target are required"})
+    try:
+        src_resolved, _ = _resolve_entity(source)
+        tgt_resolved, _ = _resolve_entity(target)
+        data = _load_relationships()
+        # Build adjacency list from active edges
+        adj: dict[str, list[tuple[str, dict]]] = {}
+        for edge in data["edges"]:
+            if edge.get("expired_at"):
+                continue
+            s, t = edge["source"], edge["target"]
+            adj.setdefault(s, []).append((t, edge))
+            adj.setdefault(t, []).append((s, edge))
+        # BFS
+        from collections import deque
+        queue = deque([(src_resolved, [src_resolved], [])])
+        visited = {src_resolved}
+        while queue:
+            node, path, edges_path = queue.popleft()
+            if node == tgt_resolved:
+                return json.dumps({"found": True, "path": path, "edges": edges_path, "hops": len(edges_path)})
+            if len(path) > max_hops:
+                continue
+            for neighbor, edge in adj.get(node, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, path + [neighbor],
+                                  edges_path + [{"source": edge["source"], "target": edge["target"], "type": edge["type"]}]))
+        return json.dumps({"found": False, "path": [], "edges": [], "hops": -1})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def _fact_neighbors(params: dict) -> str:
+    """Get neighborhood subgraph around an entity within N hops."""
+    entity = params.get("entity", "").strip()
+    if not entity:
+        return json.dumps({"error": "entity is required"})
+    hops = int(params.get("hops", 1))
+    min_confidence = float(params.get("min_confidence", 0.5))
+    try:
+        resolved, _ = _resolve_entity(entity)
+        data = _load_relationships()
+        # Build adjacency list
+        adj: dict[str, list[tuple[str, dict]]] = {}
+        for edge in data["edges"]:
+            if edge.get("expired_at") or edge.get("confidence", 1.0) < min_confidence:
+                continue
+            s, t = edge["source"], edge["target"]
+            adj.setdefault(s, []).append((t, edge))
+            adj.setdefault(t, []).append((s, edge))
+        # BFS up to N hops
+        from collections import deque
+        visited = {resolved}
+        current_layer = [resolved]
+        all_edges = []
+        for _ in range(hops):
+            next_layer = []
+            for node in current_layer:
+                for neighbor, edge in adj.get(node, []):
+                    edge_key = (edge["source"], edge["target"], edge["type"])
+                    all_edges.append({"source": edge["source"], "target": edge["target"],
+                                      "type": edge["type"], "confidence": edge.get("confidence", 1.0)})
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        next_layer.append(neighbor)
+            current_layer = next_layer
+        # Deduplicate edges
+        seen_edges = set()
+        unique_edges = []
+        for e in all_edges:
+            key = (e["source"], e["target"], e["type"])
+            if key not in seen_edges:
+                seen_edges.add(key)
+                unique_edges.append(e)
+        return json.dumps({"entity": resolved, "nodes": sorted(visited),
+                           "edges": unique_edges, "node_count": len(visited), "edge_count": len(unique_edges)})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
 def _vault_get(params: dict) -> str:
     path = params.get("path", "").strip()
     if not path:
@@ -651,12 +891,40 @@ def _vault_search(params: dict) -> str:
         return json.dumps({"error": str(exc), "results": []})
 
 
+def _graph_expand_entities(seed_entities: list[str], hops: int = 1) -> list[str]:
+    """Expand a set of seed entities via relationship graph traversal."""
+    if not RELATIONSHIPS_PATH.exists():
+        return []
+    try:
+        data = _load_relationships()
+        adj: dict[str, set[str]] = {}
+        for edge in data["edges"]:
+            if edge.get("expired_at"):
+                continue
+            adj.setdefault(edge["source"], set()).add(edge["target"])
+            adj.setdefault(edge["target"], set()).add(edge["source"])
+        expanded = set()
+        current = set(seed_entities)
+        for _ in range(hops):
+            next_layer = set()
+            for entity in current:
+                for neighbor in adj.get(entity, set()):
+                    if neighbor not in seed_entities and neighbor not in expanded:
+                        next_layer.add(neighbor)
+            expanded.update(next_layer)
+            current = next_layer
+        return list(expanded)
+    except Exception:
+        return []
+
+
 def _vault_recall(params: dict) -> str:
     query = params.get("query", "").strip()
     if not query:
         return json.dumps({"error": "query is required", "documents": [], "facts": []})
     limit = int(params.get("limit", 20))
     include_facts = params.get("include_facts", True)
+    expand_graph = params.get("expand_graph", False)
 
     def _do_search():
         result = _qmd_daemon_search(query, limit, VAULT_SEGMENTS)
@@ -666,9 +934,10 @@ def _vault_recall(params: dict) -> str:
 
     def _do_facts():
         if not include_facts:
-            return []
+            return [], []
+        seed_entities = [e for e, _ in _extract_entities_from_query(query)[:5]]
         facts = []
-        for entity, _ in _extract_entities_from_query(query)[:5]:
+        for entity in seed_entities:
             try:
                 entity_data = _get_facts_sync(entity)
                 if entity_data.get("facts"):
@@ -676,21 +945,37 @@ def _vault_recall(params: dict) -> str:
                     facts.extend(top[:3])
             except Exception:
                 pass
-        return facts
+        # Graph expansion: also fetch top facts from neighboring entities
+        graph_facts = []
+        if expand_graph and seed_entities:
+            neighbors = _graph_expand_entities(seed_entities, hops=1)
+            for entity in neighbors[:5]:  # Cap to avoid blowing up context
+                try:
+                    entity_data = _get_facts_sync(entity)
+                    if entity_data.get("facts"):
+                        top = sorted(entity_data["facts"], key=lambda f: f.get("confidence", 0.5), reverse=True)
+                        graph_facts.extend(top[:2])
+                except Exception:
+                    pass
+        return facts, graph_facts
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             search_fut = pool.submit(_do_search)
             facts_fut = pool.submit(_do_facts)
             raw_results = search_fut.result()
-            facts = facts_fut.result()
+            facts_result = facts_fut.result()
+            facts, graph_facts = facts_result
         documents = []
         for r in raw_results[:limit]:
             path = r.get("file", "").removeprefix("qmd://")
             if path.startswith("obsidian/"):
                 path = path.removeprefix("obsidian/")
             documents.append({"path": path, "title": r.get("title", ""), "snippet": r.get("snippet", ""), "score": r.get("score", 0)})
-        return json.dumps({"documents": documents, "facts": facts, "query": query})
+        result = {"documents": documents, "facts": facts, "query": query}
+        if graph_facts:
+            result["graph_expanded_facts"] = graph_facts
+        return json.dumps(result)
     except Exception as exc:
         return json.dumps({"error": str(exc), "documents": [], "facts": []})
 
@@ -778,16 +1063,26 @@ def _memory_remove(params: dict) -> str:
 @app.list_tools()
 async def list_tools():
     return [
-        Tool(name="fact_get", description="Retrieve structured facts for a named entity.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}}, "required": ["entity"]}),
+        Tool(name="fact_get", description="Retrieve structured facts for a named entity. Supports temporal queries with as_of and include_expired.", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "as_of": {"type": "string", "description": "ISO date — return facts valid at this point in time"}, "include_expired": {"type": "boolean", "description": "If true, include expired/invalidated facts"}}, "required": ["entity"]}),
         Tool(name="fact_add", description="Add a structured fact for a named entity/category.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "fact": {"type": "string"}, "confidence": {"type": "number"}, "valid_at": {"type": "string"}, "source_doc": {"type": "string"}}, "required": ["entity", "category", "fact"]}),
+            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "fact": {"type": "string"}, "confidence": {"type": "number"}, "valid_at": {"type": "string"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string"}}, "required": ["entity", "category", "fact"]}),
         Tool(name="fact_profile", description="Get synthesized profile for an entity — all facts grouped by category.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string"}}, "required": ["entity"]}),
         Tool(name="fact_check", description="Detect contradictions in stored facts for an entity.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}}, "required": ["entity"]}),
         Tool(name="fact_resolve", description="Resolve contradictions by keeping higher-confidence fact.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string"}, "auto_resolve": {"type": "boolean"}}, "required": ["entity"]}),
+        Tool(name="fact_invalidate", description="Expire facts that are no longer current. Sets expired_at on matching facts.", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "fact_substring": {"type": "string", "description": "Match facts containing this text"}, "ended": {"type": "string", "description": "ISO date when fact stopped being true"}, "reason": {"type": "string", "description": "Why the fact was expired"}}, "required": ["entity", "ended"]}),
+        Tool(name="fact_relate", description="Add a typed relationship edge between two entities.", inputSchema={
+            "type": "object", "properties": {"source": {"type": "string"}, "target": {"type": "string"}, "type": {"type": "string", "description": "Relationship type (e.g. built_on, uses, part_of, related_to)"}, "confidence": {"type": "number"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"]}, "source_doc": {"type": "string"}}, "required": ["source", "target", "type"]}),
+        Tool(name="fact_relationships", description="Get all relationships for an entity (inbound + outbound edges).", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string"}, "direction": {"type": "string", "enum": ["in", "out", "both"]}, "type": {"type": "string"}}, "required": ["entity"]}),
+        Tool(name="fact_path", description="Find shortest path between two entities via relationship graph.", inputSchema={
+            "type": "object", "properties": {"source": {"type": "string"}, "target": {"type": "string"}, "max_hops": {"type": "integer"}}, "required": ["source", "target"]}),
+        Tool(name="fact_neighbors", description="Get neighborhood subgraph around an entity within N hops.", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string"}, "hops": {"type": "integer"}, "min_confidence": {"type": "number"}}, "required": ["entity"]}),
         Tool(name="vault_get", description="Read a file from the obsidian vault by vault-relative path.", inputSchema={
             "type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "num_lines": {"type": "integer"}}, "required": ["path"]}),
         Tool(name="vault_write", description="Write content to a vault file. Audit-logged.", inputSchema={
@@ -796,8 +1091,8 @@ async def list_tools():
             "type": "object", "properties": {"detail": {"type": "string", "enum": ["summary", "hubs"]}}}),
         Tool(name="vault_search", description="Hybrid BM25+vector search across the obsidian vault.", inputSchema={
             "type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}, "min_score": {"type": "number"}, "scope": {"type": "string"}, "consolidate": {"type": "boolean"}}, "required": ["query"]}),
-        Tool(name="vault_recall", description="Combined recall: vault search + entity fact retrieval in parallel.", inputSchema={
-            "type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "include_facts": {"type": "boolean"}}, "required": ["query"]}),
+        Tool(name="vault_recall", description="Combined recall: vault search + entity fact retrieval in parallel. Use expand_graph=true to include facts from related entities.", inputSchema={
+            "type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "include_facts": {"type": "boolean"}, "expand_graph": {"type": "boolean", "description": "Expand results via relationship graph (1 hop)"}}, "required": ["query"]}),
         Tool(name="memory_read", description="Read MEMORY.md or USER.md session memory files.", inputSchema={
             "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "Which file to read"}}, "required": []}),
         Tool(name="memory_add", description="Append an entry to MEMORY.md or USER.md.", inputSchema={
@@ -814,6 +1109,9 @@ async def call_tool(name: str, arguments: dict):
     handlers = {
         "fact_get": _fact_get, "fact_add": _fact_add, "fact_profile": _fact_profile,
         "fact_check": _fact_check, "fact_resolve": _fact_resolve,
+        "fact_invalidate": _fact_invalidate,
+        "fact_relate": _fact_relate, "fact_relationships": _fact_relationships,
+        "fact_path": _fact_path, "fact_neighbors": _fact_neighbors,
         "vault_get": _vault_get, "vault_write": _vault_write, "vault_overview": _vault_overview,
         "vault_search": _vault_search, "vault_recall": _vault_recall,
         "memory_read": _memory_read, "memory_add": _memory_add,
