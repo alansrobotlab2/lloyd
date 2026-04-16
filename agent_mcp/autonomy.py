@@ -53,7 +53,7 @@ def _parse_task_file(path: Path) -> dict | None:
             "id": frontmatter.get("id", 0),
             "name": frontmatter.get("name", ""),
             "description": frontmatter.get("description", ""),
-            "status": frontmatter.get("status", "inbox"),
+            "status": frontmatter.get("status", "draft"),
             "priority": frontmatter.get("priority", "medium"),
             "frequency": frontmatter.get("frequency", ""),
             "scheduled_at": _to_iso(frontmatter.get("scheduled_at", "")),
@@ -99,7 +99,7 @@ def _write_task_file(task_dict: dict) -> Path:
         "id": task_dict.get("id", 0),
         "name": task_dict.get("name", ""),
         "description": task_dict.get("description", ""),
-        "status": task_dict.get("status", "inbox"),
+        "status": task_dict.get("status", "draft"),
         "priority": task_dict.get("priority", "medium"),
         "frequency": task_dict.get("frequency", ""),
         "agent_id": task_dict.get("agent_id", "memory"),
@@ -206,7 +206,7 @@ async def list_tools():
         Tool(name="autonomy_tasks", description="List/filter autonomy tasks. Returns array of task objects.", inputSchema={
             "type": "object",
             "properties": {
-                "status": {"type": "string", "description": "Filter by status (inbox, up_next, in_progress, done, etc.)"},
+                "status": {"type": "string", "description": "Filter by status (draft, up_next, in_progress)"},
                 "tag": {"type": "string", "description": "Filter by tag"},
                 "frequency": {"type": "string", "description": "Filter by frequency"},
                 "agent_id": {"type": "string", "description": "Filter by agent_id"},
@@ -218,7 +218,7 @@ async def list_tools():
                 "id": {"type": "integer", "description": "Task ID to update (0 for create)"},
                 "name": {"type": "string", "description": "Task name/title"},
                 "description": {"type": "string", "description": "Task description"},
-                "status": {"type": "string", "description": "Task status"},
+                "status": {"type": "string", "description": "Task status (draft, up_next, in_progress)"},
                 "priority": {"type": "string", "description": "Task priority (low, medium, high)"},
                 "frequency": {"type": "string", "description": "Task frequency"},
                 "skill_path": {"type": "string", "description": "Path to skill file to execute"},
@@ -243,7 +243,7 @@ async def list_tools():
             "type": "object",
             "properties": {
                 "id": {"type": "integer", "description": "Task ID to delete"},
-                "archive": {"type": "boolean", "description": "If true, set status to done instead of deleting"},
+                "archive": {"type": "boolean", "description": "If true, set status to draft instead of deleting"},
             },
             "required": ["id"],
         }),
@@ -327,7 +327,7 @@ def _handle_write(params: dict) -> str:
             "id": new_id,
             "name": name,
             "description": params.get("description", ""),
-            "status": params.get("status", "") or "inbox",
+            "status": params.get("status", "") or "draft",
             "priority": params.get("priority", "") or "medium",
             "frequency": params.get("frequency", ""),
             "skill_path": params.get("skill_path", ""),
@@ -413,7 +413,7 @@ def _handle_delete(params: dict) -> str:
     if archive:
         task = _parse_task_file(path)
         if task:
-            task["status"] = "done"
+            task["status"] = "draft"
             task["updated_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             _write_task_file(task)
             return json.dumps({"success": True, "id": task_id})
