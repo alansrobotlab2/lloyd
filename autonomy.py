@@ -463,8 +463,12 @@ def run_task(task_id) -> dict:
             body=f"## Prompt\n\n{prompt[:500]}...\n\n## Response\n\n{final_response}",
         )
 
+        interval = _frequency_interval_seconds(task)
+        completed_dt = datetime.datetime.fromisoformat(completed_at)
+        next_run_iso = (completed_dt + datetime.timedelta(seconds=interval)).isoformat() if interval else None
         _update_task_field(task_id, status="up_next", last_run=completed_at,
-                           updated=completed_at, failure_count=0)
+                           updated=completed_at, failure_count=0,
+                           **({"next_run": next_run_iso} if next_run_iso else {}))
         _append_activity_log(task_id, f"Run {run_id} — success ({duration:.0f}s)")
 
         logger.info("Task #%s completed in %.1fs", task_id, duration)

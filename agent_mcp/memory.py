@@ -1058,6 +1058,176 @@ def _memory_remove(params: dict) -> str:
     return json.dumps({"success": True, "file": file})
 
 
+# ── Session recall ───────────────────────────────────────────────────────────
+
+SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
+_SESSION_INDEX_TTL = 120       # cache session index for 2 min
+_SESSION_CORPUS_MAX = 5000     # max chars of searchable text per session
+
+_session_index_cache: Optional[tuple] = None  # (monotonic_ts, {filename: metadata})
+
+
+def _extract_msg_text(msg: dict) -> str:
+    """Extract plain text from a session message, skipping injected context."""
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        parts = [b.get("text", "") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text"]
+        text = " ".join(t for t in parts if t)
+    elif isinstance(content, str):
+        text = content
+    else:
+        return ""
+    stripped = text.strip()
+    if any(stripped.startswith(p) for p in (
+        "<context>", "<system-reminder>", "<memory>", "<daily_notes>",
+        "[cron:", "[System Message]", "[autonomy:",
+    )):
+        return ""
+    return text
+
+
+def _load_session_index(max_days: int = 14) -> dict:
+    """Load session metadata from recent JSON files. Cached with TTL.
+
+    Returns {filename: {session_id, date_str, time_str, created_at, model,
+    preview, message_count, platform, corpus, user_snippets}}.
+    """
+    global _session_index_cache
+    now = time.monotonic()
+
+    if _session_index_cache and (now - _session_index_cache[0]) < _SESSION_INDEX_TTL:
+        return _session_index_cache[1]
+
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=max_days)).strftime("%Y%m%d")
+    index: dict[str, dict] = {}
+
+    if not SESSIONS_DIR.exists():
+        _session_index_cache = (now, index)
+        return index
+
+    for f in SESSIONS_DIR.iterdir():
+        if not f.name.endswith(".json") or f.name.startswith("autonomy_"):
+            continue
+        parts = f.name.split("_")
+        if len(parts) < 3 or len(parts[0]) != 8:
+            continue
+        if parts[0] < cutoff:
+            continue
+
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if data.get("platform") == "autonomy":
+                continue
+
+            user_texts: list[str] = []
+            asst_texts: list[str] = []
+            for msg in data.get("messages", []):
+                text = _extract_msg_text(msg)
+                if not text.strip():
+                    continue
+                if msg.get("role") == "user":
+                    user_texts.append(text[:500])
+                elif msg.get("role") == "assistant":
+                    asst_texts.append(text[:300])
+
+            corpus = " ".join(user_texts + asst_texts).lower()[:_SESSION_CORPUS_MAX]
+
+            index[f.name] = {
+                "filename": f.name,
+                "session_id": data.get("session_id", f.stem),
+                "date_str": parts[0],
+                "time_str": parts[1] if len(parts) > 1 else "",
+                "created_at": data.get("created_at", ""),
+                "model": data.get("model", ""),
+                "preview": data.get("preview", ""),
+                "message_count": data.get("message_count", 0),
+                "platform": data.get("platform", ""),
+                "corpus": corpus,
+                "user_snippets": [t[:300] for t in user_texts[:8]],
+            }
+        except Exception:
+            continue
+
+    _session_index_cache = (now, index)
+    return index
+
+
+def _score_session(session: dict, query_tokens: set) -> float:
+    """Score a session against query tokens using term frequency."""
+    corpus = session.get("corpus", "")
+    if not corpus or not query_tokens:
+        return 0.0
+    score = 0.0
+    for token in query_tokens:
+        count = corpus.count(token)
+        if count > 0:
+            score += 1.0 + 0.3 * min(count - 1, 4)
+    return score / len(query_tokens)
+
+
+def _session_recall(params: dict) -> str:
+    """Search recent session transcripts for topics, decisions, or discussions."""
+    query = params.get("query", "").strip()
+    if not query:
+        return json.dumps({"error": "query is required", "sessions": []})
+
+    days = int(params.get("days", 7))
+    limit = int(params.get("limit", 5))
+
+    index = _load_session_index(max_days=max(days, 14))
+
+    # Filter to requested date range
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y%m%d")
+    sessions = [s for s in index.values() if s["date_str"] >= cutoff]
+
+    # Tokenize query (reuse existing stopwords)
+    query_tokens = {w for w in re.findall(r"\w+", query.lower())
+                    if w not in _ENTITY_STOPWORDS and len(w) >= 2}
+
+    if not query_tokens:
+        # No meaningful tokens — return most recent sessions
+        sessions.sort(key=lambda s: s["date_str"] + s.get("time_str", ""), reverse=True)
+        results = [{
+            "session_id": s["session_id"],
+            "created_at": s["created_at"],
+            "model": s["model"],
+            "preview": s["preview"][:200],
+            "message_count": s["message_count"],
+            "snippets": s["user_snippets"][:3],
+        } for s in sessions[:limit]]
+        return json.dumps({"query": query, "sessions": results, "total_searched": len(sessions)})
+
+    # Score and rank
+    scored = []
+    for s in sessions:
+        score = _score_session(s, query_tokens)
+        if score > 0.2:
+            scored.append((score, s))
+    scored.sort(key=lambda x: -x[0])
+
+    results = []
+    for score, s in scored[:limit]:
+        # Extract matching snippets
+        snippets = []
+        for text in s.get("user_snippets", []):
+            if any(t in text.lower() for t in query_tokens):
+                snippets.append(text[:300])
+                if len(snippets) >= 3:
+                    break
+        results.append({
+            "session_id": s["session_id"],
+            "created_at": s["created_at"],
+            "model": s["model"],
+            "preview": s["preview"][:200],
+            "message_count": s["message_count"],
+            "match_score": round(score, 3),
+            "snippets": snippets or [s["preview"][:200]],
+        })
+
+    return json.dumps({"query": query, "sessions": results, "total_searched": len(sessions)})
+
+
 # ── MCP registration ─────────────────────────────────────────────────────────
 
 @app.list_tools()
@@ -1101,6 +1271,8 @@ async def list_tools():
             "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"]}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["old_text", "new_text"]}),
         Tool(name="memory_remove", description="Remove an entry from MEMORY.md or USER.md (substring match).", inputSchema={
             "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"]}, "entry": {"type": "string", "description": "Text to remove"}}, "required": ["entry"]}),
+        Tool(name="session_recall", description="Search recent session transcripts for topics, decisions, or discussions from past sessions. Use for cross-session context like 'what did we work on today?' or 'what was decided about X?'", inputSchema={
+            "type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "days": {"type": "integer", "description": "Days back to search (default: 7)"}, "limit": {"type": "integer", "description": "Max results (default: 5)"}}, "required": ["query"]}),
     ]
 
 
@@ -1116,6 +1288,7 @@ async def call_tool(name: str, arguments: dict):
         "vault_search": _vault_search, "vault_recall": _vault_recall,
         "memory_read": _memory_read, "memory_add": _memory_add,
         "memory_replace": _memory_replace, "memory_remove": _memory_remove,
+        "session_recall": _session_recall,
     }
     handler = handlers.get(name)
     if handler:

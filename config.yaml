@@ -79,3 +79,5 @@ skills:
   directories:
   - ~/obsidian/skills
   - ~/lloyd/skills
+tools:
+  disabled_builtin: []
