@@ -22,6 +22,7 @@ from agent_mcp.skills import _iter_skills, _score_skill, _tokenize
 from agent_mcp.memory import (
     _extract_entities_from_query, _get_facts_sync,
     _qmd_daemon_search, _qmd_strip_stopwords,
+    _load_session_index, _score_session, _ENTITY_STOPWORDS,
 )
 
 logger = logging.getLogger("lloyd.prefetch")
@@ -41,7 +42,7 @@ VAULT_MAX_RESULTS = 5           # top N vault documents to inject
 VAULT_SNIPPET_MAX = 500         # chars per vault snippet
 VAULT_MIN_SCORE = 0.5           # minimum relevance score (0.3 was too noisy)
 VAULT_MIN_QUERY_LEN = 25        # skip vault search for short/vague messages
-VAULT_COLLECTIONS = ["memory", "knowledge", "projects", "lloyd", "work"]  # skip facts (entity lookup), skills (skill search)
+VAULT_COLLECTIONS = ["memory", "knowledge", "projects", "lloyd", "work", "sessions"]  # skip facts (entity lookup), skills (skill search)
 
 # Conversation focus tracking
 FOCUS_DECAY = 0.75              # decay factor per turn for keyword weights
@@ -251,10 +252,66 @@ def _search_vault(query: str, focus: SessionFocus | None = None) -> list[dict]:
         return []  # Non-fatal
 
 
+# ── Session search ───────────────────────────────────────────────────────────
+
+# Temporal query patterns — triggers session search in prefetch
+_TEMPORAL_RE = re.compile(
+    r"\b(today|yesterday|earlier|last\s+session|this\s+morning|this\s+afternoon|"
+    r"this\s+evening|what\s+did\s+we|what\s+have\s+we|recent(?:ly)?|"
+    r"previous(?:ly)?|before\s+this|last\s+time|worked\s+on|talked\s+about|"
+    r"discussed|decided|earlier\s+today|what\s+was)\b", re.I
+)
+
+SESSION_PREFETCH_LIMIT = 3
+SESSION_PREFETCH_SNIPPET_MAX = 200
+SESSION_PREFETCH_DAYS = 3
+
+
+def _search_recent_sessions(query: str) -> list[dict]:
+    """Search recent sessions for prefetch context injection.
+
+    Only fires for temporal queries ('today', 'yesterday', 'what did we', etc.)
+    to avoid adding session noise to non-temporal queries.
+    """
+    if not _TEMPORAL_RE.search(query):
+        return []
+
+    try:
+        import datetime as _dt
+
+        index = _load_session_index(max_days=SESSION_PREFETCH_DAYS)
+        cutoff = (_dt.datetime.now() - _dt.timedelta(days=SESSION_PREFETCH_DAYS)).strftime("%Y%m%d")
+        sessions = [s for s in index.values() if s["date_str"] >= cutoff]
+
+        if not sessions:
+            return []
+
+        # Tokenize query for scoring
+        query_tokens = {w for w in re.findall(r"\w+", query.lower())
+                        if w not in _FOCUS_NOISE and w not in _ENTITY_STOPWORDS and len(w) >= 2}
+
+        if not query_tokens:
+            # Pure temporal query like "what did we work on today?" — return most recent
+            sessions.sort(key=lambda s: s["date_str"] + s.get("time_str", ""), reverse=True)
+            return sessions[:SESSION_PREFETCH_LIMIT]
+
+        # Score sessions, with a baseline boost since the query is temporal
+        scored = []
+        for s in sessions:
+            score = _score_session(s, query_tokens) + 0.3  # temporal baseline
+            scored.append((score, s))
+        scored.sort(key=lambda x: -x[0])
+
+        return [s for _, s in scored[:SESSION_PREFETCH_LIMIT]]
+    except Exception:
+        return []
+
+
 # ── Context block formatting ──────────────────────────────────────────────────
 
 def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
                     vault_results: list[dict] = None,
+                    session_results: list[dict] = None,
                     had_query: bool = True) -> str:
     parts = []
 
@@ -288,6 +345,20 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
                 vault_lines.append(f"- **{title}** (score: {score:.2f}): {snippet}")
         if vault_lines:
             parts.append("<vault-context>\n" + "\n".join(vault_lines) + "\n</vault-context>")
+
+    # Recent session context — cross-session recall for temporal queries
+    if session_results:
+        session_lines = []
+        for sr in session_results:
+            created = sr.get("created_at", "")[:16]
+            preview = sr.get("preview", "")[:SESSION_PREFETCH_SNIPPET_MAX]
+            msg_count = sr.get("message_count", 0)
+            model = sr.get("model", "")
+            snippets = sr.get("user_snippets", [])[:2]
+            snippet_text = " | ".join(s[:150] for s in snippets) if snippets else preview
+            session_lines.append(f"- [{created}] ({model}, {msg_count} msgs): {snippet_text}")
+        if session_lines:
+            parts.append("<recent-sessions>\n" + "\n".join(session_lines) + "\n</recent-sessions>")
 
     # No skill matched but the message was long enough to warrant a search —
     # nudge the agent to consider an explicit skills_search call.
@@ -326,27 +397,32 @@ def prefetch_context(text: str, session_id: str | None = None) -> str:
 
     query_tokens = _tokenize(text)
 
-    # Run skill, fact, and vault search in parallel
+    # Run skill, fact, vault, and session search in parallel
     skills_result: list[tuple[float, dict]] = []
     facts_result: list[str] = []
     vault_result: list[dict] = []
+    session_result: list[dict] = []
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         f_skills = pool.submit(_search_skills, query_tokens)
         f_facts = pool.submit(_search_facts, text)
         f_vault = pool.submit(_search_vault, text, focus)
-        for future in as_completed([f_skills, f_facts, f_vault]):
+        f_sessions = pool.submit(_search_recent_sessions, text)
+        for future in as_completed([f_skills, f_facts, f_vault, f_sessions]):
             try:
                 if future is f_skills:
                     skills_result = future.result()
                 elif future is f_facts:
                     facts_result = future.result()
-                else:
+                elif future is f_vault:
                     vault_result = future.result()
+                else:
+                    session_result = future.result()
             except Exception:
                 pass  # Prefetch failures are non-fatal
 
-    context = _format_context(skills_result, facts_result, vault_result, had_query=True)
+    context = _format_context(skills_result, facts_result, vault_result,
+                              session_result, had_query=True)
     if not context:
         return text
 

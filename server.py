@@ -3106,6 +3106,115 @@ def _sync_35b_focus_extraction(transcript: str) -> list[str]:
         return []
 
 
+VAULT_SESSIONS_DIR = Path.home() / "obsidian" / "sessions"
+
+
+def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
+    """Export a Lloyd session as searchable markdown to the vault sessions collection.
+
+    Writes immediately (no LLM call) so QMD can index it within seconds.
+    Format matches the old Hermes extract-session-log.py output for consistency.
+    Returns the path written, or None on failure.
+    """
+    from zoneinfo import ZoneInfo
+    pst = ZoneInfo("America/Los_Angeles")
+
+    created_at = data.get("created_at", "")
+    try:
+        dt = datetime.fromisoformat(created_at)
+    except Exception:
+        dt = datetime.now()
+    date_str = dt.astimezone(pst).strftime("%Y-%m-%d")
+    ts_str = dt.isoformat()
+
+    # Build markdown transcript
+    lines: list[str] = []
+    lines.append(f"# {session_id}")
+    lines.append(f"# {ts_str}")
+    model = data.get("model", "")
+    if model:
+        lines.append(f"# model: {model}")
+    lines.append("")
+
+    for msg in data.get("messages", []):
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        # Extract text from content blocks
+        if isinstance(content, list):
+            text_parts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            text = "\n".join(t for t in text_parts if t)
+
+            # Also extract tool_use blocks
+            tool_uses = [
+                b for b in content
+                if isinstance(b, dict) and b.get("type") == "tool_use"
+            ]
+        elif isinstance(content, str):
+            text = content
+            tool_uses = []
+        else:
+            continue
+
+        if role == "user":
+            stripped = text.strip()
+            # Skip injected system context
+            if any(stripped.startswith(p) for p in (
+                "<context>", "<system-reminder>", "<memory>", "<daily_notes>",
+                "[cron:", "[System Message]", "[autonomy:",
+            )):
+                continue
+            if not stripped or len(stripped) < 2:
+                continue
+            # Truncate very long user messages
+            display = stripped[:600] if len(stripped) > 600 else stripped
+            lines.append(f"user: {display}")
+
+        elif role == "assistant":
+            # Output tool calls
+            for tu in tool_uses:
+                name = tu.get("name", "?")
+                args = tu.get("input", {})
+                arg_parts = []
+                for k, v in (args.items() if isinstance(args, dict) else []):
+                    if isinstance(v, str):
+                        arg_parts.append(f"{k}={v[:200]}")
+                    elif isinstance(v, (bool, int, float)):
+                        arg_parts.append(f"{k}={v}")
+                    else:
+                        arg_parts.append(f"{k}=...")
+                lines.append(f"tool_call: {name}({', '.join(arg_parts)})")
+
+            # Output assistant text
+            if text.strip() and len(text.strip()) > 10:
+                display = text.strip()[:500]
+                lines.append(f"lloyd: {display}")
+
+        elif role == "tool":
+            # Tool result — brief summary
+            result_text = text.strip()[:300] if text else "(empty)"
+            is_error = msg.get("is_error", False)
+            status = "ERROR" if is_error else "OK"
+            lines.append(f"  → [{status}] {result_text}")
+
+    if len(lines) <= 3:
+        # Only headers, no real content
+        return None
+
+    # Write to vault sessions collection
+    out_dir = VAULT_SESSIONS_DIR / date_str
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Filename: {session_id[:12]}.md (matches old format)
+    safe_id = session_id.replace("/", "--")[:30]
+    out_path = out_dir / f"{safe_id}.md"
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
+
+
 async def _post_session_capture(session_id: str):
     """Background task: extract summary from completed session via 35b model."""
     try:
@@ -3129,6 +3238,14 @@ async def _post_session_capture(session_id: str):
         ]
         if not user_msgs:
             return
+
+        # ── Immediate: export session markdown to vault for QMD indexing ──
+        try:
+            md_path = _export_session_markdown(session_id, data)
+            if md_path:
+                logger.info(f"Post-session capture: {session_id} — markdown exported to {md_path}")
+        except Exception as me:
+            logger.warning(f"Session markdown export failed for {session_id}: {me}")
 
         # Build transcript
         transcript = _build_capture_transcript(data.get("messages", []))
