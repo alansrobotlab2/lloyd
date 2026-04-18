@@ -159,6 +159,31 @@ export default function ChatPanel({
     return () => clearInterval(interval)
   }, [sessionKey, thinking, sending, visible])
 
+  // Poll status + messages for restored streaming sessions (no local AbortController).
+  // Detects when the backend finishes so the cancel button goes away and messages refresh.
+  useEffect(() => {
+    if (!sessionKey || !thinking || abortControllerRef.current) return
+    const poll = async () => {
+      try {
+        const status = await api.getSessionStatus(sessionKey)
+        if (!status.streaming) {
+          setThinking(false)
+          setSending(false)
+          // Refresh messages to pick up final response
+          const result = await api.loadMessages(sessionKey)
+          if (result.messages) setMessages(result.messages as ApiMessage[])
+        } else {
+          // Still streaming — refresh messages so new tool calls / text appear
+          const result = await api.loadMessages(sessionKey)
+          if (result.messages) setMessages(result.messages as ApiMessage[])
+        }
+      } catch { /* ignore */ }
+    }
+    poll()
+    const interval = setInterval(poll, 3000)
+    return () => clearInterval(interval)
+  }, [sessionKey, thinking])
+
   // Scroll to bottom when messages change, always while thinking (agent is actively responding)
   useEffect(() => {
     if (messages.length === 0) return
@@ -185,6 +210,21 @@ export default function ChatPanel({
         onActiveSessionChange?.(key) // Notify parent of active session
         if (result.model) onModelSwitch?.(result.model) // Sync model dropdown to session's model
         onLoaded?.() // Clear requestedSessionKey only after activeSessionKey is set
+        // Check if this session is still actively streaming on the backend
+        try {
+          const status = await api.getSessionStatus(key)
+          if (status.streaming) {
+            setThinking(true)
+            setSending(true)
+          } else {
+            setThinking(false)
+            setSending(false)
+          }
+        } catch {
+          // Status endpoint unavailable — assume idle
+          setThinking(false)
+          setSending(false)
+        }
         // Scroll to bottom after loading
         isNearBottom.current = true
         setTimeout(() => {
@@ -786,7 +826,28 @@ export default function ChatPanel({
           {(sending || thinking) ? (
             <button
               type="button"
-              onClick={() => abortControllerRef.current?.abort()}
+              onClick={() => {
+                if (abortControllerRef.current) {
+                  // Local stream — abort the fetch directly
+                  abortControllerRef.current.abort()
+                } else if (sessionKey) {
+                  // Restored session with no local stream — cancel via API
+                  api.cancelSession(sessionKey).then(() => {
+                    setThinking(false)
+                    setSending(false)
+                    setMessages(prev => [...prev, {
+                      id: `msg_${Date.now()}_interrupted`,
+                      role: 'assistant' as const,
+                      content: [{ type: 'text' as const, text: '*[Cancelled]*' }],
+                      timestamp: new Date().toISOString(),
+                    }])
+                  }).catch(() => {
+                    // Cancel failed — force reset UI state anyway
+                    setThinking(false)
+                    setSending(false)
+                  })
+                }
+              }}
               className="w-[38px] h-[38px] flex items-center justify-center bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 text-red-400 rounded-lg shrink-0 transition-colors"
               title="Stop"
             >

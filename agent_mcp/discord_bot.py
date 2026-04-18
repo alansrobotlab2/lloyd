@@ -631,7 +631,7 @@ def _build_bot():
             await interaction.response.send_message("Nothing running.", ephemeral=True)
 
     @tree.command(name="model", description="Switch Lloyd's model (owner only)")
-    @app_commands.describe(model_name="Model name or alias (e.g. sonnet, 122b)")
+    @app_commands.describe(model_name="Model name or alias (e.g. sonnet, primary)")
     async def cmd_model(interaction, model_name: str):
         if not _is_owner(str(interaction.user.id)):
             await interaction.response.send_message("Owner only.", ephemeral=True)

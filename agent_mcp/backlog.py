@@ -17,6 +17,7 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+VALID_STATUSES = {"draft", "up_next", "in_progress", "done"}
 
 app = Server("lloyd-backlog")
 
@@ -285,7 +286,11 @@ def _handle_write(args: dict) -> str:
             current_body = f"# {title}\n\n{current_body}"
         task["body"] = (current_body + "\n\n" + description) if current_body else description
 
-    for key in ("status", "priority", "board"):
+    if args.get("status"):
+        if args["status"] not in VALID_STATUSES:
+            return json.dumps({"success": False, "error": f"Invalid status '{args['status']}'. Must be one of: {', '.join(sorted(VALID_STATUSES))}"})
+        task["status"] = args["status"]
+    for key in ("priority", "board"):
         if args.get(key):
             task[key] = args[key]
     if args.get("tags") is not None:

@@ -10,7 +10,7 @@ import asyncio
 import json
 import os
 
-from claude_code_sdk import query, ClaudeCodeOptions
+from claude_agent_sdk import query, ClaudeAgentOptions
 
 os.environ["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8096"
 os.environ["ANTHROPIC_API_KEY"] = "no-key-required"
@@ -24,7 +24,7 @@ async def main():
     print("=" * 60)
     print()
 
-    options = ClaudeCodeOptions(
+    options = ClaudeAgentOptions(
         model="Qwen3.5-122B-A10B",
         system_prompt="You are a helpful assistant.",
         allowed_tools=["Bash"],

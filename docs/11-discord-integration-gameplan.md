@@ -180,7 +180,7 @@ discord:
 
 **How enforcement works (Option A):**
 
-The bot resolves the tier at message-receive time, builds the disallowed list locally, and POSTs it directly to the server as `extra_disallowed`. The server merges it with the globally disabled tools from `config.yaml` before building `ClaudeCodeOptions`. `permission_mode` travels with it for the same reason — a guest with `bypassPermissions` would still bypass prompts for whatever tools they can reach.
+The bot resolves the tier at message-receive time, builds the disallowed list locally, and POSTs it directly to the server as `extra_disallowed`. The server merges it with the globally disabled tools from `config.yaml` before building `ClaudeAgentOptions`. `permission_mode` travels with it for the same reason — a guest with `bypassPermissions` would still bypass prompts for whatever tools they can reach.
 
 Bot side (`mcp_server/discord.py`):
 ```python
@@ -209,7 +209,7 @@ Server side (`server.py`) — two lines change in `post_message_stream`:
 extra_disallowed = data.get("extra_disallowed", [])
 permission_mode = data.get("permission_mode") or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
 
-options = ClaudeCodeOptions(
+options = ClaudeAgentOptions(
     ...
     permission_mode=permission_mode,
     disallowed_tools=_get_disallowed_tools() + extra_disallowed,

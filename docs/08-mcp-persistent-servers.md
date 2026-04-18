@@ -32,7 +32,7 @@ config.yaml:
 
 server.py _get_mcp_servers() → {"autonomy": {"command": ..., "args": ...}}
     ↓
-ClaudeCodeOptions(mcp_servers=MCP_SERVERS)
+ClaudeAgentOptions(mcp_servers=MCP_SERVERS)
     ↓
 SDK passes --mcp-config JSON to claude CLI
     ↓
@@ -47,7 +47,7 @@ Server dies when query/session ends
 |------|------|
 | `server.py:82-94` | `_get_mcp_servers()` — builds server config dict from config.yaml |
 | `server.py:137-189` | `_discover_mcp_tools()` — spawns subprocess, sends JSON-RPC initialize + tools/list for tool discovery |
-| `server.py:288-298` | `ClaudeCodeOptions(mcp_servers=MCP_SERVERS)` — passes to SDK |
+| `server.py:288-298` | `ClaudeAgentOptions(mcp_servers=MCP_SERVERS)` — passes to SDK |
 | `server.py:2161-2209` | `/api/tools` endpoint — calls `_discover_mcp_tools()` per server |
 | `config.yaml:55-79` | MCP server definitions (command + args) |
 | `mcp-servers/*.py` | 8 servers, all using `mcp.server.stdio.stdio_server` |
@@ -70,7 +70,7 @@ Server dies when query/session ends
 
 ## 3. The SDK Already Supports This
 
-The Claude Code SDK (`claude_code_sdk` v0.0.25) defines three MCP server config types in `claude_code_sdk/types.py` (lines 152-187):
+The Claude Agent SDK (`claude_agent_sdk`) defines three MCP server config types in `claude_agent_sdk/types.py`:
 
 ```python
 class McpStdioServerConfig(TypedDict):

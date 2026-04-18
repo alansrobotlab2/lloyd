@@ -12,10 +12,12 @@ import datetime
 from pathlib import Path
 
 LLOYD_HOME = Path(__file__).parent
-SOUL_PATH = Path.home() / "obsidian" / "lloyd" / "SOUL.md"
-MEMORIES_DIR = Path.home() / "obsidian" / "lloyd"
+# Use LLOYD_HOME instead of Path.home() to avoid distrobox path mismatch issues
+# where Path.home() resolves to the host home instead of the container's isolated home
+SOUL_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "SOUL.md"
+MEMORIES_DIR = LLOYD_HOME.parent / "obsidian" / "lloyd"
 SKILLS_DIRS = [
-    Path.home() / "obsidian" / "skills",
+    LLOYD_HOME.parent / "obsidian" / "skills",
     LLOYD_HOME / "skills",
 ]
 
