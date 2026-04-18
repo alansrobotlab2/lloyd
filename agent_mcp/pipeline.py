@@ -38,8 +38,7 @@ DEFAULT_STAGE_TIMEOUT = 1800
 MODEL_ALIASES: dict[str, str] = {
     "122b": "Qwen3.5-122B-A10B",
     "35b": "Qwen3.5-35B-A3B",
-    "m2.7": "MiniMax-M2.7",
-    "opus": "claude-opus-4-6",
+    "opus": "claude-opus-4-7",
     "sonnet": "claude-sonnet-4-6",
 }
 
@@ -243,18 +242,18 @@ def _run_stage_sdk(
 ) -> str:
     """Run a single stage via Claude Agent SDK (called from background thread)."""
     import asyncio
-    import claude_code_sdk._internal.transport.subprocess_cli as _cli_transport
-    from claude_code_sdk import query, ClaudeCodeOptions
-    from claude_code_sdk import AssistantMessage, UserMessage
-    from claude_code_sdk.types import TextBlock, ToolUseBlock, ToolResultBlock
+    import claude_agent_sdk._internal.transport.subprocess_cli as _cli_transport
+    from claude_agent_sdk import query, ClaudeAgentOptions
+    from claude_agent_sdk import AssistantMessage, UserMessage
+    from claude_agent_sdk.types import TextBlock, ToolUseBlock, ToolResultBlock
 
     # The SDK's subprocess transport buffers stdout line-by-line and enforces a 1MB
     # limit per JSON message. Large tool results (e.g. WebFetch on a big page) can
     # exceed this. Raise the limit to 32MB — it's just a runaway-buffer guard.
-    _cli_transport._MAX_BUFFER_SIZE = 32 * 1024 * 1024
+    _cli_transport._DEFAULT_MAX_BUFFER_SIZE = 32 * 1024 * 1024
 
     env_vars = _get_model_env(model)
-    options = ClaudeCodeOptions(
+    options = ClaudeAgentOptions(
         system_prompt=system_prompt,
         max_turns=80,
         permission_mode="bypassPermissions",
@@ -272,7 +271,7 @@ def _run_stage_sdk(
                 pass
 
     async def _inner():
-        from claude_code_sdk._errors import MessageParseError
+        from claude_agent_sdk._errors import MessageParseError
         result_text = ""
         current_tool: Optional[str] = None
 
@@ -290,7 +289,7 @@ def _run_stage_sdk(
                 _log(f"\n[sdk: skipped unknown message: {e}]\n")
                 continue
 
-            from claude_code_sdk.types import StreamEvent
+            from claude_agent_sdk.types import StreamEvent
             if isinstance(msg, StreamEvent):
                 evt = msg.event
                 if evt.get("type") == "content_block_delta":
