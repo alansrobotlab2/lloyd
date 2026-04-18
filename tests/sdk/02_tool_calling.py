@@ -11,7 +11,7 @@ migration path opens up significantly.
 import asyncio
 import os
 
-from claude_code_sdk import query, ClaudeCodeOptions, AssistantMessage, ResultMessage, SystemMessage
+from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage, SystemMessage
 
 os.environ["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8096"
 os.environ["ANTHROPIC_API_KEY"] = "no-key-required"
@@ -25,7 +25,7 @@ async def main():
     print("=" * 60)
     print()
 
-    options = ClaudeCodeOptions(
+    options = ClaudeAgentOptions(
         model="Qwen3.5-122B-A10B",
         system_prompt="You are a helpful assistant. Use tools when asked to perform tasks.",
         allowed_tools=["Bash", "Read"],

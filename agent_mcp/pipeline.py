@@ -36,8 +36,8 @@ _runs_lock = threading.Lock()
 DEFAULT_STAGE_TIMEOUT = 1800
 
 MODEL_ALIASES: dict[str, str] = {
-    "122b": "Qwen3.5-122B-A10B",
-    "35b": "Qwen3.5-35B-A3B",
+    "primary": "primary",
+    "secondary": "secondary",
     "opus": "claude-opus-4-7",
     "sonnet": "claude-sonnet-4-6",
 }
@@ -253,11 +253,15 @@ def _run_stage_sdk(
     _cli_transport._DEFAULT_MAX_BUFFER_SIZE = 32 * 1024 * 1024
 
     env_vars = _get_model_env(model)
+    # For local models, pass model=None so SDK uses its default, but the
+    # env vars (ANTHROPIC_BASE_URL + ANTHROPIC_CUSTOM_MODEL_OPTION) route
+    # to the correct local endpoint with the correct model loaded.
+    sdk_model = None if model in ("primary", "secondary") else (model or None)
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
         max_turns=80,
         permission_mode="bypassPermissions",
-        model=model or None,
+        model=sdk_model,
         env=env_vars,
         include_partial_messages=True,
     )
@@ -539,19 +543,19 @@ def _get_model_env(model: str) -> dict:
     endpoints (8096/8091).  The proxy injects priority=1 into every request so
     interactive sessions (priority 0) preempt pipeline calls in vLLM's scheduler.
     """
-    if model in ("Qwen3.5-122B-A10B", "122b"):
+    if model == "primary":
         return {
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:8097",  # priority proxy
             "ANTHROPIC_API_KEY": "no-key-required",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION": "Qwen3.5-122B-A10B",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Qwen 122B",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": "primary",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Primary",
         }
-    elif model in ("Qwen3.5-35B-A3B", "35b"):
+    elif model == "secondary":
         return {
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:8093",  # priority proxy
             "ANTHROPIC_API_KEY": "no-key-required",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION": "Qwen3.5-35B-A3B",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Qwen 35B",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": "secondary",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Secondary",
         }
     # Claude/Anthropic models — no env override needed
     return {}
@@ -566,7 +570,7 @@ async def list_tools():
             "properties": {
                 "task": {"type": "string", "description": "Full task description for the worker."},
                 "stages": {"type": "array", "items": {"type": "string"}, "description": f"Ordered stage names. Available: {available}."},
-                "model": {"type": "string", "description": "Model override. Aliases: 122b, 35b, opus, sonnet."},
+                "model": {"type": "string", "description": "Model override. Aliases: primary, secondary, opus, sonnet."},
                 "autonomy_task_id": {"type": "integer", "description": "Autonomy task ID to mark done on completion."},
                 "stage_timeout": {"type": "integer", "description": "Per-stage timeout in seconds (default: 1800)."},
             },

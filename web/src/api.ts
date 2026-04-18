@@ -410,6 +410,16 @@ export interface PipelineRun {
   blocked_reason: string
 }
 
+export interface ActiveProc {
+  pid: number
+  sdk_session_id: string | null
+  session_id: string | null
+  model: string | null
+  preview: string
+  created_at: string | null
+  streaming: boolean
+}
+
 const API_BASE = '/api'
 
 export const api = {
@@ -449,7 +459,12 @@ export const api = {
       signal: controller.signal,
     }).then(async (response) => {
       if (!response.ok || !response.body) {
-        callbacks.onError?.(`HTTP ${response.status}`)
+        try {
+          const errData = await response.json()
+          callbacks.onError?.(errData.detail || `HTTP ${response.status}`)
+        } catch {
+          callbacks.onError?.(`HTTP ${response.status}`)
+        }
         return
       }
       const reader = response.body.getReader()
@@ -510,6 +525,18 @@ export const api = {
     }
     // Fallback to old endpoint
     const response = await fetch(`${API_BASE}/messages?session_key=${encodeURIComponent(sessionKey)}&limit=${limit}`)
+    return response.json()
+  },
+
+  async getSessionStatus(sessionId: string): Promise<{ streaming: boolean }> {
+    const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/status`)
+    return response.json()
+  },
+
+  async cancelSession(sessionId: string): Promise<{ cancelled: boolean }> {
+    const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+      method: 'POST',
+    })
     return response.json()
   },
 
@@ -736,6 +763,12 @@ export const api = {
   autonomySchedulerDisable: (): Promise<{ enabled: boolean }> =>
     fetch(`${API_BASE}/autonomy/scheduler/disable`, { method: 'POST' }).then(r => r.json()),
 
+  // Active SDK session subprocesses
+  getActiveProcs: (): Promise<{ procs: ActiveProc[] }> =>
+    fetch(`${API_BASE}/sessions/active-procs`).then(r => r.json()),
+  killSessionProc: (sessionId: string): Promise<{ killed: boolean; session_id: string }> =>
+    fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/kill-proc`, { method: 'POST' }).then(r => r.json()),
+
   // Pipeline runs
   listPipelines: (status?: string): Promise<{ runs: PipelineRun[] }> =>
     fetch(`${API_BASE}/pipelines${status ? `?status=${status}` : ''}`).then(r => r.json()),
@@ -751,4 +784,10 @@ export const api = {
     fetch(`${API_BASE}/voice/toggle`, { method: 'POST' }).then(r => r.json()),
   voiceSay: (text: string): Promise<{ text: string; duration_s: number; elapsed_s: number }> =>
     fetch(`${API_BASE}/voice/say`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }).then(r => r.json()),
+  voiceSetActiveSession: (sessionId: string | null): Promise<{ active_session: string | null }> =>
+    fetch(`${API_BASE}/voice/active-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    }).then(r => r.json()),
 }

@@ -1,4 +1,4 @@
-"""Quick smoke tests for claude-code-sdk against Sonnet."""
+"""Quick smoke tests for claude-agent-sdk against Sonnet."""
 import asyncio
 import os
 import sys
@@ -8,10 +8,10 @@ for var in ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY",
             "ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"]:
     os.environ.pop(var, None)
 
-from claude_code_sdk import query, ClaudeCodeOptions, AssistantMessage, ResultMessage
-from claude_code_sdk.types import TextBlock, StreamEvent
-from claude_code_sdk._internal import client as _sdk_client
-from claude_code_sdk._internal.message_parser import parse_message as _orig_parse
+from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage
+from claude_agent_sdk.types import TextBlock, StreamEvent
+from claude_agent_sdk._internal import client as _sdk_client
+from claude_agent_sdk._internal.message_parser import parse_message as _orig_parse
 
 # Patch: SDK 0.0.25 doesn't handle rate_limit_event — patch it to a no-op.
 # Must patch the reference in client.py (which imported by-name at load time).
@@ -32,7 +32,7 @@ async def run(label, prompt, *, check):
     try:
         text = ""
         result = None
-        async for msg in query(prompt=prompt, options=ClaudeCodeOptions(model=MODEL, max_turns=3)):
+        async for msg in query(prompt=prompt, options=ClaudeAgentOptions(model=MODEL, max_turns=3)):
             if isinstance(msg, AssistantMessage):
                 for block in msg.content:
                     if isinstance(block, TextBlock):

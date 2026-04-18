@@ -22,56 +22,50 @@ mcp_servers:
   ? ''
   : disabled_tools:
     - browser_screenshot
+    - pipeline_dispatch
+    - pipeline_status
+    - pipeline_abort
     type: sse
     url: http://127.0.0.1:8500/sse
 model:
-  default: Qwen3.5-122B-A10B
+  default: primary
 models:
-  MiniMax-M2.7:
-    alias: m2.7
-    base_url: http://127.0.0.1:8098
-    context_length: 200000
-    display_name: MiniMax M2.7
-    env:
-      ANTHROPIC_API_KEY: no-key-required
-      ANTHROPIC_BASE_URL: http://127.0.0.1:8098
-      ANTHROPIC_CUSTOM_MODEL_OPTION: MiniMax-M2.7
-      ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: MiniMax M2.7
-  Qwen3.5-122B-A10B:
-    alias: 122b
-    base_url: http://127.0.0.1:8096
-    context_length: 262144
-    display_name: Qwen 122B Local
-    env:
-      ANTHROPIC_API_KEY: no-key-required
-      ANTHROPIC_BASE_URL: http://127.0.0.1:8096
-      ANTHROPIC_CUSTOM_MODEL_OPTION: Qwen3.5-122B-A10B
-      ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Qwen 122B
-  Qwen3.5-35B-A3B:
-    alias: 35b
-    base_url: http://127.0.0.1:8091
-    context_length: 262144
-    display_name: Qwen 35B Local
-    env:
-      ANTHROPIC_API_KEY: no-key-required
-      ANTHROPIC_BASE_URL: http://127.0.0.1:8091
-      ANTHROPIC_CUSTOM_MODEL_OPTION: Qwen3.5-35B-A3B
-      ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Qwen 35B
   claude-haiku-4-5-20251001:
     alias: haiku
     context_length: 200000
     display_name: Claude Haiku 4.5
     env: {}
-  claude-opus-4-6:
+  claude-opus-4-7:
     alias: opus
     context_length: 200000
-    display_name: Claude Opus 4.6
+    display_name: Claude Opus 4.7
+    effort: high
     env: {}
   claude-sonnet-4-6:
     alias: sonnet
     context_length: 200000
     display_name: Claude Sonnet 4.6
     env: {}
+  primary:
+    alias: primary
+    base_url: http://127.0.0.1:8096
+    context_length: 262144
+    display_name: Primary (Local)
+    env:
+      ANTHROPIC_API_KEY: no-key-required
+      ANTHROPIC_BASE_URL: http://127.0.0.1:8096
+      ANTHROPIC_CUSTOM_MODEL_OPTION: primary
+      ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Primary
+  secondary:
+    alias: secondary
+    base_url: http://127.0.0.1:8091
+    context_length: 262144
+    display_name: Secondary (Local)
+    env:
+      ANTHROPIC_API_KEY: no-key-required
+      ANTHROPIC_BASE_URL: http://127.0.0.1:8091
+      ANTHROPIC_CUSTOM_MODEL_OPTION: secondary
+      ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Secondary
 server:
   host: 0.0.0.0
   port: 8080

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Lloyd is a clean-slate AI agent built on the **Claude Agent SDK** (`claude-code-sdk`). It replaces the legacy `hermes-agent` system. The backend is FastAPI + SSE, the frontend is React (Vite), and all custom tools are exposed as MCP servers.
+Lloyd is a clean-slate AI agent built on the **Claude Agent SDK** (`claude-agent-sdk`). It replaces the legacy `hermes-agent` system. The backend is FastAPI + SSE, the frontend is React (Vite), and all custom tools are exposed as MCP servers.
 
 - **Backend**: `server.py` (FastAPI, port 8080)
 - **Frontend**: `web/` (Vite dev server, proxied through backend)
@@ -103,7 +103,7 @@ agent:
 
 ## Development Notes
 
-- The SDK's `query()` call spawns a `claude` CLI subprocess per session. MCP servers are passed via `ClaudeCodeOptions.mcp_servers`.
+- The SDK's `query()` call spawns a `claude` CLI subprocess per session. MCP servers are passed via `ClaudeAgentOptions.mcp_servers`.
 - Local models (Qwen) are selected by passing env vars: `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_MODEL_OPTION`, etc.
 - Session continuity: the SDK session ID from `SystemMessage` is stored in `sessions/<id>.json` as `sdk_session_id`, then passed as `resume=` on subsequent turns.
 - The `/api/message/stream` endpoint uses SSE. The frontend connects via `fetch` + `ReadableStream`, not `EventSource`, to allow `POST`.

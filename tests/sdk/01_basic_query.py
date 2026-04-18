@@ -9,7 +9,7 @@ at 127.0.0.1:8096 using the OpenAI-compatible endpoint.
 import asyncio
 import os
 
-from claude_code_sdk import query, ClaudeCodeOptions, AssistantMessage, ResultMessage, SystemMessage
+from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage, SystemMessage
 
 # Route SDK to local model via Anthropic-compatible endpoint
 # Note: vLLM serves both OpenAI and Anthropic API formats
@@ -26,7 +26,7 @@ async def main():
     print("=" * 60)
     print()
 
-    options = ClaudeCodeOptions(
+    options = ClaudeAgentOptions(
         model="Qwen3.5-122B-A10B",
         system_prompt="You are a helpful assistant. Respond concisely.",
         max_turns=1,

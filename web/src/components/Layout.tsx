@@ -59,6 +59,13 @@ export default function Layout() {
   const currentModel = visibleSlot?.model ?? ''
   const sessionsPanelRefreshTrigger = useMemo(() => slots.map(s => s.sessionKey ?? 'null').join(','), [slots])
 
+  // Route voice transcripts to whichever session is focused in MC.
+  // Null (new/empty slot) clears the override so the backend falls back to "voice-main".
+  useEffect(() => {
+    const sid = visibleSlot?.sessionKey ?? null
+    api.voiceSetActiveSession(sid).catch(() => {})
+  }, [visibleSlot?.sessionKey])
+
   const handleNewSession = () => {
     const existingBlank = slots.find(s => s.sessionKey === null)
     if (existingBlank) {

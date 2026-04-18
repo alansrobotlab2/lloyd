@@ -2,7 +2,7 @@
 """
 Lloyd Mission Control Server — FastAPI backend powered by Claude Agent SDK.
 
-All agent interactions go through `query()` from claude_code_sdk.
+All agent interactions go through `query()` from claude_agent_sdk.
 SSE streaming bridge maps SDK events to the frontend's expected format.
 """
 
@@ -16,20 +16,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import psutil
 import yaml
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from claude_code_sdk import (
-    query, ClaudeCodeOptions,
+from claude_agent_sdk import (
+    query, ClaudeAgentOptions,
     SystemMessage, AssistantMessage, UserMessage, ResultMessage,
 )
-from claude_code_sdk import TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock
-from claude_code_sdk.types import StreamEvent
-from claude_code_sdk._internal import client as _sdk_client
-from claude_code_sdk._internal.message_parser import parse_message as _sdk_parse_original
+from claude_agent_sdk import TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock
+from claude_agent_sdk.types import StreamEvent
+from claude_agent_sdk._internal import client as _sdk_client
+from claude_agent_sdk._internal.message_parser import parse_message as _sdk_parse_original
 
 # Patch: SDK 0.0.25 doesn't handle rate_limit_event or other new Anthropic API
 # message types — they raise MessageParseError and kill the stream mid-turn.
@@ -60,6 +61,11 @@ logger = logging.getLogger("lloyd-server")
 LLOYD_HOME = Path(__file__).parent
 SESSIONS_DIR = LLOYD_HOME / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
+
+# ── Active stream tracking (for cancel & duplicate-query guard) ──────────────
+# Maps session_id → asyncio.Event.  The Event is *set* when cancellation is
+# requested; the streaming generator checks it between SDK messages.
+_active_streams: dict[str, asyncio.Event] = {}
 
 # ── Load config ───────────────────────────────────────────────────────────────
 
@@ -112,23 +118,41 @@ def _get_model_env(model_name: str) -> dict:
     return model_env
 
 
-def _get_sdk_extra_args(model_name: str) -> dict:
-    """Build extra CLI args for the SDK query (effort level, etc.).
+def _resolve_effort(model_name: str, think_level: str | None = None) -> str:
+    """Resolve effort level for a model, with optional /think override.
 
-    Effort level controls extended thinking. Works for both Anthropic models
-    (via thinking API) and local Qwen models (via vLLM thinking support).
-    Resolution order: per-model config > global agent config > 'medium' default.
+    Resolution order for base effort:
+      per-model `effort` config > global `agent.effort` > 'medium'
+
+    /think override behavior:
+      - "off" → force "low" (minimal thinking)
+      - "low"/"medium"/"high" on Anthropic models → pass through
+      - Any non-off level on local models → "high" (local is binary on/off)
     """
     cfg = _get_model_cfg(model_name)
-    extra: dict[str, str | None] = {}
-
     effort = (
         cfg.get("effort")
         or CONFIG.get("agent", {}).get("effort", "medium")
     )
-    extra["effort"] = effort
+    if think_level == "off":
+        return "low"
+    if think_level and think_level != "off":
+        is_local = bool(cfg.get("env", {}).get("ANTHROPIC_BASE_URL"))
+        return "high" if is_local else think_level
+    return effort
 
-    return extra
+
+def _resolve_thinking(model_name: str) -> dict | None:
+    """Return the SDK `thinking` config for a model.
+
+    Opus 4.7 requires explicit `thinking: {type: "adaptive"}` to enable thinking
+    at all — the default with no config is thinking OFF. Opus 4.6 and Sonnet 4.6
+    also accept adaptive as the recommended mode. Local Qwen models (vLLM /
+    llama-server behind an Anthropic-compatible gateway) also accept the adaptive
+    thinking flag and return visible thinking content — unlike Opus 4.7 which
+    defaults `display` to "omitted". Return adaptive for all models.
+    """
+    return {"type": "adaptive"}
 
 def _model_base_url(model_name: str) -> str:
     """Return the ANTHROPIC_BASE_URL for a model, or '' for real Anthropic models."""
@@ -334,6 +358,10 @@ async def post_message_stream(request: Request):
     if not text:
         raise HTTPException(status_code=400, detail="Message text required")
 
+    # Guard against duplicate queries on the same session
+    if session_id and session_id in _active_streams:
+        raise HTTPException(status_code=409, detail="Session is already streaming")
+
     # Resolve model
     model = model_override or ""
     if session_id:
@@ -398,21 +426,7 @@ async def post_message_stream(request: Request):
     )
 
     # Build SDK options
-    sdk_extra = _get_sdk_extra_args(model)
-
-    # Apply /think override — maps think level to effort
-    if think_level and think_level != "off":
-        is_local = bool(_model_base_url(model))
-        if is_local:
-            # Qwen/local models: thinking is binary (on/off via effort=high)
-            sdk_extra["effort"] = "high"
-        else:
-            # Anthropic models: granular effort levels
-            sdk_extra["effort"] = think_level  # low/medium/high pass through
-    elif think_level == "off":
-        sdk_extra["effort"] = "low"  # minimal thinking
-
-    options = ClaudeCodeOptions(
+    options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
@@ -420,12 +434,17 @@ async def post_message_stream(request: Request):
         mcp_servers=MCP_SERVERS,
         disallowed_tools=_get_disallowed_tools() + extra_disallowed,
         env=model_env,
-        extra_args=sdk_extra,
+        effort=_resolve_effort(model, think_level),
+        thinking=_resolve_thinking(model),
         resume=resume_id,
         include_partial_messages=True,
     )
 
     _save_session_meta(session_id, model, preview=text)
+
+    # Register active stream so status/cancel endpoints and duplicate guard work
+    cancel_event = asyncio.Event()
+    _active_streams[session_id] = cancel_event
 
     async def event_generator():
         # Send session_id immediately
@@ -473,6 +492,11 @@ async def post_message_stream(request: Request):
                 prompt=prefetched_text,
                 options=options,
             ):
+                # Check for server-side cancellation (from /api/sessions/{id}/cancel)
+                if cancel_event.is_set():
+                    logger.info(f"Session {session_id} cancelled via API")
+                    break
+
                 if first_event:
                     logger.info(f"[TIMING] first SDK event after {time.perf_counter() - t_query_start:.3f}s (SDK+MCP startup)")
                     first_event = False
@@ -675,7 +699,7 @@ async def post_message_stream(request: Request):
                         _append_messages(session_id, tail)
                     final_persisted = True
 
-                    # Fire background post-session capture (35b summary → daily note)
+                    # Fire background post-session capture (secondary model summary → daily note)
                     asyncio.ensure_future(_post_session_capture(session_id))
 
                     # Fire background focus extraction if due (every 5 turns)
@@ -733,6 +757,8 @@ async def post_message_stream(request: Request):
                 # Normal: SDK exited with code 1 after clean completion — ignore
                 logger.debug(f"Post-completion SDK exit (ignored): {e}")
         finally:
+            # Unregister active stream so status endpoint reports idle
+            _active_streams.pop(session_id, None)
             # Catch client disconnects (CancelledError is BaseException, not Exception).
             # Tool pairs were already persisted eagerly; only the response text may be missing.
             if not final_persisted and full_response.strip():
@@ -796,7 +822,7 @@ async def post_message(request: Request):
         or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
     )
 
-    options = ClaudeCodeOptions(
+    options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
@@ -804,7 +830,8 @@ async def post_message(request: Request):
         mcp_servers=MCP_SERVERS,
         disallowed_tools=_get_disallowed_tools() + sync_extra_disallowed,
         env=model_env,
-        extra_args=_get_sdk_extra_args(model),
+        effort=_resolve_effort(model),
+        thinking=_resolve_thinking(model),
         resume=resume_id,
     )
 
@@ -904,6 +931,131 @@ async def get_messages(session_id: str):
         "model": data.get("model", ""),
         "messages": data.get("messages", []),
     })
+
+
+def _find_active_claude_procs() -> list[dict]:
+    """Find live claude SDK subprocesses spawned by this server process."""
+    server_pid = os.getpid()
+    results = []
+    try:
+        parent = psutil.Process(server_pid)
+        children = parent.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return results
+
+    # Build sdk_session_id -> session_id reverse lookup from recent session files
+    sdk_to_session: dict[str, str] = {}
+    for sf in sorted(SESSIONS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:200]:
+        try:
+            data = json.loads(sf.read_text())
+            sdk_id = data.get("sdk_session_id")
+            if sdk_id:
+                sdk_to_session[sdk_id] = data.get("session_id", sf.stem)
+        except Exception:
+            continue
+
+    for child in children:
+        try:
+            if "claude" not in child.name():
+                continue
+            cmdline = child.cmdline()
+            # Parse --resume (sdk session id) and --model
+            resume_id = None
+            model = None
+            if "--resume" in cmdline:
+                idx = cmdline.index("--resume")
+                if idx + 1 < len(cmdline):
+                    resume_id = cmdline[idx + 1]
+            if "--model" in cmdline:
+                idx = cmdline.index("--model")
+                if idx + 1 < len(cmdline):
+                    model = cmdline[idx + 1]
+
+            session_id = sdk_to_session.get(resume_id) if resume_id else None
+            # Load preview from session file if we matched
+            preview = ""
+            created_at = None
+            if session_id:
+                try:
+                    sf_data = json.loads((SESSIONS_DIR / f"{session_id}.json").read_text())
+                    preview = sf_data.get("preview", "")
+                    created_at = sf_data.get("created_at")
+                except Exception:
+                    pass
+
+            results.append({
+                "pid": child.pid,
+                "sdk_session_id": resume_id,
+                "session_id": session_id,
+                "model": model,
+                "preview": preview,
+                "created_at": created_at,
+                "streaming": session_id in _active_streams if session_id else False,
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    return results
+
+
+@app.get("/api/sessions/active-procs")
+async def get_active_procs():
+    """List active SDK subprocess sessions — includes ones whose SSE connection has dropped."""
+    return JSONResponse({"procs": _find_active_claude_procs()})
+
+
+@app.post("/api/sessions/{session_id}/kill-proc")
+async def kill_session_proc(session_id: str):
+    """Kill the SDK subprocess for a session (hard kill, bypasses cancel signal)."""
+    # Look up sdk_session_id for this session
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    data = json.loads(meta_path.read_text())
+    sdk_session_id = data.get("sdk_session_id")
+
+    # Also cancel the SSE stream if it's still registered
+    cancel_event = _active_streams.get(session_id)
+    if cancel_event:
+        cancel_event.set()
+
+    # Find and kill the subprocess
+    server_pid = os.getpid()
+    killed = False
+    try:
+        parent = psutil.Process(server_pid)
+        for child in parent.children(recursive=True):
+            try:
+                if "claude" not in child.name():
+                    continue
+                cmdline = child.cmdline()
+                if sdk_session_id and "--resume" in cmdline:
+                    idx = cmdline.index("--resume")
+                    if idx + 1 < len(cmdline) and cmdline[idx + 1] == sdk_session_id:
+                        child.kill()
+                        killed = True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
+    return JSONResponse({"killed": killed, "session_id": session_id})
+
+
+@app.get("/api/sessions/{session_id}/status")
+async def get_session_status(session_id: str):
+    """Check whether a session has an active streaming query."""
+    return JSONResponse({"streaming": session_id in _active_streams})
+
+
+@app.post("/api/sessions/{session_id}/cancel")
+async def cancel_session(session_id: str):
+    """Request cancellation of an active streaming query."""
+    cancel_event = _active_streams.get(session_id)
+    if cancel_event is None:
+        return JSONResponse({"cancelled": False, "detail": "Session is not streaming"})
+    cancel_event.set()
+    return JSONResponse({"cancelled": True})
 
 
 @app.post("/api/sessions/clear")
@@ -1890,6 +2042,7 @@ async def architecture_graph():
 import re as _re
 
 _BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+_VALID_STATUSES = {"draft", "up_next", "in_progress", "done"}
 _BACKLOG_PATTERN = _re.compile(r"^(\d+)[-_].*\.md$")
 _BOARD_COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7"]
 _BOARD_ICONS = ["📋", "📋", "📋", "📋", "📋"]
@@ -2054,7 +2207,11 @@ async def backlog_task_update(request: Request):
             body = body[:heading.end()].rstrip() + "\n\n" + data["description"]
         else:
             body = data["description"]
-    for key in ("status", "priority", "blocked", "position"):
+    if "status" in data:
+        if data["status"] not in _VALID_STATUSES:
+            raise HTTPException(status_code=400, detail=f"Invalid status '{data['status']}'. Must be one of: {', '.join(sorted(_VALID_STATUSES))}")
+        fm["status"] = data["status"]
+    for key in ("priority", "blocked", "position"):
         if key in data:
             fm[key] = data[key]
     if "tags" in data:
@@ -2101,8 +2258,11 @@ async def backlog_task_create(request: Request):
     id_to_name = {v: k for k, v in board_map.items()}
     board_name = id_to_name.get(data.get("board_id"), "default")
     now = datetime.now().isoformat()
+    create_status = data.get("status", "draft")
+    if create_status not in _VALID_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status '{create_status}'. Must be one of: {', '.join(sorted(_VALID_STATUSES))}")
     fm = {
-        "status": data.get("status", "draft"),
+        "status": create_status,
         "priority": data.get("priority", "none"),
         "board": board_name,
         "blocked": False,
@@ -2285,8 +2445,8 @@ _SUPERVISOR_SOCK = "/tmp/agent-supervisor.sock"
 
 # service_id → (display_name, port_or_None)
 _INFRA_SERVICES = {
-    "agent-llm-122b":   ("LLM 122B",      8096),
-    "agent-llm-35b":    ("LLM 35B",        8091),
+    "agent-llm-primary":   ("LLM Primary",  8096),
+    "agent-llm-secondary": ("LLM Secondary", 8091),
     "agent-qmd-daemon": ("QMD Daemon",     8181),
     "agent-qmd-watcher":("QMD Watcher",    None),
     "agent-tts":        ("TTS",            None),
@@ -2816,15 +2976,15 @@ async def abort_pipeline(run_id: int):
 
 
 # ── Post-session capture ─────────────────────────────────────────────────────
-# After a session completes, fire a background task that calls the 35b model
+# After a session completes, fire a background task that calls the secondary model
 # (separate GPU, port 8091) to extract a summary and append it to today's daily
 # note.  This closes the latency gap between conversation events and their
 # availability in the memory store.  Facts are NOT written here — inline
-# fact_add during conversation (Phase 1) and nightly 122B extraction handle
+# fact_add during conversation (Phase 1) and nightly extraction handle
 # structured facts.
 
 _POST_CAPTURE_MODEL_URL = "http://127.0.0.1:8091/v1/chat/completions"
-_POST_CAPTURE_MODEL_NAME = "Qwen3.5-35B-A3B"
+_POST_CAPTURE_MODEL_NAME = "secondary"
 
 
 def _build_capture_transcript(messages: list, max_chars: int = 4000) -> str:
@@ -2865,8 +3025,8 @@ def _build_capture_transcript(messages: list, max_chars: int = 4000) -> str:
     return result
 
 
-def _sync_35b_capture_call(transcript: str) -> Optional[str]:
-    """Call 35b model synchronously for post-session summary extraction."""
+def _sync_secondary_capture_call(transcript: str) -> Optional[str]:
+    """Call secondary model synchronously for post-session summary extraction."""
     import urllib.request as _urllib_request
 
     prompt = (
@@ -2900,7 +3060,7 @@ def _sync_35b_capture_call(transcript: str) -> Optional[str]:
             data = json.loads(resp.read().decode("utf-8"))
             return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        logger.warning(f"35b capture call failed: {e}")
+        logger.warning(f"secondary capture call failed: {e}")
         return None
 
 
@@ -2926,8 +3086,8 @@ Transcript:
 """
 
 
-def _sync_35b_fact_extraction(transcript: str) -> list[dict]:
-    """Call 35b model to extract durable facts from a session transcript."""
+def _sync_secondary_fact_extraction(transcript: str) -> list[dict]:
+    """Call secondary model to extract durable facts from a session transcript."""
     import urllib.request as _urllib_request
 
     payload = {
@@ -2975,7 +3135,7 @@ def _sync_35b_fact_extraction(transcript: str) -> list[dict]:
         return facts[:5]  # Hard cap at 5
 
     except Exception as e:
-        logger.warning(f"35b fact extraction call failed: {e}")
+        logger.warning(f"secondary fact extraction call failed: {e}")
         return []
 
 
@@ -3059,9 +3219,9 @@ async def _maybe_extract_focus(session_id: str):
         if len(transcript) < 50:
             return
 
-        # Call 35B to extract topic phrases
+        # Call secondary model to extract topic phrases
         topics = await asyncio.get_event_loop().run_in_executor(
-            None, _sync_35b_focus_extraction, transcript
+            None, _sync_secondary_focus_extraction, transcript
         )
 
         if topics:
@@ -3072,8 +3232,8 @@ async def _maybe_extract_focus(session_id: str):
         logger.debug(f"Focus extraction failed for {session_id}: {e}")
 
 
-def _sync_35b_focus_extraction(transcript: str) -> list[str]:
-    """Call 35B model to extract 3-5 topic phrases from recent conversation."""
+def _sync_secondary_focus_extraction(transcript: str) -> list[str]:
+    """Call secondary model to extract 3-5 topic phrases from recent conversation."""
     import urllib.request as _urllib_request
 
     payload = {
@@ -3216,7 +3376,7 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
 
 
 async def _post_session_capture(session_id: str):
-    """Background task: extract summary from completed session via 35b model."""
+    """Background task: extract summary from completed session via secondary model."""
     try:
         meta_path = SESSIONS_DIR / f"{session_id}.json"
         if not meta_path.exists():
@@ -3252,9 +3412,9 @@ async def _post_session_capture(session_id: str):
         if len(transcript.strip()) < 50:
             return
 
-        # Call 35b model (runs on separate GPU — non-blocking for main model)
+        # Call secondary model (runs on separate GPU — non-blocking for primary)
         summary = await asyncio.get_event_loop().run_in_executor(
-            None, _sync_35b_capture_call, transcript
+            None, _sync_secondary_capture_call, transcript
         )
 
         if not summary or summary.strip().upper() == "TRIVIAL":
@@ -3272,7 +3432,7 @@ async def _post_session_capture(session_id: str):
         if user_msg_count >= 3:
             try:
                 facts = await asyncio.get_event_loop().run_in_executor(
-                    None, _sync_35b_fact_extraction, transcript
+                    None, _sync_secondary_fact_extraction, transcript
                 )
                 if facts:
                     _write_extracted_facts(facts, session_id)
@@ -3293,6 +3453,32 @@ async def _post_session_capture(session_id: str):
 # ── Voice Mode proxy (port 8092) ─────────────────────────────────────────────
 
 VOICE_API = "http://127.0.0.1:8092"
+
+# Tracks the MC-focused session so voice transcripts route to whatever session
+# the user currently has open. Set by the frontend via /api/voice/active-session.
+# None = fall back to voice_bridge_config.json's lloyd_session_key (voice-main).
+_VOICE_ACTIVE_SESSION: str | None = None
+
+
+@app.post("/api/voice/active-session")
+async def voice_set_active_session(request: Request):
+    """Set the session that voice transcripts should route to.
+
+    Payload: {session_id: str | null}  — null clears the override.
+    """
+    global _VOICE_ACTIVE_SESSION
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    sid = data.get("session_id")
+    _VOICE_ACTIVE_SESSION = sid if isinstance(sid, str) and sid else None
+    return JSONResponse({"active_session": _VOICE_ACTIVE_SESSION})
+
+
+@app.get("/api/voice/active-session")
+async def voice_get_active_session():
+    return JSONResponse({"active_session": _VOICE_ACTIVE_SESSION})
 
 
 @app.get("/api/voice/status")
@@ -3330,6 +3516,108 @@ async def voice_say(request: Request):
             return JSONResponse(r.json())
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Voice mode not available: {e}")
+
+
+@app.post("/api/voice/inject")
+async def voice_inject(request: Request):
+    """Accept a transcript from voice_mode.py, run a turn, speak the response.
+
+    Payload: {text, speaker?, session_key?, speak?=true}
+    """
+    data = await request.json()
+    text = (data.get("text") or "").strip()
+    speaker = (data.get("speaker") or "").strip()
+    # Priority:
+    #   1. explicit session_key/session_id in the inject payload (e.g. WS client mapping)
+    #   2. the MC-focused session set by the frontend via /api/voice/active-session
+    #   3. the legacy "voice-main" catch-all session
+    session_id = (
+        data.get("session_key")
+        or data.get("session_id")
+        or _VOICE_ACTIVE_SESSION
+        or "voice-main"
+    )
+    speak = bool(data.get("speak", True))
+
+    if not text:
+        raise HTTPException(status_code=400, detail="Message text required")
+
+    # Prefix with speaker name when known (helps the LLM attribute dialog)
+    prompt_text = (
+        f"[{speaker}]: {text}"
+        if speaker and speaker.lower() not in ("", "unknown")
+        else text
+    )
+
+    model = CONFIG.get("model", {}).get("default", "")
+    model = _resolve_model_name(model)
+    model_env = _get_model_env(model)
+
+    # Resume prior voice session if present (and endpoint-compatible)
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    resume_id = None
+    if meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text())
+            session_model = _resolve_model_name(existing.get("model", ""))
+            if _model_base_url(session_model) == _model_base_url(model):
+                resume_id = existing.get("sdk_session_id")
+        except Exception:
+            pass
+
+    system_prompt = build_system_prompt()
+    prefetched_text = prefetch_context(prompt_text, session_id=session_id)
+
+    options = ClaudeAgentOptions(
+        model=model,
+        system_prompt=system_prompt,
+        max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
+        permission_mode=CONFIG.get("agent", {}).get(
+            "permission_mode", "bypassPermissions"
+        ),
+        mcp_servers=MCP_SERVERS,
+        disallowed_tools=_get_disallowed_tools(),
+        env=model_env,
+        effort=_resolve_effort(model),
+        thinking=_resolve_thinking(model),
+        resume=resume_id,
+    )
+
+    _save_session_meta(session_id, model, preview=prompt_text)
+
+    full_response = ""
+    try:
+        async for message in query(prompt=prefetched_text, options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        full_response += block.text
+            elif isinstance(message, ResultMessage):
+                if hasattr(message, "result") and message.result:
+                    full_response = message.result
+    except Exception as e:
+        logger.error(f"Voice inject error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Fire-and-forget TTS of the response
+    if speak and full_response.strip():
+        async def _speak(text_to_say: str):
+            try:
+                import httpx as _hx
+                async with _hx.AsyncClient() as client:
+                    await client.post(
+                        f"{VOICE_API}/v1/say",
+                        json={"text": text_to_say},
+                        timeout=180.0,
+                    )
+            except Exception as e:
+                logger.warning(f"Voice inject TTS failed: {e}")
+
+        asyncio.create_task(_speak(full_response))
+
+    return JSONResponse(
+        {"success": True, "response": full_response, "session_id": session_id}
+    )
 
 
 @app.get("/api/voice/config")

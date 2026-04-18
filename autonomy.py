@@ -396,7 +396,7 @@ def run_task(task_id) -> dict:
     started_at = now_iso
 
     try:
-        from claude_code_sdk import query as sdk_query, ClaudeCodeOptions
+        from claude_agent_sdk import query as sdk_query, ClaudeAgentOptions
         from prompt_builder import build_system_prompt
 
         system_prompt = build_system_prompt()
@@ -416,7 +416,7 @@ def run_task(task_id) -> dict:
             for tool_name in cfg.get("disabled_tools", []):
                 disallowed_tools.append(f"mcp__{name}__{tool_name}")
 
-        options = ClaudeCodeOptions(
+        options = ClaudeAgentOptions(
             model=task_model,
             system_prompt=system_prompt,
             max_turns=config.get("agent", {}).get("max_turns", 60),

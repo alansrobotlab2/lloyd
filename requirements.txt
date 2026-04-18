@@ -2,7 +2,7 @@
 # Install in venv: python -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 # Claude Agent SDK
-claude-code-sdk>=0.0.25
+claude-agent-sdk>=0.1.60
 
 # Anthropic SDK (for usage ping / rate-limit headers)
 anthropic>=0.89.0

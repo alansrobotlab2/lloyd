@@ -11,7 +11,7 @@ import asyncio
 import os
 import tempfile
 
-from claude_code_sdk import query, ClaudeCodeOptions, AssistantMessage, ResultMessage, SystemMessage
+from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage, SystemMessage
 
 os.environ["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8096"
 os.environ["ANTHROPIC_API_KEY"] = "no-key-required"
@@ -88,7 +88,7 @@ async def main():
 
     venv_python = os.path.expanduser("~/agent-services/.venvs/claude-agent-sdk/bin/python")
 
-    options = ClaudeCodeOptions(
+    options = ClaudeAgentOptions(
         model="Qwen3.5-122B-A10B",
         system_prompt="You are a helpful assistant. Use the MCP tools (get_current_time, calculate) to answer questions. Do NOT use Bash.",
         allowed_tools=["mcp__test-tools__get_current_time", "mcp__test-tools__calculate"],

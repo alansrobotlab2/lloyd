@@ -4,7 +4,7 @@
 
 The current system uses a large custom agent framework (`hermes-agent`, ~8,800-line `AIAgent` class) deployed at `~/.hermes/` with a web UI, autonomy scheduler, 8 plugin directories, ~50+ skills, and supporting infrastructure managed from `~/agent-services/`.
 
-**Lloyd** (`~/lloyd/`) is the successor — a clean-slate deployment built on the **Claude Agent SDK** (`claude-code-sdk`). It replaces hermes-agent's custom orchestration while preserving all custom extensions as MCP tool servers.
+**Lloyd** (`~/lloyd/`) is the successor — a clean-slate deployment built on the **Claude Agent SDK** (`claude-agent-sdk`). It replaces hermes-agent's custom orchestration while preserving all custom extensions as MCP tool servers.
 
 ## Validated: Local Models Work with the SDK
 
@@ -25,7 +25,7 @@ ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Qwen 122B Local"
 | Streaming event inspection | Works — full event stream with all block types |
 
 Test scripts: `~/.hermes/tests/claude-sdk/01-04*.py`
-SDK venv: `~/agent-services/.venvs/claude-agent-sdk/` (Python 3.12, claude-code-sdk v0.0.25)
+SDK venv: `~/agent-services/.venvs/claude-agent-sdk/` (Python 3.12, claude-agent-sdk v0.1.60)
 
 ## Design Decisions
 
@@ -140,8 +140,8 @@ Verify via `mcp dev` or direct stdio before SDK integration.
 
 ```python
 # ~/lloyd/server.py
-from claude_code_sdk import query, ClaudeCodeOptions, SystemMessage, AssistantMessage, UserMessage, ResultMessage
-from claude_code_sdk import TextBlock, ToolUseBlock, ToolResultBlock
+from claude_agent_sdk import query, ClaudeAgentOptions, SystemMessage, AssistantMessage, UserMessage, ResultMessage
+from claude_agent_sdk import TextBlock, ToolUseBlock, ToolResultBlock
 
 MCP_SERVERS = {
     "autonomy":    {"type": "stdio", "command": "python", "args": ["mcp-servers/autonomy.py"]},

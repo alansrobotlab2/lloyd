@@ -197,7 +197,7 @@ def compare_snapshots(before: str, after: str) -> dict:
       Path.home() / "obsidian" / "memory",
   ]
   ```
-- When building `ClaudeCodeOptions` for autonomy runs, add file-write restrictions via `disallowed_tools` or a wrapper that validates paths before writing. The simplest approach: a pre-execution subliminal that says "You may only modify files under these paths: ..." and rely on the model respecting it (soft boundary). A hard boundary would require a custom MCP tool that validates paths, which is Phase 3 work.
+- When building `ClaudeAgentOptions` for autonomy runs, add file-write restrictions via `disallowed_tools` or a wrapper that validates paths before writing. The simplest approach: a pre-execution subliminal that says "You may only modify files under these paths: ..." and rely on the model respecting it (soft boundary). A hard boundary would require a custom MCP tool that validates paths, which is Phase 3 work.
 
 **Changes to task #29**:
 - Update the skill to explicitly state it may only modify task frontmatter (frequencies, priorities, timeouts) and must not touch skill content or SOUL.md.
