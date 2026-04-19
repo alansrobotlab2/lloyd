@@ -22,6 +22,57 @@ _FACTS_ROOT = Path.home() / "obsidian" / "facts"
 _RELATIONS_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
 
 
+def _overview_file(entity_dir: Path) -> Path:
+    return entity_dir / f"{entity_dir.name}-overview.md"
+
+
+def _read_overview(entity_dir: Path) -> tuple[str | None, str | None]:
+    """Return (definition, summary) from {entity}-overview.md, or (None, None)."""
+    path = _overview_file(entity_dir)
+    if not path.exists():
+        return None, None
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception:
+        return None, None
+    if not content.startswith("---"):
+        return None, None
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return None, None
+    try:
+        fm = yaml.safe_load(parts[1]) or {}
+    except Exception:
+        fm = {}
+    definition = fm.get("definition")
+    body = parts[2].lstrip("\n")
+    if body.startswith("# Summary"):
+        body = body.split("\n", 1)[1].lstrip("\n") if "\n" in body else ""
+    summary = body.strip() or None
+    return definition, summary
+
+
+def _read_definition(entity_dir: Path) -> str | None:
+    """Cheap: read only frontmatter definition, for graph tooltips."""
+    path = _overview_file(entity_dir)
+    if not path.exists():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    if not content.startswith("---"):
+        return None
+    parts = content.split("---", 2)
+    if len(parts) < 2:
+        return None
+    try:
+        fm = yaml.safe_load(parts[1]) or {}
+    except Exception:
+        return None
+    return fm.get("definition")
+
+
 @router.get("/api/entities")
 async def list_entities():
     if not _FACTS_ROOT.exists():
@@ -43,7 +94,7 @@ async def entity_detail(name: str = ""):
         raise HTTPException(status_code=400, detail="name required")
     entity_dir = _FACTS_ROOT / name
     if not entity_dir.exists():
-        return JSONResponse({"name": name, "facts": [], "relationships": []})
+        return JSONResponse({"name": name, "facts": [], "relationships": [], "definition": None, "summary": None})
     facts = []
     for f in sorted(entity_dir.glob("*.md")):
         try:
@@ -54,6 +105,9 @@ async def entity_detail(name: str = ""):
             if len(parts) < 3:
                 continue
             fm = yaml.safe_load(parts[1]) or {}
+            # Overview files carry type=overview and are not part of the fact list.
+            if fm.get("type") == "overview":
+                continue
             for fact_item in (fm.get("facts") or []):
                 if isinstance(fact_item, dict):
                     facts.append({
@@ -65,6 +119,7 @@ async def entity_detail(name: str = ""):
                     })
         except Exception:
             continue
+    definition, summary = _read_overview(entity_dir)
     relationships = []
     if _RELATIONS_INDEX.exists():
         try:
@@ -82,7 +137,13 @@ async def entity_detail(name: str = ""):
                     })
         except Exception:
             pass
-    return JSONResponse({"name": name, "facts": facts, "relationships": relationships})
+    return JSONResponse({
+        "name": name,
+        "facts": facts,
+        "relationships": relationships,
+        "definition": definition,
+        "summary": summary,
+    })
 
 
 @router.get("/api/entity-graph")
@@ -102,9 +163,12 @@ async def entity_graph():
         fact_texts = []
         categories = []
         for f in d.glob("*.md"):
+            stem_suffix = f.stem.split("-", 1)[-1] if "-" in f.stem else ""
+            if stem_suffix == "overview":
+                continue  # overview files are not facts
             fact_count += 1
-            if "-" in f.stem:
-                categories.append(f.stem.split("-", 1)[-1])
+            if stem_suffix:
+                categories.append(stem_suffix)
             try:
                 content = f.read_text(encoding="utf-8")[:4000]
                 if content.startswith("---"):
@@ -123,6 +187,7 @@ async def entity_graph():
             "label": name,
             "type": node_type,
             "factCount": fact_count,
+            "definition": _read_definition(d),
         })
     # Track mentions per direction: dir_counts[(mentioner, mentioned)] = count
     dir_counts: dict[tuple[str, str], int] = {}

@@ -38,7 +38,7 @@ RELATIONS_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
 LLOYD_SESSIONS = Path.home() / "lloyd" / "sessions"
 
 LLM_ENDPOINT = "http://127.0.0.1:8096/v1/chat/completions"
-LLM_MODEL = "Qwen3.5-122B-A10B"
+LLM_MODEL = "primary"
 
 # Vault segments that are valid relationship endpoints
 VAULT_SEGMENTS = {

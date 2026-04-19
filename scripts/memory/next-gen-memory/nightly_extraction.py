@@ -72,6 +72,7 @@ sys.path.insert(0, str(VAULT / "agents" / "memory" / "scripts" / "next-gen-memor
 
 from fact_extractor import FactExtractor
 from relations_index import RelationsIndexGenerator
+from profile_generator import ProfileGenerator
 
 
 class NightlyExtraction:
@@ -80,6 +81,7 @@ class NightlyExtraction:
     def __init__(self):
         self.extractor = FactExtractor(model_port=8096)  # Uses 122B for deep extraction
         self.rel_generator = RelationsIndexGenerator()
+        self.profile_generator = ProfileGenerator(model_port=8096)
         self.log_file = Path.home() / "lloyd" / "_pipeline" / "nightly-extraction.log"
         # Thread-safe locks per entity for parallel processing
         self.entity_locks = {}
@@ -271,7 +273,12 @@ class NightlyExtraction:
             log_lines.append("\n[Step 4] Index Rebuild")
             index = self.rel_generator.rebuild()
             log_lines.append(f"  → Rebuilt index with {index['total_relationships']} relationships")
-            
+
+            # Step 5: Entity overview generation (change-triggered)
+            log_lines.append("\n[Step 5] Entity Overview Generation")
+            overviews_generated = self._regenerate_entity_overviews()
+            log_lines.append(f"  → Generated/updated {overviews_generated} entity overviews")
+
             # Summary
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
@@ -281,17 +288,18 @@ class NightlyExtraction:
                 f"Duration: {duration:.1f} seconds",
                 f"{'='*60}\n"
             ])
-            
+
             # Write log
             self.log_file.write_text("\n".join(log_lines))
-            
+
             return {
                 "success": True,
                 "duration_seconds": duration,
                 "facts_extracted": facts_extracted,
                 "derives_created": derives_created,
                 "relations_found": relations_found,
-                "total_relationships": index['total_relationships']
+                "total_relationships": index['total_relationships'],
+                "overviews_generated": overviews_generated,
             }
             
         except Exception as e:
@@ -492,6 +500,10 @@ class NightlyExtraction:
         
         return len(shared) >= 2 and len(text2) > len(text1)
     
+    def _regenerate_entity_overviews(self) -> int:
+        """Regenerate entity overview files whose source facts have changed."""
+        return self.profile_generator.regenerate_all(workers=8)
+
     def _discover_relations(self) -> int:
         """Discover new document relationships."""
         # Scan documents for potential relations

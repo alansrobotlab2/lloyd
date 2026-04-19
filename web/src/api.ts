@@ -271,6 +271,8 @@ export interface EntityDetailData {
   name: string;
   facts: EntityFact[];
   relationships: EntityRelationship[];
+  definition?: string | null;
+  summary?: string | null;
 }
 
 export interface EntityGraphNode {
@@ -278,6 +280,7 @@ export interface EntityGraphNode {
   label: string;
   type: string;
   factCount?: number;
+  definition?: string | null;
 }
 
 export interface EntityGraphEdge {

@@ -172,7 +172,7 @@ class FactExtractor:
 
         url = f"http://localhost:{self.model_port}/v1/chat/completions"
         payload = {
-            "model": "Qwen3.5-122B-A10B",
+            "model": "primary",
             "messages": [
                 {"role": "system", "content": "You are a fact extraction engine."},
                 {"role": "user", "content": prompt}

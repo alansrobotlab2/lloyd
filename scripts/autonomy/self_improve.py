@@ -51,7 +51,7 @@ PENDING_IMPROVEMENTS_FILE = os.path.expanduser("~/lloyd/_pipeline/metrics/pendin
 
 # Local LLM config
 LLM_ENDPOINT = "http://127.0.0.1:8096/v1/chat/completions"
-LLM_MODEL = "Qwen3.5-122B-A10B"
+LLM_MODEL = "primary"
 LLM_API_KEY = os.environ.get("LOCAL_LLM_KEY", "dummy")
 
 # Workspace files for context
