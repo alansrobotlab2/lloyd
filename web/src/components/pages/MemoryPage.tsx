@@ -324,6 +324,18 @@ function EntityDetailPanel({ detail }: { detail: EntityDetailData }) {
         <span className="ml-auto text-[10px] text-slate-500">{detail.facts.length} facts</span>
       </div>
 
+      {detail.definition && (
+        <div className="text-[11px] text-slate-400 italic leading-snug">
+          {detail.definition}
+        </div>
+      )}
+
+      {detail.summary && (
+        <div className="text-[11px] text-slate-300 leading-relaxed whitespace-pre-wrap bg-surface-2/30 rounded px-2 py-1.5">
+          {detail.summary}
+        </div>
+      )}
+
       {categories.map((cat) => {
         const facts = byCategory.get(cat)!;
         const colorClass = CATEGORY_COLORS[cat] || "text-slate-400";

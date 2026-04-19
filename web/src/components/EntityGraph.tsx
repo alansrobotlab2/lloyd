@@ -55,6 +55,15 @@ interface EdgeFilters {
 
 // -- Helpers --
 
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function nodeColor(node: GNode): string {
   if (node.type === "entity") return "#F59E0B"; // gold/amber for entity nodes
   const id = node.id;
@@ -258,18 +267,13 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
 
   useEffect(() => {
     if (!rawGraphData.nodes.length) return;
-    // Defer to next tick so ForceGraph3D's internal simulation is initialized.
-    // Do NOT call d3ReheatSimulation here — it sets engineRunning=true, which
-    // the library's animation loop treats as a signal that state.layout is
-    // populated. On first mount that's a race: the library's own updateFn
-    // hasn't run yet, state.layout is undefined, layoutTick crashes.
-    // fg.d3Force() just writes to state.d3ForceLayout (always present from
-    // stateInit) — the library's updateFn will then kick the sim with our
-    // forces in place.
-    const t = setTimeout(() => {
-      configureForces();
-    }, 0);
-    return () => clearTimeout(t);
+    // Apply custom forces synchronously — BEFORE the library's debounced
+    // updateFn runs. updateFn reads d3ForceLayout at the moment it fires and
+    // then runs warmupTicks of the sim; if our forces are already in place
+    // the sim warms up with them and we avoid the visible "re-settle" when
+    // they're applied mid-animation. fg.d3Force() writes to state.d3ForceLayout
+    // (always present from stateInit) so this is safe to call immediately.
+    configureForces();
   }, [rawGraphData, configureForces]);
 
   // -- Sync with external selectedNode prop --
@@ -425,9 +429,9 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       const tgt = typeof link.target === "string" ? link.target : link.target.id;
       if (!highlightLinks.has(`${src}\x00${tgt}`)) return undefined;
       const geo = new THREE.ConeGeometry(0.7, 2.0, 6);
-      // Tip points along +Y by default; rotate so it points along -Z, which
-      // is what Object3D.lookAt orients toward.
-      geo.rotateX(-Math.PI / 2);
+      // Tip points along +Y by default; rotate so it points along +Z so the
+      // tip faces the particle's direction of travel (source → target).
+      geo.rotateX(Math.PI / 2);
       const { color, alpha } = splitRgba(edgeColor(link.type, true, false));
       const mat = new THREE.MeshBasicMaterial({
         color: new THREE.Color(color),
@@ -441,10 +445,14 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
 
   const nodeTooltip = useCallback((node: any) => {
     const n = node as GNode;
+    const label = escapeHtml(n.label);
+    const defLine = n.definition
+      ? `<br/><span style="color:#cbd5e1;font-size:11px;display:inline-block;max-width:260px;white-space:normal">${escapeHtml(n.definition)}</span>`
+      : "";
     if (n.type === "entity") {
-      return `<b>⬥ ${n.label}</b> (entity)<br/><span style="color:#94a3b8;font-size:10px">${n.factCount || 0} facts</span>`;
+      return `<b>⬥ ${label}</b> (entity)<br/><span style="color:#94a3b8;font-size:10px">${n.factCount || 0} facts</span>${defLine}`;
     }
-    return `<b>${n.label}</b><br/><span style="color:#94a3b8;font-size:10px">${n.id}</span>`;
+    return `<b>${label}</b><br/><span style="color:#94a3b8;font-size:10px">${escapeHtml(n.id)}</span>${defLine}`;
   }, []);
 
   // -- Hover handler (debounced 150ms) --
@@ -505,6 +513,19 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     }
   }, [rawGraphData]);
 
+  // Remap middle-click-drag to PAN (default is DOLLY/zoom, redundant with scroll).
+  // TrackballControls.mouseButtons = { LEFT: ROTATE, MIDDLE: DOLLY, RIGHT: PAN }
+  // Runs once the graph ref is populated.
+  useEffect(() => {
+    if (loading) return;
+    const fg = fgRef.current;
+    if (!fg) return;
+    const controls = fg.controls?.();
+    if (controls?.mouseButtons) {
+      controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
+    }
+  }, [loading]);
+
   // -- Lighting --
   // Default lights flatten Phong highlights with too much ambient.
   // Use dimmer ambient + two directional lights for proper shading.
@@ -536,7 +557,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
             linkOpacity={1}
             linkCurvature={0.15}
             linkDirectionalParticles={linkParticlesFn}
-            linkDirectionalParticleSpeed={0.003}
+            linkDirectionalParticleSpeed={0.001}
             linkDirectionalParticleThreeObject={particleArrowFn}
             backgroundColor="rgba(0,0,0,0)"
             onNodeHover={handleNodeHover}
@@ -545,6 +566,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
             onEngineStop={handleEngineStop}
             cooldownTicks={100}
             cooldownTime={8000}
+            warmupTicks={60}
             d3AlphaDecay={0.04}
             d3VelocityDecay={0.4}
             enableNodeDrag={false}
