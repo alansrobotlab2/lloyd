@@ -2,9 +2,30 @@ agent:
   max_turns: 60
   permission_mode: bypassPermissions
 autonomy:
-  enabled: false
+  enabled: true
   task_dir: ~/obsidian/autonomy
   tick_interval: 60
+autoresearch:
+  bench_dir: ~/obsidian/lloyd/bench
+  default_budget_minutes: 120
+  default_model: primary
+  facts_experiments_dir: ~/obsidian/facts/experiments
+  ledger_path: ~/lloyd/_pipeline/research/ledger.jsonl
+  max_variants_per_round: 7
+  promotion:
+    min_bench_win_fraction: 0.6
+    min_composite_delta: 0.05
+    require_safety_pass: true
+    tool_allowlist_consecutive_wins: 2
+  research_root: ~/lloyd/_pipeline/research
+  rounds_dir: ~/lloyd/_pipeline/research/rounds
+  snapshots_dir: ~/lloyd/_pipeline/research/snapshots
+  targets:
+  - prompts
+  - skills
+  - retrieval
+  - tool_allowlist
+  variants_dir: ~/lloyd/_pipeline/research/variants
 discord:
   allowed_users: []
   auto_thread: true
@@ -19,12 +40,13 @@ display:
   personality: kawaii
   streaming: true
 mcp_servers:
-  ? ''
-  : disabled_tools:
+  lloyd-mcp:
+    disabled_tools:
     - browser_screenshot
     - pipeline_dispatch
     - pipeline_status
     - pipeline_abort
+    name: lloyd-mcp
     type: sse
     url: http://127.0.0.1:8500/sse
 model:
@@ -75,3 +97,40 @@ skills:
   - ~/lloyd/skills
 tools:
   disabled_builtin: []
+workers:
+  db_path: ~/lloyd/workers.db
+  enabled: true
+  max_attempts: 3
+  priority_proxy_url: http://127.0.0.1:8097
+  slots: 8
+  sources:
+    autoresearch:
+      enabled: false
+      interval_seconds: 3600
+      max_inflight: 1
+    bench-mine:
+      enabled: false
+      interval_seconds: 7200
+      max_inflight: 1
+    domain-research:
+      enabled: false
+      interval_seconds: 600
+      max_inflight: 1
+    gap-fill:
+      enabled: false
+      interval_seconds: 300
+      max_inflight: 2
+    kg-pipeline:
+      cooldown_seconds: 900
+      enabled: true
+      interval_seconds: 60
+      max_inflight: 1
+    scheduled-task:
+      enabled: true
+      interval_seconds: 60
+    session-distill:
+      enabled: false
+      interval_seconds: 1800
+      max_inflight: 1
+  staging_root: ~/obsidian/pending-research
+  worker_priority: 2

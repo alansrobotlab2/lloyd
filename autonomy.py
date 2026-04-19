@@ -1,24 +1,19 @@
-"""
-Lloyd Autonomy Scheduler — task scheduler and executor powered by Claude Agent SDK.
+"""Lloyd autonomy helpers — task-file I/O and single-task execution.
 
-Evaluates which autonomy tasks are due based on frequency, last_run,
-depends_on, preferred_hours, and priority. Executes the highest-priority
-due task by calling query() from the Claude Agent SDK.
-
-Usage:
-    from autonomy import autonomy_tick, run_task
-    autonomy_tick()       # Called every 60s from server.py
-    run_task(task_id=48)  # Run a specific task on demand
+Scheduling, KG pipeline dispatch, and worker orchestration now all live in
+the unified work queue (see workers/ and docs/21-unified-work-queue.md).
+This module provides the task-file CRUD + `run_task()` that the
+`scheduled-task` source and the `/api/autonomy/run` endpoint both call.
 """
+
+from __future__ import annotations
 
 import asyncio
 import datetime
-import json
 import logging
 import os
 import time
 import traceback
-import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -30,16 +25,15 @@ AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
 LLOYD_HOME = Path(__file__).parent
 
-# ── State ─────────────────────────────────────────────────────────────────────
+# ── Status ───────────────────────────────────────────────────────────────────
 
 _ticker_enabled = False
-_ticker_running = False
 _last_tick_time: float = 0.0
 _current_task_id: Optional[int] = None
 
 
 def recover_stuck_tasks() -> list:
-    """Reset any tasks stuck in_progress longer than their timeout. Called on startup."""
+    """Reset any tasks stuck in_progress longer than their timeout."""
     recovered = []
     if not AUTONOMY_DIR.exists():
         return recovered
@@ -63,11 +57,23 @@ def recover_stuck_tasks() -> list:
 
 
 def get_status() -> dict:
+    from workers.pool import get_pool
+    from workers.queue import get_queue
+
+    pool = get_pool()
+    try:
+        q = get_queue()
+        queue_depth = q.depth_by_source()
+    except RuntimeError:
+        queue_depth = {}
+
     return {
         "enabled": _ticker_enabled,
-        "running": _ticker_running,
+        "running": bool(pool and pool._running and not pool._paused),
         "last_tick": _last_tick_time,
         "current_task_id": _current_task_id,
+        "pool": pool.status() if pool else None,
+        "queue_depth": queue_depth,
     }
 
 
@@ -159,7 +165,7 @@ def _write_run_record(task_id: int, run_id: str, status: str,
     return path
 
 
-# ── Scheduling logic ──────────────────────────────────────────────────────────
+# ── Scheduling logic (used by scheduled-task source) ──────────────────────────
 
 def _all_runnable_tasks() -> list[dict]:
     if not AUTONOMY_DIR.exists():
@@ -210,7 +216,6 @@ def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
     dep_id = task.get("depends_on")
     if not dep_id or str(dep_id).strip().lower() in ("null", "none", ""):
         return True
-    # Normalize to string for comparison so alphanumeric IDs work too
     dep_id = str(dep_id).strip()
     dep_task = None
     for t in all_tasks:
@@ -314,7 +319,6 @@ def _build_task_prompt(task: dict, skill_content: str) -> str:
 
 
 def _get_model_env(model_name: str) -> dict:
-    """Get environment variable overrides for a model."""
     config_path = LLOYD_HOME / "config.yaml"
     if not config_path.exists():
         return {}
@@ -340,7 +344,6 @@ _BG_URL_MAP = {
 
 
 def _to_bg_url(env: dict) -> dict:
-    """Rewrite local vLLM URLs to use the priority-injecting proxy."""
     base_url = env.get("ANTHROPIC_BASE_URL", "")
     if base_url in _BG_URL_MAP:
         env = dict(env)
@@ -350,7 +353,7 @@ def _to_bg_url(env: dict) -> dict:
 
 def run_task(task_id) -> dict:
     """Execute a single autonomy task via Claude Agent SDK."""
-    global _current_task_id
+    global _current_task_id, _last_tick_time
 
     path = _find_task_file(task_id)
     if not path:
@@ -379,8 +382,6 @@ def run_task(task_id) -> dict:
             task_model = cfg.get("model", {}).get("default", "")
         except Exception:
             pass
-    # Ensure we have a valid model - fallback to empty string if nothing found
-    # (the SDK will use its own default if model is empty)
     if not task_model:
         task_model = ""
 
@@ -393,6 +394,7 @@ def run_task(task_id) -> dict:
 
     logger.info("Running task #%s: %s (model=%s)", task_id, task.get("name"), task_model)
     _current_task_id = task_id
+    _last_tick_time = time.time()
     started_at = now_iso
 
     try:
@@ -401,7 +403,6 @@ def run_task(task_id) -> dict:
 
         system_prompt = build_system_prompt()
 
-        # Get MCP server configs
         config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
         mcp_servers = {}
         disallowed_tools = list(config.get("tools", {}).get("disabled_builtin", []))
@@ -425,7 +426,6 @@ def run_task(task_id) -> dict:
             disallowed_tools=disallowed_tools,
         )
 
-        # Set model env
         old_env = {}
         for key, value in model_env.items():
             old_env[key] = os.environ.get(key)
@@ -501,36 +501,3 @@ def run_task(task_id) -> dict:
 
     finally:
         _current_task_id = None
-
-
-# ── Tick ──────────────────────────────────────────────────────────────────────
-
-def autonomy_tick() -> dict:
-    global _ticker_running, _last_tick_time
-
-    if not _ticker_enabled:
-        return {"skipped": True, "reason": "disabled"}
-    if _ticker_running:
-        return {"skipped": True, "reason": "already_running"}
-
-    _ticker_running = True
-    _last_tick_time = time.time()
-
-    try:
-        due = get_due_tasks()
-        if not due:
-            return {"skipped": False, "reason": "no_tasks_due", "checked": True}
-
-        task = due[0]
-        task_id = task.get("id")
-        logger.info("Tick: running task #%s (%s) — %d due total", task_id, task.get("name"), len(due))
-        result = run_task(task_id)
-        result["tasks_due"] = len(due)
-        return result
-
-    except Exception as e:
-        logger.error("Tick failed: %s", e)
-        return {"skipped": False, "error": str(e)}
-
-    finally:
-        _ticker_running = False
