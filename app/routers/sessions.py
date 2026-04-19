@@ -1,4 +1,4 @@
-"""Session-list / transcript / active-proc / cancel endpoints."""
+"""Session-list / transcript / active-proc / cancel / inject endpoints."""
 
 import json
 import os
@@ -9,7 +9,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.paths import SESSIONS_DIR
-from app.sessions_io import is_session_active, get_cancel_event
+from app.sessions_io import (
+    is_session_active,
+    get_cancel_event,
+    get_queue_state,
+    drain_pending,
+)
 
 
 router = APIRouter()
@@ -173,13 +178,62 @@ async def get_session_status(session_id: str):
 
 
 @router.post("/api/sessions/{session_id}/cancel")
-async def cancel_session(session_id: str):
-    """Request cancellation of the currently-running turn."""
+async def cancel_session(session_id: str, request: Request):
+    """Request cancellation of the currently-running turn.
+
+    Query params:
+        drain_pending: if "true" (or "1"), also clear queued ambient
+            turns. User turns are never silently dropped by this call.
+    """
     cancel_event = get_cancel_event(session_id)
+    drain = request.query_params.get("drain_pending", "").lower() in ("true", "1", "yes")
+
+    drained = 0
+    if drain:
+        drained = await drain_pending(session_id, source="ambient")
+
     if cancel_event is None:
-        return JSONResponse({"cancelled": False, "detail": "Session is not streaming"})
+        payload = {"cancelled": False, "drained": drained}
+        if drained == 0:
+            payload["detail"] = "Session is not streaming"
+        return JSONResponse(payload)
+
     cancel_event.set()
-    return JSONResponse({"cancelled": True})
+    return JSONResponse({"cancelled": True, "drained": drained})
+
+
+@router.get("/api/sessions/{session_id}/queue")
+async def get_session_queue(session_id: str):
+    """Return a snapshot of the session's turn queue."""
+    return JSONResponse(get_queue_state(session_id))
+
+
+@router.post("/api/sessions/{session_id}/inject")
+async def inject_ambient_turn(session_id: str, request: Request):
+    """Enqueue an ambient (background-producer) turn on this session.
+
+    Body: { "text": "...", "dedup_key": "..."  (optional, ignored in Phase 2) }
+
+    Response: { "turn_id": "...", "source": "ambient", "preempted": false,
+                "queue": {...} }
+
+    Producers (autonomy, future session_inject_context MCP tool) call
+    this to hand the agent context that should be processed when the
+    user isn't actively typing. If a user turn arrives while this
+    ambient is running, the ambient is preempted.
+    """
+    data = await request.json()
+    text = (data.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    # Imported here to avoid an import cycle at module load time.
+    from app.routers.messages import build_ambient_turn, enqueue_ambient
+
+    turn = await build_ambient_turn(session_id, text)
+    result = await enqueue_ambient(session_id, turn)
+    result["queue"] = get_queue_state(session_id)
+    return JSONResponse(result)
 
 
 @router.post("/api/sessions/clear")
