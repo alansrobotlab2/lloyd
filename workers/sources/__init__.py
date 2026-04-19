@@ -38,8 +38,10 @@ def get_sources_config() -> dict[str, dict]:
 
 
 # Import and register all sources. Each module calls register() at import-time.
+# KG pipeline steps (data-pipeline, conversation-relation-linking,
+# entity-resolution-sweep) run as regular scheduled-task entries in
+# ~/obsidian/autonomy/, chained via depends_on — no dedicated source.
 from workers.sources import scheduled_task as _scheduled_task  # noqa: E402,F401
-from workers.sources import kg_pipeline as _kg_pipeline  # noqa: E402,F401
 from workers.sources import autoresearch as _autoresearch  # noqa: E402,F401
 from workers.sources import gap_fill as _gap_fill  # noqa: E402,F401
 from workers.sources import session_distill as _session_distill  # noqa: E402,F401
@@ -47,7 +49,6 @@ from workers.sources import domain_research as _domain_research  # noqa: E402,F4
 from workers.sources import bench_mine as _bench_mine  # noqa: E402,F401
 
 register(_scheduled_task)
-register(_kg_pipeline)
 register(_autoresearch)
 register(_gap_fill)
 register(_session_distill)

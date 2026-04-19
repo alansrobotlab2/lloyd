@@ -105,31 +105,26 @@ workers:
   slots: 8
   sources:
     autoresearch:
-      enabled: false
+      enabled: true
       interval_seconds: 3600
       max_inflight: 1
     bench-mine:
-      enabled: false
+      enabled: true
       interval_seconds: 7200
       max_inflight: 1
     domain-research:
-      enabled: false
+      enabled: true
       interval_seconds: 600
       max_inflight: 1
     gap-fill:
-      enabled: false
+      enabled: true
       interval_seconds: 300
       max_inflight: 2
-    kg-pipeline:
-      cooldown_seconds: 900
-      enabled: true
-      interval_seconds: 60
-      max_inflight: 1
     scheduled-task:
       enabled: true
       interval_seconds: 60
     session-distill:
-      enabled: false
+      enabled: true
       interval_seconds: 1800
       max_inflight: 1
   staging_root: ~/obsidian/pending-research

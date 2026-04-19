@@ -59,9 +59,9 @@ All agent LLM calls route through the existing priority proxy at port 8097 with 
 | `session-distill` | 1800s | `pending-research/distill/` | `periodic-memory-capture-lloyd.md` watermark pattern |
 | `bench-mine` | 7200s | `pending-research/bench/` | session failures + autoresearch ledger losers |
 | `domain-research` | 600s | `pending-research/domain/` | reads new `~/obsidian/lloyd/research-queue.md` |
-| `kg-pipeline` | 60s (poll), 900s (cooldown) | vault (existing behavior) | calls the 4 existing KG skills on primary model |
+| KG pipeline steps | per-task frequency | vault (existing behavior) | ordinary `scheduled-task` entries in `~/obsidian/autonomy/` chained via `depends_on` |
 
-`kg-pipeline` poll check: compare `~/obsidian/**/*.md` max mtime against watermark `kg-pipeline.last_vault_mtime`. If newer, enqueue a single `kind=chain` item (dedup_key `kg-pipeline:chain`, bumps if already queued). Chain handler runs data-pipeline → conversation-relation-linking → entity-resolution-sweep (30-min throttle preserved) → groundskeeper-loop in sequence.
+The KG chain (data-pipeline → conversation-relation-linking → entity-resolution-sweep) does NOT get a dedicated source. It's three `scheduled-task` entries (#24, #51, #48) with `frequency: every-15min` and `depends_on` pointing up the chain. The scheduled-task source fires them in order; queue dedup on `scheduled-task:{id}` handles bursts. This keeps a single code path and makes the chain visible/editable in the Autonomy UI.
 
 ## Files to create
 
@@ -74,7 +74,6 @@ All agent LLM calls route through the existing priority proxy at port 8097 with 
 - [workers/sources/session_distill.py](workers/sources/session_distill.py)
 - [workers/sources/bench_mine.py](workers/sources/bench_mine.py)
 - [workers/sources/domain_research.py](workers/sources/domain_research.py)
-- [workers/sources/kg_pipeline.py](workers/sources/kg_pipeline.py)
 - [app/routers/workers.py](app/routers/workers.py) — `GET /api/workers/status`, `/queue`, `/runs`, `POST /api/workers/{enable,enqueue,pause}`
 - `~/obsidian/pending-research/README.md` — staging semantics
 - `~/obsidian/lloyd/research-queue.md` — user-curated backlog for `domain-research`

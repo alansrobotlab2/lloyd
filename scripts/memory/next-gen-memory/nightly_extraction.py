@@ -346,6 +346,10 @@ class NightlyExtraction:
         # Collect eligible files
         eligible_files = []
         for md_file in VAULT.rglob("*.md"):
+            # Skip directories (e.g. facts/ entities stored as .md directories)
+            if not md_file.is_file():
+                continue
+
             # Strict vault path validation
             path_str = str(md_file)
             if not path_str.startswith(str(VAULT) + "/"):
