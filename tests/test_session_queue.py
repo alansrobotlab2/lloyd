@@ -1,9 +1,11 @@
 """Task #296: verify per-session turn queue behavior.
 
-Covers Phases 1 and 2:
+Covers Phases 1–3:
 - Phase 1: concurrent user POSTs serialize; cancel targets current turn
 - Phase 2: user preempts running ambient; user tier popped first;
            drain_pending clears ambient only; ambient cancel marker
+- Phase 3: ambient queue cap drops oldest; dedup_key collapses duplicates;
+           queue_state event emitted on enqueue/drain
 
 Run: .venvs/lloyd/bin/python -m tests.test_session_queue
 """
@@ -23,6 +25,7 @@ from app.sessions_io import (  # noqa: E402
     get_queue_state,
     enqueue_turn,
     drain_pending,
+    AMBIENT_QUEUE_CAP,
 )
 from app.routers import messages as msg_mod  # noqa: E402
 
@@ -215,6 +218,121 @@ async def test_drain_pending_ambient_only():
     print("OK drain: 2 queued ambients dropped, running turn preempted, user ran")
 
 
+async def test_ambient_queue_cap():
+    """Queued ambient turns beyond AMBIENT_QUEUE_CAP get dropped (oldest
+    first). Running turn is untouched.
+    """
+    msg_mod._run_turn = _slow_cancel_aware_run
+    session_id = "test-session-cap"
+    _session_queues.pop(session_id, None)
+
+    running = _make_turn("running", source="ambient")
+    await _enqueue(session_id, running)
+    await asyncio.sleep(0.05)
+
+    # Fill the queue up to cap, then add one more.
+    queued = [_make_turn(f"a{i}", source="ambient") for i in range(AMBIENT_QUEUE_CAP + 1)]
+    results = []
+    for t in queued:
+        results.append(await _enqueue(session_id, t))
+
+    # The final enqueue should have reported the oldest queued turn as dropped.
+    assert results[-1]["dropped"], f"expected non-empty dropped list, got {results[-1]}"
+    assert queued[0].turn_id in results[-1]["dropped"], (
+        f"expected oldest {queued[0].turn_id} in dropped, got {results[-1]['dropped']}"
+    )
+    assert queued[0].done.is_set(), "dropped turn's done event should be set"
+
+    state = get_queue_state(session_id)
+    assert state["pending_ambient"] == AMBIENT_QUEUE_CAP
+
+    # Drain so the test exits cleanly.
+    await drain_pending(session_id, source="ambient")
+    ev = get_cancel_event(session_id)
+    if ev: ev.set()
+    await asyncio.wait_for(running.done.wait(), timeout=3)
+    print(f"OK cap: AMBIENT_QUEUE_CAP={AMBIENT_QUEUE_CAP} enforced, oldest dropped")
+
+
+async def test_ambient_dedup_collapse():
+    """Enqueueing an ambient with the same dedup_key as a queued one
+    drops the old one; newest wins.
+    """
+    msg_mod._run_turn = _slow_cancel_aware_run
+    session_id = "test-session-dedup"
+    _session_queues.pop(session_id, None)
+
+    running = _make_turn("running", source="ambient")
+    await _enqueue(session_id, running)
+    await asyncio.sleep(0.05)
+
+    # Two ambients with distinct keys.
+    a1 = SessionTurn(
+        turn_id=uuid.uuid4().hex[:8], source="ambient",
+        payload={"dedup_key": "K1", "label": "v1"}, enqueued_at=datetime.now(),
+    )
+    a2 = SessionTurn(
+        turn_id=uuid.uuid4().hex[:8], source="ambient",
+        payload={"dedup_key": "K2", "label": "v1"}, enqueued_at=datetime.now(),
+    )
+    # Third one with same key as a1 — should collapse a1.
+    a1_new = SessionTurn(
+        turn_id=uuid.uuid4().hex[:8], source="ambient",
+        payload={"dedup_key": "K1", "label": "v2"}, enqueued_at=datetime.now(),
+    )
+    await _enqueue(session_id, a1)
+    await _enqueue(session_id, a2)
+    result = await _enqueue(session_id, a1_new)
+
+    assert result["deduped"] is True, f"expected deduped=True, got {result}"
+    assert a1.turn_id in result["dropped"], f"expected a1 ({a1.turn_id}) dropped, got {result}"
+    assert a1.done.is_set()
+
+    state = get_queue_state(session_id)
+    # a2 (K2) and a1_new (K1) remain, a1 collapsed.
+    assert state["pending_ambient"] == 2, f"expected 2 pending, got {state}"
+
+    # Drain + cancel so the running turn exits.
+    await drain_pending(session_id, source="ambient")
+    ev = get_cancel_event(session_id)
+    if ev: ev.set()
+    await asyncio.wait_for(running.done.wait(), timeout=3)
+    print("OK dedup: same dedup_key collapsed, newest kept")
+
+
+async def test_queue_state_event_emitted():
+    """Subscribers of the running turn receive a queue_state event when
+    another turn is enqueued.
+    """
+    msg_mod._run_turn = _slow_cancel_aware_run
+    session_id = "test-session-qs-event"
+    _session_queues.pop(session_id, None)
+
+    running = _make_turn("running", source="ambient")
+    await _enqueue(session_id, running)
+    await asyncio.sleep(0.05)
+
+    # Drain current events so we have a clean slate.
+    while not running.events.empty():
+        running.events.get_nowait()
+
+    # Enqueueing another ambient should broadcast queue_state into running.events.
+    extra = _make_turn("extra", source="ambient")
+    await _enqueue(session_id, extra)
+
+    # First event on running's queue should be queue_state.
+    evt = await asyncio.wait_for(running.events.get(), timeout=1.0)
+    assert evt["event"] == "queue_state", f"expected queue_state, got {evt}"
+    assert evt["data"]["pending_ambient"] >= 1, f"expected pending_ambient>=1, got {evt}"
+
+    # Cleanup.
+    await drain_pending(session_id, source="ambient")
+    ev = get_cancel_event(session_id)
+    if ev: ev.set()
+    await asyncio.wait_for(running.done.wait(), timeout=3)
+    print("OK queue_state: event broadcast to running turn on enqueue")
+
+
 async def main():
     await test_serial_execution()
     await test_cancel_current()
@@ -222,6 +340,9 @@ async def main():
     await test_user_preempts_ambient()
     await test_user_tier_popped_first()
     await test_drain_pending_ambient_only()
+    await test_ambient_queue_cap()
+    await test_ambient_dedup_collapse()
+    await test_queue_state_event_emitted()
     print("\nAll tests passed.")
 
 
