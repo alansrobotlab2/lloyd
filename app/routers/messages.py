@@ -46,6 +46,7 @@ from app.sessions_io import (
     _session_queues,
     _save_session_meta,
     _append_messages,
+    mutate_session,
     _broadcast_queue_state,
     enqueue_turn,
     get_queue_state,
@@ -129,7 +130,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     }
     if turn.source != "user":
         user_msg["source"] = turn.source
-    _append_messages(session_id, [user_msg])
+    await _append_messages(session_id, [user_msg])
 
     try:
         async for message in query(
@@ -180,10 +181,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
             if isinstance(message, SystemMessage):
                 sdk_session = message.data.get("session_id")
                 if sdk_session:
-                    if meta_path.exists():
-                        meta = json.loads(meta_path.read_text())
-                        meta["sdk_session_id"] = sdk_session
-                        meta_path.write_text(json.dumps(meta, indent=2))
+                    await mutate_session(session_id, lambda d: d.__setitem__("sdk_session_id", sdk_session))
 
             elif isinstance(message, AssistantMessage):
                 has_tool_use = any(isinstance(b, ToolUseBlock) for b in message.content)
@@ -197,7 +195,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     }
                     if accumulated_thinking:
                         seg_entry["reasoning"] = accumulated_thinking
-                    _append_messages(session_id, [seg_entry])
+                    await _append_messages(session_id, [seg_entry])
                     full_response = ""
                     accumulated_thinking = ""
                 for block in message.content:
@@ -274,7 +272,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         if tc and call_id not in persisted_tool_ids:
                             persisted_tool_ids.add(call_id)
                             pair_ts = datetime.now().isoformat()
-                            _append_messages(session_id, [
+                            await _append_messages(session_id, [
                                 {
                                     "id": f"msg_{call_id}_tc",
                                     "role": "assistant",
@@ -311,10 +309,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
                 if message.session_id:
                     try:
-                        if meta_path.exists():
-                            meta = json.loads(meta_path.read_text())
-                            meta["sdk_session_id"] = message.session_id
-                            meta_path.write_text(json.dumps(meta, indent=2))
+                        await mutate_session(
+                            session_id,
+                            lambda d, sid=message.session_id: d.__setitem__("sdk_session_id", sid),
+                        )
                     except Exception as se:
                         logger.warning(f"Failed to save sdk_session_id: {se}")
 
@@ -359,7 +357,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         msg_entry["reasoning"] = accumulated_thinking
                     tail.append(msg_entry)
                 if tail:
-                    _append_messages(session_id, tail)
+                    await _append_messages(session_id, tail)
                 final_persisted = True
 
                 asyncio.ensure_future(_post_session_capture(session_id))
@@ -396,7 +394,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         err_msg_entry["reasoning"] = accumulated_thinking
                     tail.append(err_msg_entry)
                 if tail:
-                    _append_messages(session_id, tail)
+                    await _append_messages(session_id, tail)
                 try:
                     if stream_stats["input_tokens"] or stream_stats["output_tokens"]:
                         usage_store.record_usage(
@@ -469,7 +467,7 @@ async def _session_consumer(session_id: str) -> None:
                 # shows that context-injection was interrupted.
                 if turn.source == "ambient" and turn.preempted:
                     try:
-                        _append_messages(session_id, [{
+                        await _append_messages(session_id, [{
                             "id": uuid.uuid4().hex[:8],
                             "role": "system",
                             "source": "ambient",
@@ -608,7 +606,7 @@ async def post_message_stream(request: Request):
         include_partial_messages=True,
     )
 
-    _save_session_meta(session_id, model, preview=text)
+    await _save_session_meta(session_id, model, preview=text)
 
     logger.info(
         f"[TIMING] pre-enqueue overhead: prompt={t_prompt - t0:.3f}s  "
@@ -781,7 +779,7 @@ async def post_message(request: Request):
         resume=resume_id,
     )
 
-    _save_session_meta(session_id, model, preview=text)
+    await _save_session_meta(session_id, model, preview=text)
 
     try:
         full_response = ""

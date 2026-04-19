@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.paths import SESSIONS_DIR
+from app.sessions_io import mutate_session
 from app.secondary_models import (
     _sync_secondary_capture_call,
     _sync_secondary_fact_extraction,
@@ -252,12 +253,20 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
 
 
 async def _post_session_capture(session_id: str):
-    """Background task: extract summary from completed session via secondary model."""
+    """Background task: extract summary from completed session via secondary model.
+
+    Must never write a stale snapshot back to the session file — the
+    secondary-model call can take 10+ seconds, during which new turns
+    may append messages. Use `mutate_session` to apply the `captured`
+    flag atomically against current on-disk state.
+    """
     try:
         meta_path = SESSIONS_DIR / f"{session_id}.json"
         if not meta_path.exists():
             return
 
+        # Snapshot is used only for read-only operations (markdown export,
+        # transcript build). We never write this dict back.
         data = json.loads(meta_path.read_text())
 
         if data.get("platform") == "autonomy":
@@ -289,8 +298,7 @@ async def _post_session_capture(session_id: str):
 
         if not summary or summary.strip().upper() == "TRIVIAL":
             logger.info(f"Post-session capture: {session_id} — trivial, skipped")
-            data["captured"] = True
-            meta_path.write_text(json.dumps(data, indent=2))
+            await mutate_session(session_id, lambda d: d.__setitem__("captured", True))
             return
 
         _append_daily_note(session_id, summary)
@@ -307,8 +315,7 @@ async def _post_session_capture(session_id: str):
             except Exception as fe:
                 logger.warning(f"Post-session fact extraction failed for {session_id}: {fe}")
 
-        data["captured"] = True
-        meta_path.write_text(json.dumps(data, indent=2))
+        await mutate_session(session_id, lambda d: d.__setitem__("captured", True))
 
         logger.info(f"Post-session capture: {session_id} — summary written to daily note")
 

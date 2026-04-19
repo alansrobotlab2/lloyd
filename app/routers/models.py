@@ -1,12 +1,10 @@
 """Model list + per-session model switch endpoints."""
 
-import json
-
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from app.paths import SESSIONS_DIR
 from app.config import CONFIG, MODEL_CONFIGS, _resolve_model_name
+from app.sessions_io import mutate_session
 
 
 router = APIRouter()
@@ -41,10 +39,7 @@ async def switch_model(request: Request):
     data = await request.json()
     model = data.get("model", "")
     session_id = data.get("session_id", "")
+    resolved = _resolve_model_name(model)
     if session_id:
-        meta_path = SESSIONS_DIR / f"{session_id}.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text())
-            meta["model"] = _resolve_model_name(model)
-            meta_path.write_text(json.dumps(meta, indent=2))
-    return JSONResponse({"success": True, "model": _resolve_model_name(model)})
+        await mutate_session(session_id, lambda d: d.__setitem__("model", resolved))
+    return JSONResponse({"success": True, "model": resolved})

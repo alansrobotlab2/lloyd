@@ -245,38 +245,74 @@ async def drain_pending(session_id: str, source: Optional[TurnSource] = None) ->
     return drained
 
 
-def _save_session_meta(session_id: str, model: str, preview: str = ""):
-    """Save session metadata to JSON file."""
+# Per-session file locks. All mutations to a session's JSON file must go
+# through `mutate_session` (or helpers built on it) to prevent concurrent
+# read-modify-write from clobbering each other's changes. Previously,
+# post_capture would read a snapshot, await for 10+ seconds on a
+# secondary-model call, then write the stale snapshot back — wiping any
+# messages that had been appended in the meantime.
+_file_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_file_lock(session_id: str) -> asyncio.Lock:
+    lock = _file_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _file_locks[session_id] = lock
+    return lock
+
+
+async def mutate_session(session_id: str, fn) -> bool:
+    """Atomic read-modify-write on a session file.
+
+    Acquires the per-session lock, reads fresh data from disk, calls
+    `fn(data)` (which mutates in place), writes back. Returns True if the
+    mutation ran, False if the file doesn't exist.
+
+    `fn` MUST be synchronous and fast — never await or do I/O inside it.
+    Expensive work (LLM calls, etc.) must happen OUTSIDE this helper;
+    only apply the result via a small `fn` callback.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    async with _get_file_lock(session_id):
+        if not meta_path.exists():
+            return False
+        data = json.loads(meta_path.read_text())
+        fn(data)
+        meta_path.write_text(json.dumps(data, indent=2))
+        return True
+
+
+async def _save_session_meta(session_id: str, model: str, preview: str = ""):
+    """Save session metadata to JSON file (creates if missing)."""
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     now = datetime.now().isoformat()
-    if meta_path.exists():
-        data = json.loads(meta_path.read_text())
-        data["last_active"] = now
-        if preview:
-            data["preview"] = preview[:60]
-        data["message_count"] = data.get("message_count", 0) + 1
-    else:
-        data = {
-            "session_id": session_id,
-            "model": model,
-            "created_at": now,
-            "last_active": now,
-            "preview": preview[:60],
-            "message_count": 1,
-            "messages": [],
-            "platform": "mission-control",
-        }
-    meta_path.write_text(json.dumps(data, indent=2))
+    async with _get_file_lock(session_id):
+        if meta_path.exists():
+            data = json.loads(meta_path.read_text())
+            data["last_active"] = now
+            if preview:
+                data["preview"] = preview[:60]
+            data["message_count"] = data.get("message_count", 0) + 1
+        else:
+            data = {
+                "session_id": session_id,
+                "model": model,
+                "created_at": now,
+                "last_active": now,
+                "preview": preview[:60],
+                "message_count": 1,
+                "messages": [],
+                "platform": "mission-control",
+            }
+        meta_path.write_text(json.dumps(data, indent=2))
 
 
-def _append_messages(session_id: str, new_messages: list[dict]):
+async def _append_messages(session_id: str, new_messages: list[dict]):
     """Append messages to session metadata file."""
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    if not meta_path.exists():
-        return
-    data = json.loads(meta_path.read_text())
-    msgs = data.get("messages", [])
-    msgs.extend(new_messages)
-    data["messages"] = msgs
-    data["last_active"] = datetime.now().isoformat()
-    meta_path.write_text(json.dumps(data, indent=2))
+    def _append(data):
+        msgs = data.get("messages", [])
+        msgs.extend(new_messages)
+        data["messages"] = msgs
+        data["last_active"] = datetime.now().isoformat()
+    await mutate_session(session_id, _append)
