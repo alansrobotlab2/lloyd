@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ForceGraph3D from "react-force-graph-3d";
 import * as THREE from "three";
+import SpriteText from "three-spritetext";
 import { forceCollide } from "d3-force";
 import { api, type EntityGraphNode } from "../api";
 import { RotateCcw, Maximize } from "lucide-react";
@@ -74,16 +75,29 @@ function nodeRadius(node: GNode): number {
   return Math.max(2.5, Math.min(3.5, 2.5 + Math.sqrt(degree) * 0.15));
 }
 
+// THREE.Color can't parse the alpha component of "rgba(...)" strings — it
+// warns and drops the alpha. Split it ourselves so we can feed Color a
+// color-only string and apply the alpha via material.opacity.
+function splitRgba(rgba: string): { color: string; alpha: number } {
+  const m = rgba.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)/);
+  if (!m) return { color: rgba, alpha: 1 };
+  return {
+    color: `rgb(${m[1]}, ${m[2]}, ${m[3]})`,
+    alpha: m[4] !== undefined ? parseFloat(m[4]) : 1,
+  };
+}
+
 function edgeColor(type: string, highlighted: boolean, dimmed: boolean): string {
-  if (dimmed) return "rgba(71,85,105,0.06)";
+  if (dimmed) return "rgba(71,85,105,0.05)";
   if (highlighted) {
     if (type === "tag-cluster") return "rgba(251,191,36,0.9)";
     if (type === "has-facts") return "rgba(245,158,11,0.9)";
     return "rgba(148,163,184,0.9)";
   }
-  if (type === "tag-cluster") return "rgba(251,191,36,0.35)";
-  if (type === "has-facts") return "rgba(245,158,11,0.40)";
-  return "rgba(100,116,139,0.40)";
+  // Default (no selection): very faint so selected edges pop
+  if (type === "tag-cluster") return "rgba(251,191,36,0.05)";
+  if (type === "has-facts") return "rgba(245,158,11,0.05)";
+  return "rgba(100,116,139,0.05)";
 }
 
 // -- Component --
@@ -244,10 +258,16 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
 
   useEffect(() => {
     if (!rawGraphData.nodes.length) return;
-    // Defer to next tick so ForceGraph3D's internal simulation is initialized
+    // Defer to next tick so ForceGraph3D's internal simulation is initialized.
+    // Do NOT call d3ReheatSimulation here — it sets engineRunning=true, which
+    // the library's animation loop treats as a signal that state.layout is
+    // populated. On first mount that's a race: the library's own updateFn
+    // hasn't run yet, state.layout is undefined, layoutTick crashes.
+    // fg.d3Force() just writes to state.d3ForceLayout (always present from
+    // stateInit) — the library's updateFn will then kick the sim with our
+    // forces in place.
     const t = setTimeout(() => {
       configureForces();
-      fgRef.current?.d3ReheatSimulation();
     }, 0);
     return () => clearTimeout(t);
   }, [rawGraphData, configureForces]);
@@ -299,15 +319,34 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       transparent: true,
       opacity: 1,
     });
-    return new THREE.Mesh(geometry, material);
+    const mesh = new THREE.Mesh(geometry, material);
+
+    const sprite = new SpriteText(n.label);
+    sprite.textHeight = 2.2;
+    sprite.color = n.type === "entity" ? "#FCD34D" : "#e2e8f0";
+    sprite.backgroundColor = "rgba(15,23,42,0.65)";
+    sprite.padding = 1.5;
+    sprite.borderRadius = 2;
+    sprite.position.set(0, r + 2.2, 0);
+    sprite.visible = false;
+    // Don't intercept pointer events targeting the node behind the label.
+    (sprite as any).raycast = () => {};
+
+    const group = new THREE.Group();
+    group.add(mesh);
+    group.add(sprite);
+    (group as any).__nodeMesh = mesh;
+    (group as any).__nodeLabel = sprite;
+    return group;
   }, []);
 
   // Sync mesh opacity with highlight/dim state by reaching into each node's
-  // library-assigned __threeObj. Avoids retaining our own mesh references
+  // library-assigned __threeObj group. Avoids retaining our own mesh refs
   // (which the library may have already disposed).
   useEffect(() => {
     for (const n of rawGraphData.nodes as any[]) {
-      const mesh = n.__threeObj as THREE.Mesh | undefined;
+      const group = n.__threeObj as THREE.Object3D | undefined;
+      const mesh = (group as any)?.__nodeMesh as THREE.Mesh | undefined;
       if (!mesh) continue;
       const isLit = highlightNodes.has(n.id);
       const opacity = hasDimming && !isLit ? 0.08 : 1;
@@ -315,6 +354,41 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       if (mat && mat.opacity !== opacity) mat.opacity = opacity;
     }
   }, [highlightNodes, hasDimming, rawGraphData]);
+
+  // Labels: visible when a node is highlighted (selection fan-out) OR when the
+  // camera is within PROXIMITY_THRESHOLD of the node. Driven by a rAF loop
+  // because pan/rotate don't emit React events.
+  const highlightNodesRef = useRef<Set<string>>(highlightNodes);
+  useEffect(() => { highlightNodesRef.current = highlightNodes; }, [highlightNodes]);
+
+  useEffect(() => {
+    if (!rawGraphData.nodes.length) return;
+    const PROXIMITY_THRESHOLD = 90;
+    const tmp = new THREE.Vector3();
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const fg = fgRef.current;
+      if (!fg) return;
+      const camera: THREE.Camera | undefined = fg.camera?.();
+      if (!camera) return;
+      const lit = highlightNodesRef.current;
+      const anyLit = lit.size > 0;
+      for (const n of rawGraphData.nodes as any[]) {
+        const group = n.__threeObj as THREE.Object3D | undefined;
+        const sprite = (group as any)?.__nodeLabel as THREE.Sprite | undefined;
+        if (!sprite || !group) continue;
+        if (anyLit) {
+          sprite.visible = lit.has(n.id);
+          continue;
+        }
+        group.getWorldPosition(tmp);
+        sprite.visible = tmp.distanceTo(camera.position) < PROXIMITY_THRESHOLD;
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [rawGraphData]);
 
   // -- Link styling --
 
@@ -328,6 +402,41 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       return edgeColor(link.type, highlighted, dimmed);
     },
     [highlightLinks, hasDimming]
+  );
+
+  // Highlighted edges get multiple arrow cones evenly spaced along their
+  // length, slowly flowing toward the (dominant) target. Direction and
+  // magnitude are conveyed by the cone orientation + motion.
+  const linkParticlesFn = useCallback(
+    (link: any) => {
+      const src = typeof link.source === "string" ? link.source : link.source.id;
+      const tgt = typeof link.target === "string" ? link.target : link.target.id;
+      return highlightLinks.has(`${src}\x00${tgt}`) ? 5 : 0;
+    },
+    [highlightLinks]
+  );
+
+  // One arrow cone per link — the library clones it for each particle and
+  // orients them via lookAt() toward the direction of travel (three-forcegraph
+  // applies lookAt for non-sphere geometries at updatePhotons).
+  const particleArrowFn = useCallback(
+    (link: any) => {
+      const src = typeof link.source === "string" ? link.source : link.source.id;
+      const tgt = typeof link.target === "string" ? link.target : link.target.id;
+      if (!highlightLinks.has(`${src}\x00${tgt}`)) return undefined;
+      const geo = new THREE.ConeGeometry(0.7, 2.0, 6);
+      // Tip points along +Y by default; rotate so it points along -Z, which
+      // is what Object3D.lookAt orients toward.
+      geo.rotateX(-Math.PI / 2);
+      const { color, alpha } = splitRgba(edgeColor(link.type, true, false));
+      const mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(color),
+        transparent: true,
+        opacity: alpha,
+      });
+      return new THREE.Mesh(geo, mat);
+    },
+    [highlightLinks]
   );
 
   const nodeTooltip = useCallback((node: any) => {
@@ -424,8 +533,11 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
             nodeThreeObject={nodeThreeObject}
             linkColor={linkColorFn}
             linkWidth={0}
-            linkOpacity={0.5}
+            linkOpacity={1}
             linkCurvature={0.15}
+            linkDirectionalParticles={linkParticlesFn}
+            linkDirectionalParticleSpeed={0.003}
+            linkDirectionalParticleThreeObject={particleArrowFn}
             backgroundColor="rgba(0,0,0,0)"
             onNodeHover={handleNodeHover}
             onNodeClick={handleNodeClick}
@@ -435,7 +547,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
             cooldownTime={8000}
             d3AlphaDecay={0.04}
             d3VelocityDecay={0.4}
-            enableNodeDrag={true}
+            enableNodeDrag={false}
             controlType="trackball"
             lights={lights}
           />
