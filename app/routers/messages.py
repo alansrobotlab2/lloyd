@@ -1,10 +1,15 @@
 """Chat endpoints — SSE streaming and synchronous one-shot.
 
-`POST /api/message/stream` is the hot path. The nested `event_generator`
-translates SDK events into the frontend's SSE contract, persists tool
-pairs eagerly (so disconnects don't lose history), auto-wires
-pipeline_dispatch results back to the requester session, records usage,
-and fires post-session capture + focus extraction on completion.
+`POST /api/message/stream` enqueues a turn onto the session's queue and
+returns a StreamingResponse that subscribes to the turn's event broker.
+The per-session consumer task (lazily spawned on first enqueue) runs
+turns serially: drains the SDK loop into `turn.events`, persists tool
+pairs eagerly, auto-wires pipeline_dispatch results, records usage, and
+fires post-session capture + focus extraction on completion.
+
+Client disconnect no longer kills the SDK subprocess — the consumer runs
+to completion, events pile up in `turn.events`, and persistence lands in
+the session JSON regardless. (Phase 1 for task #296.)
 """
 
 import asyncio
@@ -13,6 +18,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from typing import Any
 
 from claude_agent_sdk import (
     query, ClaudeAgentOptions,
@@ -33,7 +39,14 @@ from app.config import (
     _resolve_model_name,
 )
 from app.paths import SESSIONS_DIR, PIPELINE_RUNS_DIR
-from app.sessions_io import _active_streams, _save_session_meta, _append_messages
+from app.sessions_io import (
+    SessionTurn,
+    SessionQueue,
+    _get_or_create_queue,
+    _session_queues,
+    _save_session_meta,
+    _append_messages,
+)
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools
 from app.post_capture import _post_session_capture, _maybe_extract_focus
 from prompt_builder import build_system_prompt
@@ -44,9 +57,435 @@ router = APIRouter()
 logger = logging.getLogger("lloyd-server")
 
 
+# ---------------------------------------------------------------------------
+# Turn execution — SDK loop + persistence. Pushes events into turn.events.
+# ---------------------------------------------------------------------------
+
+async def _emit(turn: SessionTurn, event: str, data: dict):
+    """Push a named event onto the turn's broker queue."""
+    await turn.events.put({"event": event, "data": data})
+
+
+async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None:
+    """Run a single turn through the SDK, persisting as we go.
+
+    Does not format SSE wire bytes — that's the subscriber's job. On
+    return, the consumer pushes the sentinel `None` to close the stream.
+    """
+    payload = turn.payload
+    text: str = payload["text"]
+    prefetched_text: str = payload["prefetched_text"]
+    model: str = payload["model"]
+    options: ClaudeAgentOptions = payload["options"]
+    meta_path = payload["meta_path"]
+    resume_id = payload.get("resume_id")
+    cancel_event = q.cancel_event
+
+    t_query_start = time.perf_counter()
+
+    # Surface a session event immediately so the client has the turn_id
+    # and can correlate any later queue-state updates.
+    await _emit(turn, "session", {"session_id": session_id, "turn_id": turn.turn_id})
+
+    full_response = ""
+    accumulated_thinking = ""
+    tool_calls_log: list[dict] = []
+    tool_results_log: list[dict] = []
+    persisted_tool_ids: set[str] = set()
+    final_persisted = False
+    first_event = True
+    pending_pipeline_wires: dict[str, str] = {}
+    stream_stats: dict[str, Any] = {
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_create": 0, "cache_read": 0,
+        "cost_usd": None, "duration_ms": None, "num_turns": None,
+        "model": model,
+    }
+    # stream_stats["input_tokens"] gets overwritten per turn, but ResultMessage later
+    # replaces it with the cumulative total — we need both values.
+    last_turn_input: int = 0
+
+    # Persist the user message up-front so transcripts stay coherent even
+    # if the SDK crashes before emitting anything.
+    now_ts = datetime.now().isoformat()
+    _append_messages(session_id, [{
+        "id": uuid.uuid4().hex[:8],
+        "role": "user",
+        "content": [{"type": "text", "text": text}],
+        "timestamp": now_ts,
+    }])
+
+    try:
+        async for message in query(
+            prompt=prefetched_text,
+            options=options,
+        ):
+            if cancel_event.is_set():
+                logger.info(f"Session {session_id} turn {turn.turn_id} cancelled via API")
+                break
+
+            if first_event:
+                logger.info(
+                    f"[TIMING] first SDK event after {time.perf_counter() - t_query_start:.3f}s "
+                    f"(SDK+MCP startup)  resume={'yes' if resume_id else 'no'}"
+                )
+                first_event = False
+            if isinstance(message, StreamEvent):
+                evt = message.event
+                etype = evt.get("type", "")
+                if etype == "content_block_delta":
+                    delta = evt.get("delta", {})
+                    dtype = delta.get("type", "")
+                    if dtype == "text_delta":
+                        delta_text = delta.get("text", "")
+                        if delta_text:
+                            if not full_response:
+                                logger.info(
+                                    f"[TIMING] first text token after "
+                                    f"{time.perf_counter() - t_query_start:.3f}s (model TTFT)"
+                                )
+                            full_response += delta_text
+                            await _emit(turn, "text_delta", {"text": delta_text})
+                    elif dtype == "thinking_delta":
+                        thinking_text = delta.get("thinking", "")
+                        if thinking_text:
+                            accumulated_thinking += thinking_text
+                            await _emit(turn, "thinking_delta", {"text": thinking_text})
+                elif etype == "message_start":
+                    msg_usage = evt.get("message", {}).get("usage", {})
+                    stream_stats["input_tokens"] = msg_usage.get("input_tokens", 0)
+                    last_turn_input = stream_stats["input_tokens"]
+                    stream_stats["cache_create"] = msg_usage.get("cache_creation_input_tokens", 0)
+                    stream_stats["cache_read"] = msg_usage.get("cache_read_input_tokens", 0)
+                elif etype == "message_delta":
+                    stream_stats["output_tokens"] = evt.get("usage", {}).get("output_tokens", 0)
+                continue
+
+            if isinstance(message, SystemMessage):
+                sdk_session = message.data.get("session_id")
+                if sdk_session:
+                    if meta_path.exists():
+                        meta = json.loads(meta_path.read_text())
+                        meta["sdk_session_id"] = sdk_session
+                        meta_path.write_text(json.dumps(meta, indent=2))
+
+            elif isinstance(message, AssistantMessage):
+                has_tool_use = any(isinstance(b, ToolUseBlock) for b in message.content)
+                if has_tool_use and full_response.strip():
+                    seg_ts = datetime.now().isoformat()
+                    seg_entry: dict = {
+                        "id": uuid.uuid4().hex[:8],
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": full_response}],
+                        "timestamp": seg_ts,
+                    }
+                    if accumulated_thinking:
+                        seg_entry["reasoning"] = accumulated_thinking
+                    _append_messages(session_id, [seg_entry])
+                    full_response = ""
+                    accumulated_thinking = ""
+                for block in message.content:
+                    if isinstance(block, ThinkingBlock):
+                        accumulated_thinking = block.thinking
+                        await _emit(turn, "thinking_done", {"text": block.thinking})
+                    elif isinstance(block, ToolUseBlock):
+                        args_str = json.dumps(block.input) if isinstance(block.input, dict) else str(block.input)
+                        tool_calls_log.append({
+                            "id": block.id, "call_id": block.id, "type": "function",
+                            "function": {"name": block.name, "arguments": args_str},
+                        })
+                        await _emit(turn, "tool_start", {
+                            "call_id": block.id, "name": block.name,
+                            "args": args_str, "context_tokens": last_turn_input,
+                        })
+                        if block.name.endswith("pipeline_dispatch"):
+                            pending_pipeline_wires[block.id] = session_id
+                            logger.info(f"Tracking pipeline_dispatch call {block.id!r} for session {session_id}")
+
+            elif isinstance(message, UserMessage):
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        result_str = ""
+                        if hasattr(block, "content"):
+                            if isinstance(block.content, str):
+                                result_str = block.content
+                            elif isinstance(block.content, list):
+                                result_str = " ".join(
+                                    getattr(c, "text", str(c)) for c in block.content
+                                )
+                        if len(result_str) > 2000:
+                            result_str = result_str[:2000] + "...(truncated)"
+                        call_id = getattr(block, 'tool_use_id', '')
+                        tool_results_log.append({"call_id": call_id, "result": result_str})
+                        await _emit(turn, "tool_complete", {
+                            "call_id": call_id, "name": "", "result": result_str,
+                        })
+                        if call_id in pending_pipeline_wires:
+                            req_session = pending_pipeline_wires.pop(call_id)
+                            try:
+                                # result_str may be JSON or str() of a dict (single-quote repr)
+                                import ast as _ast
+                                try:
+                                    res_data = json.loads(result_str)
+                                except json.JSONDecodeError:
+                                    res_data = _ast.literal_eval(result_str)
+                                # Unwrap if result_str was str({'type':'text','text':'{...}'})
+                                if isinstance(res_data, dict) and "text" in res_data:
+                                    inner = res_data["text"]
+                                    if isinstance(inner, str):
+                                        try:
+                                            res_data = json.loads(inner)
+                                        except Exception:
+                                            pass
+                                run_id = res_data.get("run_id")
+                                if run_id:
+                                    run_path = PIPELINE_RUNS_DIR / f"{run_id}.json"
+                                    if run_path.exists():
+                                        run_json = json.loads(run_path.read_text(encoding="utf-8"))
+                                        run_json["requester_session_id"] = req_session
+                                        run_path.write_text(json.dumps(run_json, indent=2), encoding="utf-8")
+                                        logger.info(f"Linked pipeline run #{run_id} → session {req_session}")
+                                    else:
+                                        logger.warning(f"Pipeline run file {run_id}.json not found for wiring")
+                                else:
+                                    logger.warning(f"No run_id in pipeline_dispatch result: {result_str[:200]}")
+                            except Exception as _we:
+                                logger.warning(f"Failed to wire pipeline session: {_we} | result={result_str[:200]}")
+
+                        # Eager per-pair persistence so a mid-stream error doesn't
+                        # lose tool history.
+                        tc = next((t for t in tool_calls_log if t["call_id"] == call_id), None)
+                        if tc and call_id not in persisted_tool_ids:
+                            persisted_tool_ids.add(call_id)
+                            pair_ts = datetime.now().isoformat()
+                            _append_messages(session_id, [
+                                {
+                                    "id": f"msg_{call_id}_tc",
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": ""}],
+                                    "tool_calls": [tc],
+                                    "timestamp": pair_ts,
+                                },
+                                {
+                                    "id": f"msg_{call_id}_result",
+                                    "role": "tool",
+                                    "content": [{"type": "text", "text": result_str}],
+                                    "tool_call_id": call_id,
+                                    "timestamp": pair_ts,
+                                },
+                            ])
+
+            elif isinstance(message, ResultMessage):
+                try:
+                    usage = getattr(message, "usage", None) or {}
+                    usage_store.record_usage(
+                        session_id=session_id,
+                        model=model,
+                        input_tokens=usage.get("input_tokens", 0),
+                        output_tokens=usage.get("output_tokens", 0),
+                        cache_create=usage.get("cache_creation_input_tokens", 0),
+                        cache_read=usage.get("cache_read_input_tokens", 0),
+                        cost_usd=getattr(message, "total_cost_usd", None),
+                        duration_ms=getattr(message, "duration_ms", None),
+                        duration_api_ms=getattr(message, "duration_api_ms", None),
+                        num_turns=getattr(message, "num_turns", None),
+                    )
+                except Exception as ue:
+                    logger.warning(f"Failed to record usage: {ue}")
+
+                if message.session_id:
+                    try:
+                        if meta_path.exists():
+                            meta = json.loads(meta_path.read_text())
+                            meta["sdk_session_id"] = message.session_id
+                            meta_path.write_text(json.dumps(meta, indent=2))
+                    except Exception as se:
+                        logger.warning(f"Failed to save sdk_session_id: {se}")
+
+                # Persisted text reflects only the post-last-tool segment;
+                # earlier segments were already flushed mid-stream. The done
+                # payload still surfaces message.result for callers that want
+                # the full concatenated turn.
+                result_text = full_response
+                done_text = full_response
+                if hasattr(message, "result") and message.result:
+                    done_text = message.result
+
+                end_ts = datetime.now().isoformat()
+                tail: list[dict] = []
+                results_by_id = {r["call_id"]: r["result"] for r in tool_results_log}
+                for tc in tool_calls_log:
+                    cid = tc["call_id"]
+                    if cid not in persisted_tool_ids:
+                        persisted_tool_ids.add(cid)
+                        tail.append({"id": f"msg_{cid}_tc", "role": "assistant",
+                                     "content": [{"type": "text", "text": ""}],
+                                     "tool_calls": [tc], "timestamp": end_ts})
+                        tail.append({"id": f"msg_{cid}_result", "role": "tool",
+                                     "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
+                                     "tool_call_id": cid, "timestamp": end_ts})
+                stream_stats.update({
+                    "input_tokens":  usage.get("input_tokens", 0) or stream_stats["input_tokens"],
+                    "output_tokens": usage.get("output_tokens", 0) or stream_stats["output_tokens"],
+                    "cache_create":  usage.get("cache_creation_input_tokens", 0),
+                    "cache_read":    usage.get("cache_read_input_tokens", 0),
+                    "cost_usd":      getattr(message, "total_cost_usd", None),
+                    "duration_ms":   getattr(message, "duration_ms", None),
+                    "num_turns":     getattr(message, "num_turns", None),
+                    "peak_input_tokens": last_turn_input,
+                })
+                stats_dict = stream_stats
+                if result_text.strip():
+                    msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
+                                 "content": [{"type": "text", "text": result_text}],
+                                 "timestamp": end_ts, "stats": stats_dict}
+                    if accumulated_thinking:
+                        msg_entry["reasoning"] = accumulated_thinking
+                    tail.append(msg_entry)
+                if tail:
+                    _append_messages(session_id, tail)
+                final_persisted = True
+
+                asyncio.ensure_future(_post_session_capture(session_id))
+                asyncio.ensure_future(_maybe_extract_focus(session_id))
+
+                done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
+                if accumulated_thinking:
+                    done_payload['reasoning'] = accumulated_thinking
+                await _emit(turn, "done", done_payload)
+
+    except Exception as e:
+        if not final_persisted:
+            if full_response or tool_calls_log:
+                # SDK exit-code-1 after completion, or mid-stream error with content.
+                logger.warning(f"Turn {turn.turn_id} ended without ResultMessage (content delivered): {e}")
+                err_ts = datetime.now().isoformat()
+                tail = []
+                results_by_id = {r["call_id"]: r["result"] for r in tool_results_log}
+                for tc in tool_calls_log:
+                    cid = tc["call_id"]
+                    if cid not in persisted_tool_ids:
+                        tail.append({"id": f"msg_{cid}_tc", "role": "assistant",
+                                     "content": [{"type": "text", "text": ""}],
+                                     "tool_calls": [tc], "timestamp": err_ts})
+                        tail.append({"id": f"msg_{cid}_result", "role": "tool",
+                                     "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
+                                     "tool_call_id": cid, "timestamp": err_ts})
+                stream_stats["peak_input_tokens"] = last_turn_input
+                if full_response.strip():
+                    err_msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
+                                 "content": [{"type": "text", "text": full_response}],
+                                 "timestamp": err_ts, "stats": stream_stats}
+                    if accumulated_thinking:
+                        err_msg_entry["reasoning"] = accumulated_thinking
+                    tail.append(err_msg_entry)
+                if tail:
+                    _append_messages(session_id, tail)
+                try:
+                    if stream_stats["input_tokens"] or stream_stats["output_tokens"]:
+                        usage_store.record_usage(
+                            session_id=session_id,
+                            model=model,
+                            input_tokens=stream_stats["input_tokens"],
+                            output_tokens=stream_stats["output_tokens"],
+                            cache_create=stream_stats["cache_create"],
+                            cache_read=stream_stats["cache_read"],
+                        )
+                except Exception as ue:
+                    logger.warning(f"Failed to record usage (exception path): {ue}")
+                await _emit(turn, "done", {
+                    'response': full_response, 'session_id': session_id, 'stats': stream_stats,
+                })
+            else:
+                logger.error(f"Turn {turn.turn_id} SDK error: {e}")
+                await _emit(turn, "error", {"detail": str(e)})
+        else:
+            # Normal: SDK exited with code 1 after clean completion — ignore
+            logger.debug(f"Post-completion SDK exit (ignored): {e}")
+
+
+# ---------------------------------------------------------------------------
+# Per-session consumer. Drains q.pending serially; lazily spawned.
+# ---------------------------------------------------------------------------
+
+async def _session_consumer(session_id: str) -> None:
+    """Drain the queue for a single session. Exits when queue empties."""
+    q = _session_queues.get(session_id)
+    if q is None:
+        return
+    try:
+        while True:
+            async with q.lock:
+                if not q.pending:
+                    q.current = None
+                    q.consumer_task = None
+                    return
+                turn = q.pending.popleft()
+                q.current = turn
+                q.cancel_event = asyncio.Event()
+            turn.started_at = datetime.now()
+            try:
+                await _run_turn(session_id, turn, q)
+            except asyncio.CancelledError:
+                # Don't swallow cancel — propagate to drop the consumer.
+                await turn.events.put(None)
+                turn.done.set()
+                raise
+            except Exception:
+                logger.exception(f"Turn {turn.turn_id} raised from _run_turn")
+                try:
+                    await turn.events.put({"event": "error", "data": {"detail": "internal error"}})
+                except Exception:
+                    pass
+            finally:
+                # Sentinel: tells the SSE subscriber to close cleanly.
+                try:
+                    await turn.events.put(None)
+                except Exception:
+                    pass
+                turn.done.set()
+    except asyncio.CancelledError:
+        logger.warning(f"Consumer for session {session_id} cancelled")
+        async with q.lock:
+            q.current = None
+            q.consumer_task = None
+        raise
+    except Exception:
+        logger.exception(f"Consumer for session {session_id} crashed")
+        async with q.lock:
+            q.current = None
+            q.consumer_task = None
+
+
+# ---------------------------------------------------------------------------
+# SSE subscriber. Forwards events from turn.events to the wire.
+# ---------------------------------------------------------------------------
+
+async def _turn_sse_generator(turn: SessionTurn):
+    """Yield SSE-formatted bytes for a single turn.
+
+    Client disconnect cancels this generator; the consumer keeps running
+    and persistence still lands — events pile up in turn.events until the
+    turn finishes. That buffer is bounded by turn length, not by client.
+    """
+    try:
+        while True:
+            evt = await turn.events.get()
+            if evt is None:
+                break
+            yield f"event: {evt['event']}\ndata: {json.dumps(evt['data'])}\n\n"
+    except asyncio.CancelledError:
+        logger.info(f"Client disconnected from turn {turn.turn_id} (consumer continues)")
+        raise
+
+
+# ---------------------------------------------------------------------------
+# HTTP handlers
+# ---------------------------------------------------------------------------
+
 @router.post("/api/message/stream")
 async def post_message_stream(request: Request):
-    """SSE endpoint: streams tool_start, tool_complete, text_delta, and done events."""
+    """SSE endpoint. Enqueues a user turn; consumer streams events back."""
     data = await request.json()
     text = data.get("text", "").strip()
     session_id = data.get("session_id", "")
@@ -55,9 +494,6 @@ async def post_message_stream(request: Request):
 
     if not text:
         raise HTTPException(status_code=400, detail="Message text required")
-
-    if session_id and session_id in _active_streams:
-        raise HTTPException(status_code=409, detail="Session is already streaming")
 
     model = model_override or ""
     if session_id:
@@ -132,335 +568,43 @@ async def post_message_stream(request: Request):
 
     _save_session_meta(session_id, model, preview=text)
 
-    cancel_event = asyncio.Event()
-    _active_streams[session_id] = cancel_event
+    logger.info(
+        f"[TIMING] pre-enqueue overhead: prompt={t_prompt - t0:.3f}s  "
+        f"prefetch={t_prefetch - t_prompt:.3f}s  "
+        f"total={time.perf_counter() - t0:.3f}s  resume={'yes' if resume_id else 'no'}"
+    )
 
-    async def event_generator():
-        yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
-
-        t_query_start = time.perf_counter()
-        logger.info(
-            f"[TIMING] pre-query overhead: prompt={t_prompt - t0:.3f}s  "
-            f"prefetch={t_prefetch - t_prompt:.3f}s  "
-            f"total={t_query_start - t0:.3f}s  resume={'yes' if resume_id else 'no'}"
-        )
-
-        full_response = ""
-        accumulated_thinking = ""
-        tool_calls_log = []
-        tool_results_log = []
-        persisted_tool_ids: set[str] = set()
-        final_persisted = False
-        first_event = True
-        pending_pipeline_wires: dict[str, str] = {}
-        stream_stats: dict = {
-            "input_tokens": 0, "output_tokens": 0,
-            "cache_create": 0, "cache_read": 0,
-            "cost_usd": None, "duration_ms": None, "num_turns": None,
+    turn = SessionTurn(
+        turn_id=uuid.uuid4().hex[:12],
+        source="user",
+        payload={
+            "text": text,
+            "prefetched_text": prefetched_text,
             "model": model,
-        }
-        # stream_stats["input_tokens"] gets overwritten per turn, but ResultMessage later
-        # replaces it with the cumulative total — we need both values.
-        last_turn_input: int = 0
+            "options": options,
+            "meta_path": meta_path,
+            "resume_id": resume_id,
+        },
+        enqueued_at=datetime.now(),
+    )
 
-        now_ts = datetime.now().isoformat()
-        _append_messages(session_id, [{
-            "id": uuid.uuid4().hex[:8],
-            "role": "user",
-            "content": [{"type": "text", "text": text}],
-            "timestamp": now_ts,
-        }])
+    q = _get_or_create_queue(session_id)
+    async with q.lock:
+        q.pending.append(turn)
+        if q.consumer_task is None or q.consumer_task.done():
+            q.consumer_task = asyncio.create_task(_session_consumer(session_id))
 
-        try:
-            async for message in query(
-                prompt=prefetched_text,
-                options=options,
-            ):
-                if cancel_event.is_set():
-                    logger.info(f"Session {session_id} cancelled via API")
-                    break
-
-                if first_event:
-                    logger.info(f"[TIMING] first SDK event after {time.perf_counter() - t_query_start:.3f}s (SDK+MCP startup)")
-                    first_event = False
-                if isinstance(message, StreamEvent):
-                    evt = message.event
-                    etype = evt.get("type", "")
-                    if etype == "content_block_delta":
-                        delta = evt.get("delta", {})
-                        dtype = delta.get("type", "")
-                        if dtype == "text_delta":
-                            delta_text = delta.get("text", "")
-                            if delta_text:
-                                if not full_response:
-                                    logger.info(f"[TIMING] first text token after {time.perf_counter() - t_query_start:.3f}s (model TTFT)")
-                                full_response += delta_text
-                                yield f"event: text_delta\ndata: {json.dumps({'text': delta_text})}\n\n"
-                        elif dtype == "thinking_delta":
-                            thinking_text = delta.get("thinking", "")
-                            if thinking_text:
-                                accumulated_thinking += thinking_text
-                                yield f"event: thinking_delta\ndata: {json.dumps({'text': thinking_text})}\n\n"
-                    elif etype == "message_start":
-                        msg_usage = evt.get("message", {}).get("usage", {})
-                        stream_stats["input_tokens"] = msg_usage.get("input_tokens", 0)
-                        last_turn_input = stream_stats["input_tokens"]
-                        stream_stats["cache_create"] = msg_usage.get("cache_creation_input_tokens", 0)
-                        stream_stats["cache_read"] = msg_usage.get("cache_read_input_tokens", 0)
-                    elif etype == "message_delta":
-                        stream_stats["output_tokens"] = evt.get("usage", {}).get("output_tokens", 0)
-                    continue
-
-                if isinstance(message, SystemMessage):
-                    sdk_session = message.data.get("session_id")
-                    if sdk_session:
-                        if meta_path.exists():
-                            meta = json.loads(meta_path.read_text())
-                            meta["sdk_session_id"] = sdk_session
-                            meta_path.write_text(json.dumps(meta, indent=2))
-
-                elif isinstance(message, AssistantMessage):
-                    has_tool_use = any(isinstance(b, ToolUseBlock) for b in message.content)
-                    if has_tool_use and full_response.strip():
-                        seg_ts = datetime.now().isoformat()
-                        seg_entry: dict = {
-                            "id": uuid.uuid4().hex[:8],
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": full_response}],
-                            "timestamp": seg_ts,
-                        }
-                        if accumulated_thinking:
-                            seg_entry["reasoning"] = accumulated_thinking
-                        _append_messages(session_id, [seg_entry])
-                        full_response = ""
-                        accumulated_thinking = ""
-                    for block in message.content:
-                        if isinstance(block, ThinkingBlock):
-                            accumulated_thinking = block.thinking
-                            yield f"event: thinking_done\ndata: {json.dumps({'text': block.thinking})}\n\n"
-                        elif isinstance(block, ToolUseBlock):
-                            args_str = json.dumps(block.input) if isinstance(block.input, dict) else str(block.input)
-                            tool_calls_log.append({"id": block.id, "call_id": block.id, "type": "function", "function": {"name": block.name, "arguments": args_str}})
-                            yield f"event: tool_start\ndata: {json.dumps({'call_id': block.id, 'name': block.name, 'args': args_str, 'context_tokens': last_turn_input})}\n\n"
-                            if block.name.endswith("pipeline_dispatch"):
-                                pending_pipeline_wires[block.id] = session_id
-                                logger.info(f"Tracking pipeline_dispatch call {block.id!r} for session {session_id}")
-
-                elif isinstance(message, UserMessage):
-                    for block in message.content:
-                        if isinstance(block, ToolResultBlock):
-                            result_str = ""
-                            if hasattr(block, "content"):
-                                if isinstance(block.content, str):
-                                    result_str = block.content
-                                elif isinstance(block.content, list):
-                                    result_str = " ".join(
-                                        getattr(c, "text", str(c)) for c in block.content
-                                    )
-                            if len(result_str) > 2000:
-                                result_str = result_str[:2000] + "...(truncated)"
-                            call_id = getattr(block, 'tool_use_id', '')
-                            tool_results_log.append({"call_id": call_id, "result": result_str})
-                            yield f"event: tool_complete\ndata: {json.dumps({'call_id': call_id, 'name': '', 'result': result_str})}\n\n"
-                            if call_id in pending_pipeline_wires:
-                                req_session = pending_pipeline_wires.pop(call_id)
-                                try:
-                                    # result_str may be JSON or str() of a dict (single-quote repr)
-                                    import ast as _ast
-                                    try:
-                                        res_data = json.loads(result_str)
-                                    except json.JSONDecodeError:
-                                        res_data = _ast.literal_eval(result_str)
-                                    # Unwrap if result_str was str({'type':'text','text':'{...}'})
-                                    if isinstance(res_data, dict) and "text" in res_data:
-                                        inner = res_data["text"]
-                                        if isinstance(inner, str):
-                                            try:
-                                                res_data = json.loads(inner)
-                                            except Exception:
-                                                pass
-                                    run_id = res_data.get("run_id")
-                                    if run_id:
-                                        run_path = PIPELINE_RUNS_DIR / f"{run_id}.json"
-                                        if run_path.exists():
-                                            run_json = json.loads(run_path.read_text(encoding="utf-8"))
-                                            run_json["requester_session_id"] = req_session
-                                            run_path.write_text(json.dumps(run_json, indent=2), encoding="utf-8")
-                                            logger.info(f"Linked pipeline run #{run_id} → session {req_session}")
-                                        else:
-                                            logger.warning(f"Pipeline run file {run_id}.json not found for wiring")
-                                    else:
-                                        logger.warning(f"No run_id in pipeline_dispatch result: {result_str[:200]}")
-                                except Exception as _we:
-                                    logger.warning(f"Failed to wire pipeline session: {_we} | result={result_str[:200]}")
-
-                            # Eager per-pair persistence so a mid-stream disconnect
-                            # doesn't lose tool history.
-                            tc = next((t for t in tool_calls_log if t["call_id"] == call_id), None)
-                            if tc and call_id not in persisted_tool_ids:
-                                persisted_tool_ids.add(call_id)
-                                pair_ts = datetime.now().isoformat()
-                                _append_messages(session_id, [
-                                    {
-                                        "id": f"msg_{call_id}_tc",
-                                        "role": "assistant",
-                                        "content": [{"type": "text", "text": ""}],
-                                        "tool_calls": [tc],
-                                        "timestamp": pair_ts,
-                                    },
-                                    {
-                                        "id": f"msg_{call_id}_result",
-                                        "role": "tool",
-                                        "content": [{"type": "text", "text": result_str}],
-                                        "tool_call_id": call_id,
-                                        "timestamp": pair_ts,
-                                    },
-                                ])
-
-                elif isinstance(message, ResultMessage):
-                    try:
-                        usage = getattr(message, "usage", None) or {}
-                        usage_store.record_usage(
-                            session_id=session_id,
-                            model=model,
-                            input_tokens=usage.get("input_tokens", 0),
-                            output_tokens=usage.get("output_tokens", 0),
-                            cache_create=usage.get("cache_creation_input_tokens", 0),
-                            cache_read=usage.get("cache_read_input_tokens", 0),
-                            cost_usd=getattr(message, "total_cost_usd", None),
-                            duration_ms=getattr(message, "duration_ms", None),
-                            duration_api_ms=getattr(message, "duration_api_ms", None),
-                            num_turns=getattr(message, "num_turns", None),
-                        )
-                    except Exception as ue:
-                        logger.warning(f"Failed to record usage: {ue}")
-
-                    if message.session_id:
-                        try:
-                            if meta_path.exists():
-                                meta = json.loads(meta_path.read_text())
-                                meta["sdk_session_id"] = message.session_id
-                                meta_path.write_text(json.dumps(meta, indent=2))
-                        except Exception as se:
-                            logger.warning(f"Failed to save sdk_session_id: {se}")
-
-                    # Persisted text reflects only the post-last-tool segment;
-                    # earlier segments were already flushed mid-stream. The done
-                    # payload still surfaces message.result for callers that want
-                    # the full concatenated turn.
-                    result_text = full_response
-                    done_text = full_response
-                    if hasattr(message, "result") and message.result:
-                        done_text = message.result
-
-                    end_ts = datetime.now().isoformat()
-                    tail: list[dict] = []
-                    results_by_id = {r["call_id"]: r["result"] for r in tool_results_log}
-                    for tc in tool_calls_log:
-                        cid = tc["call_id"]
-                        if cid not in persisted_tool_ids:
-                            persisted_tool_ids.add(cid)
-                            tail.append({"id": f"msg_{cid}_tc", "role": "assistant",
-                                         "content": [{"type": "text", "text": ""}],
-                                         "tool_calls": [tc], "timestamp": end_ts})
-                            tail.append({"id": f"msg_{cid}_result", "role": "tool",
-                                         "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
-                                         "tool_call_id": cid, "timestamp": end_ts})
-                    stream_stats.update({
-                        "input_tokens":  usage.get("input_tokens", 0) or stream_stats["input_tokens"],
-                        "output_tokens": usage.get("output_tokens", 0) or stream_stats["output_tokens"],
-                        "cache_create":  usage.get("cache_creation_input_tokens", 0),
-                        "cache_read":    usage.get("cache_read_input_tokens", 0),
-                        "cost_usd":      getattr(message, "total_cost_usd", None),
-                        "duration_ms":   getattr(message, "duration_ms", None),
-                        "num_turns":     getattr(message, "num_turns", None),
-                        "peak_input_tokens": last_turn_input,
-                    })
-                    stats_dict = stream_stats
-                    if result_text.strip():
-                        msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
-                                     "content": [{"type": "text", "text": result_text}],
-                                     "timestamp": end_ts, "stats": stats_dict}
-                        if accumulated_thinking:
-                            msg_entry["reasoning"] = accumulated_thinking
-                        tail.append(msg_entry)
-                    if tail:
-                        _append_messages(session_id, tail)
-                    final_persisted = True
-
-                    asyncio.ensure_future(_post_session_capture(session_id))
-                    asyncio.ensure_future(_maybe_extract_focus(session_id))
-
-                    done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
-                    if accumulated_thinking:
-                        done_payload['reasoning'] = accumulated_thinking
-                    yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
-
-        except Exception as e:
-            if not final_persisted:
-                if full_response or tool_calls_log:
-                    # SDK exit-code-1 after completion, or mid-stream error with content.
-                    logger.warning(f"Stream ended without ResultMessage (content delivered): {e}")
-                    err_ts = datetime.now().isoformat()
-                    tail = []
-                    results_by_id = {r["call_id"]: r["result"] for r in tool_results_log}
-                    for tc in tool_calls_log:
-                        cid = tc["call_id"]
-                        if cid not in persisted_tool_ids:
-                            tail.append({"id": f"msg_{cid}_tc", "role": "assistant",
-                                         "content": [{"type": "text", "text": ""}],
-                                         "tool_calls": [tc], "timestamp": err_ts})
-                            tail.append({"id": f"msg_{cid}_result", "role": "tool",
-                                         "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
-                                         "tool_call_id": cid, "timestamp": err_ts})
-                    stream_stats["peak_input_tokens"] = last_turn_input
-                    if full_response.strip():
-                        err_msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
-                                     "content": [{"type": "text", "text": full_response}],
-                                     "timestamp": err_ts, "stats": stream_stats}
-                        if accumulated_thinking:
-                            err_msg_entry["reasoning"] = accumulated_thinking
-                        tail.append(err_msg_entry)
-                    if tail:
-                        _append_messages(session_id, tail)
-                    try:
-                        if stream_stats["input_tokens"] or stream_stats["output_tokens"]:
-                            usage_store.record_usage(
-                                session_id=session_id,
-                                model=model,
-                                input_tokens=stream_stats["input_tokens"],
-                                output_tokens=stream_stats["output_tokens"],
-                                cache_create=stream_stats["cache_create"],
-                                cache_read=stream_stats["cache_read"],
-                            )
-                    except Exception as ue:
-                        logger.warning(f"Failed to record usage (exception path): {ue}")
-                    yield f"event: done\ndata: {json.dumps({'response': full_response, 'session_id': session_id, 'stats': stream_stats})}\n\n"
-                else:
-                    logger.error(f"Stream error: {e}")
-                    yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
-            else:
-                # Normal: SDK exited with code 1 after clean completion — ignore
-                logger.debug(f"Post-completion SDK exit (ignored): {e}")
-        finally:
-            _active_streams.pop(session_id, None)
-            # Catch client disconnects (CancelledError is BaseException, not Exception).
-            # Tool pairs were already persisted eagerly; only the response text may be missing.
-            if not final_persisted and full_response.strip():
-                logger.info(f"Client disconnected mid-stream — persisting partial response ({len(full_response)} chars)")
-                _append_messages(session_id, [{
-                    "id": uuid.uuid4().hex[:8],
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": full_response}],
-                    "timestamp": datetime.now().isoformat(),
-                }])
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(_turn_sse_generator(turn), media_type="text/event-stream")
 
 
 @router.post("/api/message")
 async def post_message(request: Request):
-    """Synchronous message endpoint — collects full response then returns."""
+    """Synchronous message endpoint — collects full response then returns.
+
+    Not routed through the session queue (task #296 Phase 1 covers the
+    streaming path only). Concurrent sync POSTs to the same session
+    still race the SDK subprocess; callers should prefer /stream.
+    """
     data = await request.json()
     text = data.get("text", "").strip()
     session_id = data.get("session_id", "")

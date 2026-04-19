@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.paths import SESSIONS_DIR
-from app.sessions_io import _active_streams
+from app.sessions_io import is_session_active, get_cancel_event
 
 
 router = APIRouter()
@@ -117,7 +117,7 @@ def _find_active_claude_procs() -> list[dict]:
                 "model": model,
                 "preview": preview,
                 "created_at": created_at,
-                "streaming": session_id in _active_streams if session_id else False,
+                "streaming": is_session_active(session_id) if session_id else False,
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -140,7 +140,7 @@ async def kill_session_proc(session_id: str):
     data = json.loads(meta_path.read_text())
     sdk_session_id = data.get("sdk_session_id")
 
-    cancel_event = _active_streams.get(session_id)
+    cancel_event = get_cancel_event(session_id)
     if cancel_event:
         cancel_event.set()
 
@@ -168,14 +168,14 @@ async def kill_session_proc(session_id: str):
 
 @router.get("/api/sessions/{session_id}/status")
 async def get_session_status(session_id: str):
-    """Check whether a session has an active streaming query."""
-    return JSONResponse({"streaming": session_id in _active_streams})
+    """Check whether a session has an active or queued turn."""
+    return JSONResponse({"streaming": is_session_active(session_id)})
 
 
 @router.post("/api/sessions/{session_id}/cancel")
 async def cancel_session(session_id: str):
-    """Request cancellation of an active streaming query."""
-    cancel_event = _active_streams.get(session_id)
+    """Request cancellation of the currently-running turn."""
+    cancel_event = get_cancel_event(session_id)
     if cancel_event is None:
         return JSONResponse({"cancelled": False, "detail": "Session is not streaming"})
     cancel_event.set()
