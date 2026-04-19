@@ -1,5 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
-import { Workflow, Pause, Play, RefreshCw, CheckCircle2, XCircle, Clock, Loader2 } from "lucide-react";
+import {
+  Workflow, Pause, Play, RefreshCw, CheckCircle2, XCircle, Clock, Loader2,
+  ArrowUpCircle, Trash2, FileText, FolderOpen,
+} from "lucide-react";
 import { api } from "../../api";
 
 interface Status {
@@ -58,7 +61,7 @@ export default function WorkersPage() {
   const [status, setStatus] = useState<Status | null>(null);
   const [items, setItems] = useState<QueueItem[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
-  const [tab, setTab] = useState<"queue" | "runs" | "sources">("queue");
+  const [tab, setTab] = useState<"queue" | "runs" | "sources" | "review">("queue");
   const [stateFilter, setStateFilter] = useState<string>("");
   const [sourceFilter, setSourceFilter] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -144,19 +147,19 @@ export default function WorkersPage() {
 
       {/* Tab strip */}
       <div className="flex items-center gap-1 mb-3 border-b border-slate-700">
-        {(["queue", "runs", "sources"] as const).map((t) => (
+        {(["queue", "runs", "sources", "review"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             className={`px-4 py-2 text-sm border-b-2 ${tab === t ? "border-sky-400 text-sky-300" : "border-transparent text-slate-400 hover:text-slate-200"}`}
           >
-            {t === "queue" ? "Queue" : t === "runs" ? "Recent Runs" : "Sources"}
+            {t === "queue" ? "Queue" : t === "runs" ? "Recent Runs" : t === "sources" ? "Sources" : "Review"}
           </button>
         ))}
       </div>
 
-      {/* Filters */}
-      {tab !== "sources" && (
+      {/* Filters — not on Sources or Review tabs */}
+      {(tab === "queue" || tab === "runs") && (
         <div className="flex flex-wrap gap-3 mb-3 items-center text-sm">
           {tab === "queue" && (
             <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}
@@ -176,6 +179,7 @@ export default function WorkersPage() {
       {tab === "queue" && <QueueTable items={items} />}
       {tab === "runs" && <RunsTable runs={runs} />}
       {tab === "sources" && <SourcesTable sources={status?.sources || []} />}
+      {tab === "review" && <ReviewPanel />}
     </div>
   );
 }
@@ -212,8 +216,18 @@ function QueueTable({ items }: { items: QueueItem[] }) {
               </td>
               <td className="px-3 py-2">{it.attempts}</td>
               <td className="px-3 py-2 text-slate-400">{formatAgo(it.enqueued_at)}</td>
-              <td className="px-3 py-2 text-rose-400 text-xs max-w-[260px] truncate" title={it.error || ""}>
-                {it.error || ""}
+              <td className="px-3 py-2 text-xs max-w-[260px] truncate">
+                {it.error && it.state !== "completed" && (
+                  <span className="text-rose-400" title={it.error}>{it.error}</span>
+                )}
+                {it.error && it.state === "completed" && it.attempts > 1 && (
+                  <span
+                    className="text-slate-500 italic"
+                    title={`Succeeded on retry. Prior error: ${it.error}`}
+                  >
+                    (recovered after {it.attempts} attempts)
+                  </span>
+                )}
               </td>
             </tr>
           ))}
@@ -317,4 +331,225 @@ function formatAgo(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+// ── Review tab ─────────────────────────────────────────────────────────────
+
+interface PendingItem {
+  path: string;
+  source: string;
+  date: string;
+  filename: string;
+  size_bytes: number;
+  mtime: string;
+  frontmatter: Record<string, any>;
+  preview: string;
+}
+
+const DEFAULT_DEST: Record<string, string> = {
+  "domain-research": "knowledge",
+  "bench-mine": "lloyd/bench",
+};
+
+function ReviewPanel() {
+  const [items, setItems] = useState<PendingItem[]>([]);
+  const [sources, setSources] = useState<string[]>([]);
+  const [sourceFilter, setSourceFilter] = useState<string>("");
+  const [selected, setSelected] = useState<PendingItem | null>(null);
+  const [detail, setDetail] = useState<{ frontmatter: Record<string, any>; body: string } | null>(null);
+  const [destination, setDestination] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>("");
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await api.workersPending(sourceFilter || undefined, 300);
+      setItems(d.items || []);
+      setSources(d.sources || []);
+    } finally {
+      setLoading(false);
+    }
+  }, [sourceFilter]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  useEffect(() => {
+    if (!selected) { setDetail(null); return; }
+    setDestination(DEFAULT_DEST[selected.source] || "");
+    setError("");
+    api.workersPendingRead(selected.path).then(d => {
+      setDetail({ frontmatter: d.frontmatter || {}, body: d.body || "" });
+    }).catch(e => setError(String(e)));
+  }, [selected]);
+
+  const promote = async () => {
+    if (!selected) return;
+    setBusy(true); setError("");
+    try {
+      await api.workersPendingPromote({
+        path: selected.path,
+        destination: destination || undefined,
+      });
+      setSelected(null);
+      await refresh();
+    } catch (e: any) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reject = async () => {
+    if (!selected) return;
+    if (!confirm(`Move to _rejected/?\n\n${selected.filename}`)) return;
+    setBusy(true); setError("");
+    try {
+      await api.workersPendingReject(selected.path);
+      setSelected(null);
+      await refresh();
+    } catch (e: any) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const canPromoteWithoutDest = !!selected && !!DEFAULT_DEST[selected.source];
+
+  return (
+    <div className="flex gap-3" style={{ minHeight: "65vh" }}>
+      {/* Left — item list */}
+      <div className="w-96 flex-shrink-0 border border-slate-700 rounded bg-slate-900/40 flex flex-col">
+        <div className="p-2 border-b border-slate-700 flex gap-2 items-center">
+          <select
+            value={sourceFilter}
+            onChange={(e) => { setSourceFilter(e.target.value); setSelected(null); }}
+            className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm flex-1"
+          >
+            <option value="">all sources ({items.length})</option>
+            {sources.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <button
+            onClick={refresh}
+            disabled={loading}
+            className="p-1.5 rounded border border-slate-600 hover:border-sky-500"
+            title="Refresh"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+          </button>
+        </div>
+        <div className="overflow-y-auto flex-1">
+          {items.length === 0 && (
+            <div className="p-6 text-center text-slate-500 italic text-sm">
+              no pending artifacts
+            </div>
+          )}
+          {items.map(it => {
+            const active = selected?.path === it.path;
+            const conf = it.frontmatter?.confidence;
+            return (
+              <button
+                key={it.path}
+                onClick={() => setSelected(it)}
+                className={`w-full text-left px-3 py-2 border-b border-slate-800 hover:bg-slate-800/60 ${active ? "bg-slate-800/80" : ""}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-sky-400 font-medium">{it.source}</span>
+                  <span className="text-xs text-slate-500">{formatAgo(it.mtime)}</span>
+                </div>
+                <div className="text-sm truncate mt-0.5" title={it.filename}>
+                  {it.filename.replace(/\.md$/, "")}
+                </div>
+                <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
+                  {typeof conf === "number" && (
+                    <span className={`px-1.5 py-0.5 rounded border ${
+                      conf >= 0.7 ? "border-emerald-500/40 text-emerald-300" :
+                      conf >= 0.4 ? "border-amber-500/40 text-amber-300" :
+                      "border-rose-500/40 text-rose-300"
+                    }`}>
+                      {conf.toFixed(2)}
+                    </span>
+                  )}
+                  <span className="truncate" title={it.preview}>{it.preview.slice(0, 60)}</span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Right — detail pane */}
+      <div className="flex-1 border border-slate-700 rounded bg-slate-900/40 flex flex-col min-w-0">
+        {!selected && (
+          <div className="flex-1 flex items-center justify-center text-slate-500 italic">
+            <div className="text-center">
+              <FileText className="w-8 h-8 mx-auto mb-2 text-slate-600" />
+              select an artifact to review
+            </div>
+          </div>
+        )}
+        {selected && (
+          <>
+            <div className="p-3 border-b border-slate-700 flex-shrink-0">
+              <div className="flex items-center gap-2 mb-1">
+                <FolderOpen className="w-4 h-4 text-slate-500" />
+                <span className="text-xs text-slate-500 truncate" title={selected.path}>
+                  {selected.path.replace("/home/alansrobotlab/obsidian/", "~/obsidian/")}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <h3 className="font-medium">{selected.filename}</h3>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder={canPromoteWithoutDest ? `dest: ${DEFAULT_DEST[selected.source]}` : "destination required"}
+                    value={destination}
+                    onChange={(e) => setDestination(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs w-56"
+                  />
+                  <button
+                    onClick={promote}
+                    disabled={busy || (!canPromoteWithoutDest && !destination)}
+                    className="px-3 py-1 text-sm rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                    title="Promote to canonical vault location"
+                  >
+                    <ArrowUpCircle className="w-3.5 h-3.5" />
+                    Promote
+                  </button>
+                  <button
+                    onClick={reject}
+                    disabled={busy}
+                    className="px-3 py-1 text-sm rounded border border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 disabled:opacity-40 flex items-center gap-1.5"
+                    title="Move to _rejected/"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Reject
+                  </button>
+                </div>
+              </div>
+              {error && <div className="mt-2 text-xs text-rose-400">{error}</div>}
+            </div>
+            <div className="overflow-y-auto flex-1 p-4 font-mono text-sm">
+              {detail?.frontmatter && Object.keys(detail.frontmatter).length > 0 && (
+                <div className="mb-4 p-3 rounded bg-slate-950/80 border border-slate-800">
+                  <div className="text-xs text-slate-500 uppercase mb-2">frontmatter</div>
+                  {Object.entries(detail.frontmatter).map(([k, v]) => (
+                    <div key={k} className="flex gap-2 text-xs">
+                      <span className="text-slate-400 w-28">{k}</span>
+                      <span className="text-slate-200 break-all">{
+                        typeof v === "object" ? JSON.stringify(v) : String(v)
+                      }</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <pre className="whitespace-pre-wrap text-slate-200">{detail?.body ?? "loading…"}</pre>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }

@@ -779,6 +779,46 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
     }).then(r => r.json()),
+  workersPending: (source?: string, limit = 200): Promise<{
+    items: Array<{
+      path: string
+      source: string
+      date: string
+      filename: string
+      size_bytes: number
+      mtime: string
+      frontmatter: Record<string, any>
+      preview: string
+    }>
+    sources: string[]
+  }> => {
+    const q = new URLSearchParams()
+    if (source) q.set('source', source)
+    q.set('limit', String(limit))
+    return fetch(`${API_BASE}/workers/pending?${q.toString()}`).then(r => r.json())
+  },
+  workersPendingRead: (path: string): Promise<{
+    path: string
+    source: string | null
+    frontmatter: Record<string, any>
+    body: string
+    raw: string
+  }> => fetch(`${API_BASE}/workers/pending/read?path=${encodeURIComponent(path)}`).then(r => r.json()),
+  workersPendingPromote: (data: { path: string; destination?: string; filename?: string }): Promise<{ promoted: boolean; from: string; to: string }> =>
+    fetch(`${API_BASE}/workers/pending/promote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }).then(async r => {
+      if (!r.ok) throw new Error((await r.json()).detail || `HTTP ${r.status}`)
+      return r.json()
+    }),
+  workersPendingReject: (path: string): Promise<{ rejected: boolean; from: string; to: string }> =>
+    fetch(`${API_BASE}/workers/pending/reject`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }).then(r => r.json()),
 
   // Usage
   usagePing: (): Promise<UsagePing> =>

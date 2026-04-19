@@ -245,16 +245,19 @@ class WorkQueue:
         item_id: int,
         dedup_release: bool = True,
     ) -> None:
+        """Mark success. Clears `error` (prior retry errors become stale on success)
+        and releases `dedup_key` so future enqueues of the same key succeed.
+        `attempts` is preserved so 'recovered after N attempts' is still visible.
+        """
         with self._lock, self._connect() as conn:
-            # Release dedup_key so future enqueues of the same key succeed.
             if dedup_release:
                 conn.execute(
-                    "UPDATE queue SET state='completed', completed_at=?, dedup_key=NULL WHERE id=?",
+                    "UPDATE queue SET state='completed', completed_at=?, error=NULL, dedup_key=NULL WHERE id=?",
                     (_now_iso(), item_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE queue SET state='completed', completed_at=? WHERE id=?",
+                    "UPDATE queue SET state='completed', completed_at=?, error=NULL WHERE id=?",
                     (_now_iso(), item_id),
                 )
             conn.commit()
