@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench, Square } from 'lucide-react'
 import { marked } from 'marked'
-import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats } from '../api'
+import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState } from '../api'
 
 // Configure marked
 marked.setOptions({ breaks: true, gfm: true })
@@ -85,6 +85,7 @@ export default function ChatPanel({
   const [models, setModels] = useState<ModelInfo[]>([])
   const [activeToolName, setActiveToolName] = useState<string | null>(null)
   const [thinkLevel, setThinkLevel] = useState<string>(() => localStorage.getItem('mc_think_level') || 'off')
+  const [queueState, setQueueState] = useState<QueueState | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -453,6 +454,9 @@ export default function ChatPanel({
           onActiveSessionChange?.(sid)
         }
       },
+      onQueueState: (state) => {
+        setQueueState(state)
+      },
       onToolStart: (callId, name, args, contextTokens) => {
         setActiveToolName(name)
         // Close the current text segment so the next text_delta starts a new bubble.
@@ -549,6 +553,7 @@ export default function ChatPanel({
         setActiveToolName(null)
         setThinking(false)
         setSending(false)
+        setQueueState(null)
         inputRef.current?.focus()
       },
       onError: (detail) => {
@@ -564,6 +569,7 @@ export default function ChatPanel({
         setActiveToolName(null)
         setThinking(false)
         setSending(false)
+        setQueueState(null)
         inputRef.current?.focus()
       },
       onAborted: () => {
@@ -573,6 +579,7 @@ export default function ChatPanel({
         setActiveToolName(null)
         setThinking(false)
         setSending(false)
+        setQueueState(null)
         setMessages(prev => [...prev, {
           id: `msg_${Date.now()}_interrupted`,
           role: 'assistant' as const,
@@ -765,10 +772,17 @@ export default function ChatPanel({
             <div className="bg-surface-2 border border-surface-3/50 px-3.5 py-2.5 rounded-xl">
               <div className="flex items-center gap-2 text-sm text-slate-400">
                 <Loader2 className="w-4 h-4 animate-spin text-brand-400" />
-                {activeToolName
-                  ? <span>Working: <span className="font-mono text-brand-300">{activeToolName}</span>...</span>
-                  : <span>Thinking...</span>
+                {queueState?.current?.source === 'ambient'
+                  ? <span><span className="text-amber-400">Ambient context</span> — Lloyd is processing background input...</span>
+                  : activeToolName
+                    ? <span>Working: <span className="font-mono text-brand-300">{activeToolName}</span>...</span>
+                    : <span>Thinking...</span>
                 }
+                {queueState && queueState.depth > 0 && (
+                  <span className="ml-2 text-xs text-slate-500 font-mono">
+                    (queue: {queueState.pending_user}u + {queueState.pending_ambient}a)
+                  </span>
+                )}
               </div>
             </div>
           </div>

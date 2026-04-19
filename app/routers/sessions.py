@@ -212,25 +212,30 @@ async def get_session_queue(session_id: str):
 async def inject_ambient_turn(session_id: str, request: Request):
     """Enqueue an ambient (background-producer) turn on this session.
 
-    Body: { "text": "...", "dedup_key": "..."  (optional, ignored in Phase 2) }
+    Body: { "text": "...", "dedup_key": "..." (optional) }
 
     Response: { "turn_id": "...", "source": "ambient", "preempted": false,
-                "queue": {...} }
+                "dropped": [...], "deduped": false, "queue": {...} }
 
     Producers (autonomy, future session_inject_context MCP tool) call
     this to hand the agent context that should be processed when the
     user isn't actively typing. If a user turn arrives while this
     ambient is running, the ambient is preempted.
+
+    When `dedup_key` is supplied, any queued ambient with the same key
+    is dropped (newest wins) — safe for producers that may re-fire the
+    same context while the previous version is still queued.
     """
     data = await request.json()
     text = (data.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
+    dedup_key = (data.get("dedup_key") or "").strip() or None
 
     # Imported here to avoid an import cycle at module load time.
     from app.routers.messages import build_ambient_turn, enqueue_ambient
 
-    turn = await build_ambient_turn(session_id, text)
+    turn = await build_ambient_turn(session_id, text, dedup_key=dedup_key)
     result = await enqueue_ambient(session_id, turn)
     result["queue"] = get_queue_state(session_id)
     return JSONResponse(result)

@@ -46,7 +46,9 @@ from app.sessions_io import (
     _session_queues,
     _save_session_meta,
     _append_messages,
+    _broadcast_queue_state,
     enqueue_turn,
+    get_queue_state,
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools
 from app.post_capture import _post_session_capture, _maybe_extract_focus
@@ -94,6 +96,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # Surface a session event immediately so the client has the turn_id
     # and can correlate any later queue-state updates.
     await _emit(turn, "session", {"session_id": session_id, "turn_id": turn.turn_id})
+    # Initial queue snapshot so the client doesn't need a separate poll.
+    await turn.events.put({"event": "queue_state", "data": get_queue_state(session_id)})
 
     full_response = ""
     accumulated_thinking = ""
@@ -639,13 +643,16 @@ async def post_message_stream(request: Request):
 # Ambient turn builder — used by /api/sessions/{id}/inject (see sessions.py)
 # ---------------------------------------------------------------------------
 
-async def build_ambient_turn(session_id: str, text: str) -> SessionTurn:
+async def build_ambient_turn(session_id: str, text: str, dedup_key: str | None = None) -> SessionTurn:
     """Assemble a `SessionTurn` suitable for ambient injection.
 
     Reuses the session's existing model + system_prompt and skips the
     /stream handler's prefetch (ambient producers are expected to send
     already-contextualized content). Raises HTTPException(404) if the
     session doesn't exist.
+
+    `dedup_key` (optional): if provided and another queued ambient has
+    the same key, the older one is dropped when this turn enqueues.
     """
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     if not meta_path.exists():
@@ -678,17 +685,20 @@ async def build_ambient_turn(session_id: str, text: str) -> SessionTurn:
         include_partial_messages=True,
     )
 
+    payload: dict[str, Any] = {
+        "text": text,
+        "prefetched_text": text,  # no prefetch for ambient — producer supplies context
+        "model": model,
+        "options": options,
+        "meta_path": meta_path,
+        "resume_id": resume_id,
+    }
+    if dedup_key:
+        payload["dedup_key"] = dedup_key
     return SessionTurn(
         turn_id=uuid.uuid4().hex[:12],
         source="ambient",
-        payload={
-            "text": text,
-            "prefetched_text": text,  # no prefetch for ambient — producer supplies context
-            "model": model,
-            "options": options,
-            "meta_path": meta_path,
-            "resume_id": resume_id,
-        },
+        payload=payload,
         enqueued_at=datetime.now(),
     )
 

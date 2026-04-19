@@ -10,6 +10,17 @@ export interface TurnStats {
   peak_input_tokens?: number
 }
 
+export interface QueueState {
+  current: {
+    turn_id: string
+    source: 'user' | 'ambient' | 'system'
+    started_at: string | null
+  } | null
+  pending_user: number
+  pending_ambient: number
+  depth: number
+}
+
 export interface MessageEntry {
   id: string
   role: 'user' | 'assistant' | 'tool'
@@ -447,6 +458,7 @@ export const api = {
       onDone?: (response: string, sessionId: string, stats?: TurnStats, reasoning?: string) => void
       onError?: (detail: string) => void
       onAborted?: () => void
+      onQueueState?: (state: QueueState) => void
     },
     model?: string,
     think?: string,
@@ -501,6 +513,7 @@ export const api = {
               case 'thinking_done': callbacks.onThinkingDone?.(payload.text); break
               case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats, payload.reasoning); break
               case 'error': callbacks.onError?.(payload.detail); break
+              case 'queue_state': callbacks.onQueueState?.(payload as QueueState); break
             }
           } catch { /* skip malformed */ }
         }
@@ -533,9 +546,32 @@ export const api = {
     return response.json()
   },
 
-  async cancelSession(sessionId: string): Promise<{ cancelled: boolean }> {
-    const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+  async cancelSession(
+    sessionId: string,
+    options: { drainPending?: boolean } = {},
+  ): Promise<{ cancelled: boolean; drained: number; detail?: string }> {
+    const qs = options.drainPending ? '?drain_pending=true' : ''
+    const response = await fetch(
+      `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/cancel${qs}`,
+      { method: 'POST' },
+    )
+    return response.json()
+  },
+
+  async getSessionQueue(sessionId: string): Promise<QueueState> {
+    const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/queue`)
+    return response.json()
+  },
+
+  async injectAmbient(
+    sessionId: string,
+    text: string,
+    dedupKey?: string,
+  ): Promise<{ turn_id: string; source: string; preempted: boolean; dropped: string[]; deduped: boolean; queue: QueueState }> {
+    const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/inject`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, ...(dedupKey ? { dedup_key: dedupKey } : {}) }),
     })
     return response.json()
   },

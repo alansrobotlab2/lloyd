@@ -119,6 +119,11 @@ def get_queue_state(session_id: str) -> dict[str, Any]:
     }
 
 
+# Max queued ambient turns per session. Producers can spam —
+# drop the oldest beyond this cap so the queue doesn't grow unbounded.
+AMBIENT_QUEUE_CAP = 3
+
+
 async def enqueue_turn(session_id: str, turn: SessionTurn, consumer_factory) -> dict[str, Any]:
     """Enqueue a turn on the appropriate tier.
 
@@ -129,12 +134,19 @@ async def enqueue_turn(session_id: str, turn: SessionTurn, consumer_factory) -> 
     User turns: appended to `pending_user`. If an ambient turn is
     currently running, sets `cancel_event` to preempt it.
 
-    Ambient turns: appended to `pending_ambient`.
+    Ambient turns: appended to `pending_ambient`, with two policies:
+      - `dedup_key` in payload collapses duplicates (newest wins — old
+        entry is dropped so producers can spam safely).
+      - Queue is capped at `AMBIENT_QUEUE_CAP`; oldest ambient is
+        dropped when the cap is exceeded.
 
-    Returns a small dict the caller can surface: turn_id, tier, preempted.
+    Returns: turn_id, source, preempted, dropped (list of dropped turn_ids
+    from dedup+cap), dedup (bool).
     """
     q = _get_or_create_queue(session_id)
     preempted = False
+    dropped: list[str] = []
+    deduped = False
     async with q.lock:
         if turn.source == "user":
             q.pending_user.append(turn)
@@ -143,10 +155,60 @@ async def enqueue_turn(session_id: str, turn: SessionTurn, consumer_factory) -> 
                 q.cancel_event.set()
                 preempted = True
         else:
+            dedup_key = turn.payload.get("dedup_key") if isinstance(turn.payload, dict) else None
+            if dedup_key:
+                # Collapse: newest wins. Drop any queued ambient sharing this key.
+                keep = deque()
+                for t in q.pending_ambient:
+                    t_key = t.payload.get("dedup_key") if isinstance(t.payload, dict) else None
+                    if t_key == dedup_key:
+                        t.preempted = True
+                        try: t.events.put_nowait(None)
+                        except Exception: pass
+                        t.done.set()
+                        dropped.append(t.turn_id)
+                        deduped = True
+                    else:
+                        keep.append(t)
+                q.pending_ambient = keep
             q.pending_ambient.append(turn)
+            # Cap: drop oldest until within limit.
+            while len(q.pending_ambient) > AMBIENT_QUEUE_CAP:
+                old = q.pending_ambient.popleft()
+                old.preempted = True
+                try: old.events.put_nowait(None)
+                except Exception: pass
+                old.done.set()
+                dropped.append(old.turn_id)
         if q.consumer_task is None or q.consumer_task.done():
             q.consumer_task = asyncio.create_task(consumer_factory())
-    return {"turn_id": turn.turn_id, "source": turn.source, "preempted": preempted}
+    # Broadcast state to the currently-running turn's subscribers so they
+    # see queue depth change in real time.
+    await _broadcast_queue_state(session_id)
+    return {
+        "turn_id": turn.turn_id,
+        "source": turn.source,
+        "preempted": preempted,
+        "dropped": dropped,
+        "deduped": deduped,
+    }
+
+
+async def _broadcast_queue_state(session_id: str) -> None:
+    """Push a `queue_state` event into the running turn's broker so any
+    SSE subscriber sees queue changes.
+
+    No-op if no turn is currently running. (Clients with no active
+    subscription fall back to polling GET /api/sessions/{id}/queue.)
+    """
+    q = _session_queues.get(session_id)
+    if q is None or q.current is None:
+        return
+    state = get_queue_state(session_id)
+    try:
+        await q.current.events.put({"event": "queue_state", "data": state})
+    except Exception:
+        pass
 
 
 async def drain_pending(session_id: str, source: Optional[TurnSource] = None) -> int:
@@ -178,6 +240,8 @@ async def drain_pending(session_id: str, source: Optional[TurnSource] = None) ->
                     pass
                 t.done.set()
                 drained += 1
+    if drained:
+        await _broadcast_queue_state(session_id)
     return drained
 
 
