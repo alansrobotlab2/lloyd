@@ -1,15 +1,15 @@
 """Chat endpoints — SSE streaming and synchronous one-shot.
 
-`POST /api/message/stream` enqueues a turn onto the session's queue and
-returns a StreamingResponse that subscribes to the turn's event broker.
-The per-session consumer task (lazily spawned on first enqueue) runs
-turns serially: drains the SDK loop into `turn.events`, persists tool
-pairs eagerly, auto-wires pipeline_dispatch results, records usage, and
-fires post-session capture + focus extraction on completion.
+`POST /api/message/stream` enqueues a user turn onto the session's queue
+and returns a StreamingResponse that subscribes to the turn's event
+broker. `POST /api/sessions/{id}/inject` enqueues an ambient (background)
+turn. The per-session consumer task (lazily spawned on first enqueue)
+pops from the user tier before the ambient tier; a user turn arriving
+while an ambient is running preempts it via the queue's cancel_event.
 
-Client disconnect no longer kills the SDK subprocess — the consumer runs
+Client disconnect does not kill the SDK subprocess — the consumer runs
 to completion, events pile up in `turn.events`, and persistence lands in
-the session JSON regardless. (Phase 1 for task #296.)
+the session JSON regardless. (Task #296 Phases 1+2.)
 """
 
 import asyncio
@@ -46,6 +46,7 @@ from app.sessions_io import (
     _session_queues,
     _save_session_meta,
     _append_messages,
+    enqueue_turn,
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools
 from app.post_capture import _post_session_capture, _maybe_extract_focus
@@ -62,7 +63,14 @@ logger = logging.getLogger("lloyd-server")
 # ---------------------------------------------------------------------------
 
 async def _emit(turn: SessionTurn, event: str, data: dict):
-    """Push a named event onto the turn's broker queue."""
+    """Push a named event onto the turn's broker queue.
+
+    Auto-tags `source` (user/ambient/system) so SSE clients can style
+    ambient output distinctly without needing to correlate with the
+    session event.
+    """
+    data.setdefault("source", turn.source)
+    data.setdefault("turn_id", turn.turn_id)
     await turn.events.put({"event": event, "data": data})
 
 
@@ -106,14 +114,18 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     last_turn_input: int = 0
 
     # Persist the user message up-front so transcripts stay coherent even
-    # if the SDK crashes before emitting anything.
+    # if the SDK crashes before emitting anything. Tag ambient-sourced
+    # turns so the UI can render them differently from real user input.
     now_ts = datetime.now().isoformat()
-    _append_messages(session_id, [{
+    user_msg: dict[str, Any] = {
         "id": uuid.uuid4().hex[:8],
         "role": "user",
         "content": [{"type": "text", "text": text}],
         "timestamp": now_ts,
-    }])
+    }
+    if turn.source != "user":
+        user_msg["source"] = turn.source
+    _append_messages(session_id, [user_msg])
 
     try:
         async for message in query(
@@ -409,18 +421,28 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 # ---------------------------------------------------------------------------
 
 async def _session_consumer(session_id: str) -> None:
-    """Drain the queue for a single session. Exits when queue empties."""
+    """Drain the queue for a single session. Exits when queue empties.
+
+    Pop order: user tier first, then ambient. This plus the preempt set
+    at enqueue time (see `enqueue_turn`) is how "user always wins" is
+    enforced — the currently running ambient gets its cancel_event fired,
+    breaks out of its SDK loop, and the consumer immediately pops the
+    newly-enqueued user turn.
+    """
     q = _session_queues.get(session_id)
     if q is None:
         return
     try:
         while True:
             async with q.lock:
-                if not q.pending:
+                if q.pending_user:
+                    turn = q.pending_user.popleft()
+                elif q.pending_ambient:
+                    turn = q.pending_ambient.popleft()
+                else:
                     q.current = None
                     q.consumer_task = None
                     return
-                turn = q.pending.popleft()
                 q.current = turn
                 q.cancel_event = asyncio.Event()
             turn.started_at = datetime.now()
@@ -438,6 +460,22 @@ async def _session_consumer(session_id: str) -> None:
                 except Exception:
                     pass
             finally:
+                # If an ambient turn was preempted by an incoming user turn,
+                # drop a breadcrumb in the session transcript so history
+                # shows that context-injection was interrupted.
+                if turn.source == "ambient" and turn.preempted:
+                    try:
+                        _append_messages(session_id, [{
+                            "id": uuid.uuid4().hex[:8],
+                            "role": "system",
+                            "source": "ambient",
+                            "canceled": True,
+                            "content": [{"type": "text",
+                                         "text": "(ambient turn interrupted by user input)"}],
+                            "timestamp": datetime.now().isoformat(),
+                        }])
+                    except Exception as ce:
+                        logger.warning(f"Failed to write ambient-cancel marker: {ce}")
                 # Sentinel: tells the SSE subscriber to close cleanly.
                 try:
                     await turn.events.put(None)
@@ -588,13 +626,83 @@ async def post_message_stream(request: Request):
         enqueued_at=datetime.now(),
     )
 
-    q = _get_or_create_queue(session_id)
-    async with q.lock:
-        q.pending.append(turn)
-        if q.consumer_task is None or q.consumer_task.done():
-            q.consumer_task = asyncio.create_task(_session_consumer(session_id))
+    await enqueue_turn(
+        session_id,
+        turn,
+        consumer_factory=lambda: _session_consumer(session_id),
+    )
 
     return StreamingResponse(_turn_sse_generator(turn), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Ambient turn builder — used by /api/sessions/{id}/inject (see sessions.py)
+# ---------------------------------------------------------------------------
+
+async def build_ambient_turn(session_id: str, text: str) -> SessionTurn:
+    """Assemble a `SessionTurn` suitable for ambient injection.
+
+    Reuses the session's existing model + system_prompt and skips the
+    /stream handler's prefetch (ambient producers are expected to send
+    already-contextualized content). Raises HTTPException(404) if the
+    session doesn't exist.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    existing = json.loads(meta_path.read_text())
+    model = _resolve_model_name(existing.get("model", "") or CONFIG.get("model", {}).get("default", ""))
+    model_env = _get_model_env(model)
+
+    resume_id = None
+    try:
+        session_model = _resolve_model_name(existing.get("model", ""))
+        if _model_base_url(session_model) == _model_base_url(model):
+            resume_id = existing.get("sdk_session_id")
+    except Exception:
+        pass
+
+    system_prompt = build_system_prompt()
+    options = ClaudeAgentOptions(
+        model=model,
+        system_prompt=system_prompt,
+        max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
+        permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
+        mcp_servers=_get_mcp_servers(),
+        disallowed_tools=_get_disallowed_tools(),
+        env=model_env,
+        effort=_resolve_effort(model),
+        thinking=_resolve_thinking(model),
+        resume=resume_id,
+        include_partial_messages=True,
+    )
+
+    return SessionTurn(
+        turn_id=uuid.uuid4().hex[:12],
+        source="ambient",
+        payload={
+            "text": text,
+            "prefetched_text": text,  # no prefetch for ambient — producer supplies context
+            "model": model,
+            "options": options,
+            "meta_path": meta_path,
+            "resume_id": resume_id,
+        },
+        enqueued_at=datetime.now(),
+    )
+
+
+async def enqueue_ambient(session_id: str, turn: SessionTurn) -> dict[str, Any]:
+    """Enqueue a pre-built ambient turn. Thin wrapper around enqueue_turn
+    that binds the consumer factory so sessions.py doesn't need to import
+    the consumer coroutine directly.
+    """
+    return await enqueue_turn(
+        session_id,
+        turn,
+        consumer_factory=lambda: _session_consumer(session_id),
+    )
 
 
 @router.post("/api/message")
