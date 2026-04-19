@@ -50,6 +50,8 @@ from app.sessions_io import (
     _broadcast_queue_state,
     enqueue_turn,
     get_queue_state,
+    set_last_user_session,
+    take_ambient_decision,
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools
 from app.post_capture import _post_session_capture, _maybe_extract_focus
@@ -349,24 +351,63 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     "peak_input_tokens": last_turn_input,
                 })
                 stats_dict = stream_stats
-                if result_text.strip():
-                    msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
-                                 "content": [{"type": "text", "text": result_text}],
-                                 "timestamp": end_ts, "stats": stats_dict}
+
+                # Ambient turns only: if the agent called `ambient_decide`
+                # mid-turn to opt out of surfacing, replace the assistant
+                # text with a muted breadcrumb so the transcript shows the
+                # decision without user-visible noise. (#295 Slice 4)
+                ambient_decision = None
+                if turn.source == "ambient":
+                    ambient_decision = take_ambient_decision(session_id)
+
+                if ambient_decision and not ambient_decision.get("surface", True):
+                    # Silent path: muted system breadcrumb, no assistant message.
+                    silent_entry = {
+                        "id": uuid.uuid4().hex[:8],
+                        "role": "system",
+                        "source": "ambient",
+                        "silent": True,
+                        "content": [{"type": "text",
+                                     "text": f"(ambient: Lloyd reviewed and chose not to surface — {ambient_decision.get('reasoning', 'no reason given')[:200]})"}],
+                        "timestamp": end_ts,
+                        "stats": stats_dict,
+                    }
+                    tail.append(silent_entry)
+                    if tail:
+                        await _append_messages(session_id, tail)
+                    final_persisted = True
+                    asyncio.ensure_future(_post_session_capture(session_id))
+                    await _emit(turn, "ambient_silent", {
+                        "session_id": session_id,
+                        "reasoning": ambient_decision.get("reasoning", ""),
+                    })
+                    await _emit(turn, "done", {
+                        "response": "",
+                        "session_id": session_id,
+                        "stats": stats_dict,
+                        "ambient_silent": True,
+                    })
+                else:
+                    if result_text.strip():
+                        msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
+                                     "content": [{"type": "text", "text": result_text}],
+                                     "timestamp": end_ts, "stats": stats_dict}
+                        if accumulated_thinking:
+                            msg_entry["reasoning"] = accumulated_thinking
+                        if turn.source != "user":
+                            msg_entry["source"] = turn.source
+                        tail.append(msg_entry)
+                    if tail:
+                        await _append_messages(session_id, tail)
+                    final_persisted = True
+
+                    asyncio.ensure_future(_post_session_capture(session_id))
+                    asyncio.ensure_future(_maybe_extract_focus(session_id))
+
+                    done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
                     if accumulated_thinking:
-                        msg_entry["reasoning"] = accumulated_thinking
-                    tail.append(msg_entry)
-                if tail:
-                    await _append_messages(session_id, tail)
-                final_persisted = True
-
-                asyncio.ensure_future(_post_session_capture(session_id))
-                asyncio.ensure_future(_maybe_extract_focus(session_id))
-
-                done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
-                if accumulated_thinking:
-                    done_payload['reasoning'] = accumulated_thinking
-                await _emit(turn, "done", done_payload)
+                        done_payload['reasoning'] = accumulated_thinking
+                    await _emit(turn, "done", done_payload)
 
     except Exception as e:
         if not final_persisted:
@@ -633,6 +674,10 @@ async def post_message_stream(request: Request):
         turn,
         consumer_factory=lambda: _session_consumer(session_id),
     )
+    # Ambient producers (autonomy, cron, pipelines) target "the user's
+    # active session" — record this one so they can resolve without
+    # scanning disk. #295.
+    set_last_user_session(session_id)
 
     return StreamingResponse(_turn_sse_generator(turn), media_type="text/event-stream")
 
@@ -641,13 +686,25 @@ async def post_message_stream(request: Request):
 # Ambient turn builder — used by /api/sessions/{id}/inject (see sessions.py)
 # ---------------------------------------------------------------------------
 
-async def build_ambient_turn(session_id: str, text: str, dedup_key: str | None = None) -> SessionTurn:
+async def build_ambient_turn(
+    session_id: str,
+    text: str,
+    dedup_key: str | None = None,
+    priority: str = "notable",
+    source: str = "producer",
+    summary: str = "",
+) -> SessionTurn:
     """Assemble a `SessionTurn` suitable for ambient injection.
 
     Reuses the session's existing model + system_prompt and skips the
     /stream handler's prefetch (ambient producers are expected to send
     already-contextualized content). Raises HTTPException(404) if the
     session doesn't exist.
+
+    Wraps `text` in an `<ambient ...>` envelope plus an explicit hint that
+    the agent may call `ambient_decide(session_id=..., surface=False)` to
+    stay silent. Producers set `priority` to `notable` (default) or
+    `urgent` to change the urgency framing.
 
     `dedup_key` (optional): if provided and another queued ambient has
     the same key, the older one is dropped when this turn enqueues.
@@ -683,13 +740,32 @@ async def build_ambient_turn(session_id: str, text: str, dedup_key: str | None =
         include_partial_messages=True,
     )
 
+    # Envelope the raw producer text so the agent sees framing + knows it
+    # can opt out. The session_id is pre-filled so the agent can just copy
+    # it into the ambient_decide call. Urgent nudges get a stronger verb.
+    urge = "surface this now if the user should know" if priority == "urgent" \
+           else "consider whether to mention this to the user"
+    prefetched_text = (
+        f'<ambient priority="{priority}" source="{source}" session_id="{session_id}">\n'
+        f'{text}\n'
+        f'</ambient>\n\n'
+        f'This is a background signal from `{source}`. You were not asked a question — '
+        f'{urge}. If it is not worth interrupting them, call '
+        f'`ambient_decide(session_id="{session_id}", surface=false, reasoning="...")` '
+        f'and stop. If it is worth surfacing, reply briefly and naturally — the user will '
+        f'see your message as a normal assistant turn.'
+    )
+
     payload: dict[str, Any] = {
         "text": text,
-        "prefetched_text": text,  # no prefetch for ambient — producer supplies context
+        "prefetched_text": prefetched_text,
         "model": model,
         "options": options,
         "meta_path": meta_path,
         "resume_id": resume_id,
+        "priority": priority,
+        "producer_source": source,
+        "summary": summary,
     }
     if dedup_key:
         payload["dedup_key"] = dedup_key

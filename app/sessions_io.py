@@ -65,6 +65,172 @@ class SessionQueue:
 _session_queues: dict[str, SessionQueue] = {}
 
 
+# ---------------------------------------------------------------------------
+# Active-session tracking (task #295)
+#
+# Producers (autonomy, cron, pipelines) need to target "the user's current
+# session" without knowing session IDs. We track the last session that
+# received a user turn in-memory; fallback is mtime-sorted mission-control
+# session files.
+# ---------------------------------------------------------------------------
+
+_last_user_session_id: Optional[str] = None
+
+
+def set_last_user_session(session_id: str) -> None:
+    """Record that a user turn just enqueued for this session. Called from
+    `post_message_stream` so `get_active_session_id()` can resolve "current
+    session" without scanning the filesystem on the hot path.
+    """
+    global _last_user_session_id
+    _last_user_session_id = session_id
+
+
+def get_active_session_id(max_age_hours: float = 24.0) -> Optional[str]:
+    """Best-effort "current user session" for ambient producers.
+
+    Resolution:
+      1. `_last_user_session_id` if set AND the session JSON still exists.
+      2. Most-recent `platform: mission-control` session by mtime within
+         `max_age_hours`. Explicitly excludes `platform: autonomy` so an
+         autonomy task's own session never receives its own injection.
+
+    Returns None if nothing qualifies — producers should treat this as a
+    no-op (the user simply has no active chat session to notify).
+    """
+    import time as _time
+
+    if _last_user_session_id:
+        p = SESSIONS_DIR / f"{_last_user_session_id}.json"
+        if p.exists():
+            return _last_user_session_id
+
+    if not SESSIONS_DIR.exists():
+        return None
+
+    cutoff = _time.time() - (max_age_hours * 3600)
+    best: tuple[float, str] | None = None
+    for sf in SESSIONS_DIR.glob("*.json"):
+        try:
+            mtime = sf.stat().st_mtime
+            if mtime < cutoff:
+                continue
+            data = json.loads(sf.read_text())
+            platform = data.get("platform", "mission-control")
+            if platform == "autonomy":
+                continue
+            if best is None or mtime > best[0]:
+                best = (mtime, data.get("session_id", sf.stem))
+        except Exception:
+            continue
+    return best[1] if best else None
+
+
+# ---------------------------------------------------------------------------
+# Ambient prefetch queue (task #295, Mechanism 1)
+#
+# Producers push entries here for priority=`ambient` injections. On the
+# user's next turn, `prefetch.py` drains pending entries for the target
+# session and appends them to the <context> block. No SDK turn is fired;
+# this is the cheap passive path.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AmbientPrefetchEntry:
+    source: str                # e.g. "autonomy:task-42"
+    summary: str               # one-liner for the <context> block
+    content: str = ""          # optional fuller body
+    dedup_key: str = ""        # collapses with earlier entries of same key
+    expires_at: float = 0.0    # unix ts; 0 means no expiry
+    enqueued_at: float = 0.0
+
+
+_ambient_prefetch_queue: dict[str, list[AmbientPrefetchEntry]] = {}
+AMBIENT_PREFETCH_CAP = 5       # max stored per session before oldest is dropped
+AMBIENT_PREFETCH_DRAIN_MAX = 3 # max injected into a single turn's <context>
+
+
+def enqueue_ambient_prefetch(session_id: str, entry: AmbientPrefetchEntry) -> dict[str, Any]:
+    """Push an ambient prefetch entry for `session_id`.
+
+    Behavior:
+      - If `dedup_key` is set, collapses any existing entry sharing that
+        key (newest wins — old is dropped so rapid producer re-fires don't
+        stack).
+      - Caps at `AMBIENT_PREFETCH_CAP`; oldest beyond cap is evicted.
+
+    Returns a small dict describing what happened (for producer logging).
+    """
+    q = _ambient_prefetch_queue.setdefault(session_id, [])
+    dropped: list[str] = []
+    deduped = False
+    if entry.dedup_key:
+        keep: list[AmbientPrefetchEntry] = []
+        for e in q:
+            if e.dedup_key == entry.dedup_key:
+                dropped.append(e.source)
+                deduped = True
+            else:
+                keep.append(e)
+        q[:] = keep
+    q.append(entry)
+    while len(q) > AMBIENT_PREFETCH_CAP:
+        old = q.pop(0)
+        dropped.append(old.source)
+    return {
+        "queued": 1,
+        "queue_depth": len(q),
+        "dropped": dropped,
+        "deduped": deduped,
+    }
+
+
+def drain_ambient_prefetch(session_id: str) -> list[AmbientPrefetchEntry]:
+    """Pop and return (up to `AMBIENT_PREFETCH_DRAIN_MAX`) unexpired entries
+    for `session_id`. Expired entries are silently evicted. Safe to call
+    when the queue is empty (returns []).
+    """
+    import time as _time
+    q = _ambient_prefetch_queue.pop(session_id, [])
+    if not q:
+        return []
+    now = _time.time()
+    alive = [e for e in q if e.expires_at == 0.0 or e.expires_at > now]
+    # Keep newest first for drain, then put any overflow back for next turn.
+    alive.sort(key=lambda e: e.enqueued_at, reverse=True)
+    drained = alive[:AMBIENT_PREFETCH_DRAIN_MAX]
+    leftover = alive[AMBIENT_PREFETCH_DRAIN_MAX:]
+    if leftover:
+        _ambient_prefetch_queue[session_id] = leftover
+    return drained
+
+
+def peek_ambient_prefetch(session_id: str) -> list[AmbientPrefetchEntry]:
+    """Snapshot without popping — for debug endpoints and tests."""
+    return list(_ambient_prefetch_queue.get(session_id, []))
+
+
+# ---------------------------------------------------------------------------
+# Ambient-turn decision state (task #295, Slice 4)
+#
+# When an agent calls `ambient_decide(session_id, surface=False)` during an
+# ambient turn, we record the decision here. `_run_turn`'s finally clause
+# consults this dict and, if surface=False, suppresses normal assistant
+# persistence and writes a muted breadcrumb instead.
+# ---------------------------------------------------------------------------
+
+_ambient_decisions: dict[str, dict[str, Any]] = {}
+
+
+def set_ambient_decision(session_id: str, decision: dict[str, Any]) -> None:
+    _ambient_decisions[session_id] = decision
+
+
+def take_ambient_decision(session_id: str) -> Optional[dict[str, Any]]:
+    """Pop and return the decision for a session, or None if unset."""
+    return _ambient_decisions.pop(session_id, None)
+
+
 def _get_or_create_queue(session_id: str) -> SessionQueue:
     q = _session_queues.get(session_id)
     if q is None:
