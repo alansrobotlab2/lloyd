@@ -32,7 +32,7 @@ const SLASH_COMMANDS = [
   { name: 'background', desc: 'Run prompt in background', alias: 'bg' },
   { name: 'btw', desc: 'Ephemeral side question' },
   { name: 'queue', desc: 'Queue prompt for next turn', alias: 'q' },
-  { name: 'think', desc: 'Toggle extended thinking (off/low/medium/high)' },
+  { name: 'think', desc: 'Toggle extended thinking (off/low/medium/high/xhigh/max)' },
   { name: 'profile', desc: 'Show active profile' },
   { name: 'config', desc: 'Show configuration' },
   { name: 'provider', desc: 'Show available providers' },
@@ -396,7 +396,7 @@ export default function ChatPanel({
     // Handle /think command locally
     if (text.startsWith('/think')) {
       const arg = text.split(/\s+/)[1]?.toLowerCase() || ''
-      const validLevels = ['off', 'low', 'medium', 'high']
+      const validLevels = ['off', 'low', 'medium', 'high', 'xhigh', 'max']
       let newLevel: string
       if (arg && validLevels.includes(arg)) {
         newLevel = arg
@@ -407,7 +407,7 @@ export default function ChatPanel({
         setMessages(prev => [...prev, {
           id: `msg_${Date.now()}_think`,
           role: 'assistant',
-          content: [{ type: 'text', text: `Invalid think level **"${arg}"**. Valid: off, low, medium, high` }],
+          content: [{ type: 'text', text: `Invalid think level **"${arg}"**. Valid: off, low, medium, high, xhigh, max` }],
           timestamp: new Date().toISOString(),
         }])
         setInput('')
@@ -632,7 +632,9 @@ export default function ChatPanel({
             )}
             <div className={`max-w-[80%] ${msg.role === 'user' ? 'min-w-0' : 'flex-1 min-w-0'}`}>
               <div
-                className={`px-3.5 py-2.5 rounded-xl ${
+                className={`rounded-xl ${
+                  msg.role === 'tool' ? 'px-2.5 py-1.5' : 'px-3.5 py-2.5'
+                } ${
                   msg.role === 'user'
                     ? 'bg-brand-600/30 border border-brand-500/40 text-white'
                     : msg.role === 'tool'
@@ -640,23 +642,6 @@ export default function ChatPanel({
                     : 'bg-surface-2 border border-surface-3/50 text-slate-200'
                 }`}
               >
-                {msg.role === 'tool' && (
-                  <div className="flex items-center gap-1.5 mb-2 text-xs font-semibold text-slate-400 uppercase tracking-wide">
-                    <Wrench className="w-3 h-3" />
-                    <span>Tool</span>
-                    {msg.tool_call_id && (
-                      <span className="normal-case font-mono font-normal text-slate-500 ml-0.5">
-                        {(() => {
-                          const toolCall = messages.find(m =>
-                            m.role === 'assistant' &&
-                            m.tool_calls?.some(tc => tc.call_id === msg.tool_call_id)
-                          )?.tool_calls?.find(tc => tc.call_id === msg.tool_call_id)
-                          return toolCall?.function?.name || ''
-                        })()}
-                      </span>
-                    )}
-                  </div>
-                )}
                 <div className="prose-chat text-sm leading-relaxed">
                   {msg.role === 'assistant' ? (
                     <>
@@ -676,55 +661,56 @@ export default function ChatPanel({
                       )}
                       <div dangerouslySetInnerHTML={{ __html: marked.parse(msg.content.map(c => c.text).join('\n')) }} />
                     </>
-                  ) : msg.role === 'tool' ? (
-                    // Tool call rendering - show arguments and response - only when Agent Details is enabled
-                    showAgentDetails ? (() => {
-                    const assistantMsg = messages.find(m => 
-                      m.role === 'assistant' && 
+                  ) : msg.role === 'tool' ? (() => {
+                    // Tool call rendering — single-line summary, click to expand args+response
+                    const assistantMsg = messages.find(m =>
+                      m.role === 'assistant' &&
                       m.tool_calls?.some(tc => tc.call_id === msg.tool_call_id)
                     )
                     const toolCall = assistantMsg?.tool_calls?.find(tc => tc.call_id === msg.tool_call_id)
+                    const toolName = toolCall?.function?.name || ''
                     const toolArgs = toolCall?.function?.arguments || '{}'
-                    
+
                     let argsDisplay = toolArgs
                     try {
-                      const parsed = JSON.parse(toolArgs)
-                      argsDisplay = JSON.stringify(parsed, null, 2)
+                      argsDisplay = JSON.stringify(JSON.parse(toolArgs), null, 2)
                     } catch (e) {
                       // Keep raw string if not valid JSON
                     }
-                    
+
                     const responseText = msg.content.map(c => c.text).join('\n')
                     return (
-                      <div>
-                        <details className="group">
-                          <summary className="cursor-pointer list-none flex items-center gap-1 text-xs text-slate-400 hover:text-slate-300 transition-colors">
-                            <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
-                            <span className="font-semibold">Details</span>
-                          </summary>
-                          <div className="mt-2 space-y-2">
-                            {argsDisplay !== '{}' && (
-                              <div>
-                                <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Arguments</div>
-                                <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono">
-                                  {argsDisplay}
-                                </pre>
-                              </div>
-                            )}
+                      <details className="group">
+                        <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-300 transition-colors">
+                          <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform shrink-0" />
+                          <Wrench className="w-3 h-3 shrink-0" />
+                          <span className="font-semibold uppercase tracking-wide">Tool</span>
+                          {toolName && (
+                            <span className="font-mono font-normal text-slate-500 truncate">{toolName}</span>
+                          )}
+                        </summary>
+                        <div className="mt-2 space-y-2">
+                          {argsDisplay !== '{}' && (
                             <div>
-                              <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Response</div>
-                              <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">
-                                {responseText || '⏳ Running...'}
+                              <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Arguments</div>
+                              <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono">
+                                {argsDisplay}
                               </pre>
                             </div>
+                          )}
+                          <div>
+                            <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Response</div>
+                            <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">
+                              {responseText || '⏳ Running...'}
+                            </pre>
                           </div>
-                        </details>
-                      </div>
+                        </div>
+                      </details>
                     )
-                  })() : null
-                ) : (
-                  <div dangerouslySetInnerHTML={{ __html: marked.parse(msg.content.map(c => c.text).join('\n')) }} />
-                )}
+                  })() : (
+                    <div dangerouslySetInnerHTML={{ __html: marked.parse(msg.content.map(c => c.text).join('\n')) }} />
+                  )}
+                </div>
               </div>
               <div className="mt-1.5 text-[10px] text-slate-600 font-mono flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
                 <span>{timeStr(msg.timestamp)}</span>
@@ -753,7 +739,6 @@ export default function ChatPanel({
                   return <span className="text-slate-600">ctx: {msg.context_tokens.toLocaleString()} ({pct}%)</span>
                 })()}
               </div>
-            </div>
             </div>
             {msg.role === 'user' && !isMobile && (
               <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5 hidden sm:flex">
@@ -823,9 +808,9 @@ export default function ChatPanel({
             className="flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3.5 py-2.5 border border-surface-3/50 outline-none focus:border-brand-500/50 placeholder:text-slate-500 transition-colors disabled:opacity-50"
             disabled={sending || thinking}
           />
-          {/* Think level toggle — always visible, cycles off→low→medium→high→off */}
+          {/* Think level toggle — always visible, cycles off→low→medium→high→xhigh→max→off */}
           {(() => {
-            const levels = ['off', 'low', 'medium', 'high'] as const
+            const levels = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const
             const idx = levels.indexOf(thinkLevel as typeof levels[number])
             const nextLevel = levels[(idx + 1) % levels.length]
             const isActive = thinkLevel !== 'off'
