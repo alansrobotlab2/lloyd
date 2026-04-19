@@ -876,14 +876,6 @@ export const api = {
   usageRecent: (limit = 20): Promise<{ records: UsageRecord[] }> =>
     fetch(`${API_BASE}/usage/recent?limit=${limit}`).then(r => r.json()),
 
-  // Autonomy Scheduler
-  autonomySchedulerStatus: (): Promise<{ enabled: boolean; running: boolean; last_tick: number; current_task_id: number | null }> =>
-    fetch(`${API_BASE}/autonomy/scheduler/status`).then(r => r.json()),
-  autonomySchedulerEnable: (): Promise<{ enabled: boolean }> =>
-    fetch(`${API_BASE}/autonomy/scheduler/enable`, { method: 'POST' }).then(r => r.json()),
-  autonomySchedulerDisable: (): Promise<{ enabled: boolean }> =>
-    fetch(`${API_BASE}/autonomy/scheduler/disable`, { method: 'POST' }).then(r => r.json()),
-
   // Active SDK session subprocesses
   getActiveProcs: (): Promise<{ procs: ActiveProc[] }> =>
     fetch(`${API_BASE}/sessions/active-procs`).then(r => r.json()),

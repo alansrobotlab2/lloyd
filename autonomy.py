@@ -12,7 +12,6 @@ import asyncio
 import datetime
 import logging
 import os
-import time
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -24,13 +23,6 @@ logger = logging.getLogger("lloyd-autonomy")
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
 LLOYD_HOME = Path(__file__).parent
-
-# ── Status ───────────────────────────────────────────────────────────────────
-
-_ticker_enabled = False
-_last_tick_time: float = 0.0
-_current_task_id: Optional[int] = None
-
 
 def recover_stuck_tasks() -> list:
     """Reset any tasks stuck in_progress longer than their timeout."""
@@ -54,40 +46,6 @@ def recover_stuck_tasks() -> list:
             logger.warning("Recovered stuck task #%s (%s) after %.0fs", task_id, task.get("name"), stuck_seconds)
             recovered.append(task_id)
     return recovered
-
-
-def get_status() -> dict:
-    from workers.pool import get_pool
-    from workers.queue import get_queue
-
-    pool = get_pool()
-    try:
-        q = get_queue()
-        queue_depth = q.depth_by_source()
-    except RuntimeError:
-        queue_depth = {}
-
-    return {
-        "enabled": _ticker_enabled,
-        "running": bool(pool and pool._running and not pool._paused),
-        "last_tick": _last_tick_time,
-        "current_task_id": _current_task_id,
-        "pool": pool.status() if pool else None,
-        "queue_depth": queue_depth,
-    }
-
-
-def set_enabled(enabled: bool) -> None:
-    global _ticker_enabled
-    _ticker_enabled = enabled
-    logger.info("Autonomy scheduler %s", "enabled" if enabled else "disabled")
-    try:
-        config_path = LLOYD_HOME / "config.yaml"
-        config = yaml.safe_load(config_path.read_text()) or {}
-        config.setdefault("autonomy", {})["enabled"] = enabled
-        config_path.write_text(yaml.dump(config, default_flow_style=False, allow_unicode=True))
-    except Exception as e:
-        logger.warning("Failed to persist autonomy enabled state: %s", e)
 
 
 # ── Task file I/O ─────────────────────────────────────────────────────────────
@@ -353,8 +311,6 @@ def _to_bg_url(env: dict) -> dict:
 
 def run_task(task_id) -> dict:
     """Execute a single autonomy task via Claude Agent SDK."""
-    global _current_task_id, _last_tick_time
-
     path = _find_task_file(task_id)
     if not path:
         return {"success": False, "error": f"Task #{task_id} not found"}
@@ -393,8 +349,6 @@ def run_task(task_id) -> dict:
     run_id = f"run_{task_id}_{now.strftime('%Y%m%d_%H%M%S')}"
 
     logger.info("Running task #%s: %s (model=%s)", task_id, task.get("name"), task_model)
-    _current_task_id = task_id
-    _last_tick_time = time.time()
     started_at = now_iso
 
     try:
@@ -498,6 +452,3 @@ def run_task(task_id) -> dict:
         logger.error("Task #%s failed: %s", task_id, error_msg)
         return {"success": False, "task_id": task_id, "run_id": run_id,
                 "error": error_msg, "duration_seconds": round(duration, 1)}
-
-    finally:
-        _current_task_id = None

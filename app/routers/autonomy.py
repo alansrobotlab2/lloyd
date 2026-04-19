@@ -3,7 +3,6 @@ plus the background scheduler ticker registered at app startup.
 """
 
 import asyncio
-import json
 import logging
 import re
 from datetime import datetime
@@ -13,7 +12,6 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.config import CONFIG
 from app.discord_notify import _discord_notify_task_complete
 
 
@@ -25,39 +23,6 @@ _AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
 
 
 # ── Runtime control ──────────────────────────────────────────────────────────
-
-
-@router.get("/api/autonomy/status")
-@router.get("/api/autonomy/scheduler/status")
-async def autonomy_status():
-    try:
-        from autonomy import get_status
-        return JSONResponse(get_status())
-    except ImportError:
-        return JSONResponse({"enabled": False, "error": "Autonomy module not available"})
-
-
-@router.post("/api/autonomy/enable")
-@router.post("/api/autonomy/scheduler/enable")
-async def autonomy_enable(request: Request):
-    try:
-        from autonomy import set_enabled
-        body = await request.body()
-        data = json.loads(body) if body else {}
-        set_enabled(data.get("enabled", True))
-        return JSONResponse({"success": True})
-    except ImportError:
-        raise HTTPException(status_code=501, detail="Autonomy module not available")
-
-
-@router.post("/api/autonomy/scheduler/disable")
-async def autonomy_disable():
-    try:
-        from autonomy import set_enabled
-        set_enabled(False)
-        return JSONResponse({"success": True})
-    except ImportError:
-        raise HTTPException(status_code=501, detail="Autonomy module not available")
 
 
 @router.post("/api/autonomy/run")
@@ -325,11 +290,8 @@ async def autonomy_runs(task_id: int = 0, limit: int = 20):
 
 async def start_autonomy_ticker():
     """Recover stuck tasks on startup. Scheduling is driven by the worker pool."""
-    initial_enabled = CONFIG.get("autonomy", {}).get("enabled", False)
     try:
-        from autonomy import set_enabled, recover_stuck_tasks
-        if initial_enabled:
-            set_enabled(True)
+        from autonomy import recover_stuck_tasks
         recovered = recover_stuck_tasks()
         if recovered:
             logger.info("Autonomy startup: recovered %d stuck task(s): %s", len(recovered), recovered)
