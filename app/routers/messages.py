@@ -220,6 +220,20 @@ async def post_message_stream(request: Request):
                             meta_path.write_text(json.dumps(meta, indent=2))
 
                 elif isinstance(message, AssistantMessage):
+                    has_tool_use = any(isinstance(b, ToolUseBlock) for b in message.content)
+                    if has_tool_use and full_response.strip():
+                        seg_ts = datetime.now().isoformat()
+                        seg_entry: dict = {
+                            "id": uuid.uuid4().hex[:8],
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": full_response}],
+                            "timestamp": seg_ts,
+                        }
+                        if accumulated_thinking:
+                            seg_entry["reasoning"] = accumulated_thinking
+                        _append_messages(session_id, [seg_entry])
+                        full_response = ""
+                        accumulated_thinking = ""
                     for block in message.content:
                         if isinstance(block, ThinkingBlock):
                             accumulated_thinking = block.thinking
@@ -330,9 +344,14 @@ async def post_message_stream(request: Request):
                         except Exception as se:
                             logger.warning(f"Failed to save sdk_session_id: {se}")
 
+                    # Persisted text reflects only the post-last-tool segment;
+                    # earlier segments were already flushed mid-stream. The done
+                    # payload still surfaces message.result for callers that want
+                    # the full concatenated turn.
                     result_text = full_response
+                    done_text = full_response
                     if hasattr(message, "result") and message.result:
-                        result_text = message.result
+                        done_text = message.result
 
                     end_ts = datetime.now().isoformat()
                     tail: list[dict] = []
@@ -372,7 +391,7 @@ async def post_message_stream(request: Request):
                     asyncio.ensure_future(_post_session_capture(session_id))
                     asyncio.ensure_future(_maybe_extract_focus(session_id))
 
-                    done_payload: dict = {'response': result_text, 'session_id': session_id, 'stats': stats_dict}
+                    done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
                     if accumulated_thinking:
                         done_payload['reasoning'] = accumulated_thinking
                     yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"

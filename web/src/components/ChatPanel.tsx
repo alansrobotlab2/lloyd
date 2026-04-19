@@ -437,8 +437,10 @@ export default function ChatPanel({
 
     setThinking(true)
 
-    // Streaming assistant message ID — used to accumulate text deltas
-    const assistantMsgId = `msg_${Date.now()}_resp`
+    // Current streaming assistant bubble — reset on each tool_start so text
+    // emitted between tool calls lands in its own bubble.
+    let assistantMsgId: string | null = null
+    let segmentCounter = 0
     let streamingStarted = false
     let settled = false
     let accumulatedThinking = ''
@@ -453,6 +455,9 @@ export default function ChatPanel({
       },
       onToolStart: (callId, name, args, contextTokens) => {
         setActiveToolName(name)
+        // Close the current text segment so the next text_delta starts a new bubble.
+        assistantMsgId = null
+        accumulatedThinking = ''
         // Add an assistant message with the tool_call, then a pending tool result message
         setMessages(prev => [
           ...prev,
@@ -493,18 +498,22 @@ export default function ChatPanel({
         accumulatedThinking = fullText || accumulatedThinking
       },
       onTextDelta: (delta) => {
-        if (!streamingStarted) {
-          streamingStarted = true
+        streamingStarted = true
+        if (assistantMsgId === null) {
+          segmentCounter += 1
+          const newId = `msg_${Date.now()}_resp_${segmentCounter}`
+          assistantMsgId = newId
           setMessages(prev => [...prev, {
-            id: assistantMsgId,
+            id: newId,
             role: 'assistant' as const,
             content: [{ type: 'text' as const, text: delta }],
             timestamp: new Date().toISOString(),
             ...(accumulatedThinking ? { reasoning: accumulatedThinking } : {}),
           }])
         } else {
+          const currentId = assistantMsgId
           setMessages(prev => prev.map(m =>
-            m.id === assistantMsgId
+            m.id === currentId
               ? {
                   ...m,
                   content: [{ type: 'text' as const, text: m.content[0].text + delta }],
@@ -519,17 +528,19 @@ export default function ChatPanel({
         settled = true
         const finalReasoning = accumulatedThinking || reasoning || ''
         if (!streamingStarted && response) {
+          const fallbackId = `msg_${Date.now()}_resp_final`
           setMessages(prev => [...prev, {
-            id: assistantMsgId,
+            id: fallbackId,
             role: 'assistant' as const,
             content: [{ type: 'text' as const, text: response }],
             timestamp: new Date().toISOString(),
             stats,
             ...(finalReasoning ? { reasoning: finalReasoning } : {}),
           }])
-        } else if (stats || finalReasoning) {
+        } else if (assistantMsgId && (stats || finalReasoning)) {
+          const lastId = assistantMsgId
           setMessages(prev => prev.map(m =>
-            m.id === assistantMsgId
+            m.id === lastId
               ? { ...m, ...(stats ? { stats } : {}), ...(finalReasoning ? { reasoning: finalReasoning } : {}) }
               : m
           ))

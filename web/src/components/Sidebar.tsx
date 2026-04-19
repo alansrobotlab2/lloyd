@@ -23,10 +23,11 @@ import {
   VolumeX,
   Zap,
   ZapOff,
+  Workflow,
 } from 'lucide-react'
 import { api } from '../api'
 
-export type Page = 'chat' | 'services' | 'dashboard' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture'
+export type Page = 'chat' | 'services' | 'dashboard' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers'
 
 interface NavItem {
   id: Page
@@ -39,6 +40,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Usage', icon: ChartArea },
   { id: 'backlog', label: 'Backlog', icon: LayoutGrid },
   { id: 'autonomy', label: 'Autonomy', icon: Lightbulb },
+  { id: 'workers', label: 'Workers', icon: Workflow },
   { id: 'memory', label: 'Memory', icon: Brain },
   { id: 'architecture', label: 'Architecture', icon: Code2 },
   { id: 'skills', label: 'Skills', icon: Sparkles },

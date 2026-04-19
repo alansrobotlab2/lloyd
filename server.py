@@ -29,6 +29,7 @@ from app.routers import models as _models_router
 from app.routers import usage as _usage_router
 from app.routers import voice as _voice_router
 from app.routers import messages as _messages_router
+from app.routers import workers as _workers_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -58,8 +59,10 @@ app.include_router(_services_router.router)
 app.include_router(_tools_router.router)
 app.include_router(_pipelines_router.router)
 app.include_router(_voice_router.router)
+app.include_router(_workers_router.router)
 
 app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
+app.on_event("startup")(_workers_router.start_worker_pool)
 
 
 if __name__ == "__main__":

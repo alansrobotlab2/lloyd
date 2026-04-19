@@ -10,6 +10,7 @@ import ToolsPage from './pages/ToolsPage'
 import ArchitecturePageFull from './pages/ArchitecturePage'
 import AutonomyPage from './pages/AutonomyPage'
 import UsagePage from './pages/UsagePage'
+import WorkersPage from './pages/WorkersPage'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu, X } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
 import { api, type ModelInfo } from '../api'
@@ -39,6 +40,7 @@ const PAGES: Record<string, React.FC> = {
   settings: SettingsPage,
   architecture: ArchitecturePageFull,
   autonomy: AutonomyPage,
+  workers: WorkersPage,
 }
 
 export default function Layout() {

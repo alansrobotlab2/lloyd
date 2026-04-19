@@ -320,12 +320,11 @@ async def autonomy_runs(task_id: int = 0, limit: int = 20):
     return JSONResponse({"runs": runs})
 
 
-# ── Scheduler background ticker (registered at app startup) ──────────────────
+# ── Startup hook (recovery only — scheduling lives in workers/pool.py) ──────
 
 
 async def start_autonomy_ticker():
-    """Recover stuck tasks, then loop forever firing autonomy_tick() on interval."""
-    tick_interval = CONFIG.get("autonomy", {}).get("tick_interval", 60)
+    """Recover stuck tasks on startup. Scheduling is driven by the worker pool."""
     initial_enabled = CONFIG.get("autonomy", {}).get("enabled", False)
     try:
         from autonomy import set_enabled, recover_stuck_tasks
@@ -336,35 +335,4 @@ async def start_autonomy_ticker():
             logger.info("Autonomy startup: recovered %d stuck task(s): %s", len(recovered), recovered)
     except ImportError:
         pass
-
-    async def _ticker_loop():
-        while True:
-            await asyncio.sleep(tick_interval)
-            try:
-                from autonomy import autonomy_tick, _find_task_file, _parse_task_file, _ticker_enabled
-                if not _ticker_enabled:
-                    continue
-                result = await asyncio.get_event_loop().run_in_executor(None, autonomy_tick)
-                if result and result.get("success"):
-                    task_id = result.get("task_id")
-                    logger.info("Autonomy tick: ran task #%s", task_id)
-                    preview = result.get("response_preview", "")
-                    if task_id and preview and "[SILENT]" not in preview:
-                        try:
-                            path = _find_task_file(task_id)
-                            task_name = "Autonomy Task"
-                            if path:
-                                task = _parse_task_file(path)
-                                if task:
-                                    task_name = task.get("name", task_name)
-                                    if not task.get("notify_on_complete", True):
-                                        task_name = None  # skip notification
-                            if task_name:
-                                await _discord_notify_task_complete(task_id, task_name, preview)
-                        except Exception as ne:
-                            logger.warning("Discord notify error: %s", ne)
-            except Exception as e:
-                logger.error("Autonomy ticker error: %s", e)
-
-    asyncio.create_task(_ticker_loop())
-    logger.info("Autonomy ticker started (interval=%ds)", tick_interval)
+    logger.info("Autonomy startup complete — worker pool handles task execution")

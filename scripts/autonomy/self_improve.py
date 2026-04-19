@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
+DEPRECATED — superseded by the autoresearch loop.
+
 Self-Improvement Loop (Karpathy Cycle)
 
 Implements a tight measure → propose → evaluate → keep/revert loop
 for autonomous system prompt optimization.
+
+This single-threaded scaffold predates the parallel autoresearch loop at
+`scripts/autoresearch/` + `agent_mcp/autoresearch.py`. New rounds run through
+`autoresearch_round` (MCP) or `python -m scripts.autoresearch.run_round`.
+This file is kept for reference and historical backfill/replay; do not
+schedule it for new work.
 """
 
 import json

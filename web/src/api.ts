@@ -739,6 +739,47 @@ export const api = {
   autonomyRuns: (taskId: number, limit = 20): Promise<{ runs: any[] }> =>
     fetch(`${API_BASE}/autonomy/runs?task_id=${taskId}&limit=${limit}`).then(r => r.json()),
 
+  // Workers (unified work queue)
+  workersStatus: (): Promise<{
+    initialized: boolean
+    workers_enabled?: boolean
+    pool?: { running: boolean; paused: boolean; slots: number; in_flight: Record<string, any>; in_flight_count: number }
+    depth?: Record<string, Record<string, number>>
+    sources?: Array<{ name: string; enabled: boolean; interval_seconds?: number; max_inflight?: number; depth?: Record<string, number> }>
+  }> => fetch(`${API_BASE}/workers/status`).then(r => r.json()),
+  workersQueue: (opts: { state?: string; source?: string; limit?: number } = {}): Promise<{ items: any[] }> => {
+    const q = new URLSearchParams()
+    if (opts.state) q.set('state', opts.state)
+    if (opts.source) q.set('source', opts.source)
+    if (opts.limit) q.set('limit', String(opts.limit))
+    return fetch(`${API_BASE}/workers/queue?${q.toString()}`).then(r => r.json())
+  },
+  workersRuns: (opts: { source?: string; task_id?: string; limit?: number } = {}): Promise<{ runs: any[] }> => {
+    const q = new URLSearchParams()
+    if (opts.source) q.set('source', opts.source)
+    if (opts.task_id) q.set('task_id', opts.task_id)
+    if (opts.limit) q.set('limit', String(opts.limit))
+    return fetch(`${API_BASE}/workers/runs?${q.toString()}`).then(r => r.json())
+  },
+  workersEnqueue: (data: { source: string; kind: string; payload?: Record<string, unknown>; priority?: number; dedup_key?: string }): Promise<{ id?: number; coalesced?: boolean }> =>
+    fetch(`${API_BASE}/workers/enqueue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }).then(r => r.json()),
+  workersPause: (paused: boolean): Promise<{ paused: boolean }> =>
+    fetch(`${API_BASE}/workers/pause`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused }),
+    }).then(r => r.json()),
+  workersEnable: (enabled: boolean): Promise<{ enabled: boolean }> =>
+    fetch(`${API_BASE}/workers/enable`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }).then(r => r.json()),
+
   // Usage
   usagePing: (): Promise<UsagePing> =>
     fetch(`${API_BASE}/usage/ping`).then(r => r.json()),

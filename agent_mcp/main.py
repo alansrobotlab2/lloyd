@@ -19,6 +19,7 @@ from starlette.routing import Mount, Route
 
 from agent_mcp import (
     autonomy,
+    autoresearch,
     backlog,
     browser,
     discord_bot,
@@ -35,6 +36,7 @@ PORT = 8500
 
 MODULES = [
     autonomy,
+    autoresearch,
     backlog,
     browser,
     discord_bot,

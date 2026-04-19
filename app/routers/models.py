@@ -14,6 +14,7 @@ router = APIRouter()
 
 @router.get("/api/models")
 async def get_models():
+    _ordered = ["primary", "secondary"]  # always first in dropdown
     models = []
     for name, cfg in MODEL_CONFIGS.items():
         models.append({
@@ -24,6 +25,11 @@ async def get_models():
             "base_url": cfg.get("base_url", ""),
             "context_length": cfg.get("context_length", 0),
         })
+    # Sort so primary and secondary always appear first
+    def _sort_key(m):
+        priority = 0 if m["name"] in _ordered else 1
+        return (priority, m["name"])
+    models.sort(key=_sort_key)
     return JSONResponse({
         "models": models,
         "default": CONFIG.get("model", {}).get("default", ""),
