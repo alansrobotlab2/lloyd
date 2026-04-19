@@ -21,8 +21,6 @@ import {
   Radio,
   Volume2,
   VolumeX,
-  Zap,
-  ZapOff,
   Workflow,
 } from 'lucide-react'
 import { api } from '../api'
@@ -101,41 +99,6 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
     }
   }
   const handleTtsToggle = () => {} // stub — no TTS mute endpoint yet
-
-  // Autonomy scheduler state
-  const [schedulerEnabled, setSchedulerEnabled] = useState(false)
-  const [schedulerRunning, setSchedulerRunning] = useState(false)
-  const [schedulerLoaded, setSchedulerLoaded] = useState(false)
-
-  const pollSchedulerStatus = useCallback(() => {
-    api.autonomySchedulerStatus()
-      .then(s => {
-        setSchedulerEnabled(s.enabled)
-        setSchedulerRunning(s.running)
-        setSchedulerLoaded(true)
-      })
-      .catch(() => setSchedulerLoaded(false))
-  }, [])
-
-  useEffect(() => {
-    pollSchedulerStatus()
-    const interval = setInterval(pollSchedulerStatus, 15000)
-    return () => clearInterval(interval)
-  }, [pollSchedulerStatus])
-
-  const handleSchedulerToggle = async () => {
-    try {
-      if (schedulerEnabled) {
-        const r = await api.autonomySchedulerDisable()
-        setSchedulerEnabled(r.enabled ?? false)
-      } else {
-        const r = await api.autonomySchedulerEnable()
-        setSchedulerEnabled(r.enabled ?? true)
-      }
-    } catch (e) {
-      console.error('Failed to toggle scheduler:', e)
-    }
-  }
 
   const renderItem = (item: NavItem) => {
     const Icon = item.icon
@@ -260,26 +223,6 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
           </button>
         </div>
         <div className="border-t border-surface-3/30 my-1" />
-
-        {/* Autonomy Scheduler toggle */}
-        <button
-          onClick={schedulerLoaded ? handleSchedulerToggle : undefined}
-          disabled={!schedulerLoaded}
-          title={collapsed ? (schedulerEnabled ? 'Autonomy: On' : 'Autonomy: Off') : undefined}
-          className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-            !schedulerLoaded
-              ? 'text-slate-600 cursor-not-allowed opacity-50'
-              : schedulerEnabled
-                ? 'text-green-400 bg-green-600/10 hover:bg-green-600/20'
-                : 'text-red-400 bg-red-600/10 hover:bg-red-600/20'
-          }`}
-        >
-          {schedulerEnabled
-            ? <Zap className={`w-4 h-4 flex-shrink-0 ${schedulerRunning ? 'animate-pulse' : ''}`} />
-            : <ZapOff className="w-4 h-4 flex-shrink-0" />
-          }
-          {!collapsed && <span className="truncate">Autonomy</span>}
-        </button>
 
         {/* Work Mode toggle */}
         <button

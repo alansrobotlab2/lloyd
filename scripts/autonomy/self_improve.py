@@ -880,7 +880,9 @@ Reply ONLY "A" or "B". /no_think"""
     logger.info(f"Results: {wins}/{len(user_messages)} for modified — {'KEEPING' if keep else 'REVERTING'}")
     
     # Commit change if keeping
+    # Wrapped in try/finally to guarantee branch cleanup on ANY exception.
     if keep:
+        branch_created = False
         try:
             subprocess.run(
                 ["git", "add", file_path],
@@ -897,19 +899,55 @@ Reply ONLY "A" or "B". /no_think"""
                 check=True,
                 capture_output=True,
             )
+            branch_created = True
+
             if not skip_branch:
+                # Ensure clean slate: abort any in-progress merge
                 subprocess.run(
-                    ["git", "checkout", "main"],
+                    ["git", "merge", "--abort"],
+                    cwd=OBSIDIAN_DIR,
+                    check=False,
+                    capture_output=True,
+                )
+                # Switch to main with force to handle dirty state
+                subprocess.run(
+                    ["git", "checkout", "-f", "main"],
                     cwd=OBSIDIAN_DIR,
                     check=True,
                     capture_output=True,
                 )
-                subprocess.run(
-                    ["git", "merge", branch_name],
+                # Fast-forward merge only — cleaner error on conflict
+                merge_result = subprocess.run(
+                    ["git", "merge", "--ff-only", branch_name],
                     cwd=OBSIDIAN_DIR,
-                    check=True,
                     capture_output=True,
+                    text=True,
                 )
+                if merge_result.returncode != 0:
+                    # --ff-only failed → fast-forward not possible, fall back to regular merge
+                    logger.info("Fast-forward merge failed, attempting regular merge")
+                    subprocess.run(
+                        ["git", "merge", "--no-edit", "--abort"],
+                        cwd=OBSIDIAN_DIR,
+                        capture_output=True,
+                    )
+                    merge_result = subprocess.run(
+                        ["git", "merge", "--no-edit"],
+                        cwd=OBSIDIAN_DIR,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if merge_result.returncode != 0:
+                        logger.error(f"Merge failed: {merge_result.stderr}")
+                        subprocess.run(
+                            ["git", "merge", "--abort"],
+                            cwd=OBSIDIAN_DIR,
+                            check=False,
+                            capture_output=True,
+                        )
+                        # Branch deletion in finally block handles cleanup
+                        return False
+                # Delete the experiment branch
                 subprocess.run(
                     ["git", "branch", "-D", branch_name],
                     cwd=OBSIDIAN_DIR,
@@ -919,24 +957,36 @@ Reply ONLY "A" or "B". /no_think"""
                 logger.info("Change merged to main")
             else:
                 logger.info("Change committed to current branch (skip_branch=True)")
-        except subprocess.CalledProcessError as e:
-            stdout = e.stdout.decode(errors="replace").strip() if e.stdout else ""
-            stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
-            logger.error(f"Failed to commit/merge: {e}\n  stdout: {stdout}\n  stderr: {stderr}")
-            if not skip_branch:
-                # Try to recover
-                subprocess.run(
-                    ["git", "checkout", "main"],
-                    cwd=OBSIDIAN_DIR,
-                    check=True,
-                    capture_output=True,
-                )
-                subprocess.run(
-                    ["git", "branch", "-D", branch_name],
-                    cwd=OBSIDIAN_DIR,
-                    check=True,
-                    capture_output=True,
-                )
+        except Exception as e:
+            logger.error(f"Commit/merge failed: {e}")
+            raise  # Re-raise so the finally block runs
+        finally:
+            # Always clean up dangling branches, regardless of success/failure
+            if branch_created:
+                try:
+                    # If branch still exists and we're not on it, delete it
+                    current_branch = subprocess.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=OBSIDIAN_DIR,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+                    if current_branch != branch_name:
+                        subprocess.run(
+                            ["git", "branch", "-D", "-f", branch_name],
+                            cwd=OBSIDIAN_DIR,
+                            check=False,
+                            capture_output=True,
+                        )
+                    # If we ended up on the experiment branch, force-switch to main
+                    subprocess.run(
+                        ["git", "checkout", "-f", "main"],
+                        cwd=OBSIDIAN_DIR,
+                        check=False,
+                        capture_output=True,
+                    )
+                except Exception:
+                    pass  # Best effort cleanup only
     else:
         # Revert using context manager
         if skip_branch:
@@ -1141,45 +1191,31 @@ def apply_pending_proposal():
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     branch_name = f"pending-{timestamp}"
     
-    # Create git branch
+    # Apply the proposal with guaranteed branch cleanup
+    branch_created = False
     try:
+        # Create git branch
         subprocess.run(
             ["git", "checkout", "-b", branch_name],
             cwd=OBSIDIAN_DIR,
             check=True,
             capture_output=True,
         )
+        branch_created = True
         logger.info(f"Created branch: {branch_name}")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to create branch: {e}")
-        return False
-    
-    # Apply the change
-    try:
+
         with open(file_path) as f:
             content = f.read()
-        
+
         if original_text not in content:
             logger.error(f"Original text not found in {file_path}")
-            subprocess.run(
-                ["git", "checkout", "main", "--", file_path],
-                cwd=OBSIDIAN_DIR,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "branch", "-D", branch_name],
-                cwd=OBSIDIAN_DIR,
-                check=True,
-                capture_output=True,
-            )
             return False
-        
+
         new_content = content.replace(original_text, replacement_text, 1)
-        
+
         with open(file_path, "w") as f:
             f.write(new_content)
-        
+
         # Commit and merge
         subprocess.run(
             ["git", "add", file_path],
@@ -1193,49 +1229,84 @@ def apply_pending_proposal():
             check=True,
             capture_output=True,
         )
+        # Ensure clean slate before merge
         subprocess.run(
-            ["git", "checkout", "main"],
+            ["git", "merge", "--abort"],
+            cwd=OBSIDIAN_DIR,
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "-f", "main"],
             cwd=OBSIDIAN_DIR,
             check=True,
             capture_output=True,
         )
-        subprocess.run(
-            ["git", "merge", branch_name],
+        merge_result = subprocess.run(
+            ["git", "merge", "--ff-only", branch_name],
             cwd=OBSIDIAN_DIR,
-            check=True,
             capture_output=True,
+            text=True,
         )
-        subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=OBSIDIAN_DIR,
-            check=True,
-            capture_output=True,
-        )
-        
+        if merge_result.returncode != 0:
+            subprocess.run(
+                ["git", "merge", "--no-edit", "--abort"],
+                cwd=OBSIDIAN_DIR,
+                capture_output=True,
+            )
+            merge_result = subprocess.run(
+                ["git", "merge", "--no-edit"],
+                cwd=OBSIDIAN_DIR,
+                capture_output=True,
+                text=True,
+            )
+            if merge_result.returncode != 0:
+                subprocess.run(
+                    ["git", "merge", "--abort"],
+                    cwd=OBSIDIAN_DIR,
+                    check=False,
+                    capture_output=True,
+                )
+                logger.error(f"Failed to apply pending proposal: {merge_result.stderr}")
+                return False
+
         # Remove applied proposal from queue
         remaining = pending[1:]
         with open(PENDING_IMPROVEMENTS_FILE, "w") as f:
             for p in remaining:
                 f.write(json.dumps(p) + "\n")
-        
+
         logger.info("Pending proposal applied and removed from queue")
         return True
-        
+
     except Exception as e:
-        logger.error(f"Failed to apply proposal: {e}")
-        subprocess.run(
-            ["git", "checkout", "main", "--", file_path],
-            cwd=OBSIDIAN_DIR,
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=OBSIDIAN_DIR,
-            check=True,
-            capture_output=True,
-        )
-        return False
+        logger.error(f"Commit/merge failed: {e}")
+        raise  # Re-raise so the finally block runs
+    finally:
+        # Always clean up the branch regardless of success/failure
+        if branch_created:
+            try:
+                current_branch = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=OBSIDIAN_DIR,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+                if current_branch != "main":
+                    subprocess.run(
+                        ["git", "branch", "-D", "-f", branch_name],
+                        cwd=OBSIDIAN_DIR,
+                        check=False,
+                        capture_output=True,
+                    )
+                subprocess.run(
+                    ["git", "checkout", "-f", "main"],
+                    cwd=OBSIDIAN_DIR,
+                    check=False,
+                    capture_output=True,
+                )
+            except Exception:
+                pass  # Best effort cleanup only
 
 
 def backfill():
