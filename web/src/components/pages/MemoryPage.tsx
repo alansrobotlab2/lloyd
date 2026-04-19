@@ -810,8 +810,8 @@ export default function MemoryPage() {
   // Entity selection → set graph node + show entity detail
   const handleEntitySelect = useCallback((name: string | null) => {
     setActiveEntity(name);
-    // Map to entity:: node ID format
-    setSelectedGraphNode(name ? `entity::${name}` : null);
+    // Graph nodes are keyed by plain entity name (see /api/entity-graph)
+    setSelectedGraphNode(name);
 
     if (!name) {
       setRightPanel({ kind: "empty" });
