@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import ForceGraph2D from "react-force-graph-2d";
-import { forceCollide, forceX, forceY } from "d3-force";
-import { api, type EntityGraphNode, type EntityGraphEdge } from "../api";
+import ForceGraph3D from "react-force-graph-3d";
+import * as THREE from "three";
+import { forceCollide } from "d3-force";
+import { api, type EntityGraphNode } from "../api";
 import { RotateCcw, Maximize } from "lucide-react";
 
 // -- Types --
@@ -10,10 +11,13 @@ interface GNode extends EntityGraphNode {
   // d3 simulation props (added at runtime)
   x?: number;
   y?: number;
+  z?: number;
   vx?: number;
   vy?: number;
+  vz?: number;
   fx?: number;
   fy?: number;
+  fz?: number;
   // computed
   degree?: number;
 }
@@ -96,7 +100,6 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
   const [activeNode, setActiveNode] = useState<GNode | null>(null);
   const [hoverNode, setHoverNode] = useState<GNode | null>(null);
   const [dimensions, setDimensions] = useState({ w: 800, h: 600 });
-  const [minZoom, setMinZoom] = useState(0.01);
   const [edgeFilters, setEdgeFilters] = useState<EdgeFilters>({
     "wiki-link": true,
     "tag-cluster": true,
@@ -218,12 +221,6 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       if (fgRef.current) {
         fgRef.current.zoomToFit(1000, 50);
         initialFitDone.current = true;
-        setTimeout(() => {
-          if (fgRef.current) {
-            const fitZoom = fgRef.current.zoom();
-            setMinZoom(fitZoom * 0.9);
-          }
-        }, 1100);
       }
     }, 400);
     return () => clearTimeout(t);
@@ -234,19 +231,25 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
   const configureForces = useCallback(() => {
     const fg = fgRef.current;
     if (!fg) return;
-    fg.d3Force("collide",
-      forceCollide().radius(() => 3.5).strength(0.4).iterations(1)
-    );
-    fg.d3Force("charge")?.strength(-30).distanceMax(150);
-    fg.d3Force("link")?.distance(() => 25).strength(0.3);
-    fg.d3Force("centerX", forceX(0).strength(0.02));
-    fg.d3Force("centerY", forceY(0).strength(0.02));
+    try {
+      fg.d3Force("collide",
+        forceCollide().radius(() => 4).strength(0.4).iterations(1)
+      );
+      fg.d3Force("charge")?.strength(-40).distanceMax(300);
+      fg.d3Force("link")?.distance(() => 25).strength(0.3);
+    } catch (e) {
+      console.warn("configureForces failed:", e);
+    }
   }, []);
 
   useEffect(() => {
     if (!rawGraphData.nodes.length) return;
-    configureForces();
-    fgRef.current?.d3ReheatSimulation();
+    // Defer to next tick so ForceGraph3D's internal simulation is initialized
+    const t = setTimeout(() => {
+      configureForces();
+      fgRef.current?.d3ReheatSimulation();
+    }, 0);
+    return () => clearTimeout(t);
   }, [rawGraphData, configureForces]);
 
   // -- Sync with external selectedNode prop --
@@ -264,79 +267,54 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     if (nd && nd.id !== activeNode?.id) {
       setActiveNode(nd);
       if (fgRef.current && nd.x != null && nd.y != null) {
-        fgRef.current.centerAt(nd.x, nd.y, 800);
+        const nx = nd.x, ny = nd.y, nz = nd.z ?? 0;
+        const dist = 120;
+        const mag = Math.hypot(nx, ny, nz) || 1;
+        const k = 1 + dist / mag;
+        fgRef.current.cameraPosition(
+          { x: nx * k, y: ny * k, z: nz * k },
+          { x: nx, y: ny, z: nz },
+          800
+        );
       }
     }
   }, [selectedNodeId, graphData, loading]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // -- Node drawing --
+  // -- Node drawing (three.js) --
+  // Return a fresh mesh per node. The library (three-forcegraph) owns the
+  // object lifecycle — it disposes geometry/material when nodes are removed.
+  // We access meshes for opacity sync via the library's `__threeObj` binding.
 
-  const nodeCanvasObject = useCallback(
-    (node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-      const n = node as GNode;
+  const nodeThreeObject = useCallback((node: any) => {
+    const n = node as GNode;
+    const r = nodeRadius(n);
+    const color = nodeColor(n);
+    const geometry = n.type === "entity"
+      ? new THREE.OctahedronGeometry(r * 1.6, 0)
+      : new THREE.SphereGeometry(r, 20, 16);
+    const material = new THREE.MeshPhongMaterial({
+      color,
+      specular: 0x222222,
+      shininess: 25,
+      transparent: true,
+      opacity: 1,
+    });
+    return new THREE.Mesh(geometry, material);
+  }, []);
+
+  // Sync mesh opacity with highlight/dim state by reaching into each node's
+  // library-assigned __threeObj. Avoids retaining our own mesh references
+  // (which the library may have already disposed).
+  useEffect(() => {
+    for (const n of rawGraphData.nodes as any[]) {
+      const mesh = n.__threeObj as THREE.Mesh | undefined;
+      if (!mesh) continue;
       const isLit = highlightNodes.has(n.id);
-      const alpha = hasDimming && !isLit ? 0.08 : 1;
-
-      const r = nodeRadius(n);
-      const color = nodeColor(n);
-
-      ctx.globalAlpha = alpha;
-
-      if (n.type === "entity") {
-        // Diamond shape for entity nodes
-        const d = r * 1.6;
-        ctx.beginPath();
-        ctx.moveTo(node.x, node.y - d);
-        ctx.lineTo(node.x + d, node.y);
-        ctx.lineTo(node.x, node.y + d);
-        ctx.lineTo(node.x - d, node.y);
-        ctx.closePath();
-        ctx.fillStyle = color;
-        ctx.fill();
-        if (isLit && hasDimming) {
-          ctx.strokeStyle = "rgba(251,191,36,0.9)";
-          ctx.lineWidth = 1.5 / globalScale;
-          ctx.stroke();
-        }
-      } else {
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        if (isLit && hasDimming) {
-          ctx.strokeStyle = "rgba(148,163,184,0.9)";
-          ctx.lineWidth = 1.5 / globalScale;
-          ctx.stroke();
-        }
-      }
-
-      ctx.globalAlpha = 1;
-
-      // Labels: only show when zoomed in or for highlighted/active nodes
-      const showLabel = globalScale > 2 || (isLit && hasDimming);
-      if (showLabel) {
-        const fontSize = Math.max(8 / globalScale, 2);
-        ctx.font = `${n.type === "entity" ? "bold " : ""}${fontSize}px ui-monospace, monospace`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "top";
-        ctx.globalAlpha = hasDimming && !isLit ? 0.05 : 0.85;
-        ctx.fillStyle = n.type === "entity" ? "#FCD34D" : "#cbd5e1";
-        ctx.fillText(n.label, node.x, node.y + r + 1.5 / globalScale);
-        ctx.globalAlpha = 1;
-      }
-    },
-    [highlightNodes, hasDimming]
-  );
-
-  const nodePointerAreaPaint = useCallback(
-    (node: any, color: string, ctx: CanvasRenderingContext2D) => {
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, 8, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-    },
-    []
-  );
+      const opacity = hasDimming && !isLit ? 0.08 : 1;
+      const mat = mesh.material as THREE.Material | undefined;
+      if (mat && mat.opacity !== opacity) mat.opacity = opacity;
+    }
+  }, [highlightNodes, hasDimming, rawGraphData]);
 
   // -- Link styling --
 
@@ -350,16 +328,6 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       return edgeColor(link.type, highlighted, dimmed);
     },
     [highlightLinks, hasDimming]
-  );
-
-  const linkWidthFn = useCallback(
-    (link: any) => {
-      const src = typeof link.source === "string" ? link.source : link.source.id;
-      const tgt = typeof link.target === "string" ? link.target : link.target.id;
-      if (highlightLinks.has(`${src}\x00${tgt}`)) return 1.5;
-      return 0.4;
-    },
-    [highlightLinks]
   );
 
   const nodeTooltip = useCallback((node: any) => {
@@ -418,34 +386,47 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     setEdgeFilters((prev) => ({ ...prev, [type]: !prev[type] }));
   }, []);
 
+  // -- Lighting --
+  // Default lights flatten Phong highlights with too much ambient.
+  // Use dimmer ambient + two directional lights for proper shading.
+  const lights = useMemo(() => {
+    const ambient = new THREE.AmbientLight(0x404060, 1.2);
+    const key = new THREE.DirectionalLight(0xffffff, 1.6);
+    key.position.set(150, 200, 100);
+    const fill = new THREE.DirectionalLight(0x9fb8ff, 0.5);
+    fill.position.set(-150, -50, -120);
+    return [ambient, key, fill];
+  }, []);
+
   // -- Render --
 
   return (
     <div ref={containerRef} className="w-full h-full relative overflow-hidden bg-surface-0 rounded-lg border border-surface-3/30">
       {!loading && !error && (
         <div className="absolute inset-0">
-          <ForceGraph2D
+          <ForceGraph3D
             ref={fgRef}
             width={dimensions.w}
             height={dimensions.h}
             graphData={graphData}
             nodeId="id"
             nodeLabel={nodeTooltip}
-            nodeCanvasObject={nodeCanvasObject}
-            nodePointerAreaPaint={nodePointerAreaPaint}
+            nodeThreeObject={nodeThreeObject}
             linkColor={linkColorFn}
-            linkWidth={linkWidthFn}
-            linkCurvature={0.2}
-            backgroundColor="transparent"
+            linkWidth={0}
+            linkOpacity={0.5}
+            linkCurvature={0.15}
+            backgroundColor="rgba(0,0,0,0)"
             onNodeHover={handleNodeHover}
             onNodeClick={handleNodeClick}
             onBackgroundClick={handleBackgroundClick}
-            minZoom={minZoom}
-            cooldownTicks={200}
-            d3AlphaDecay={0.03}
-            d3VelocityDecay={0.85}
+            cooldownTicks={100}
+            cooldownTime={8000}
+            d3AlphaDecay={0.04}
+            d3VelocityDecay={0.4}
             enableNodeDrag={true}
-            warmupTicks={40}
+            controlType="trackball"
+            lights={lights}
           />
         </div>
       )}
