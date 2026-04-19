@@ -71,7 +71,7 @@ function nodeColor(node: GNode): string {
 
 function nodeRadius(node: GNode): number {
   const degree = node.degree ?? 0;
-  return Math.max(2, Math.min(8, 2 + Math.sqrt(degree) * 0.6));
+  return Math.max(2.5, Math.min(3.5, 2.5 + Math.sqrt(degree) * 0.15));
 }
 
 function edgeColor(type: string, highlighted: boolean, dimmed: boolean): string {
@@ -233,10 +233,10 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     if (!fg) return;
     try {
       fg.d3Force("collide",
-        forceCollide().radius(() => 4).strength(0.4).iterations(1)
+        forceCollide().radius(() => 8).strength(0.6).iterations(2)
       );
-      fg.d3Force("charge")?.strength(-40).distanceMax(300);
-      fg.d3Force("link")?.distance(() => 25).strength(0.3);
+      fg.d3Force("charge")?.strength(-90).distanceMax(400);
+      fg.d3Force("link")?.distance(() => 45).strength(0.3);
     } catch (e) {
       console.warn("configureForces failed:", e);
     }
@@ -386,6 +386,16 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     setEdgeFilters((prev) => ({ ...prev, [type]: !prev[type] }));
   }, []);
 
+  // Pin every node at its resting position when the simulation settles,
+  // so the layout doesn't drift on subsequent data changes (e.g. filter toggles).
+  const handleEngineStop = useCallback(() => {
+    for (const n of rawGraphData.nodes as any[]) {
+      if (typeof n.x === "number") n.fx = n.x;
+      if (typeof n.y === "number") n.fy = n.y;
+      if (typeof n.z === "number") n.fz = n.z;
+    }
+  }, [rawGraphData]);
+
   // -- Lighting --
   // Default lights flatten Phong highlights with too much ambient.
   // Use dimmer ambient + two directional lights for proper shading.
@@ -420,6 +430,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
             onNodeHover={handleNodeHover}
             onNodeClick={handleNodeClick}
             onBackgroundClick={handleBackgroundClick}
+            onEngineStop={handleEngineStop}
             cooldownTicks={100}
             cooldownTime={8000}
             d3AlphaDecay={0.04}

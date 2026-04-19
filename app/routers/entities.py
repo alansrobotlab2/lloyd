@@ -50,10 +50,10 @@ async def entity_detail(name: str = ""):
                 if isinstance(fact_item, dict):
                     facts.append({
                         "id": fact_item.get("id", ""),
-                        "text": fact_item.get("fact", ""),
+                        "fact": fact_item.get("fact", ""),
                         "confidence": fact_item.get("confidence", 0),
                         "category": fact_item.get("category", fm.get("category", "")),
-                        "eventDate": fact_item.get("event_date"),
+                        "event_date": fact_item.get("event_date"),
                     })
         except Exception:
             continue
