@@ -18,6 +18,7 @@ from starlette.responses import Response
 from starlette.routing import Mount, Route
 
 from agent_mcp import (
+    ambient,
     autonomy,
     autoresearch,
     backlog,
@@ -35,6 +36,7 @@ from agent_mcp import (
 PORT = 8500
 
 MODULES = [
+    ambient,
     autonomy,
     autoresearch,
     backlog,

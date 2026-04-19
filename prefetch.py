@@ -312,8 +312,32 @@ def _search_recent_sessions(query: str) -> list[dict]:
 def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
                     vault_results: list[dict] = None,
                     session_results: list[dict] = None,
+                    ambient_entries: list = None,
                     had_query: bool = True) -> str:
     parts = []
+
+    # Ambient prefetch drain — background signals from autonomy/cron/etc.
+    # Rendered first so the agent sees them as current-but-passive context
+    # BEFORE skills/facts/vault. Agent is free to reference or ignore.
+    # (#295 Mechanism 1)
+    if ambient_entries:
+        amb_lines = []
+        for entry in ambient_entries:
+            line = f"- **[{entry.source}]** {entry.summary}"
+            if entry.content:
+                # Indent content so it's clearly nested under the summary
+                body = entry.content[:800]
+                if len(entry.content) > 800:
+                    body += "…"
+                line += f"\n  > {body}"
+            amb_lines.append(line)
+        parts.append(
+            "<ambient-signals>\n"
+            "Background producers queued these signals for you. The user did NOT ask — "
+            "reference them only if naturally relevant to what they're saying now.\n"
+            + "\n".join(amb_lines)
+            + "\n</ambient-signals>"
+        )
 
     # First skill: full body
     if skills:
@@ -385,9 +409,22 @@ def prefetch_context(text: str, session_id: str | None = None) -> str:
 
     If session_id is provided, maintains conversation focus state to improve
     vault search quality across turns. Short/vague messages benefit from
-    accumulated topic keywords.
+    accumulated topic keywords. Also drains the session's ambient prefetch
+    queue (#295 Mechanism 1) so background producer signals are folded
+    into this turn's context.
     """
-    if len(text.strip()) < MIN_MESSAGE_LEN:
+    # Drain ambient queue FIRST — even a short message should surface
+    # queued background context. Don't let the MIN_MESSAGE_LEN guard
+    # suppress injections the producer already decided were worth showing.
+    ambient_entries = []
+    if session_id:
+        try:
+            from app.sessions_io import drain_ambient_prefetch
+            ambient_entries = drain_ambient_prefetch(session_id)
+        except Exception:
+            ambient_entries = []  # Non-fatal
+
+    if len(text.strip()) < MIN_MESSAGE_LEN and not ambient_entries:
         return text
 
     # Update conversation focus tracker
@@ -403,26 +440,30 @@ def prefetch_context(text: str, session_id: str | None = None) -> str:
     vault_result: list[dict] = []
     session_result: list[dict] = []
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        f_skills = pool.submit(_search_skills, query_tokens)
-        f_facts = pool.submit(_search_facts, text)
-        f_vault = pool.submit(_search_vault, text, focus)
-        f_sessions = pool.submit(_search_recent_sessions, text)
-        for future in as_completed([f_skills, f_facts, f_vault, f_sessions]):
-            try:
-                if future is f_skills:
-                    skills_result = future.result()
-                elif future is f_facts:
-                    facts_result = future.result()
-                elif future is f_vault:
-                    vault_result = future.result()
-                else:
-                    session_result = future.result()
-            except Exception:
-                pass  # Prefetch failures are non-fatal
+    # Short messages still get ambient injection but skip the
+    # skill/fact/vault search (too little signal to query with).
+    if len(text.strip()) >= MIN_MESSAGE_LEN:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_skills = pool.submit(_search_skills, query_tokens)
+            f_facts = pool.submit(_search_facts, text)
+            f_vault = pool.submit(_search_vault, text, focus)
+            f_sessions = pool.submit(_search_recent_sessions, text)
+            for future in as_completed([f_skills, f_facts, f_vault, f_sessions]):
+                try:
+                    if future is f_skills:
+                        skills_result = future.result()
+                    elif future is f_facts:
+                        facts_result = future.result()
+                    elif future is f_vault:
+                        vault_result = future.result()
+                    else:
+                        session_result = future.result()
+                except Exception:
+                    pass  # Prefetch failures are non-fatal
 
     context = _format_context(skills_result, facts_result, vault_result,
-                              session_result, had_query=True)
+                              session_result, ambient_entries=ambient_entries,
+                              had_query=True)
     if not context:
         return text
 
