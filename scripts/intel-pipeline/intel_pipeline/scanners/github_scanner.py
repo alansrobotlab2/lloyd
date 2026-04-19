@@ -1,6 +1,8 @@
 """GitHub repository scanner for releases, commits, and issues."""
 
-import requests
+import urllib.request
+import json
+import re
 import hashlib
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -17,20 +19,58 @@ GITHUB_API_URL = "https://api.github.com"
 GITHUB_STATE_KEY = "github_repos"
 
 
+def _yaml_load_repos(path: str) -> List[Dict]:
+    """Parse a simple YAML file containing a list of repo dicts (no external deps)."""
+    with open(path) as f:
+        text = f.read()
+    repos = []
+    # Match each - owner: ... block
+    for m in re.finditer(r'-\s*owner:\s*(.+?)(?:\n|$)', text):
+        owner = m.group(1).strip().strip('"').strip("'")
+        # Collect block until next '-' or end
+        block_start = m.start()
+        next_dash = re.search(r'\n\s+-\s+owner:', text[block_start + 1:])
+        end = block_start + 1 + (next_dash.start() if next_dash else len(text) - block_start - 1)
+        block = text[block_start:end]
+        lines = block.strip().split('\n')
+        repo = {"owner": owner}
+        for line in lines[1:]:  # skip owner line
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            kv = line.split(':', 1)
+            if len(kv) == 2:
+                k, v = kv[0].strip(), kv[1].strip()
+                repo[k] = _yaml_parse_val(v)
+        repos.append(repo)
+    return repos
+
+
+def _yaml_parse_val(s: str) -> Any:
+    s = s.strip().strip('"').strip("'")
+    if s.startswith('[') and s.endswith(']'):
+        inner = s[1:-1]
+        if not inner.strip():
+            return []
+        return [v.strip() for v in inner.split(',')]
+    if s.lower() == 'true':
+        return True
+    if s.lower() == 'false':
+        return False
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    return s
+
+
 def load_github_repos_config() -> List[Dict[str, Any]]:
     """Load GitHub repos configuration."""
-    import yaml
     from pathlib import Path
-    
     config_path = Path.home() / "lloyd/scripts/intel-pipeline/config/github-repos.yml"
-    
     if not config_path.exists():
         return []
-    
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    
-    return config.get("repos", [])
+    return _yaml_load_repos(str(config_path))
 
 
 def get_repo_state_key(owner: str, repo: str, state_type: str) -> str:
@@ -38,27 +78,32 @@ def get_repo_state_key(owner: str, repo: str, state_type: str) -> str:
     return f"{owner}/{repo}:{state_type}"
 
 
+def _http_get(url: str, params: Optional[Dict] = None, headers: Optional[Dict] = None, timeout: int = 30) -> Any:
+    """HTTP GET using stdlib urllib. Returns parsed JSON or raises."""
+    from urllib.parse import urlencode
+    if params:
+        url = url + "?" + urlencode(params)
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        raise Exception(str(e))
+
+
 def fetch_releases(owner: str, repo: str, last_tag: Optional[str] = None) -> List[Dict]:
     """Fetch releases for a repo."""
     url = f"{GITHUB_API_URL}/repos/{owner}/{repo}/releases"
-    params = {"per_page": 10}
-    
+
     try:
-        response = requests.get(
-            url,
-            params=params,
-            headers={"User-Agent": "lloyd-intel-pipeline"},
-            timeout=30
-        )
-        response.raise_for_status()
-        releases = response.json()
-        
+        releases = _http_get(url, params={"per_page": 10}, headers={"User-Agent": "lloyd-intel-pipeline"}, timeout=30)
+
         # Filter to only new releases since last check
         if last_tag:
             releases = [r for r in releases if r.get("tag_name") != last_tag]
-        
+
         return releases[:5]  # Limit to 5 most recent new releases
-    except requests.RequestException as e:
+    except Exception as e:
         print(f"Error fetching releases for {owner}/{repo}: {e}")
         return []
 
@@ -66,18 +111,10 @@ def fetch_releases(owner: str, repo: str, last_tag: Optional[str] = None) -> Lis
 def fetch_commits(owner: str, repo: str, last_sha: Optional[str] = None) -> List[Dict]:
     """Fetch recent commits for a repo."""
     url = f"{GITHUB_API_URL}/repos/{owner}/{repo}/commits"
-    params = {"per_page": 10}
-    
+
     try:
-        response = requests.get(
-            url,
-            params=params,
-            headers={"User-Agent": "lloyd-intel-pipeline"},
-            timeout=30
-        )
-        response.raise_for_status()
-        commits = response.json()
-        
+        commits = _http_get(url, params={"per_page": 10}, headers={"User-Agent": "lloyd-intel-pipeline"}, timeout=30)
+
         # Filter to only commits since last check
         if last_sha:
             # Find position of last_sha and take only newer commits
@@ -89,9 +126,9 @@ def fetch_commits(owner: str, repo: str, last_sha: Optional[str] = None) -> List
                     break
                 filtered.append(commit)
             commits = filtered
-        
+
         return commits[:10]  # Limit to 10 commits
-    except requests.RequestException as e:
+    except Exception as e:
         print(f"Error fetching commits for {owner}/{repo}: {e}")
         return []
 
@@ -99,22 +136,10 @@ def fetch_commits(owner: str, repo: str, last_sha: Optional[str] = None) -> List
 def fetch_issues(owner: str, repo: str, last_ts: Optional[str] = None) -> List[Dict]:
     """Fetch recently updated issues/PRs for a repo."""
     url = f"{GITHUB_API_URL}/repos/{owner}/{repo}/issues"
-    params = {
-        "state": "open",
-        "sort": "updated",
-        "per_page": 10
-    }
-    
+
     try:
-        response = requests.get(
-            url,
-            params=params,
-            headers={"User-Agent": "lloyd-intel-pipeline"},
-            timeout=30
-        )
-        response.raise_for_status()
-        issues = response.json()
-        
+        issues = _http_get(url, params={"state": "open", "sort": "updated", "per_page": 10}, headers={"User-Agent": "lloyd-intel-pipeline"}, timeout=30)
+
         # Filter to only recently updated issues
         if last_ts:
             try:
@@ -132,9 +157,9 @@ def fetch_issues(owner: str, repo: str, last_ts: Optional[str] = None) -> List[D
                 issues = filtered
             except ValueError:
                 pass
-        
+
         return issues[:5]  # Limit to 5 issues
-    except requests.RequestException as e:
+    except Exception as e:
         print(f"Error fetching issues for {owner}/{repo}: {e}")
         return []
 
@@ -142,7 +167,7 @@ def fetch_issues(owner: str, repo: str, last_ts: Optional[str] = None) -> List[D
 def scan_github_repos() -> List[FeedItem]:
     """
     Scan configured GitHub repositories for new activity.
-    
+
     Returns:
         List of FeedItem objects
     """
@@ -150,48 +175,48 @@ def scan_github_repos() -> List[FeedItem]:
     if not repos:
         print("No GitHub repos configured")
         return []
-    
+
     # Load current state
     current_state = state.load_state()
     if GITHUB_STATE_KEY not in current_state:
         current_state[GITHUB_STATE_KEY] = {}
     repo_state = current_state[GITHUB_STATE_KEY]
-    
+
     all_items = []
     today = datetime.utcnow().strftime("%Y-%m-%d")
-    
+
     for repo_config in repos:
         owner = repo_config.get("owner", "")
         repo = repo_config.get("repo", "")
         track = repo_config.get("track", ["releases", "commits", "issues"])
-        
+
         if not owner or not repo:
             continue
-        
+
         repo_key = f"{owner}/{repo}"
         print(f"\nScanning {repo_key}...")
-        
+
         # Get stored state for this repo
         stored_state = repo_state.get(repo_key, {})
         last_tag = stored_state.get("last_release_tag")
         last_sha = stored_state.get("last_commit_sha")
         last_ts = stored_state.get("last_issue_check_ts")
-        
+
         # Fetch releases
         if "releases" in track:
             releases = fetch_releases(owner, repo, last_tag)
             for release in releases:
                 tag = release.get("tag_name", "")
                 item_id = f"github:{owner}/{repo}:release:{tag}"
-                
+
                 # Skip if already seen
                 if state.is_seen(item_id, current_state):
                     continue
-                
+
                 title = f"Release {tag}: {release.get('name', tag)}"
                 summary = release.get("body", "")[:500] if release.get("body") else "No description"
                 url = release.get("html_url", "")
-                
+
                 item = FeedItem(
                     id=item_id,
                     source="github",
@@ -204,28 +229,28 @@ def scan_github_repos() -> List[FeedItem]:
                 )
                 all_items.append(item)
                 state.mark_seen(item_id, current_state)
-            
+
             # Update state with latest tag
             if releases:
                 stored_state["last_release_tag"] = releases[0].get("tag_name", "")
-        
+
         # Fetch commits
         if "commits" in track:
             commits = fetch_commits(owner, repo, last_sha)
             for commit in commits:
                 sha = commit.get("sha", "")
                 item_id = f"github:{owner}/{repo}:commit:{sha[:8]}"
-                
+
                 # Skip if already seen
                 if state.is_seen(item_id, current_state):
                     continue
-                
+
                 commit_info = commit.get("commit", {})
                 message = commit_info.get("message", "")
                 first_line = message.split("\n")[0][:100] if message else "Unknown commit"
                 summary = message[:500] if message else ""
                 url = commit.get("html_url", "")
-                
+
                 item = FeedItem(
                     id=item_id,
                     source="github",
@@ -238,27 +263,27 @@ def scan_github_repos() -> List[FeedItem]:
                 )
                 all_items.append(item)
                 state.mark_seen(item_id, current_state)
-            
+
             # Update state with latest SHA
             if commits:
                 stored_state["last_commit_sha"] = commits[0].get("sha", "")
-        
+
         # Fetch issues
         if "issues" in track:
             issues = fetch_issues(owner, repo, last_ts)
             for issue in issues:
                 number = issue.get("number", 0)
                 item_id = f"github:{owner}/{repo}:issue:{number}"
-                
+
                 # Skip if already seen
                 if state.is_seen(item_id, current_state):
                     continue
-                
+
                 title = issue.get("title", "")
                 body = issue.get("body", "") or ""
                 summary = body[:500] if body else "No description"
                 url = issue.get("html_url", "")
-                
+
                 item = FeedItem(
                     id=item_id,
                     source="github",
@@ -271,22 +296,22 @@ def scan_github_repos() -> List[FeedItem]:
                 )
                 all_items.append(item)
                 state.mark_seen(item_id, current_state)
-            
+
             # Update state with current timestamp
             stored_state["last_issue_check_ts"] = datetime.utcnow().isoformat() + "Z"
-        
+
         # Save updated state for this repo
         repo_state[repo_key] = stored_state
-    
+
     # Save updated state
     current_state[GITHUB_STATE_KEY] = repo_state
     state.save_state(current_state)
-    
+
     # Save raw items
     if all_items:
         state.save_raw_items(all_items, today)
         print(f"\nSaved {len(all_items)} items to raw JSONL")
-    
+
     return all_items
 
 
@@ -295,7 +320,7 @@ if __name__ == "__main__":
     items = scan_github_repos()
     print(f"\n=== GitHub Scan Complete ===")
     print(f"Found {len(items)} new items")
-    
+
     for item in items[:5]:
         print(f"\n[{item.source}] {item.title}")
         print(f"  URL: {item.url}")

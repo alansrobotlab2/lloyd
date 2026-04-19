@@ -1,10 +1,12 @@
 """YouTube RSS feed scanner for monitoring channels."""
 
-import requests
+import json
 import hashlib
+import re
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 import time
+import urllib.request
 import xml.etree.ElementTree as ET
 
 from ..models import FeedItem
@@ -12,24 +14,86 @@ from .. import state
 from ..profile import load_profile
 
 
-# State keys for YouTube scanner
-YOUTUBE_STATE_KEY = "youtube_channels"
+def _http_get(url: str, headers: Optional[Dict] = None, timeout: int = 30) -> str:
+    """HTTP GET using stdlib urllib. Returns text content."""
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode()
+
+
+def _parse_yaml_list(text: str) -> List[Dict]:
+    """Minimal YAML parser for youtube channels config."""
+    result = []
+    current: Optional[Dict[str, Any]] = None
+    current_list_key: Optional[str] = None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if indent >= 4 and stripped.startswith("- "):
+            if current is not None and current_list_key:
+                if current_list_key not in result:
+                    result.append(current)
+                current = None
+            m = re.match(r"^- (.+?):\s*(.*)", stripped)
+            if m:
+                k, v = m.group(1).strip(), m.group(2).strip()
+                current = {k: _yaml_val(v)}
+                current_list_key = k
+        elif current is not None and indent >= 4:
+            m = re.match(r"^  (\w[\w_-]*):\s*(.*)", raw)
+            if m:
+                k, v = m.group(1), m.group(2).strip()
+                if v:
+                    current[k] = _yaml_val(v)
+                else:
+                    current_list_key = k
+    if current is not None and current_list_key:
+        if current_list_key not in result:
+            result.append(current)
+    return result
+
+
+def _yaml_val(s: str) -> Any:
+    s = s.strip().strip("'\"")
+    if s.startswith("[") and s.endswith("]"):
+        inner = s[1:-1]
+        if not inner.strip():
+            return []
+        return [v.strip() for v in inner.split(",")]
+    if s.lower() == "true":
+        return True
+    if s.lower() == "false":
+        return False
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
 
 
 def load_youtube_channels_config() -> List[Dict[str, Any]]:
     """Load YouTube channels configuration."""
-    import yaml
     from pathlib import Path
-    
+
     config_path = Path.home() / "lloyd/scripts/intel-pipeline/config/youtube-channels.yml"
-    
+
     if not config_path.exists():
         return []
-    
+
     with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    
-    return config.get("channels", [])
+        config = _parse_yaml_list(f.read())
+
+    return config
+
+
+# State keys for YouTube scanner
+YOUTUBE_STATE_KEY = "youtube_channels"
 
 
 def fetch_channel_rss(channel_id: str) -> List[Dict]:
@@ -37,15 +101,14 @@ def fetch_channel_rss(channel_id: str) -> List[Dict]:
     rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     
     try:
-        response = requests.get(
+        content = _http_get(
             rss_url,
             headers={"User-Agent": "lloyd-intel-pipeline"},
             timeout=30
         )
-        response.raise_for_status()
-        
+
         # Parse XML
-        root = ET.fromstring(response.content)
+        root = ET.fromstring(content)
         
         # Define namespaces
         namespaces = {
@@ -83,11 +146,11 @@ def fetch_channel_rss(channel_id: str) -> List[Dict]:
         
         return videos
     
-    except requests.RequestException as e:
-        print(f"  Error fetching RSS for channel {channel_id}: {e}")
-        return []
     except ET.ParseError as e:
         print(f"  Error parsing RSS for channel {channel_id}: {e}")
+        return []
+    except Exception as e:
+        print(f"  Error fetching RSS for channel {channel_id}: {e}")
         return []
 
 
