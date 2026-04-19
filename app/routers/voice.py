@@ -155,7 +155,7 @@ async def voice_inject(request: Request):
         resume=resume_id,
     )
 
-    _save_session_meta(session_id, model, preview=prompt_text)
+    await _save_session_meta(session_id, model, preview=prompt_text)
 
     full_response = ""
     try:
