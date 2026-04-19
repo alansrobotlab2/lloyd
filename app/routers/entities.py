@@ -1,11 +1,19 @@
 """Entity facts/graph endpoints."""
 
+import datetime as _dt
 import json
 from pathlib import Path
 
 import yaml
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
+
+
+def _jsonable(v):
+    """Coerce yaml-parsed values into JSON-safe scalars (dates → ISO strings)."""
+    if isinstance(v, (_dt.date, _dt.datetime)):
+        return v.isoformat()
+    return v
 
 
 router = APIRouter()
@@ -53,7 +61,7 @@ async def entity_detail(name: str = ""):
                         "fact": fact_item.get("fact", ""),
                         "confidence": fact_item.get("confidence", 0),
                         "category": fact_item.get("category", fm.get("category", "")),
-                        "event_date": fact_item.get("event_date"),
+                        "event_date": _jsonable(fact_item.get("event_date")),
                     })
         except Exception:
             continue
@@ -116,7 +124,8 @@ async def entity_graph():
             "type": node_type,
             "factCount": fact_count,
         })
-    edge_counts: dict[tuple[str, str], int] = {}
+    # Track mentions per direction: dir_counts[(mentioner, mentioned)] = count
+    dir_counts: dict[tuple[str, str], int] = {}
     searchable = {n for n in entity_names if len(n) >= 3}
     name_lower_map = {n.lower(): n for n in searchable}
     for entity, facts in entity_facts.items():
@@ -125,10 +134,24 @@ async def entity_graph():
             if other == entity:
                 continue
             if other_lower in all_text:
-                key = (min(entity, other), max(entity, other))
-                edge_counts[key] = edge_counts.get(key, 0) + 1
-    edges = [
-        {"source": src, "target": tgt, "type": "has-facts", "weight": float(count)}
-        for (src, tgt), count in sorted(edge_counts.items(), key=lambda x: -x[1])
-    ]
+                dir_counts[(entity, other)] = dir_counts.get((entity, other), 0) + 1
+    # Collapse into one edge per unordered pair, preserving the dominant direction.
+    pair_edges: dict[tuple[str, str], dict] = {}
+    for (src, tgt), count in dir_counts.items():
+        key = (min(src, tgt), max(src, tgt))
+        if key in pair_edges:
+            continue
+        reverse = dir_counts.get((tgt, src), 0)
+        if count >= reverse:
+            dom_src, dom_tgt, dom, sub = src, tgt, count, reverse
+        else:
+            dom_src, dom_tgt, dom, sub = tgt, src, reverse, count
+        pair_edges[key] = {
+            "source": dom_src,
+            "target": dom_tgt,
+            "type": "has-facts",
+            "weight": float(dom + sub),
+            "bidirectional": sub > 0,
+        }
+    edges = sorted(pair_edges.values(), key=lambda e: -e["weight"])
     return JSONResponse({"nodes": nodes, "edges": edges})

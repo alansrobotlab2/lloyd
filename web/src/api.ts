@@ -285,6 +285,7 @@ export interface EntityGraphEdge {
   target: string;
   type: string;
   weight: number;
+  bidirectional?: boolean;
 }
 
 export interface EntityGraphData {
