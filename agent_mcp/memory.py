@@ -17,7 +17,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -48,9 +50,35 @@ AUDIT_LOG_FILE = AUDIT_LOG_DIR / "writes.jsonl"
 QMD_BIN = Path.home() / ".bun" / "bin" / "qmd"
 QMD_DAEMON_URL = "http://localhost:8181/query"
 
-VAULT_SEGMENTS = ["facts", "memory", "knowledge", "projects", "agents", "personal", "work", "skills"]
+VAULT_SEGMENTS = [
+    "facts", "memory", "knowledge", "projects", "personal", "work", "skills",
+    "architecture", "lloyd", "autonomy", "backlog", "people",
+]
 VAULT_EXCLUDE_DIRS = {"templates", "images"}
 VAULT_EXCLUDE_FILES = {"tags.md"}
+
+# Edge-type weights for weighted graph expansion in vault_recall.
+# Typed semantic edges dominate; cooccurrence-style edges are down-weighted so
+# they still contribute but don't drown out real relationships.
+# Keep this in sync with the vocabulary emitted by the relation classifier
+# (scripts/memory/classify-relationships.py, Phase 1B of backlog #294).
+EDGE_TYPE_WEIGHTS = {
+    # semantic, high-confidence
+    "uses": 1.0,
+    "depends_on": 1.0,
+    "implements": 1.0,
+    "supersedes": 0.9,
+    "part_of": 0.85,
+    "created_by": 0.8,
+    "discusses": 0.75,
+    "competes_with": 0.7,
+    "related_to": 0.6,
+    # cooccurrence / weak signals
+    "wiki_link_co_occurrence": 0.4,
+    "co_mentioned": 0.35,
+    "mentions": 0.3,
+}
+_DEFAULT_EDGE_WEIGHT = 0.3  # unknown types fall back to same weight as mentions
 
 CONSOLIDATION_ENDPOINT = "http://localhost:8091/v1/chat/completions"
 CONSOLIDATION_MODEL = "Qwen3.5-35B-A3B"
@@ -295,20 +323,70 @@ def _qmd_strip_stopwords(query: str) -> str:
     return " ".join(words) if words else query
 
 
+# qmd rerank can fail (e.g. GPU OOM on context creation) — when it does, we
+# fall back to skipRerank=true so hybrid search still returns results instead
+# of a blanket HTTP 500. One-shot retry per request — previously we stuck
+# skipRerank=true for 5 min after any 500, which silently killed rerank
+# quality across the fleet. If GPU is consistently under pressure we'd rather
+# see the errors than blind-degrade.
+def _qmd_log(msg: str) -> None:
+    # MCP server uses stdout for JSON-RPC; stderr is safe for diagnostics
+    # and ends up in agent-services logs alongside other MCP chatter.
+    print(f"[qmd] {msg}", file=sys.stderr, flush=True)
+
+
+def _qmd_post(payload: dict) -> list:
+    req = urllib.request.Request(
+        QMD_DAEMON_URL,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    return [
+        {
+            "file": r.get("file", ""),
+            "title": r.get("title", ""),
+            "snippet": r.get("snippet", ""),
+            "score": r.get("score", 0),
+        }
+        for r in data.get("results", [])
+    ]
+
+
 def _qmd_daemon_search(query: str, limit: int, collections: list) -> Optional[list]:
     query = _qmd_sanitize(query)
     if not query:
         return []
-    payload = json.dumps({
-        "searches": [{"type": "lex", "query": _qmd_strip_stopwords(query)}, {"type": "vec", "query": query}],
-        "limit": limit, "collections": collections,
-    }).encode()
-    req = urllib.request.Request(QMD_DAEMON_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    payload = {
+        "searches": [
+            {"type": "lex", "query": _qmd_strip_stopwords(query)},
+            {"type": "vec", "query": query},
+        ],
+        "limit": limit,
+        "collections": collections,
+    }
+
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        return [{"file": r.get("file", ""), "title": r.get("title", ""), "snippet": r.get("snippet", ""), "score": r.get("score", 0)} for r in data.get("results", [])]
-    except Exception:
+        return _qmd_post(payload)
+    except urllib.error.HTTPError as e:
+        # Rerank context OOM manifests as HTTP 500. One-shot retry without
+        # rerank so callers see documents instead of silent zero-hits. Not
+        # sticky — if GPU pressure is persistent we'd rather surface the
+        # errors than silently degrade rerank quality fleet-wide.
+        if e.code == 500 and not payload.get("skipRerank"):
+            try:
+                payload["skipRerank"] = True
+                _qmd_log("rerank failed (HTTP 500) — retrying with skipRerank")
+                return _qmd_post(payload)
+            except Exception as e2:
+                _qmd_log(f"skipRerank retry also failed: {e2!r}")
+                return None
+        _qmd_log(f"HTTPError {e.code}: {e.reason}")
+        return None
+    except Exception as e:
+        _qmd_log(f"search failed: {e!r}")
         return None
 
 
@@ -918,6 +996,62 @@ def _graph_expand_entities(seed_entities: list[str], hops: int = 1) -> list[str]
         return []
 
 
+def _graph_weighted_neighbors(
+    seed_entities: list[str], top_k: int = 3, hops: int = 1
+) -> list[tuple[str, float]]:
+    """Weighted graph expansion: return top-k neighbors scored by
+    edge confidence × EDGE_TYPE_WEIGHTS[type].
+
+    Multiple edges to the same neighbor sum their contributions so entities
+    connected by multiple typed relationships rise to the top. Seed entities
+    are excluded from results.
+
+    Returns [(entity, weight)] sorted by weight desc.
+    """
+    if not RELATIONSHIPS_PATH.exists() or not seed_entities:
+        return []
+    try:
+        data = _load_relationships()
+    except Exception:
+        return []
+
+    # adjacency with edge metadata
+    adj: dict[str, list[tuple[str, str, float]]] = {}
+    for edge in data.get("edges", []):
+        if edge.get("expired_at"):
+            continue
+        src, tgt, etype = edge.get("source"), edge.get("target"), edge.get("type", "")
+        conf = float(edge.get("confidence", 0.5))
+        if not src or not tgt:
+            continue
+        adj.setdefault(src, []).append((tgt, etype, conf))
+        adj.setdefault(tgt, []).append((src, etype, conf))
+
+    seed_set = set(seed_entities)
+    # scores[entity] = accumulated weight, capped at 1.0 to avoid runaway
+    scores: dict[str, float] = {}
+    current = set(seed_entities)
+    visited = set(seed_entities)
+
+    for hop in range(hops):
+        # decay by hop so 2-hop neighbors weigh less than 1-hop
+        hop_decay = 1.0 if hop == 0 else 0.5 ** hop
+        next_layer = set()
+        for entity in current:
+            for neighbor, etype, conf in adj.get(entity, []):
+                if neighbor in seed_set:
+                    continue
+                w = EDGE_TYPE_WEIGHTS.get(etype, _DEFAULT_EDGE_WEIGHT) * conf * hop_decay
+                scores[neighbor] = min(1.0, scores.get(neighbor, 0.0) + w)
+                if neighbor not in visited:
+                    next_layer.add(neighbor)
+        visited.update(next_layer)
+        current = next_layer
+
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+    return ranked[:top_k]
+
+
 def _vault_recall(params: dict) -> str:
     query = params.get("query", "").strip()
     if not query:
@@ -925,6 +1059,18 @@ def _vault_recall(params: dict) -> str:
     limit = int(params.get("limit", 20))
     include_facts = params.get("include_facts", True)
     expand_graph = params.get("expand_graph", False)
+
+    # Extract seed entities once — used by fact expansion below.
+    seed_entities = [e for e, _ in _extract_entities_from_query(query)[:5]]
+
+    # Weighted graph expansion: rank neighbors by edge_type × confidence.
+    # Currently drives fact expansion only. Document augmentation via
+    # additional qmd queries was tried (Phase 1A prototype, 2026-04-20) but
+    # regressed recall and tripled latency — reverted. Phase 2 (PPR + typed
+    # edges after the classifier lands) should produce a measurable lift.
+    weighted_neighbors: list[tuple[str, float]] = []
+    if expand_graph and seed_entities:
+        weighted_neighbors = _graph_weighted_neighbors(seed_entities, top_k=5, hops=1)
 
     def _do_search():
         result = _qmd_daemon_search(query, limit, VAULT_SEGMENTS)
@@ -935,7 +1081,6 @@ def _vault_recall(params: dict) -> str:
     def _do_facts():
         if not include_facts:
             return [], []
-        seed_entities = [e for e, _ in _extract_entities_from_query(query)[:5]]
         facts = []
         for entity in seed_entities:
             try:
@@ -945,11 +1090,12 @@ def _vault_recall(params: dict) -> str:
                     facts.extend(top[:3])
             except Exception:
                 pass
-        # Graph expansion: also fetch top facts from neighboring entities
+        # Graph expansion: also fetch top facts from weighted neighbors.
+        # Neighbors are already sorted by edge_weight × confidence desc, so
+        # stronger semantic ties surface first.
         graph_facts = []
-        if expand_graph and seed_entities:
-            neighbors = _graph_expand_entities(seed_entities, hops=1)
-            for entity in neighbors[:5]:  # Cap to avoid blowing up context
+        if expand_graph and weighted_neighbors:
+            for entity, _w in weighted_neighbors[:5]:
                 try:
                     entity_data = _get_facts_sync(entity)
                     if entity_data.get("facts"):
@@ -964,17 +1110,25 @@ def _vault_recall(params: dict) -> str:
             search_fut = pool.submit(_do_search)
             facts_fut = pool.submit(_do_facts)
             raw_results = search_fut.result()
-            facts_result = facts_fut.result()
-            facts, graph_facts = facts_result
+            facts, graph_facts = facts_fut.result()
         documents = []
         for r in raw_results[:limit]:
             path = r.get("file", "").removeprefix("qmd://")
             if path.startswith("obsidian/"):
                 path = path.removeprefix("obsidian/")
-            documents.append({"path": path, "title": r.get("title", ""), "snippet": r.get("snippet", ""), "score": r.get("score", 0)})
+            documents.append({
+                "path": path,
+                "title": r.get("title", ""),
+                "snippet": r.get("snippet", ""),
+                "score": r.get("score", 0),
+            })
         result = {"documents": documents, "facts": facts, "query": query}
         if graph_facts:
             result["graph_expanded_facts"] = graph_facts
+        if weighted_neighbors:
+            result["graph_neighbors_used"] = [
+                {"entity": e, "weight": round(w, 3)} for e, w in weighted_neighbors
+            ]
         return json.dumps(result)
     except Exception as exc:
         return json.dumps({"error": str(exc), "documents": [], "facts": []})
