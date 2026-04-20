@@ -16,7 +16,7 @@ Called by server.py before every query() invocation.
 import re
 import time
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 from agent_mcp.skills import _iter_skills, _score_skill, _tokenize
 from agent_mcp.memory import (
@@ -36,6 +36,19 @@ SKILL_EXCERPT_MAX = 500         # chars, second skill
 FACT_MAX_ENTITIES = 2           # top N entities to look up
 FACT_MAX_PER_ENTITY = 3         # top N facts per entity (by confidence)
 MIN_MESSAGE_LEN = 10            # skip prefetch for very short messages
+
+# Hard latency budget for the parallel prefetch phase. Any subtask not
+# finished within this window is dropped for the current turn. Fast paths
+# (skills ~37ms, facts ~20-75ms, sessions <1ms) always finish. After the
+# qmd searchVec patch + embedding LRU cache (2026-04-20), the vault qmd
+# search is:
+#   - ~290ms warm on cache hit (replay of recent query)
+#   - ~800-1700ms warm on cache miss (novel query — embedding dominates)
+#   - ~2.5s cold (one-time startup)
+# 300ms lets cached queries land in prefetch; novel queries still drop
+# but the user can always ask vault_recall explicitly. This keeps
+# first-token latency predictable for the voice pipeline.
+PREFETCH_BUDGET_MS = 300
 
 # Vault search settings
 VAULT_MAX_RESULTS = 5           # top N vault documents to inject
@@ -443,12 +456,35 @@ def prefetch_context(text: str, session_id: str | None = None) -> str:
     # Short messages still get ambient injection but skip the
     # skill/fact/vault search (too little signal to query with).
     if len(text.strip()) >= MIN_MESSAGE_LEN:
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            f_skills = pool.submit(_search_skills, query_tokens)
-            f_facts = pool.submit(_search_facts, text)
-            f_vault = pool.submit(_search_vault, text, focus)
-            f_sessions = pool.submit(_search_recent_sessions, text)
-            for future in as_completed([f_skills, f_facts, f_vault, f_sessions]):
+        # Note: pool is NOT used as a context manager. `with ThreadPoolExecutor`
+        # blocks on __exit__ until every submitted future finishes — which
+        # would defeat PREFETCH_BUDGET_MS for the slow vault qmd call.
+        # Instead we submit, wait up to the budget, and leave stragglers
+        # running in a daemon-like pool that GCs after their threads finish.
+        pool = ThreadPoolExecutor(max_workers=4)
+        f_skills = pool.submit(_search_skills, query_tokens)
+        f_facts = pool.submit(_search_facts, text)
+        f_vault = pool.submit(_search_vault, text, focus)
+        f_sessions = pool.submit(_search_recent_sessions, text)
+        futures = [f_skills, f_facts, f_vault, f_sessions]
+
+        t0 = time.monotonic()
+        budget_s = PREFETCH_BUDGET_MS / 1000.0
+        dropped: list[str] = []
+
+        # Block at most `budget_s` total across all four futures. Any still
+        # running at the deadline is abandoned for this turn.
+        pending = set(futures)
+        while pending:
+            elapsed = time.monotonic() - t0
+            remaining = budget_s - elapsed
+            if remaining <= 0:
+                break
+            done, pending = wait(pending, timeout=remaining,
+                                 return_when=FIRST_COMPLETED)
+            if not done:
+                break  # timed out
+            for future in done:
                 try:
                     if future is f_skills:
                         skills_result = future.result()
@@ -459,7 +495,22 @@ def prefetch_context(text: str, session_id: str | None = None) -> str:
                     else:
                         session_result = future.result()
                 except Exception:
-                    pass  # Prefetch failures are non-fatal
+                    pass  # Individual failure — non-fatal
+
+        # Record which subtasks missed the budget for observability.
+        for name, fut in (("skills", f_skills), ("facts", f_facts),
+                          ("vault", f_vault), ("sessions", f_sessions)):
+            if not fut.done():
+                dropped.append(name)
+
+        # shutdown(wait=False) lets stragglers (vault qmd call) complete
+        # in the background without blocking the caller. Python will GC
+        # the pool once every thread returns.
+        pool.shutdown(wait=False)
+
+        if dropped:
+            logger.info("prefetch budget=%dms exceeded, dropped=%s",
+                        PREFETCH_BUDGET_MS, ",".join(dropped))
 
     context = _format_context(skills_result, facts_result, vault_result,
                               session_result, ambient_entries=ambient_entries,
