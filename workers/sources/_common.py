@@ -61,6 +61,11 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
 
     Runs in executor (Claude Agent SDK uses asyncio.run internally and we call
     it from async context — so shell it out to a thread).
+
+    Captures CLI stderr so that when the SDK subprocess dies with a generic
+    "Command failed with exit code N" the real diagnostic lines are preserved
+    and re-raised as part of the exception — otherwise they're lost and every
+    poisoned queue item looks identical ("Check stderr output for details").
     """
     def _run() -> str:
         from claude_agent_sdk import query as sdk_query, ClaudeAgentOptions
@@ -84,6 +89,18 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
             for tname in sc.get("disabled_tools", []):
                 disallowed.append(f"mcp__{name}__{tname}")
 
+        # Bounded stderr capture — the CLI can emit a lot on crash; keep the
+        # last N lines so we surface the tail (where the failure usually is)
+        # without blowing up the exception message or the queue.error column.
+        stderr_buf: list[str] = []
+        STDERR_MAX_LINES = 40
+
+        def _capture_stderr(line: str) -> None:
+            stderr_buf.append(line)
+            if len(stderr_buf) > STDERR_MAX_LINES:
+                # Drop oldest, keep tail
+                del stderr_buf[: len(stderr_buf) - STDERR_MAX_LINES]
+
         options = ClaudeAgentOptions(
             model="primary",
             system_prompt=system_prompt,
@@ -91,6 +108,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
             permission_mode="bypassPermissions",
             mcp_servers=mcp_servers,
             disallowed_tools=disallowed,
+            stderr=_capture_stderr,
         )
 
         model_env = _to_bg_url(_get_model_env("primary"))
@@ -101,16 +119,45 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
 
         try:
             final = ""
+            saw_result = False
 
             async def _q():
-                nonlocal final
+                nonlocal final, saw_result
                 async for msg in sdk_query(prompt=prompt, options=options):
+                    if type(msg).__name__ == "ResultMessage":
+                        saw_result = True
                     if hasattr(msg, "content"):
                         for block in msg.content:
                             if hasattr(block, "text"):
                                 final += block.text
 
-            asyncio.run(_q())
+            try:
+                asyncio.run(_q())
+            except Exception as e:
+                # Run already completed at the application level — the CLI
+                # subprocess exits with code 1 during teardown for reasons
+                # unrelated to the work (likely a spurious final API call or
+                # connection reset). Don't throw away the accumulated output.
+                if saw_result and final:
+                    logger.warning(
+                        "SDK raised after ResultMessage (exit-code-1 teardown noise) — returning %d chars of accumulated output. err=%s",
+                        len(final), e,
+                    )
+                    return final
+                # Otherwise: real failure. Surface the captured CLI stderr
+                # tail so the queue.error column has the actual diagnostic
+                # instead of the SDK's "Check stderr output for details"
+                # placeholder.
+                if stderr_buf:
+                    tail = "\n".join(stderr_buf[-STDERR_MAX_LINES:])
+                    logger.error(
+                        "SDK subprocess failed: %s\n--- CLI stderr tail ---\n%s\n--- end ---",
+                        e, tail,
+                    )
+                    raise RuntimeError(
+                        f"{type(e).__name__}: {e}\n--- CLI stderr tail ---\n{tail}"
+                    ) from e
+                raise
             return final or ""
         finally:
             for k, old_val in old.items():
