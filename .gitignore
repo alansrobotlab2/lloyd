@@ -34,4 +34,8 @@ __pycache__/
 /usage.db-shm
 /usage.db-wal
 
+/workers.db
+/workers.db-shm
+/workers.db-wal
+
 state.json
