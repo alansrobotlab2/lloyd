@@ -371,6 +371,17 @@ def run_task(task_id) -> dict:
             for tool_name in cfg.get("disabled_tools", []):
                 disallowed_tools.append(f"mcp__{name}__{tool_name}")
 
+        # Bounded stderr capture so SDK subprocess crashes surface the real
+        # diagnostic lines instead of the SDK's placeholder
+        # ("Check stderr output for details").
+        _stderr_buf: list[str] = []
+        _STDERR_MAX = 40
+
+        def _capture_stderr(line: str) -> None:
+            _stderr_buf.append(line)
+            if len(_stderr_buf) > _STDERR_MAX:
+                del _stderr_buf[: len(_stderr_buf) - _STDERR_MAX]
+
         options = ClaudeAgentOptions(
             model=task_model,
             system_prompt=system_prompt,
@@ -378,6 +389,7 @@ def run_task(task_id) -> dict:
             permission_mode="bypassPermissions",
             mcp_servers=mcp_servers,
             disallowed_tools=disallowed_tools,
+            stderr=_capture_stderr,
         )
 
         old_env = {}
@@ -396,7 +408,19 @@ def run_task(task_id) -> dict:
                             if hasattr(block, "text"):
                                 final_response += block.text
 
-            asyncio.run(_run())
+            try:
+                asyncio.run(_run())
+            except Exception as e:
+                if _stderr_buf:
+                    tail = "\n".join(_stderr_buf[-_STDERR_MAX:])
+                    logger.error(
+                        "Task #%s SDK subprocess failed: %s\n--- CLI stderr tail ---\n%s\n--- end ---",
+                        task_id, e, tail,
+                    )
+                    raise RuntimeError(
+                        f"{type(e).__name__}: {e}\n--- CLI stderr tail ---\n{tail}"
+                    ) from e
+                raise
         finally:
             for key, old_val in old_env.items():
                 if old_val is None:
