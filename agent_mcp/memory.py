@@ -355,7 +355,22 @@ def _qmd_post(payload: dict) -> list:
     ]
 
 
-def _qmd_daemon_search(query: str, limit: int, collections: list) -> Optional[list]:
+def _qmd_daemon_search(query: str, limit: int, collections: list,
+                      skip_rerank: bool = False) -> Optional[list]:
+    """Send a hybrid lex+vec query to the qmd daemon.
+
+    Phase cost (post 2026-04-20 patches, 141K vectors, 12 collections):
+      lex       ~15ms   (BM25 FTS5)
+      embed      ~5ms   (cached) / ~20ms cold
+      vec      ~240ms   (sqlite-vec brute-force KNN — hard floor)
+      chunk      ~0ms   (skipped when skip_rerank=True)
+      rerank   300-900ms on novel queries (Qwen3-reranker, ~25-40ms per chunk)
+               ~1ms on cache hit
+
+    skip_rerank=True drops total to ~250-300ms warm — use for latency-critical
+    paths like prefetch. Leave False for quality-critical paths (explicit
+    vault_recall) where reranker value outweighs the latency cost.
+    """
     query = _qmd_sanitize(query)
     if not query:
         return []
@@ -367,6 +382,8 @@ def _qmd_daemon_search(query: str, limit: int, collections: list) -> Optional[li
         "limit": limit,
         "collections": collections,
     }
+    if skip_rerank:
+        payload["skipRerank"] = True
 
     try:
         return _qmd_post(payload)

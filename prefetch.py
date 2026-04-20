@@ -248,7 +248,12 @@ def _search_vault(query: str, focus: SessionFocus | None = None) -> list[dict]:
     if len(effective_query.strip()) < VAULT_MIN_QUERY_LEN:
         return []
     try:
-        results = _qmd_daemon_search(effective_query, VAULT_MAX_RESULTS, VAULT_COLLECTIONS)
+        # Prefetch is latency-critical — skip the reranker (300-900ms novel) in
+        # favour of RRF-only ranking (~250ms warm). Explicit vault_recall calls
+        # keep rerank on for higher quality. See _qmd_daemon_search for phase
+        # breakdown.
+        results = _qmd_daemon_search(effective_query, VAULT_MAX_RESULTS,
+                                      VAULT_COLLECTIONS, skip_rerank=True)
         if not results:
             return []
         return [
