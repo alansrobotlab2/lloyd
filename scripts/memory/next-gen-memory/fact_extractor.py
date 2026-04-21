@@ -131,7 +131,7 @@ class FactExtractor:
             existing_facts=existing_facts[:1000] if existing_facts else "None"
         )
         
-        # Call local LLM (122B model on port 8096)
+        # Call local LLM (primary model on port 8096)
         response = self._call_llm(prompt)
         
         # Parse JSON response

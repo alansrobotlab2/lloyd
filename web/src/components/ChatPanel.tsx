@@ -241,7 +241,7 @@ export default function ChatPanel({
     const value = e.target.value
     setInput(value)
     
-    // Check if we have a complete model switch command like "/model 122b"
+    // Check if we have a complete model switch command like "/model primary"
     const match = value.match(/^\/(model|switch)\s+(\w+)$/)
     if (match) {
       // Auto-execute the model switch
@@ -333,7 +333,7 @@ export default function ChatPanel({
         setMessages(prev => [...prev, {
           id: `msg_${Date.now()}_model`,
           role: 'assistant',
-          content: [{ type: 'text', text: `Available models:\n\n${modelText}\n\nType **/model <alias>** to switch (e.g., /model 122b)` }],
+          content: [{ type: 'text', text: `Available models:\n\n${modelText}\n\nType **/model <alias>** to switch (e.g., /model primary)` }],
           timestamp: new Date().toISOString(),
         }])
         setInput('')
@@ -355,7 +355,7 @@ export default function ChatPanel({
       setSelectedCommandIndex(0)
       return SLASH_COMMANDS.slice(0, 8)
     }
-    // Check if we're typing a model switch command like "/model 122b"
+    // Check if we're typing a model switch command like "/model primary"
     if (commandFilter.startsWith('model ') || commandFilter.startsWith('switch ')) {
       // Show model names as completions
       const modelArg = commandFilter.split(' ')[1] || ''

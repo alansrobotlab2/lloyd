@@ -75,16 +75,17 @@ Disabled tools are enforced via the SDK's `disallowed_tools` option (format: `mc
 
 ```yaml
 model:
-  default: Qwen3.5-122B-A10B
+  default: primary
 
 models:
-  Qwen3.5-122B-A10B:
-    alias: 122b
+  primary:
+    alias: primary
+    base_url: http://127.0.0.1:8096
     env:
       ANTHROPIC_BASE_URL: "http://127.0.0.1:8096"
       ANTHROPIC_API_KEY: "no-key-required"
-      ANTHROPIC_CUSTOM_MODEL_OPTION: "Qwen3.5-122B-A10B"
-      ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: "Qwen 122B"
+      ANTHROPIC_CUSTOM_MODEL_OPTION: "primary"
+      ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: "Primary"
 
 mcp_servers:
   thunderbird:

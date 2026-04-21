@@ -71,7 +71,7 @@ JUDGE_FILES = [
 
 
 def call_llm(prompt: str, temperature: float = 0.7) -> str | None:
-    """Call local 122B via vLLM API."""
+    """Call local primary model via vLLM API."""
     try:
         response = requests.post(
             LLM_ENDPOINT,
@@ -459,7 +459,7 @@ def load_history() -> list:
 
 def propose(metrics: dict, history: list) -> dict | None:
     """
-    Ask local 122B to propose one improvement.
+    Ask local primary model to propose one improvement.
     
     Args:
         metrics: current quality scores from measure()
@@ -704,7 +704,7 @@ def validate_proposal(change: dict) -> tuple[bool, str]:
 
 def evaluate(change: dict, session_files: list[str] | None = None, skip_branch: bool = False) -> bool:
     """
-    Apply change on branch, replay recent sessions, judge with 122B.
+    Apply change on branch, replay recent sessions, judge with primary model.
     
     Args:
         change: dict from propose() with file, original_text, replacement_text

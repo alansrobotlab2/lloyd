@@ -15,8 +15,8 @@ from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, Result
 
 os.environ["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8096"
 os.environ["ANTHROPIC_API_KEY"] = "no-key-required"
-os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION"] = "Qwen3.5-122B-A10B"
-os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = "Qwen 122B Local"
+os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION"] = "primary"
+os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = "Primary Local"
 
 # Create a minimal test MCP server inline
 MCP_SERVER_CODE = '''
@@ -75,7 +75,7 @@ asyncio.run(main())
 
 async def main():
     print("=" * 60)
-    print("Test 3: Custom MCP server with local Qwen 122B")
+    print("Test 3: Custom MCP server with local primary")
     print("=" * 60)
     print()
 
@@ -89,7 +89,7 @@ async def main():
     venv_python = os.path.expanduser("~/agent-services/.venvs/claude-agent-sdk/bin/python")
 
     options = ClaudeAgentOptions(
-        model="Qwen3.5-122B-A10B",
+        model="primary",
         system_prompt="You are a helpful assistant. Use the MCP tools (get_current_time, calculate) to answer questions. Do NOT use Bash.",
         allowed_tools=["mcp__test-tools__get_current_time", "mcp__test-tools__calculate"],
         max_turns=3,

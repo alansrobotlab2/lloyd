@@ -6,7 +6,7 @@ patterns and propose typed relationships between vault documents.
 Stage 1 (deterministic): Extract co-access pairs from trajectory JSONL,
   compute weighted scores, aggregate across sessions.
 Stage 2 (LLM-assisted): For high-confidence pairs, extract conversation
-  context from raw session JSON and classify relationship type via 122B.
+  context from raw session JSON and classify relationship type via primary model.
 
 Usage:
     python3 conversation_relations.py --incremental    # Stage 1 only (watermark-gated)

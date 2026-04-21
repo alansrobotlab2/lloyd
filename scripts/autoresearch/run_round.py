@@ -67,7 +67,8 @@ async def run(
 
     logger.info("loaded %d bench tasks", len(tasks))
 
-    variants = propose_variants(
+    variants = await asyncio.to_thread(
+        propose_variants,
         cfg, targets=targets, max_variants=max_variants or cfg.max_variants_per_round, model=model,
     )
     if not variants:
