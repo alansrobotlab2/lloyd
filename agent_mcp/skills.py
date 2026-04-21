@@ -81,8 +81,55 @@ def _iter_skills():
                 yield skill
 
 
+# Conversational noise + function words — stripped from *query* side before
+# scoring. Skill-side tokenization is unchanged: we still match against full
+# name/desc/tag/body text. The asymmetry is deliberate — a query like "lets
+# dig into 311" should not fire skills just because "lets", "dig", and
+# "into" appear in arbitrary skill bodies.
+_QUERY_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "must",
+    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
+    "they", "them", "their", "its", "his", "her",
+    "this", "that", "these", "those", "what", "which", "who", "whom",
+    "how", "when", "where", "why",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "about",
+    "into", "through", "during", "before", "after", "between",
+    "and", "or", "but", "not", "no", "nor", "so", "if", "then",
+    "just", "also", "very", "really", "quite", "too", "much",
+    "ok", "okay", "yeah", "yes", "nah", "sure", "right",
+    "lets", "let", "go", "going", "get", "got", "getting",
+    "want", "wants", "wanted", "know", "knows", "knew",
+    "think", "thinks", "thought", "look", "looking", "looked",
+    "take", "takes", "took", "make", "makes", "made",
+    "now", "some", "any", "all", "each", "every", "both",
+    "up", "out", "over", "down", "off", "away",
+    "here", "there", "thing", "things", "stuff",
+    "left", "done", "next", "back", "ready", "still", "already",
+    "tell", "show", "give", "put", "run", "running", "ran",
+    "come", "came", "see", "saw", "seen", "say", "said",
+    "try", "tried", "use", "used", "using",
+    "start", "started", "stop", "stopped", "keep", "kept",
+    "set", "well", "good",
+    "bit", "lot", "way", "something", "anything", "everything",
+    "like", "first", "last", "new", "old", "one", "two",
+    "dig", "really",
+}
+
+
 def _tokenize(text: str) -> set[str]:
     return set(re.findall(r"\b\w+\b", text.lower()))
+
+
+def _query_tokens(text: str) -> set[str]:
+    """Tokenize a *query* string: lowercase words, stopwords dropped, len ≥ 2.
+
+    Use this for the query side of skill matching. Skill-side tokenization
+    stays with plain `_tokenize` so we keep recall on legitimate substantive
+    words that happen to appear in skill content.
+    """
+    return {t for t in _tokenize(text) if t not in _QUERY_STOPWORDS and len(t) > 1}
 
 
 def _excerpt(body: str, query_tokens: set[str], max_len: int = 200) -> str:
@@ -98,8 +145,25 @@ def _excerpt(body: str, query_tokens: set[str], max_len: int = 200) -> str:
     return ""
 
 
-def _score_skill(skill: dict, query_tokens: set[str]) -> float:
-    """Score a skill against query tokens. Higher = more relevant."""
+# Body-hit cap: with 223 skills, each ~5-15KB of body text, a 5-token query
+# will coincidentally match body words in half the skills. Cap the body
+# contribution so a skill can't qualify on body-noise alone.
+_BODY_HITS_CAP = 4
+
+
+def _score_skill(skill: dict, query_tokens: set[str],
+                 require_metadata_hit: bool = True) -> float:
+    """Score a skill against query tokens. Higher = more relevant.
+
+    If `require_metadata_hit` is True (default), a skill with zero
+    name/desc/tag overlap scores 0.0 regardless of body overlap. This
+    prevents the "12× powerpoint on graph-classifier work" failure mode
+    where generic English stopwords in queries bag-of-words-match arbitrary
+    skill bodies.
+
+    Body hits are capped (see `_BODY_HITS_CAP`) and weighted to be a
+    tiebreaker, not a qualifier.
+    """
     name_tokens = _tokenize(skill["name"].replace("-", " "))
     desc_tokens = _tokenize(skill["description"])
     tag_tokens = _tokenize(" ".join(skill["tags"]))
@@ -108,9 +172,12 @@ def _score_skill(skill: dict, query_tokens: set[str]) -> float:
     name_hits = len(query_tokens & name_tokens)
     desc_hits = len(query_tokens & desc_tokens)
     tag_hits = len(query_tokens & tag_tokens)
-    body_hits = len(query_tokens & body_tokens)
+    body_hits = min(len(query_tokens & body_tokens), _BODY_HITS_CAP)
 
-    return name_hits * 3.0 + desc_hits * 2.0 + tag_hits * 1.5 + body_hits * 1.0
+    if require_metadata_hit and (name_hits + desc_hits + tag_hits) == 0:
+        return 0.0
+
+    return name_hits * 3.0 + desc_hits * 2.0 + tag_hits * 1.5 + body_hits * 0.3
 
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
@@ -120,11 +187,11 @@ def _skills_search(params: dict) -> str:
     if not query:
         return json.dumps({"error": "query is required", "results": []})
     max_results = int(params.get("max_results", 10))
-    query_tokens = _tokenize(query)
+    query_tokens = _query_tokens(query)
 
     scored = []
     for skill in _iter_skills():
-        score = _score_skill(skill, query_tokens)
+        score = _score_skill(skill, query_tokens, require_metadata_hit=True)
         if score > 0:
             scored.append((score, skill))
 
