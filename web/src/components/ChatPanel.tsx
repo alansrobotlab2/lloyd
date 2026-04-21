@@ -1,10 +1,202 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
 import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench, Square } from 'lucide-react'
 import { marked } from 'marked'
 import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState } from '../api'
 
 // Configure marked
 marked.setOptions({ breaks: true, gfm: true })
+
+// ------------ perf helpers ------------
+
+const timeStr = (iso: string) => {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+type ToolCallRef = { name: string; args: string }
+
+// Preserve per-message object identity across polling refreshes so memoized rows
+// don't re-render when nothing actually changed. Compares by id + joined-text
+// length + stats/reasoning shallow-ish equality.
+const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => {
+  const prevById = new Map(prev.map(m => [m.id, m]))
+  let different = prev.length !== next.length
+  const merged = next.map((n, i) => {
+    const p = prevById.get(n.id) || prev[i]
+    if (p && p.id === n.id) {
+      const pt = p.content?.map(c => c.text).join('') || ''
+      const nt = n.content?.map(c => c.text).join('') || ''
+      const sameStats = (p.stats == null && n.stats == null) ||
+        (p.stats && n.stats && JSON.stringify(p.stats) === JSON.stringify(n.stats))
+      if (pt === nt && sameStats && p.reasoning === n.reasoning) {
+        return p // preserve identity → row memo hit
+      }
+    }
+    different = true
+    return n
+  })
+  return different ? merged : prev
+}
+
+// ------------ memoized message row ------------
+
+interface MessageRowProps {
+  msg: ApiMessage
+  showAgentDetails: boolean
+  thinkLevel: string
+  isMobile: boolean
+  toolCallIndex: Map<string, ToolCallRef>
+}
+
+const MessageRow = memo(function MessageRow({
+  msg,
+  showAgentDetails,
+  thinkLevel,
+  isMobile,
+  toolCallIndex,
+}: MessageRowProps) {
+  // Skip messages with empty content
+  const hasContent = msg.content?.some(c => c.text?.trim())
+  if (!hasContent) return null
+
+  // Hide tool messages when details hidden, but always show error messages
+  const isError = msg.role === 'tool' && msg.content?.some(c => c.text?.startsWith('Error:'))
+  const hideToolMessage = !showAgentDetails && msg.role === 'tool' && !isError
+  if (hideToolMessage) return null
+
+  const textJoined = useMemo(
+    () => msg.content.map(c => c.text).join('\n'),
+    [msg.content]
+  )
+
+  // Parse markdown once per text change, not every render
+  const parsedHtml = useMemo(() => {
+    if (msg.role === 'tool') return '' // tool renders as pre, no markdown
+    return marked.parse(textJoined) as string
+  }, [textJoined, msg.role])
+
+  return (
+    <div className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}>
+      {msg.role !== 'user' && !isMobile && (
+        <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
+          {msg.role === 'tool'
+            ? <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Wrench className="w-3.5 h-3.5 text-slate-400" /></div>
+            : <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
+          }
+        </div>
+      )}
+      <div className={`max-w-[80%] ${msg.role === 'user' ? 'min-w-0' : 'flex-1 min-w-0'}`}>
+        <div
+          className={`rounded-xl ${
+            msg.role === 'tool' ? 'px-2.5 py-1.5' : 'px-3.5 py-2.5'
+          } ${
+            msg.role === 'user'
+              ? 'bg-brand-600/30 border border-brand-500/40 text-white'
+              : msg.role === 'tool'
+              ? 'bg-slate-800/40 border border-slate-600/30 text-slate-200'
+              : 'bg-surface-2 border border-surface-3/50 text-slate-200'
+          }`}
+        >
+          <div className="prose-chat text-sm leading-relaxed">
+            {msg.role === 'assistant' ? (
+              <>
+                {msg.reasoning && (showAgentDetails || thinkLevel !== 'off') && (
+                  <details className="group mb-3">
+                    <summary className="cursor-pointer list-none flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition-colors">
+                      <Brain className="w-3 h-3" />
+                      <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
+                      <span className="font-semibold">Thinking</span>
+                      <span className="text-slate-500 font-normal ml-1">({msg.reasoning.length.toLocaleString()} chars)</span>
+                    </summary>
+                    <div className="mt-2 p-3 bg-purple-900/10 border border-purple-500/10 rounded text-xs text-slate-300 whitespace-pre-wrap max-h-96 overflow-y-auto">
+                      {msg.reasoning}
+                    </div>
+                  </details>
+                )}
+                <div dangerouslySetInnerHTML={{ __html: parsedHtml }} />
+              </>
+            ) : msg.role === 'tool' ? (() => {
+              // Tool call rendering — single-line summary, click to expand args+response
+              const tc = msg.tool_call_id ? toolCallIndex.get(msg.tool_call_id) : undefined
+              const toolName = tc?.name || ''
+              const toolArgs = tc?.args || '{}'
+
+              let argsDisplay = toolArgs
+              try {
+                argsDisplay = JSON.stringify(JSON.parse(toolArgs), null, 2)
+              } catch {
+                // Keep raw string if not valid JSON
+              }
+
+              const responseText = textJoined
+              return (
+                <details className="group">
+                  <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-300 transition-colors">
+                    <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform shrink-0" />
+                    <Wrench className="w-3 h-3 shrink-0" />
+                    <span className="font-semibold uppercase tracking-wide">Tool</span>
+                    {toolName && (
+                      <span className="font-mono font-normal text-slate-500 truncate">{toolName}</span>
+                    )}
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                    {argsDisplay !== '{}' && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Arguments</div>
+                        <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono">
+                          {argsDisplay}
+                        </pre>
+                      </div>
+                    )}
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Response</div>
+                      <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">
+                        {responseText || '⏳ Running...'}
+                      </pre>
+                    </div>
+                  </div>
+                </details>
+              )
+            })() : (
+              <div dangerouslySetInnerHTML={{ __html: parsedHtml }} />
+            )}
+          </div>
+        </div>
+        <div className="mt-1.5 text-[10px] text-slate-600 font-mono flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+          <span>{timeStr(msg.timestamp)}</span>
+          {msg.stats && msg.role === 'assistant' && (() => {
+            const s = msg.stats as TurnStats
+            const peak = s.peak_input_tokens ?? s.input_tokens
+            const pct = (peak / 262144 * 100).toFixed(1)
+            return (<>
+              <span className="text-slate-600">ctx: {peak.toLocaleString()} ({pct}%)</span>
+              {s.cache_read > 0 && (
+                <span className="text-emerald-700">cache↑: {s.cache_read.toLocaleString()}</span>
+              )}
+              {s.cache_create > 0 && (
+                <span className="text-amber-700">cache✎: {s.cache_create.toLocaleString()}</span>
+              )}
+              {s.duration_ms != null && (
+                <span className="text-slate-600">time: {(s.duration_ms / 1000).toFixed(1)}s</span>
+              )}
+              {s.num_turns != null && s.num_turns > 1 && (
+                <span className="text-slate-600">turns: {s.num_turns}</span>
+              )}
+            </>)
+          })()}
+          {msg.context_tokens != null && msg.context_tokens > 0 && msg.role === 'tool' && (() => {
+            const pct = (msg.context_tokens / 262144 * 100).toFixed(1)
+            return <span className="text-slate-600">ctx: {msg.context_tokens.toLocaleString()} ({pct}%)</span>
+          })()}
+        </div>
+      </div>
+      {msg.role === 'user' && !isMobile && (
+        <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5 hidden sm:flex">
+          <User className="w-3.5 h-3.5 text-slate-300" />
+        </div>
+      )}
+    </div>
+  )
+})
 
 interface ChatPanelProps {
   requestedSessionKey?: string | null
@@ -148,7 +340,8 @@ export default function ChatPanel({
       try {
         const result = await api.loadMessages(sessionKey)
         if (result.messages) {
-          setMessages(result.messages as ApiMessage[])
+          const next = result.messages as ApiMessage[]
+          setMessages(prev => mergeMessages(prev, next))
         }
       } catch (err) {
         console.error('Failed to load messages:', err)
@@ -172,11 +365,17 @@ export default function ChatPanel({
           setSending(false)
           // Refresh messages to pick up final response
           const result = await api.loadMessages(sessionKey)
-          if (result.messages) setMessages(result.messages as ApiMessage[])
+          if (result.messages) {
+            const next = result.messages as ApiMessage[]
+            setMessages(prev => mergeMessages(prev, next))
+          }
         } else {
           // Still streaming — refresh messages so new tool calls / text appear
           const result = await api.loadMessages(sessionKey)
-          if (result.messages) setMessages(result.messages as ApiMessage[])
+          if (result.messages) {
+            const next = result.messages as ApiMessage[]
+            setMessages(prev => mergeMessages(prev, next))
+          }
         }
       } catch { /* ignore */ }
     }
@@ -185,14 +384,14 @@ export default function ChatPanel({
     return () => clearInterval(interval)
   }, [sessionKey, thinking])
 
-  // Scroll to bottom when messages change, always while thinking (agent is actively responding)
+  // Scroll to bottom when messages change. Use 'auto' (instant) during streaming
+  // so smooth-scroll animations don't pile up and jank the main thread.
   useEffect(() => {
     if (messages.length === 0) return
     const el = messagesContainerRef.current
     if (!el) return
     if (thinking) {
-      // Always scroll while agent is working so new tool calls / text stay in view
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
     } else {
       const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200
       if (nearBottom) {
@@ -206,7 +405,8 @@ export default function ChatPanel({
     try {
       const result = await api.loadMessages(key)
       if (result.messages) {
-        setMessages(result.messages as ApiMessage[])
+        const next = result.messages as ApiMessage[]
+        setMessages(prev => mergeMessages(prev, next))
         setSessionKey(key) // Update local state so polling works
         onActiveSessionChange?.(key) // Notify parent of active session
         if (result.model) onModelSwitch?.(result.model) // Sync model dropdown to session's model
@@ -350,6 +550,27 @@ export default function ChatPanel({
     inputRef.current?.focus()
   }
 
+  // Build tool_call_id → { name, args } index once per messages change so
+  // memoized tool rows can look up their call info in O(1) instead of scanning
+  // the whole message array per render.
+  const toolCallIndex = useMemo(() => {
+    const map = new Map<string, ToolCallRef>()
+    for (const m of messages) {
+      if (m.role === 'assistant' && m.tool_calls) {
+        for (const tc of m.tool_calls) {
+          const callId = tc.call_id || tc.id
+          if (callId) {
+            map.set(callId, {
+              name: tc.function?.name || '',
+              args: tc.function?.arguments || '{}',
+            })
+          }
+        }
+      }
+    }
+    return map
+  }, [messages])
+
   const filteredCommands = useMemo(() => {
     if (!showCommands || !commandFilter) {
       setSelectedCommandIndex(0)
@@ -446,6 +667,32 @@ export default function ChatPanel({
     let settled = false
     let accumulatedThinking = ''
 
+    // Coalesce text deltas — per-token setState was O(n) per message array and
+    // killed the main thread on long sessions. Buffer deltas and flush once per
+    // animation frame instead.
+    let pendingDelta = ''
+    let rafId: number | null = null
+    const flushDelta = () => {
+      rafId = null
+      const delta = pendingDelta
+      if (!delta || !assistantMsgId) return
+      pendingDelta = ''
+      const currentId = assistantMsgId
+      const currentThinking = accumulatedThinking
+      setMessages(prev => prev.map(m =>
+        m.id === currentId
+          ? {
+              ...m,
+              content: [{ type: 'text' as const, text: m.content[0].text + delta }],
+              ...(currentThinking && !m.reasoning ? { reasoning: currentThinking } : {}),
+            }
+          : m
+      ))
+    }
+    const scheduleFlush = () => {
+      if (rafId === null) rafId = requestAnimationFrame(flushDelta)
+    }
+
     const controller = api.streamMessage(text, clientId.current, sessionKey || undefined, {
       onSession: (sid) => {
         if (!sessionKey) {
@@ -515,21 +762,17 @@ export default function ChatPanel({
             ...(accumulatedThinking ? { reasoning: accumulatedThinking } : {}),
           }])
         } else {
-          const currentId = assistantMsgId
-          setMessages(prev => prev.map(m =>
-            m.id === currentId
-              ? {
-                  ...m,
-                  content: [{ type: 'text' as const, text: m.content[0].text + delta }],
-                  ...(accumulatedThinking && !m.reasoning ? { reasoning: accumulatedThinking } : {}),
-                }
-              : m
-          ))
+          pendingDelta += delta
+          scheduleFlush()
         }
       },
       onDone: (response, _sid, stats, reasoning) => {
         if (settled) return
         settled = true
+        // Cancel any queued delta frame and merge its payload into the final update
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
+        const pendingFinal = pendingDelta
+        pendingDelta = ''
         const finalReasoning = accumulatedThinking || reasoning || ''
         if (!streamingStarted && response) {
           const fallbackId = `msg_${Date.now()}_resp_final`
@@ -541,11 +784,16 @@ export default function ChatPanel({
             stats,
             ...(finalReasoning ? { reasoning: finalReasoning } : {}),
           }])
-        } else if (assistantMsgId && (stats || finalReasoning)) {
+        } else if (assistantMsgId && (stats || finalReasoning || pendingFinal)) {
           const lastId = assistantMsgId
           setMessages(prev => prev.map(m =>
             m.id === lastId
-              ? { ...m, ...(stats ? { stats } : {}), ...(finalReasoning ? { reasoning: finalReasoning } : {}) }
+              ? {
+                  ...m,
+                  ...(pendingFinal ? { content: [{ type: 'text' as const, text: m.content[0].text + pendingFinal }] } : {}),
+                  ...(stats ? { stats } : {}),
+                  ...(finalReasoning ? { reasoning: finalReasoning } : {}),
+                }
               : m
           ))
         }
@@ -559,6 +807,8 @@ export default function ChatPanel({
       onError: (detail) => {
         if (settled) return
         settled = true
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
+        pendingDelta = ''
         setMessages(prev => [...prev, {
           id: `msg_${Date.now()}_err`,
           role: 'tool' as const,
@@ -575,6 +825,8 @@ export default function ChatPanel({
       onAborted: () => {
         if (settled) return
         settled = true
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
+        pendingDelta = ''
         abortControllerRef.current = null
         setActiveToolName(null)
         setThinking(false)
@@ -592,10 +844,6 @@ export default function ChatPanel({
     abortControllerRef.current = controller
   }
 
-  const timeStr = (iso: string) => {
-    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  }
-
   return (
     <div className="flex flex-col h-full">
       {/* Messages */}
@@ -610,144 +858,16 @@ export default function ChatPanel({
           </div>
         )}
         
-        {messages.map((msg) => {
-          // Skip messages with empty content
-          const hasContent = msg.content?.some(c => c.text?.trim())
-          if (!hasContent) return null
-          
-          // Hide tool messages when details hidden, but always show error messages
-          const isError = msg.role === 'tool' && msg.content?.some(c => c.text?.startsWith('Error:'))
-          const hideToolMessage = !showAgentDetails && msg.role === 'tool' && !isError
-          if (hideToolMessage) return null
-          
-          return (
-            <div key={msg.id} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}>
-            {msg.role !== 'user' && !isMobile && (
-              <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
-                {msg.role === 'tool'
-                  ? <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Wrench className="w-3.5 h-3.5 text-slate-400" /></div>
-                  : <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
-                }
-              </div>
-            )}
-            <div className={`max-w-[80%] ${msg.role === 'user' ? 'min-w-0' : 'flex-1 min-w-0'}`}>
-              <div
-                className={`rounded-xl ${
-                  msg.role === 'tool' ? 'px-2.5 py-1.5' : 'px-3.5 py-2.5'
-                } ${
-                  msg.role === 'user'
-                    ? 'bg-brand-600/30 border border-brand-500/40 text-white'
-                    : msg.role === 'tool'
-                    ? 'bg-slate-800/40 border border-slate-600/30 text-slate-200'
-                    : 'bg-surface-2 border border-surface-3/50 text-slate-200'
-                }`}
-              >
-                <div className="prose-chat text-sm leading-relaxed">
-                  {msg.role === 'assistant' ? (
-                    <>
-                      {/* Reasoning — always shown when thinking mode produced it, or when Agent Details is on */}
-                      {msg.reasoning && (showAgentDetails || thinkLevel !== 'off') && (
-                        <details className="group mb-3">
-                          <summary className="cursor-pointer list-none flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition-colors">
-                            <Brain className="w-3 h-3" />
-                            <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
-                            <span className="font-semibold">Thinking</span>
-                            <span className="text-slate-500 font-normal ml-1">({msg.reasoning.length.toLocaleString()} chars)</span>
-                          </summary>
-                          <div className="mt-2 p-3 bg-purple-900/10 border border-purple-500/10 rounded text-xs text-slate-300 whitespace-pre-wrap max-h-96 overflow-y-auto">
-                            {msg.reasoning}
-                          </div>
-                        </details>
-                      )}
-                      <div dangerouslySetInnerHTML={{ __html: marked.parse(msg.content.map(c => c.text).join('\n')) }} />
-                    </>
-                  ) : msg.role === 'tool' ? (() => {
-                    // Tool call rendering — single-line summary, click to expand args+response
-                    const assistantMsg = messages.find(m =>
-                      m.role === 'assistant' &&
-                      m.tool_calls?.some(tc => tc.call_id === msg.tool_call_id)
-                    )
-                    const toolCall = assistantMsg?.tool_calls?.find(tc => tc.call_id === msg.tool_call_id)
-                    const toolName = toolCall?.function?.name || ''
-                    const toolArgs = toolCall?.function?.arguments || '{}'
-
-                    let argsDisplay = toolArgs
-                    try {
-                      argsDisplay = JSON.stringify(JSON.parse(toolArgs), null, 2)
-                    } catch (e) {
-                      // Keep raw string if not valid JSON
-                    }
-
-                    const responseText = msg.content.map(c => c.text).join('\n')
-                    return (
-                      <details className="group">
-                        <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-300 transition-colors">
-                          <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform shrink-0" />
-                          <Wrench className="w-3 h-3 shrink-0" />
-                          <span className="font-semibold uppercase tracking-wide">Tool</span>
-                          {toolName && (
-                            <span className="font-mono font-normal text-slate-500 truncate">{toolName}</span>
-                          )}
-                        </summary>
-                        <div className="mt-2 space-y-2">
-                          {argsDisplay !== '{}' && (
-                            <div>
-                              <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Arguments</div>
-                              <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono">
-                                {argsDisplay}
-                              </pre>
-                            </div>
-                          )}
-                          <div>
-                            <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Response</div>
-                            <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">
-                              {responseText || '⏳ Running...'}
-                            </pre>
-                          </div>
-                        </div>
-                      </details>
-                    )
-                  })() : (
-                    <div dangerouslySetInnerHTML={{ __html: marked.parse(msg.content.map(c => c.text).join('\n')) }} />
-                  )}
-                </div>
-              </div>
-              <div className="mt-1.5 text-[10px] text-slate-600 font-mono flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
-                <span>{timeStr(msg.timestamp)}</span>
-                {msg.stats && msg.role === 'assistant' && (() => {
-                  const s = msg.stats as TurnStats
-                  const peak = s.peak_input_tokens ?? s.input_tokens
-                  const pct = (peak / 262144 * 100).toFixed(1)
-                  return (<>
-                    <span className="text-slate-600">ctx: {peak.toLocaleString()} ({pct}%)</span>
-                    {s.cache_read > 0 && (
-                      <span className="text-emerald-700">cache↑: {s.cache_read.toLocaleString()}</span>
-                    )}
-                    {s.cache_create > 0 && (
-                      <span className="text-amber-700">cache✎: {s.cache_create.toLocaleString()}</span>
-                    )}
-                    {s.duration_ms != null && (
-                      <span className="text-slate-600">time: {(s.duration_ms / 1000).toFixed(1)}s</span>
-                    )}
-                    {s.num_turns != null && s.num_turns > 1 && (
-                      <span className="text-slate-600">turns: {s.num_turns}</span>
-                    )}
-                  </>)
-                })()}
-                {msg.context_tokens != null && msg.context_tokens > 0 && msg.role === 'tool' && (() => {
-                  const pct = (msg.context_tokens / 262144 * 100).toFixed(1)
-                  return <span className="text-slate-600">ctx: {msg.context_tokens.toLocaleString()} ({pct}%)</span>
-                })()}
-              </div>
-            </div>
-            {msg.role === 'user' && !isMobile && (
-              <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5 hidden sm:flex">
-                <User className="w-3.5 h-3.5 text-slate-300" />
-              </div>
-            )}
-          </div>
-        )}
-      )}
+        {messages.map((msg) => (
+          <MessageRow
+            key={msg.id}
+            msg={msg}
+            showAgentDetails={showAgentDetails}
+            thinkLevel={thinkLevel}
+            isMobile={isMobile}
+            toolCallIndex={toolCallIndex}
+          />
+        ))}
 
         {thinking && (
           <div className="flex gap-3">
