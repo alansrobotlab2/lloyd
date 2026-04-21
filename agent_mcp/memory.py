@@ -199,7 +199,24 @@ def _levenshtein(s1: str, s2: str) -> int:
     return prev[-1]
 
 
-def _fuzzy_entity_match(name: str, candidates: list[str], threshold: float = 0.7) -> Optional[str]:
+def _fuzzy_entity_match(name: str, candidates: list[str], threshold: float = 0.85) -> Optional[str]:
+    """Fuzzy match an entity name against known entities.
+
+    History: previously used threshold=0.7 with a substring-match boost to 0.8,
+    which poisoned the alias table with entries like
+      'agent prompt constraint' -> 'agent'
+      'autonomy-system.md'      -> 'System'
+    because any short canonical name containing a token of the query got the
+    substring boost. See backlog #310 Tier 4.
+
+    Changes:
+    - Threshold bumped 0.7 → 0.85 (tight similarity required).
+    - Substring boost removed entirely — Levenshtein + token overlap drive
+      the match.
+    - Additional guard: block matches where the length ratio is extreme
+      (>2×), which reliably indicates a short canonical swallowing a long
+      specific name.
+    """
     name_lower = name.lower().strip()
     best_match = None
     best_score = 0.0
@@ -207,12 +224,18 @@ def _fuzzy_entity_match(name: str, candidates: list[str], threshold: float = 0.7
         cand_lower = candidate.lower().strip()
         if name_lower == cand_lower:
             return candidate
+        # Block extreme length asymmetry — "agent prompt constraint" shouldn't
+        # match "agent".
+        if name_lower and cand_lower:
+            len_ratio = max(len(name_lower), len(cand_lower)) / min(
+                len(name_lower), len(cand_lower)
+            )
+            if len_ratio > 2.0:
+                continue
         overlap = _token_overlap(name_lower, cand_lower)
         max_len = max(len(name_lower), len(cand_lower))
         lev_score = 1.0 - (_levenshtein(name_lower, cand_lower) / max_len) if max_len > 0 else 0.0
         combined = 0.4 * overlap + 0.6 * lev_score
-        if name_lower in cand_lower or cand_lower in name_lower:
-            combined = max(combined, 0.8)
         if combined > best_score:
             best_score = combined
             best_match = candidate
@@ -227,19 +250,19 @@ def _resolve_entity(name: str, auto_create: bool = False) -> tuple[str, bool]:
     if entity_dir:
         return entity_dir.name, False
     aliases = _load_aliases()
-    name_lower = name.lower()
-    if name_lower in aliases:
-        canonical = aliases[name_lower]
+    # Check both original-case and lowercase keys — Tier 1 sweep writes both.
+    canonical = aliases.get(name) or aliases.get(name.lower())
+    if canonical:
         if _find_entity_dir(canonical):
             return canonical, False
     known_entities = _get_entity_dirs_cached()
     fuzzy_match = _fuzzy_entity_match(name, known_entities)
     if fuzzy_match:
-        aliases[name_lower] = fuzzy_match
+        aliases[name.lower()] = fuzzy_match
         _save_aliases(aliases)
         return fuzzy_match, False
     if auto_create:
-        aliases[name_lower] = name
+        aliases[name.lower()] = name
         _save_aliases(aliases)
     return name, True
 
