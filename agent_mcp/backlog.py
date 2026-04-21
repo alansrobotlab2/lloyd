@@ -30,7 +30,15 @@ def parse_frontmatter(content: str) -> tuple:
         return {}, content
     try:
         frontmatter = yaml.safe_load(parts[1]) or {}
-    except Exception:
+    except Exception as e:
+        # Don't silently drop every frontmatter field on a parse error — log
+        # so the operator can see when data has been clobbered on disk.
+        import sys
+        print(
+            f"[backlog] WARNING: YAML frontmatter parse failed ({type(e).__name__}: {e}); "
+            "returning empty frontmatter (fields will appear as null).",
+            file=sys.stderr,
+        )
         frontmatter = {}
     return frontmatter, parts[2].strip()
 
@@ -111,12 +119,19 @@ async def list_tools():
             "properties": {"task_id": {"type": "integer", "description": "Task ID to retrieve"}},
             "required": ["task_id"],
         }),
-        Tool(name="backlog_write_task", description="Create or update a task. Provide task_id to update, omit to create new. For new tasks, name/description/board are required.", inputSchema={
+        Tool(name="backlog_write_task", description=(
+            "Create or update a task. Provide task_id to update, omit to create new. "
+            "For new tasks, name/description/board are required. On update, any omitted "
+            "field is left unchanged. By default, a new description passed on update is "
+            "APPENDED to the existing body — pass description_mode='replace' to overwrite "
+            "or 'prepend' to push the new text above the existing body."
+        ), inputSchema={
             "type": "object",
             "properties": {
                 "task_id": {"type": "integer", "description": "Task ID to update (omit for new task)"},
                 "name": {"type": "string", "description": "Task name/title (required for new tasks)"},
-                "description": {"type": "string", "description": "Task description (required for new tasks)"},
+                "description": {"type": "string", "description": "Task description. On create, becomes the body. On update, combined with existing body per description_mode."},
+                "description_mode": {"type": "string", "enum": ["append", "replace", "prepend"], "description": "How description is applied on update. Default: 'append'. Use 'replace' to overwrite the body (title heading is preserved)."},
                 "status": {"type": "string", "description": "Task status"},
                 "priority": {"type": "string", "description": "Task priority"},
                 "board": {"type": "string", "description": "Board name (required for new tasks)"},
@@ -278,13 +293,39 @@ def _handle_write(args: dict) -> str:
             current_body = f"# {name}"
         task["body"] = current_body
     if description:
+        mode = args.get("description_mode", "append")
+        if mode not in ("append", "replace", "prepend"):
+            return json.dumps({"success": False, "error": f"Invalid description_mode '{mode}'. Must be one of: append, replace, prepend"})
         current_body = task.get("body", "")
-        # Ensure body has a title heading if it doesn't already
-        if current_body and not re.match(r"^#\s+", current_body, re.MULTILINE):
-            # No heading found, prepend one based on task name or ID
-            title = name if name else f"Task {task.get('id', 'unknown')}"
-            current_body = f"# {title}\n\n{current_body}"
-        task["body"] = (current_body + "\n\n" + description) if current_body else description
+        # Existing title heading (first '# ...' line), used to preserve the title
+        # when the caller replaces body content without supplying their own heading.
+        existing_title_match = re.search(r"^#\s+(.+)$", current_body, re.MULTILINE) if current_body else None
+        existing_title = existing_title_match.group(1).strip() if existing_title_match else None
+
+        if mode == "replace":
+            new_body = description
+            # If caller's description doesn't open with its own heading, preserve the
+            # existing title (or fall back to the `name` arg, or a synthetic title).
+            if not re.match(r"^#\s+", new_body, re.MULTILINE):
+                title = name or existing_title or f"Task {task.get('id', 'unknown')}"
+                new_body = f"# {title}\n\n{new_body}"
+            task["body"] = new_body
+        elif mode == "prepend":
+            if not current_body:
+                task["body"] = description
+            else:
+                # Keep existing title at the top if we have one; splice the new text below it.
+                if existing_title_match:
+                    title_line = existing_title_match.group(0)
+                    rest = current_body[existing_title_match.end():].lstrip("\n")
+                    task["body"] = f"{title_line}\n\n{description}\n\n{rest}" if rest else f"{title_line}\n\n{description}"
+                else:
+                    task["body"] = f"{description}\n\n{current_body}"
+        else:  # append (default, backwards-compat)
+            if current_body and not re.match(r"^#\s+", current_body, re.MULTILINE):
+                title = name if name else f"Task {task.get('id', 'unknown')}"
+                current_body = f"# {title}\n\n{current_body}"
+            task["body"] = (current_body + "\n\n" + description) if current_body else description
 
     if args.get("status"):
         if args["status"] not in VALID_STATUSES:

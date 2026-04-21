@@ -14,8 +14,8 @@ from claude_agent_sdk import query, ClaudeAgentOptions
 
 os.environ["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8096"
 os.environ["ANTHROPIC_API_KEY"] = "no-key-required"
-os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION"] = "Qwen3.5-122B-A10B"
-os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = "Qwen 122B Local"
+os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION"] = "primary"
+os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = "Primary Local"
 
 
 async def main():
@@ -25,7 +25,7 @@ async def main():
     print()
 
     options = ClaudeAgentOptions(
-        model="Qwen3.5-122B-A10B",
+        model="primary",
         system_prompt="You are a helpful assistant.",
         allowed_tools=["Bash"],
         max_turns=2,

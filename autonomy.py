@@ -296,8 +296,8 @@ def _get_model_env(model_name: str) -> dict:
 # Autonomy tasks are background work — route them through the priority proxy
 # so interactive sessions preempt them in vLLM's scheduler.
 _BG_URL_MAP = {
-    "http://127.0.0.1:8096": "http://127.0.0.1:8097",  # 122B → proxy
-    "http://127.0.0.1:8091": "http://127.0.0.1:8093",  # 35B → proxy
+    "http://127.0.0.1:8096": "http://127.0.0.1:8097",  # primary → proxy
+    "http://127.0.0.1:8091": "http://127.0.0.1:8093",  # secondary → proxy
 }
 
 

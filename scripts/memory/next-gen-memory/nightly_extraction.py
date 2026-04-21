@@ -2,7 +2,7 @@
 """
 Nightly Deep Extraction - Next-Gen Memory System
 
-Runs at 2 AM PST with the 122B model for comprehensive extraction.
+Runs at 2 AM PST with the primary model for comprehensive extraction.
 """
 
 import argparse
@@ -76,10 +76,10 @@ from profile_generator import ProfileGenerator
 
 
 class NightlyExtraction:
-    """Nightly deep extraction with 122B model."""
-    
+    """Nightly deep extraction with primary model."""
+
     def __init__(self):
-        self.extractor = FactExtractor(model_port=8096)  # Uses 122B for deep extraction
+        self.extractor = FactExtractor(model_port=8096)  # Uses primary for deep extraction
         self.rel_generator = RelationsIndexGenerator()
         self.profile_generator = ProfileGenerator(model_port=8096)
         self.log_file = Path.home() / "lloyd" / "_pipeline" / "nightly-extraction.log"

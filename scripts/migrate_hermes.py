@@ -150,7 +150,7 @@ def migrate(dry_run: bool = False) -> None:
         best_file: Path | None = None
         best_count = -1
         best_dump_ts = ""
-        best_model = "Qwen3.5-122B-A10B"
+        best_model = "primary"
 
         for f in files:
             try:
@@ -171,7 +171,7 @@ def migrate(dry_run: bool = False) -> None:
         try:
             data = json.loads(best_file.read_text())
             raw_messages = data.get("request", {}).get("body", {}).get("messages", [])
-            model = data.get("request", {}).get("body", {}).get("model", "Qwen3.5-122B-A10B")
+            model = data.get("request", {}).get("body", {}).get("model", "primary")
             dump_ts = data.get("timestamp", "")
 
             created_at = session_id_to_iso(session_id)

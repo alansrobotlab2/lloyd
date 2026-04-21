@@ -2,7 +2,7 @@
 """
 Test 1: Basic query() with local Qwen model via ANTHROPIC_BASE_URL.
 
-Tests whether the Claude Agent SDK can route to our local 122B model
+Tests whether the Claude Agent SDK can route to our local primary model
 at 127.0.0.1:8096 using the OpenAI-compatible endpoint.
 """
 
@@ -16,18 +16,18 @@ from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, Result
 # ANTHROPIC_BASE_URL should NOT include /v1 — the SDK appends /v1/messages
 os.environ["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8096"
 os.environ["ANTHROPIC_API_KEY"] = "no-key-required"
-os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION"] = "Qwen3.5-122B-A10B"
-os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = "Qwen 122B Local"
+os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION"] = "primary"
+os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = "Primary Local"
 
 
 async def main():
     print("=" * 60)
-    print("Test 1: Basic query() with local Qwen 122B")
+    print("Test 1: Basic query() with local primary")
     print("=" * 60)
     print()
 
     options = ClaudeAgentOptions(
-        model="Qwen3.5-122B-A10B",
+        model="primary",
         system_prompt="You are a helpful assistant. Respond concisely.",
         max_turns=1,
         permission_mode="bypassPermissions",

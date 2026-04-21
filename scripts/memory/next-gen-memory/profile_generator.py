@@ -4,7 +4,7 @@ Entity Overview Generator — Next-Gen Memory System
 
 Generates a `{entity}-overview.md` file for each entity in ~/obsidian/facts/,
 containing a one-line definition (frontmatter) and a synthesized summary
-(markdown body). Uses the local 122B model and, for non-personal entities,
+(markdown body). Uses the local primary model and, for non-personal entities,
 augments the prompt with DuckDuckGo search snippets.
 
 Note: filename uses `-overview.md` (not `-profile.md`) because `profile` is
