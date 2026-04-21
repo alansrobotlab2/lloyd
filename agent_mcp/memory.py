@@ -356,20 +356,27 @@ def _qmd_post(payload: dict) -> list:
 
 
 def _qmd_daemon_search(query: str, limit: int, collections: list,
-                      skip_rerank: bool = False) -> Optional[list]:
+                      skip_rerank: bool = True) -> Optional[list]:
     """Send a hybrid lex+vec query to the qmd daemon.
 
-    Phase cost (post 2026-04-20 patches, 141K vectors, 12 collections):
+    Phase cost (post 2026-04-20 binary-quantization patch, 157K vectors, 12 colls):
       lex       ~15ms   (BM25 FTS5)
       embed      ~5ms   (cached) / ~20ms cold
-      vec      ~240ms   (sqlite-vec brute-force KNN — hard floor)
+      vec       ~80ms   (sqlite-vec bit-KNN + blob rescore)
       chunk      ~0ms   (skipped when skip_rerank=True)
-      rerank   300-900ms on novel queries (Qwen3-reranker, ~25-40ms per chunk)
+      rerank   500-750ms on novel queries (Qwen3-reranker, batched cross-encode)
                ~1ms on cache hit
 
-    skip_rerank=True drops total to ~250-300ms warm — use for latency-critical
-    paths like prefetch. Leave False for quality-critical paths (explicit
-    vault_recall) where reranker value outweighs the latency cost.
+    DEFAULT: skip_rerank=True (~100ms warm end-to-end).
+
+    Evidence (2026-04-20 bench, 15 novel queries): the reranker never changes
+    the #1 result, shuffles ~1-3 of positions 2-5 on ~67% of queries, and
+    never surfaces anything outside the RRF top-20 candidate pool. 500ms for
+    a within-top-5 reorder is not worth the latency tax — especially when the
+    downstream consumer (LLM context) reads all 5 anyway.
+
+    Pass skip_rerank=False explicitly only when ordering within the top-5
+    matters for a human scanning results.
     """
     query = _qmd_sanitize(query)
     if not query:
