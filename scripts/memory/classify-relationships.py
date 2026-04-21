@@ -77,30 +77,39 @@ SYSTEM_PROMPT = (
 USER_PROMPT_TEMPLATE = """Classify the strongest semantic relationship from SOURCE to TARGET.
 
 Vocabulary (pick ONE; definitions are directional: SOURCE [verb] TARGET):
-- uses: SOURCE actively uses, invokes, or leverages TARGET as a tool/library/service.
-- depends_on: SOURCE cannot function without TARGET (stronger than "uses").
-- implements: SOURCE is an implementation, realization, or instance of TARGET.
-- supersedes: SOURCE replaces or obsoletes TARGET.
-- part_of: SOURCE is a subsystem or component inside TARGET.
-- created_by: SOURCE was created, built, authored, or operated by TARGET.
-- discusses: SOURCE is a document/note/conversation that describes or analyzes TARGET as its subject.
-- competes_with: SOURCE and TARGET are alternatives for the same purpose.
-- related_to: Semantically connected but none of the above fits clearly.
-- mentions: TARGET appears only incidentally in SOURCE's text; no strong semantic link.
+- uses: SOURCE actively invokes, calls, or leverages TARGET as a tool/library/service to accomplish its function.
+    YES: "Lloyd uses Claude Code" (Lloyd spawns claude CLI).
+    NO:  "SOURCE writes output to a path inside TARGET" — storage location is not usage.
+- depends_on: SOURCE cannot function without TARGET (stronger than "uses"). Explicit runtime or build dependency.
+- implements: SOURCE is a concrete realization or instance of TARGET's spec/interface/concept.
+    NO:  Do NOT use when SOURCE and TARGET appear to be aliases or alternate names for the same thing — use "related_to" instead.
+- supersedes: SOURCE explicitly REPLACES, OBSOLETES, or is the successor to TARGET as a temporal replacement.
+    REQUIRED: the evidence must contain language like "replaces", "obsoletes", "deprecated by", "successor to", "new version of", or "takes over from".
+    NO:  "modernizes", "manages", "reduces dependency on", "integrates with", "is compatible with" — these are NOT supersedes.
+    NO:  Entity-name confusion (e.g., SOURCE supersedes a different-named TARGET that's actually the same product family but unrelated).
+- part_of: SOURCE is a subsystem, component, sub-task, or sub-folder INSIDE TARGET.
+    Direction check: if the evidence says TARGET contains/includes SOURCE, emit part_of. If SOURCE contains TARGET, the direction is reversed — emit "mentions" instead of flipping the verb.
+- created_by: SOURCE was built, authored, or produced by TARGET (TARGET is the creator/author/company).
+    YES: "LangGraph → LangChain" (company created the framework).
+    NO:  "Roman → Author" — 'Author' is a role, not an entity that created Roman. Use "related_to" for role/is-a relations.
+    NO:  "Lloyd → extract-transcript.py" — if Lloyd created the script, the direction is reversed; emit "mentions".
+- discusses: SOURCE is a document/note/paper/conversation whose subject is TARGET.
+- competes_with: SOURCE and TARGET are ALTERNATIVE solutions for the same purpose or use-case.
+    NO:  A product and its maker (e.g., "Claude competes_with Anthropic" — Claude IS Anthropic's product; use "created_by" in reversed direction or "mentions").
+    NO:  Unrelated entities that happen to co-occur in text.
+- related_to: Semantically connected but none of the above fits clearly. Use for is-a/role relations, aliases, ambiguous-direction, or unusual pairings.
+- mentions: TARGET appears only incidentally in SOURCE's text; no strong semantic link. Also use when direction is reversed for an asymmetric relation.
 
 Return strict JSON with no prose, no markdown:
 {{"type": "<one of the vocabulary>", "confidence": <0.0-1.0>, "reason": "<8-25 words>"}}
 
 Rules:
-- Pick the MOST SPECIFIC type that fits. Only use "mentions" if nothing stronger applies.
-- Direction matters. If the relation runs target→source instead, use "mentions".
+- **Direction check FIRST.** For asymmetric verbs (uses, created_by, part_of, implements, supersedes), confirm the relation runs SOURCE→TARGET before emitting the verb. If the evidence describes TARGET acting on SOURCE (or containing SOURCE), return "mentions" rather than emitting the verb with reversed direction. Do not rely on surface word order in the context.
+- Pick the MOST SPECIFIC type that fits. Only use "mentions" if nothing stronger applies OR direction is wrong.
 - Confidence 0.9+ only when the evidence is explicit. 0.5-0.8 for inferred. <0.5 for weak.
-- If CONTEXT is labeled "(reverse direction: ...)", flip your reasoning: the text
-  comes from TARGET mentioning SOURCE. If the relation still runs source→target,
-  emit that type; otherwise return "mentions" with low confidence.
-- If CONTEXT says "no fact text available", classify from entity names alone with
-  confidence ≤ 0.4 — prefer "mentions" or "related_to" over stronger types.
-- Reason must cite what in the context supports the choice (one sentence).
+- If CONTEXT is labeled "(reverse direction: ...)", the text is from TARGET mentioning SOURCE. Re-verify direction carefully; if you can't confirm SOURCE→TARGET, emit "mentions".
+- If CONTEXT says "no fact text available", classify from entity names alone with confidence ≤ 0.4 — prefer "mentions" or "related_to" over stronger types.
+- Reason must cite what in the context supports the choice AND explicitly name SOURCE and TARGET to verify direction (one sentence, 8-25 words).
 
 SOURCE: {source}
 TARGET: {target}
@@ -370,17 +379,36 @@ def main() -> int:
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     p.add_argument("--all-types", action="store_true", help="Classify all edges, not just 'mentions'")
+    p.add_argument(
+        "--only-types",
+        default=None,
+        help="Comma-separated list of current edge types to classify (e.g., 'created_by,supersedes'). "
+             "Overrides default mentions-only filter. Mutually exclusive with --all-types.",
+    )
     p.add_argument("--max-ctx-chars", type=int, default=DEFAULT_MAX_CTX_CHARS)
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC)
     args = p.parse_args()
 
+    if args.all_types and args.only_types:
+        print("[error] --all-types and --only-types are mutually exclusive", file=sys.stderr)
+        return 2
+
     data = _load_relationships()
     all_edges = data.get("edges", [])
-    if args.all_types:
+    if args.only_types:
+        only_set = {t.strip() for t in args.only_types.split(",") if t.strip()}
+        unknown = only_set - set(VOCABULARY)
+        if unknown:
+            print(f"[error] --only-types contains unknown types: {sorted(unknown)}", file=sys.stderr)
+            return 2
+        candidates = [e for e in all_edges if not e.get("expired_at") and e.get("type") in only_set]
+        print(f"[info] {len(candidates)} candidate edges (only_types={sorted(only_set)})")
+    elif args.all_types:
         candidates = [e for e in all_edges if not e.get("expired_at")]
+        print(f"[info] {len(candidates)} candidate edges (all_types=True)")
     else:
         candidates = [e for e in all_edges if not e.get("expired_at") and e.get("type") == "mentions"]
-    print(f"[info] {len(candidates)} candidate edges (all_types={args.all_types})")
+        print(f"[info] {len(candidates)} candidate edges (mentions only)")
 
     seen = _already_classified(args.output) if not args.dry_run else set()
     if seen:

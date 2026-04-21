@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
-import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench, Square } from 'lucide-react'
+import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench, Square, Sparkles } from 'lucide-react'
 import { marked } from 'marked'
 import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState } from '../api'
 
@@ -58,10 +58,11 @@ const MessageRow = memo(function MessageRow({
   const hasContent = msg.content?.some(c => c.text?.trim())
   if (!hasContent) return null
 
-  // Hide tool messages when details hidden, but always show error messages
+  // Hide tool/subliminal messages when details hidden, but always show error messages
   const isError = msg.role === 'tool' && msg.content?.some(c => c.text?.startsWith('Error:'))
   const hideToolMessage = !showAgentDetails && msg.role === 'tool' && !isError
-  if (hideToolMessage) return null
+  const hideSubliminal = !showAgentDetails && msg.role === 'subliminal'
+  if (hideToolMessage || hideSubliminal) return null
 
   const textJoined = useMemo(
     () => msg.content.map(c => c.text).join('\n'),
@@ -70,7 +71,7 @@ const MessageRow = memo(function MessageRow({
 
   // Parse markdown once per text change, not every render
   const parsedHtml = useMemo(() => {
-    if (msg.role === 'tool') return '' // tool renders as pre, no markdown
+    if (msg.role === 'tool' || msg.role === 'subliminal') return '' // render as pre, no markdown
     return marked.parse(textJoined) as string
   }, [textJoined, msg.role])
 
@@ -80,6 +81,8 @@ const MessageRow = memo(function MessageRow({
         <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
           {msg.role === 'tool'
             ? <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Wrench className="w-3.5 h-3.5 text-slate-400" /></div>
+            : msg.role === 'subliminal'
+            ? <div className="w-full h-full bg-purple-900/40 flex items-center justify-center"><Sparkles className="w-3.5 h-3.5 text-purple-300" /></div>
             : <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
           }
         </div>
@@ -87,12 +90,14 @@ const MessageRow = memo(function MessageRow({
       <div className={`max-w-[80%] ${msg.role === 'user' ? 'min-w-0' : 'flex-1 min-w-0'}`}>
         <div
           className={`rounded-xl ${
-            msg.role === 'tool' ? 'px-2.5 py-1.5' : 'px-3.5 py-2.5'
+            msg.role === 'tool' || msg.role === 'subliminal' ? 'px-2.5 py-1.5' : 'px-3.5 py-2.5'
           } ${
             msg.role === 'user'
               ? 'bg-brand-600/30 border border-brand-500/40 text-white'
               : msg.role === 'tool'
               ? 'bg-slate-800/40 border border-slate-600/30 text-slate-200'
+              : msg.role === 'subliminal'
+              ? 'bg-purple-950/30 border border-purple-500/20 text-slate-200'
               : 'bg-surface-2 border border-surface-3/50 text-slate-200'
           }`}
         >
@@ -153,6 +158,38 @@ const MessageRow = memo(function MessageRow({
                         {responseText || '⏳ Running...'}
                       </pre>
                     </div>
+                  </div>
+                </details>
+              )
+            })() : msg.role === 'subliminal' ? (() => {
+              // Subliminal rendering — ephemeral context injected into the
+              // SDK prompt but not part of the conversation. Mirrors the
+              // tool renderer shape; metadata comes from msg.subliminal.
+              const subl = msg.subliminal
+              const kind = subl?.kind || 'other'
+              const sources = subl?.sources || []
+              const chars = subl?.chars ?? textJoined.length
+              return (
+                <details className="group">
+                  <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs text-purple-400/80 hover:text-purple-300 transition-colors">
+                    <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform shrink-0" />
+                    <Sparkles className="w-3 h-3 shrink-0" />
+                    <span className="font-semibold uppercase tracking-wide">Subliminal</span>
+                    <span className="font-mono font-normal text-purple-500/80">{kind}</span>
+                    {sources.length > 0 && (
+                      <span className="font-mono font-normal text-slate-500 truncate">
+                        {sources.join(', ')}
+                      </span>
+                    )}
+                    <span className="font-mono font-normal text-slate-600 ml-auto">
+                      {chars.toLocaleString()} chars
+                    </span>
+                  </summary>
+                  <div className="mt-2">
+                    <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Injected context</div>
+                    <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">
+                      {textJoined}
+                    </pre>
                   </div>
                 </details>
               )
