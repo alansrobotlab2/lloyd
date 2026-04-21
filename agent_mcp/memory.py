@@ -302,19 +302,157 @@ def _get_facts_sync(entity: str, category: str = None, as_of: str = None,
     return {"entity": resolved, "category": category, "facts": facts}
 
 
+# Task-ID extractor. Matches "Task #299", "Task 299", "#299", "task_310",
+# "backlog_120", "backlog_item_18", "backlog_task_41". Captures the numeric
+# ID so we can dispatch to whichever naming convention exists.
+_TASK_ID_RE = re.compile(
+    r"(?:\btask\s*[#_ ]?|#|\bbacklog[_ -]?(?:item[_ -]?|task[_ -]?)?)(\d{1,4})\b",
+    re.IGNORECASE,
+)
+
+# Scoring stopwords — broader than _ENTITY_STOPWORDS. "task" and "backlog" as
+# bare tokens are noise for the scorer (the task-ID regex handles numeric
+# references explicitly).
+_SCORING_STOPWORDS = _ENTITY_STOPWORDS | {
+    "task", "backlog", "item", "issue", "ticket",
+}
+
+# Cache for entity degree (non-expired edge count) — used as a deterministic
+# tie-break signal in _extract_entities_from_query. 60s TTL keeps the hot
+# prefetch path fast without going fully stale.
+_edge_count_cache: Optional[tuple] = None
+_EDGE_COUNT_TTL = 60
+
+
+def _get_entity_edge_counts() -> dict:
+    global _edge_count_cache
+    now = time.monotonic()
+    if _edge_count_cache is not None and (now - _edge_count_cache[0]) < _EDGE_COUNT_TTL:
+        return _edge_count_cache[1]
+    counts: dict[str, int] = {}
+    rel_path = FACTS_ROOT / "_relationships.json"
+    if rel_path.exists():
+        try:
+            data = json.loads(rel_path.read_text(encoding="utf-8"))
+            for edge in data.get("edges", []):
+                if edge.get("expired_at") or edge.get("invalid_at"):
+                    continue
+                s, t = edge.get("source"), edge.get("target")
+                if s:
+                    counts[s] = counts.get(s, 0) + 1
+                if t:
+                    counts[t] = counts.get(t, 0) + 1
+        except Exception:
+            pass
+    _edge_count_cache = (now, counts)
+    return counts
+
+
 def _extract_entities_from_query(query: str) -> list:
+    """Rank known entities by how well they match the query.
+
+    Prior implementation (pre-#312) scored binary 2-or-3 with tie-breaks
+    resolved by arbitrary dict iteration order. With FACT_MAX_ENTITIES=2
+    downstream that meant legitimate entities got dropped on ties. Trace
+    evidence from #306 showed ~50% weak-match rate — e.g. "deep dive into
+    299" grabbed `Deep Agent` over a (missing) `Task #299`, and "classifier
+    prompt tweaks" grabbed `Fact Extraction 2B Model`.
+
+    New scoring:
+      - Task-ID references (#299, backlog_18, task_310) dispatch to canonical
+        `Task #N` / legacy forms with a fixed high score.
+      - Full-name substring (entity name appears verbatim in query) gets a
+        strong bonus scaled by length.
+      - Token overlap is scored (overlap^2) / (entity_tokens * query_tokens)
+        so 1-token matches on multi-token entities don't win.
+      - Ties broken deterministically: score → longer canonical → higher
+        graph degree → alphabetical.
+    """
     if not FACTS_ROOT.exists():
         return []
-    query_words = {w for w in re.findall(r"\b\w+\b", query.lower()) if w not in _ENTITY_STOPWORDS and len(w) >= 2}
-    matches = []
-    for entity in _get_entity_dirs_cached():
-        entity_words = {w for w in re.findall(r"\b\w+\b", entity.lower())} - _ENTITY_STOPWORDS
-        if entity.lower() in query_words:
-            matches.append((entity, 3))
-        elif entity_words & query_words:
-            matches.append((entity, 2))
-    matches.sort(key=lambda x: -x[1])
-    return matches
+
+    q_lower = query.lower()
+    q_tokens = {
+        w for w in re.findall(r"\b\w+\b", q_lower)
+        if w not in _SCORING_STOPWORDS and len(w) >= 2
+    }
+
+    entities = _get_entity_dirs_cached()
+    entity_lookup = {e.lower(): e for e in entities}
+
+    scores: dict[str, float] = {}
+
+    def _bump(name: str, score: float) -> None:
+        # Resolve to canonical case if we have a directory for it.
+        canonical = entity_lookup.get(name.lower(), name)
+        if scores.get(canonical, 0.0) < score:
+            scores[canonical] = score
+
+    # 1. Task-ID direct dispatch (highest-priority signal).
+    for m in _TASK_ID_RE.finditer(q_lower):
+        tid = m.group(1)
+        # Try every known naming convention in the vault.
+        for candidate in (
+            f"Task #{tid}", f"Task {tid}", f"Task_{tid}",
+            f"backlog_{tid}", f"backlog_item_{tid}", f"backlog_task_{tid}",
+            tid,
+        ):
+            hit = entity_lookup.get(candidate.lower())
+            if hit:
+                _bump(hit, 10.0)
+
+    # 2. Full-name match at word boundaries (entity appears verbatim in
+    #    query as a whole word / phrase, not as a substring of a larger
+    #    token — "dee" inside "deep" must not match "Dee").
+    for e_lower, e_cased in entity_lookup.items():
+        if len(e_lower) < 3:
+            continue
+        if re.search(r"(?<!\w)" + re.escape(e_lower) + r"(?!\w)", q_lower):
+            _bump(e_cased, 5.0 + min(len(e_lower) / 20.0, 2.0))
+
+    # 3. Token-overlap scoring. Reward specificity on both sides.
+    if q_tokens:
+        q_norm = max(len(q_tokens), 2)
+        for e_lower, e_cased in entity_lookup.items():
+            e_tokens = {
+                w for w in re.findall(r"\b\w+\b", e_lower)
+                if w not in _SCORING_STOPWORDS and len(w) >= 2
+            }
+            if not e_tokens:
+                continue
+            overlap = e_tokens & q_tokens
+            if not overlap:
+                continue
+            # Quadratic reward for multi-token matches; normalized by both
+            # sides so a single common token against a huge query doesn't
+            # bubble up.
+            score = (len(overlap) ** 2) / (len(e_tokens) * q_norm)
+            # Floor: single-token entity exactly matched to a query token is
+            # legitimate (e.g. query "prefetch" ↔ entity "prefetch").
+            if len(e_tokens) == 1 and len(overlap) == 1:
+                score = max(score, 0.5)
+            if score >= 0.25:
+                _bump(e_cased, score)
+
+    if not scores:
+        return []
+
+    # Deterministic tie-break: score desc → longer canonical → higher graph
+    # degree → alphabetical. Longer canonical first deliberately prefers
+    # specific entities ("Lloyd Agent") over generic parents ("Lloyd") when
+    # all else is equal — the specific one usually carries more relevant
+    # facts for a query that mentioned it.
+    edge_counts = _get_entity_edge_counts()
+    ranked = sorted(
+        scores.items(),
+        key=lambda kv: (
+            -kv[1],
+            -len(kv[0]),
+            -edge_counts.get(kv[0], 0),
+            kv[0].lower(),
+        ),
+    )
+    return ranked
 
 
 def _detect_contradictions_sync(entity: str, category: str = None) -> dict:

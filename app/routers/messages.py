@@ -88,6 +88,7 @@ _SUBLIMINAL_KINDS = (
 _SUBLIMINAL_SOURCE_TAGS = (
     ("ambient",  "<ambient-signals>"),
     ("skills",   "<skill "),
+    ("backlog",  "<backlog-refs>"),
     ("facts",    "<facts>"),
     ("vault",    "<vault-context>"),
     ("sessions", "<recent-sessions>"),
