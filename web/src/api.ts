@@ -23,7 +23,7 @@ export interface QueueState {
 
 export interface MessageEntry {
   id: string
-  role: 'user' | 'assistant' | 'tool'
+  role: 'user' | 'assistant' | 'tool' | 'subliminal'
   content: Array<{ type: 'text'; text: string }>
   timestamp: string
   session_key?: string
@@ -41,6 +41,15 @@ export interface MessageEntry {
     }
   }>
   tool_call_id?: string
+  // #306: ephemeral context injection captured per turn (prefetch block,
+  // ambient envelope, or 20-turn memory-preservation nudge). Only present
+  // when role === 'subliminal'.
+  subliminal?: {
+    kind: 'prefetch' | 'ambient_envelope' | 'memory_nudge' | 'other'
+    sources: string[]
+    chars: number
+    turn_id: string
+  }
 }
 
 export interface Session {

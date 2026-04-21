@@ -512,8 +512,9 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
                     merged[fpath] = r
         all_raw = sorted(merged.values(), key=lambda x: float(x.get("score", 0)), reverse=True)
 
-    if not all_raw:
-        all_raw = _qmd_subprocess_search(query, max_results, coll_list)
+    # Subprocess fallback removed 2026-04-20 — see note in _do_search above
+    # (_vault_recall). Empty daemon result means no hits, not "try the slow
+    # cold-start CLI subprocess for 30s."
 
     # Parse results
     parsed = []
@@ -1097,9 +1098,13 @@ def _vault_recall(params: dict) -> str:
         weighted_neighbors = _graph_weighted_neighbors(seed_entities, top_k=5, hops=1)
 
     def _do_search():
+        # Daemon is the only search path. Subprocess fallback was removed
+        # 2026-04-20: on daemon failure the CLI subprocess hits the same
+        # broken state, then eats 30s (timeout=30 in _qmd_subprocess_search)
+        # before returning empty. 4/20 benchmark queries were pinned at 30s
+        # entirely due to this path. Daemon-down + return-empty is strictly
+        # better than daemon-down + 30s-wait + empty.
         result = _qmd_daemon_search(query, limit, VAULT_SEGMENTS)
-        if result is None:
-            result = _qmd_subprocess_search(query, limit, VAULT_SEGMENTS)
         return result or []
 
     def _do_facts():
