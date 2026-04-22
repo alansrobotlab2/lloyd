@@ -1238,6 +1238,82 @@ def _graph_weighted_neighbors(
     return ranked[:top_k]
 
 
+# ── Fact ranking (Fix A+C for #322) ─────────────────────────────────────────
+# God-node threshold: entities with more than this many facts are treated as
+# buckets of loosely-related debris. A query-token match is required to pull
+# any of their facts. Tuned on Phase 1B benchmark: lloyd=2149, agent=181,
+# system=103, so threshold ~50 filters out catch-all entities while letting
+# normal entities (typical <20 facts) through untouched.
+FACT_GODNODE_THRESHOLD = 50
+
+# How many ranked facts to return from seed entities and from graph-expanded
+# neighbors respectively. Previously 3 per entity (so 5 entities × 3 = 15
+# unranked). Now a ranked pool capped at these totals.
+FACT_RANK_CAP_SEED = 10
+FACT_RANK_CAP_GRAPH = 5
+
+# Stopwords for query tokenization — question words, auxiliaries, common
+# function words. Kept lightweight; aggressive stopword removal hurts when
+# the query itself is short ("how does fact_path work").
+_FACT_QUERY_STOPWORDS = frozenset({
+    "what", "how", "when", "where", "why", "who", "which",
+    "the", "and", "for", "with", "from", "into", "over", "under",
+    "does", "did", "do", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "can", "could", "will", "would", "should", "may",
+    "might", "must", "shall",
+    "this", "that", "these", "those", "it", "its", "them", "they", "their",
+    "our", "ours", "my", "mine", "your", "yours", "his", "her", "hers",
+    "we", "you", "us", "me", "i",
+    "about", "also", "just", "than", "then", "there", "here", "through",
+    "during", "between", "among", "across", "within", "without", "after",
+    "before", "while", "until", "since",
+    "of", "in", "on", "to", "at", "by", "as", "or", "nor", "not", "so",
+    "if", "else", "but", "yet", "though", "although",
+    "tell", "show", "explain", "describe", "walk", "give", "get", "use",
+    "using", "used", "make", "made", "see", "seen", "know", "need",
+})
+
+
+def _fact_query_tokens(query: str) -> list[str]:
+    """Extract scorable tokens from the query. Lowercased, length-3+,
+    stopwords stripped. Preserves identifier-like tokens (with _, -, #)."""
+    if not query:
+        return []
+    raw = re.findall(r"[A-Za-z0-9_#-]+", query.lower())
+    return [t for t in raw if len(t) >= 3 and t not in _FACT_QUERY_STOPWORDS]
+
+
+def _fact_blob(fact: dict) -> str:
+    """Flatten a fact into searchable lowercased text. Mirrors the benchmark
+    scorer in `_pipeline/memory-graph/run_benchmark.py::_fact_text` so our
+    ranking is scoring the same field set that gets judged."""
+    parts = []
+    for key in ("fact", "category", "provenance", "event_date"):
+        val = fact.get(key)
+        if val:
+            parts.append(str(val))
+    return " ".join(parts).lower()
+
+
+def _fact_matches_tokens(fact: dict, tokens: list[str]) -> bool:
+    """True if any query token appears in the fact's searchable text."""
+    if not tokens:
+        return False
+    blob = _fact_blob(fact)
+    return any(t in blob for t in tokens)
+
+
+def _fact_score(fact: dict, tokens: list[str]) -> float:
+    """Fraction of query tokens that appear in the fact's searchable text.
+    Returns 0.0 if tokens is empty (preserves confidence-tiebreak as the
+    signal for contentless queries)."""
+    if not tokens:
+        return 0.0
+    blob = _fact_blob(fact)
+    hits = sum(1 for t in tokens if t in blob)
+    return hits / len(tokens)
+
+
 def _vault_recall(params: dict) -> str:
     query = params.get("query", "").strip()
     if not query:
@@ -1271,28 +1347,58 @@ def _vault_recall(params: dict) -> str:
     def _do_facts():
         if not include_facts:
             return [], []
-        facts = []
-        for entity in seed_entities:
-            try:
-                entity_data = _get_facts_sync(entity)
-                if entity_data.get("facts"):
-                    top = sorted(entity_data["facts"], key=lambda f: f.get("confidence", 0.5), reverse=True)
-                    facts.extend(top[:3])
-            except Exception:
-                pass
-        # Graph expansion: also fetch top facts from weighted neighbors.
-        # Neighbors are already sorted by edge_weight × confidence desc, so
-        # stronger semantic ties surface first.
-        graph_facts = []
-        if expand_graph and weighted_neighbors:
-            for entity, _w in weighted_neighbors[:5]:
+        # Query-aware fact ranking (Fix A, #322).
+        # Old behavior: top-3-by-confidence per seed entity. Confidence is
+        # ~1.0 for most STATED facts so ties resolved by insertion order,
+        # returning effectively-random facts unrelated to the query.
+        # New behavior: pull all facts from each seed entity, rank the whole
+        # pool by keyword-overlap with the query, tie-break on confidence,
+        # return top N overall. Matches the benchmark's substring-based
+        # fact_hit_rate scoring.
+        qtoks = _fact_query_tokens(query)
+
+        def _collect(entity_names: list[str], godnode_threshold: int) -> list[dict]:
+            """Pull facts from entities, applying god-node guardrail (Fix C)."""
+            out: list[dict] = []
+            for ent in entity_names:
                 try:
-                    entity_data = _get_facts_sync(entity)
-                    if entity_data.get("facts"):
-                        top = sorted(entity_data["facts"], key=lambda f: f.get("confidence", 0.5), reverse=True)
-                        graph_facts.extend(top[:2])
+                    entity_data = _get_facts_sync(ent)
                 except Exception:
-                    pass
+                    continue
+                ef = entity_data.get("facts") or []
+                if not ef:
+                    continue
+                # Fix C: god-nodes (>threshold facts) dump unrelated debris
+                # into the pool. Require a query-token match to include any
+                # of their facts; skip the entity if nothing matches.
+                if len(ef) > godnode_threshold and qtoks:
+                    kept = [f for f in ef if _fact_matches_tokens(f, qtoks)]
+                    if not kept:
+                        continue
+                    ef = kept
+                out.extend(ef)
+            return out
+
+        def _rank(candidates: list[dict], cap: int) -> list[dict]:
+            if not candidates:
+                return []
+            scored = [
+                (_fact_score(f, qtoks), float(f.get("confidence", 0.5)), idx, f)
+                for idx, f in enumerate(candidates)
+            ]
+            # Sort: score desc, confidence desc, insertion idx asc (stable)
+            scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
+            return [f for _s, _c, _i, f in scored[:cap]]
+
+        seed_pool = _collect(seed_entities, FACT_GODNODE_THRESHOLD)
+        facts = _rank(seed_pool, FACT_RANK_CAP_SEED)
+
+        graph_facts: list[dict] = []
+        if expand_graph and weighted_neighbors:
+            neighbor_names = [e for e, _w in weighted_neighbors[:5]]
+            graph_pool = _collect(neighbor_names, FACT_GODNODE_THRESHOLD)
+            graph_facts = _rank(graph_pool, FACT_RANK_CAP_GRAPH)
+
         return facts, graph_facts
 
     try:
@@ -1319,7 +1425,10 @@ def _vault_recall(params: dict) -> str:
             result["graph_neighbors_used"] = [
                 {"entity": e, "weight": round(w, 3)} for e, w in weighted_neighbors
             ]
-        return json.dumps(result)
+        # default=str handles datetime event_date values that slipped
+        # through YAML parsing as native objects (pre-existing data issue
+        # in ~/obsidian/facts/, surfaced by #322 returning more facts).
+        return json.dumps(result, default=str)
     except Exception as exc:
         return json.dumps({"error": str(exc), "documents": [], "facts": []})
 
