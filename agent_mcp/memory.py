@@ -96,6 +96,32 @@ _ENTITY_STOPWORDS = {
     "we", "they", "what", "which", "who", "how", "when", "where", "why",
 }
 
+# Query-phrasing stopwords (#327) — superset of _ENTITY_STOPWORDS used ONLY
+# by _qmd_strip_stopwords to clean natural-language question framing
+# ("walk me through…", "tell me about…") from the FTS5 lex leg of qmd hybrid
+# search. Questions like q16 ("How does the content hasher enable incremental
+# nightly extraction?") under the narrower _ENTITY_STOPWORDS still leak
+# "enable" / "me" / "walk" / "tell" through to BM25, where high-frequency
+# unmarked verbs dilute rank for the distinctive noun phrases.
+#
+# DO NOT use this for entity scoring, fact ranking, or anywhere a short
+# query token could be a legitimate match target. Narrowly scoped to
+# qmd lex cleanup.
+_QUERY_STOPWORDS = _ENTITY_STOPWORDS | {
+    # Conversational pronouns / self-reference
+    "me", "us", "our", "ours", "my", "mine", "your", "yours",
+    "myself", "yourself", "ourselves", "them", "their", "theirs",
+    # Question-framing verbs (content-empty when used as prefix/filler)
+    "walk", "tell", "show", "describe", "explain", "let", "lets",
+    "give", "ask", "share", "summarize",
+    # Discourse fillers / intensifiers
+    "just", "also", "really", "actually", "basically", "pretty",
+    "please", "kindly", "maybe", "probably", "perhaps",
+    # NOTE deliberately NOT stripped — can be meaningful in architectural
+    # content: enable, handle, return, work, function, operate, build,
+    # ship, shipped, run, start, stop, fail, failed.
+}
+
 CONSOLIDATION_SYSTEM_PROMPT = (
     "You are a memory consolidation engine. Your job is to take raw search results "
     "from a knowledge vault and produce a concise, deduplicated, well-structured "
@@ -497,7 +523,14 @@ def _qmd_sanitize(query: str) -> str:
 
 
 def _qmd_strip_stopwords(query: str) -> str:
-    words = [w for w in re.findall(r"\b\w+\b", query.lower()) if w not in _ENTITY_STOPWORDS and len(w) >= 2]
+    """Strip stopwords from the FTS5 lex-leg query.
+
+    Uses the wider _QUERY_STOPWORDS (see #327) rather than _ENTITY_STOPWORDS
+    so natural-language question framing gets fully removed from BM25 signal.
+    Fall-through to the original query if everything strips — protects short
+    all-stopword inputs ("what is it?") from becoming empty.
+    """
+    words = [w for w in re.findall(r"\b\w+\b", query.lower()) if w not in _QUERY_STOPWORDS and len(w) >= 2]
     return " ".join(words) if words else query
 
 
