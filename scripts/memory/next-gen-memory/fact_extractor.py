@@ -14,6 +14,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# Shared entity normalization (case-insensitive alias resolution + self-register).
+# The facts tree uses ~/obsidian/facts/_aliases.json as the source of truth;
+# without normalization, writers accumulate duplicate dirs (gr00t/ + GR00T/).
+_LLOYD_ROOT = Path(__file__).resolve().parents[3]
+if str(_LLOYD_ROOT) not in sys.path:
+    sys.path.insert(0, str(_LLOYD_ROOT))
+try:
+    from app.entity_naming import normalize_and_register as _entity_normalize
+except Exception:
+    def _entity_normalize(name: str) -> str:  # fallback: pass-through
+        return name
+
 # Try to import yaml, provide fallback if not available
 try:
     import yaml
@@ -230,7 +242,13 @@ class FactExtractor:
         return ""
     
     def _sanitize_entity(self, entity: str) -> str:
-        """Sanitize entity name to prevent nested path creation."""
+        """Sanitize entity name and resolve to canonical form.
+
+        Sanitization strips path characters; after that we run it through
+        the alias map so casing/punct variants collapse to the existing
+        canonical (gr00t → GR00T). Unknown names are registered as
+        self-identity so the next writer sees the same canonical.
+        """
         if not entity:
             return "general"
         # Take last path component if slashes present
@@ -239,7 +257,10 @@ class FactExtractor:
         entity = re.sub(r'[<>:"|?*]', '', entity)
         # Collapse whitespace
         entity = re.sub(r'\s+', ' ', entity).strip()
-        return entity if entity else "general"
+        if not entity:
+            return "general"
+        # Alias-resolve + self-register. Safe on unknowns (pass-through).
+        return _entity_normalize(entity)
     
     def write_fact_file(self, entity: str, category: str, facts_data: dict) -> Path:
         """Write or update a fact file."""

@@ -45,7 +45,7 @@ from typing import Any
 
 FACTS_ROOT = Path.home() / "obsidian" / "facts"
 REL_PATH = FACTS_ROOT / "_relationships.json"
-ALIASES_PATH = FACTS_ROOT / "entity-aliases.json"  # matches agent_mcp/memory.py
+ALIASES_PATH = FACTS_ROOT / "_aliases.json"  # unified source of truth (2026-04-21)
 OUT_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
 
 # ── Normalization ────────────────────────────────────────────────────────────

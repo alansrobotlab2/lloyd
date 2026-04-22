@@ -11,14 +11,51 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import psutil
+
 from workers.queue import WorkQueue, QueueItem, get_queue, new_run_id
 
 logger = logging.getLogger("lloyd-workers.pool")
+
+# Fallback when a source has no max_duration_seconds in config.
+_DEFAULT_MAX_DURATION_SECONDS = 900
+
+
+def _kill_sdk_subproc_since(started_wall: float, worker_id: str) -> int:
+    """Kill any bundled-claude child of this backend created at/after
+    `started_wall`. Used on timeout: `source.execute` runs the SDK inside a
+    `run_in_executor` thread, so `asyncio.wait_for` can cancel the future
+    but cannot interrupt the blocking thread — we have to reach in and kill
+    the SDK CLI subprocess so the thread unblocks. Narrow window (start ±
+    0.5s grace) avoids killing a neighboring worker's live subprocess.
+    """
+    killed = 0
+    try:
+        me = psutil.Process(os.getpid())
+        children = me.children(recursive=False)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return 0
+    for child in children:
+        try:
+            if "claude" not in child.name():
+                continue
+            if child.create_time() < started_wall - 0.5:
+                continue
+            child.kill()
+            killed += 1
+            logger.warning(
+                "[%s] killed SDK subprocess pid=%d (created %.1fs after worker start)",
+                worker_id, child.pid, child.create_time() - started_wall,
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return killed
 
 
 class WorkerPool:
@@ -167,6 +204,7 @@ class WorkerPool:
             self.queue.mark_running(item.id)
             started_at_iso = datetime.now(timezone.utc).isoformat()
             started_perf = time.monotonic()
+            started_wall = time.time()
             self._in_flight[item.id] = {
                 "source": item.source,
                 "kind": item.kind,
@@ -175,11 +213,14 @@ class WorkerPool:
             }
 
             run_id = new_run_id(item.source)
-            logger.info("[%s] running %s/%s (id=%d) run_id=%s",
-                        worker_id, item.source, item.kind, item.id, run_id)
+            cfg_all = get_sources_config()
+            src_cfg_item = cfg_all.get(item.source, {}) if isinstance(cfg_all, dict) else {}
+            max_duration = int(src_cfg_item.get("max_duration_seconds", _DEFAULT_MAX_DURATION_SECONDS))
+            logger.info("[%s] running %s/%s (id=%d) run_id=%s timeout=%ds",
+                        worker_id, item.source, item.kind, item.id, run_id, max_duration)
 
             try:
-                result = await source.execute(item)
+                result = await asyncio.wait_for(source.execute(item), timeout=max_duration)
                 duration = time.monotonic() - started_perf
                 completed_at = datetime.now(timezone.utc).isoformat()
                 self.queue.record_run(
@@ -198,6 +239,24 @@ class WorkerPool:
                 self.queue.mark_completed(item.id)
                 logger.info("[%s] completed %s/%s in %.1fs",
                             worker_id, item.source, item.kind, duration)
+            except asyncio.TimeoutError:
+                duration = time.monotonic() - started_perf
+                completed_at = datetime.now(timezone.utc).isoformat()
+                error_msg = f"TimeoutError: exceeded max_duration_seconds={max_duration}"
+                killed = _kill_sdk_subproc_since(started_wall, worker_id)
+                self.queue.record_run(
+                    run_id=run_id,
+                    queue_id=item.id,
+                    source=item.source,
+                    status="failed",
+                    started_at=started_at_iso,
+                    completed_at=completed_at,
+                    duration_seconds=duration,
+                    summary=f"{error_msg} (killed {killed} SDK subproc)"[:500],
+                )
+                new_state = self.queue.mark_failed(item.id, error_msg, self.max_attempts)
+                logger.error("[%s] timed out %s/%s after %.1fs (killed %d SDK subproc) → %s",
+                             worker_id, item.source, item.kind, duration, killed, new_state)
             except Exception as e:
                 duration = time.monotonic() - started_perf
                 completed_at = datetime.now(timezone.utc).isoformat()

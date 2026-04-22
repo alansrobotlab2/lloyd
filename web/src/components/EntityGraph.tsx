@@ -5,6 +5,7 @@ import SpriteText from "three-spritetext";
 import { forceCollide } from "d3-force";
 import { api, type EntityGraphNode } from "../api";
 import { RotateCcw, Maximize } from "lucide-react";
+import { categoryOf, CATEGORY_COLOR } from "../lib/edgeCategories";
 
 // -- Types --
 
@@ -46,11 +47,12 @@ export interface EntityGraphProps {
   onNodeHover?: (node: GNode | null) => void;
 }
 
-// Edge filter state
+// Edge filter state — one toggle per EdgeCategory defined in lib/edgeCategories.
 interface EdgeFilters {
-  "wiki-link": boolean;
-  "tag-cluster": boolean;
-  "has-facts": boolean;
+  structural: boolean;
+  lineage: boolean;
+  comparison: boolean;
+  reference: boolean;
 }
 
 // -- Helpers --
@@ -98,15 +100,11 @@ function splitRgba(rgba: string): { color: string; alpha: number } {
 
 function edgeColor(type: string, highlighted: boolean, dimmed: boolean): string {
   if (dimmed) return "rgba(71,85,105,0.05)";
-  if (highlighted) {
-    if (type === "tag-cluster") return "rgba(251,191,36,0.9)";
-    if (type === "has-facts") return "rgba(245,158,11,0.9)";
-    return "rgba(148,163,184,0.9)";
-  }
-  // Default (no selection): very faint so selected edges pop
-  if (type === "tag-cluster") return "rgba(251,191,36,0.05)";
-  if (type === "has-facts") return "rgba(245,158,11,0.05)";
-  return "rgba(100,116,139,0.05)";
+  const rgb = CATEGORY_COLOR[categoryOf(type)];
+  // Highlighted: strong alpha so the selected subgraph pops.
+  // Default (no selection): very faint so highlighted edges stand out.
+  const alpha = highlighted ? 0.9 : 0.06;
+  return `rgba(${rgb},${alpha})`;
 }
 
 // -- Component --
@@ -124,9 +122,10 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
   const [hoverNode, setHoverNode] = useState<GNode | null>(null);
   const [dimensions, setDimensions] = useState({ w: 800, h: 600 });
   const [edgeFilters, setEdgeFilters] = useState<EdgeFilters>({
-    "wiki-link": true,
-    "tag-cluster": true,
-    "has-facts": true,
+    structural: true,
+    lineage: true,
+    comparison: true,
+    reference: true,
   });
 
   // Double-click detection
@@ -171,8 +170,8 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
 
   const graphData = useMemo((): GData => {
     const filteredLinks = rawGraphData.links.filter((l) => {
-      const type = l.type as keyof EdgeFilters;
-      return edgeFilters[type] !== false;
+      const cat = categoryOf(l.type);
+      return edgeFilters[cat] !== false;
     });
 
     // Remove orphaned nodes (nodes with no remaining edges)
@@ -603,20 +602,24 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
               entity
             </span>
           </div>
-          {/* Edge type colors */}
+          {/* Edge category colors */}
           <div className="font-semibold text-[9px] uppercase tracking-wider text-slate-500 mt-1 mb-0.5">Edges</div>
           <div className="flex flex-col gap-0.5">
             <span className="flex items-center gap-1.5">
-              <span className="inline-block w-5 h-px flex-shrink-0" style={{background: "rgba(148,163,184,0.7)"}} />
-              wiki-link
+              <span className="inline-block w-5 h-px flex-shrink-0" style={{background: `rgba(${CATEGORY_COLOR.structural},0.8)`}} />
+              structural
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="inline-block w-5 h-px flex-shrink-0" style={{background: "rgba(251,191,36,0.7)"}} />
-              tag-cluster
+              <span className="inline-block w-5 h-px flex-shrink-0" style={{background: `rgba(${CATEGORY_COLOR.lineage},0.8)`}} />
+              lineage
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="inline-block w-5 h-px flex-shrink-0" style={{background: "rgba(245,158,11,0.7)"}} />
-              has-facts
+              <span className="inline-block w-5 h-px flex-shrink-0" style={{background: `rgba(${CATEGORY_COLOR.comparison},0.8)`}} />
+              comparison
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block w-5 h-px flex-shrink-0" style={{background: `rgba(${CATEGORY_COLOR.reference},0.8)`}} />
+              reference
             </span>
           </div>
         </div>
@@ -639,15 +642,15 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
         <div className="absolute bottom-2 right-2 z-10 flex items-center gap-1">
           {/* Edge type filter toggles */}
           <div className="flex items-center gap-2 mr-2 bg-surface-1/80 backdrop-blur-sm px-2 py-1 rounded text-[10px]">
-            {(["wiki-link", "tag-cluster", "has-facts"] as const).map((type) => (
-              <label key={type} className="flex items-center gap-1 cursor-pointer select-none text-slate-400 hover:text-slate-200">
+            {(["structural", "lineage", "comparison", "reference"] as const).map((cat) => (
+              <label key={cat} className="flex items-center gap-1 cursor-pointer select-none text-slate-400 hover:text-slate-200">
                 <input
                   type="checkbox"
-                  checked={edgeFilters[type]}
-                  onChange={() => toggleFilter(type)}
+                  checked={edgeFilters[cat]}
+                  onChange={() => toggleFilter(cat)}
                   className="w-2.5 h-2.5 accent-brand-500 cursor-pointer"
                 />
-                <span>{type}</span>
+                <span>{cat}</span>
               </label>
             ))}
           </div>

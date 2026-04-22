@@ -55,7 +55,7 @@ from pathlib import Path
 
 FACTS_ROOT = Path.home() / "obsidian" / "facts"
 REL_PATH = FACTS_ROOT / "_relationships.json"
-ALIASES_PATH = FACTS_ROOT / "entity-aliases.json"
+ALIASES_PATH = FACTS_ROOT / "_aliases.json"
 
 PIPELINE_ROOT = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
 CANDIDATE_LOG = PIPELINE_ROOT / f"semantic-entity-candidates-{datetime.now().strftime('%Y-%m-%d')}.jsonl"

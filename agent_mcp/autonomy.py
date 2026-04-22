@@ -9,6 +9,7 @@ Tools: autonomy_tasks, autonomy_write_task, autonomy_get_task,
        autonomy_delete_task, autonomy_config, autonomy_run_task
 """
 
+import asyncio
 import datetime
 import json
 import re
@@ -275,7 +276,10 @@ async def call_tool(name: str, arguments: dict):
     elif name == "autonomy_config":
         return [TextContent(type="text", text=_handle_config(arguments))]
     elif name == "autonomy_run_task":
-        return [TextContent(type="text", text=_handle_run(arguments))]
+        # run_task() internally calls asyncio.run(), so it must run in a
+        # worker thread — we're already inside the MCP event loop here.
+        text = await asyncio.to_thread(_handle_run, arguments)
+        return [TextContent(type="text", text=text)]
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
 

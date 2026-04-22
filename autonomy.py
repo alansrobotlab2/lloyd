@@ -9,7 +9,10 @@ This module provides the task-file CRUD + `run_task()` that the
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import datetime
+import json
+import subprocess
 import logging
 import os
 import traceback
@@ -409,7 +412,30 @@ def run_task(task_id) -> dict:
                                 final_response += block.text
 
             try:
-                asyncio.run(_run())
+                # asyncio.run() fails when called from an already-running
+                # event loop (e.g. inside the MCP server's call_tool).
+                # Run the SDK query in a separate thread so it gets its
+                # own event loop, handling both scheduler and MCP callers.
+                def _sdk_worker():
+                    nonlocal final_response
+                    async def _run_inner():
+                        nonlocal final_response
+                        async for msg in sdk_query(prompt=prompt, options=options):
+                            if hasattr(msg, "content"):
+                                for block in msg.content:
+                                    if hasattr(block, "text"):
+                                        final_response += block.text
+                    asyncio.run(_run_inner())
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(_sdk_worker)
+                    future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                logger.warning("Task #%s timed out after %ds", task_id, timeout)
+                return {
+                    "success": False, "error": f"Task #{task_id} timed out after {timeout}s",
+                }
             except Exception as e:
                 if _stderr_buf:
                     tail = "\n".join(_stderr_buf[-_STDERR_MAX:])
