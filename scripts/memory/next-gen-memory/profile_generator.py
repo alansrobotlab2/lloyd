@@ -124,6 +124,46 @@ class ProfileGenerator:
         bodies = sorted(f["fact"] for f in facts if f.get("fact"))
         return _sha256("\n".join(bodies))
 
+    @staticmethod
+    def _is_ambiguous_name(name: str) -> bool:
+        """Heuristic: names that reliably pull wrong-sense web results.
+
+        - Short names (≤6 chars): PPO, LoRA, etc.
+        - Names with embedded digits inside letters: GR00T, N1.6.
+        - All-uppercase short acronyms (SDK, MCP, SSE).
+        """
+        if not name:
+            return False
+        clean = name.strip()
+        if len(clean) <= 6:
+            return True
+        # Mixed letters + embedded digits (GR00T, K8s, B4b, R2D2)
+        if re.search(r"[A-Za-z]\d", clean) and re.search(r"\d[A-Za-z]", clean):
+            return True
+        # Short all-caps
+        if clean.isupper() and len(clean) <= 8:
+            return True
+        return False
+
+    @staticmethod
+    def _category_hint(facts: list[dict]) -> str:
+        """Pick a short domain-hint suffix from the entity's fact categories.
+
+        We use the most frequent category name. Returns '' if no useful hint.
+        Categories like 'personal' or 'general' are too vague; filter them.
+        """
+        BLACKLIST = {"general", "personal", "overview", "misc", "other"}
+        counts: dict[str, int] = {}
+        for f in facts:
+            cat = (f.get("category") or "").strip().lower()
+            if not cat or cat in BLACKLIST:
+                continue
+            counts[cat] = counts.get(cat, 0) + 1
+        if not counts:
+            return ""
+        best = max(counts.items(), key=lambda kv: kv[1])[0]
+        return best
+
     def is_personal_entity(self, entity_dir: Path) -> bool:
         """True if the entity has a file whose top-level category is personal.
 
@@ -139,16 +179,31 @@ class ProfileGenerator:
 
     # ── Web augmentation ────────────────────────────────────────────────
 
-    def web_augment(self, entity: str) -> tuple[str, list[str]]:
+    def web_augment(self, entity: str, facts: list[dict] | None = None) -> tuple[str, list[str]]:
         """Query DuckDuckGo via a subprocess; return (concatenated snippets, source URLs).
 
         Silent failure: returns ("", []) on any error. We never want a web
         hiccup to break profile generation. Subprocess isolation lets many
         workers run DDGS in parallel without hitting primp's threading bug.
+
+        Disambiguation: short/acronym names (e.g. GR00T, PPO, LoRA) reliably
+        pull wrong-sense results from the open web (Marvel character,
+        healthcare PPO, etc.). If the name is ≤6 chars or mostly uppercase
+        with digits, we either skip web search entirely or append a
+        domain-hint token derived from the entity's fact categories.
         """
+        query = entity
+        if self._is_ambiguous_name(entity):
+            hint = self._category_hint(facts or [])
+            if hint:
+                query = f"{entity} {hint}"
+            else:
+                # No domain context available — refuse to search rather than
+                # pull in wrong-sense garbage.
+                return "", []
         try:
             proc = subprocess.run(
-                [sys.executable, "-c", _DDGS_WORKER_SCRIPT, entity, "5"],
+                [sys.executable, "-c", _DDGS_WORKER_SCRIPT, query, "5"],
                 capture_output=True, text=True,
                 timeout=_DDGS_SUBPROCESS_TIMEOUT,
             )
@@ -264,7 +319,7 @@ class ProfileGenerator:
         if personal:
             web_text, web_urls = "", []
         else:
-            web_text, web_urls = self.web_augment(entity)
+            web_text, web_urls = self.web_augment(entity, facts=facts)
 
         # Build prompt
         facts_str = "\n".join(

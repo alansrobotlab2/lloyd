@@ -25,6 +25,7 @@ import {
 } from "../../api";
 import { sanitizeHtml } from "../../utils/sanitize";
 import EntityGraph, { type EntityGraphProps } from "../EntityGraph";
+import { categoryOf, CATEGORY_CHIP_CLASS } from "../../lib/edgeCategories";
 
 // -- Types --
 
@@ -144,9 +145,7 @@ function NodeQuickInfo({
           <div className="space-y-0.5">
             {connectedNodes.map((n, i) => (
               <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
-                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${
-                  n.type === "tag-cluster" ? "bg-amber-400/10 text-amber-500" : "bg-slate-400/10 text-slate-500"
-                }`}>{n.type}</span>
+                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${CATEGORY_CHIP_CLASS[categoryOf(n.type)]}`}>{n.type}</span>
                 <span className="truncate">{n.label}</span>
               </div>
             ))}
@@ -234,11 +233,7 @@ function DocNodeDetail({
           <div className="space-y-0.5">
             {connectedDocs.map((n, i) => (
               <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
-                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${
-                  n.type === "tag-cluster" ? "bg-amber-400/10 text-amber-500" :
-                  n.type === "has-facts" ? "bg-orange-400/10 text-orange-500" :
-                  "bg-slate-400/10 text-slate-500"
-                }`}>{n.type}</span>
+                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${CATEGORY_CHIP_CLASS[categoryOf(n.type)]}`}>{n.type}</span>
                 <span className="truncate">{n.label}</span>
               </div>
             ))}
@@ -371,9 +366,7 @@ function EntityDetailPanel({ detail }: { detail: EntityDetailData }) {
           <div className="space-y-0.5">
             {detail.relationships.slice(0, 10).map((r, i) => (
               <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
-                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${
-                  r.type === "tag-cluster" ? "bg-amber-400/10 text-amber-500" : "bg-slate-400/10 text-slate-500"
-                }`}>
+                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${CATEGORY_CHIP_CLASS[categoryOf(r.type)]}`}>
                   {r.type}
                 </span>
                 <span className="truncate">{r.target.split("/").pop()?.replace(/\.md$/, "")}</span>

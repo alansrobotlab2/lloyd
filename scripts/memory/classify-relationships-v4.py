@@ -60,11 +60,11 @@ ROLE_BLOCKED_VERBS = {"created_by", "implements", "supersedes", "part_of", "depe
 # Entity alias table (loaded once at module import)
 # ---------------------------------------------------------------------------
 
-ALIASES_PATH = Path.home() / "obsidian" / "facts" / "entity-aliases.json"
+ALIASES_PATH = Path.home() / "obsidian" / "facts" / "_aliases.json"
 
 
 def _load_aliases() -> dict[str, str]:
-    """Load alias → canonical mapping from entity-aliases.json."""
+    """Load alias → canonical mapping from _aliases.json."""
     if not ALIASES_PATH.exists():
         return {}
     try:

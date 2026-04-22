@@ -1,5 +1,10 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
-import ForceGraph2D from "react-force-graph-2d";
+import _ForceGraph3D from "react-force-graph-3d";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const ForceGraph3D = _ForceGraph3D as any;
+import * as THREE from "three";
+import SpriteText from "three-spritetext";
+import { forceCollide } from "d3-force";
 import {
   FileText,
   Folder,
@@ -10,6 +15,8 @@ import {
   Code2,
   ArrowRightLeft,
   Layers,
+  RotateCcw,
+  Maximize,
 } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -46,8 +53,16 @@ interface GraphNode {
   count: number;
   lang?: string;
   exports?: string[];
+  // d3 simulation props (added at runtime)
   x?: number;
   y?: number;
+  z?: number;
+  vx?: number;
+  vy?: number;
+  vz?: number;
+  fx?: number;
+  fy?: number;
+  fz?: number;
 }
 
 interface GraphLink {
@@ -150,15 +165,6 @@ function highlightCode(code: string, language: string): string {
   return result;
 }
 
-function getColorFromPath(path: string): string {
-  const parentDir = path.split("/").slice(0, -1).join("/");
-  let hash = 0;
-  for (let i = 0; i < parentDir.length; i++) {
-    hash = ((hash << 5) - hash + parentDir.charCodeAt(i)) | 0;
-  }
-  const hue = ((hash % 360) + 360) % 360;
-  return `hsl(${hue}, 60%, 55%)`;
-}
 
 function getFileName(path: string): string {
   return path.split("/").pop() || path;
@@ -546,83 +552,421 @@ function FileDetailsPanel({
   );
 }
 
+// ── Graph View 3D helpers ───────────────────────────────────────────────
+
+function langColor(lang: string | undefined): string {
+  if (lang === "python")     return "hsl(142, 45%, 50%)";   // green
+  if (lang === "typescript") return "hsl(210, 60%, 55%)";   // blue
+  if (lang === "javascript") return "hsl(45,  65%, 55%)";   // yellow
+  return "hsl(220, 20%, 50%)";                               // gray fallback
+}
+
+function langColorBright(lang: string | undefined): string {
+  if (lang === "python")     return "rgba(34, 197, 94,  0.9)";
+  if (lang === "typescript") return "rgba(99, 179, 255, 0.9)";
+  if (lang === "javascript") return "rgba(234,210, 100, 0.9)";
+  return "rgba(148, 163, 184, 0.85)";
+}
+
+function splitRgba(rgba: string): { color: string; alpha: number } {
+  const m = rgba.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)/);
+  if (!m) return { color: rgba, alpha: 1 };
+  return {
+    color: `rgb(${m[1]}, ${m[2]}, ${m[3]})`,
+    alpha: m[4] !== undefined ? parseFloat(m[4]) : 1,
+  };
+}
+
+interface LangFilters {
+  python: boolean;
+  typescript: boolean;
+  javascript: boolean;
+}
+
 // ── Graph View Component ────────────────────────────────────────────────
 
 interface GraphViewProps {
   graphData: GraphData | null;
   loading: boolean;
   onSelectNode: (nodeId: string | null) => void;
+  selectedNodeId: string | null;
 }
 
-function GraphView({
-  graphData,
-  loading,
-  onSelectNode,
-}: GraphViewProps) {
-  const nodeColor = (node: GraphNode) => {
-    const parentDir = node.path.split("/").slice(0, -1).join("/");
-    let hash = 0;
-    for (let i = 0; i < parentDir.length; i++) {
-      hash = ((hash << 5) - hash + parentDir.charCodeAt(i)) | 0;
+function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphViewProps) {
+  const fgRef = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const initialFitDone = useRef(false);
+  const highlightNodesRef = useRef<Set<string>>(new Set());
+  const lastClickRef = useRef<{ nodeId: string; ts: number } | null>(null);
+
+  const [dimensions, setDimensions] = useState({ w: 800, h: 600 });
+  const [langFilters, setLangFilters] = useState<LangFilters>({ python: true, typescript: true, javascript: true });
+  const [activeNode, setActiveNode] = useState<GraphNode | null>(null);
+  const [hoverNode, setHoverNode] = useState<GraphNode | null>(null);
+
+  // Sync active node with external selection
+  useEffect(() => {
+    if (!graphData || !selectedNodeId) { setActiveNode(null); return; }
+    const nd = graphData.nodes.find(n => n.id === selectedNodeId) || null;
+    if (nd) setActiveNode(nd);
+  }, [selectedNodeId, graphData]);
+
+  // Resize tracking
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const ro = new ResizeObserver((entries) => {
+      const rect = entries[0].contentRect;
+      setDimensions({ w: rect.width, h: rect.height });
+    });
+    ro.observe(container);
+    const rect = container.getBoundingClientRect();
+    setDimensions({ w: rect.width, h: rect.height });
+    return () => ro.disconnect();
+  }, []);
+
+  // Language-filtered data
+  const filteredData = useMemo(() => {
+    if (!graphData) return { nodes: [] as GraphNode[], links: [] as GraphLink[] };
+    const filteredNodes = graphData.nodes.filter(n => {
+      const lang = n.lang || "other";
+      if (lang === "python"     && !langFilters.python)     return false;
+      if (lang === "typescript" && !langFilters.typescript) return false;
+      if (lang === "javascript" && !langFilters.javascript) return false;
+      return true;
+    });
+    const nodeIds = new Set(filteredNodes.map(n => n.id));
+    const filteredLinks = graphData.links.filter(l => {
+      const src = typeof l.source === "string" ? l.source : (l.source as any).id;
+      const tgt = typeof l.target === "string" ? l.target : (l.target as any).id;
+      return nodeIds.has(src) && nodeIds.has(tgt);
+    });
+    return { nodes: filteredNodes, links: filteredLinks };
+  }, [graphData, langFilters]);
+
+  // Highlight sets (active node or hover node fan-out)
+  const { highlightNodes, highlightLinks } = useMemo(() => {
+    const hn = new Set<string>();
+    const hl = new Set<string>();
+    const focusId = activeNode?.id ?? hoverNode?.id ?? null;
+    if (focusId) {
+      hn.add(focusId);
+      for (const l of filteredData.links) {
+        const src = typeof l.source === "string" ? l.source : (l.source as any).id;
+        const tgt = typeof l.target === "string" ? l.target : (l.target as any).id;
+        if (src === focusId) { hn.add(tgt); hl.add(`${src}\x00${tgt}`); }
+        if (tgt === focusId) { hn.add(src); hl.add(`${src}\x00${tgt}`); }
+      }
     }
-    const hue = ((hash % 60) + 60) % 60; // narrow hue range per-language
-    if (node.lang === "typescript") return `hsl(${200 + hue}, 60%, 55%)`; // blues
-    return `hsl(${100 + hue}, 55%, 50%)`; // greens for python
-  };
-  const stableData = useMemo(
-    () => graphData ? { nodes: graphData.nodes, links: graphData.links } : { nodes: [], links: [] },
-    [graphData]
-  );
+    return { highlightNodes: hn, highlightLinks: hl };
+  }, [activeNode, hoverNode, filteredData]);
+
+  const hasDimming = !!(activeNode || hoverNode);
+
+  // Keep ref in sync for the rAF label loop
+  useEffect(() => { highlightNodesRef.current = highlightNodes; }, [highlightNodes]);
+
+  // Fit view on first data load
+  useEffect(() => {
+    if (!filteredData.nodes.length || initialFitDone.current) return;
+    const t = setTimeout(() => {
+      if (fgRef.current) { fgRef.current.zoomToFit(1000, 50); initialFitDone.current = true; }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [filteredData]);
+
+  // Force configuration
+  const configureForces = useCallback(() => {
+    const fg = fgRef.current;
+    if (!fg) return;
+    try {
+      fg.d3Force("collide", forceCollide().radius(() => 9).strength(0.6).iterations(2));
+      fg.d3Force("charge")?.strength(-120).distanceMax(500);
+      fg.d3Force("link")?.distance(() => 55).strength(0.3);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    if (!filteredData.nodes.length) return;
+    configureForces();
+  }, [filteredData, configureForces]);
+
+  // Mesh opacity sync (highlight/dim)
+  useEffect(() => {
+    for (const n of filteredData.nodes as any[]) {
+      const group = n.__threeObj as THREE.Object3D | undefined;
+      const mesh = (group as any)?.__nodeMesh as THREE.Mesh | undefined;
+      if (!mesh) continue;
+      const isLit = highlightNodes.has(n.id);
+      const opacity = hasDimming && !isLit ? 0.08 : 1;
+      const mat = mesh.material as THREE.MeshPhongMaterial | undefined;
+      if (mat && mat.opacity !== opacity) mat.opacity = opacity;
+    }
+  }, [highlightNodes, hasDimming, filteredData]);
+
+  // Label visibility: highlight-based OR proximity-based (rAF loop)
+  useEffect(() => {
+    if (!filteredData.nodes.length) return;
+    const PROXIMITY = 110;
+    const tmp = new THREE.Vector3();
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const fg = fgRef.current;
+      if (!fg) return;
+      const camera: THREE.Camera | undefined = fg.camera?.();
+      if (!camera) return;
+      const lit = highlightNodesRef.current;
+      const anyLit = lit.size > 0;
+      for (const n of filteredData.nodes as any[]) {
+        const group = n.__threeObj as THREE.Object3D | undefined;
+        const sprite = (group as any)?.__nodeLabel as THREE.Sprite | undefined;
+        if (!sprite || !group) continue;
+        if (anyLit) { sprite.visible = lit.has(n.id); continue; }
+        group.getWorldPosition(tmp);
+        sprite.visible = tmp.distanceTo(camera.position) < PROXIMITY;
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [filteredData]);
+
+  // Node THREE.js object
+  const nodeThreeObject = useCallback((node: any) => {
+    const n = node as GraphNode;
+    const r = Math.max(2.5, Math.min(5, 2.5 + Math.sqrt(n.count || 0) * 0.35));
+    const color = langColor(n.lang);
+    const geometry = n.lang === "python"
+      ? new THREE.OctahedronGeometry(r * 1.5, 0)
+      : new THREE.SphereGeometry(r, 20, 16);
+    const material = new THREE.MeshPhongMaterial({
+      color, specular: 0x222222, shininess: 25, transparent: true, opacity: 1,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+
+    const sprite = new SpriteText(getFileName(n.path));
+    sprite.textHeight = 2.2;
+    sprite.color = n.lang === "python" ? "#86efac" : n.lang === "typescript" ? "#93c5fd" : "#fde68a";
+    sprite.backgroundColor = "rgba(15,23,42,0.65)";
+    sprite.padding = 1.5;
+    sprite.borderRadius = 2;
+    sprite.position.set(0, r + 2.8, 0);
+    sprite.visible = false;
+    (sprite as any).raycast = () => {};
+
+    const group = new THREE.Group();
+    group.add(mesh);
+    group.add(sprite);
+    (group as any).__nodeMesh = mesh;
+    (group as any).__nodeLabel = sprite;
+    return group;
+  }, []);
+
+  // Link color
+  const linkColorFn = useCallback((link: any) => {
+    const src = typeof link.source === "string" ? link.source : link.source?.id;
+    const tgt = typeof link.target === "string" ? link.target : link.target?.id;
+    const key = `${src}\x00${tgt}`;
+    const highlighted = highlightLinks.has(key);
+    const dimmed = hasDimming && !highlighted;
+    if (dimmed) return "rgba(71,85,105,0.05)";
+    if (highlighted) {
+      const srcNode = filteredData.nodes.find(n => n.id === src);
+      return langColorBright(srcNode?.lang);
+    }
+    return "rgba(100,116,139,0.05)";
+  }, [highlightLinks, hasDimming, filteredData]);
+
+  // Flowing arrow particles on highlighted edges
+  const linkParticlesFn = useCallback((link: any) => {
+    const src = typeof link.source === "string" ? link.source : link.source?.id;
+    const tgt = typeof link.target === "string" ? link.target : link.target?.id;
+    return highlightLinks.has(`${src}\x00${tgt}`) ? 5 : 0;
+  }, [highlightLinks]);
+
+  const particleArrowFn = useCallback((link: any) => {
+    const src = typeof link.source === "string" ? link.source : link.source?.id;
+    const tgt = typeof link.target === "string" ? link.target : link.target?.id;
+    if (!highlightLinks.has(`${src}\x00${tgt}`)) return undefined as any;
+    const srcNode = filteredData.nodes.find(n => n.id === src);
+    const { color, alpha } = splitRgba(langColorBright(srcNode?.lang));
+    const geo = new THREE.ConeGeometry(0.7, 2.0, 6);
+    geo.rotateX(Math.PI / 2);
+    return new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: new THREE.Color(color), transparent: true, opacity: alpha,
+    }));
+  }, [highlightLinks, filteredData]);
+
+  // Tooltip
+  const nodeTooltip = useCallback((node: any) => {
+    const n = node as GraphNode;
+    const exStr = n.exports?.length
+      ? `<br/><span style="color:#94a3b8;font-size:10px">exports: ${n.exports.slice(0, 3).join(", ")}${n.exports.length > 3 ? "…" : ""}</span>`
+      : "";
+    return `<b>${getFileName(n.path)}</b><br/><span style="color:#94a3b8;font-size:10px">${n.lang || "?"} · ${n.count} imports</span>${exStr}`;
+  }, []);
+
+  // Hover handler
+  const handleNodeHover = useCallback((node: any) => {
+    setHoverNode(node ? (node as GraphNode) : null);
+  }, []);
+
+  // Click handler
+  const handleNodeClick = useCallback((node: any) => {
+    const n = node as GraphNode;
+    const now = Date.now();
+    const last = lastClickRef.current;
+    if (last && last.nodeId === n.id && now - last.ts < 300) {
+      lastClickRef.current = null; return; // ignore double-click
+    }
+    lastClickRef.current = { nodeId: n.id, ts: now };
+    if (activeNode?.id === n.id) {
+      setActiveNode(null); onSelectNode(null);
+    } else {
+      setActiveNode(n); onSelectNode(n.id);
+      if (fgRef.current && typeof n.x === "number") {
+        const { x = 0, y = 0, z = 0 } = n;
+        const dist = 120, mag = Math.hypot(x, y, z) || 1, k = 1 + dist / mag;
+        fgRef.current.cameraPosition({ x: x*k, y: y*k, z: z*k }, { x, y, z }, 800);
+      }
+    }
+  }, [activeNode, onSelectNode]);
+
+  const handleBackgroundClick = useCallback(() => {
+    setActiveNode(null); onSelectNode(null);
+  }, [onSelectNode]);
+
+  // Pin nodes when simulation settles
+  const handleEngineStop = useCallback(() => {
+    for (const n of filteredData.nodes as any[]) {
+      if (typeof n.x === "number") n.fx = n.x;
+      if (typeof n.y === "number") n.fy = n.y;
+      if (typeof n.z === "number") n.fz = n.z;
+    }
+  }, [filteredData]);
+
+  // Middle-click → pan (not zoom)
+  useEffect(() => {
+    if (!filteredData.nodes.length) return;
+    const controls = fgRef.current?.controls?.();
+    if (controls?.mouseButtons) controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
+  }, [filteredData]);
+
+  // Custom lighting (like EntityGraph)
+  const lights = useMemo(() => {
+    const ambient = new THREE.AmbientLight(0x404060, 1.2);
+    const key = new THREE.DirectionalLight(0xffffff, 1.6);
+    key.position.set(150, 200, 100);
+    const fill = new THREE.DirectionalLight(0x9fb8ff, 0.5);
+    fill.position.set(-150, -50, -120);
+    return [ambient, key, fill];
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-surface-1 rounded-lg border border-surface-3/50 text-slate-500 text-sm">
+        Loading graph...
+      </div>
+    );
+  }
+
+  if (!graphData) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-surface-1 rounded-lg border border-surface-3/50 text-red-400 text-sm">
+        Failed to load graph
+      </div>
+    );
+  }
 
   return (
-    <div className="flex-1 relative bg-surface-1 rounded-lg border border-surface-3/50 overflow-hidden">
-      {loading ? (
-        <div className="absolute inset-0 flex items-center justify-center text-slate-500">
-          Loading graph...
+    <div ref={containerRef} className="flex-1 relative bg-surface-1 rounded-lg border border-surface-3/50 overflow-hidden">
+      <div className="absolute inset-0">
+        <ForceGraph3D
+          ref={fgRef}
+          width={dimensions.w}
+          height={dimensions.h}
+          graphData={filteredData as any}
+          nodeId="id"
+          nodeLabel={nodeTooltip}
+          nodeThreeObject={nodeThreeObject}
+          linkColor={linkColorFn}
+          linkWidth={0}
+          linkOpacity={1}
+          linkCurvature={0.15}
+          linkDirectionalParticles={linkParticlesFn}
+          linkDirectionalParticleSpeed={0.001}
+          linkDirectionalParticleThreeObject={particleArrowFn}
+          backgroundColor="rgba(0,0,0,0)"
+          onNodeHover={handleNodeHover}
+          onNodeClick={handleNodeClick}
+          onBackgroundClick={handleBackgroundClick}
+          onEngineStop={handleEngineStop}
+          cooldownTicks={100}
+          cooldownTime={8000}
+          warmupTicks={60}
+          d3AlphaDecay={0.04}
+          d3VelocityDecay={0.4}
+          enableNodeDrag={false}
+          controlType="trackball"
+          lights={lights}
+        />
+      </div>
+
+      {/* Legend */}
+      <div className="absolute top-2 left-2 z-10 bg-surface-1/80 backdrop-blur-sm px-2 py-1.5 rounded text-[10px] text-slate-400 space-y-1">
+        <div className="font-semibold text-[9px] uppercase tracking-wider text-slate-500 mb-0.5">Files</div>
+        <div className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-2 h-2 flex-shrink-0 rotate-45" style={{ background: "hsl(142,45%,50%)" }} />
+            python (◇)
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: "hsl(210,60%,55%)" }} />
+            typescript
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: "hsl(45,65%,55%)" }} />
+            javascript
+          </span>
         </div>
-      ) : graphData ? (
-        <>
-          <ForceGraph2D
-            graphData={stableData}
-            nodeLabel={(node: any) => getFileName(node.path)}
-            nodeColor={nodeColor}
-            nodeRelSize={3}
-            nodeVal="count"
-            linkDirectionalArrowLength={5}
-            linkCurvature={0.3}
-            linkColor={() => "rgba(148, 163, 184, 0.4)"}
-            linkWidth={1}
-            backgroundColor="transparent"
-            nodeCanvasObjectMode={() => "after"}
-            nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-              const label = getFileName(node.path || node.id);
-              const fontSize = Math.max(10 / globalScale, 2);
-              ctx.font = `${fontSize}px sans-serif`;
-              ctx.textAlign = "center";
-              ctx.textBaseline = "top";
-              ctx.fillStyle = "rgba(203, 213, 225, 0.8)";
-              ctx.fillText(label, node.x, node.y + 5);
-            }}
-            onNodeClick={(node: GraphNode) => {
-              onSelectNode(node.id);
-            }}
-            minZoom={0.2}
-            maxZoom={4}
-            warmupTicks={100}
-            cooldownTicks={200}
-            cooldownTime={2000}
-            d3AlphaMin={0.001}
-            d3VelocityDecay={0.3}
-          />
-          <div className="absolute top-2 right-2 bg-surface-2/90 px-3 py-2 rounded text-[11px] text-slate-500">
-            {graphData.totalNodes} nodes · {graphData.totalLinks} links
-          </div>
-        </>
-      ) : (
-        <div className="absolute inset-0 flex items-center justify-center text-red-400">
-          Failed to load graph
+        <div className="text-[9px] text-slate-600 mt-1">size = import count</div>
+      </div>
+
+      {/* Stats */}
+      <div className="absolute top-2 right-2 bg-surface-2/90 px-3 py-2 rounded text-[11px] text-slate-500">
+        {filteredData.nodes.length} nodes · {filteredData.links.length} links
+      </div>
+
+      {/* Controls: language filters + reset/fit */}
+      <div className="absolute bottom-2 right-2 z-10 flex items-center gap-1">
+        <div className="flex items-center gap-2 mr-2 bg-surface-1/80 backdrop-blur-sm px-2 py-1 rounded text-[10px]">
+          {(["python", "typescript", "javascript"] as const).map((lang) => (
+            <label key={lang} className="flex items-center gap-1 cursor-pointer select-none text-slate-400 hover:text-slate-200">
+              <input
+                type="checkbox"
+                checked={langFilters[lang]}
+                onChange={() => setLangFilters(prev => ({ ...prev, [lang]: !prev[lang] }))}
+                className="w-2.5 h-2.5 accent-brand-500 cursor-pointer"
+              />
+              <span>{lang}</span>
+            </label>
+          ))}
         </div>
-      )}
+        <button
+          onClick={() => { setActiveNode(null); onSelectNode(null); }}
+          title="Reset selection"
+          className="p-1 rounded text-slate-500 hover:text-slate-300 hover:bg-surface-2/80 transition-colors"
+        >
+          <RotateCcw className="w-3 h-3" />
+        </button>
+        <button
+          onClick={() => { if (fgRef.current) fgRef.current.zoomToFit(1200, 50); }}
+          title="Fit all"
+          className="p-1 rounded text-slate-500 hover:text-slate-300 hover:bg-surface-2/80 transition-colors"
+        >
+          <Maximize className="w-3 h-3" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -726,6 +1070,7 @@ export default function ArchitecturePage() {
           graphData={graphData}
           loading={graphLoading}
           onSelectNode={handleSelectNode}
+          selectedNodeId={selectedNodeId}
         />
 
         {/* Right panel: File details (conditional) */}
