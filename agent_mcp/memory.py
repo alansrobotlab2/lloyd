@@ -476,7 +476,24 @@ def _detect_contradictions_sync(entity: str, category: str = None) -> dict:
 # ── QMD helpers ───────────────────────────────────────────────────────────────
 
 def _qmd_sanitize(query: str) -> str:
-    return re.sub(r"[\x00-\x1f\x7f]", " ", query).strip()
+    """Strip control chars and collapse qmd query-syntax operators to spaces.
+
+    qmd's vec/hyde parser treats `-term` as negation (Google-style) and throws
+    HTTP 500 when it sees one — "Negation (-term) is not supported in vec/hyde
+    queries." Questions like "next-gen memory subsystem", "SMPL-X pipeline",
+    "three-layer architecture", or "end-to-end flow" hit this silently: hybrid
+    search returns zero results and the caller sees no documents.
+
+    We replace hyphens (and other operator chars qmd treats as syntax) with
+    spaces before the query hits either the vec or lex leg. The lex path
+    already tokenizes on non-word boundaries so this is a no-op there; the
+    vec path gets identical clean input and embeddings tokenize robustly
+    across the substitution (`SMPL-X` ≈ `SMPL X`). Fixes #325.
+    """
+    q = re.sub(r"[\x00-\x1f\x7f]", " ", query)
+    # qmd query-syntax operators → space. `-` is negation; `+`/`"` also reserved.
+    q = re.sub(r"[-+\"]", " ", q)
+    return re.sub(r"\s+", " ", q).strip()
 
 
 def _qmd_strip_stopwords(query: str) -> str:
