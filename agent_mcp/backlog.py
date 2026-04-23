@@ -31,15 +31,23 @@ def parse_frontmatter(content: str) -> tuple:
     try:
         frontmatter = yaml.safe_load(parts[1]) or {}
     except Exception as e:
-        # Don't silently drop every frontmatter field on a parse error — log
-        # so the operator can see when data has been clobbered on disk.
+        # YAML parse failed (e.g. unquoted colons in string values).
+        # Fall back to regex extraction of known fields so boards
+        # enumeration stays accurate even with malformed frontmatter.
         import sys
         print(
             f"[backlog] WARNING: YAML frontmatter parse failed ({type(e).__name__}: {e}); "
-            "returning empty frontmatter (fields will appear as null).",
+            "falling back to regex extraction.",
             file=sys.stderr,
         )
-        frontmatter = {}
+        fm_text = parts[1]
+        fm = {}
+        fm["_yaml_broken"] = True
+        for field in ("board", "status", "priority", "tags", "blocked", "assigned"):
+            m = re.search(rf"^{field}:\s*(.+)$", fm_text, re.MULTILINE)
+            if m:
+                fm[field] = m.group(1).strip()
+        frontmatter = fm
     return frontmatter, parts[2].strip()
 
 
