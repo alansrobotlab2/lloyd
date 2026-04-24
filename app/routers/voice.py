@@ -1,10 +1,17 @@
 """Voice Mode endpoints — proxy to voice mode daemon on port 8092, plus
 full turn execution on transcript injection.
+
+Also owns the global TTS-enabled flag (`_TTS_ENABLED`). When true, the
+streaming chat loop (messages.py::_run_turn) and the inject path below
+both speak the **first two sentences** of each agent response via
+`/v1/say`. The flag is persisted to `voice_runtime_state.json` so it
+survives backend restarts.
 """
 
 import asyncio
 import json
 import logging
+import re
 
 import httpx
 from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage, TextBlock
@@ -19,7 +26,7 @@ from app.config import (
     _model_base_url,
     _resolve_model_name,
 )
-from app.paths import SESSIONS_DIR
+from app.paths import SESSIONS_DIR, LLOYD_HOME
 from app.sessions_io import _save_session_meta
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools
 from prompt_builder import build_system_prompt
@@ -35,6 +42,86 @@ VOICE_API = "http://127.0.0.1:8092"
 # the user currently has open. Set by the frontend via /api/voice/active-session.
 # None = fall back to voice_bridge_config.json's lloyd_session_key (voice-main).
 _VOICE_ACTIVE_SESSION: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# TTS-enabled flag (persisted) + sentence extraction
+# ---------------------------------------------------------------------------
+
+_TTS_STATE_PATH = LLOYD_HOME / "voice_runtime_state.json"
+_TTS_ENABLED: bool = False
+
+
+def _load_tts_state() -> None:
+    """Restore _TTS_ENABLED from disk on import. Default False on any error."""
+    global _TTS_ENABLED
+    try:
+        if _TTS_STATE_PATH.exists():
+            data = json.loads(_TTS_STATE_PATH.read_text())
+            _TTS_ENABLED = bool(data.get("tts_enabled", False))
+    except Exception as e:
+        logger.warning(f"Failed to load voice runtime state: {e}")
+        _TTS_ENABLED = False
+
+
+def _save_tts_state() -> None:
+    """Persist _TTS_ENABLED to disk. Atomic-ish write via tmp + rename."""
+    try:
+        tmp = _TTS_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"tts_enabled": _TTS_ENABLED}))
+        tmp.replace(_TTS_STATE_PATH)
+    except Exception as e:
+        logger.warning(f"Failed to save voice runtime state: {e}")
+
+
+_load_tts_state()
+
+
+def tts_is_enabled() -> bool:
+    """Read-only accessor for the TTS-enabled flag (importable by other routers)."""
+    return _TTS_ENABLED
+
+
+# Matches a run of one-or-more sentence-terminators followed by whitespace,
+# end-of-string, or a closing quote/bracket. Collapses "..." into one match,
+# so we don't burn a sentence on an ellipsis. Lookahead avoids consuming the
+# trailing space.
+_SENTENCE_RE = re.compile(r'[.!?]+(?=\s|$|["\')\]])')
+
+
+def extract_first_two_sentences(text: str) -> str | None:
+    """Return text up through the second sentence-terminator, or None if <2.
+
+    Pure function — used by both the streaming buffer (incremental) and the
+    inject path (one-shot). Caller is responsible for trimming the result if
+    desired.
+    """
+    matches = list(_SENTENCE_RE.finditer(text))
+    if len(matches) < 2:
+        return None
+    return text[: matches[1].end()]
+
+
+async def speak_text(text: str) -> None:
+    """Fire-and-forget TTS via the voice mode proxy. No-op if TTS disabled or text empty.
+
+    Intended to be wrapped in `asyncio.create_task(speak_text(...))` so the
+    caller doesn't block on synthesis time (Qwen3-TTS is ~2s/sentence).
+    """
+    if not _TTS_ENABLED:
+        return
+    text = (text or "").strip()
+    if not text:
+        return
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{VOICE_API}/v1/say",
+                json={"text": text},
+                timeout=180.0,
+            )
+    except Exception as e:
+        logger.warning(f"TTS speak failed: {e}")
 
 
 @router.post("/api/voice/active-session")
@@ -67,6 +154,22 @@ async def voice_status():
             return JSONResponse(r.json())
     except Exception:
         return JSONResponse({"state": "OFFLINE", "voice_enabled": False, "last_transcript": ""})
+
+
+@router.get("/api/voice/tts-status")
+async def voice_tts_status():
+    """Return whether TTS-on-response is enabled. Distinct from wake-word state."""
+    return JSONResponse({"tts_enabled": _TTS_ENABLED})
+
+
+@router.post("/api/voice/tts-toggle")
+async def voice_tts_toggle():
+    """Flip the TTS-on-response flag and persist."""
+    global _TTS_ENABLED
+    _TTS_ENABLED = not _TTS_ENABLED
+    _save_tts_state()
+    logger.info(f"TTS-on-response toggled: {_TTS_ENABLED}")
+    return JSONResponse({"tts_enabled": _TTS_ENABLED})
 
 
 @router.post("/api/voice/toggle")
@@ -171,19 +274,12 @@ async def voice_inject(request: Request):
         logger.error(f"Voice inject error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-    if speak and full_response.strip():
-        async def _speak(text_to_say: str):
-            try:
-                async with httpx.AsyncClient() as client:
-                    await client.post(
-                        f"{VOICE_API}/v1/say",
-                        json={"text": text_to_say},
-                        timeout=180.0,
-                    )
-            except Exception as e:
-                logger.warning(f"Voice inject TTS failed: {e}")
-
-        asyncio.create_task(_speak(full_response))
+    if speak and full_response.strip() and tts_is_enabled():
+        # Speak only the first two sentences (or the whole response if shorter).
+        # Same rule the streaming path uses, so the speaker toggle is the
+        # single source of truth for "what gets spoken."
+        chunk = extract_first_two_sentences(full_response) or full_response
+        asyncio.create_task(speak_text(chunk))
 
     return JSONResponse(
         {"success": True, "response": full_response, "session_id": session_id}
