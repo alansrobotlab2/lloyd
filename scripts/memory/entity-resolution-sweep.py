@@ -45,7 +45,7 @@ from typing import Any
 
 FACTS_ROOT = Path.home() / "obsidian" / "facts"
 REL_PATH = FACTS_ROOT / "_relationships.json"
-ALIASES_PATH = FACTS_ROOT / "_aliases.json"  # unified source of truth (2026-04-21)
+ALIASES_PATH = FACTS_ROOT / "entity-aliases.json"  # canonical alias table consumed by MCP server + v4 classifier
 OUT_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
 
 # ── Normalization ────────────────────────────────────────────────────────────
@@ -95,17 +95,20 @@ def normalize_punct(name: str) -> str:
 
 
 def safe_suffix_forms(name: str) -> list[str]:
-    """Return all forms reachable by stripping AT MOST ONE safe suffix token.
+    """Return all forms reachable by stripping ALL consecutive safe suffix tokens
+    from the end of the name.
 
-    Single-strip is important: without it, `Claude Agent SDK` over-normalizes
-    to `claude`, conflating it with the Claude entity. With single-strip,
-    `Claude Agent SDK` → {claudeagentsdk, claudeagent}, neither matching
-    `Claude`, so the pair correctly lands in the AMBIGUOUS bucket for review.
+    This handles compound safe suffixes like "OpenClaw Agent SDK" → {openclawagentsdk,
+    openclawagent, openclaw}. The full normalization (normalize_full) already strips
+    ALL suffix tokens (safe + ambiguous), so stripping just the safe ones from the
+    end is the correct boundary: it produces the bare entity name which can then
+    match against the bare-name variant.
     """
     toks = tokens(name)
     forms = ["".join(toks)]
-    if toks and toks[-1] in STOP_SUFFIX_TOKENS_SAFE:
-        forms.append("".join(toks[:-1]))
+    while toks and toks[-1] in STOP_SUFFIX_TOKENS_SAFE:
+        toks = toks[:-1]
+        forms.append("".join(toks))
     return [f for f in forms if f]
 
 
@@ -241,7 +244,29 @@ def decide_merge(
         return (False, f"SUFFIX_SAFE but imbalance {ratio:.1f}× < {SUFFIX_SAFE_RATIO}")
 
     if tier == "SUFFIX_AMBIGUOUS":
-        return (False, "SUFFIX_AMBIGUOUS — always hand-review")
+        # Generally hand-review, but allow when there's a clear bare-name
+        # dominant (ratio >= threshold or second-largest is small).
+        if smallest_deg == 0:
+            return (True, "SUFFIX_AMBIG, a variant has 0 degree")
+        if second_deg <= SUFFIX_SAFE_SMALL_VARIANT:
+            return (True, f"SUFFIX_AMBIG, second-largest variant is small ({second_deg})")
+        ratio = top_deg / second_deg if second_deg else float("inf")
+        if ratio >= SUFFIX_SAFE_RATIO:
+            return (True, f"SUFFIX_AMBIG, imbalance {ratio:.1f}× >= {SUFFIX_SAFE_RATIO}")
+        return (False, f"SUFFIX_AMBIG, imbalance {ratio:.1f}× < {SUFFIX_SAFE_RATIO} — hand-review")
+
+    if tier == "OTHER":
+        return (False, f"OTHER — always hand-review")
+
+    if tier == "SAFE":
+        # SAFE tier: every pair is CASE/PUNCT/SUFFIX_SAFE.
+        # Auto-merge unless high-value gate.
+        if total > HIGH_VALUE_GATE:
+            return (
+                False,
+                f"SAFE high-value cluster (total degree {total} > {HIGH_VALUE_GATE}) — hand-review",
+            )
+        return (True, f"SAFE merge, total degree {total}")
 
     return (False, f"unclassified tier {tier}")
 

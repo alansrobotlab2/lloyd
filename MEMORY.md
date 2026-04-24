@@ -1,3 +1,4 @@
 2026-04-20 18:00 PDT - Memory capture task #25 skipped: No new sessions detected since last run (watermark-gated: 766 == 766)
 2026-04-20 17:55 PDT - Memory capture task #25 skipped: No new sessions detected since last run (watermark-gated, count 767)
 2026-04-20 18:00 PDT - Memory capture task #25 skipped: No new sessions detected since last run (watermark-gated)
+- **Entity Resolution Sweep #48 (2026-04-23)**: 681 entities, 2396 active edges, 5 AMBIGUOUS clusters, 0 SAFE merges. Graph stable. **Path bug found & fixed**: 5 scripts (entity-resolution-sweep, classify-relationships-v4, semantic-entity-resolution, normalize-task-entities, fact_extractor) were reading from `_aliases.json` (48 entries) instead of `entity-aliases.json` (91 entries). The memory MCP server and entity_naming.py were already correct. Fixed all paths; `_aliases.json` removed as dead code.

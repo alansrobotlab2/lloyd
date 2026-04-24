@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 # Shared entity normalization (case-insensitive alias resolution + self-register).
-# The facts tree uses ~/obsidian/facts/_aliases.json as the source of truth;
+# The facts tree uses ~/obsidian/facts/entity-aliases.json as the source of truth;
 # without normalization, writers accumulate duplicate dirs (gr00t/ + GR00T/).
 _LLOYD_ROOT = Path(__file__).resolve().parents[3]
 if str(_LLOYD_ROOT) not in sys.path:

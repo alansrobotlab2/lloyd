@@ -20,11 +20,15 @@ from typing import Any
 from .bench_runner import run_bench
 from .common import (
     AutoresearchConfig,
+    find_last_promoted_variant,
     ledger_append,
     load_bench_tasks,
     load_config,
     now_iso,
     round_id,
+    validate_run_spec,
+    write_run_spec,
+    _run_spec_from_cfg,
 )
 from .hypothesis_generator import propose_variants
 from .judge import aggregate_variant, judge_trace
@@ -57,6 +61,30 @@ async def run(
     rid = round_id()
     logger.info("=== autoresearch round %s (dry_run=%s) ===", rid, dry_run)
 
+    # 1. Build and write run_spec.yaml
+    spec = _run_spec_from_cfg(cfg, model, budget_minutes)
+    err = validate_run_spec(spec)
+    if err:
+        logger.error("run_spec.yaml validation failed: %s", err)
+        return {"round_id": rid, "error": f"run_spec validation: {err}"}
+    spec_path = write_run_spec(rid, cfg, spec)
+
+    # Log run_spec to ledger
+    ledger_append(cfg.paths.ledger_path, {
+        "round_id": rid,
+        "event": "spec",
+        "spec_path": str(spec_path),
+        "writable_paths": spec["mutation_scope"]["writable_paths"],
+        "created_at": now_iso(),
+    })
+
+    # 2. Look up last promoted variant for parent lineage (Part 2)
+    parent_variant = find_last_promoted_variant(cfg.paths.ledger_path, cfg.paths.variants_dir)
+    if parent_variant:
+        logger.info("found last promoted variant for parent lineage: %s", parent_variant["variant_id"])
+    else:
+        logger.info("no prior promoted variant found — flat from baseline")
+
     tasks = load_bench_tasks(cfg.paths.bench_dir)
     if bench_limit:
         tasks = tasks[:bench_limit]
@@ -70,6 +98,7 @@ async def run(
     variants = await asyncio.to_thread(
         propose_variants,
         cfg, targets=targets, max_variants=max_variants or cfg.max_variants_per_round, model=model,
+        parent_variant=parent_variant,
     )
     if not variants:
         logger.warning("hypothesis generator produced 0 variants — nothing to evaluate this round")
@@ -200,11 +229,13 @@ async def run(
     return {
         "round_id": rid,
         "summary_file": str(summary_file),
+        "spec_file": str(spec_path),
         "variants_proposed": len(variants),
         "tasks_run": len(tasks),
         "baseline_mean": baseline_summary.get("mean_composite", 0.0),
         "decisions": decisions,
         "promoted": promotion_result,
+        "parent_variant_id": parent_variant["variant_id"] if parent_variant else None,
         "dry_run": dry_run,
     }
 

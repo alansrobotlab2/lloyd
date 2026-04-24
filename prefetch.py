@@ -31,6 +31,7 @@ logger = logging.getLogger("lloyd.prefetch")
 
 SKILL_THRESHOLD_FIRST = 3.0     # minimum score to inject first skill (full body)
 SKILL_THRESHOLD_SECOND = 4.0    # minimum score to inject second skill (excerpt only)
+SKILL_HIGH_CONFIDENCE = 6.5     # below this, also nudge the agent to skills_search
 SKILL_BODY_MAX = 6000           # chars, first skill
 SKILL_EXCERPT_MAX = 500         # chars, second skill
 FACT_MAX_ENTITIES = 2           # top N entities to look up
@@ -531,14 +532,30 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
         if session_lines:
             parts.append("<recent-sessions>\n" + "\n".join(session_lines) + "\n</recent-sessions>")
 
-    # No skill matched but the message was long enough to warrant a search —
-    # nudge the agent to consider an explicit skills_search call.
-    if not skills and had_query:
-        parts.append(
-            "<skill-hint>No skills matched automatically. "
-            "If this task involves a repeatable workflow, consider calling "
-            "skills_search to check for applicable skills.</skill-hint>"
-        )
+    # Skill-hint nudges. Two firing conditions:
+    # 1. No skill matched at all → ask the agent to consider an explicit search.
+    # 2. Top skill matched but with low confidence → tell the agent the
+    #    auto-pick is tentative and a real search may surface a better fit.
+    #    This is the failure mode that bit us 2026-04-22: "full systems check"
+    #    auto-picked claude-sdk-check (6.8) when system-health-check was the
+    #    canonical skill — keyword-match alone wasn't enough.
+    if had_query:
+        if not skills:
+            parts.append(
+                "<skill-hint>No skills matched automatically. "
+                "If this task involves a repeatable workflow, consider calling "
+                "skills_search to check for applicable skills.</skill-hint>"
+            )
+        elif skills[0][0] < SKILL_HIGH_CONFIDENCE:
+            top_score = skills[0][0]
+            top_name = skills[0][1]["name"]
+            parts.append(
+                f"<skill-hint>Auto-picked skill '{top_name}' is a "
+                f"low-confidence keyword match (score {top_score:.1f} < "
+                f"{SKILL_HIGH_CONFIDENCE}). Verify it actually covers your "
+                f"task — share both verb and noun stems with the request? "
+                f"If not, call skills_search with task-specific terms.</skill-hint>"
+            )
 
     if not parts:
         return ""

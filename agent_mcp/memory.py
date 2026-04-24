@@ -114,6 +114,13 @@ _QUERY_STOPWORDS = _ENTITY_STOPWORDS | {
     # Question-framing verbs (content-empty when used as prefix/filler)
     "walk", "tell", "show", "describe", "explain", "let", "lets",
     "give", "ask", "share", "summarize",
+    # Third-person-s question framing verbs (#332). These surface as the
+    # main verb in "What X when Y?" phrasings where the verb itself carries
+    # no topical signal but has enough lex-leg BM25 weight to narrow the
+    # hybrid candidate pool. Restricted to the -s forms so root-verb uses
+    # in content queries ("send email feature", "happen during deploy")
+    # remain searchable.
+    "happens", "sends", "occurs", "goes",
     # Discourse fillers / intensifiers
     "just", "also", "really", "actually", "basically", "pretty",
     "please", "kindly", "maybe", "probably", "perhaps",
@@ -796,8 +803,12 @@ def _fact_get(params: dict) -> str:
     as_of = params.get("as_of") or None
     include_expired = bool(params.get("include_expired", False))
     try:
+        # default=str handles datetime event_date values parsed natively from
+        # YAML (pre-existing data issue; see vault_recall for precedent at
+        # line ~1481).
         return json.dumps(_get_facts_sync(entity, category, as_of=as_of,
-                                          include_expired=include_expired))
+                                          include_expired=include_expired),
+                          default=str)
     except Exception as exc:
         return json.dumps({"error": str(exc), "facts": []})
 
@@ -855,7 +866,7 @@ def _fact_profile(params: dict) -> str:
             lines.append(f"\n{cat.upper()}:")
             for f in cat_facts[:3]:
                 lines.append(f"  - {f.get('fact', '')}")
-        return json.dumps({"entity": entity, "categories": categories, "fact_count": len(facts), "summary": "\n".join(lines)})
+        return json.dumps({"entity": entity, "categories": categories, "fact_count": len(facts), "summary": "\n".join(lines)}, default=str)
     except Exception as exc:
         return json.dumps({"error": str(exc)})
 
