@@ -245,10 +245,22 @@ def get_due_tasks() -> list[dict]:
 def _load_skill_content(skill_path: str) -> Optional[str]:
     expanded = Path(skill_path.replace("~", str(Path.home())))
     if not expanded.exists():
-        alt = Path.home() / "obsidian" / skill_path
-        if alt.exists():
-            expanded = alt
-        else:
+        # Fallback: skill_path might be a bare slug like "autonomy-data-pipeline"
+        # without the ~/obsidian/skills/ prefix or /SKILL.md suffix.
+        # Skip paths that look like bare slugs (no slash, no .md extension)
+        # to avoid matching autonomy task files (e.g., obsidian/autonomy-data-pipeline.md).
+        if "/" not in skill_path and not skill_path.endswith(".md"):
+            expanded = Path.home() / "obsidian" / "skills" / skill_path / "SKILL.md"
+
+        if expanded.exists():
+            pass  # use the constructed path below
+        elif not skill_path.endswith(".md"):
+            # Try bare slug as direct obsidian path (for backward compat)
+            alt = Path.home() / "obsidian" / skill_path
+            if alt.exists():
+                expanded = alt
+
+        if not expanded.exists():
             return None
     try:
         return expanded.read_text(encoding="utf-8")
