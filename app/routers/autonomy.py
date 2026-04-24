@@ -86,7 +86,7 @@ def _autonomy_parse(path: Path) -> dict | None:
             "depends_on": fm.get("depends_on"),
             "pipeline": fm.get("pipeline"),
             "agent_id": fm.get("agent_id") or None,
-            "skill_path": fm.get("skill_path") or None,
+            "skill_name": fm.get("skill_name", fm.get("skill_path")) or None,
             "model": fm.get("model") or None,
             "timeout_seconds": fm.get("timeout_seconds", 1800),
             "max_retries": fm.get("max_retries", 3),
@@ -132,7 +132,7 @@ def _autonomy_write_file(task_dict: dict) -> Path:
     fm = {}
     for key in ("type", "id", "name", "description", "status", "priority", "frequency",
                  "agent_id", "model", "tags", "auto_advance", "preemptible", "pipeline_mode",
-                 "timeout_seconds", "max_retries", "failure_count", "skill_path", "cron_id",
+                 "timeout_seconds", "max_retries", "failure_count", "skill_name", "cron_id",
                  "runs_per_day", "scheduled_at", "last_run", "next_run", "depends_on",
                  "preferred_hours", "notify_on_complete", "pipeline", "created", "updated"):
         if key in task_dict and task_dict[key] is not None:
@@ -187,7 +187,7 @@ async def autonomy_task_write(request: Request):
             "status": data.get("status") or "draft",
             "priority": data.get("priority") or "medium",
             "frequency": data.get("frequency", ""),
-            "skill_path": data.get("skill_path", ""),
+            "skill_name": data.get("skill_name", data.get("skill_path", "")),
             "agent_id": data.get("agent_id") or "memory",
             "model": data.get("model", ""),
             "timeout_seconds": data.get("timeout_seconds") or 1800,
@@ -213,7 +213,7 @@ async def autonomy_task_write(request: Request):
         task = _autonomy_parse(path)
         if not task:
             raise HTTPException(status_code=500, detail=f"Failed to parse task {task_id}")
-        for key in ("name", "description", "status", "priority", "frequency", "skill_path",
+        for key in ("name", "description", "status", "priority", "frequency", "skill_name",
                      "agent_id", "model", "scheduled_at", "pipeline", "auto_advance",
                      "preemptible", "pipeline_mode", "notify_on_complete", "timeout_seconds",
                      "max_retries", "depends_on", "preferred_hours", "cron_id", "runs_per_day"):

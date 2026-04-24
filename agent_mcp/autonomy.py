@@ -66,7 +66,7 @@ def _parse_task_file(path: Path) -> dict | None:
             "tags": frontmatter.get("tags", []) or [],
             "created_at": _to_iso(frontmatter.get("created", frontmatter.get("created_at", ""))),
             "updated_at": _to_iso(frontmatter.get("updated", frontmatter.get("updated_at", ""))),
-            "skill_path": frontmatter.get("skill_path", ""),
+            "skill_name": frontmatter.get("skill_name", frontmatter.get("skill_path", "")),
             "agent_id": frontmatter.get("agent_id", "memory"),
             "model": frontmatter.get("model", ""),
             "timeout_seconds": frontmatter.get("timeout_seconds", 1800),
@@ -112,7 +112,7 @@ def _write_task_file(task_dict: dict) -> Path:
         "timeout_seconds": task_dict.get("timeout_seconds", 1800),
         "max_retries": task_dict.get("max_retries", 3),
         "failure_count": task_dict.get("failure_count", 0),
-        "skill_path": task_dict.get("skill_path", ""),
+        "skill_name": task_dict.get("skill_name", task_dict.get("skill_path", "")),
         "cron_id": task_dict.get("cron_id"),
         "runs_per_day": task_dict.get("runs_per_day"),
         "scheduled_at": task_dict.get("scheduled_at", ""),
@@ -222,7 +222,7 @@ async def list_tools():
                 "status": {"type": "string", "description": "Task status (draft, up_next, in_progress)"},
                 "priority": {"type": "string", "description": "Task priority (low, medium, high)"},
                 "frequency": {"type": "string", "description": "Task frequency"},
-                "skill_path": {"type": "string", "description": "Path to skill file to execute"},
+                "skill_name": {"type": "string", "description": "Skill slug (e.g. 'autonomy-data-pipeline'). Resolves to ~/obsidian/skills/<slug>/SKILL.md"},
                 "agent_id": {"type": "string", "description": "Agent ID to run the task"},
                 "model": {"type": "string", "description": "Model to use"},
                 "timeout_seconds": {"type": "integer", "description": "Timeout in seconds"},
@@ -334,7 +334,7 @@ def _handle_write(params: dict) -> str:
             "status": params.get("status", "") or "draft",
             "priority": params.get("priority", "") or "medium",
             "frequency": params.get("frequency", ""),
-            "skill_path": params.get("skill_path", ""),
+            "skill_name": params.get("skill_name", params.get("skill_path", "")),
             "agent_id": params.get("agent_id", "") or "memory",
             "model": params.get("model", ""),
             "timeout_seconds": params.get("timeout_seconds", 0) or 1800,
@@ -357,7 +357,7 @@ def _handle_write(params: dict) -> str:
         task_dict = _parse_task_file(existing_path)
         if task_dict is None:
             return json.dumps({"error": f"Failed to parse task #{task_id}"})
-        for key in ("status", "priority", "frequency", "skill_path", "agent_id", "model",
+        for key in ("status", "priority", "frequency", "skill_name", "agent_id", "model",
                      "scheduled_at", "pipeline", "description"):
             if params.get(key):
                 task_dict[key] = params[key]

@@ -111,7 +111,7 @@ function TaskModal({
   const [pipeline, setPipeline] = useState(task?.pipeline || "");
   const [dependsOn, setDependsOn] = useState(task?.depends_on?.toString() || "");
   const [agentId, setAgentId] = useState(task?.agent_id || "");
-  const [skillPath, setSkillPath] = useState(task?.skill_path || "");
+  const [skillName, setSkillName] = useState(task?.skill_name || "");
   const [model, setModel] = useState(task?.model || "");
   const [timeoutSeconds, setTimeoutSeconds] = useState(task?.timeout_seconds?.toString() || "");
   const [scheduledAt, setScheduledAt] = useState(task?.scheduled_at || "");
@@ -172,7 +172,7 @@ function TaskModal({
         pipeline: pipeline || null,
         depends_on: dependsOn ? parseInt(dependsOn) : null,
         agent_id: agentId || null,
-        skill_path: skillPath || null,
+        skill_name: skillName || null,
         model: model || null,
         timeout_seconds: timeoutSeconds ? parseInt(timeoutSeconds) : null,
       };
@@ -444,13 +444,13 @@ function TaskModal({
             </div>
             <div>
               <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
-                Skill path
+                Skill name
               </label>
               <input
                 type="text"
-                value={skillPath}
-                onChange={(e) => setSkillPath(e.target.value)}
-                placeholder="skills/some-skill.ts"
+                value={skillName}
+                onChange={(e) => setSkillName(e.target.value)}
+                placeholder="e.g. autonomy-data-pipeline"
                 className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
               />
             </div>
