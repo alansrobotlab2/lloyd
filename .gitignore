@@ -39,3 +39,6 @@ __pycache__/
 /workers.db-wal
 
 state.json
+
+# Voice runtime: TTS-on-response toggle persistence
+/voice_runtime_state.json

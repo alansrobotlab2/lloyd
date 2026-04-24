@@ -912,4 +912,9 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId }),
     }).then(r => r.json()),
+  // TTS-on-response (speaker toggle in MC sidebar). Independent of wake-word state.
+  voiceTtsStatus: (): Promise<{ tts_enabled: boolean }> =>
+    fetch(`${API_BASE}/voice/tts-status`).then(r => r.json()),
+  voiceTtsToggle: (): Promise<{ tts_enabled: boolean }> =>
+    fetch(`${API_BASE}/voice/tts-toggle`, { method: 'POST' }).then(r => r.json()),
 }

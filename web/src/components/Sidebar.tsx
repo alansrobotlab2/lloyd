@@ -69,6 +69,9 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
   const [voiceEnabled, setVoiceEnabled] = useState(false)
   const [voiceOnline, setVoiceOnline] = useState(false)
   const [_pipelineState, setPipelineState] = useState<string>('IDLE')
+  // TTS-on-response: independent of wake-word state. Speaker icon (Vol2/VolX)
+  // reflects this; mic-related rows reflect voiceEnabled.
+  const [ttsEnabled, setTtsEnabled] = useState(false)
   const _wsAvailable = voiceOnline
   const _statusLoaded = voiceOnline
 
@@ -82,6 +85,11 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
         setIsListening(s.state === 'LISTENING' || s.state === 'ACTIVE_LISTEN')
       })
       .catch(() => setVoiceOnline(false))
+    // TTS flag is owned by lloyd backend, not the voice-mode daemon, so it's
+    // queryable independent of voice mode being up.
+    api.voiceTtsStatus()
+      .then(s => setTtsEnabled(s.tts_enabled ?? false))
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -98,7 +106,14 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
       // ignore
     }
   }
-  const handleTtsToggle = () => {} // stub — no TTS mute endpoint yet
+  const handleTtsToggle = async () => {
+    try {
+      const r = await api.voiceTtsToggle()
+      setTtsEnabled(r.tts_enabled ?? !ttsEnabled)
+    } catch {
+      // ignore
+    }
+  }
 
   const renderItem = (item: NavItem) => {
     const Icon = item.icon
@@ -191,18 +206,18 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
             {!collapsed && <span className="truncate">{isListening ? 'Listening' : 'Mic Off'}</span>}
           </div>
 
-          {/* Row 3.5 — Speaker toggle */}
+          {/* Row 3.5 — Speaker toggle (TTS-on-response, not wake-word) */}
           <button
             onClick={handleTtsToggle}
-            title={collapsed ? (voiceEnabled ? 'Voice On' : 'Voice Off') : undefined}
+            title={collapsed ? (ttsEnabled ? 'Speak responses: ON' : 'Speak responses: OFF') : undefined}
             className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-              voiceEnabled
+              ttsEnabled
                 ? 'text-green-400 bg-green-600/10 hover:bg-green-600/20'
-                : 'text-red-400 bg-red-600/10 hover:bg-red-600/20'
+                : 'text-slate-500 hover:text-slate-300 hover:bg-surface-2'
             }`}
           >
-            {voiceEnabled ? <Volume2 className="w-4 h-4 flex-shrink-0" /> : <VolumeX className="w-4 h-4 flex-shrink-0" />}
-            {!collapsed && <span className="truncate">{voiceEnabled ? 'Voice' : 'Voice'}</span>}
+            {ttsEnabled ? <Volume2 className="w-4 h-4 flex-shrink-0" /> : <VolumeX className="w-4 h-4 flex-shrink-0" />}
+            {!collapsed && <span className="truncate">{ttsEnabled ? 'Speak: On' : 'Speak: Off'}</span>}
           </button>
 
           {/* Row 4 — Power toggle */}
