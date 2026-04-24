@@ -206,8 +206,11 @@ def _is_preferred_hour(task: dict) -> bool:
 
 
 def _is_task_due(task: dict, all_tasks: list[dict]) -> bool:
-    skill = str(task.get("skill_path", "") or "").strip()
-    if not skill or skill.lower() in ("null", "none"):
+    # A task is runnable if it has a skill_name (slug) or a full skill_path.
+    # If both are empty, skip it.
+    skill_name = str(task.get("skill_name", "") or "").strip()
+    skill_path = str(task.get("skill_path", "") or "").strip()
+    if not skill_name and not skill_path:
         return False
     interval = _frequency_interval_seconds(task)
     if interval is None:
@@ -242,30 +245,36 @@ def get_due_tasks() -> list[dict]:
 
 # ── Task execution via Claude Agent SDK ───────────────────────────────────────
 
-def _load_skill_content(skill_path: str) -> Optional[str]:
-    expanded = Path(skill_path.replace("~", str(Path.home())))
-    if not expanded.exists():
-        # Fallback: skill_path might be a bare slug like "autonomy-data-pipeline"
-        # without the ~/obsidian/skills/ prefix or /SKILL.md suffix.
-        # Skip paths that look like bare slugs (no slash, no .md extension)
-        # to avoid matching autonomy task files (e.g., obsidian/autonomy-data-pipeline.md).
-        if "/" not in skill_path and not skill_path.endswith(".md"):
-            expanded = Path.home() / "obsidian" / "skills" / skill_path / "SKILL.md"
+def _load_skill_content(skill_name: str) -> Optional[str]:
+    """Resolve a skill name (slug) or path to SKILL.md content.
 
-        if expanded.exists():
-            pass  # use the constructed path below
-        elif not skill_path.endswith(".md"):
-            # Try bare slug as direct obsidian path (for backward compat)
-            alt = Path.home() / "obsidian" / skill_path
-            if alt.exists():
-                expanded = alt
-
-        if not expanded.exists():
-            return None
-    try:
-        return expanded.read_text(encoding="utf-8")
-    except Exception:
+    Priority:
+      1. If skill_name looks like a filesystem path (contains / or .md), use it directly.
+      2. Otherwise treat it as a slug → ~/obsidian/skills/<slug>/SKILL.md.
+    """
+    skill_name = str(skill_name or "").strip()
+    if not skill_name or skill_name.lower() in ("null", "none"):
         return None
+
+    # If it's already a path, try it directly first
+    if "/" in skill_name or skill_name.endswith(".md"):
+        expanded = Path(skill_name.replace("~", str(Path.home())))
+        if expanded.exists():
+            try:
+                return expanded.read_text(encoding="utf-8")
+            except Exception:
+                return None
+        # Path didn't exist — fall through to slug resolution below
+        return None
+
+    # Treat as slug: ~/obsidian/skills/<slug>/SKILL.md
+    expanded = Path.home() / "obsidian" / "skills" / skill_name / "SKILL.md"
+    if expanded.exists():
+        try:
+            return expanded.read_text(encoding="utf-8")
+        except Exception:
+            return None
+    return None
 
 
 def _build_task_prompt(task: dict, skill_content: str) -> str:
@@ -334,13 +343,20 @@ def run_task(task_id) -> dict:
     if not task:
         return {"success": False, "error": f"Failed to parse task #{task_id}"}
 
-    skill_path = str(task.get("skill_path", "") or "").strip()
-    if not skill_path or skill_path.lower() in ("null", "none"):
-        return {"success": False, "error": f"Task #{task_id} has no skill_path"}
+    skill_name = str(task.get("skill_name", "") or "").strip()
+    # Backward compat: if skill_name is empty but skill_path exists (old format), use it
+    skill_path = str(task.get("skill_path", "") or "").strip() if not skill_name else ""
 
-    skill_content = _load_skill_content(skill_path)
-    if not skill_content:
-        return {"success": False, "error": f"Skill not found: {skill_path}"}
+    if skill_name:
+        skill_content = _load_skill_content(skill_name)
+        if not skill_content:
+            return {"success": False, "error": f"Skill not found: {skill_name}"}
+    elif skill_path:
+        skill_content = _load_skill_content(skill_path)
+        if not skill_content:
+            return {"success": False, "error": f"Skill not found: {skill_path}"}
+    else:
+        return {"success": False, "error": f"Task #{task_id} has no skill_name or skill_path"}
 
     _update_task_field(task_id, status="in_progress")
     prompt = _build_task_prompt(task, skill_content)

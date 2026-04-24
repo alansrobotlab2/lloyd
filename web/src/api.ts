@@ -409,7 +409,7 @@ export interface AutonomyTask {
   depends_on: number | null;
   pipeline: string | null;
   agent_id: string | null;
-  skill_path: string | null;
+  skill_name: string | null;
   model: string | null;
   timeout_seconds: number | null;
   max_retries: number | null;
