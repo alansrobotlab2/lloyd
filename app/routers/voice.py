@@ -8,13 +8,14 @@ both speak the **first two sentences** of each agent response via
 survives backend restarts.
 """
 
-import asyncio
 import json
 import logging
 import re
+import uuid
+from datetime import datetime
 
 import httpx
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import ClaudeAgentOptions
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -27,7 +28,12 @@ from app.config import (
     _resolve_model_name,
 )
 from app.paths import SESSIONS_DIR, LLOYD_HOME
-from app.sessions_io import _save_session_meta
+from app.sessions_io import (
+    SessionTurn,
+    _save_session_meta,
+    enqueue_turn,
+    set_last_user_session,
+)
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools
 from prompt_builder import build_system_prompt
 from prefetch import prefetch_context
@@ -41,7 +47,36 @@ VOICE_API = "http://127.0.0.1:8092"
 # Tracks the MC-focused session so voice transcripts route to whatever session
 # the user currently has open. Set by the frontend via /api/voice/active-session.
 # None = fall back to voice_bridge_config.json's lloyd_session_key (voice-main).
+#
+# Persisted to disk so a backend restart doesn't orphan the setting. The
+# frontend's Layout only POSTs when `visibleSlot.sessionKey` changes, so if
+# the backend restarts while the user stays on the same session tab, the
+# frontend never re-asserts and transcripts silently fall back to "voice-main".
+_ACTIVE_SESSION_STATE_PATH = LLOYD_HOME / "voice_active_session.json"
 _VOICE_ACTIVE_SESSION: str | None = None
+
+
+def _load_active_session_state() -> None:
+    """Restore _VOICE_ACTIVE_SESSION from disk on import."""
+    global _VOICE_ACTIVE_SESSION
+    try:
+        if _ACTIVE_SESSION_STATE_PATH.exists():
+            data = json.loads(_ACTIVE_SESSION_STATE_PATH.read_text())
+            v = data.get("active_session")
+            _VOICE_ACTIVE_SESSION = v if isinstance(v, str) and v else None
+    except Exception as e:
+        logger.warning(f"Failed to load active-session state: {e}")
+        _VOICE_ACTIVE_SESSION = None
+
+
+def _save_active_session_state() -> None:
+    """Persist _VOICE_ACTIVE_SESSION to disk. Atomic-ish write via tmp + rename."""
+    try:
+        tmp = _ACTIVE_SESSION_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"active_session": _VOICE_ACTIVE_SESSION}))
+        tmp.replace(_ACTIVE_SESSION_STATE_PATH)
+    except Exception as e:
+        logger.warning(f"Failed to save active-session state: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +110,7 @@ def _save_tts_state() -> None:
 
 
 _load_tts_state()
+_load_active_session_state()
 
 
 def tts_is_enabled() -> bool:
@@ -137,6 +173,7 @@ async def voice_set_active_session(request: Request):
         data = {}
     sid = data.get("session_id")
     _VOICE_ACTIVE_SESSION = sid if isinstance(sid, str) and sid else None
+    _save_active_session_state()
     return JSONResponse({"active_session": _VOICE_ACTIVE_SESSION})
 
 
@@ -197,24 +234,39 @@ async def voice_say(request: Request):
 
 @router.post("/api/voice/inject")
 async def voice_inject(request: Request):
-    """Accept a transcript from voice_mode.py, run a turn, speak the response.
+    """Accept a transcript from voice_mode.py and enqueue it as a real user
+    turn on the active chat session.
 
-    Payload: {text, speaker?, session_key?, speak?=true}
+    Routing: the transcript becomes `source="user"` in the session queue, so
+    it streams through `_run_turn` the same way a typed message does —
+    persists the user message to the session JSON, broadcasts SSE events to
+    any open chat UI, and fires TTS-on-response automatically when the
+    speaker toggle is on.
+
+    Payload: {text, speaker?, session_key?}
+    Response: {success, session_id, turn_id}
     """
     data = await request.json()
     text = (data.get("text") or "").strip()
     speaker = (data.get("speaker") or "").strip()
     # Priority:
-    #   1. explicit session_key/session_id in the inject payload
-    #   2. the MC-focused session set by the frontend
+    #   1. the MC-focused session set by the frontend — if the user has MC
+    #      open, the current chat tab is always the right destination
+    #   2. explicit session_key/session_id in the payload — used when the
+    #      daemon has a WS client with its own session, or when injected
+    #      from a non-MC caller that knows which session it wants
     #   3. the legacy "voice-main" catch-all session
+    #
+    # Note: the daemon's _lloyd_session_key config default is "voice-main",
+    # so in local/TUI mode every payload arrives with session_key="voice-main".
+    # Putting _VOICE_ACTIVE_SESSION first prevents that default from
+    # clobbering the MC user's actual focus.
+    payload_session = data.get("session_key") or data.get("session_id")
     session_id = (
-        data.get("session_key")
-        or data.get("session_id")
-        or _VOICE_ACTIVE_SESSION
+        _VOICE_ACTIVE_SESSION
+        or payload_session
         or "voice-main"
     )
-    speak = bool(data.get("speak", True))
 
     if not text:
         raise HTTPException(status_code=400, detail="Message text required")
@@ -225,20 +277,32 @@ async def voice_inject(request: Request):
         else text
     )
 
-    model = CONFIG.get("model", {}).get("default", "")
-    model = _resolve_model_name(model)
-    model_env = _get_model_env(model)
-
+    # Resolve model: prefer the model the session already uses, fall back
+    # to the default. This keeps resume_id valid across voice/typed turns.
+    model = ""
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     resume_id = None
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
+            model = existing.get("model", "") or ""
+        except Exception:
+            existing = {}
+    else:
+        existing = {}
+
+    if not model:
+        model = CONFIG.get("model", {}).get("default", "")
+    model = _resolve_model_name(model)
+    model_env = _get_model_env(model)
+
+    if existing:
+        try:
             session_model = _resolve_model_name(existing.get("model", ""))
             if _model_base_url(session_model) == _model_base_url(model):
                 resume_id = existing.get("sdk_session_id")
         except Exception:
-            pass
+            resume_id = None
 
     system_prompt = build_system_prompt()
     prefetched_text = prefetch_context(prompt_text, session_id=session_id)
@@ -256,33 +320,46 @@ async def voice_inject(request: Request):
         effort=_resolve_effort(model),
         thinking=_resolve_thinking(model),
         resume=resume_id,
+        include_partial_messages=True,
     )
 
     await _save_session_meta(session_id, model, preview=prompt_text)
 
-    full_response = ""
+    # Build the user turn and hand it to the same queue /api/message/stream
+    # uses. `_session_consumer` drains user turns first (preempting any
+    # ambient), `_run_turn` persists the transcript as a user message and
+    # speaks the first two sentences of the reply when TTS is on.
+    turn = SessionTurn(
+        turn_id=uuid.uuid4().hex[:12],
+        source="user",
+        payload={
+            "text": prompt_text,
+            "prefetched_text": prefetched_text,
+            "model": model,
+            "options": options,
+            "meta_path": meta_path,
+            "resume_id": resume_id,
+        },
+        enqueued_at=datetime.now(),
+    )
+
+    # Lazy import to avoid the messages<->voice import cycle at load time.
+    from app.routers.messages import _session_consumer
+
     try:
-        async for message in query(prompt=prefetched_text, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        full_response += block.text
-            elif isinstance(message, ResultMessage):
-                if hasattr(message, "result") and message.result:
-                    full_response = message.result
+        await enqueue_turn(
+            session_id,
+            turn,
+            consumer_factory=lambda: _session_consumer(session_id),
+        )
     except Exception as e:
-        logger.error(f"Voice inject error: {e}")
+        logger.error(f"Voice inject enqueue failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-    if speak and full_response.strip() and tts_is_enabled():
-        # Speak only the first two sentences (or the whole response if shorter).
-        # Same rule the streaming path uses, so the speaker toggle is the
-        # single source of truth for "what gets spoken."
-        chunk = extract_first_two_sentences(full_response) or full_response
-        asyncio.create_task(speak_text(chunk))
+    set_last_user_session(session_id)
 
     return JSONResponse(
-        {"success": True, "response": full_response, "session_id": session_id}
+        {"success": True, "session_id": session_id, "turn_id": turn.turn_id}
     )
 
 
