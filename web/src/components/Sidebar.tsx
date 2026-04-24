@@ -17,7 +17,6 @@ import {
   Lightbulb,
   Mic,
   MicOff,
-  Power,
   Radio,
   Volume2,
   VolumeX,
@@ -191,22 +190,41 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
             </div>
           )}
 
-          {/* Row 3 — Mic status (read-only indicator) */}
-          <div
-            title={collapsed ? (isListening ? 'Mic Active' : 'Mic Inactive') : undefined}
-            className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium ${
+          {/* Row 3 — Mic toggle (click to enable/disable ASR wake-word listener) */}
+          <button
+            onClick={_statusLoaded ? handleVoiceToggle : undefined}
+            disabled={!_statusLoaded}
+            title={collapsed ? (
+              !_statusLoaded ? 'Voice Offline' :
+              isListening ? 'Listening — click to disable' :
+              voiceEnabled ? 'Mic On — click to disable' :
+              'Mic Off — click to enable'
+            ) : undefined}
+            className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
               !_statusLoaded
-                ? 'text-slate-600 opacity-50'
-                : isListening
-                  ? 'text-green-400 bg-green-600/10'
-                  : 'text-slate-500'
+                ? 'text-slate-600 cursor-not-allowed opacity-50'
+                : voiceEnabled
+                  ? isListening
+                    ? 'text-green-400 bg-green-600/20 hover:bg-green-600/30'
+                    : 'text-green-400 bg-green-600/10 hover:bg-green-600/20'
+                  : 'text-slate-500 hover:text-slate-300 hover:bg-surface-2'
             }`}
           >
-            {isListening ? <Mic className={`w-4 h-4 flex-shrink-0 ${_pipelineState === 'LISTENING' || _pipelineState === 'ACTIVE_LISTEN' ? 'animate-pulse' : ''}`} /> : <MicOff className="w-4 h-4 flex-shrink-0" />}
-            {!collapsed && <span className="truncate">{isListening ? 'Listening' : 'Mic Off'}</span>}
-          </div>
+            {voiceEnabled ? (
+              <Mic className={`w-4 h-4 flex-shrink-0 ${isListening ? 'animate-pulse' : ''}`} />
+            ) : (
+              <MicOff className="w-4 h-4 flex-shrink-0" />
+            )}
+            {!collapsed && (
+              <span className="truncate">
+                {!_statusLoaded ? 'Offline' :
+                 isListening ? 'Listening' :
+                 voiceEnabled ? 'Mic On' : 'Mic Off'}
+              </span>
+            )}
+          </button>
 
-          {/* Row 3.5 — Speaker toggle (TTS-on-response, not wake-word) */}
+          {/* Row 3.5 — Speaker toggle (TTS-on-response, independent of wake-word) */}
           <button
             onClick={handleTtsToggle}
             title={collapsed ? (ttsEnabled ? 'Speak responses: ON' : 'Speak responses: OFF') : undefined}
@@ -218,23 +236,6 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
           >
             {ttsEnabled ? <Volume2 className="w-4 h-4 flex-shrink-0" /> : <VolumeX className="w-4 h-4 flex-shrink-0" />}
             {!collapsed && <span className="truncate">{ttsEnabled ? 'Speak: On' : 'Speak: Off'}</span>}
-          </button>
-
-          {/* Row 4 — Power toggle */}
-          <button
-            onClick={_statusLoaded ? handleVoiceToggle : undefined}
-            disabled={!_statusLoaded}
-            title={collapsed ? (voiceEnabled ? 'Voice Enabled' : 'Voice Disabled') : undefined}
-            className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-              !_statusLoaded
-                ? 'text-slate-600 cursor-not-allowed opacity-50'
-                : voiceEnabled
-                  ? 'text-green-400 bg-green-600/10 hover:bg-green-600/20'
-                  : 'text-slate-500 hover:text-slate-300 hover:bg-surface-2'
-            }`}
-          >
-            <Power className="w-4 h-4 flex-shrink-0" />
-            {!collapsed && <span className="truncate">{voiceEnabled ? 'Enabled' : 'Disabled'}</span>}
           </button>
         </div>
         <div className="border-t border-surface-3/30 my-1" />
