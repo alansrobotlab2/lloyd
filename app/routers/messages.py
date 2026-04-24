@@ -63,8 +63,9 @@ from app.routers.voice import (
 from prompt_builder import build_system_prompt
 from prefetch import prefetch_context
 from app.compaction import (
-    check_local_compaction,
     format_conversation_for_local,
+    is_local_model,
+    load_and_compact_session,
 )
 
 
@@ -248,26 +249,41 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         )
 
     # ------------------------------------------------------------------
-    # Local-model compaction: read conversation from session JSON,
-    # format as text, append new user message, pass as prompt.
-    # Disable resume since local APIs are stateless.
-    # Cloud models: no changes — API handles context via resume.
+    # Local-model compaction: local endpoints (vLLM/llama-server) are
+    # stateless, so we reconstruct the conversation from the persisted
+    # session JSON each turn, truncate to fit the model's context window,
+    # and render it in the model's native chat template. Cloud models
+    # skip this block entirely — the Anthropic API manages context via
+    # `resume`.
     # ------------------------------------------------------------------
-    conv_text = ""  # formatted conversation text for local models
-    use_resume = resume_id is not None  # whether to use SDK resume for context
+    base_url = (options.env or {}).get("ANTHROPIC_BASE_URL", "")
+    is_local = is_local_model(base_url)
+    conv_text = ""
 
-    # --- Local model: read & format conversation before query ---
-    if not use_resume:
-        comp = check_local_compaction(meta_path)
-        if comp["recent_messages"]:
-            formatted = format_conversation_for_local(comp["recent_messages"])
-            conv_text = formatted + "\n\n<human>: " + text + "</human>"
-        # Disable resume — local APIs are stateless
+    if is_local:
+        comp = load_and_compact_session(meta_path, model=model)
+        conv_text = format_conversation_for_local(
+            comp["history"],
+            current_user_text=prefetched_text,
+            model=model,
+        )
+        if comp["truncated"]:
+            logger.info(
+                "[compaction] %s: dropped %d tokens (%d → %d, window=%d, threshold=%d)",
+                session_id,
+                comp["tokens_before"] - comp["tokens_after"],
+                comp["tokens_before"],
+                comp["tokens_after"],
+                comp["context_window"],
+                comp["threshold"],
+            )
+        # Local endpoints don't support SDK resume; drive context purely
+        # from our reconstructed prompt.
         options.resume = None
 
     try:
         async for message in query(
-            prompt=conv_text if not use_resume else prefetched_text,
+            prompt=conv_text if is_local else prefetched_text,
             options=options,
         ):
             if cancel_event.is_set():
@@ -1009,14 +1025,25 @@ async def post_message(request: Request):
     )
 
     # --- Sync endpoint: local-model compaction ---
-    use_resume = resume_id is not None
+    base_url = (options.env or {}).get("ANTHROPIC_BASE_URL", "")
+    is_local = is_local_model(base_url)
     conv_text = ""
 
-    if not use_resume:
-        comp = check_local_compaction(meta_path)
-        if comp["recent_messages"]:
-            formatted = format_conversation_for_local(comp["recent_messages"])
-            conv_text = formatted + "\n\n<human>: " + text + "</human>"
+    if is_local:
+        comp = load_and_compact_session(meta_path, model=model)
+        conv_text = format_conversation_for_local(
+            comp["history"],
+            current_user_text=prefetched_text,
+            model=model,
+        )
+        if comp["truncated"]:
+            logger.info(
+                "[compaction] %s: dropped %d tokens (%d → %d)",
+                session_id,
+                comp["tokens_before"] - comp["tokens_after"],
+                comp["tokens_before"],
+                comp["tokens_after"],
+            )
         options.resume = None
 
     await _save_session_meta(session_id, model, preview=text)
@@ -1024,7 +1051,7 @@ async def post_message(request: Request):
     try:
         full_response = ""
         turn_stats: dict | None = None
-        async for message in query(prompt=conv_text if not use_resume else prefetched_text, options=options):
+        async for message in query(prompt=conv_text if is_local else prefetched_text, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
@@ -1060,7 +1087,7 @@ async def post_message(request: Request):
                     logger.warning(f"Failed to record usage: {ue}")
 
         # Persist assistant response for local models (no SDK resume)
-        if not use_resume and full_response:
+        if is_local and full_response:
             await _append_messages(session_id, [{
                 "id": uuid.uuid4().hex[:8],
                 "role": "assistant",

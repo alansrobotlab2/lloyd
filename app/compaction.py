@@ -1,400 +1,431 @@
-"""Conversation compaction — manage context window pressure.
+"""Conversation compaction — client-side context management for local models.
 
-Based on Claude Code's client-side compaction strategy:
-  - Token estimation: rough char/4 heuristic
-  - Conversation truncation: keep system prompt + last N turns
-  - Threshold-based auto-truncation for local models
-  - Prompt cache awareness for cloud models
+Design:
+  - Cloud (Anthropic API): the API handles auto-compaction and `resume`
+    gives the SDK a persistent session. This module is a no-op for cloud.
+  - Local (vLLM / llama-server / any `ANTHROPIC_BASE_URL != ""`): the
+    endpoint is stateless per request, so we reconstruct the conversation
+    from the persisted session JSON each turn, truncate to fit the
+    model's context window, and format it in the model's expected chat
+    template before passing as `prompt`.
 
-For cloud (Anthropic API): the API handles auto-compaction + cache_control.
-We mainly estimate to decide when to be conservative.
+Gate: `is_local_model(base_url)` — `base_url` is the value of the model's
+`ANTHROPIC_BASE_URL` env var (empty for cloud).
 
-For local (vLLM/llama-server): we must manage context client-side since
-there's no API-level context management.
-
-Both assume 256k context window.
+This module intentionally does NOT do LLM-based summarization. That's a
+future follow-up; for now "compaction" here means truncation with a
+synthetic omission marker.
 """
+
+from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("lloyd-server")
 
-# Context window: assume 256k for both cloud and local.
-CONTEXT_WINDOW = 256_000
 
-# Reserve this many tokens for model output.
+# ---------------------------------------------------------------------------
+# Token accounting
+# ---------------------------------------------------------------------------
+
+# Rough English-text heuristic: 1 token ≈ 4 chars. Integer arithmetic only.
+TOKENS_PER_CHAR = 4
+
+# Output headroom — reserve this many tokens for the model's response.
 OUTPUT_TOKENS_RESERVED = 20_000
 
-# Buffer before truncation fires.
-# We truncate before hitting the limit so the model still has headroom.
+# Additional safety buffer so we start truncating before hitting the wall.
 TRUNCATION_BUFFER_TOKENS = 32_000
 
-# Max tokens we'll allow in the prompt before truncating.
-TRUNCATION_THRESHOLD = CONTEXT_WINDOW - OUTPUT_TOKENS_RESERVED - TRUNCATION_BUFFER_TOKENS
-# = 256k - 20k - 32k = 204,000 tokens
+# Default context window if a model has no configured `context_length`.
+DEFAULT_CONTEXT_WINDOW = 128_000
 
-# How many turns to keep after truncation.
-TURNS_TO_KEEP = 12
-
-# Rough token estimator: 1 token ≈ 4 chars for English text.
-TOKENS_PER_CHAR = 4.0
-
-# Token estimation for common message types to be more accurate.
-SYSTEM_PROMPT_TOK_ESTIMATE = 20_000  # Lloyd's system prompt is ~20K
-SKILL_PROMPT_TOK_ESTIMATE = 5_000   # Skills prefix ~5K
+# Number of most-recent turns (user+assistant pairs) to keep when
+# truncation fires.
+TURNS_TO_KEEP = 20
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough token count. ~4 chars/token for English text."""
+    """Rough token count for a string. Integer result."""
+    if not text:
+        return 0
     return max(1, len(text) // TOKENS_PER_CHAR)
 
 
+def _message_text(message: dict) -> str:
+    """Flatten a message's content to a single string for token counting.
+
+    Handles both string content and structured content (list of blocks).
+    Tool-use / tool-result / thinking blocks are serialized in full — no
+    silent truncation, since they're often the informationally dense
+    parts of a turn.
+    """
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            parts.append(str(block))
+            continue
+        btype = block.get("type", "")
+        if btype == "text":
+            parts.append(block.get("text", ""))
+        elif btype == "tool_use":
+            name = block.get("name", "")
+            inp = json.dumps(block.get("input", {}))
+            parts.append(f"[tool_call: {name}({inp})]")
+        elif btype == "tool_result":
+            result = block.get("content", "")
+            if isinstance(result, str):
+                parts.append(f"[tool_result: {result}]")
+            elif isinstance(result, list):
+                for b in result:
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        parts.append(f"[tool_result: {b.get('text', '')}]")
+                    elif isinstance(b, dict):
+                        parts.append(f"[tool_result: {json.dumps(b)}]")
+        elif btype == "thinking":
+            parts.append(f"[thinking: {block.get('thinking', '')}]")
+        elif btype == "image":
+            parts.append("[image]")
+        else:
+            parts.append(json.dumps(block))
+    return "\n".join(p for p in parts if p)
+
+
 def estimate_message_tokens(message: dict) -> int:
-    """Estimate token count for a single message dict."""
+    """Estimate tokens for a single message dict."""
     if not message:
         return 0
-
-    # Text content
-    text = message.get("content", "")
-    if isinstance(text, list):
-        # Structured content (blocks)
-        text = json.dumps(text)
-    text_tokens = estimate_tokens(text if isinstance(text, str) else str(text))
-
-    # Tool call overhead
-    if "tool_calls" in message:
-        text_tokens += estimate_tokens(json.dumps(message["tool_calls"])) * 3
-
-    if "tool_result" in message:
-        text_tokens += estimate_tokens(str(message.get("tool_result", "")))
-
-    return text_tokens
+    return estimate_tokens(_message_text(message))
 
 
-def estimate_conversation_tokens(messages: list[dict], system_prompt: str) -> int:
-    """Estimate total tokens in a conversation."""
-    system_tokens = estimate_tokens(system_prompt) + SYSTEM_PROMPT_TOK_ESTIMATE + SKILL_PROMPT_TOK_ESTIMATE
-    message_tokens = sum(estimate_message_tokens(m) for m in messages)
-    return system_tokens + message_tokens
+def estimate_conversation_tokens(messages: list[dict], system_prompt: str = "") -> int:
+    """Estimate total tokens for a conversation.
+
+    Counts the literal bytes of `system_prompt` + each message. Does NOT
+    add any opaque padding constants — the caller is responsible for
+    passing the real system prompt if it wants that accounted for.
+    """
+    total = estimate_tokens(system_prompt)
+    total += sum(estimate_message_tokens(m) for m in messages)
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Local/cloud detection + per-model window
+# ---------------------------------------------------------------------------
+
+
+def is_local_model(base_url: str) -> bool:
+    """Return True if `base_url` points at a local/self-hosted endpoint.
+
+    Cloud = real Anthropic API: empty base_url, or any `*.anthropic.com`
+    host (e.g. api.anthropic.com, api2.anthropic.com). Anything else
+    (localhost, custom domain, etc.) is treated as local.
+    """
+    if not base_url:
+        return False
+    lower = base_url.lower()
+    return "anthropic.com" not in lower
+
+
+def get_context_window(model: str) -> int:
+    """Return the configured context length for a model, or the default.
+
+    Reads `models.<name>.context_length` from config.yaml. Imports lazily
+    so this module stays importable without a full app bootstrap (tests
+    can monkey-patch `_get_model_cfg` if needed).
+    """
+    try:
+        from app.config import _get_model_cfg  # lazy — avoids circular deps at import
+    except Exception:
+        return DEFAULT_CONTEXT_WINDOW
+    cfg = _get_model_cfg(model) if model else {}
+    ctx = cfg.get("context_length")
+    if isinstance(ctx, int) and ctx > 0:
+        return ctx
+    return DEFAULT_CONTEXT_WINDOW
+
+
+def truncation_threshold(context_window: int) -> int:
+    """Token budget above which truncation should fire."""
+    return max(1_000, context_window - OUTPUT_TOKENS_RESERVED - TRUNCATION_BUFFER_TOKENS)
+
+
+# ---------------------------------------------------------------------------
+# Truncation
+# ---------------------------------------------------------------------------
+
+
+def _group_into_turns(messages: list[dict]) -> list[list[dict]]:
+    """Group a message list into turns.
+
+    A turn = one user message optionally followed by assistant/tool
+    messages, up to the next user message. The very first segment
+    (messages before any user msg) is treated as its own "turn" so the
+    system-initial content isn't lost.
+    """
+    turns: list[list[dict]] = []
+    current: list[dict] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        if role == "user" and current:
+            turns.append(current)
+            current = [msg]
+        else:
+            current.append(msg)
+    if current:
+        turns.append(current)
+    return turns
 
 
 def truncate_conversation(
     messages: list[dict],
-    system_prompt: str,
-    max_tokens: int = TRUNCATION_THRESHOLD,
+    max_tokens: int,
     turns_to_keep: int = TURNS_TO_KEEP,
-) -> list[dict]:
-    """Truncate conversation to fit within token budget.
+    system_prompt: str = "",
+) -> tuple[list[dict], int]:
+    """Truncate conversation to fit within a token budget.
 
-    Keeps:
-    1. System prompt (untouched)
-    2. Last N turns (user + assistant pairs)
-    3. Recent tool results
+    Returns (truncated_messages, tokens_dropped). If no truncation is
+    needed, returns (messages, 0).
 
-    Drops everything before the kept window.
-
-    Returns truncated message list.
+    Strategy: keep the last `turns_to_keep` turns. If that's still too
+    big, drop turns from the front until we fit. Always keeps at least
+    the final turn. When anything is dropped, prepends one synthetic
+    user message describing what was removed, so the model isn't
+    confused by mid-conversation jumps.
     """
-    tokens = estimate_conversation_tokens(messages, system_prompt)
+    current_tokens = estimate_conversation_tokens(messages, system_prompt)
+    if current_tokens <= max_tokens:
+        return messages, 0
 
-    if tokens <= max_tokens:
-        return messages  # No truncation needed
+    turns = _group_into_turns(messages)
+    if not turns:
+        return messages, 0
 
-    # Count turns from the end
-    # A "turn" = user message + optional assistant response
-    turns = []
-    i = len(messages) - 1
-    while i >= 0:
-        if messages[i].get("role") == "assistant":
-            # Found an assistant message — collect backwards to user
-            turn = [messages[i]]
-            i -= 1
-            while i >= 0 and messages[i].get("role") in ("user", "tool"):
-                turn.append(messages[i])
-                i -= 1
-            turns.append(list(reversed(turn)))
-        else:
-            i -= 1
+    # Start by keeping the last N turns.
+    kept = turns[-turns_to_keep:] if len(turns) > turns_to_keep else turns[:]
 
-    # Keep last N turns
-    keep_turns = turns[-turns_to_keep:]
-    keep_indices = set()
-    for turn in keep_turns:
-        for msg in turn:
-            # Find original index
-            for idx, m in enumerate(messages):
-                if m is msg or (m.get("content") == msg.get("content") and m.get("role") == msg.get("role")):
-                    keep_indices.add(idx)
+    def _flatten(ts: list[list[dict]]) -> list[dict]:
+        out: list[dict] = []
+        for t in ts:
+            out.extend(t)
+        return out
 
-    # Build truncated list
-    truncated = []
-    for i, msg in enumerate(messages):
-        if i in keep_indices:
-            truncated.append(msg)
-        elif i > 0:  # Don't drop the first message (user's opening)
-            truncated.append({
-                "role": msg.get("role", "user"),
-                "content": f"[... {estimate_tokens(json.dumps(msg)) if isinstance(msg.get('content'), str) else 0} tokens omitted — conversation truncated]",
-            })
+    # Drop oldest turns until under budget, but never drop the last turn.
+    while len(kept) > 1 and estimate_conversation_tokens(_flatten(kept), system_prompt) > max_tokens:
+        kept.pop(0)
 
-    return truncated
+    truncated = _flatten(kept)
+    dropped_tokens = current_tokens - estimate_conversation_tokens(truncated, system_prompt)
 
+    if dropped_tokens > 0:
+        note = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"[compaction: {dropped_tokens} tokens of earlier conversation "
+                        f"omitted to fit the context window. {len(turns) - len(kept)} "
+                        f"turns were dropped.]"
+                    ),
+                }
+            ],
+        }
+        truncated = [note] + truncated
 
-def should_truncate(messages: list[dict], system_prompt: str) -> bool:
-    """Check if conversation needs truncation."""
-    return estimate_conversation_tokens(messages, system_prompt) > TRUNCATION_THRESHOLD
-
-
-def needs_auto_reset(messages: list[dict], system_prompt: str, is_local: bool) -> bool:
-    """Determine if the session should be reset.
-
-    For local models: hard reset at lower threshold (we can't rely on API).
-    For cloud models: the API handles auto-compaction, but we still monitor
-    for sessions that are getting very long.
-    """
-    tokens = estimate_conversation_tokens(messages, system_prompt)
-
-    if is_local:
-        # Hard threshold for local: 180k tokens
-        return tokens > 180_000
-    else:
-        # Cloud models handle auto-compaction. Only hard-reset at 220k.
-        return tokens > 220_000
-
-
-def build_compaction_note(tokens: int, was_truncated: bool) -> str:
-    """Build a note about compaction to add to the conversation."""
-    if not was_truncated:
-        return ""
-
-    return f"[Compaction note: conversation was truncated at ~{tokens} tokens. Old context before the last {TURNS_TO_KEEP} turns has been removed.]"
+    return truncated, dropped_tokens
 
 
 # ---------------------------------------------------------------------------
-# Local-model compaction — format conversation as text for non-resume APIs
+# Chat-template formatting
 # ---------------------------------------------------------------------------
 
-def is_local_model(model: str) -> bool:
-    """Check if a model URL points to a local/self-hosted endpoint.
+# Per-family template config. Each family emits the same shape:
+#   <open><role>\n<content><close>\n
+# and the full output ends with `gen_cue` to prompt generation.
+#
+# Qwen/Mistral: ChatML (<|im_start|> / <|im_end|>).
+# Llama 3/4: header-based (<|start_header_id|> / <|end_header_id|> + <|eot_id|>).
 
-    Cloud Anthropic URLs: api.anthropic.com, api2.anthropic.com
-    All others (http://, https:// to custom hosts, or non-API hostnames)
-    are treated as local/self-hosted.
-    """
-    if not model:
-        return False
-    lower = model.lower()
-    if "api.anthropic" in lower:
-        return False
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Chat template — configurable per model family. Local LLM APIs expect
-# specific role markers and message delimiters; using the wrong ones means
-# the model treats the whole conversation as raw text with no structural
-# awareness. Each family defines (role_map, delimiter, join_char).
-# ---------------------------------------------------------------------------
-
-_CHAT_TEMPLATES = {
-    # Qwen family — <|im_start|><|im_end|> delimiters
+_CHAT_TEMPLATES: dict[str, dict[str, Any]] = {
     "qwen": {
-        "role_map": {"user": "user", "assistant": "assistant", "system": "system", "tool": "assistant"},
-        "delimiter": "<|im_end|>\n<|im_start|>",
-        "join": "\n",
-        "wrap_open": "<|im_start|>assistant\n",
+        "role_map": {"user": "user", "assistant": "assistant", "system": "system", "tool": "user"},
+        "message_open": "<|im_start|>{role}\n",
+        "message_close": "<|im_end|>\n",
+        "gen_cue": "<|im_start|>assistant\n",
     },
-    # Llama 3/4 family — <START/END> markers
-    "llama": {
-        "role_map": {"user": "user", "assistant": "assistant", "system": "system", "tool": "assistant"},
-        "delimiter": "\n",
-        "join": "\n",
-        "wrap_open": "",
-    },
-    # Mistral — <|im_start|>…<|im_end|>
     "mistral": {
-        "role_map": {"user": "user", "assistant": "assistant", "system": "system", "tool": "assistant"},
-        "delimiter": "<|im_end|>\n<|im_start|>",
-        "join": "\n",
-        "wrap_open": "<|im_start|>assistant\n",
+        "role_map": {"user": "user", "assistant": "assistant", "system": "system", "tool": "user"},
+        "message_open": "<|im_start|>{role}\n",
+        "message_close": "<|im_end|>\n",
+        "gen_cue": "<|im_start|>assistant\n",
+    },
+    "llama": {
+        "role_map": {"user": "user", "assistant": "assistant", "system": "system", "tool": "user"},
+        "message_open": "<|start_header_id|>{role}<|end_header_id|>\n\n",
+        "message_close": "<|eot_id|>",
+        "gen_cue": "<|start_header_id|>assistant<|end_header_id|>\n\n",
     },
 }
 
-# Default fallback for unknown model families.
-_DEFAULT_TEMPLATE = _CHAT_TEMPLATES["qwen"]
+_DEFAULT_TEMPLATE_KEY = "qwen"
 
 
-def _get_template_for_model(model: str) -> dict:
-    """Return the chat template config for a given model name."""
-    lower = model.lower()
+def _pick_template(model: str) -> dict[str, Any]:
+    lower = (model or "").lower()
     if "qwen" in lower:
         return _CHAT_TEMPLATES["qwen"]
     if "llama" in lower or "metallama" in lower or "xwin" in lower:
         return _CHAT_TEMPLATES["llama"]
     if "mistral" in lower:
         return _CHAT_TEMPLATES["mistral"]
-    # Default to Qwen (most common local model family right now)
-    return _DEFAULT_TEMPLATE
+    return _CHAT_TEMPLATES[_DEFAULT_TEMPLATE_KEY]
 
 
-def _format_message_block(msg: dict, template: dict) -> str:
-    """Format a single message into template-specific text."""
-    role = msg.get("role", "user")
-    content = msg.get("content", "")
-
-    # Extract text from structured content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                btype = block.get("type", "")
-                if btype == "text":
-                    text = block.get("text", "")
-                    if text:
-                        parts.append(text)
-                elif btype == "tool_use":
-                    name = block.get("name", "")
-                    inp = json.dumps(block.get("input", {}))
-                    parts.append(f"[tool_call: {name}({inp})]")
-                elif btype == "tool_result":
-                    result = block.get("content", "")
-                    if isinstance(result, str):
-                        parts.append(f"[tool_result: {result[:500]}]")
-                    elif isinstance(result, list):
-                        for b in result:
-                            if isinstance(b, dict) and b.get("type") == "text":
-                                parts.append(f"[tool_result: {b.get('text', '')[:500]}]")
-                elif btype == "image":
-                    parts.append("[image]")
-                elif btype == "thinking":
-                    thinking = block.get("thinking", "")
-                    if thinking:
-                        parts.append(f"[thinking: {thinking[:2000]}]")
-            elif isinstance(block, str):
-                parts.append(block)
-        content_str = "\n".join(parts) if parts else ""
-    elif isinstance(content, str):
-        content_str = content
-    else:
-        content_str = str(content)
-
-    # Map role via template
-    mapped_role = template["role_map"].get(role, role)
-    return f"{mapped_role}\n{content_str}"
+def _format_one(msg: dict, template: dict[str, Any]) -> str:
+    role_raw = msg.get("role", "user")
+    mapped = template["role_map"].get(role_raw, role_raw)
+    content = _message_text(msg)
+    return template["message_open"].format(role=mapped) + content + template["message_close"]
 
 
-def format_conversation_for_local(messages: list[dict], model: str = "") -> str:
-    """Format a conversation history as a text block for local LLM APIs.
+def format_conversation_for_local(
+    history: list[dict],
+    current_user_text: str = "",
+    model: str = "",
+) -> str:
+    """Render history + current turn as a chat-template-formatted prompt.
 
-    Converts structured message dicts into a template-specific conversation
-    format so the model can parse the role boundaries correctly.
+    `history` is the persisted message list. If its last message is a
+    user message, that message is replaced by `current_user_text` (which
+    is expected to be the prefetch-enhanced text for the current turn —
+    includes subliminal context the persisted copy doesn't have).
 
-    Args:
-        messages: List of message dicts (role + content).
-        model: Model name for template selection (e.g. 'primary' → Qwen).
+    Output ends with the template's generation cue (e.g.
+    `<|im_start|>assistant\\n` for ChatML) so the local model starts
+    emitting the reply immediately.
+
+    If both `history` and `current_user_text` are empty, returns the
+    bare generation cue (edge case; callers should avoid this).
     """
-    if not messages:
-        return ""
+    template = _pick_template(model)
 
-    template = _get_template_for_model(model)
-    blocks = []
-    for msg in messages:
-        blocks.append(_format_message_block(msg, template))
+    # Strip trailing user msg — caller will re-add it with fresh context.
+    working = list(history)
+    if current_user_text and working and working[-1].get("role") == "user":
+        working = working[:-1]
 
-    # Join with delimiter, prepend opening for assistant context
-    joined = template["join"].join(blocks)
-    if template["wrap_open"]:
-        joined = template["wrap_open"] + joined
+    pieces: list[str] = [_format_one(m, template) for m in working]
 
-    return joined
+    if current_user_text:
+        pieces.append(
+            template["message_open"].format(role="user")
+            + current_user_text
+            + template["message_close"]
+        )
+
+    pieces.append(template["gen_cue"])
+    return "".join(pieces)
 
 
-def check_local_compaction(session_path: str) -> dict:
-    """Check if a local model session needs compaction.
+# ---------------------------------------------------------------------------
+# Session-level helper — read JSON, truncate, return ready-to-format history
+# ---------------------------------------------------------------------------
 
-    Reads the session JSON, estimates tokens, and returns compaction
-    status. Used before each query() call for local models.
 
-    Returns:
-        {
-            "is_local": bool,
-            "needs_compaction": bool,
-            "token_count": int,
-            "message_count": int,
-            "turn_count": int,
-            "should_reset": bool,
-            "recent_messages": list[dict],
-        }
+def load_and_compact_session(
+    session_path: Path | str,
+    model: str = "",
+    system_prompt: str = "",
+) -> dict[str, Any]:
+    """Read a persisted session and return a compaction result.
+
+    Returns a dict with:
+      - history:        list[dict], possibly truncated
+      - tokens_before:  int, estimated tokens in the original history
+      - tokens_after:   int, estimated tokens after truncation
+      - truncated:      bool, True if any turns were dropped
+      - context_window: int, the model's configured window
+      - threshold:      int, the truncation threshold in use
+
+    On any error (missing file, malformed JSON), returns an empty result
+    with `history=[]` and logs a warning.
     """
+    context_window = get_context_window(model)
+    threshold = truncation_threshold(context_window)
+
+    empty: dict[str, Any] = {
+        "history": [],
+        "tokens_before": 0,
+        "tokens_after": 0,
+        "truncated": False,
+        "context_window": context_window,
+        "threshold": threshold,
+    }
+
     try:
-        if not session_path or not session_path.exists():
-            return {
-                "is_local": True,
-                "needs_compaction": False,
-                "token_count": 0,
-                "message_count": 0,
-                "turn_count": 0,
-                "should_reset": False,
-                "recent_messages": [],
-            }
-
-        data = json.loads(session_path.read_text())
-        messages = data.get("messages", [])
-
-        if not messages:
-            return {
-                "is_local": True,
-                "needs_compaction": False,
-                "token_count": 0,
-                "message_count": 0,
-                "turn_count": 0,
-                "should_reset": False,
-                "recent_messages": [],
-            }
-
-        message_count = len(messages)
-        turn_count = sum(1 for m in messages if m.get("role") == "user")
-        token_count = estimate_conversation_tokens(messages, "")
-
-        # Count last 30 turns (60 messages) for compaction check
-        recent = []
-        i = len(messages) - 1
-        turns_found = 0
-        while i >= 0 and turns_found < 30:
-            if messages[i].get("role") == "user":
-                recent.insert(0, messages[i])
-                turns_found += 1
-                if i > 0 and messages[i-1].get("role") == "assistant":
-                    recent.insert(0, messages[i-1])
-                    i -= 1
-            i -= 1
-
-        # Need compaction if over threshold
-        needs_compaction = token_count > TRUNCATION_THRESHOLD
-
-        # Hard reset if over 180k (local models can't rely on API)
-        should_reset = token_count > 180_000
-
-        return {
-            "is_local": True,
-            "needs_compaction": needs_compaction,
-            "token_count": token_count,
-            "message_count": message_count,
-            "turn_count": turns_found,
-            "should_reset": should_reset,
-            "recent_messages": recent,
-        }
-
+        path = Path(session_path) if not isinstance(session_path, Path) else session_path
+        if not path.exists():
+            return empty
+        data = json.loads(path.read_text())
     except Exception as e:
-        logger.warning(f"Compaction check failed: {e}")
-        return {
-            "is_local": True,
-            "needs_compaction": False,
-            "token_count": 0,
-            "message_count": 0,
-            "turn_count": 0,
-            "should_reset": False,
-            "recent_messages": [],
-        }
+        logger.warning("compaction: failed to read session %s: %s", session_path, e)
+        return empty
 
+    messages = data.get("messages", [])
+    if not isinstance(messages, list) or not messages:
+        return empty
+
+    # Drop non-conversation entries (subliminal, tombstones, ambient markers)
+    # since they're for UI display, not for the model.
+    convo = [m for m in messages if m.get("role") in ("user", "assistant", "tool", "system")]
+
+    tokens_before = estimate_conversation_tokens(convo, system_prompt)
+    truncated_msgs, dropped = truncate_conversation(
+        convo,
+        max_tokens=threshold,
+        turns_to_keep=TURNS_TO_KEEP,
+        system_prompt=system_prompt,
+    )
+    tokens_after = estimate_conversation_tokens(truncated_msgs, system_prompt)
+
+    return {
+        "history": truncated_msgs,
+        "tokens_before": tokens_before,
+        "tokens_after": tokens_after,
+        "truncated": dropped > 0,
+        "context_window": context_window,
+        "threshold": threshold,
+    }
+
+
+__all__ = [
+    "estimate_tokens",
+    "estimate_message_tokens",
+    "estimate_conversation_tokens",
+    "is_local_model",
+    "get_context_window",
+    "truncation_threshold",
+    "truncate_conversation",
+    "format_conversation_for_local",
+    "load_and_compact_session",
+    "TOKENS_PER_CHAR",
+    "OUTPUT_TOKENS_RESERVED",
+    "TRUNCATION_BUFFER_TOKENS",
+    "DEFAULT_CONTEXT_WINDOW",
+    "TURNS_TO_KEEP",
+]
