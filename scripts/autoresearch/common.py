@@ -93,6 +93,156 @@ def variant_id(prefix: str = "V") -> str:
     return f"{prefix}_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
 
+# --- Run spec schema -----------------------------------------------------------
+
+RUN_SPEC_REQUIRED_TOP_LEVEL = {"objective", "evaluation", "budget", "mutation_scope"}
+
+# Top-level key → type hint for validation.
+# Nested dicts use the value as a set of required sub-keys.
+RUN_SPEC_SCHEMA: dict[str, Any] = {
+    "objective": str,
+    "evaluation": {
+        "timeout_secs": (int, 0),          # (type, default)
+        "command": str,
+    },
+    "budget": {
+        "max_rounds": (int, 0),
+        "max_variants_per_round": (int, 1),
+    },
+    "mutation_scope": {
+        "writable_paths": list,
+    },
+    "stop_conditions": list,
+    "sampling": {
+        "algorithm": (str, "baseline"),     # baseline | ucb1 | island
+    },
+}
+
+
+def _canonical_prompt_paths() -> dict[str, Path]:
+    """Canonical prompt files that can be overwritten by promotion."""
+    return {
+        "SOUL.md": LLOYD_HOME.parent / "obsidian" / "lloyd" / "SOUL.md",
+        "MEMORY.md": LLOYD_HOME.parent / "obsidian" / "lloyd" / "MEMORY.md",
+        "USER.md": LLOYD_HOME.parent / "obsidian" / "lloyd" / "USER.md",
+    }
+
+
+def _run_spec_from_cfg(cfg: AutoresearchConfig, model: str, budget_minutes: int | None) -> dict[str, Any]:
+    """Build the run spec for the current round from config + params.
+
+    This is called at the start of every round and written alongside the .md
+    summary so that rounds are reproducible from disk alone.
+    """
+    timeout_secs = 300  # per-trial hard cap (also set in run_bench call)
+    max_variants = cfg.max_variants_per_round
+    writable_paths = [str(p) for p in _canonical_prompt_paths().values()]
+
+    return {
+        "objective": (
+            "Improve Lloyd's prompt surfaces (SOUL.md, MEMORY.md, USER.md) "
+            "on the bench-task benchmark to increase mean composite score "
+            "while maintaining or improving safety."
+        ),
+        "evaluation": {
+            "timeout_secs": timeout_secs,
+            "command": "scripts/autoresearch/judge.py <trace> <rubric_model>",
+        },
+        "budget": {
+            "max_rounds": 0,  # open-ended — no fixed ceiling
+            "max_variants_per_round": max_variants,
+        },
+        "mutation_scope": {
+            "writable_paths": writable_paths,
+        },
+        "stop_conditions": [],
+        "sampling": {
+            "algorithm": "baseline",  # flat from baseline until Part 3
+        },
+    }
+
+
+def write_run_spec(round_id: str, cfg: AutoresearchConfig, spec: dict[str, Any]) -> Path:
+    """Write run_spec.yaml to rounds/<round_id>/ and return the path."""
+    round_dir = cfg.paths.rounds_dir / round_id
+    round_dir.mkdir(parents=True, exist_ok=True)
+    path = round_dir / "run_spec.yaml"
+    path.write_text(yaml.safe_dump(spec, sort_keys=False, indent=2), encoding="utf-8")
+    logger.info("wrote run_spec.yaml to %s", path)
+    return path
+
+
+def validate_run_spec(spec: dict[str, Any]) -> str | None:
+    """Validate run_spec against the schema. Returns None on success, error string on failure."""
+    # Required top-level keys
+    for key in RUN_SPEC_REQUIRED_TOP_LEVEL:
+        if key not in spec:
+            return f"missing required key: {key}"
+
+    # Nested validation
+    for key, value in RUN_SPEC_SCHEMA.items():
+        if key not in spec:
+            continue
+        val = spec[key]
+        if isinstance(value, dict):
+            if not isinstance(val, dict):
+                return f"'{key}' must be an object, got {type(val).__name__}"
+            for subkey, subval in value.items():
+                if isinstance(subval, tuple):
+                    expected_type, _ = subval
+                    if key in ("budget", "evaluation"):  # optional nested keys
+                        continue
+                    if not isinstance(val.get(subkey), expected_type):
+                        return f"'{key}.{subkey}' expected {expected_type.__name__}, got {type(val.get(subkey)).__name__}"
+                else:
+                    if not isinstance(val.get(subkey), subval):
+                        return f"'{key}.{subkey}' expected {subval.__name__}, got {type(val.get(subkey)).__name__ if val.get(subkey) else 'NoneType'}"
+    return None
+
+
+def find_last_promoted_variant(ledger_path: Path, variants_dir: Path | None = None) -> dict[str, Any] | None:
+    """Find the most recently promoted variant from the ledger.
+
+    Reads variant meta from variants_dir to get description/hypothesis.
+    Returns dict with variant_id, description, hypothesis if found, else None.
+    """
+    if not ledger_path.exists():
+        return None
+    try:
+        lines = ledger_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+
+    # Walk backwards looking for a decision where promoted=true
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        if entry.get("event") != "decision":
+            continue
+        if entry.get("promoted") is True:
+            vid = entry.get("variant_id", "")
+            description = ""
+            hypothesis = ""
+            # Try to enrich from variant meta
+            if variants_dir:
+                meta_path = variants_dir / vid / "variant.json"
+                if meta_path.exists():
+                    try:
+                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                        description = meta.get("description", "")
+                        hypothesis = meta.get("hypothesis", "")
+                    except Exception:
+                        pass
+            return {
+                "variant_id": vid,
+                "description": description,
+                "hypothesis": hypothesis,
+            }
+    return None
+
+
 def ledger_append(path: Path, entry: dict[str, Any]) -> None:
     """Append a single JSON line to the ledger. Best-effort — never raises."""
     try:

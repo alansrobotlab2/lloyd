@@ -208,6 +208,7 @@ def _build_single_variant_prompt(
     cfg: AutoresearchConfig,
     targets: list[str],
     target_file_hint: str | None = None,
+    parent_variant: dict[str, Any] | None = None,
 ) -> str:
     """Prompt for ONE variant, targeting ONE file. Small JSON output → reliable parse."""
     soul = _read(SOUL_PATH)
@@ -239,6 +240,18 @@ def _build_single_variant_prompt(
             f"You MUST modify exactly: `{target_file_hint}`. Leave the other file(s) alone.\n"
         )
 
+    # If this round should build on a previously promoted variant, surface it.
+    parent_block = ""
+    if parent_variant:
+        parent_block = (
+            f"\n## Previously promoted variant (build on this)\n"
+            f"- ID: `{parent_variant.get('variant_id', '')}`\n"
+            f"- Description: {parent_variant.get('description', '')}\n"
+            f"- Hypothesis: {parent_variant.get('hypothesis', '')}\n"
+            f"Use this variant's state as the starting point — don't redo its work,\n"
+            f"build on top of it.\n"
+        )
+
     return f"""You are a prompt-engineering researcher proposing ONE improvement to an AI
 agent named Lloyd. Generate exactly ONE variant of Lloyd's prompt surfaces
 that might score higher on Lloyd's benchmark.
@@ -267,6 +280,7 @@ that might score higher on Lloyd's benchmark.
 ## Recent losing variants (avoid repeating these approaches)
 {losers_summary}
 {file_hint_block}
+{parent_block}
 ## Your task
 Output a JSON object with this EXACT shape:
 
@@ -323,6 +337,7 @@ def _parse_single_variant(raw: str) -> tuple[dict[str, Any] | None, str | None]:
         "hypothesis": str(data.get("hypothesis", ""))[:1000],
         "target_surface": "prompts",
         "overlay_files": filtered,
+        "parent_variant_id": str(data.get("parent_variant_id", "")) if data.get("parent_variant_id") else None,
         "created_at": now_iso(),
     }, None
 
@@ -332,11 +347,12 @@ def _propose_one(
     targets: list[str],
     model: str,
     seed_idx: int,
+    parent_variant: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Run one hypothesis call. Returns a variant or None."""
     # Alternate hinted target file by index to diversify.
     hint = "SOUL.md" if seed_idx % 2 == 0 else "MEMORY.md"
-    prompt = _build_single_variant_prompt(cfg, targets, target_file_hint=hint)
+    prompt = _build_single_variant_prompt(cfg, targets, target_file_hint=hint, parent_variant=parent_variant)
     raw, payload = _call_local_llm(prompt, model=model)
     if raw is None:
         return None
@@ -358,6 +374,7 @@ def propose_variants(
     targets: list[str] | None = None,
     max_variants: int | None = None,
     model: str | None = None,
+    parent_variant: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Ask the local model for up to N variant overlays, one per parallel call.
 
@@ -379,7 +396,7 @@ def propose_variants(
     variants: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [
-            pool.submit(_propose_one, cfg, targets, model, idx)
+            pool.submit(_propose_one, cfg, targets, model, idx, parent_variant)
             for idx in range(max_variants)
         ]
         for fut in concurrent.futures.as_completed(futures):

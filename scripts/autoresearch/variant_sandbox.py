@@ -48,6 +48,7 @@ def materialize(cfg: AutoresearchConfig, variant: dict[str, Any]) -> Path:
         "target_surface": variant.get("target_surface", "prompts"),
         "description": variant.get("description", ""),
         "hypothesis": variant.get("hypothesis", ""),
+        "parent_variant_id": variant.get("parent_variant_id"),
         "overlay_files": sorted((variant.get("overlay_files") or {}).keys()),
         "created_at": variant.get("created_at", now_iso()),
     }

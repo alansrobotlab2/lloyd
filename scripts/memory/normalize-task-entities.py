@@ -29,7 +29,7 @@ from pathlib import Path
 
 FACTS = Path("/home/alansrobotlab/obsidian/facts")
 RELATIONSHIPS = FACTS / "_relationships.json"
-ALIASES = FACTS / "_aliases.json"
+ALIASES = FACTS / "entity-aliases.json"
 
 # Priority: the higher the index, the more we prefer this form's body as
 # the "primary" when merging (filenames, metadata, etc.). `hash` is already

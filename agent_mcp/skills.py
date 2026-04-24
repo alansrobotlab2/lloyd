@@ -118,16 +118,60 @@ _QUERY_STOPWORDS = {
 }
 
 
+# Suffixes we collapse for matching. "systems" → "system", "services" → "service",
+# "checks" → "check", "tasks" → "task". Conservative: only strip if the result is
+# still a real-looking word (≥ 3 chars) and the original isn't already an
+# exception (`news`, `bus`, `gas`, `os`, `is`, `us`, `ss`-endings).
+_STEM_SKIP = {"news", "bus", "gas", "lens", "kids", "his", "its", "yes", "this", "thus", "plus", "loss", "boss"}
+
+
+def _stem(token: str) -> str:
+    """Cheap morphology collapse for skill-matching only.
+
+    Folds simple English plurals so a query token ("systems") matches a skill
+    token ("system"). Not a real stemmer — this is a single-suffix rule tuned
+    to fix the prefetch failure mode where "full systems check" picked
+    `claude-sdk-check` over `system-health-check` because "systems" ≠ "system".
+
+    Rules (applied in order, first match wins):
+      - len ≤ 3: return as-is (too short to safely strip)
+      - in _STEM_SKIP: return as-is
+      - ends in 'ies' (len > 4): 'ies' → 'y'  (queries → query)
+      - ends in 'sses': strip 'es'  (passes → pass)
+      - ends in 'ss', 'us', 'is', 'os': return as-is
+      - ends in 's': strip 's'  (systems → system)
+      - else: return as-is
+    """
+    if len(token) <= 3 or token in _STEM_SKIP:
+        return token
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+    if token.endswith("sses"):
+        return token[:-2]
+    if token.endswith(("ss", "us", "is", "os")):
+        return token
+    if token.endswith("s"):
+        return token[:-1]
+    return token
+
+
 def _tokenize(text: str) -> set[str]:
-    return set(re.findall(r"\b\w+\b", text.lower()))
+    """Lowercase word tokens, plural-collapsed for stable matching.
+
+    Both query side and skill side go through stemming so "systems" in a
+    query matches "system" in a skill name (and vice versa).
+    """
+    raw = re.findall(r"\b\w+\b", text.lower())
+    return {_stem(t) for t in raw}
 
 
 def _query_tokens(text: str) -> set[str]:
     """Tokenize a *query* string: lowercase words, stopwords dropped, len ≥ 2.
 
-    Use this for the query side of skill matching. Skill-side tokenization
-    stays with plain `_tokenize` so we keep recall on legitimate substantive
-    words that happen to appear in skill content.
+    Use this for the query side of skill matching. Both sides are stemmed
+    via `_tokenize`; the asymmetry vs. skill-side is the stopword filter —
+    a query like "lets dig into 311" should not fire skills just because
+    "lets", "dig", and "into" appear in arbitrary skill bodies.
     """
     return {t for t in _tokenize(text) if t not in _QUERY_STOPWORDS and len(t) > 1}
 

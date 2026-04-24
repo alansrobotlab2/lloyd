@@ -7,7 +7,7 @@ normalize through this module.
 
 Key facts about the data layout (as of 2026-04-21):
 
-- `~/obsidian/facts/_aliases.json` is a flat
+- `~/obsidian/facts/entity-aliases.json` is a flat
   `{surface_form: canonical_name}` map. Keys are case-sensitive surface
   forms; multiple casings/punctuations can map to the same canonical.
 - `~/obsidian/facts/entity-registry.json` is metadata only — it does NOT
@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 
 FACTS = Path.home() / "obsidian" / "facts"
-_ALIASES_PATH = FACTS / "_aliases.json"
+_ALIASES_PATH = FACTS / "entity-aliases.json"
 
 _ALIAS_CACHE: dict = {"mtime": 0.0, "map": {}}
 
@@ -74,10 +74,10 @@ def normalize(name: str) -> str:
 
 
 def register_canonical(name: str) -> str:
-    """Ensure `name` is present in `_aliases.json` as a self-identity entry.
+    """Ensure `name` is present in `entity-aliases.json` as a self-identity entry.
 
     If `name` already resolves (case-insensitive) to a canonical, returns
-    that canonical. Otherwise writes `{name: name}` into `_aliases.json`
+    that canonical. Otherwise writes `{name: name}` into `entity-aliases.json`
     and returns `name`.
 
     This is the right thing to call at entity-dir creation time in writers:

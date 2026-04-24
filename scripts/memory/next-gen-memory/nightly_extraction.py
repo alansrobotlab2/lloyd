@@ -452,6 +452,8 @@ class NightlyExtraction:
             facts_by_entity[entity] = []
             
             for fact_file in entity_dir.glob("*.md"):
+                if not fact_file.is_file():
+                    continue
                 content = fact_file.read_text()
                 if content.startswith("---"):
                     parts = content.split("---", 2)
@@ -471,7 +473,13 @@ class NightlyExtraction:
         
         for entity, facts in facts_by_entity.items():
             for i, f1 in enumerate(facts):
+                if not isinstance(f1, dict):
+                    continue
                 for f2 in facts[i+1:]:
+                    if not isinstance(f2, dict):
+                        continue
+                    if "fact" not in f1 or "fact" not in f2:
+                        continue
                     # Check if f2 derives from f1
                     if self._check_derives(f1, f2):
                         # Add relation
@@ -489,9 +497,16 @@ class NightlyExtraction:
     
     def _check_derives(self, fact1: dict, fact2: dict) -> bool:
         """Check if fact2 derives from fact1."""
+        # Guard against None/empty inputs from corrupt fact data
+        if not fact1 or not fact2:
+            return False
+        fact1_text = fact1.get("fact", "")
+        fact2_text = fact2.get("fact", "")
+        if not fact1_text or not fact2_text:
+            return False
         # Simple heuristic: check if fact2 references fact1's content
-        text1 = fact1.get("fact", "").lower()
-        text2 = fact2.get("fact", "").lower()
+        text1 = fact1_text.lower()
+        text2 = fact2_text.lower()
         
         # Check for shared key terms
         words1 = set(text1.split())

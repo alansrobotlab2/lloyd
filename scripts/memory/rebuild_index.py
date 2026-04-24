@@ -80,6 +80,8 @@ def rebuild_relations_index() -> dict:
         if not scan_dir.exists():
             continue
         for md_file in scan_dir.rglob("*.md"):
+            if not md_file.is_file():
+                continue
             try:
                 content = md_file.read_text(errors='ignore')
                 rel_path = str(md_file.relative_to(VAULT))
@@ -183,6 +185,8 @@ def rebuild_facts_index() -> dict:
                 continue
             entity_name = entity_dir.name
             for fact_file in entity_dir.glob("*.md"):
+                if not fact_file.is_file():
+                    continue
                 try:
                     content = fact_file.read_text()
                     if content.startswith("---"):

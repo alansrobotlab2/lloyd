@@ -65,7 +65,13 @@ def build_system_prompt(include_skills_index: bool = True, overlay_dir: str | Pa
     # Platform hints — NOTE: no timestamp here; a per-minute timestamp busts
     # vLLM's prefix cache, forcing full re-prefill of the system prompt every turn.
     # The model gets the current time via tool calls or conversation context instead.
-    platform = f"Platform: Lloyd (Claude Agent SDK). Home: {LLOYD_HOME}"
+    platform = (
+        "Platform: Lloyd (Claude Agent SDK). "
+        f"Home: {LLOYD_HOME}. "
+        "Vault: ~/obsidian/. Knowledge notes go in ~/obsidian/knowledge/. "
+        "All persistent notes, research output, and files created by the agent "
+        "go in the vault (~/obsidian/), NOT in the lloyd project directory."
+    )
     parts.append(platform)
 
     return "\n\n".join(parts)

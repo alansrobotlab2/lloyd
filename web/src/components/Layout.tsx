@@ -380,47 +380,46 @@ export default function Layout() {
             </div>
           )}
 
-          {/* Main content area */}
-          {page === 'chat' && (
-            <div className={`flex-1 flex min-h-0 overflow-hidden flex-shrink-0 ${isMobile ? 'm-0' : 'mx-6 mb-6'}`}>
-              <div className={`flex flex-1 flex-row h-full bg-surface-1 ${isMobile ? '' : 'border border-surface-3/50 rounded-xl'} overflow-hidden`}>
-                {/* Sessions Panel - desktop only */}
-                {!isMobile && showSessions && (
-                  <div className="w-64 border-r border-surface-3/30 flex-shrink-0">
-                    <SessionsPanel
-                      onSwitchSession={(key) => handleOpenSession(key)}
-                      currentSessionKey={visibleSlot?.sessionKey ?? null}
-                      activeSessions={activeSessions}
-                      refreshTrigger={sessionsPanelRefreshTrigger}
+          {/* Chat area — always mounted so session state + messages survive tab switches.
+              Hidden via display:none when another page is active so no layout space is taken. */}
+          <div className={`flex-1 flex min-h-0 overflow-hidden flex-shrink-0 ${isMobile ? 'm-0' : 'mx-6 mb-6'} ${page === 'chat' ? '' : 'hidden'}`}>
+            <div className={`flex flex-1 flex-row h-full bg-surface-1 ${isMobile ? '' : 'border border-surface-3/50 rounded-xl'} overflow-hidden`}>
+              {/* Sessions Panel - desktop only */}
+              {!isMobile && showSessions && (
+                <div className="w-64 border-r border-surface-3/30 flex-shrink-0">
+                  <SessionsPanel
+                    onSwitchSession={(key) => handleOpenSession(key)}
+                    currentSessionKey={visibleSlot?.sessionKey ?? null}
+                    activeSessions={activeSessions}
+                    refreshTrigger={sessionsPanelRefreshTrigger}
+                  />
+                </div>
+              )}
+
+              {/* Chat panels — one per slot, only visible one shown */}
+              <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+                {slots.map(slot => (
+                  <div
+                    key={slot.slotId}
+                    className={`absolute inset-0 flex flex-col ${slot.slotId === visibleSlotId ? '' : 'hidden'}`}
+                  >
+                    <ChatPanel
+                      requestedSessionKey={slot.sessionKey}
+                      onSessionLoaded={() => {}}
+                      onActiveSessionChange={(key) => handleActiveSessionChange(slot.slotId, key)}
+                      onThinkingChange={(thinking, _toolName) => handleThinkingChange(slot.sessionKey, thinking)}
+                      onModelSwitch={(model) => handleSlotModelSwitch(slot.slotId, model)}
+                      currentSessionKey={slot.sessionKey}
+                      showAgentDetails={showAgentDetails}
+                      pendingModel={slot.model || models[0]?.name}
+                      visible={page === 'chat' && slot.slotId === visibleSlotId}
+                      isMobile={isMobile}
                     />
                   </div>
-                )}
-
-                {/* Chat panels — one per slot, only visible one shown */}
-                <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
-                  {slots.map(slot => (
-                    <div
-                      key={slot.slotId}
-                      className={`absolute inset-0 flex flex-col ${slot.slotId === visibleSlotId ? '' : 'hidden'}`}
-                    >
-                      <ChatPanel
-                        requestedSessionKey={slot.sessionKey}
-                        onSessionLoaded={() => {}}
-                        onActiveSessionChange={(key) => handleActiveSessionChange(slot.slotId, key)}
-                        onThinkingChange={(thinking, _toolName) => handleThinkingChange(slot.sessionKey, thinking)}
-                        onModelSwitch={(model) => handleSlotModelSwitch(slot.slotId, model)}
-                        currentSessionKey={slot.sessionKey}
-                        showAgentDetails={showAgentDetails}
-                        pendingModel={slot.model || models[0]?.name}
-                        visible={slot.slotId === visibleSlotId}
-                        isMobile={isMobile}
-                      />
-                    </div>
-                  ))}
-                </div>
+                ))}
               </div>
             </div>
-          )}
+          </div>
 
             {/* Other pages */}
             {PageComponent && <PageComponent />}
