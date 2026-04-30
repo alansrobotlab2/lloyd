@@ -134,7 +134,7 @@ def _generate_fact_id(category: str) -> str:
 
 def _get_facts_sync(entity: str, category: str = None, as_of: str = None,
                      include_expired: bool = False) -> dict:
-    resolved, _ = _resolve_entity(entity)
+    resolved, _ = _resolve_entity(entity, mode="read")
     entity_dir = _find_entity_dir(resolved)
     if not entity_dir:
         return {"error": f"Entity not found: {entity}", "facts": []}
@@ -643,7 +643,10 @@ def _fact_add(params: dict) -> str:
     confidence = float(params.get("confidence", 0.9))
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
-        entity, is_new = _resolve_entity(raw_entity, auto_create=True)
+        # mode="write" — exact + alias only, no fuzzy match. The fact lands
+        # on the literal name the caller specified. (#340 PR 3 — fixes the
+        # silent fuzzy-merge data-corruption bug.)
+        entity, is_new = _resolve_entity(raw_entity, mode="write")
         entity_dir = _find_entity_dir(entity)
         if not entity_dir:
             entity_dir = FACTS_ROOT / entity
@@ -750,7 +753,7 @@ def _fact_invalidate(params: dict) -> str:
     fact_substring = params.get("fact_substring", "").strip().lower()
     reason = params.get("reason", "").strip()
     try:
-        resolved, _ = _resolve_entity(entity)
+        resolved, _ = _resolve_entity(entity, mode="read")
         entity_dir = _find_entity_dir(resolved)
         if not entity_dir:
             return json.dumps({"error": f"Entity not found: {entity}", "expired_count": 0})
@@ -875,9 +878,11 @@ def _fact_relate(params: dict) -> str:
         provenance = "STATED"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
-        # Resolve entity names
-        src_resolved, _ = _resolve_entity(source, auto_create=True)
-        tgt_resolved, _ = _resolve_entity(target, auto_create=True)
+        # Resolve entity names — mode="write" so edges land on the literal
+        # names the caller specified, not fuzzy-matched neighbours. (#340
+        # PR 3.)
+        src_resolved, _ = _resolve_entity(source, mode="write")
+        tgt_resolved, _ = _resolve_entity(target, mode="write")
         data = _load_relationships()
         # Check for duplicate
         for edge in data["edges"]:
@@ -907,7 +912,7 @@ def _fact_relationships(params: dict) -> str:
     direction = params.get("direction", "both")  # "in", "out", "both"
     rel_type = params.get("type") or None
     try:
-        resolved, _ = _resolve_entity(entity)
+        resolved, _ = _resolve_entity(entity, mode="read")
         data = _load_relationships()
         edges = []
         for edge in data["edges"]:
@@ -935,8 +940,8 @@ def _fact_path(params: dict) -> str:
     if not source or not target:
         return json.dumps({"error": "source and target are required"})
     try:
-        src_resolved, _ = _resolve_entity(source)
-        tgt_resolved, _ = _resolve_entity(target)
+        src_resolved, _ = _resolve_entity(source, mode="read")
+        tgt_resolved, _ = _resolve_entity(target, mode="read")
         data = _load_relationships()
         # Build adjacency list from active edges
         adj: dict[str, list[tuple[str, dict]]] = {}
@@ -974,7 +979,7 @@ def _fact_neighbors(params: dict) -> str:
     hops = int(params.get("hops", 1))
     min_confidence = float(params.get("min_confidence", 0.5))
     try:
-        resolved, _ = _resolve_entity(entity)
+        resolved, _ = _resolve_entity(entity, mode="read")
         data = _load_relationships()
         # Build adjacency list
         adj: dict[str, list[tuple[str, dict]]] = {}
