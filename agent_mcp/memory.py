@@ -797,19 +797,69 @@ def _fact_invalidate(params: dict) -> str:
 
 RELATIONSHIPS_PATH = FACTS_ROOT / "_relationships.json"
 
+# In-memory cache for the relationships index (#340 PR 2).
+#
+# Layout: (mtime_ns, parsed_data) | None
+#
+# Invalidation strategy:
+#   - Reads stat() the file and compare mtime_ns. Mismatch → reload.
+#   - _save_relationships() refreshes the cache with the new mtime.
+#   - This handles both in-process mutation (load → mutate → save) and
+#     cross-process writes (autonomy classifier writes file, MCP server
+#     picks up via stat-check on next read).
+#
+# Mutation contract: callers that mutate the returned dict MUST follow
+# with _save_relationships(). Between load and save, the cache and the
+# caller share the same object — there's no defensive deep-copy because
+# the MCP server is single-threaded and the file is small enough to
+# parse but large enough (2.3 MB / 4.6k edges) that copying defeats
+# the cache.
+_relationships_cache: Optional[tuple[int, dict]] = None
+
 
 def _load_relationships() -> dict:
+    """Load the relationships index, with mtime-based caching.
+
+    Returns the parsed dict. On missing file or parse error, returns the
+    empty schema and clears the cache.
+    """
+    global _relationships_cache
     if not RELATIONSHIPS_PATH.exists():
+        _relationships_cache = None
         return {"edges": [], "schema_version": 1}
     try:
-        return json.loads(RELATIONSHIPS_PATH.read_text(encoding="utf-8"))
-    except Exception:
+        mtime_ns = RELATIONSHIPS_PATH.stat().st_mtime_ns
+    except OSError:
         return {"edges": [], "schema_version": 1}
+    if _relationships_cache is not None and _relationships_cache[0] == mtime_ns:
+        return _relationships_cache[1]
+    try:
+        data = json.loads(RELATIONSHIPS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        # Don't poison the cache with an empty placeholder; just return one.
+        return {"edges": [], "schema_version": 1}
+    _relationships_cache = (mtime_ns, data)
+    return data
 
 
 def _save_relationships(data: dict) -> None:
+    """Persist the relationships index and refresh the cache."""
+    global _relationships_cache
     RELATIONSHIPS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RELATIONSHIPS_PATH.write_text(json.dumps(data, indent=2, sort_keys=False), encoding="utf-8")
+    RELATIONSHIPS_PATH.write_text(
+        json.dumps(data, indent=2, sort_keys=False), encoding="utf-8"
+    )
+    try:
+        new_mtime = RELATIONSHIPS_PATH.stat().st_mtime_ns
+        _relationships_cache = (new_mtime, data)
+    except OSError:
+        _relationships_cache = None
+
+
+def _invalidate_relationships_cache() -> None:
+    """Clear the relationships cache. Used by tests and forced reloads."""
+    global _relationships_cache
+    _relationships_cache = None
 
 
 def _fact_relate(params: dict) -> str:
