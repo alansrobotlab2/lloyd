@@ -10,7 +10,6 @@ Vault root: ~/obsidian/
 QMD daemon: http://localhost:8181/query
 """
 
-import asyncio
 import concurrent.futures
 import datetime
 import json
@@ -25,7 +24,6 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-import yaml
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
@@ -43,8 +41,29 @@ _INJECTION_PATTERNS = [
     re.compile(r"\x00|\u200b|\u200c|\u200d|\u2060|\ufeff", re.I),
 ]
 
-VAULT = Path.home() / "obsidian"
-FACTS_ROOT = Path.home() / "obsidian" / "facts"
+# Path constants and shared helpers extracted to agent_mcp/_shared.py (#340 PR 1).
+# Re-imported here to preserve the existing memory.X public surface for callers
+# and tests during the multi-PR refactor.
+from agent_mcp._shared import (  # noqa: E402,F401  (re-exports)
+    VAULT,
+    FACTS_ROOT,
+    ALIASES_PATH,
+    _ENTITY_STOPWORDS,
+    _SCORING_STOPWORDS,
+    _QUERY_STOPWORDS,
+    _token_overlap,
+    _levenshtein,
+    _fuzzy_entity_match,
+    _parse_fact_frontmatter,
+    _write_fact_frontmatter,
+    _find_entity_dir,
+    _load_aliases,
+    _save_aliases,
+    _get_entity_dirs_cached,
+    _invalidate_entity_dirs_cache,
+    _resolve_entity,
+)
+
 AUDIT_LOG_DIR = VAULT / "memory" / "audit"
 AUDIT_LOG_FILE = AUDIT_LOG_DIR / "writes.jsonl"
 QMD_BIN = Path.home() / ".bun" / "bin" / "qmd"
@@ -85,50 +104,6 @@ CONSOLIDATION_MODEL = "Qwen3.5-35B-A3B"
 CONSOLIDATION_MIN_RESULTS = 4
 CONSOLIDATION_TIMEOUT = 10
 
-ALIASES_PATH = FACTS_ROOT / "entity-aliases.json"
-
-_ENTITY_STOPWORDS = {
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "up", "about", "into", "through", "is",
-    "are", "was", "were", "be", "been", "being", "have", "has", "had",
-    "do", "does", "did", "will", "would", "could", "should", "may", "might",
-    "it", "its", "this", "that", "these", "those", "i", "you", "he", "she",
-    "we", "they", "what", "which", "who", "how", "when", "where", "why",
-}
-
-# Query-phrasing stopwords (#327) — superset of _ENTITY_STOPWORDS used ONLY
-# by _qmd_strip_stopwords to clean natural-language question framing
-# ("walk me through…", "tell me about…") from the FTS5 lex leg of qmd hybrid
-# search. Questions like q16 ("How does the content hasher enable incremental
-# nightly extraction?") under the narrower _ENTITY_STOPWORDS still leak
-# "enable" / "me" / "walk" / "tell" through to BM25, where high-frequency
-# unmarked verbs dilute rank for the distinctive noun phrases.
-#
-# DO NOT use this for entity scoring, fact ranking, or anywhere a short
-# query token could be a legitimate match target. Narrowly scoped to
-# qmd lex cleanup.
-_QUERY_STOPWORDS = _ENTITY_STOPWORDS | {
-    # Conversational pronouns / self-reference
-    "me", "us", "our", "ours", "my", "mine", "your", "yours",
-    "myself", "yourself", "ourselves", "them", "their", "theirs",
-    # Question-framing verbs (content-empty when used as prefix/filler)
-    "walk", "tell", "show", "describe", "explain", "let", "lets",
-    "give", "ask", "share", "summarize",
-    # Third-person-s question framing verbs (#332). These surface as the
-    # main verb in "What X when Y?" phrasings where the verb itself carries
-    # no topical signal but has enough lex-leg BM25 weight to narrow the
-    # hybrid candidate pool. Restricted to the -s forms so root-verb uses
-    # in content queries ("send email feature", "happen during deploy")
-    # remain searchable.
-    "happens", "sends", "occurs", "goes",
-    # Discourse fillers / intensifiers
-    "just", "also", "really", "actually", "basically", "pretty",
-    "please", "kindly", "maybe", "probably", "perhaps",
-    # NOTE deliberately NOT stripped — can be meaningful in architectural
-    # content: enable, handle, return, work, function, operate, build,
-    # ship, shipped, run, start, stop, fail, failed.
-}
-
 CONSOLIDATION_SYSTEM_PROMPT = (
     "You are a memory consolidation engine. Your job is to take raw search results "
     "from a knowledge vault and produce a concise, deduplicated, well-structured "
@@ -151,153 +126,6 @@ _OPPOSING_PAIRS = [
 ]
 
 app = Server("lloyd-memory")
-
-# ── Caches ────────────────────────────────────────────────────────────────────
-
-_entity_dirs_cache: Optional[tuple] = None
-_ENTITY_DIRS_TTL = 60
-
-
-def _get_entity_dirs_cached() -> list:
-    global _entity_dirs_cache
-    now = time.monotonic()
-    if _entity_dirs_cache is not None and (now - _entity_dirs_cache[0]) < _ENTITY_DIRS_TTL:
-        return _entity_dirs_cache[1]
-    if not FACTS_ROOT.exists():
-        _entity_dirs_cache = (now, [])
-        return []
-    names = [d.name for d in FACTS_ROOT.iterdir() if d.is_dir()]
-    _entity_dirs_cache = (now, names)
-    return names
-
-
-# ── Fact helpers ──────────────────────────────────────────────────────────────
-
-def _parse_fact_frontmatter(content: str) -> dict:
-    if not content.startswith("---"):
-        return {}
-    end = content.find("---", 3)
-    if end == -1:
-        return {}
-    return yaml.safe_load(content[3:end]) or {}
-
-
-def _write_fact_frontmatter(data: dict) -> str:
-    return f"---\n{yaml.dump(data, default_flow_style=False, sort_keys=False)}---\n"
-
-
-def _find_entity_dir(entity: str) -> Optional[Path]:
-    if not FACTS_ROOT.exists():
-        return None
-    entity_lower = entity.lower()
-    for entry in FACTS_ROOT.iterdir():
-        if entry.is_dir() and entry.name.lower() == entity_lower:
-            return entry
-    return None
-
-
-def _load_aliases() -> dict:
-    if not ALIASES_PATH.exists():
-        return {}
-    try:
-        return json.loads(ALIASES_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_aliases(aliases: dict) -> None:
-    ALIASES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ALIASES_PATH.write_text(json.dumps(aliases, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def _token_overlap(a: str, b: str) -> float:
-    ta = set(re.findall(r"\w+", a.lower()))
-    tb = set(re.findall(r"\w+", b.lower()))
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
-
-
-def _levenshtein(s1: str, s2: str) -> int:
-    if len(s1) < len(s2):
-        return _levenshtein(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-    prev = list(range(len(s2) + 1))
-    for i, c1 in enumerate(s1):
-        curr = [i + 1]
-        for j, c2 in enumerate(s2):
-            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (c1 != c2)))
-        prev = curr
-    return prev[-1]
-
-
-def _fuzzy_entity_match(name: str, candidates: list[str], threshold: float = 0.85) -> Optional[str]:
-    """Fuzzy match an entity name against known entities.
-
-    History: previously used threshold=0.7 with a substring-match boost to 0.8,
-    which poisoned the alias table with entries like
-      'agent prompt constraint' -> 'agent'
-      'autonomy-system.md'      -> 'System'
-    because any short canonical name containing a token of the query got the
-    substring boost. See backlog #310 Tier 4.
-
-    Changes:
-    - Threshold bumped 0.7 → 0.85 (tight similarity required).
-    - Substring boost removed entirely — Levenshtein + token overlap drive
-      the match.
-    - Additional guard: block matches where the length ratio is extreme
-      (>2×), which reliably indicates a short canonical swallowing a long
-      specific name.
-    """
-    name_lower = name.lower().strip()
-    best_match = None
-    best_score = 0.0
-    for candidate in candidates:
-        cand_lower = candidate.lower().strip()
-        if name_lower == cand_lower:
-            return candidate
-        # Block extreme length asymmetry — "agent prompt constraint" shouldn't
-        # match "agent".
-        if name_lower and cand_lower:
-            len_ratio = max(len(name_lower), len(cand_lower)) / min(
-                len(name_lower), len(cand_lower)
-            )
-            if len_ratio > 2.0:
-                continue
-        overlap = _token_overlap(name_lower, cand_lower)
-        max_len = max(len(name_lower), len(cand_lower))
-        lev_score = 1.0 - (_levenshtein(name_lower, cand_lower) / max_len) if max_len > 0 else 0.0
-        combined = 0.4 * overlap + 0.6 * lev_score
-        if combined > best_score:
-            best_score = combined
-            best_match = candidate
-    return best_match if best_score >= threshold else None
-
-
-def _resolve_entity(name: str, auto_create: bool = False) -> tuple[str, bool]:
-    name = name.strip()
-    if not name:
-        return name, True
-    entity_dir = _find_entity_dir(name)
-    if entity_dir:
-        return entity_dir.name, False
-    aliases = _load_aliases()
-    # Check both original-case and lowercase keys — Tier 1 sweep writes both.
-    canonical = aliases.get(name) or aliases.get(name.lower())
-    if canonical:
-        if _find_entity_dir(canonical):
-            return canonical, False
-    known_entities = _get_entity_dirs_cached()
-    fuzzy_match = _fuzzy_entity_match(name, known_entities)
-    if fuzzy_match:
-        aliases[name.lower()] = fuzzy_match
-        _save_aliases(aliases)
-        return fuzzy_match, False
-    if auto_create:
-        aliases[name.lower()] = name
-        _save_aliases(aliases)
-    return name, True
 
 
 def _generate_fact_id(category: str) -> str:
@@ -342,13 +170,6 @@ _TASK_ID_RE = re.compile(
     r"(?:\btask\s*[#_ ]?|#|\bbacklog[_ -]?(?:item[_ -]?|task[_ -]?)?)(\d{1,4})\b",
     re.IGNORECASE,
 )
-
-# Scoring stopwords — broader than _ENTITY_STOPWORDS. "task" and "backlog" as
-# bare tokens are noise for the scorer (the task-ID regex handles numeric
-# references explicitly).
-_SCORING_STOPWORDS = _ENTITY_STOPWORDS | {
-    "task", "backlog", "item", "issue", "ticket",
-}
 
 # Cache for entity degree (non-expired edge count) — used as a deterministic
 # tie-break signal in _extract_entities_from_query. 60s TTL keeps the hot
@@ -841,8 +662,7 @@ def _fact_add(params: dict) -> str:
         frontmatter["last_updated"] = now_iso
         body = f"\n# {entity} - {category}\n\n**Entity:** {entity}\n**Category:** {category}\n**Fact Count:** {len(frontmatter['facts'])}\n"
         fact_file.write_text(_write_fact_frontmatter(frontmatter) + body, encoding="utf-8")
-        global _entity_dirs_cache
-        _entity_dirs_cache = None
+        _invalidate_entity_dirs_cache()
         result = {"success": True, "fact_id": fact_id, "entity": entity, "category": category}
         if entity != raw_entity:
             result["resolved_from"] = raw_entity
