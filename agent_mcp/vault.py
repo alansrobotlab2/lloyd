@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+"""
+Lloyd MCP Server: Vault — obsidian vault read/write/search and hybrid recall.
+
+Tools:
+    vault_get, vault_write, vault_overview, vault_search, vault_recall (5 tools)
+
+Vault root: ~/obsidian/
+QMD daemon: http://localhost:8181/query
+
+Split out of agent_mcp/memory.py as part of Task #340 PR 5. Owns:
+    - Vault file read/write with case-insensitive resolution
+    - Audit log for writes (~/obsidian/memory/audit/writes.jsonl)
+    - QMD daemon hybrid search (BM25 + vector) with stopword cleanup
+    - vault_recall, the parallel doc + fact retrieval entry point
+
+Imports from agent_mcp.facts for the fact-side of vault_recall (entity
+extraction, graph expansion, fact ranking).
+"""
+
+import concurrent.futures
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Optional
+
+from mcp.server import Server
+from mcp.types import Tool, TextContent
+
+from agent_mcp._shared import VAULT, _QUERY_STOPWORDS
+from agent_mcp.facts import (
+    FACT_GODNODE_THRESHOLD,
+    FACT_RANK_CAP_SEED,
+    FACT_RANK_CAP_GRAPH,
+    _extract_entities_from_query,
+    _graph_weighted_neighbors,
+    _fact_query_tokens,
+    _fact_matches_tokens,
+    _fact_score,
+    _get_facts_sync,
+)
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+AUDIT_LOG_DIR = VAULT / "memory" / "audit"
+AUDIT_LOG_FILE = AUDIT_LOG_DIR / "writes.jsonl"
+QMD_BIN = Path.home() / ".bun" / "bin" / "qmd"
+QMD_DAEMON_URL = "http://localhost:8181/query"
+
+VAULT_SEGMENTS = [
+    "facts", "memory", "knowledge", "projects", "personal", "work", "skills",
+    "architecture", "lloyd", "autonomy", "backlog", "people",
+]
+VAULT_EXCLUDE_DIRS = {"templates", "images"}
+VAULT_EXCLUDE_FILES = {"tags.md"}
+
+CONSOLIDATION_ENDPOINT = "http://localhost:8091/v1/chat/completions"
+CONSOLIDATION_MODEL = "Qwen3.5-35B-A3B"
+CONSOLIDATION_MIN_RESULTS = 4
+CONSOLIDATION_TIMEOUT = 10
+
+CONSOLIDATION_SYSTEM_PROMPT = (
+    "You are a memory consolidation engine. Your job is to take raw search results "
+    "from a knowledge vault and produce a concise, deduplicated, well-structured "
+    "consolidation that directly answers the user's query.\n\n"
+    "Rules:\n1. Deduplicate overlapping content.\n2. Preserve specific facts, dates, names, numbers.\n"
+    "3. Return a JSON object with a 'summary' key.\n4. Be concise — under 400 words."
+)
+
+_INTENT_FACTUAL_RE = re.compile(
+    r"(?:what\s+port|where\s+is|how\s+to|which\s+file|what\s+is\s+the|config\s+for|path\s+to|url\s+for|command\s+to)", re.I)
+_INTENT_TEMPORAL_RE = re.compile(
+    r"(?:last\s+week|yesterday|today|when\s+did|recent(?:ly)?|latest|last\s+month|last\s+time|\d{4}-\d{2}-\d{2})", re.I)
+_INTENT_CONCEPTUAL_RE = re.compile(
+    r"(?:approaches?\s+to|how\s+does\s+\w+\s+compare|explain\s|overview\s+of|strategy\s+for|principles?\s+of)", re.I)
+
+app = Server("lloyd-vault")
+
+
+# ── QMD helpers ──────────────────────────────────────────────────────────────
+
+def _qmd_sanitize(query: str) -> str:
+    """Strip control chars and collapse qmd query-syntax operators to spaces.
+
+    qmd's vec/hyde parser treats `-term` as negation (Google-style) and throws
+    HTTP 500 when it sees one. Replace hyphens (and other operator chars qmd
+    treats as syntax) with spaces before the query hits either the vec or lex
+    leg. The lex path already tokenizes on non-word boundaries so this is a
+    no-op there; the vec path gets identical clean input. Fixes #325.
+    """
+    q = re.sub(r"[\x00-\x1f\x7f]", " ", query)
+    q = re.sub(r"[-+\"]", " ", q)
+    return re.sub(r"\s+", " ", q).strip()
+
+
+def _qmd_strip_stopwords(query: str) -> str:
+    """Strip stopwords from the FTS5 lex-leg query.
+
+    Uses the wider _QUERY_STOPWORDS (see #327) rather than _ENTITY_STOPWORDS
+    so natural-language question framing gets fully removed from BM25 signal.
+    """
+    words = [w for w in re.findall(r"\b\w+\b", query.lower()) if w not in _QUERY_STOPWORDS and len(w) >= 2]
+    return " ".join(words) if words else query
+
+
+def _qmd_log(msg: str) -> None:
+    print(f"[qmd] {msg}", file=sys.stderr, flush=True)
+
+
+def _qmd_post(payload: dict) -> list:
+    req = urllib.request.Request(
+        QMD_DAEMON_URL,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    return [
+        {
+            "file": r.get("file", ""),
+            "title": r.get("title", ""),
+            "snippet": r.get("snippet", ""),
+            "score": r.get("score", 0),
+        }
+        for r in data.get("results", [])
+    ]
+
+
+def _qmd_daemon_search(query: str, limit: int, collections: list,
+                      skip_rerank: bool = True) -> Optional[list]:
+    """Send a hybrid lex+vec query to the qmd daemon.
+
+    DEFAULT: skip_rerank=True (~100ms warm end-to-end). The reranker rarely
+    changes top-1 and shuffles within top-5; 500ms tax not worth it for
+    LLM-context consumers. Pass skip_rerank=False explicitly only when
+    ordering within the top-5 matters for a human scanning results.
+    """
+    query = _qmd_sanitize(query)
+    if not query:
+        return []
+    payload = {
+        "searches": [
+            {"type": "lex", "query": _qmd_strip_stopwords(query)},
+            {"type": "vec", "query": query},
+        ],
+        "limit": limit,
+        "collections": collections,
+    }
+    if skip_rerank:
+        payload["skipRerank"] = True
+
+    try:
+        return _qmd_post(payload)
+    except urllib.error.HTTPError as e:
+        # Rerank context OOM manifests as HTTP 500. One-shot retry without
+        # rerank so callers see documents instead of silent zero-hits.
+        if e.code == 500 and not payload.get("skipRerank"):
+            try:
+                payload["skipRerank"] = True
+                _qmd_log("rerank failed (HTTP 500) — retrying with skipRerank")
+                return _qmd_post(payload)
+            except Exception as e2:
+                _qmd_log(f"skipRerank retry also failed: {e2!r}")
+                return None
+        _qmd_log(f"HTTPError {e.code}: {e.reason}")
+        return None
+    except Exception as e:
+        _qmd_log(f"search failed: {e!r}")
+        return None
+
+
+def _qmd_subprocess_search(query: str, limit: int, collections: list) -> list:
+    if not QMD_BIN.exists():
+        return []
+    try:
+        coll_args = []
+        for c in collections:
+            coll_args.extend(["-c", c])
+        env = {**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "0"}
+        proc = subprocess.run([str(QMD_BIN), "query", query, *coll_args, "-n", str(limit), "--json"],
+                              capture_output=True, text=True, timeout=30, env=env)
+        if proc.returncode != 0:
+            return []
+        return json.loads(proc.stdout)
+    except Exception:
+        return []
+
+
+def _consolidate_results(query: str, results: list) -> Optional[dict]:
+    if len(results) < CONSOLIDATION_MIN_RESULTS:
+        return None
+    parts = [f"Query: {query}\n\nSearch Results:\n"]
+    for i, r in enumerate(results, 1):
+        parts.append(f"--- Result {i} (score: {r.get('score', 'N/A')}) ---")
+        parts.append(f"File: {r.get('citation', r.get('path', ''))}")
+        snippet = r.get("snippet", "")[:2000]
+        parts.append(f"Content:\n{snippet}\n")
+    payload = json.dumps({
+        "model": CONSOLIDATION_MODEL,
+        "messages": [{"role": "system", "content": CONSOLIDATION_SYSTEM_PROMPT}, {"role": "user", "content": "\n".join(parts)}],
+        "temperature": 0.0, "max_tokens": 1000,
+    }).encode()
+    req = urllib.request.Request(CONSOLIDATION_ENDPOINT, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=CONSOLIDATION_TIMEOUT) as resp:
+            data = json.loads(resp.read())
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if not content:
+            return None
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        return json.loads(content)
+    except Exception:
+        return None
+
+
+def _rrf_fuse(ranked_lists: list, k: int = 60) -> list:
+    scores, items = {}, {}
+    for ranked in ranked_lists:
+        for rank, item in enumerate(ranked):
+            path = item.get("path") or item.get("file", "")
+            rrf_score = 1.0 / (k + rank + 1)
+            scores[path] = scores.get(path, 0.0) + rrf_score
+            existing = items.get(path)
+            if not existing or float(item.get("score", 0)) > float(existing.get("score", 0)):
+                items[path] = item
+    fused = []
+    for path, rrf_score in sorted(scores.items(), key=lambda x: -x[1]):
+        result = dict(items[path])
+        result["rrf_score"] = round(rrf_score, 6)
+        fused.append(result)
+    return fused
+
+
+def _run_vault_search(query: str, max_results: int, min_score: float, scope: str, consolidate: bool) -> str:
+    scope_prefixes = []
+    if scope:
+        for item in scope.split(","):
+            item = item.strip()
+            if item:
+                scope_prefixes.append(item.rstrip("/") + "/")
+
+    coll_list = VAULT_SEGMENTS
+    if scope:
+        scope_segs = [s.strip().rstrip("/") for s in scope.split(",") if s.strip()]
+        coll_list = [s for s in scope_segs if s in VAULT_SEGMENTS] or VAULT_SEGMENTS
+
+    all_raw = []
+    if len(coll_list) == 1:
+        result = _qmd_daemon_search(query, max_results, coll_list)
+        if result is not None:
+            all_raw = result
+    else:
+        def _search_one(coll):
+            return _qmd_daemon_search(query, max_results, [coll]) or []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(coll_list), 4)) as pool:
+            batches = list(pool.map(_search_one, coll_list))
+        merged = {}
+        for batch in batches:
+            for r in batch:
+                fpath = r.get("file", "")
+                if fpath not in merged or float(r.get("score", 0)) > float(merged[fpath].get("score", 0)):
+                    merged[fpath] = r
+        all_raw = sorted(merged.values(), key=lambda x: float(x.get("score", 0)), reverse=True)
+
+    parsed = []
+    for r in all_raw:
+        file_val = r.get("file", "")
+        path = file_val.removeprefix("qmd://")
+        if path.startswith("obsidian/"):
+            path = path.removeprefix("obsidian/")
+        score = float(r.get("score", 0))
+        if score < min_score:
+            continue
+        if scope_prefixes and not any(path.startswith(p) for p in scope_prefixes):
+            continue
+        snippet = re.sub(r"@@[^@]*@@\s*(?:\([^)]*\)\s*)?", "", r.get("snippet", "")).strip()
+        snippet = re.sub(r"^\d+:\s*", "", snippet, flags=re.MULTILINE).strip()
+        parsed.append({"path": path, "score": round(score, 4), "snippet": snippet[:300], "citation": path})
+
+    trimmed = parsed[:max_results]
+
+    consolidated = None
+    if consolidate and len(trimmed) >= CONSOLIDATION_MIN_RESULTS:
+        consolidated = _consolidate_results(query, trimmed)
+
+    return json.dumps({
+        "results": trimmed, "mode": "hybrid",
+        "consolidated": consolidated is not None,
+        "consolidated_summary": consolidated,
+        "collections_searched": coll_list,
+    })
+
+
+# ── Vault helpers ────────────────────────────────────────────────────────────
+
+def _resolve_case_insensitive(rel_path: str) -> Optional[Path]:
+    current = VAULT
+    for segment in Path(rel_path).parts:
+        exact = current / segment
+        if exact.exists():
+            current = exact
+            continue
+        try:
+            matches = [e for e in current.iterdir() if e.name.lower() == segment.lower()]
+        except OSError:
+            return None
+        if not matches:
+            return None
+        current = matches[0]
+    return current if current.is_file() else None
+
+
+def _audit_write(path: str, byte_count: int) -> None:
+    try:
+        AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {"timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "agent_id": "lloyd", "path": path, "bytes": byte_count, "action": "write"}
+        with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+# ── Tool handlers ────────────────────────────────────────────────────────────
+
+def _vault_get(params: dict) -> str:
+    path = params.get("path", "").strip()
+    if not path:
+        return json.dumps({"error": "path is required"})
+    try:
+        target = VAULT / path
+        if not target.resolve().is_relative_to(VAULT.resolve()):
+            return json.dumps({"error": "path escapes vault root"})
+        if not target.exists():
+            resolved = _resolve_case_insensitive(path)
+            if resolved is None:
+                return json.dumps({"error": f"File not found: {path}"})
+            target = resolved
+        text = target.read_text(encoding="utf-8", errors="replace")
+        start_line = int(params.get("start_line", 0))
+        num_lines = int(params.get("num_lines", 0))
+        if start_line > 0 or num_lines > 0:
+            lines = text.splitlines()
+            start = max(0, start_line - 1)
+            end = (start + num_lines) if num_lines > 0 else len(lines)
+            text = "\n".join(lines[start:end])
+        return json.dumps({"path": path, "text": text or "(empty file)"})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def _vault_write(params: dict) -> str:
+    path = params.get("path", "").strip()
+    content = params.get("content", "")
+    if not path:
+        return json.dumps({"error": "path is required"})
+    try:
+        target = VAULT / path
+        if not target.resolve().is_relative_to(VAULT.resolve()):
+            return json.dumps({"error": "path escapes vault root"})
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        byte_count = len(content.encode("utf-8"))
+        _audit_write(path, byte_count)
+        return json.dumps({"success": True, "path": path, "bytes": byte_count})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def _vault_overview(params: dict) -> str:
+    try:
+        if not VAULT.exists():
+            return json.dumps({"error": f"Vault not found: {VAULT}"})
+        totals, grand_total = {}, 0
+        for segment in VAULT_SEGMENTS:
+            seg_dir = VAULT / segment
+            if not seg_dir.is_dir():
+                totals[segment] = 0
+                continue
+            count = sum(1 for f in seg_dir.rglob("*.md") if f.name not in VAULT_EXCLUDE_FILES and not any(p in VAULT_EXCLUDE_DIRS for p in f.parts))
+            totals[segment] = count
+            grand_total += count
+        return json.dumps({"total_files": grand_total, "segments": totals})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def _vault_search(params: dict) -> str:
+    query = params.get("query", "").strip()
+    if not query:
+        return json.dumps({"error": "query is required", "results": []})
+    try:
+        return _run_vault_search(query, int(params.get("max_results", 10)), float(params.get("min_score", 0.0)), params.get("scope", ""), params.get("consolidate", True))
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "results": []})
+
+
+def _vault_recall(params: dict) -> str:
+    query = params.get("query", "").strip()
+    if not query:
+        return json.dumps({"error": "query is required", "documents": [], "facts": []})
+    limit = int(params.get("limit", 20))
+    include_facts = params.get("include_facts", True)
+    expand_graph = params.get("expand_graph", False)
+
+    seed_entities = [e for e, _ in _extract_entities_from_query(query)[:5]]
+
+    weighted_neighbors: list[tuple[str, float]] = []
+    if expand_graph and seed_entities:
+        weighted_neighbors = _graph_weighted_neighbors(seed_entities, top_k=5, hops=1)
+
+    def _do_search():
+        # Daemon is the only search path. Subprocess fallback was removed
+        # 2026-04-20: on daemon failure the CLI subprocess hits the same
+        # broken state, then eats 30s before returning empty.
+        result = _qmd_daemon_search(query, limit, VAULT_SEGMENTS)
+        return result or []
+
+    def _do_facts():
+        if not include_facts:
+            return [], []
+        # Query-aware fact ranking (Fix A, #322).
+        qtoks = _fact_query_tokens(query)
+
+        def _collect(entity_names: list[str], godnode_threshold: int) -> list[dict]:
+            """Pull facts from entities, applying god-node guardrail (Fix C)."""
+            out: list[dict] = []
+            for ent in entity_names:
+                try:
+                    entity_data = _get_facts_sync(ent)
+                except Exception:
+                    continue
+                ef = entity_data.get("facts") or []
+                if not ef:
+                    continue
+                if len(ef) > godnode_threshold and qtoks:
+                    kept = [f for f in ef if _fact_matches_tokens(f, qtoks)]
+                    if not kept:
+                        continue
+                    ef = kept
+                out.extend(ef)
+            return out
+
+        def _rank(candidates: list[dict], cap: int) -> list[dict]:
+            if not candidates:
+                return []
+            scored = [
+                (_fact_score(f, qtoks), float(f.get("confidence", 0.5)), idx, f)
+                for idx, f in enumerate(candidates)
+            ]
+            scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
+            return [f for _s, _c, _i, f in scored[:cap]]
+
+        seed_pool = _collect(seed_entities, FACT_GODNODE_THRESHOLD)
+        facts = _rank(seed_pool, FACT_RANK_CAP_SEED)
+
+        graph_facts: list[dict] = []
+        if expand_graph and weighted_neighbors:
+            neighbor_names = [e for e, _w in weighted_neighbors[:5]]
+            graph_pool = _collect(neighbor_names, FACT_GODNODE_THRESHOLD)
+            graph_facts = _rank(graph_pool, FACT_RANK_CAP_GRAPH)
+
+        return facts, graph_facts
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            search_fut = pool.submit(_do_search)
+            facts_fut = pool.submit(_do_facts)
+            raw_results = search_fut.result()
+            facts, graph_facts = facts_fut.result()
+        documents = []
+        for r in raw_results[:limit]:
+            path = r.get("file", "").removeprefix("qmd://")
+            if path.startswith("obsidian/"):
+                path = path.removeprefix("obsidian/")
+            documents.append({
+                "path": path,
+                "title": r.get("title", ""),
+                "snippet": r.get("snippet", ""),
+                "score": r.get("score", 0),
+            })
+        result = {"documents": documents, "facts": facts, "query": query}
+        if graph_facts:
+            result["graph_expanded_facts"] = graph_facts
+        if weighted_neighbors:
+            result["graph_neighbors_used"] = [
+                {"entity": e, "weight": round(w, 3)} for e, w in weighted_neighbors
+            ]
+        # default=str handles datetime event_date values that slipped
+        # through YAML parsing as native objects (pre-existing data issue
+        # in ~/obsidian/facts/, surfaced by #322 returning more facts).
+        return json.dumps(result, default=str)
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "documents": [], "facts": []})
+
+
+# ── MCP registration ─────────────────────────────────────────────────────────
+
+@app.list_tools()
+async def list_tools():
+    return [
+        Tool(name="vault_get", description="Read a file from the obsidian vault by vault-relative path.", inputSchema={
+            "type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "num_lines": {"type": "integer"}}, "required": ["path"]}),
+        Tool(name="vault_write", description="Write content to a vault file. Audit-logged.", inputSchema={
+            "type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
+        Tool(name="vault_overview", description="Get vault statistics: file counts per segment.", inputSchema={
+            "type": "object", "properties": {"detail": {"type": "string", "enum": ["summary", "hubs"]}}}),
+        Tool(name="vault_search", description="Hybrid BM25+vector search across the obsidian vault.", inputSchema={
+            "type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}, "min_score": {"type": "number"}, "scope": {"type": "string"}, "consolidate": {"type": "boolean"}}, "required": ["query"]}),
+        Tool(name="vault_recall", description="Combined recall: vault search + entity fact retrieval in parallel. Use expand_graph=true to include facts from related entities.", inputSchema={
+            "type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "include_facts": {"type": "boolean"}, "expand_graph": {"type": "boolean", "description": "Expand results via relationship graph (1 hop)"}}, "required": ["query"]}),
+    ]
+
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict):
+    handlers = {
+        "vault_get": _vault_get, "vault_write": _vault_write, "vault_overview": _vault_overview,
+        "vault_search": _vault_search, "vault_recall": _vault_recall,
+    }
+    handler = handlers.get(name)
+    if handler:
+        return [TextContent(type="text", text=handler(arguments))]
+    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]

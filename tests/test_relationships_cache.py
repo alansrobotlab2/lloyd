@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent_mcp import memory  # noqa: E402
+from agent_mcp import facts as memory  # noqa: E402  (post-PR5: cache moved here)
 
 
 def _reset_cache():
