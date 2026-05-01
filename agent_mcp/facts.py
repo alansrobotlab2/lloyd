@@ -25,18 +25,21 @@ import uuid
 from typing import Optional
 
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
 
 from agent_mcp._shared import (
     FACTS_ROOT,
+    ErrorCode,
     _SCORING_STOPWORDS,
-    _token_overlap,
-    _parse_fact_frontmatter,
-    _write_fact_frontmatter,
+    _err,
     _find_entity_dir,
     _get_entity_dirs_cached,
     _invalidate_entity_dirs_cache,
+    _parse_fact_frontmatter,
     _resolve_entity,
+    _token_overlap,
+    _wrap,
+    _write_fact_frontmatter,
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -315,27 +318,26 @@ def _detect_contradictions_sync(entity: str, category: str = None) -> dict:
 
 # ── Tool handlers ────────────────────────────────────────────────────────────
 
-def _fact_get(params: dict) -> str:
+def _fact_get(params: dict) -> dict:
     entity = params.get("entity", "").strip()
     if not entity:
-        return json.dumps({"error": "entity is required", "facts": []})
+        return _err("entity is required", ErrorCode.MISSING_PARAM, facts=[])
     category = params.get("category") or None
     as_of = params.get("as_of") or None
     include_expired = bool(params.get("include_expired", False))
     try:
-        return json.dumps(_get_facts_sync(entity, category, as_of=as_of,
-                                          include_expired=include_expired),
-                          default=str)
+        return _get_facts_sync(entity, category, as_of=as_of,
+                               include_expired=include_expired)
     except Exception as exc:
-        return json.dumps({"error": str(exc), "facts": []})
+        return _err(str(exc), ErrorCode.INTERNAL, facts=[])
 
 
-def _fact_add(params: dict) -> str:
+def _fact_add(params: dict) -> dict:
     raw_entity = params.get("entity", "").strip()
     category = params.get("category", "").strip()
     fact_text = params.get("fact", "").strip()
     if not raw_entity or not category or not fact_text:
-        return json.dumps({"error": "entity, category, and fact are required"})
+        return _err("entity, category, and fact are required", ErrorCode.MISSING_PARAM)
     confidence = float(params.get("confidence", 0.9))
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
@@ -362,21 +364,21 @@ def _fact_add(params: dict) -> str:
         body = f"\n# {entity} - {category}\n\n**Entity:** {entity}\n**Category:** {category}\n**Fact Count:** {len(frontmatter['facts'])}\n"
         fact_file.write_text(_write_fact_frontmatter(frontmatter) + body, encoding="utf-8")
         _invalidate_entity_dirs_cache()
-        result = {"success": True, "fact_id": fact_id, "entity": entity, "category": category}
+        result: dict = {"success": True, "fact_id": fact_id, "entity": entity, "category": category}
         if entity != raw_entity:
             result["resolved_from"] = raw_entity
-        return json.dumps(result)
+        return result
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return _err(str(exc), ErrorCode.INTERNAL)
 
 
-def _fact_profile(params: dict) -> str:
+def _fact_profile(params: dict) -> dict:
     entity = params.get("entity", "").strip()
     if not entity:
-        return json.dumps({"error": "entity is required"})
+        return _err("entity is required", ErrorCode.MISSING_PARAM)
     try:
         facts = _get_facts_sync(entity).get("facts", [])
-        categories = {}
+        categories: dict = {}
         for fact in facts:
             cat = fact.get("category", "general")
             categories.setdefault(cat, []).append(fact)
@@ -385,25 +387,25 @@ def _fact_profile(params: dict) -> str:
             lines.append(f"\n{cat.upper()}:")
             for f in cat_facts[:3]:
                 lines.append(f"  - {f.get('fact', '')}")
-        return json.dumps({"entity": entity, "categories": categories, "fact_count": len(facts), "summary": "\n".join(lines)}, default=str)
+        return {"entity": entity, "categories": categories, "fact_count": len(facts), "summary": "\n".join(lines)}
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return _err(str(exc), ErrorCode.INTERNAL)
 
 
-def _fact_check(params: dict) -> str:
+def _fact_check(params: dict) -> dict:
     entity = params.get("entity", "").strip()
     if not entity:
-        return json.dumps({"error": "entity is required", "contradictions": [], "checked": 0})
+        return _err("entity is required", ErrorCode.MISSING_PARAM, contradictions=[], checked=0)
     try:
-        return json.dumps(_detect_contradictions_sync(entity, params.get("category")))
+        return _detect_contradictions_sync(entity, params.get("category"))
     except Exception as exc:
-        return json.dumps({"error": str(exc), "contradictions": [], "checked": 0})
+        return _err(str(exc), ErrorCode.INTERNAL, contradictions=[], checked=0)
 
 
-def _fact_resolve(params: dict) -> str:
+def _fact_resolve(params: dict) -> dict:
     entity = params.get("entity", "").strip()
     if not entity:
-        return json.dumps({"error": "entity is required"})
+        return _err("entity is required", ErrorCode.MISSING_PARAM)
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
         result = _detect_contradictions_sync(entity)
@@ -434,17 +436,17 @@ def _fact_resolve(params: dict) -> str:
                             body = content[body_start + 3:] if body_start != -1 else ""
                             fact_file.write_text(_write_fact_frontmatter(frontmatter) + body, encoding="utf-8")
                             resolved += 1
-        return json.dumps({"entity": entity, "resolved": resolved, "remaining": len(contradictions) - resolved})
+        return {"entity": entity, "resolved": resolved, "remaining": len(contradictions) - resolved}
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return _err(str(exc), ErrorCode.INTERNAL)
 
 
-def _fact_invalidate(params: dict) -> str:
+def _fact_invalidate(params: dict) -> dict:
     """Expire facts that are no longer current (were true, now outdated)."""
     entity = params.get("entity", "").strip()
     ended = params.get("ended", "").strip()
     if not entity or not ended:
-        return json.dumps({"error": "entity and ended (ISO date) are required"})
+        return _err("entity and ended (ISO date) are required", ErrorCode.MISSING_PARAM)
     category = params.get("category") or None
     fact_substring = params.get("fact_substring", "").strip().lower()
     reason = params.get("reason", "").strip()
@@ -452,7 +454,7 @@ def _fact_invalidate(params: dict) -> str:
         resolved, _ = _resolve_entity(entity, mode="read")
         entity_dir = _find_entity_dir(resolved)
         if not entity_dir:
-            return json.dumps({"error": f"Entity not found: {entity}", "expired_count": 0})
+            return _err(f"Entity not found: {entity}", ErrorCode.NOT_FOUND, expired_count=0)
         expired_count = 0
         matched_facts = []
         files_to_scan = []
@@ -485,9 +487,9 @@ def _fact_invalidate(params: dict) -> str:
                 body_start = content.find("---", 3)
                 body = content[body_start + 3:] if body_start != -1 else ""
                 fact_file.write_text(_write_fact_frontmatter(frontmatter) + body, encoding="utf-8")
-        return json.dumps({"success": True, "entity": resolved, "expired_count": expired_count, "matched_facts": matched_facts})
+        return {"success": True, "entity": resolved, "expired_count": expired_count, "matched_facts": matched_facts}
     except Exception as exc:
-        return json.dumps({"error": str(exc), "expired_count": 0})
+        return _err(str(exc), ErrorCode.INTERNAL, expired_count=0)
 
 
 # ── Relationship store ───────────────────────────────────────────────────────
@@ -536,13 +538,13 @@ def _invalidate_relationships_cache() -> None:
     _relationships_cache = None
 
 
-def _fact_relate(params: dict) -> str:
+def _fact_relate(params: dict) -> dict:
     """Add a typed relationship edge between two entities."""
     source = params.get("source", "").strip()
     target = params.get("target", "").strip()
     rel_type = params.get("type", "").strip()
     if not source or not target or not rel_type:
-        return json.dumps({"error": "source, target, and type are required"})
+        return _err("source, target, and type are required", ErrorCode.MISSING_PARAM)
     confidence = float(params.get("confidence", 0.9))
     provenance = params.get("provenance", "STATED")
     if provenance not in ("STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"):
@@ -557,8 +559,8 @@ def _fact_relate(params: dict) -> str:
         for edge in data["edges"]:
             if (edge["source"] == src_resolved and edge["target"] == tgt_resolved
                     and edge["type"] == rel_type and not edge.get("expired_at")):
-                return json.dumps({"success": True, "action": "already_exists",
-                                   "source": src_resolved, "target": tgt_resolved, "type": rel_type})
+                return {"success": True, "action": "already_exists",
+                        "source": src_resolved, "target": tgt_resolved, "type": rel_type}
         new_edge = {
             "source": src_resolved, "target": tgt_resolved, "type": rel_type,
             "confidence": confidence, "provenance": provenance,
@@ -567,17 +569,17 @@ def _fact_relate(params: dict) -> str:
         }
         data["edges"].append(new_edge)
         _save_relationships(data)
-        return json.dumps({"success": True, "action": "created",
-                           "source": src_resolved, "target": tgt_resolved, "type": rel_type})
+        return {"success": True, "action": "created",
+                "source": src_resolved, "target": tgt_resolved, "type": rel_type}
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return _err(str(exc), ErrorCode.INTERNAL)
 
 
-def _fact_relationships(params: dict) -> str:
+def _fact_relationships(params: dict) -> dict:
     """Get all relationships for an entity (inbound + outbound)."""
     entity = params.get("entity", "").strip()
     if not entity:
-        return json.dumps({"error": "entity is required", "edges": []})
+        return _err("entity is required", ErrorCode.MISSING_PARAM, edges=[])
     direction = params.get("direction", "both")
     rel_type = params.get("type") or None
     try:
@@ -596,18 +598,18 @@ def _fact_relationships(params: dict) -> str:
                 match = False
             if match:
                 edges.append(edge)
-        return json.dumps({"entity": resolved, "edges": edges, "count": len(edges)})
+        return {"entity": resolved, "edges": edges, "count": len(edges)}
     except Exception as exc:
-        return json.dumps({"error": str(exc), "edges": []})
+        return _err(str(exc), ErrorCode.INTERNAL, edges=[])
 
 
-def _fact_path(params: dict) -> str:
+def _fact_path(params: dict) -> dict:
     """Find shortest path between two entities via BFS on relationship graph."""
     source = params.get("source", "").strip()
     target = params.get("target", "").strip()
     max_hops = int(params.get("max_hops", 3))
     if not source or not target:
-        return json.dumps({"error": "source and target are required"})
+        return _err("source and target are required", ErrorCode.MISSING_PARAM)
     try:
         src_resolved, _ = _resolve_entity(source, mode="read")
         tgt_resolved, _ = _resolve_entity(target, mode="read")
@@ -625,7 +627,7 @@ def _fact_path(params: dict) -> str:
         while queue:
             node, path, edges_path = queue.popleft()
             if node == tgt_resolved:
-                return json.dumps({"found": True, "path": path, "edges": edges_path, "hops": len(edges_path)})
+                return {"found": True, "path": path, "edges": edges_path, "hops": len(edges_path)}
             if len(path) > max_hops:
                 continue
             for neighbor, edge in adj.get(node, []):
@@ -633,16 +635,16 @@ def _fact_path(params: dict) -> str:
                     visited.add(neighbor)
                     queue.append((neighbor, path + [neighbor],
                                   edges_path + [{"source": edge["source"], "target": edge["target"], "type": edge["type"]}]))
-        return json.dumps({"found": False, "path": [], "edges": [], "hops": -1})
+        return {"found": False, "path": [], "edges": [], "hops": -1}
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return _err(str(exc), ErrorCode.INTERNAL)
 
 
-def _fact_neighbors(params: dict) -> str:
+def _fact_neighbors(params: dict) -> dict:
     """Get neighborhood subgraph around an entity within N hops."""
     entity = params.get("entity", "").strip()
     if not entity:
-        return json.dumps({"error": "entity is required"})
+        return _err("entity is required", ErrorCode.MISSING_PARAM)
     hops = int(params.get("hops", 1))
     min_confidence = float(params.get("min_confidence", 0.5))
     try:
@@ -677,10 +679,10 @@ def _fact_neighbors(params: dict) -> str:
             if key not in seen_edges:
                 seen_edges.add(key)
                 unique_edges.append(e)
-        return json.dumps({"entity": resolved, "nodes": sorted(visited),
-                           "edges": unique_edges, "node_count": len(visited), "edge_count": len(unique_edges)})
+        return {"entity": resolved, "nodes": sorted(visited),
+                "edges": unique_edges, "node_count": len(visited), "edge_count": len(unique_edges)}
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return _err(str(exc), ErrorCode.INTERNAL)
 
 
 # ── Graph traversal (used by vault.py for vault_recall) ──────────────────────
@@ -842,5 +844,5 @@ async def call_tool(name: str, arguments: dict):
     }
     handler = handlers.get(name)
     if handler:
-        return [TextContent(type="text", text=handler(arguments))]
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return _wrap(handler(arguments))
+    return _wrap(_err(f"Unknown tool: {name}", ErrorCode.UNKNOWN_TOOL))

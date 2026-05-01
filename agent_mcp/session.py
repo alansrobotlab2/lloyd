@@ -24,9 +24,14 @@ from pathlib import Path
 from typing import Optional
 
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
 
-from agent_mcp._shared import _ENTITY_STOPWORDS
+from agent_mcp._shared import (
+    ErrorCode,
+    _ENTITY_STOPWORDS,
+    _err,
+    _wrap,
+)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -60,73 +65,73 @@ def _check_injection(text: str) -> Optional[str]:
     return None
 
 
-def _memory_read(params: dict) -> str:
+def _memory_read(params: dict) -> dict:
     file = params.get("file", "MEMORY.md").strip()
     if file not in MEMORY_FILES:
-        return json.dumps({"error": f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}"})
+        return _err(f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}", ErrorCode.INVALID_PARAM)
     filepath = MEMORIES_ROOT / file
     if not filepath.exists():
-        return json.dumps({"content": "", "file": file})
-    return json.dumps({"content": filepath.read_text(encoding="utf-8"), "file": file})
+        return {"content": "", "file": file}
+    return {"content": filepath.read_text(encoding="utf-8"), "file": file}
 
 
-def _memory_add(params: dict) -> str:
+def _memory_add(params: dict) -> dict:
     file = params.get("file", "MEMORY.md").strip()
     entry = params.get("entry", "").strip()
     if file not in MEMORY_FILES:
-        return json.dumps({"error": f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}"})
+        return _err(f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}", ErrorCode.INVALID_PARAM)
     if not entry:
-        return json.dumps({"error": "entry is required"})
-    err = _check_injection(entry)
-    if err:
-        return json.dumps({"error": err})
+        return _err("entry is required", ErrorCode.MISSING_PARAM)
+    injection_msg = _check_injection(entry)
+    if injection_msg:
+        return _err(injection_msg, ErrorCode.INJECTION)
     MEMORIES_ROOT.mkdir(parents=True, exist_ok=True)
     filepath = MEMORIES_ROOT / file
     existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
     if existing and not existing.endswith("\n"):
         existing += "\n"
     filepath.write_text(existing + entry + "\n", encoding="utf-8")
-    return json.dumps({"success": True, "file": file})
+    return {"success": True, "file": file}
 
 
-def _memory_replace(params: dict) -> str:
+def _memory_replace(params: dict) -> dict:
     file = params.get("file", "MEMORY.md").strip()
     old_text = params.get("old_text", "")
     new_text = params.get("new_text", "")
     if file not in MEMORY_FILES:
-        return json.dumps({"error": f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}"})
+        return _err(f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}", ErrorCode.INVALID_PARAM)
     if not old_text:
-        return json.dumps({"error": "old_text is required"})
-    err = _check_injection(new_text)
-    if err:
-        return json.dumps({"error": err})
+        return _err("old_text is required", ErrorCode.MISSING_PARAM)
+    injection_msg = _check_injection(new_text)
+    if injection_msg:
+        return _err(injection_msg, ErrorCode.INJECTION)
     filepath = MEMORIES_ROOT / file
     if not filepath.exists():
-        return json.dumps({"error": f"{file} does not exist"})
+        return _err(f"{file} does not exist", ErrorCode.NOT_FOUND)
     content = filepath.read_text(encoding="utf-8")
     if old_text not in content:
-        return json.dumps({"error": "old_text not found in file", "matched": False})
+        return _err("old_text not found in file", ErrorCode.NO_MATCH, matched=False)
     filepath.write_text(content.replace(old_text, new_text, 1), encoding="utf-8")
-    return json.dumps({"success": True, "file": file})
+    return {"success": True, "file": file}
 
 
-def _memory_remove(params: dict) -> str:
+def _memory_remove(params: dict) -> dict:
     file = params.get("file", "MEMORY.md").strip()
     entry = params.get("entry", "").strip()
     if file not in MEMORY_FILES:
-        return json.dumps({"error": f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}"})
+        return _err(f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}", ErrorCode.INVALID_PARAM)
     if not entry:
-        return json.dumps({"error": "entry is required"})
+        return _err("entry is required", ErrorCode.MISSING_PARAM)
     filepath = MEMORIES_ROOT / file
     if not filepath.exists():
-        return json.dumps({"error": f"{file} does not exist"})
+        return _err(f"{file} does not exist", ErrorCode.NOT_FOUND)
     content = filepath.read_text(encoding="utf-8")
     if entry not in content:
-        return json.dumps({"error": "entry not found in file", "matched": False})
+        return _err("entry not found in file", ErrorCode.NO_MATCH, matched=False)
     updated = content.replace(entry, "", 1)
     updated = re.sub(r"\n{3,}", "\n\n", updated)
     filepath.write_text(updated, encoding="utf-8")
-    return json.dumps({"success": True, "file": file})
+    return {"success": True, "file": file}
 
 
 # ── Session recall ───────────────────────────────────────────────────────────
@@ -230,11 +235,11 @@ def _score_session(session: dict, query_tokens: set) -> float:
     return score / len(query_tokens)
 
 
-def _session_recall(params: dict) -> str:
+def _session_recall(params: dict) -> dict:
     """Search recent session transcripts for topics, decisions, or discussions."""
     query = params.get("query", "").strip()
     if not query:
-        return json.dumps({"error": "query is required", "sessions": []})
+        return _err("query is required", ErrorCode.MISSING_PARAM, sessions=[])
 
     days = int(params.get("days", 7))
     limit = int(params.get("limit", 5))
@@ -258,7 +263,7 @@ def _session_recall(params: dict) -> str:
             "message_count": s["message_count"],
             "snippets": s["user_snippets"][:3],
         } for s in sessions[:limit]]
-        return json.dumps({"query": query, "sessions": results, "total_searched": len(sessions)})
+        return {"query": query, "sessions": results, "total_searched": len(sessions)}
 
     scored = []
     for s in sessions:
@@ -285,7 +290,7 @@ def _session_recall(params: dict) -> str:
             "snippets": snippets or [s["preview"][:200]],
         })
 
-    return json.dumps({"query": query, "sessions": results, "total_searched": len(sessions)})
+    return {"query": query, "sessions": results, "total_searched": len(sessions)}
 
 
 # ── MCP registration ─────────────────────────────────────────────────────────
@@ -315,5 +320,5 @@ async def call_tool(name: str, arguments: dict):
     }
     handler = handlers.get(name)
     if handler:
-        return [TextContent(type="text", text=handler(arguments))]
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return _wrap(handler(arguments))
+    return _wrap(_err(f"Unknown tool: {name}", ErrorCode.UNKNOWN_TOOL))

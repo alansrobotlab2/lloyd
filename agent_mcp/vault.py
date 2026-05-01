@@ -31,9 +31,15 @@ from pathlib import Path
 from typing import Optional
 
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
 
-from agent_mcp._shared import VAULT, _QUERY_STOPWORDS
+from agent_mcp._shared import (
+    VAULT,
+    ErrorCode,
+    _QUERY_STOPWORDS,
+    _err,
+    _wrap,
+)
 from agent_mcp.facts import (
     FACT_GODNODE_THRESHOLD,
     FACT_RANK_CAP_SEED,
@@ -242,7 +248,7 @@ def _rrf_fuse(ranked_lists: list, k: int = 60) -> list:
     return fused
 
 
-def _run_vault_search(query: str, max_results: int, min_score: float, scope: str, consolidate: bool) -> str:
+def _run_vault_search(query: str, max_results: int, min_score: float, scope: str, consolidate: bool) -> dict:
     scope_prefixes = []
     if scope:
         for item in scope.split(","):
@@ -294,12 +300,12 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
     if consolidate and len(trimmed) >= CONSOLIDATION_MIN_RESULTS:
         consolidated = _consolidate_results(query, trimmed)
 
-    return json.dumps({
+    return {
         "results": trimmed, "mode": "hybrid",
         "consolidated": consolidated is not None,
         "consolidated_summary": consolidated,
         "collections_searched": coll_list,
-    })
+    }
 
 
 # ── Vault helpers ────────────────────────────────────────────────────────────
@@ -333,18 +339,18 @@ def _audit_write(path: str, byte_count: int) -> None:
 
 # ── Tool handlers ────────────────────────────────────────────────────────────
 
-def _vault_get(params: dict) -> str:
+def _vault_get(params: dict) -> dict:
     path = params.get("path", "").strip()
     if not path:
-        return json.dumps({"error": "path is required"})
+        return _err("path is required", ErrorCode.MISSING_PARAM)
     try:
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
-            return json.dumps({"error": "path escapes vault root"})
+            return _err("path escapes vault root", ErrorCode.PATH_ESCAPE)
         if not target.exists():
             resolved = _resolve_case_insensitive(path)
             if resolved is None:
-                return json.dumps({"error": f"File not found: {path}"})
+                return _err(f"File not found: {path}", ErrorCode.NOT_FOUND)
             target = resolved
         text = target.read_text(encoding="utf-8", errors="replace")
         start_line = int(params.get("start_line", 0))
@@ -354,34 +360,35 @@ def _vault_get(params: dict) -> str:
             start = max(0, start_line - 1)
             end = (start + num_lines) if num_lines > 0 else len(lines)
             text = "\n".join(lines[start:end])
-        return json.dumps({"path": path, "text": text or "(empty file)"})
+        return {"path": path, "text": text or "(empty file)"}
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return _err(str(exc), ErrorCode.INTERNAL)
 
 
-def _vault_write(params: dict) -> str:
+def _vault_write(params: dict) -> dict:
     path = params.get("path", "").strip()
     content = params.get("content", "")
     if not path:
-        return json.dumps({"error": "path is required"})
+        return _err("path is required", ErrorCode.MISSING_PARAM)
     try:
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
-            return json.dumps({"error": "path escapes vault root"})
+            return _err("path escapes vault root", ErrorCode.PATH_ESCAPE)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         byte_count = len(content.encode("utf-8"))
         _audit_write(path, byte_count)
-        return json.dumps({"success": True, "path": path, "bytes": byte_count})
+        return {"success": True, "path": path, "bytes": byte_count}
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return _err(str(exc), ErrorCode.INTERNAL)
 
 
-def _vault_overview(params: dict) -> str:
+def _vault_overview(params: dict) -> dict:
     try:
         if not VAULT.exists():
-            return json.dumps({"error": f"Vault not found: {VAULT}"})
-        totals, grand_total = {}, 0
+            return _err(f"Vault not found: {VAULT}", ErrorCode.NOT_FOUND)
+        totals: dict = {}
+        grand_total = 0
         for segment in VAULT_SEGMENTS:
             seg_dir = VAULT / segment
             if not seg_dir.is_dir():
@@ -390,25 +397,25 @@ def _vault_overview(params: dict) -> str:
             count = sum(1 for f in seg_dir.rglob("*.md") if f.name not in VAULT_EXCLUDE_FILES and not any(p in VAULT_EXCLUDE_DIRS for p in f.parts))
             totals[segment] = count
             grand_total += count
-        return json.dumps({"total_files": grand_total, "segments": totals})
+        return {"total_files": grand_total, "segments": totals}
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return _err(str(exc), ErrorCode.INTERNAL)
 
 
-def _vault_search(params: dict) -> str:
+def _vault_search(params: dict) -> dict:
     query = params.get("query", "").strip()
     if not query:
-        return json.dumps({"error": "query is required", "results": []})
+        return _err("query is required", ErrorCode.MISSING_PARAM, results=[])
     try:
         return _run_vault_search(query, int(params.get("max_results", 10)), float(params.get("min_score", 0.0)), params.get("scope", ""), params.get("consolidate", True))
     except Exception as exc:
-        return json.dumps({"error": str(exc), "results": []})
+        return _err(str(exc), ErrorCode.INTERNAL, results=[])
 
 
-def _vault_recall(params: dict) -> str:
+def _vault_recall(params: dict) -> dict:
     query = params.get("query", "").strip()
     if not query:
-        return json.dumps({"error": "query is required", "documents": [], "facts": []})
+        return _err("query is required", ErrorCode.MISSING_PARAM, documents=[], facts=[])
     limit = int(params.get("limit", 20))
     include_facts = params.get("include_facts", True)
     expand_graph = params.get("expand_graph", False)
@@ -496,12 +503,13 @@ def _vault_recall(params: dict) -> str:
             result["graph_neighbors_used"] = [
                 {"entity": e, "weight": round(w, 3)} for e, w in weighted_neighbors
             ]
-        # default=str handles datetime event_date values that slipped
-        # through YAML parsing as native objects (pre-existing data issue
-        # in ~/obsidian/facts/, surfaced by #322 returning more facts).
-        return json.dumps(result, default=str)
+        # NOTE: datetime event_date values from YAML-parsed fact frontmatter
+        # are non-JSON-native. _wrap() in the dispatcher uses default=str to
+        # serialize them. (Pre-existing data issue in ~/obsidian/facts/,
+        # surfaced by #322 returning more facts.)
+        return result
     except Exception as exc:
-        return json.dumps({"error": str(exc), "documents": [], "facts": []})
+        return _err(str(exc), ErrorCode.INTERNAL, documents=[], facts=[])
 
 
 # ── MCP registration ─────────────────────────────────────────────────────────
@@ -530,5 +538,5 @@ async def call_tool(name: str, arguments: dict):
     }
     handler = handlers.get(name)
     if handler:
-        return [TextContent(type="text", text=handler(arguments))]
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return _wrap(handler(arguments))
+    return _wrap(_err(f"Unknown tool: {name}", ErrorCode.UNKNOWN_TOOL))
