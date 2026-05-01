@@ -18,6 +18,11 @@ import yaml
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
+# Skill-side query stopwords moved to agent_mcp._shared (#340 P3 cleanup).
+# Local alias preserves the existing internal name `_QUERY_STOPWORDS` so
+# the rest of skills.py doesn't change.
+from agent_mcp._shared import _SKILLS_QUERY_STOPWORDS as _QUERY_STOPWORDS
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 SKILLS_DIRS = [
@@ -79,43 +84,6 @@ def _iter_skills():
             if skill:
                 seen.add(entry.name)
                 yield skill
-
-
-# Conversational noise + function words — stripped from *query* side before
-# scoring. Skill-side tokenization is unchanged: we still match against full
-# name/desc/tag/body text. The asymmetry is deliberate — a query like "lets
-# dig into 311" should not fire skills just because "lets", "dig", and
-# "into" appear in arbitrary skill bodies.
-_QUERY_STOPWORDS = {
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "must",
-    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
-    "they", "them", "their", "its", "his", "her",
-    "this", "that", "these", "those", "what", "which", "who", "whom",
-    "how", "when", "where", "why",
-    "in", "on", "at", "to", "for", "of", "with", "by", "from", "about",
-    "into", "through", "during", "before", "after", "between",
-    "and", "or", "but", "not", "no", "nor", "so", "if", "then",
-    "just", "also", "very", "really", "quite", "too", "much",
-    "ok", "okay", "yeah", "yes", "nah", "sure", "right",
-    "lets", "let", "go", "going", "get", "got", "getting",
-    "want", "wants", "wanted", "know", "knows", "knew",
-    "think", "thinks", "thought", "look", "looking", "looked",
-    "take", "takes", "took", "make", "makes", "made",
-    "now", "some", "any", "all", "each", "every", "both",
-    "up", "out", "over", "down", "off", "away",
-    "here", "there", "thing", "things", "stuff",
-    "left", "done", "next", "back", "ready", "still", "already",
-    "tell", "show", "give", "put", "run", "running", "ran",
-    "come", "came", "see", "saw", "seen", "say", "said",
-    "try", "tried", "use", "used", "using",
-    "start", "started", "stop", "stopped", "keep", "kept",
-    "set", "well", "good",
-    "bit", "lot", "way", "something", "anything", "everything",
-    "like", "first", "last", "new", "old", "one", "two",
-    "dig", "really",
-}
 
 
 # Suffixes we collapse for matching. "systems" → "system", "services" → "service",

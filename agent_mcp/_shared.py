@@ -5,7 +5,8 @@ change — pure module split for maintainability.
 
 Contents:
     - Path constants (VAULT, FACTS_ROOT, ALIASES_PATH)
-    - Stopword sets (_ENTITY_STOPWORDS, _SCORING_STOPWORDS, _QUERY_STOPWORDS)
+    - Stopword sets (_ENTITY_STOPWORDS, _SCORING_STOPWORDS, _QUERY_STOPWORDS,
+      _FACT_QUERY_STOPWORDS, _SKILLS_QUERY_STOPWORDS)
     - Pure helpers (_token_overlap, _levenshtein, _fuzzy_entity_match)
     - Fact frontmatter helpers (_parse_fact_frontmatter, _write_fact_frontmatter)
     - Entity resolution (_find_entity_dir, _load_aliases, _save_aliases,
@@ -154,6 +155,70 @@ _QUERY_STOPWORDS = _ENTITY_STOPWORDS | {
     # NOTE deliberately NOT stripped — can be meaningful in architectural
     # content: enable, handle, return, work, function, operate, build,
     # ship, shipped, run, start, stop, fail, failed.
+}
+
+# Fact-side query stopwords (#322 fact ranking). Used by
+# agent_mcp.facts._fact_query_tokens to keep fact ranking responsive to
+# query-token overlap without aggressive trimming. Lightweight on purpose:
+# aggressive stopword removal hurts when the query is short
+# ("how does fact_path work"). Kept as a frozenset because it's hot-path.
+_FACT_QUERY_STOPWORDS = frozenset({
+    "what", "how", "when", "where", "why", "who", "which",
+    "the", "and", "for", "with", "from", "into", "over", "under",
+    "does", "did", "do", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "can", "could", "will", "would", "should", "may",
+    "might", "must", "shall",
+    "this", "that", "these", "those", "it", "its", "them", "they", "their",
+    "our", "ours", "my", "mine", "your", "yours", "his", "her", "hers",
+    "we", "you", "us", "me", "i",
+    "about", "also", "just", "than", "then", "there", "here", "through",
+    "during", "between", "among", "across", "within", "without", "after",
+    "before", "while", "until", "since",
+    "of", "in", "on", "to", "at", "by", "as", "or", "nor", "not", "so",
+    "if", "else", "but", "yet", "though", "although",
+    "tell", "show", "explain", "describe", "walk", "give", "get", "use",
+    "using", "used", "make", "made", "see", "seen", "know", "need",
+})
+
+# Skill-matching query stopwords. Used by agent_mcp.skills._query_tokens
+# to filter conversational fillers from the *query* side of skill scoring
+# (skill body side is unfiltered — the asymmetry is deliberate). Per
+# the original docstring in skills.py: a query like "lets dig into 311"
+# should NOT fire skills just because "lets", "dig", "into" appear in
+# arbitrary skill bodies.
+#
+# Broader than _QUERY_STOPWORDS — includes many more conversational
+# tokens (ok, yeah, sure, getting, looked, made, etc.). Distinct purpose,
+# distinct shape. Kept as a separate constant rather than aliased.
+_SKILLS_QUERY_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "must",
+    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
+    "they", "them", "their", "its", "his", "her",
+    "this", "that", "these", "those", "what", "which", "who", "whom",
+    "how", "when", "where", "why",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "about",
+    "into", "through", "during", "before", "after", "between",
+    "and", "or", "but", "not", "no", "nor", "so", "if", "then",
+    "just", "also", "very", "really", "quite", "too", "much",
+    "ok", "okay", "yeah", "yes", "nah", "sure", "right",
+    "lets", "let", "go", "going", "get", "got", "getting",
+    "want", "wants", "wanted", "know", "knows", "knew",
+    "think", "thinks", "thought", "look", "looking", "looked",
+    "take", "takes", "took", "make", "makes", "made",
+    "now", "some", "any", "all", "each", "every", "both",
+    "up", "out", "over", "down", "off", "away",
+    "here", "there", "thing", "things", "stuff",
+    "left", "done", "next", "back", "ready", "still", "already",
+    "tell", "show", "give", "put", "run", "running", "ran",
+    "come", "came", "see", "saw", "seen", "say", "said",
+    "try", "tried", "use", "used", "using",
+    "start", "started", "stop", "stopped", "keep", "kept",
+    "set", "well", "good",
+    "bit", "lot", "way", "something", "anything", "everything",
+    "like", "first", "last", "new", "old", "one", "two",
+    "dig", "really",
 }
 
 
