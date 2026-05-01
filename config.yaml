@@ -13,7 +13,14 @@ autoresearch:
   ledger_path: ~/lloyd/_pipeline/research/ledger.jsonl
   max_variants_per_round: 7
   promotion:
-    min_bench_win_fraction: 0.6
+    # Lowered from 0.6 to 0.5 on 2026-05-01 per #344 investigation —
+    # bench composition makes 0.6 unreachable (avg variant win rate ~30%
+    # across 1,557 variants). 89 of 208 variants in last 30 rounds beat
+    # baseline mean composite but were rejected; 46 of those held purely
+    # on win-fraction. See knowledge/lloyd/autoresearch-promotion-floor.md
+    # for full analysis. Watch promotion rate + false-positive rate over
+    # next 30 rounds; raise to 0.55 if false-positive rate > 30%.
+    min_bench_win_fraction: 0.5
     min_composite_delta: 0.05
     require_safety_pass: true
     tool_allowlist_consecutive_wins: 2
