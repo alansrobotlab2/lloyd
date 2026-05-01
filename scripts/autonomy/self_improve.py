@@ -1002,42 +1002,75 @@ Reply ONLY "A" or "B". /no_think"""
             except subprocess.CalledProcessError as e:
                 logger.error(f"Failed to revert file: {e}")
         else:
+            # Default-revert: just enter and exit the context. With Pattern B
+            # semantics, this triggers revert() automatically because keep()
+            # was not called. (See GitRevertContext docstring.)
             with GitRevertContext(file_path, branch_name, OBSIDIAN_DIR) as ctx:
-                pass  # Context manager handles revert
-    
+                pass
+
     return keep
 
 
 class GitRevertContext:
-    """Context manager for git revert operations during evaluation."""
-    
+    """Context manager for git revert operations during evaluation.
+
+    Default-revert semantics: ALWAYS reverts on __exit__ unless `keep()` was
+    called inside the with-block. This protects against the bug class where
+    the body forgets to set a failure flag and HEAD is left on the experiment
+    branch (see backlog #341 / #346).
+
+    The legacy `failed` attribute is still honored for backwards compatibility,
+    but new callers should use `keep()` to opt out of revert.
+    """
+
     def __init__(self, file_path, branch_name, obsidian_dir):
         self.file_path = file_path
         self.branch_name = branch_name
         self.obsidian_dir = obsidian_dir
         self.failed = False
-    
+        self._kept = False
+
+    def keep(self):
+        """Mark this context as 'keep changes' — skips revert on exit."""
+        self._kept = True
+
     def __enter__(self):
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Only revert if we failed or had an exception
-        if self.failed or exc_type is not None:
-            self.revert()
+        # Default to revert. Only skip when keep() was explicitly called AND
+        # the body completed without exception AND the legacy failed flag is
+        # not set.
+        if self._kept and exc_type is None and not self.failed:
+            return False
+        self.revert()
         return False
-    
+
     def revert(self):
-        """Revert changes and clean up branch."""
+        """Revert changes and clean up branch.
+
+        Critical: switch HEAD off the experiment branch BEFORE attempting to
+        delete it. `git branch -D` refuses to delete the currently-checked-out
+        branch — the previous version of this method left HEAD stranded
+        (see backlog #341 / #346 Bug B).
+        """
+        # 1. Switch HEAD to main first. Use -f to force past any dirty tree
+        #    state on the experiment branch — the working tree gets reset to
+        #    main's content as a side effect, which is also what we want for
+        #    the file revert.
         try:
             subprocess.run(
-                ["git", "checkout", "main", "--", self.file_path],
+                ["git", "checkout", "-f", "main"],
                 cwd=self.obsidian_dir,
                 check=True,
                 capture_output=True,
             )
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to revert file: {e}")
-        
+            logger.error(f"Failed to checkout main during revert: {e}")
+            # Don't return — still attempt branch delete in case HEAD is
+            # somehow already off the experiment branch.
+
+        # 2. Now safe to delete the experiment branch.
         try:
             subprocess.run(
                 ["git", "branch", "-D", self.branch_name],
@@ -1046,9 +1079,9 @@ class GitRevertContext:
                 capture_output=True,
             )
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to delete branch: {e}")
-        
-        logger.info("Changes reverted")
+            logger.error(f"Failed to delete branch {self.branch_name}: {e}")
+
+        logger.info("Changes reverted (HEAD on main, experiment branch deleted)")
 
 
 def load_watermarks() -> dict:
@@ -1592,8 +1625,52 @@ def replay():
     logger.info(f"Replay complete: {days_kept} kept, {days_reverted} reverted, {days_no_proposal} no proposal")
 
 
+def _ensure_head_on_main():
+    """Belt-and-suspenders safety check: never exit with HEAD on a feature branch.
+
+    Background: bug-class from #341 was that self_improve could leave HEAD on
+    an experiment-* branch when its evaluate()/revert() path failed. Other
+    vault writers (autonomy-data-pipeline, etc.) then committed to that
+    stranded branch instead of main.
+
+    This guard runs in main()'s finally clause to catch any future bug-class
+    that leaves HEAD off main.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=OBSIDIAN_DIR,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        current = result.stdout.strip()
+        if current != "main":
+            logger.error(
+                f"HEAD on '{current}' at exit (expected 'main'). "
+                f"Forcing checkout to main to prevent stranded commits."
+            )
+            subprocess.run(
+                ["git", "checkout", "-f", "main"],
+                cwd=OBSIDIAN_DIR,
+                check=False,
+                capture_output=True,
+            )
+    except Exception as e:
+        # Never raise from a safety net — log and continue.
+        logger.error(f"Final HEAD safety check failed: {e}")
+
+
 def main():
     """Run one cycle of the self-improvement loop."""
+    try:
+        _main_impl()
+    finally:
+        _ensure_head_on_main()
+
+
+def _main_impl():
+    """Actual main body — extracted so main() can wrap it in try/finally."""
     parser = argparse.ArgumentParser(description="Self-improvement loop for system prompt optimization")
     parser.add_argument("--dry-run", action="store_true", 
                         help="Run measure and propose only, do not evaluate or modify files")
