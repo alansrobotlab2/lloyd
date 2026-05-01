@@ -19,11 +19,10 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 from agent_mcp.skills import _iter_skills, _score_skill, _query_tokens
-from agent_mcp.memory import (
-    _extract_entities_from_query, _get_facts_sync,
-    _qmd_daemon_search, _qmd_strip_stopwords,
-    _load_session_index, _score_session, _ENTITY_STOPWORDS,
-)
+from agent_mcp._shared import _ENTITY_STOPWORDS
+from agent_mcp.facts import _extract_entities_from_query, _get_facts_sync
+from agent_mcp.session import _load_session_index, _score_session
+from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords
 
 logger = logging.getLogger("lloyd.prefetch")
 

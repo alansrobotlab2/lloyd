@@ -1,16 +1,22 @@
-"""Characterization tests for agent_mcp/memory.py — pin current behavior
-before extracting shared helpers (Task #340 PR 1).
+"""Characterization tests for the agent_mcp knowledge-graph helpers.
 
-Run: .venvs/lloyd/bin/python -m tests.test_memory_characterization
+Originally written against the monolithic agent_mcp/memory.py to pin
+current behavior before PR 1's extraction. After PR 5 the module was
+split into facts/vault/session/_shared, with a `memory.py` shim
+re-exporting everything for backward compat. The cleanup PR (post-PR-4)
+deletes the shim, so this file imports directly from the canonical
+modules.
+
+Run: .venvs/lloyd/bin/python -m pytest tests/test_memory_characterization.py
 
 Scope: pure functions and the public tool-list shape. I/O-bound tests
 (disk-touching _resolve_entity round-trips) are deferred to a later PR
 because they require patching FACTS_ROOT / ALIASES_PATH across modules,
 which is easier after PR 3 makes path resolution explicit.
 
-NOTE: These tests must pass BEFORE and AFTER PR 1's extraction. After
-extraction, memory.py re-exports the helpers from agent_mcp._shared, so
-attribute access via `memory.X` still resolves correctly.
+The `memory` namespace alias below is just to keep these tests readable
+— `memory._token_overlap` reads better than juggling four module names
+across many short tests. All names below resolve to `_shared.py`.
 """
 
 import asyncio
@@ -19,7 +25,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent_mcp import memory  # noqa: E402
+# `_shared` holds all the pure helpers and stopword sets exercised by
+# this file. Aliasing keeps the assertion expressions concise.
+from agent_mcp import _shared as memory  # noqa: E402
+
+# For test_list_tools_*: aggregate the 20 tools across the three split
+# modules. After the shim is gone there's no `memory.list_tools()`.
+from agent_mcp import facts as _facts_mod  # noqa: E402
+from agent_mcp import vault as _vault_mod  # noqa: E402
+from agent_mcp import session as _session_mod  # noqa: E402
+
+
+async def _aggregated_list_tools() -> list:
+    """Aggregate tools across facts/vault/session — replaces the
+    deleted `agent_mcp.memory.list_tools()` from PR 5's shim."""
+    out: list = []
+    for mod in (_facts_mod, _vault_mod, _session_mod):
+        out.extend(await mod.list_tools())
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +233,7 @@ EXPECTED_TOOL_NAMES = {
 
 
 def test_list_tools_returns_expected_set():
-    tools = asyncio.run(memory.list_tools())
+    tools = asyncio.run(_aggregated_list_tools())
     names = {t.name for t in tools}
     missing = EXPECTED_TOOL_NAMES - names
     extra = names - EXPECTED_TOOL_NAMES
@@ -224,7 +247,7 @@ def test_list_tools_returns_expected_set():
 
 def test_list_tools_required_inputs_present():
     # Spot-check that critical tools declare their required params
-    tools = asyncio.run(memory.list_tools())
+    tools = asyncio.run(_aggregated_list_tools())
     by_name = {t.name: t for t in tools}
 
     assert by_name["fact_get"].inputSchema.get("required") == ["entity"]
@@ -239,9 +262,12 @@ def test_list_tools_required_inputs_present():
 # Module import smoke — regression guard for PR 1 extraction
 # ---------------------------------------------------------------------------
 
-def test_helpers_accessible_via_memory_module():
-    # After PR 1 extraction, these names must still be reachable via
-    # `memory.X` so existing call sites and tests don't break.
+def test_helpers_accessible_via_shared_module():
+    # After PR 1 extraction these names live in agent_mcp._shared. The
+    # cleanup PR (post-PR-4) deleted the agent_mcp.memory shim, so this
+    # guard now pins the canonical home directly. If a future split
+    # moves any of these out of `_shared`, update both the import alias
+    # at the top of this file and this list together.
     required_names = [
         "_token_overlap", "_levenshtein", "_fuzzy_entity_match",
         "_parse_fact_frontmatter", "_write_fact_frontmatter",
@@ -252,7 +278,9 @@ def test_helpers_accessible_via_memory_module():
         "FACTS_ROOT", "ALIASES_PATH", "VAULT",
     ]
     for name in required_names:
-        assert hasattr(memory, name), f"memory.{name} missing — PR 1 broke re-exports"
+        assert hasattr(memory, name), (
+            f"agent_mcp._shared.{name} missing — split refactor lost a helper"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +321,7 @@ _TESTS = [
     test_list_tools_returns_expected_set,
     test_list_tools_required_inputs_present,
     # extraction smoke
-    test_helpers_accessible_via_memory_module,
+    test_helpers_accessible_via_shared_module,
 ]
 
 

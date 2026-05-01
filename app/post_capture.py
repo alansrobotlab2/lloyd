@@ -70,7 +70,7 @@ def _build_capture_transcript(messages: list, max_chars: int = 4000) -> str:
 
 def _write_extracted_facts(facts: list[dict], session_id: str):
     """Write extracted facts to the fact store via direct file append."""
-    from agent_mcp.memory import _fact_add
+    from agent_mcp.facts import _fact_add
 
     for f in facts:
         try:
