@@ -21,6 +21,7 @@ session memory injection patterns, or fact ranking stays in its owning module
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -296,14 +297,27 @@ def _fuzzy_entity_match(name: str, candidates: list[str], threshold: float = 0.8
 def _parse_fact_frontmatter(content: str) -> dict:
     """Parse YAML frontmatter from the head of a markdown string.
 
-    Returns {} for any malformed input (no leading ---, no closing ---).
+    Returns {} for any malformed input (no leading ---, no closing ---,
+    or YAML parse error). Logs YAML errors so bad files are visible without
+    crashing the caller — a single corrupt fact file should not kill an
+    entity-wide read. See backlog #343/#348 for the bug class this protects
+    against.
     """
     if not content.startswith("---"):
         return {}
     end = content.find("---", 3)
     if end == -1:
         return {}
-    return yaml.safe_load(content[3:end]) or {}
+    try:
+        return yaml.safe_load(content[3:end]) or {}
+    except yaml.YAMLError as e:
+        # Fail-soft: log and skip. Caller gets an empty dict (treated as
+        # "no facts in this file") rather than an exception that aborts
+        # the whole entity read.
+        logging.getLogger(__name__).warning(
+            "fact frontmatter YAML parse failed; skipping file: %s", e
+        )
+        return {}
 
 
 def _write_fact_frontmatter(data: dict) -> str:
