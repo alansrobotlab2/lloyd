@@ -182,8 +182,15 @@ def extract_mentions(entities: list[str], existing: set) -> list[dict]:
         facts = load_facts_for_entity(entity_dir)
         entity_lower = entity.lower()
 
-        # Collect all fact text for this entity
-        all_text = " ".join(f.get("fact", "") for f in facts if f.get("expired_at") is None)
+        # Collect all fact text for this entity.
+        # Handle both missing 'fact' key AND explicit fact: None values
+        # (the latter shows up in some extracted fact files; previously
+        # crashed with `TypeError: expected str instance, NoneType found`).
+        all_text = " ".join(
+            (f.get("fact") or "")
+            for f in facts
+            if f.get("expired_at") is None
+        )
         if not all_text:
             continue
 
