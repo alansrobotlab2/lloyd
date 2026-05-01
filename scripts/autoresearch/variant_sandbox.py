@@ -17,16 +17,24 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .common import AutoresearchConfig, now_iso
+from .common import AutoresearchConfig, _canonical_prompt_paths, now_iso
 
 logger = logging.getLogger("autoresearch.sandbox")
 
-SUPPORTED_RELATIVE_PATHS = {
-    "SOUL.md",
-    "MEMORY.md",
-    "USER.md",
-    # Skills and config overlays are out of scope for v1 (see hypothesis_generator).
-}
+
+def _supported_relative_paths() -> set[str]:
+    """Relative-path names a variant is allowed to overlay.
+
+    Single source of truth: `_canonical_prompt_paths()` in common.py.
+    Its keys are the relative names; its values are the absolute paths
+    written into `run_spec.yaml`'s `mutation_scope.writable_paths`.
+    Both the spec and the enforcement here resolve from the same dict
+    so they cannot drift. (Skills/config overlays remain out of scope —
+    `_canonical_prompt_paths()` is the gate for what to support.)
+
+    #335 acceptance: writable-path enforcement is now spec-aligned.
+    """
+    return set(_canonical_prompt_paths().keys())
 
 
 def materialize(cfg: AutoresearchConfig, variant: dict[str, Any]) -> Path:
@@ -35,9 +43,13 @@ def materialize(cfg: AutoresearchConfig, variant: dict[str, Any]) -> Path:
     overlay_dir = cfg.paths.variants_dir / variant_id_val
     overlay_dir.mkdir(parents=True, exist_ok=True)
 
+    supported = _supported_relative_paths()
     for rel_path, content in (variant.get("overlay_files") or {}).items():
-        if rel_path not in SUPPORTED_RELATIVE_PATHS:
-            logger.warning("variant %s: skipping unsupported path %s", variant_id_val, rel_path)
+        if rel_path not in supported:
+            logger.warning(
+                "variant %s: skipping unsupported path %s (not in spec writable_paths: %s)",
+                variant_id_val, rel_path, sorted(supported),
+            )
             continue
         dest = overlay_dir / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
