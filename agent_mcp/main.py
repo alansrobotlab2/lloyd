@@ -24,17 +24,23 @@ from agent_mcp import (
     backlog,
     browser,
     discord_bot,
+    facts,
     http_tools,
-    memory,
     mission_control,
     pipeline,
+    session,
     skills,
     subliminal,
     thunderbird,
+    vault,
 )
 
 PORT = 8500
 
+# memory.py was split into facts/vault/session in #340 PR 5. The legacy
+# memory module remains as a backward-compat re-export shim for callers
+# (prefetch.py, app/post_capture.py) but is NOT in MODULES — including it
+# would double-register every tool.
 MODULES = [
     ambient,
     autonomy,
@@ -42,7 +48,9 @@ MODULES = [
     backlog,
     browser,
     discord_bot,
-    memory,
+    facts,
+    vault,
+    session,
     mission_control,
     skills,
     subliminal,
