@@ -23,15 +23,98 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional, TypedDict
 
 import yaml
+from mcp.types import TextContent
 
 # ── Path constants ───────────────────────────────────────────────────────────
 
 VAULT = Path.home() / "obsidian"
 FACTS_ROOT = VAULT / "facts"
 ALIASES_PATH = FACTS_ROOT / "entity-aliases.json"
+
+
+# ── Result types & dispatch helpers (#340 PR 4) ──────────────────────────────
+#
+# All handlers in agent_mcp.facts / .vault / .session return a Python dict.
+# The per-module call_tool dispatcher wraps each return in TextContent via
+# _wrap() — json.dumps happens exactly once per call, not 3+ times per
+# handler.
+#
+# Shape policy:
+#   - Success: handler-specific data, NOT wrapped in an envelope. The agent
+#     reads tool output as text; an extra {"ok": true, "data": {...}} layer
+#     adds visual noise on every successful call. Pre-existing success
+#     shapes ({"facts": [...]}, {"path": ..., "text": ...}, etc.) are
+#     preserved verbatim.
+#
+#   - Error: standardized via _err() — always {"error": str, "code": str,
+#     ...extra}. Extra keys preserve pre-existing companion fields like
+#     {"facts": []} that callers may expect on the error path.
+#
+# Why no Result envelope:
+#   The original audit (#340 background) proposed
+#   {"ok": bool, "data": ..., "error": ..., "code": ...}. PR 4's callsite
+#   audit found zero programmatic consumers (prefetch.py uses internal
+#   helpers below the json layer; post_capture.py discards the return).
+#   The only "consumer" is the LLM agent reading the JSON visually, where
+#   verbosity is a tax. We get the type-safety, single-dumps, and code-
+#   field wins from this approach without taxing every successful call.
+
+class Result(TypedDict, total=False):
+    """Type contract for MCP handler returns.
+
+    All handlers in facts.py / vault.py / session.py return Result dicts
+    (Python dicts). The dispatcher serializes via _wrap() exactly once.
+
+    Two valid shapes:
+      Success: arbitrary handler-specific keys (no envelope).
+      Error:   {"error": str, "code": str, ...extra}
+
+    Use _err() to construct errors so the shape stays consistent.
+    """
+    error: str
+    code: str
+
+
+class ErrorCode:
+    """Standardized error-code constants for handler returns.
+
+    Use these instead of inline strings so callers can branch on the code
+    without parsing the human-readable error message.
+    """
+    MISSING_PARAM = "MISSING_PARAM"        # Required parameter omitted/empty
+    INVALID_PARAM = "INVALID_PARAM"        # Parameter present but malformed
+    NOT_FOUND = "NOT_FOUND"                # Entity/file/resource doesn't exist
+    PATH_ESCAPE = "PATH_ESCAPE"            # Path traversal outside vault
+    INJECTION = "INJECTION"                # Prompt-injection guardrail tripped
+    NO_MATCH = "NO_MATCH"                  # Substring not found in target
+    INTERNAL = "INTERNAL"                  # Caught exception during handler
+    UNKNOWN_TOOL = "UNKNOWN_TOOL"          # Dispatcher could not route name
+
+
+def _err(message: str, code: str = ErrorCode.INTERNAL, **extra: Any) -> dict:
+    """Construct a standardized error result.
+
+    Example:
+        return _err("entity is required", ErrorCode.MISSING_PARAM, facts=[])
+
+    The order is fixed: error first, code second, then any caller-supplied
+    extras (e.g. empty list/dict companions that pre-existing callers may
+    expect on the error path).
+    """
+    return {"error": message, "code": code, **extra}
+
+
+def _wrap(result: dict) -> list[TextContent]:
+    """Serialize a handler return to a TextContent envelope.
+
+    Exactly one json.dumps per tool call. default=str handles datetimes
+    and other non-JSON-native types that may slip through (e.g. event_date
+    values from YAML-parsed fact frontmatter).
+    """
+    return [TextContent(type="text", text=json.dumps(result, default=str))]
 
 
 # ── Stopword sets ────────────────────────────────────────────────────────────
