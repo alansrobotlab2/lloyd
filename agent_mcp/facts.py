@@ -30,6 +30,7 @@ from mcp.types import Tool
 from agent_mcp._shared import (
     FACTS_ROOT,
     ErrorCode,
+    _FACT_QUERY_STOPWORDS,
     _SCORING_STOPWORDS,
     _err,
     _find_entity_dir,
@@ -120,26 +121,8 @@ FACT_GODNODE_THRESHOLD = 50
 FACT_RANK_CAP_SEED = 10
 FACT_RANK_CAP_GRAPH = 5
 
-# Stopwords for query tokenization — question words, auxiliaries, common
-# function words. Kept lightweight; aggressive stopword removal hurts when
-# the query itself is short ("how does fact_path work").
-_FACT_QUERY_STOPWORDS = frozenset({
-    "what", "how", "when", "where", "why", "who", "which",
-    "the", "and", "for", "with", "from", "into", "over", "under",
-    "does", "did", "do", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "can", "could", "will", "would", "should", "may",
-    "might", "must", "shall",
-    "this", "that", "these", "those", "it", "its", "them", "they", "their",
-    "our", "ours", "my", "mine", "your", "yours", "his", "her", "hers",
-    "we", "you", "us", "me", "i",
-    "about", "also", "just", "than", "then", "there", "here", "through",
-    "during", "between", "among", "across", "within", "without", "after",
-    "before", "while", "until", "since",
-    "of", "in", "on", "to", "at", "by", "as", "or", "nor", "not", "so",
-    "if", "else", "but", "yet", "though", "although",
-    "tell", "show", "explain", "describe", "walk", "give", "get", "use",
-    "using", "used", "make", "made", "see", "seen", "know", "need",
-})
+# _FACT_QUERY_STOPWORDS now lives in agent_mcp._shared (#340 P3 cleanup)
+# alongside the other four stopword sets. Imported above.
 
 app = Server("lloyd-facts")
 
