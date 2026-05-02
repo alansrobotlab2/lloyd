@@ -257,8 +257,14 @@ def test_state_endpoint() -> bool:
         "configured_personas", "max_nudges_per_session",
     ):
         ok &= _check(f"field present: {k}", k in body, f"got keys={list(body.keys())}")
-    ok &= _check("stage == '4'", body.get("stage") == "4",
-                 f"got {body.get('stage')!r}")
+    # Stage label tracks the latest shipped stage; Stage 4's surface is a
+    # forward-compatible subset, so we only require the label to be ≥ "4".
+    stage_str = str(body.get("stage") or "")
+    ok &= _check(
+        "stage >= '4'",
+        stage_str.isdigit() and int(stage_str) >= 4,
+        f"got {body.get('stage')!r}",
+    )
     return ok
 
 

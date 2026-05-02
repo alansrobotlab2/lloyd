@@ -254,6 +254,83 @@ def _truncate(s: str, cap: int) -> str:
     return s[: cap - 3] + "..."
 
 
+# ---------------------------------------------------------------------------
+# Stage 5: skill_recall_checker pre-compute
+# ---------------------------------------------------------------------------
+#
+# `skill_recall_checker` (Stage 5) gets a `<matched_skills>` block in its user
+# prompt — the top N results from skills_search against the frozen task
+# intent. The persona then decides whether the agent ignored a skill that
+# matched the task (per its decision rule).
+#
+# We pre-compute the matches in-process by importing the same scoring
+# function the MCP `skills_search` tool uses, so there's no MCP round-trip.
+# Caches per-prompt-hash so a repeated call within a session doesn't re-walk
+# the skill dirs.
+
+_SKILL_MATCH_CACHE: dict[str, list[tuple[str, str, float]]] = {}
+_MAX_SKILL_MATCHES = 3        # how many to surface to the persona
+_SKILL_MIN_SCORE_KEEP = 4.0   # below this, prompt shows "(no strong match)"
+
+
+def _top_matched_skills(query: str, *, k: int = _MAX_SKILL_MATCHES) -> list[tuple[str, str, float]]:
+    """Return the top-k (name, description, score) skill matches for `query`.
+
+    Uses `agent_mcp.skills` directly — no MCP subprocess. Falls back to an
+    empty list on any import or scoring error so the persona prompt
+    degrades gracefully. Cached by raw query string.
+    """
+    if not query:
+        return []
+    cached = _SKILL_MATCH_CACHE.get(query)
+    if cached is not None:
+        return cached
+
+    try:
+        from agent_mcp.skills import (
+            _iter_skills,        # type: ignore[attr-defined]
+            _query_tokens,       # type: ignore[attr-defined]
+            _score_skill,        # type: ignore[attr-defined]
+        )
+    except Exception as e:
+        logger.warning("skill_recall: agent_mcp.skills unavailable: %s", e)
+        _SKILL_MATCH_CACHE[query] = []
+        return []
+
+    try:
+        tokens = _query_tokens(query)
+        scored: list[tuple[float, str, str]] = []
+        for skill in _iter_skills():
+            score = _score_skill(skill, tokens, require_metadata_hit=True)
+            if score > 0:
+                scored.append((score, skill["name"], skill.get("description") or ""))
+        scored.sort(key=lambda t: -t[0])
+        out = [(name, desc, round(score, 2)) for score, name, desc in scored[:k]]
+    except Exception as e:
+        logger.warning("skill_recall: skills_search compute failed: %s", e)
+        out = []
+
+    _SKILL_MATCH_CACHE[query] = out
+    return out
+
+
+def _format_matched_skills_block(matches: list[tuple[str, str, float]]) -> str:
+    """Render the `<matched_skills>` block for the user prompt.
+
+    Each line: `<name> | <description (truncated)> | score <s>`. Returns
+    `(empty)` literal when the list is empty so the persona's decision rule
+    #1 has a clean signal.
+    """
+    if not matches:
+        return "(empty)"
+    rows: list[str] = []
+    for name, desc, score in matches:
+        if score < _SKILL_MIN_SCORE_KEEP:
+            continue
+        rows.append(f"{name} | {_truncate(desc, 200)} | score {score}")
+    return "\n".join(rows) if rows else "(empty)"
+
+
 def _build_user_prompt(
     *,
     frozen_task_intent: str,
@@ -261,6 +338,7 @@ def _build_user_prompt(
     tool_calls: list[dict],
     transcript: list[dict[str, Any]],
     mode: str = "final",
+    matched_skills: list[tuple[str, str, float]] | None = None,
 ) -> str:
     """Assemble the Brain 2 user-message body.
 
@@ -305,6 +383,17 @@ def _build_user_prompt(
     tool_summaries = _summarize_tool_calls(tool_calls)
     tool_str = ", ".join(tool_summaries) if tool_summaries else "(none)"
 
+    # Stage 5: skill_recall_checker reads `<matched_skills>` to decide whether
+    # the agent ignored a relevant skill. Other personas don't see this block
+    # — adding it unconditionally would just add tokens without signal.
+    skills_block = ""
+    if matched_skills is not None:
+        skills_block = (
+            "\n\n<matched_skills>\n"
+            f"{_format_matched_skills_block(matched_skills)}\n"
+            "</matched_skills>"
+        )
+
     return (
         "<task>\n"
         f"{_truncate(frozen_task_intent or '(no task text)', _TASK_INTENT_CAP)}\n"
@@ -316,6 +405,7 @@ def _build_user_prompt(
         f"text: {_truncate(response_text or '(empty)', _RESPONSE_TEXT_CAP)}\n"
         f"tool_calls: [{tool_str}]\n"
         "</final_response>"
+        f"{skills_block}"
     )
 
 
@@ -618,13 +708,56 @@ async def run_post_loop_critique(
         exclude_turn_id=turn_id,
         window_turns=transcript_window_turns,
     )
-    user_prompt = _build_user_prompt(
+    base_user_prompt = _build_user_prompt(
         frozen_task_intent=frozen_task_intent,
         response_text=response_text,
         tool_calls=tool_calls,
         transcript=transcript,
         mode="final",
     )
+
+    # Stage 5: pre-compute matched skills once if any persona in the
+    # ensemble needs them. `skill_recall_checker` is currently the only
+    # consumer; the cache key is the task intent so future personas
+    # reading the same block share the lookup.
+    matched_skills: list[tuple[str, str, float]] | None = None
+    if "skill_recall_checker" in personas:
+        try:
+            matched_skills = _top_matched_skills(frozen_task_intent or "")
+            _event_log.log_event(
+                session_id,
+                "inner_voice.skill_recall_matches",
+                {
+                    "match_count": len(matched_skills),
+                    "matches": [
+                        {"name": n, "score": s} for n, _d, s in matched_skills
+                    ],
+                },
+                turn_id=turn_id,
+            )
+        except Exception as e:
+            logger.warning("skill_recall pre-compute failed: %s", e)
+            matched_skills = []
+
+    skill_recall_user_prompt = (
+        _build_user_prompt(
+            frozen_task_intent=frozen_task_intent,
+            response_text=response_text,
+            tool_calls=tool_calls,
+            transcript=transcript,
+            mode="final",
+            matched_skills=matched_skills or [],
+        )
+        if matched_skills is not None
+        else base_user_prompt
+    )
+
+    def _prompt_for(persona_name: str) -> str:
+        return (
+            skill_recall_user_prompt
+            if persona_name == "skill_recall_checker"
+            else base_user_prompt
+        )
 
     # ─── Stage 3: concurrent fan-out ────────────────────────────────────
     # Semaphore bounds in-flight Brain 2 calls. Cap is per-process, not
@@ -639,7 +772,7 @@ async def run_post_loop_critique(
                 session_id=session_id,
                 turn_id=turn_id,
                 persona_name=p,
-                user_prompt=user_prompt,
+                user_prompt=_prompt_for(p),
                 response_excerpt=response_text or "",
             )
 
@@ -1306,4 +1439,6 @@ __all__ = [
     "_load_recent_transcript",
     "_select_ensemble_for_turn",
     "_aggregate",
+    "_top_matched_skills",
+    "_format_matched_skills_block",
 ]
