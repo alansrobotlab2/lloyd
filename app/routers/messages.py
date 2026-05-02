@@ -75,6 +75,7 @@ from app.inner_voice import heuristics as _iv_heuristics  # Inner Voice (#345) �
 from app.inner_voice import ensemble as _iv_ensemble  # Inner Voice (#345) — Stage 2
 from app.inner_voice import consensus_termination as _iv_consensus  # Inner Voice (#345) — Stage 4
 from app.inner_voice import grading as _iv_grading  # Inner Voice (#345) — Stage 5
+from app.inner_voice import intra_turn as _iv_intra_turn  # Inner Voice (#345) — Stage 7
 from usage_store import record_inner_voice_intervention
 
 
@@ -153,10 +154,11 @@ def _inner_voice_hooks_dict(session_id: str) -> dict[str, list[HookMatcher]]:
     the rest of this turn's `brain1.*` events.
 
     Stage 1 wires only PreToolUse (Bash matcher — the deny rules currently
-    only target Bash). Stage 2+ adds Stop / SubagentStop matchers when the
-    Brain 2 ensemble lands.
+    only target Bash). Stage 7 adds PostToolUse + PostToolUseFailure
+    (no matcher — fires on every tool) for ``tool_result_grader`` /
+    ``progress_monitor`` dispatch.
     """
-    return {
+    hooks: dict[str, list[HookMatcher]] = {
         "PreToolUse": [
             HookMatcher(
                 matcher="Bash",
@@ -164,6 +166,31 @@ def _inner_voice_hooks_dict(session_id: str) -> dict[str, list[HookMatcher]]:
             ),
         ],
     }
+    if _iv_intra_turn.is_enabled():
+        # PostToolUse fires after every successful tool result. No matcher
+        # = matches every tool. The closure-bound callback records the
+        # tool boundary into per-turn state and possibly fires
+        # `tool_result_grader` / `progress_monitor` via
+        # `asyncio.ensure_future`. Tool flow is NOT blocked.
+        hooks["PostToolUse"] = [
+            HookMatcher(
+                matcher=None,
+                hooks=[_iv_intra_turn.make_post_tool_use_callback(session_id)],
+            ),
+        ]
+        # PostToolUseFailure fires when SDK validation rejects the call
+        # (missing required param, schema mismatch, tool raise). Same
+        # closure pattern, but the input carries `error: str` instead of
+        # `tool_response`. Critical for the validation-loop catch — the
+        # failed Read calls from session 20260502_044548_iv5f83 only
+        # surface here, not in PostToolUse.
+        hooks["PostToolUseFailure"] = [
+            HookMatcher(
+                matcher=None,
+                hooks=[_iv_intra_turn.make_post_tool_use_failure_callback(session_id)],
+            ),
+        ]
+    return hooks
 
 
 # ---------------------------------------------------------------------------
@@ -1118,6 +1145,24 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     _iv_mtd_chars_at_last_check = 0
     _iv_mtd_checks_fired = 0
 
+    # Inner Voice (#345 Stage 7) — intra-turn progress monitoring state.
+    # Records tool-boundary events from the SDK PostToolUse hooks and
+    # decides when to fire `tool_result_grader` / `progress_monitor`.
+    # State is keyed by Lloyd session_id and reset every turn; the hook
+    # callbacks read from it via the closure-bound session_id. Fires only
+    # on opted-in sessions AND only when the master kill switch is on.
+    _iv_intra_active = (
+        _iv_should_fire_on_turn(session_id, turn.source)
+        and _iv_intra_turn.is_enabled()
+    )
+    if _iv_intra_active:
+        _iv_intra_turn.start_intra_turn(
+            session_id,
+            turn.turn_id,
+            turn_source=turn.source,
+            frozen_task_intent=text,
+        )
+
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,
         "is_local": is_local,
@@ -1200,6 +1245,22 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                                     delta_index=_stream_delta_count,
                                     cancel_event=cancel_event,
                                 ))
+                            # Inner Voice (#345 Stage 7) — also pulse the
+                            # progress_monitor's time trigger from the
+                            # text-delta path. Without this, a turn that
+                            # stalls with NO tool calls (long thinking +
+                            # long text emission) never fires the periodic
+                            # synthesizer. Sample every K=50 deltas to
+                            # avoid per-token check overhead — same cadence
+                            # as the brain1.stream_event sampling above.
+                            if (
+                                _iv_intra_active
+                                and not cancel_event.is_set()
+                                and _stream_delta_count % _stream_sample_every == 0
+                            ):
+                                _iv_intra_turn._maybe_fire_progress_monitor(
+                                    session_id, trigger_check=False,
+                                )
                             # Fire TTS for the first two sentences as soon as
                             # they land. Re-check `tts_is_enabled()` per delta
                             # so toggling mid-turn takes effect.
@@ -1722,6 +1783,13 @@ async def _session_consumer(session_id: str) -> None:
                         }])
                     except Exception as ce:
                         logger.warning(f"Failed to write ambient-cancel marker: {ce}")
+                # Inner Voice (#345 Stage 7) — clear intra-turn state.
+                # Idempotent + turn_id-checked so a stale finally doesn't
+                # clobber a fresh turn's state.
+                try:
+                    _iv_intra_turn.end_intra_turn(session_id, turn.turn_id)
+                except Exception as ce:
+                    logger.warning(f"end_intra_turn failed: {ce}")
                 # Sentinel: tells the SSE subscriber to close cleanly.
                 try:
                     await turn.events.put(None)
