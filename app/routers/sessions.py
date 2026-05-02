@@ -75,9 +75,13 @@ async def get_messages(session_id: str):
         "session_key": session_id,
         "model": data.get("model", ""),
         "messages": data.get("messages", []),
-        # Inner Voice (#345): surface experiment tag + opt-in flag.
+        # Inner Voice (#345): surface experiment tag + opt-in flag +
+        # Stage 5 user-turn evaluation flag for the IV chat tab.
         "experiment_id": data.get("experiment_id"),
         "inner_voice": bool(data.get("inner_voice", False)),
+        "inner_voice_evaluate_user_turns": bool(
+            data.get("inner_voice_evaluate_user_turns", False)
+        ),
     })
 
 
@@ -99,7 +103,7 @@ async def patch_session(session_id: str, request: Request):
     # Whitelist of patchable keys. Anything else is silently ignored —
     # keeps the endpoint forward-compatible with frontend builds that
     # may try to send unknown fields.
-    allowed_keys = {"experiment_id", "inner_voice"}
+    allowed_keys = {"experiment_id", "inner_voice", "inner_voice_evaluate_user_turns"}
     patch: dict = {}
     for k, v in body.items():
         if k not in allowed_keys:
@@ -108,9 +112,9 @@ async def patch_session(session_id: str, request: Request):
             if v is not None and not isinstance(v, str):
                 raise HTTPException(status_code=400, detail="experiment_id must be string or null")
             patch[k] = v
-        elif k == "inner_voice":
+        elif k in ("inner_voice", "inner_voice_evaluate_user_turns"):
             if not isinstance(v, bool):
-                raise HTTPException(status_code=400, detail="inner_voice must be bool")
+                raise HTTPException(status_code=400, detail=f"{k} must be bool")
             patch[k] = v
 
     if not patch:
@@ -132,6 +136,125 @@ async def patch_session(session_id: str, request: Request):
         "patched": patch,
         "experiment_id": data.get("experiment_id"),
         "inner_voice": bool(data.get("inner_voice", False)),
+        "inner_voice_evaluate_user_turns": bool(
+            data.get("inner_voice_evaluate_user_turns", False)
+        ),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Stub session creation — Inner Voice tab needs to pre-create sessions with
+# `inner_voice: true` BEFORE the first turn so Brain 2 fires on turn 1.
+# Regular Chat sessions are still created lazily via post_message_stream;
+# this endpoint is for callers that need flags set ahead of time.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/sessions/create")
+async def create_session(request: Request):
+    """Pre-create a stub session JSON with optional Inner Voice flags.
+
+    Body (all optional):
+      {
+        "model": "primary" | "haiku" | ...           — default model alias
+        "platform": "mission-control" | "autonomy" | "inner_voice"
+        "inner_voice": true,                          — opt into Brain 2
+        "inner_voice_evaluate_user_turns": true,      — fire on chat turns
+        "experiment_id": "stage5-bench-001"           — A/B tag
+      }
+
+    Returns:
+      {
+        "session_key": "20260501_213044_iva3b1",
+        "session_id":  "20260501_213044_iva3b1",
+        "model":       "primary",
+        "inner_voice": true,
+        "inner_voice_evaluate_user_turns": true,
+        "experiment_id": null,
+      }
+
+    The session JSON file is created with empty messages list; the next
+    `post_message_stream` call will use the existing session_id and
+    append turns to it.
+    """
+    try:
+        body = await request.json() if request.headers.get("content-length") else {}
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    # Generate the session_id in the same shape the chat path uses:
+    # YYYYMMDD_HHMMSS_<6 hex>. The "iv" prefix on the suffix makes Inner
+    # Voice sessions visually distinguishable in `ls sessions/`.
+    import datetime as _dt
+    import secrets
+    ts = _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    suffix = "iv" + secrets.token_hex(2)
+    session_id = f"{ts}_{suffix}"
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+
+    # Validate optional fields.
+    model = body.get("model")
+    if model is not None and not isinstance(model, str):
+        raise HTTPException(status_code=400, detail="model must be a string")
+    platform = body.get("platform") or "mission-control"
+    if not isinstance(platform, str):
+        raise HTTPException(status_code=400, detail="platform must be a string")
+
+    iv = bool(body.get("inner_voice", False))
+    iv_user = bool(body.get("inner_voice_evaluate_user_turns", False))
+    if iv_user and not iv:
+        # User-turn evaluation requires the master flag too — surface a
+        # clear error rather than silently dropping.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "inner_voice_evaluate_user_turns requires inner_voice=true; "
+                "set both or neither"
+            ),
+        )
+
+    experiment_id = body.get("experiment_id")
+    if experiment_id is not None and not isinstance(experiment_id, str):
+        raise HTTPException(status_code=400, detail="experiment_id must be string or null")
+
+    # Build the stub. Schema mirrors the lazy-create path in messages.py
+    # (session_id, model, created_at, last_active, preview, message_count,
+    # messages, platform) plus the optional Inner Voice flags.
+    now_iso = _dt.datetime.utcnow().isoformat() + "Z"
+    stub = {
+        "session_id": session_id,
+        "model": model or "",
+        "created_at": now_iso,
+        "last_active": now_iso,
+        "preview": "",
+        "message_count": 0,
+        "messages": [],
+        "platform": platform,
+    }
+    if iv:
+        stub["inner_voice"] = True
+    if iv_user:
+        stub["inner_voice_evaluate_user_turns"] = True
+    if experiment_id is not None:
+        stub["experiment_id"] = experiment_id
+
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    if meta_path.exists():
+        # Astronomically unlikely with the timestamp+token shape, but
+        # surface rather than overwrite if it ever fires.
+        raise HTTPException(status_code=409, detail="session_id collision; retry")
+    meta_path.write_text(json.dumps(stub, indent=2))
+
+    return JSONResponse({
+        "session_key": session_id,
+        "session_id": session_id,
+        "model": stub["model"],
+        "platform": stub["platform"],
+        "inner_voice": iv,
+        "inner_voice_evaluate_user_turns": iv_user,
+        "experiment_id": experiment_id,
     })
 
 
