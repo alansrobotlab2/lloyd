@@ -37,10 +37,15 @@ inner_voice:
   ensemble:
     default: autonomy_default
     sets:
-      autonomy_default: [completion_checker, drift_detector, continuation_drive]
+      # Stage 5: skill_recall_checker added to autonomy_default and
+      # research_writing. Pre-computed `<matched_skills>` block in the
+      # user prompt; persona returns disagrees=false cheaply when no
+      # skill matches (per its decision rule #1) so the persona is
+      # always-on with negligible noise on non-skill turns.
+      autonomy_default: [completion_checker, drift_detector, continuation_drive, skill_recall_checker]
       safety_critical:  [adversarial_red_team, completion_checker, hallucination_flag]
       code_writing:     [drift_detector, completion_checker]
-      research_writing: [hallucination_flag, completion_checker, drift_detector]
+      research_writing: [hallucination_flag, completion_checker, drift_detector, skill_recall_checker]
 
   # Per-Brain-2-call inference parameters. Reasoning-token consumption is
   # the dominant failure mode on local; prefill + max_tokens cap + closed
@@ -76,6 +81,18 @@ inner_voice:
     brain2_timeout_default_to_brain1: true
     three_strike_accept: true
     hard_max_turns: 60
+
+  # Stage 5 — intervention grading pass. After every ambient turn, look up
+  # ungraded interventions for the session and grade each against the just-
+  # finished outcome turn. One Brain 2 call per ungraded intervention.
+  # `max_per_session_per_run` caps the work per turn so a session that
+  # accumulated many interventions doesn't blow the throughput budget on a
+  # single grading sweep.
+  grading:
+    enabled: true
+    persona: grader
+    max_per_session_per_run: 3
+    only_grade_within_turns: 5      # skip if more than N turns elapsed since intervention
 
   throughput:
     max_concurrent_personas: 5

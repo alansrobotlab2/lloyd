@@ -4,10 +4,19 @@ Stage 0 shipped the event-log endpoint live and the others as
 stable-shape stubs. Stage 2 wires Brain 2, so `/critiques` now serves
 real rows and `/state` reports observation state from session metadata
 + recent critiques.
+
+Stage 5 adds:
+  * `/api/inner_voice/grading_summary` — addressed_rate per persona,
+    graded_rate over time, false-positive proxy. Used by the meta-review
+    notebook AND by the frontend Inner Voice tab to show "are our
+    interventions actually working?"
+  * `/state` returns ``stage='5'`` plus a `grading_progress` block
+    summarizing recent coverage so the UI pill can render it.
 """
 
 import json
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -149,6 +158,41 @@ async def get_state(
 
     dis_cfg = iv_cfg.get("disagreement") or {}
     ct_cfg = iv_cfg.get("consensus_termination") or {}
+    grading_cfg = iv_cfg.get("grading") or {}
+
+    # Stage 5: per-session grading progress. Counts interventions that
+    # are still ungraded (`outcome_turn_id IS NULL`) and the count graded
+    # since the session started. The session-scoped query is cheap
+    # because `inner_voice_interventions` is small per session (max
+    # `max_nudges_per_session + 1`-ish rows in the steady state).
+    grading_progress: dict[str, Any] = {
+        "enabled": bool(grading_cfg.get("enabled", True)),
+        "graded": 0,
+        "ungraded": 0,
+        "addressed_true": 0,
+        "addressed_false": 0,
+        "addressed_null": 0,
+    }
+    if session_id:
+        try:
+            iv_rows = usage_store.list_inner_voice_interventions(
+                session_id=session_id, limit=500,
+            )
+            for r in iv_rows:
+                if r.get("outcome_turn_id") is None:
+                    grading_progress["ungraded"] += 1
+                else:
+                    grading_progress["graded"] += 1
+                    addr = r.get("outcome_addressed")
+                    if addr is True or addr == 1:
+                        grading_progress["addressed_true"] += 1
+                    elif addr is False or addr == 0:
+                        grading_progress["addressed_false"] += 1
+                    else:
+                        grading_progress["addressed_null"] += 1
+        except Exception:
+            pass
+
     return {
         "session_id": session_id,
         "inner_voice_enabled": inner_voice_enabled,
@@ -167,7 +211,8 @@ async def get_state(
         ),
         "hard_max_turns": int(ct_cfg.get("hard_max_turns", 60)),
         "last_critique_at": last_critique_at,
-        "stage": "4",
+        "grading_progress": grading_progress,        # Stage 5
+        "stage": "5",
     }
 
 
@@ -264,3 +309,148 @@ async def get_event_log_blob(sha: str) -> dict[str, Any]:
     if content is None:
         raise HTTPException(status_code=404, detail="blob not found")
     return {"sha": sha, "content": content, "size": len(content)}
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: grading-pass aggregate metrics
+# ---------------------------------------------------------------------------
+
+
+@router.get("/grading_summary")
+async def grading_summary(
+    session_id: str | None = Query(default=None),
+    hours: float = Query(default=24, ge=0.1, le=24 * 90),
+) -> dict[str, Any]:
+    """Return Stage 5 grading-pass coverage + outcome distribution.
+
+    Window: ``hours`` (default 24, max 90 days).
+
+    Output:
+        {
+          "session_id": <str|null>,
+          "window_hours": <float>,
+          "since_iso": <ISO>,
+          "total_interventions":  <int>,        # in window
+          "graded":               <int>,        # outcome_addressed not NULL OR graded_at not NULL
+          "graded_rate":          <float>,      # graded / total (0.0 if total==0)
+          "addressed_true":       <int>,
+          "addressed_false":      <int>,
+          "addressed_null":       <int>,        # ambiguous (graded but verdict == null)
+          "addressed_rate":       <float>,      # true / (true+false), 0.0 if denom 0
+          "by_persona": {
+            "<persona>": {
+                "total":           <int>,
+                "graded":          <int>,
+                "addressed_true":  <int>,
+                "addressed_false": <int>,
+                "addressed_null":  <int>,
+                "addressed_rate":  <float>,
+            }, ...
+          },
+        }
+
+    The ``by_persona`` block groups interventions by the persona that
+    fired the triggering critique. Interventions without a known
+    triggering persona (escalations from hard_max_turns, or rows missing
+    the FK) bucket under ``"(unknown)"``.
+    """
+    try:
+        since_dt = datetime.utcnow() - timedelta(hours=hours)
+        since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+        # Pull a generous window. The schema has no FK to persona, so we
+        # join via triggered_by_critique_id → inner_voice_critiques.persona
+        # in Python (saves a SQL JOIN that would also need parametric
+        # session/window filtering twice).
+        ivs = usage_store.list_inner_voice_interventions(
+            session_id=session_id, limit=2000,
+        )
+        crits = usage_store.list_inner_voice_critiques(
+            session_id=session_id, limit=5000,
+        )
+        crit_persona_by_id: dict[int, str] = {}
+        for c in crits:
+            cid = c.get("id")
+            if cid is not None:
+                crit_persona_by_id[int(cid)] = (c.get("persona") or "(unknown)")
+
+        # Window filter on created_at (string ISO comparison works for
+        # the YYYY-MM-DDTHH:MM:SS shape the schema uses).
+        in_window = [r for r in ivs if (r.get("created_at") or "") >= since_iso]
+
+        total = len(in_window)
+        graded = 0
+        addressed_true = 0
+        addressed_false = 0
+        addressed_null = 0
+        by_persona: dict[str, dict[str, int]] = {}
+
+        def _bucket(p: str) -> dict[str, int]:
+            return by_persona.setdefault(
+                p,
+                {
+                    "total": 0,
+                    "graded": 0,
+                    "addressed_true": 0,
+                    "addressed_false": 0,
+                    "addressed_null": 0,
+                },
+            )
+
+        for r in in_window:
+            persona = "(unknown)"
+            tcid = r.get("triggered_by_critique_id")
+            if tcid is not None:
+                persona = crit_persona_by_id.get(int(tcid), "(unknown)")
+            bucket = _bucket(persona)
+            bucket["total"] += 1
+
+            outcome_set = (
+                r.get("outcome_turn_id") is not None
+                or r.get("graded_at") is not None
+            )
+            if outcome_set:
+                graded += 1
+                bucket["graded"] += 1
+                addr = r.get("outcome_addressed")
+                if addr is True or addr == 1:
+                    addressed_true += 1
+                    bucket["addressed_true"] += 1
+                elif addr is False or addr == 0:
+                    addressed_false += 1
+                    bucket["addressed_false"] += 1
+                else:
+                    addressed_null += 1
+                    bucket["addressed_null"] += 1
+
+        # Compute rates
+        graded_rate = (graded / total) if total > 0 else 0.0
+        denom = addressed_true + addressed_false
+        addressed_rate = (addressed_true / denom) if denom > 0 else 0.0
+
+        for p, b in by_persona.items():
+            denom_p = b["addressed_true"] + b["addressed_false"]
+            b["addressed_rate"] = (
+                (b["addressed_true"] / denom_p) if denom_p > 0 else 0.0
+            )
+
+        return {
+            "session_id": session_id,
+            "window_hours": hours,
+            "since_iso": since_iso,
+            "total_interventions": total,
+            "graded": graded,
+            "graded_rate": graded_rate,
+            "addressed_true": addressed_true,
+            "addressed_false": addressed_false,
+            "addressed_null": addressed_null,
+            "addressed_rate": addressed_rate,
+            "by_persona": by_persona,
+        }
+    except Exception as e:
+        logger.warning(f"grading_summary failed: {e}")
+        return {
+            "error": str(e),
+            "session_id": session_id,
+            "window_hours": hours,
+        }

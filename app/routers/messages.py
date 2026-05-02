@@ -74,6 +74,7 @@ from app import event_log as _event_log  # Inner Voice (#345) — brain1.* captu
 from app.inner_voice import heuristics as _iv_heuristics  # Inner Voice (#345) — Stage 1
 from app.inner_voice import ensemble as _iv_ensemble  # Inner Voice (#345) — Stage 2
 from app.inner_voice import consensus_termination as _iv_consensus  # Inner Voice (#345) — Stage 4
+from app.inner_voice import grading as _iv_grading  # Inner Voice (#345) — Stage 5
 from usage_store import record_inner_voice_intervention
 
 
@@ -412,6 +413,54 @@ async def _inner_voice_brain2_check(
         logger.warning(
             "[inner_voice] brain2 check failed (session=%s turn=%s): %s",
             session_id, turn_id, e,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Inner Voice (#345 Stage 5) — grading pass
+# ---------------------------------------------------------------------------
+
+async def _inner_voice_grading_pass(
+    session_id: str,
+    outcome_turn_id: str,
+    outcome_response_text: str,
+    outcome_tool_calls: list[dict],
+    frozen_task_intent: str,
+) -> None:
+    """Run the Stage 5 grading pass against the just-finished ambient turn.
+
+    Spawned via `asyncio.ensure_future` from the ResultMessage branch in
+    `_run_turn`, alongside the Stage 1 heuristic and Stage 2 Brain 2 check.
+    Best-effort. The grading module catches every internal error; this
+    wrapper exists only to bound logging.
+
+    The pass looks up any interventions for `session_id` whose
+    `outcome_turn_id IS NULL` and grades each via the `grader` persona
+    against the just-finished outcome turn. Backfills `outcome_addressed`
+    + `outcome_summary` on `inner_voice_interventions`.
+    """
+    try:
+        summary = await _iv_grading.grade_outcome_turn(
+            session_id=session_id,
+            outcome_turn_id=outcome_turn_id,
+            outcome_response_text=outcome_response_text or "",
+            outcome_tool_calls=list(outcome_tool_calls or []),
+            frozen_task_intent=frozen_task_intent or "",
+        )
+        if summary.get("graded", 0) > 0 or summary.get("errors", 0) > 0:
+            logger.info(
+                "[inner_voice] grading pass session=%s outcome_turn=%s "
+                "graded=%d skipped=%d errors=%d candidates=%d",
+                session_id, outcome_turn_id,
+                summary.get("graded", 0),
+                summary.get("skipped", 0),
+                summary.get("errors", 0),
+                summary.get("total_candidates", 0),
+            )
+    except Exception as e:
+        logger.warning(
+            "[inner_voice] grading pass failed (session=%s outcome_turn=%s): %s",
+            session_id, outcome_turn_id, e,
         )
 
 
@@ -1196,6 +1245,19 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             response_text=done_text,
                             tool_calls=list(tool_calls_log),
                             turn=turn,
+                        ))
+                        # Stage 5 — grading pass against any ungraded
+                        # interventions from PRIOR turns. The brain2 check
+                        # above may write a new intervention for THIS turn;
+                        # the grading pass filters it out via
+                        # `exclude_target_turn_id` so the new row stays in
+                        # the queue for the next outcome turn.
+                        asyncio.ensure_future(_inner_voice_grading_pass(
+                            session_id=session_id,
+                            outcome_turn_id=turn.turn_id,
+                            outcome_response_text=done_text,
+                            outcome_tool_calls=list(tool_calls_log),
+                            frozen_task_intent=text,
                         ))
 
                     # End-of-turn TTS fallback: response was shorter than two

@@ -9,7 +9,7 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 DB_PATH = Path(__file__).parent / "usage.db"
 
@@ -385,3 +385,94 @@ def list_inner_voice_interventions(
         params + [limit],
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Stage 5: grading pass helpers ─────────────────────────────────────────
+
+
+def list_ungraded_interventions(
+    session_id: str,
+    *,
+    exclude_target_turn_id: Optional[str] = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Return interventions in `session_id` whose outcome hasn't been graded
+    yet, oldest-first.
+
+    The grading pass calls this from `_run_turn` after every ambient turn
+    completes. The just-finished turn becomes the candidate outcome. Pass
+    its turn_id as `exclude_target_turn_id` so we don't grade an
+    intervention against the very turn that triggered it (which would be
+    a tautology).
+    """
+    conn = _conn()
+    where = ["session_id = ?", "outcome_turn_id IS NULL"]
+    params: list = [session_id]
+    if exclude_target_turn_id:
+        where.append("target_turn_id != ?")
+        params.append(exclude_target_turn_id)
+    where_sql = " WHERE " + " AND ".join(where)
+    rows = conn.execute(
+        f"""SELECT id, session_id, triggered_by_critique_id, kind, target_turn_id,
+                   content, created_at, outcome_turn_id, outcome_addressed,
+                   outcome_summary, graded_at
+            FROM inner_voice_interventions{where_sql}
+            ORDER BY id ASC LIMIT ?""",
+        params + [limit],
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_intervention_outcome(
+    intervention_id: int,
+    *,
+    outcome_turn_id: str,
+    outcome_addressed: Optional[bool],
+    outcome_summary: str,
+) -> None:
+    """Backfill the grading verdict on `inner_voice_interventions`.
+
+    `outcome_addressed` is tri-valued: True / False / None (ambiguous).
+    `graded_at` set to `CURRENT_TIMESTAMP` server-side.
+    """
+    conn = _conn()
+    conn.execute(
+        """UPDATE inner_voice_interventions
+              SET outcome_turn_id = ?,
+                  outcome_addressed = ?,
+                  outcome_summary = ?,
+                  graded_at = CURRENT_TIMESTAMP
+            WHERE id = ?""",
+        (outcome_turn_id, outcome_addressed, outcome_summary, intervention_id),
+    )
+    conn.commit()
+
+
+def grading_progress_since(start_iso: str) -> dict[str, Any]:
+    """Return grading-pass coverage stats since `start_iso`.
+
+    Used by `/api/inner_voice/state` and the meta-review notebook to answer
+    "what fraction of recent interventions got graded?". Schema:
+
+      {
+        "total":   <int>,    -- interventions created since start_iso
+        "graded":  <int>,    -- with non-null outcome_addressed
+        "ratio":   <float>,  -- graded / total (0.0 if total == 0)
+      }
+    """
+    conn = _conn()
+    row = conn.execute(
+        """SELECT
+              COUNT(*)                                     AS total,
+              COUNT(outcome_addressed)                     AS graded
+            FROM inner_voice_interventions
+           WHERE created_at >= ?""",
+        (start_iso,),
+    ).fetchone()
+    total = int(row["total"] or 0) if row else 0
+    graded = int(row["graded"] or 0) if row else 0
+    return {
+        "total": total,
+        "graded": graded,
+        "ratio": (graded / total) if total > 0 else 0.0,
+    }
