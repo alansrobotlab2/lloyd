@@ -221,8 +221,9 @@ async def _inner_voice_brain2_check(
     """Spawn Brain 2 against the just-finished ambient turn.
 
     Best-effort. Handles all errors internally so the chat path never sees
-    a Brain 2 failure. Stage 2 fires one persona (`completion_checker`);
-    Stage 3 will fan out concurrently.
+    a Brain 2 failure. Stage 3 fans out 3 personas concurrently
+    (`completion_checker`, `drift_detector`, `continuation_drive` for the
+    `autonomy_default` ensemble) and runs threshold-driven aggregation.
 
     SSE delivery is racy — the turn's events queue receives the events but
     the consumer may already have closed by the time the 5s critic call
@@ -250,6 +251,141 @@ async def _inner_voice_brain2_check(
         logger.warning(
             "[inner_voice] brain2 check failed (session=%s turn=%s): %s",
             session_id, turn_id, e,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Inner Voice (#345 Stage 3) — mid-turn drift detection
+# ---------------------------------------------------------------------------
+
+async def _inner_voice_mid_turn_drift_check(
+    session_id: str,
+    turn: SessionTurn,
+    frozen_task_intent: str,
+    partial_response: str,
+    stream_position_chars: int,
+    delta_index: int,
+    cancel_event: asyncio.Event,
+) -> None:
+    """Fire `drift_detector` against a partial-response stream sample.
+
+    Spawned as `asyncio.ensure_future` from inside the SDK message loop's
+    `text_delta` handler. Best-effort; never raises into the consumer.
+
+    On a veto-severity disagreement (`severity >= veto_severity_threshold`,
+    `disagrees=True`, `error is None`):
+      1. Log `inner_voice.cancel_event_fired` with stream position +
+         partial-response delta count so meta-review can replay the
+         interrupt sequence.
+      2. Enqueue an ambient prefetch entry describing the drift verdict.
+         The next user/ambient turn will surface it via `<context>`.
+      3. Set `cancel_event` — the SDK loop's `if cancel_event.is_set()`
+         check at the top of the message iterator breaks out on the next
+         message event.
+
+    On any other verdict (sub-veto disagreement, agreement, error): no
+    intervention. The verdict is still persisted to SQLite + event log
+    by `_iv_ensemble.run_mid_turn_drift_check` — Stage 3 wants the data
+    even when it doesn't act.
+    """
+    try:
+        # Skip if the turn was already cancelled by a previous mid-turn
+        # check (or by the user via API). One cancel per turn is enough.
+        if cancel_event.is_set():
+            return
+
+        async def _emit_via_turn(event: str, data: dict[str, Any]) -> None:
+            try:
+                await _emit(turn, event, data)
+            except Exception:
+                pass
+
+        critique = await _iv_ensemble.run_mid_turn_drift_check(
+            session_id=session_id,
+            turn_id=turn.turn_id,
+            frozen_task_intent=frozen_task_intent or "",
+            partial_response=partial_response or "",
+            stream_position_chars=stream_position_chars,
+            delta_index=delta_index,
+            emit_sse=_emit_via_turn,
+        )
+        if critique is None:
+            return
+
+        # Re-check cancel_event — another mid-turn fire may have set it
+        # while this Brain 2 call was in flight. First-cancel-wins.
+        if cancel_event.is_set():
+            return
+
+        if critique.action_taken != "interrupt":
+            return
+
+        # ── veto path: cancel + inject + log ─────────────────────────────
+        try:
+            _event_log.log_event(
+                session_id,
+                "inner_voice.cancel_event_fired",
+                {
+                    "persona": critique.persona,
+                    "severity": critique.severity,
+                    "reason": critique.reason,
+                    "stream_position_chars": stream_position_chars,
+                    "delta_index": delta_index,
+                    "partial_chars_at_cancel": len(partial_response or ""),
+                    "trigger": "mid_turn_drift",
+                },
+                turn_id=turn.turn_id,
+            )
+        except Exception as e:
+            logger.warning("cancel_event_fired log failed: %s", e)
+
+        try:
+            nudge_kwargs = _iv_ensemble.make_drift_cancel_ambient(
+                turn_id=turn.turn_id,
+                persona=critique.persona,
+                severity=critique.severity,
+                reason=critique.reason,
+                partial_excerpt=partial_response or "",
+            )
+            entry = AmbientPrefetchEntry(
+                source=nudge_kwargs["source"],
+                summary=nudge_kwargs["summary"],
+                content=nudge_kwargs["content"],
+                dedup_key=nudge_kwargs["dedup_key"],
+                enqueued_at=time.time(),
+            )
+            result = enqueue_ambient_prefetch(session_id, entry)
+            _event_log.log_event(
+                session_id,
+                "inner_voice.intervention_dispatched",
+                {
+                    "kind": "interrupt",
+                    "target_turn_id": turn.turn_id,
+                    "persona": critique.persona,
+                    "severity": critique.severity,
+                    "queue_depth": result.get("queue_depth"),
+                    "deduped": result.get("deduped"),
+                    "trigger": "mid_turn_drift",
+                },
+                turn_id=turn.turn_id,
+            )
+            logger.info(
+                "[inner_voice] mid-turn drift cancelled session=%s turn=%s "
+                "(persona=%s severity=%.2f at %d chars)",
+                session_id, turn.turn_id, critique.persona,
+                critique.severity, stream_position_chars,
+            )
+        except Exception as e:
+            logger.warning(
+                "[inner_voice] mid-turn cancel-ambient enqueue failed "
+                "(session=%s turn=%s): %s", session_id, turn.turn_id, e,
+            )
+
+        cancel_event.set()
+    except Exception as e:
+        logger.warning(
+            "[inner_voice] mid-turn drift check failed (session=%s turn=%s): %s",
+            session_id, turn.turn_id, e,
         )
 
 
@@ -489,6 +625,21 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     _stream_sample_every = 50
     _stream_delta_count = 0
 
+    # Inner Voice (#345 Stage 3) — mid-turn drift detection state. Fires
+    # `drift_detector` every K accumulated chars on Inner-Voice-opted-in
+    # sessions only. State is per-turn; trackers reset implicitly on each
+    # new `_run_turn` invocation.
+    _iv_mtd_enabled = (
+        _session_inner_voice_enabled(session_id)
+        and _iv_ensemble._is_mid_turn_drift_enabled()
+    )
+    _iv_mtd_cfg = _iv_ensemble.get_mid_turn_drift_config() if _iv_mtd_enabled else {}
+    _iv_mtd_min_first = int(_iv_mtd_cfg.get("min_chars_before_first_check", 250))
+    _iv_mtd_every = max(50, int(_iv_mtd_cfg.get("check_every_chars", 500)))
+    _iv_mtd_max_checks = max(1, int(_iv_mtd_cfg.get("max_checks_per_turn", 4)))
+    _iv_mtd_chars_at_last_check = 0
+    _iv_mtd_checks_fired = 0
+
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,
         "is_local": is_local,
@@ -535,6 +686,40 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                                     "position_chars": len(full_response),
                                     "delta_chars": len(delta_text),
                                 }, turn_id=turn.turn_id)
+                            # Inner Voice (#345 Stage 3) — mid-turn drift
+                            # detection. Fires `drift_detector` against the
+                            # accumulated partial response on two surfaces:
+                            #   1. First check at len >= min_chars_before_first_check
+                            #   2. Subsequent checks every check_every_chars after
+                            # The spawned task may set `cancel_event` and enqueue
+                            # an ambient nudge if the verdict crosses the
+                            # veto threshold. Fire-and-forget — text streaming
+                            # must not block on a 5s Brain 2 call.
+                            _iv_mtd_first_check_due = (
+                                _iv_mtd_checks_fired == 0
+                                and len(full_response) >= _iv_mtd_min_first
+                            )
+                            _iv_mtd_followup_due = (
+                                _iv_mtd_checks_fired > 0
+                                and (len(full_response) - _iv_mtd_chars_at_last_check) >= _iv_mtd_every
+                            )
+                            if (
+                                _iv_mtd_enabled
+                                and _iv_mtd_checks_fired < _iv_mtd_max_checks
+                                and not cancel_event.is_set()
+                                and (_iv_mtd_first_check_due or _iv_mtd_followup_due)
+                            ):
+                                _iv_mtd_chars_at_last_check = len(full_response)
+                                _iv_mtd_checks_fired += 1
+                                asyncio.ensure_future(_inner_voice_mid_turn_drift_check(
+                                    session_id=session_id,
+                                    turn=turn,
+                                    frozen_task_intent=text,
+                                    partial_response=full_response,
+                                    stream_position_chars=len(full_response),
+                                    delta_index=_stream_delta_count,
+                                    cancel_event=cancel_event,
+                                ))
                             # Fire TTS for the first two sentences as soon as
                             # they land. Re-check `tts_is_enabled()` per delta
                             # so toggling mid-turn takes effect.
