@@ -23,6 +23,7 @@ from typing import Any
 from claude_agent_sdk import (
     query, ClaudeAgentOptions,
     SystemMessage, AssistantMessage, UserMessage, ResultMessage,
+    HookMatcher,
 )
 from claude_agent_sdk import TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock
 from claude_agent_sdk.types import StreamEvent
@@ -52,6 +53,8 @@ from app.sessions_io import (
     get_queue_state,
     set_last_user_session,
     take_ambient_decision,
+    enqueue_ambient_prefetch,
+    AmbientPrefetchEntry,
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools
 from app.post_capture import _post_session_capture, _maybe_extract_focus
@@ -67,10 +70,187 @@ from app.compaction import (
     is_local_model,
     load_and_compact_session,
 )
+from app import event_log as _event_log  # Inner Voice (#345) — brain1.* capture
+from app.inner_voice import heuristics as _iv_heuristics  # Inner Voice (#345) — Stage 1
+from app.inner_voice import ensemble as _iv_ensemble  # Inner Voice (#345) — Stage 2
 
 
 router = APIRouter()
 logger = logging.getLogger("lloyd-server")
+
+
+# ---------------------------------------------------------------------------
+# Inner Voice (#345 Stage 1) — session opt-in helpers
+# ---------------------------------------------------------------------------
+
+def _session_inner_voice_enabled(session_id: str) -> bool:
+    """Read the `inner_voice` flag from the session JSON.
+
+    Returns False on any miss (no session yet, malformed JSON, missing
+    field). Stage 1 is opt-in only — Brain 2 ensembles never fire on a
+    session whose JSON doesn't explicitly say `inner_voice: true`.
+    """
+    if not session_id:
+        return False
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        return False
+    try:
+        data = json.loads(meta_path.read_text())
+        return bool(data.get("inner_voice", False))
+    except Exception:
+        return False
+
+
+def _inner_voice_hooks_dict(session_id: str) -> dict[str, list[HookMatcher]]:
+    """Build the `hooks=` value for ClaudeAgentOptions on Inner Voice
+    sessions.
+
+    The PreToolUse callback is bound to Lloyd's `session_id` via closure —
+    `PreToolUseHookInput.session_id` carries the Claude CLI's UUID, which
+    is useless for finding the events.jsonl file. The closure ensures
+    `inner_voice.pre_tool_use_evaluated` events land in the same file as
+    the rest of this turn's `brain1.*` events.
+
+    Stage 1 wires only PreToolUse (Bash matcher — the deny rules currently
+    only target Bash). Stage 2+ adds Stop / SubagentStop matchers when the
+    Brain 2 ensemble lands.
+    """
+    return {
+        "PreToolUse": [
+            HookMatcher(
+                matcher="Bash",
+                hooks=[_iv_heuristics.make_pretooluse_callback(session_id)],
+            ),
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Inner Voice (#345 Stage 1) — post-loop completion check
+# ---------------------------------------------------------------------------
+
+async def _inner_voice_completion_check(
+    session_id: str,
+    turn_id: str,
+    response_text: str,
+    tool_calls: list[dict],
+) -> None:
+    """Run the Stage 1 completion heuristic on a finished ambient turn.
+
+    Spawned as `asyncio.ensure_future` from the ResultMessage branch in
+    `_run_turn`, alongside `_post_session_capture`. Best-effort — never
+    raises into the consumer. On premature termination, enqueues an
+    ambient prefetch entry that surfaces in the next user turn's
+    `<context>` block.
+    """
+    try:
+        if not _iv_heuristics.is_completion_check_enabled():
+            return
+        verdict = _iv_heuristics.evaluate_completion(response_text, tool_calls)
+        # Always log the evaluation — passes are forensic data for tuning
+        # the heuristic and later A/B'ing against Brain 2 ensembles.
+        _event_log.log_event(
+            session_id,
+            "inner_voice.completion_check_evaluated",
+            {
+                "premature": verdict["premature"],
+                "reason": verdict["reason"],
+                "signal_seen": verdict["signal_seen"],
+                "terminal_tool": verdict["terminal_tool"],
+                "has_content": verdict.get("has_content", False),
+                "response_chars": len(response_text or ""),
+                "tool_call_count": len(tool_calls or []),
+            },
+            turn_id=turn_id,
+        )
+        if not verdict["premature"]:
+            return
+
+        # Build the prefetch nudge and enqueue. The next user turn picks
+        # it up via prefetch_context()'s ambient drain.
+        nudge_kwargs = _iv_heuristics.make_completion_nudge_entry(
+            turn_id=turn_id,
+            response_excerpt=response_text or "",
+        )
+        import time as _time
+        entry = AmbientPrefetchEntry(
+            source=nudge_kwargs["source"],
+            summary=nudge_kwargs["summary"],
+            content=nudge_kwargs["content"],
+            dedup_key=nudge_kwargs["dedup_key"],
+            enqueued_at=_time.time(),
+        )
+        result = enqueue_ambient_prefetch(session_id, entry)
+        _event_log.log_event(
+            session_id,
+            "inner_voice.completion_check_nudge_enqueued",
+            {
+                "source": entry.source,
+                "summary": entry.summary,
+                "queue_depth": result.get("queue_depth"),
+                "deduped": result.get("deduped"),
+            },
+            turn_id=turn_id,
+        )
+        logger.info(
+            "[inner_voice] completion check fired nudge on session=%s turn=%s "
+            "(reason=%s)",
+            session_id, turn_id, verdict["reason"],
+        )
+    except Exception as e:
+        logger.warning(
+            "[inner_voice] completion check failed (session=%s turn=%s): %s",
+            session_id, turn_id, e,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Inner Voice (#345 Stage 2) — single-persona Brain 2 critique
+# ---------------------------------------------------------------------------
+
+async def _inner_voice_brain2_check(
+    session_id: str,
+    turn_id: str,
+    turn_source: str,
+    frozen_task_intent: str,
+    response_text: str,
+    tool_calls: list[dict],
+    turn: SessionTurn,
+) -> None:
+    """Spawn Brain 2 against the just-finished ambient turn.
+
+    Best-effort. Handles all errors internally so the chat path never sees
+    a Brain 2 failure. Stage 2 fires one persona (`completion_checker`);
+    Stage 3 will fan out concurrently.
+
+    SSE delivery is racy — the turn's events queue receives the events but
+    the consumer may already have closed by the time the 5s critic call
+    returns. The frontend treats SSE as a fast-path hint and SQLite
+    (via `/api/inner_voice/critiques`) as the source of truth.
+    """
+    try:
+        async def _emit_via_turn(event: str, data: dict[str, Any]) -> None:
+            try:
+                await _emit(turn, event, data)
+            except Exception:
+                # Queue may be GC'd or closed; we don't care for SSE delivery.
+                pass
+
+        await _iv_ensemble.run_post_loop_critique(
+            session_id=session_id,
+            turn_id=turn_id,
+            turn_source=turn_source,
+            frozen_task_intent=frozen_task_intent or "",
+            response_text=response_text or "",
+            tool_calls=list(tool_calls or []),
+            emit_sse=_emit_via_turn,
+        )
+    except Exception as e:
+        logger.warning(
+            "[inner_voice] brain2 check failed (session=%s turn=%s): %s",
+            session_id, turn_id, e,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +375,26 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # Initial queue snapshot so the client doesn't need a separate poll.
     await turn.events.put({"event": "queue_state", "data": get_queue_state(session_id)})
 
+    # Inner Voice (#345) — capture turn-entry events to the per-session
+    # event log. Best-effort; event_log.log_event swallows exceptions.
+    _event_log.log_event(session_id, "brain1.user_prompt_received", {
+        "text": text,
+        "source": turn.source,
+        "model": model,
+        "resume_id": resume_id,
+        "has_prefetched_context": prefetched_text != text,
+    }, turn_id=turn.turn_id)
+    # `options_built` reaches here pre-baked by post_message_stream; we can
+    # surface its salient fields without dumping callbacks/closures.
+    _event_log.log_event(session_id, "brain1.options_built", {
+        "model": model,
+        "max_turns": getattr(options, "max_turns", None),
+        "permission_mode": getattr(options, "permission_mode", None),
+        "env_keys": sorted(list((options.env or {}).keys())) if hasattr(options, "env") else [],
+        "mcp_server_keys": sorted(list((options.mcp_servers or {}).keys())) if hasattr(options, "mcp_servers") else [],
+        "disallowed_tools": list(getattr(options, "disallowed_tools", []) or []),
+    }, turn_id=turn.turn_id)
+
     full_response = ""
     accumulated_thinking = ""
     tool_calls_log: list[dict] = []
@@ -281,6 +481,20 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         # from our reconstructed prompt.
         options.resume = None
 
+    # Inner Voice (#345) — sampled stream-event capture. K=50 deltas; each
+    # firing captures position + delta length so we can reconstruct the
+    # token-by-token cadence without filling the log with one event per
+    # token. K stays as a constant here; promotes to config.yaml once
+    # Stage 1 lands (`inner_voice.event_log.stream_sample_tokens`).
+    _stream_sample_every = 50
+    _stream_delta_count = 0
+
+    _event_log.log_event(session_id, "brain1.query_started", {
+        "model": model,
+        "is_local": is_local,
+        "prompt_chars": len(conv_text if is_local else prefetched_text),
+    }, turn_id=turn.turn_id)
+
     try:
         async for message in query(
             prompt=conv_text if is_local else prefetched_text,
@@ -312,6 +526,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                                 )
                             full_response += delta_text
                             await _emit(turn, "text_delta", {"text": delta_text})
+                            # Inner Voice — sampled stream event every K deltas.
+                            _stream_delta_count += 1
+                            if _stream_delta_count % _stream_sample_every == 0:
+                                _event_log.log_event(session_id, "brain1.stream_event", {
+                                    "kind": "text_delta",
+                                    "delta_index": _stream_delta_count,
+                                    "position_chars": len(full_response),
+                                    "delta_chars": len(delta_text),
+                                }, turn_id=turn.turn_id)
                             # Fire TTS for the first two sentences as soon as
                             # they land. Re-check `tts_is_enabled()` per delta
                             # so toggling mid-turn takes effect.
@@ -360,6 +583,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     if isinstance(block, ThinkingBlock):
                         accumulated_thinking = block.thinking
                         await _emit(turn, "thinking_done", {"text": block.thinking})
+                        # Inner Voice (#345) — full thinking text is the
+                        # strongest anchoring vector for Brain 2; we capture
+                        # it here for forensic replay but later stages must
+                        # NOT include this in Brain 2's context (see
+                        # `include_brain1_thinking: false` in config).
+                        _event_log.log_event(session_id, "brain1.thinking_block_emitted", {
+                            "thinking": block.thinking,
+                            "chars": len(block.thinking),
+                        }, turn_id=turn.turn_id)
                     elif isinstance(block, ToolUseBlock):
                         args_str = json.dumps(block.input) if isinstance(block.input, dict) else str(block.input)
                         tool_calls_log.append({
@@ -370,6 +602,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             "call_id": block.id, "name": block.name,
                             "args": args_str, "context_tokens": last_turn_input,
                         })
+                        # Inner Voice (#345) — pre-PreToolUse capture. In
+                        # Stage 1 the deny-rule evaluation will land between
+                        # this event and the tool's actual execution.
+                        _event_log.log_event(session_id, "brain1.tool_call_proposed", {
+                            "tool_call_id": block.id,
+                            "name": block.name,
+                            "args": args_str,
+                            "context_tokens": last_turn_input,
+                        }, turn_id=turn.turn_id)
                         if block.name.endswith("pipeline_dispatch"):
                             pending_pipeline_wires[block.id] = session_id
                             logger.info(f"Tracking pipeline_dispatch call {block.id!r} for session {session_id}")
@@ -392,6 +633,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         await _emit(turn, "tool_complete", {
                             "call_id": call_id, "name": "", "result": result_str,
                         })
+                        # Inner Voice (#345) — tool result captured to the
+                        # event log. Truncated to 2KB inline (same as the
+                        # SSE wire path); full result lives in the chat
+                        # transcript for replay.
+                        _event_log.log_event(session_id, "brain1.tool_result_received", {
+                            "tool_call_id": call_id,
+                            "result": result_str,
+                            "result_chars": len(result_str),
+                        }, turn_id=turn.turn_id)
                         if call_id in pending_pipeline_wires:
                             req_session = pending_pipeline_wires.pop(call_id)
                             try:
@@ -464,6 +714,20 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
+
+                # Inner Voice (#345) — final ResultMessage capture. Includes
+                # usage + duration + stop_reason. Brain 2 ensemble dispatch
+                # in Stage 2+ keys off this event (post-loop seam).
+                _event_log.log_event(session_id, "brain1.result_message", {
+                    "usage": dict(usage) if usage else {},
+                    "stop_reason": getattr(message, "stop_reason", None),
+                    "duration_ms": getattr(message, "duration_ms", None),
+                    "duration_api_ms": getattr(message, "duration_api_ms", None),
+                    "num_turns": getattr(message, "num_turns", None),
+                    "total_cost_usd": getattr(message, "total_cost_usd", None),
+                    "response_chars": len(full_response),
+                    "had_tool_calls": bool(tool_calls_log),
+                }, turn_id=turn.turn_id)
 
                 if message.session_id:
                     try:
@@ -559,6 +823,34 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
                     asyncio.ensure_future(_post_session_capture(session_id))
                     asyncio.ensure_future(_maybe_extract_focus(session_id))
+
+                    # Inner Voice (#345 Stage 1+2) — post-loop checks.
+                    # Fires only on ambient turns of Inner-Voice-opted-in
+                    # sessions. The silent-decision path (above) is its own
+                    # terminal signal, so it intentionally doesn't run there.
+                    # Stage 1's heuristic and Stage 2's Brain 2 critic both
+                    # spawn here — they're independent (heuristic is a regex
+                    # gate, Brain 2 is an LLM call) and the event log records
+                    # both verdicts so we can A/B them post-hoc.
+                    if (
+                        turn.source == "ambient"
+                        and _session_inner_voice_enabled(session_id)
+                    ):
+                        asyncio.ensure_future(_inner_voice_completion_check(
+                            session_id=session_id,
+                            turn_id=turn.turn_id,
+                            response_text=done_text,
+                            tool_calls=list(tool_calls_log),
+                        ))
+                        asyncio.ensure_future(_inner_voice_brain2_check(
+                            session_id=session_id,
+                            turn_id=turn.turn_id,
+                            turn_source=turn.source,
+                            frozen_task_intent=text,
+                            response_text=done_text,
+                            tool_calls=list(tool_calls_log),
+                            turn=turn,
+                        ))
 
                     # End-of-turn TTS fallback: response was shorter than two
                     # sentences (e.g. "Done.") so the mid-stream trigger never
@@ -802,6 +1094,12 @@ async def post_message_stream(request: Request):
         or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
     )
 
+    # Inner Voice (#345 Stage 1): wire PreToolUse hook only on opted-in
+    # sessions. Existing Chat-tab sessions have `inner_voice: false` and
+    # see no behavior change.
+    iv_enabled = _session_inner_voice_enabled(session_id)
+    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else None
+
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
@@ -814,6 +1112,7 @@ async def post_message_stream(request: Request):
         thinking=_resolve_thinking(model),
         resume=resume_id,
         include_partial_messages=True,
+        hooks=iv_hooks,
     )
 
     await _save_session_meta(session_id, model, preview=text)
@@ -895,6 +1194,13 @@ async def build_ambient_turn(
         pass
 
     system_prompt = build_system_prompt()
+
+    # Inner Voice (#345 Stage 1): same opt-in gate as the user-stream path.
+    # Ambient turns on Inner Voice sessions are the highest-value targets
+    # for safety hooks — autonomy fires there with no human watching.
+    iv_enabled = _session_inner_voice_enabled(session_id)
+    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else None
+
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
@@ -907,6 +1213,7 @@ async def build_ambient_turn(
         thinking=_resolve_thinking(model),
         resume=resume_id,
         include_partial_messages=True,
+        hooks=iv_hooks,
     )
 
     # Envelope the raw producer text so the agent sees framing + knows it
@@ -1011,6 +1318,12 @@ async def post_message(request: Request):
         or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
     )
 
+    # Inner Voice (#345 Stage 1): same opt-in gate. The sync endpoint is
+    # rarely used (clients prefer /stream) but symmetry matters — a
+    # dangerous Bash via /api/message bypasses the safety net otherwise.
+    iv_enabled = _session_inner_voice_enabled(session_id)
+    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else None
+
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
@@ -1022,6 +1335,7 @@ async def post_message(request: Request):
         effort=_resolve_effort(model),
         thinking=_resolve_thinking(model),
         resume=resume_id,
+        hooks=iv_hooks,
     )
 
     # --- Sync endpoint: local-model compaction ---

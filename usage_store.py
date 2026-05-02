@@ -44,6 +44,57 @@ def _init_schema(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_usage_ts    ON usage(ts);
         CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(model);
+
+        -- ── Inner Voice (#345) ──
+        -- Two tables. `inner_voice_critiques` captures "what Brain 2 thought"
+        -- per persona invocation. `inner_voice_interventions` captures "what
+        -- was done about it" — the actual injected steer/interrupt/continue.
+        -- Linked via FK so we can query each independently and join when we
+        -- want the causal chain. Forensic offsets point into event_log JSONL
+        -- so the SQLite row stays small while the raw prompt/response live
+        -- in the append-only log.
+        CREATE TABLE IF NOT EXISTS inner_voice_critiques (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            persona TEXT NOT NULL,
+            persona_version TEXT,
+            model TEXT NOT NULL,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            latency_ms INTEGER,
+            disagrees BOOLEAN,
+            severity REAL,
+            reason TEXT,
+            suggested_action TEXT,                -- 'nudge' | 'veto' | 'escalate' | NULL
+            action_taken TEXT,                    -- 'log_only' | 'steer' | 'interrupt' | 'continue' | 'escalate' | 'agreement'
+            nudge_succeeded BOOLEAN,              -- backfilled by grading pass
+            anchor_response_excerpt TEXT,
+            event_log_offset INTEGER,             -- line number of persona_invoked event
+            raw_response_offset INTEGER,          -- line number of persona_response_raw event
+            prompt_hash TEXT,                     -- sha256 for "same-prompt" grouping
+            parse_attempts INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_iv_critiques_session     ON inner_voice_critiques(session_id);
+        CREATE INDEX IF NOT EXISTS idx_iv_critiques_turn        ON inner_voice_critiques(turn_id);
+        CREATE INDEX IF NOT EXISTS idx_iv_critiques_prompt_hash ON inner_voice_critiques(prompt_hash);
+
+        CREATE TABLE IF NOT EXISTS inner_voice_interventions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            triggered_by_critique_id INTEGER REFERENCES inner_voice_critiques(id),
+            kind TEXT NOT NULL,                   -- 'steer' | 'interrupt' | 'continue' | 'escalate'
+            target_turn_id TEXT NOT NULL,
+            content TEXT NOT NULL,                -- the actual injected text
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            outcome_turn_id TEXT,                 -- backfilled by grading pass
+            outcome_addressed BOOLEAN,
+            outcome_summary TEXT,
+            graded_at TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_iv_interventions_session  ON inner_voice_interventions(session_id);
+        CREATE INDEX IF NOT EXISTS idx_iv_interventions_critique ON inner_voice_interventions(triggered_by_critique_id);
     """)
 
 
@@ -218,5 +269,119 @@ def recent_requests(limit: int = 20) -> list[dict]:
                   cache_create, cache_read, cost_usd, duration_ms, num_turns
            FROM usage ORDER BY ts DESC LIMIT ?""",
         (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Inner Voice (#345) — critiques + interventions
+# ---------------------------------------------------------------------------
+
+def record_inner_voice_critique(
+    session_id: str,
+    turn_id: str,
+    persona: str,
+    model: str,
+    *,
+    persona_version: Optional[str] = None,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+    latency_ms: Optional[int] = None,
+    disagrees: Optional[bool] = None,
+    severity: Optional[float] = None,
+    reason: Optional[str] = None,
+    suggested_action: Optional[str] = None,
+    action_taken: Optional[str] = None,
+    anchor_response_excerpt: Optional[str] = None,
+    event_log_offset: Optional[int] = None,
+    raw_response_offset: Optional[int] = None,
+    prompt_hash: Optional[str] = None,
+    parse_attempts: int = 1,
+) -> int:
+    """Insert an Inner Voice critique row. Returns the new row's id."""
+    conn = _conn()
+    cur = conn.execute(
+        """INSERT INTO inner_voice_critiques
+           (session_id, turn_id, persona, persona_version, model,
+            input_tokens, output_tokens, latency_ms,
+            disagrees, severity, reason, suggested_action, action_taken,
+            anchor_response_excerpt, event_log_offset, raw_response_offset,
+            prompt_hash, parse_attempts)
+           VALUES (?, ?, ?, ?, ?,  ?, ?, ?,  ?, ?, ?, ?, ?,  ?, ?, ?,  ?, ?)""",
+        (session_id, turn_id, persona, persona_version, model,
+         input_tokens, output_tokens, latency_ms,
+         disagrees, severity, reason, suggested_action, action_taken,
+         anchor_response_excerpt, event_log_offset, raw_response_offset,
+         prompt_hash, parse_attempts),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def record_inner_voice_intervention(
+    session_id: str,
+    kind: str,
+    target_turn_id: str,
+    content: str,
+    *,
+    triggered_by_critique_id: Optional[int] = None,
+) -> int:
+    """Insert an Inner Voice intervention row. Returns the new row's id."""
+    conn = _conn()
+    cur = conn.execute(
+        """INSERT INTO inner_voice_interventions
+           (session_id, triggered_by_critique_id, kind, target_turn_id, content)
+           VALUES (?, ?, ?, ?, ?)""",
+        (session_id, triggered_by_critique_id, kind, target_turn_id, content),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_inner_voice_critiques(
+    session_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    limit: int = 200,
+) -> list[dict]:
+    """List critiques, newest first. Filters by session_id and/or turn_id."""
+    conn = _conn()
+    where: list[str] = []
+    params: list = []
+    if session_id:
+        where.append("session_id = ?")
+        params.append(session_id)
+    if turn_id:
+        where.append("turn_id = ?")
+        params.append(turn_id)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    rows = conn.execute(
+        f"""SELECT id, session_id, turn_id, persona, persona_version, model,
+                   input_tokens, output_tokens, latency_ms,
+                   disagrees, severity, reason, suggested_action, action_taken,
+                   nudge_succeeded, anchor_response_excerpt,
+                   event_log_offset, raw_response_offset, prompt_hash,
+                   parse_attempts, created_at
+            FROM inner_voice_critiques{where_sql}
+            ORDER BY id DESC LIMIT ?""",
+        params + [limit],
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_inner_voice_interventions(
+    session_id: Optional[str] = None,
+    limit: int = 200,
+) -> list[dict]:
+    """List interventions, newest first. Filters by session_id."""
+    conn = _conn()
+    where_sql = " WHERE session_id = ?" if session_id else ""
+    params: list = [session_id] if session_id else []
+    rows = conn.execute(
+        f"""SELECT id, session_id, triggered_by_critique_id, kind, target_turn_id,
+                   content, created_at, outcome_turn_id, outcome_addressed,
+                   outcome_summary, graded_at
+            FROM inner_voice_interventions{where_sql}
+            ORDER BY id DESC LIMIT ?""",
+        params + [limit],
     ).fetchall()
     return [dict(r) for r in rows]
