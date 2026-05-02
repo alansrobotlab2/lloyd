@@ -59,6 +59,18 @@ inner_voice:
     count_threshold: 2             # alt: N personas of M flag
     veto_severity_threshold: 0.85  # required for interrupt or termination veto
 
+  # Stage 3 — mid-turn drift detection. Subscribes to the SDK's text_delta
+  # stream and fires `drift_detector` against the partial response every
+  # `check_every_chars`. On a `disagrees=True` verdict at severity ≥
+  # `disagreement.veto_severity_threshold`, the spawned task sets
+  # `cancel_event` (interrupting the SDK message loop) AND enqueues an
+  # ambient nudge so the next turn sees the drift verdict.
+  mid_turn_drift:
+    enabled: true
+    min_chars_before_first_check: 250  # don't critique a 2-word warmup
+    check_every_chars: 500             # cadence after the first check
+    max_checks_per_turn: 4             # ceiling on Brain 2 calls per turn
+
   consensus_termination:
     enabled: true
     brain2_timeout_default_to_brain1: true
