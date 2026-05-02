@@ -82,6 +82,15 @@ inner_voice:
     three_strike_accept: true
     hard_max_turns: 60
 
+  # Stage 6 — auto-fire a steer ambient retry when the post-loop ensemble
+  # lands on `nudge_proposed` (severity in [severity_threshold,
+  # veto_severity_threshold)). Without this, every nudge-band critique is
+  # log-only — Brain 2 has feedback that Brain 1 never sees.
+  #
+  # Shares the `max_nudges_per_session` budget with consensus_termination
+  # so the two paths can't both burn the cap on one session.
+  self_correct_on_nudge: true
+
   # Stage 5 — intervention grading pass. After every ambient turn, look up
   # ungraded interventions for the session and grade each against the just-
   # finished outcome turn. One Brain 2 call per ungraded intervention.

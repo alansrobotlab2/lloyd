@@ -295,41 +295,68 @@ async def _inner_voice_brain2_check(
             emit_sse=_emit_via_turn,
         )
 
-        # Stage 4: consensus termination check. Only fires when the
-        # response actually emitted SIGNAL:TASK_COMPLETE — otherwise the
-        # turn was either still in progress, blocked, or stage-completing.
-        # The ensemble's own aggregation already fired and was logged;
-        # this is the *dispatch* layer (Stage 3 only logged proposals).
-        if not _iv_consensus.has_task_complete_signal(response_text or ""):
-            return
-        if turn_source != "ambient":
-            return  # mirror the Stage 1+2 ambient-only gate
-
-        # Re-derive ensemble_name from the same heuristic the ensemble
-        # used. Pure function over (turn_source, task, tool_calls) so the
-        # second call is deterministic and cheap.
+        # Re-derive ensemble_name + recompute aggregate locally. Both
+        # functions are pure, deterministic, and cheap. We need them for
+        # both the consensus_termination branch (TASK_COMPLETE veto) AND
+        # the Stage 6 steer-dispatch branch (nudge_proposed retry).
         ensemble_name, _personas, _rationale = _iv_ensemble._select_ensemble_for_turn(
             turn_source, frozen_task_intent or "",
             tool_calls=list(tool_calls or []),
         )
+        agg = _iv_ensemble._aggregate(list(critiques or []))
 
-        try:
-            decision = await _iv_consensus.evaluate(
+        # ── Path A: SIGNAL:TASK_COMPLETE → consensus_termination veto ──
+        # Stage 4. Fires only on ambient turns (chat users stop themselves).
+        consensus_handled = False
+        if (
+            _iv_consensus.has_task_complete_signal(response_text or "")
+            and turn_source == "ambient"
+        ):
+            try:
+                decision = await _iv_consensus.evaluate(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    response_text=response_text or "",
+                    critiques=list(critiques or []),
+                    ensemble_name=ensemble_name,
+                    hard_max_turns_hit=False,  # autonomy scheduler wires
+                                               # this in a follow-up.
+                )
+                consensus_handled = True
+            except Exception as e:
+                logger.warning(
+                    "[inner_voice] consensus_termination evaluate failed "
+                    "(session=%s turn=%s): %s", session_id, turn_id, e,
+                )
+                return
+
+        # ── Path B: nudge_proposed → Stage 6 steer dispatch ─────────────
+        # Fires when the ensemble landed in [severity_threshold,
+        # veto_severity_threshold) — flagged but below the consensus veto
+        # floor. Without this branch, every chat critique with severity
+        # 0.6-0.85 was log_only with no follow-up. Brain 2 had feedback,
+        # Brain 1 never saw it.
+        #
+        # Skipped when consensus_termination already vetoed (it owns the
+        # please-continue dispatch in that case — no double-fire).
+        if not consensus_handled:
+            steer_fired = await _maybe_dispatch_steer(
                 session_id=session_id,
                 turn_id=turn_id,
+                turn_source=turn_source,
                 response_text=response_text or "",
                 critiques=list(critiques or []),
+                agg=agg,
                 ensemble_name=ensemble_name,
-                hard_max_turns_hit=False,  # Stage 4 wires this in a
-                                           # follow-up: autonomy scheduler
-                                           # will signal via session meta.
+                emit_via_turn=_emit_via_turn,
             )
-        except Exception as e:
-            logger.warning(
-                "[inner_voice] consensus_termination evaluate failed "
-                "(session=%s turn=%s): %s", session_id, turn_id, e,
-            )
-            return
+            if steer_fired:
+                return  # we enqueued an ambient retry; don't fall through
+            return  # nothing to do (agreement / log_only / no-op)
+
+        # consensus_handled == True; fall through to the existing veto +
+        # escalation handling below.
+        decision = decision  # type: ignore[name-defined]  # set in branch A above
 
         # Surface the decision to the frontend immediately.
         try:
@@ -451,6 +478,191 @@ async def _inner_voice_brain2_check(
             "[inner_voice] brain2 check failed (session=%s turn=%s): %s",
             session_id, turn_id, e,
         )
+
+
+# ---------------------------------------------------------------------------
+# Inner Voice (#345 Stage 6) — steer dispatch on nudge_proposed
+# ---------------------------------------------------------------------------
+
+async def _maybe_dispatch_steer(
+    *,
+    session_id: str,
+    turn_id: str,
+    turn_source: str,
+    response_text: str,
+    critiques: list,
+    agg: dict[str, Any],
+    ensemble_name: str,
+    emit_via_turn,
+) -> bool:
+    """Dispatch a Stage 6 steer ambient when the post-loop ensemble lands
+    on ``nudge_proposed`` (severity ≥ severity_threshold but <
+    veto_severity_threshold).
+
+    Returns True iff a steer was actually dispatched (so the caller can
+    short-circuit other dispatch paths). Best-effort — every internal
+    error is caught and logged.
+
+    Behavior:
+      1. Gate on `inner_voice.self_correct_on_nudge` (default true) AND
+         the existing `inner_voice` opt-in flag for the session.
+      2. Gate on the SHARED nudge budget (consensus_termination uses the
+         same counter; cap is `max_nudges_per_session`). If the session
+         has already burned its budget, log + return False.
+      3. Build the steer ambient kwargs via `make_steer_ambient`.
+      4. Enqueue an ambient prefetch (surfaces in next user turn's
+         `<context>` if the ambient turn races a user message).
+      5. Build + enqueue an actual ambient turn so Brain 1 picks up the
+         retry immediately rather than waiting for the user.
+      6. Record an `inner_voice_interventions` row (kind='steer') so the
+         grading pass picks it up on the next outcome turn.
+      7. Bump the shared nudge counter.
+    """
+    if agg.get("action_chosen") != "nudge_proposed":
+        return False
+    if not _iv_should_fire_on_turn(session_id, turn_source):
+        return False
+    if not _iv_consensus.is_self_correct_on_nudge_enabled():
+        return False
+    if not _iv_consensus.can_consume_nudge_budget(session_id):
+        try:
+            _event_log.log_event(
+                session_id,
+                "inner_voice.steer_skipped",
+                {
+                    "reason": "nudge_budget_exhausted",
+                    "ensemble_name": ensemble_name,
+                    "agg": agg,
+                },
+                turn_id=turn_id,
+            )
+        except Exception:
+            pass
+        logger.info(
+            "[inner_voice] steer skipped (nudge cap reached) session=%s turn=%s",
+            session_id, turn_id,
+        )
+        return False
+
+    severity_max = float(agg.get("severity_max", 0.0))
+    reasons: list[tuple[str, str]] = []
+    triggering_critique_id: int | None = None
+    for c in critiques:
+        if not getattr(c, "disagrees", False):
+            continue
+        if getattr(c, "error", None):
+            continue
+        reasons.append((c.persona, c.reason or ""))
+        # Pick the highest-severity disagreer as the link target.
+        if (
+            triggering_critique_id is None
+            or c.severity >= severity_max
+        ):
+            cid = getattr(c, "id", None) or getattr(c, "_db_id", None)
+            if isinstance(cid, int):
+                triggering_critique_id = cid
+            severity_max = max(severity_max, c.severity)
+
+    steer_kwargs = _iv_ensemble.make_steer_ambient(
+        turn_id=turn_id,
+        severity_max=severity_max,
+        reasons=reasons,
+        response_excerpt=response_text or "",
+    )
+
+    try:
+        await emit_via_turn("inner_voice_steer_dispatched", {
+            "ensemble_name": ensemble_name,
+            "severity_max": severity_max,
+            "reason_count": len(reasons),
+            "agg_rationale": agg.get("rationale"),
+            "turn_id": turn_id,
+        })
+    except Exception:
+        pass
+
+    # 1. Enqueue prefetch (so the next user message also sees the steer
+    #    context even if the ambient retry races and gets preempted).
+    try:
+        prefetch_entry = AmbientPrefetchEntry(
+            source=steer_kwargs["source"],
+            summary=steer_kwargs["summary"],
+            content=steer_kwargs["content"],
+            dedup_key=steer_kwargs["dedup_key"],
+            enqueued_at=time.time(),
+        )
+        enqueue_ambient_prefetch(session_id, prefetch_entry)
+    except Exception as e:
+        logger.warning(
+            "[inner_voice] steer prefetch enqueue failed "
+            "(session=%s turn=%s): %s", session_id, turn_id, e,
+        )
+
+    # 2. Enqueue an ambient turn so Brain 1 actually retries. The body is
+    #    the steer content — `build_ambient_turn` wraps it in its standard
+    #    `<ambient ...>` envelope which is fine; the inner-voice tag is
+    #    explicit enough.
+    try:
+        ambient_turn = await build_ambient_turn(
+            session_id=session_id,
+            text=steer_kwargs["content"],
+            dedup_key=steer_kwargs["dedup_key"],
+            priority="notable",
+            source=steer_kwargs["source"],
+            summary=steer_kwargs["summary"],
+        )
+        result = await enqueue_ambient(session_id, ambient_turn)
+    except Exception as e:
+        logger.warning(
+            "[inner_voice] steer ambient enqueue failed "
+            "(session=%s turn=%s): %s", session_id, turn_id, e,
+        )
+        result = {}
+
+    # 3. Persist as intervention row.
+    try:
+        record_inner_voice_intervention(
+            session_id=session_id,
+            kind="steer",
+            target_turn_id=turn_id,
+            content=steer_kwargs["content"],
+            triggered_by_critique_id=triggering_critique_id,
+        )
+    except Exception as e:
+        logger.warning(
+            "[inner_voice] steer intervention persist failed "
+            "(session=%s turn=%s): %s", session_id, turn_id, e,
+        )
+
+    # 4. Event log + bump counter.
+    new_count = _iv_consensus.consume_nudge_budget(session_id)
+    try:
+        _event_log.log_event(
+            session_id,
+            "inner_voice.steer_dispatched",
+            {
+                "kind": "steer",
+                "target_turn_id": turn_id,
+                "ensemble_name": ensemble_name,
+                "severity_max": severity_max,
+                "reason_count": len(reasons),
+                "nudge_count_after": new_count,
+                "ambient_turn_id": ambient_turn.turn_id if isinstance(result, dict) and result else None,
+                "queue_depth": result.get("queue_depth") if isinstance(result, dict) else None,
+                "deduped": result.get("deduped") if isinstance(result, dict) else None,
+                "agg_rationale": agg.get("rationale"),
+            },
+            turn_id=turn_id,
+        )
+    except Exception:
+        pass
+
+    logger.info(
+        "[inner_voice] steer dispatched session=%s target_turn=%s "
+        "(severity=%.2f reasons=%d nudge_count=%d)",
+        session_id, turn_id, severity_max, len(reasons), new_count,
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------

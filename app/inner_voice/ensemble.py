@@ -1219,6 +1219,24 @@ def _aggregate(critiques: list[Critique]) -> dict[str, Any]:
     count_threshold = int(iv_dis.get("count_threshold", 2))
     veto_floor = float(iv_dis.get("veto_severity_threshold", 0.85))
 
+    error_count = sum(1 for c in critiques if c.error is not None)
+    if error_count == len(critiques):
+        # Every persona errored. The docstring above promises `no_op` for
+        # this case (vs `agreement` which would mislead Stage 6 dispatch
+        # into thinking the ensemble approved). Fixed in Stage 6 along
+        # with the nudge-dispatch wiring; matches consensus_termination's
+        # `accepted_brain2_timeout` semantics.
+        return {
+            "disagree_count": 0,
+            "severity_max": 0.0,
+            "severity_mean": 0.0,
+            "action_chosen": "no_op",
+            "rationale": (
+                f"ensemble produced no usable critiques "
+                f"({error_count}/{len(critiques)} personas errored)"
+            ),
+        }
+
     disagreeing = [c for c in critiques if c.disagrees and c.error is None]
     disagree_count = len(disagreeing)
     severity_max = max((c.severity for c in disagreeing), default=0.0)
@@ -1390,6 +1408,75 @@ def get_mid_turn_drift_config() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def make_steer_ambient(
+    *,
+    turn_id: str,
+    severity_max: float,
+    reasons: list[tuple[str, str]],
+    response_excerpt: str,
+) -> dict[str, str]:
+    """Build the kwargs for a Stage 6 steer ambient — fired when the post-
+    loop ensemble's aggregate is ``nudge_proposed`` (severity in
+    [severity_threshold, veto_severity_threshold) i.e. flagged but below
+    the consensus_termination veto floor).
+
+    Unlike consensus_termination's please-continue (which only fires on
+    SIGNAL:TASK_COMPLETE), this fires whenever the ensemble landed a
+    nudge-level disagreement — chat or autonomy, signal or no signal. The
+    intent is "Brain 1 finished a turn, Brain 2 has feedback short of a
+    veto, surface it so Brain 1 can self-correct on the next pass."
+
+    The caller is responsible for actually enqueueing this as a real
+    ambient turn (not just a prefetch) so Brain 1 picks it up immediately
+    rather than waiting for the next user message. Pair with
+    ``build_ambient_turn(text=content, ...)`` + ``enqueue_ambient(...)``.
+
+    Args:
+        turn_id: id of the just-finished turn the ensemble critiqued.
+        severity_max: highest severity across the disagreeing personas.
+        reasons: list of `(persona, reason_text)` pairs from the
+                 disagreeing critiques. Top 3 are surfaced.
+        response_excerpt: tail of Brain 1's response so the agent has an
+                          anchor to "the last thing I said."
+
+    Returns kwargs compatible with both ``AmbientPrefetchEntry(**kwargs)``
+    AND ``build_ambient_turn(text=kwargs['content'], ...)``.
+    """
+    excerpt = (response_excerpt or "")[-300:]
+    reason_block: list[str] = []
+    for persona, reason in reasons[:3]:
+        if not reason:
+            continue
+        reason_block.append(f"- **{persona}**: {reason}")
+    reason_text = "\n".join(reason_block) or "- (no reasons given)"
+    return {
+        "source": "inner_voice:steer",
+        "summary": (
+            f"Inner Voice ensemble flagged your last turn ({turn_id}) at "
+            f"severity {severity_max:.2f}. Self-corrective retry."
+        ),
+        "content": (
+            "<inner-voice kind='steer'>\n"
+            "Inner Voice (#345 Stage 6) flagged your previous turn for "
+            f"self-correction. Severity {severity_max:.2f} (below the veto "
+            "threshold, but above the nudge floor — meaning the ensemble saw "
+            "a real gap that's worth fixing on a retry, not a catastrophic "
+            "miss).\n\n"
+            "Persona feedback:\n"
+            f"{reason_text}\n\n"
+            "Re-attempt the task addressing each point above. Be specific: "
+            "if a delivery item was missed, deliver it now; if a claim was "
+            "unverified, verify it; if a skill should have been used, use "
+            "it. If you genuinely believe the original response was correct, "
+            "respond explicitly addressing each persona's concern with "
+            "evidence — don't just restate the previous answer.\n\n"
+            f"Tail of your previous response: {excerpt!r}\n"
+            "</inner-voice>"
+        ),
+        "dedup_key": f"inner_voice:steer:{turn_id}",
+    }
+
+
 def make_drift_cancel_ambient(
     *,
     turn_id: str,
@@ -1435,6 +1522,7 @@ __all__ = [
     "run_mid_turn_drift_check",
     "get_mid_turn_drift_config",
     "make_drift_cancel_ambient",
+    "make_steer_ambient",
     "_build_user_prompt",
     "_load_recent_transcript",
     "_select_ensemble_for_turn",
