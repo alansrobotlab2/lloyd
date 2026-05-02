@@ -579,10 +579,19 @@ export const api = {
       onTextDelta?: (text: string) => void
       onThinkingDelta?: (text: string) => void
       onThinkingDone?: (fullText: string) => void
-      onDone?: (response: string, sessionId: string, stats?: TurnStats, reasoning?: string) => void
+      onDone?: (response: string, sessionId: string, stats?: TurnStats, reasoning?: string, cancelled?: boolean) => void
       onError?: (detail: string) => void
       onAborted?: () => void
       onQueueState?: (state: QueueState) => void
+      onInnerVoiceDriftCancel?: (info: {
+        persona: string
+        persona_version: string | null
+        severity: number
+        reason: string
+        stream_position_chars: number
+        partial_excerpt: string
+        turn_id: string
+      }) => void
     },
     model?: string,
     think?: string,
@@ -635,9 +644,10 @@ export const api = {
               case 'text_delta': callbacks.onTextDelta?.(payload.text); break
               case 'thinking_delta': callbacks.onThinkingDelta?.(payload.text); break
               case 'thinking_done': callbacks.onThinkingDone?.(payload.text); break
-              case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats, payload.reasoning); break
+              case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats, payload.reasoning, payload.cancelled); break
               case 'error': callbacks.onError?.(payload.detail); break
               case 'queue_state': callbacks.onQueueState?.(payload as QueueState); break
+              case 'inner_voice_drift_cancel': callbacks.onInnerVoiceDriftCancel?.(payload); break
             }
           } catch { /* skip malformed */ }
         }
