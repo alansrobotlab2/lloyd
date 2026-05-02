@@ -586,6 +586,24 @@ async def _inner_voice_mid_turn_drift_check(
         except Exception as e:
             logger.warning("cancel_event_fired log failed: %s", e)
 
+        # Emit a chat-facing SSE event BEFORE setting cancel_event, so the
+        # ChatPanel knows the cancel came from Inner Voice drift detection
+        # and can render a banner with the reason. The main loop's cancel
+        # handler emits `done(cancelled=true)` to close the stream; this
+        # event provides the human-readable why.
+        try:
+            await _emit(turn, "inner_voice_drift_cancel", {
+                "persona": critique.persona,
+                "persona_version": critique.persona_version,
+                "severity": critique.severity,
+                "reason": critique.reason,
+                "stream_position_chars": stream_position_chars,
+                "partial_excerpt": (partial_response or "")[-300:],
+                "turn_id": turn.turn_id,
+            })
+        except Exception:
+            pass
+
         try:
             nudge_kwargs = _iv_ensemble.make_drift_cancel_ambient(
                 turn_id=turn.turn_id,
@@ -894,13 +912,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         "prompt_chars": len(conv_text if is_local else prefetched_text),
     }, turn_id=turn.turn_id)
 
+    cancelled_mid_stream = False
     try:
         async for message in query(
             prompt=conv_text if is_local else prefetched_text,
             options=options,
         ):
             if cancel_event.is_set():
-                logger.info(f"Session {session_id} turn {turn.turn_id} cancelled via API")
+                logger.info(f"Session {session_id} turn {turn.turn_id} cancelled via API/IV")
+                cancelled_mid_stream = True
                 break
 
             if first_event:
@@ -1313,6 +1333,66 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     if accumulated_thinking:
                         done_payload['reasoning'] = accumulated_thinking
                     await _emit(turn, "done", done_payload)
+
+        # Clean cancel exit (no exception, just a `break` from the
+        # `if cancel_event.is_set()` check at the top of the loop).
+        # Without this block the SSE stream hangs forever — the chat UI
+        # waits for a `done` event that never arrives, the partial
+        # response Brain 1 had accumulated never gets persisted, and the
+        # input field stays disabled.
+        #
+        # Fires for BOTH API cancels (sessions/cancel) AND Inner Voice
+        # mid-turn drift cancels (the IV check sets cancel_event after
+        # logging cancel_event_fired + intervention_dispatched).
+        if cancelled_mid_stream and not final_persisted:
+            cancel_ts = datetime.now().isoformat()
+            tail = []
+            results_by_id = {r["call_id"]: r["result"] for r in tool_results_log}
+            for tc in tool_calls_log:
+                cid = tc["call_id"]
+                if cid not in persisted_tool_ids:
+                    tail.append({
+                        "id": f"msg_{cid}_tc", "role": "assistant",
+                        "content": [{"type": "text", "text": ""}],
+                        "tool_calls": [tc], "timestamp": cancel_ts,
+                    })
+                    tail.append({
+                        "id": f"msg_{cid}_result", "role": "tool",
+                        "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
+                        "tool_call_id": cid, "timestamp": cancel_ts,
+                    })
+            stream_stats["peak_input_tokens"] = last_turn_input
+            if full_response.strip():
+                cancel_msg: dict = {
+                    "id": uuid.uuid4().hex[:8], "role": "assistant",
+                    "content": [{"type": "text", "text": full_response}],
+                    "timestamp": cancel_ts, "stats": stream_stats,
+                    "cancelled": True,
+                }
+                if accumulated_thinking:
+                    cancel_msg["reasoning"] = accumulated_thinking
+                tail.append(cancel_msg)
+            if tail:
+                await _append_messages(session_id, tail)
+            try:
+                if stream_stats["input_tokens"] or stream_stats["output_tokens"]:
+                    usage_store.record_usage(
+                        session_id=session_id,
+                        model=model,
+                        input_tokens=stream_stats["input_tokens"],
+                        output_tokens=stream_stats["output_tokens"],
+                        cache_create=stream_stats["cache_create"],
+                        cache_read=stream_stats["cache_read"],
+                    )
+            except Exception as ue:
+                logger.warning(f"Failed to record usage on cancel: {ue}")
+            final_persisted = True
+            await _emit(turn, "done", {
+                "response": full_response,
+                "session_id": session_id,
+                "stats": stream_stats,
+                "cancelled": True,
+            })
 
     except Exception as e:
         if not final_persisted:
