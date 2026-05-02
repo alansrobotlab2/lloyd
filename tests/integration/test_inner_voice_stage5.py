@@ -404,7 +404,7 @@ def test_state_endpoint() -> bool:
     except Exception as e:
         return _check(f"GET /state succeeded", False, f"error={e!r}")
     ok1 = _check("returned JSON", isinstance(data, dict))
-    ok2 = _check("stage == '5'", data.get("stage") == "5", f"stage={data.get('stage')!r}")
+    ok2 = _check("stage >= '5'", data.get("stage", "0") >= "5", f"stage={data.get('stage')!r}")
     ok3 = _check(
         "grading_progress key present",
         "grading_progress" in data,

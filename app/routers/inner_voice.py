@@ -24,7 +24,19 @@ from fastapi import APIRouter, HTTPException, Query
 import usage_store
 from app import event_log
 from app.config import CONFIG
+from app.inner_voice import intra_turn as _iv_intra_turn  # Stage 7
 from app.paths import SESSIONS_DIR
+
+
+def _intra_turn_summary(session_id: str) -> dict[str, Any]:
+    """Stage 7 — surface the active turn's intra-turn state. Empty dict
+    when no turn is active. Read by the Inner Voice tab UI to render the
+    PostToolUse fire counter and progress_monitor cadence.
+    """
+    try:
+        return _iv_intra_turn.get_intra_turn_summary(session_id)
+    except Exception:
+        return {}
 
 logger = logging.getLogger("lloyd-server")
 
@@ -212,7 +224,8 @@ async def get_state(
         "hard_max_turns": int(ct_cfg.get("hard_max_turns", 60)),
         "last_critique_at": last_critique_at,
         "grading_progress": grading_progress,        # Stage 5
-        "stage": "5",
+        "intra_turn": _intra_turn_summary(session_id),  # Stage 7
+        "stage": "7",
     }
 
 
