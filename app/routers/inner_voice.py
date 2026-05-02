@@ -78,20 +78,27 @@ async def get_state(
 ) -> dict[str, Any]:
     """Current Inner Voice state for a session.
 
-    Stage 2: returns the session's opt-in flag, the configured default
-    ensemble name + personas, and a coarse `state` derived from the most
-    recent critique (`critiquing` if a row landed in the last 10s,
-    `observing` otherwise). Mid-turn `intervening` lands in Stage 3 when
-    drift_detector starts firing cancel events.
+    Stage 4 surface:
+      * `inner_voice_enabled` — opt-in flag from session JSON.
+      * `state` — `idle | observing | critiquing | intervening` (last
+        derived from most-recent critique recency).
+      * `active_ensemble` — config default; the per-turn ensemble can
+        differ (safety_critical / research_writing / code_writing). The
+        per-turn name lands in `inner_voice.ensemble_selected` events.
+      * `configured_personas` — full set the default ensemble would fire.
+      * `nudge_count` — interventions of kind `continue` or `steer`
+        (continue = Stage 4 consensus veto; steer = Stage 3 placeholder).
+      * `consecutive_vetoes` — current three-strike streak from the
+        consensus_termination module's in-process state.
+      * `escalations_count` — interventions of kind `escalate`.
+      * `max_nudges_per_session` / `veto_severity_threshold` /
+        `hard_max_turns` — config values the UI can render alongside.
     """
     iv_cfg = CONFIG.get("inner_voice") or {}
     ensemble_cfg = iv_cfg.get("ensemble") or {}
     default_name = ensemble_cfg.get("default") or "autonomy_default"
     sets = ensemble_cfg.get("sets") or {}
-    # Stage 2 ships only completion_checker — surface that, not the full
-    # configured set, so the UI doesn't promise personas that aren't firing.
-    stage2_personas = ["completion_checker"]
-    configured_personas = sets.get(default_name) or []
+    configured_personas = list(sets.get(default_name) or [])
 
     inner_voice_enabled = False
     if session_id:
@@ -117,28 +124,50 @@ async def get_state(
             pass
 
     nudges = 0
+    escalations = 0
     if session_id:
         try:
             interventions = usage_store.list_inner_voice_interventions(
-                session_id=session_id, limit=200,
+                session_id=session_id, limit=500,
             )
-            nudges = sum(1 for r in interventions if r.get("kind") == "steer")
+            for r in interventions:
+                k = r.get("kind")
+                if k in ("continue", "steer"):
+                    nudges += 1
+                elif k == "escalate":
+                    escalations += 1
         except Exception:
             pass
 
+    consecutive_vetoes = 0
+    if session_id:
+        try:
+            from app.inner_voice import consensus_termination as _ct
+            consecutive_vetoes = _ct.get_consecutive_veto_count(session_id)
+        except Exception:
+            pass
+
+    dis_cfg = iv_cfg.get("disagreement") or {}
+    ct_cfg = iv_cfg.get("consensus_termination") or {}
     return {
         "session_id": session_id,
         "inner_voice_enabled": inner_voice_enabled,
         "state": state,
         "active_ensemble": default_name,
-        "personas": stage2_personas,
+        "personas": configured_personas,           # Stage 4: actual fire set
         "configured_personas": configured_personas,
         "nudge_count": nudges,
+        "consecutive_vetoes": consecutive_vetoes,
+        "escalations_count": escalations,
         "max_nudges_per_session": int(
             (iv_cfg.get("throughput") or {}).get("max_nudges_per_session", 2)
         ),
+        "veto_severity_threshold": float(
+            dis_cfg.get("veto_severity_threshold", 0.85)
+        ),
+        "hard_max_turns": int(ct_cfg.get("hard_max_turns", 60)),
         "last_critique_at": last_critique_at,
-        "stage": "2",
+        "stage": "4",
     }
 
 

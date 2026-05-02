@@ -356,6 +356,72 @@ def _bump_session_count(session_id: str, *, n: int = 1) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Tool name sets used by Stage 4 work-type-keyed routing.
+# `_DESTRUCTIVE_TOOLS` are tools whose successful invocation cannot be
+# trivially reversed without remediation work. They route to
+# `safety_critical` regardless of count — one fire is enough to want a
+# paranoid review.
+_DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({
+    # External-world side effects (irreversible without remediation):
+    "email_send", "email_delete", "email_forward", "email_reply",
+    "discord_send", "discord_send_embed",
+    "calendar_create",
+    # Memory-graph mutations (vault_write is NOT here — it's research,
+    # content creation, routed to research_writing instead):
+    "fact_invalidate",
+    "memory_remove", "memory_replace",
+    # Backlog / autonomy mutations:
+    "backlog_write_task",
+    "autonomy_write_task", "autonomy_delete_task",
+})
+
+# Bash regex patterns that indicate destructive intent. Mirrors the
+# `pretooluse_deny` config rules but also catches shapes that just slipped
+# past (different argv form, env-var paths, multi-line scripts). Any one
+# match is enough to flag.
+_BASH_DESTRUCTIVE_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"\brm\s+-rf?\s+", re.IGNORECASE),
+    re.compile(r"\bgit\s+(reset\s+--hard|push\s+.*--force|clean\s+-fd|branch\s+-D)\b"),
+    re.compile(r">\s*\S*(?:CONFIG|MEMORY|USER|SOUL)\.md\b"),
+    re.compile(r"\bchmod\s+(-R\s+)?[0-9]+\s+/", re.IGNORECASE),
+    re.compile(r"\bsudo\s+", re.IGNORECASE),
+    re.compile(r"\bdd\s+if=", re.IGNORECASE),
+    re.compile(r"\bmkfs", re.IGNORECASE),
+)
+
+# Tools that signal a "research" turn: vault writes / many vault searches,
+# web fetches, arxiv, deep_research. Threshold-based: 1+ writes OR 3+
+# searches OR 1+ web/research fetches.
+_RESEARCH_WRITE_TOOLS: frozenset[str] = frozenset({"vault_write"})
+_RESEARCH_SEARCH_TOOLS: frozenset[str] = frozenset({
+    "vault_search", "vault_recall", "fact_get", "fact_neighbors",
+})
+_RESEARCH_FETCH_TOOLS: frozenset[str] = frozenset({
+    "http_fetch", "http_search", "http_request",
+    "arxiv", "deep_research", "deep_dive_research", "websearch",
+})
+
+
+def _bash_command_str(tc: dict) -> str:
+    """Extract the Bash `command` string from a tool-call dict, if it's
+    a Bash invocation. Empty string for non-Bash or missing input.
+    """
+    name = (tc.get("name") or tc.get("function", {}).get("name", "")).rsplit("__", 1)[-1]
+    if name != "Bash":
+        return ""
+    args = tc.get("input") or tc.get("arguments") or tc.get("function", {}).get("arguments")
+    if isinstance(args, dict):
+        return str(args.get("command", "") or "")
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+            if isinstance(parsed, dict):
+                return str(parsed.get("command", "") or "")
+        except json.JSONDecodeError:
+            pass
+    return ""
+
+
 def _select_ensemble_for_turn(
     turn_source: str,
     frozen_task_intent: str,
@@ -364,18 +430,17 @@ def _select_ensemble_for_turn(
 ) -> tuple[str, list[str], str]:
     """Pick which persona ensemble to fire for this turn.
 
-    Returns `(ensemble_name, personas, rationale)`. Stage 3 ships:
+    Returns `(ensemble_name, personas, rationale)`. Routing priority:
 
-      - `autonomy_default` — the everyman ensemble. Picked unless a more
-        specific work-type lights up.
-      - `code_writing` — picked if the recent tool history is Edit-heavy
-        or the task uses code-shaped vocabulary. Stage 3's heuristic is
-        intentionally cheap; Stage 4 promotes to a richer signal set.
-      - `research_writing` — picked if `vault_write` / `Read` against
-        `knowledge/` showed up. Reserved label; Stage 3 leaves the actual
-        ensemble identical to default.
-      - `safety_critical` — Stage 4. Stage 3 doesn't route to it (the
-        adversarial / hallucination personas don't ship until then).
+      1. `safety_critical` — destructive Bash patterns OR ≥1 mutation
+         tool from `_DESTRUCTIVE_TOOLS`. Highest priority because the
+         blast radius justifies the extra Brain 2 cost.
+      2. `research_writing` — vault writes, many vault searches, or web/
+         arxiv fetches. Catches knowledge-build turns where
+         `hallucination_flag` is the most informative voice.
+      3. `code_writing` — ≥2 edit-shaped tool calls (Edit, Write,
+         MultiEdit). Existing Stage 3 heuristic.
+      4. `autonomy_default` — fallback. The everyman ensemble.
 
     The rationale string lands in `inner_voice.ensemble_selected` events
     so post-hoc analysis can tell *why* a particular ensemble fired.
@@ -385,17 +450,58 @@ def _select_ensemble_for_turn(
     sets = ens.get("sets") or {}
     default_name = ens.get("default") or "autonomy_default"
 
-    # Heuristic: scan recent tool names for code-edit signals.
+    tcs = list(tool_calls or [])
     tool_names = [
         (tc.get("name") or tc.get("function", {}).get("name", "")).rsplit("__", 1)[-1]
-        for tc in (tool_calls or [])
+        for tc in tcs
     ]
+
+    # Stage 4: safety_critical signal — destructive Bash OR mutation tool.
+    safety_bash_hits: list[str] = []
+    for tc in tcs:
+        cmd = _bash_command_str(tc)
+        if not cmd:
+            continue
+        for pat in _BASH_DESTRUCTIVE_PATTERNS:
+            if pat.search(cmd):
+                safety_bash_hits.append(pat.pattern)
+                break
+    safety_tool_hits = [n for n in tool_names if n in _DESTRUCTIVE_TOOLS]
+
+    # Stage 4: research signal — writes, search count, web fetches.
+    research_writes = sum(1 for n in tool_names if n in _RESEARCH_WRITE_TOOLS)
+    research_searches = sum(1 for n in tool_names if n in _RESEARCH_SEARCH_TOOLS)
+    research_fetches = sum(1 for n in tool_names if n in _RESEARCH_FETCH_TOOLS)
+    research_signal = (
+        research_writes >= 1
+        or research_searches >= 3
+        or research_fetches >= 1
+    )
+
+    # Existing code_writing signal — preserved.
     code_signals = sum(1 for n in tool_names if n in {"Edit", "Write", "MultiEdit"})
 
     rationale = "default ensemble; no work-type signal triggered"
     name = default_name
 
-    if code_signals >= 2:
+    # Priority: safety > research > code > default. The first signal that
+    # lights up wins so we never under-route a destructive turn into a
+    # gentler ensemble.
+    if (safety_bash_hits or safety_tool_hits) and "safety_critical" in sets:
+        name = "safety_critical"
+        bits: list[str] = []
+        if safety_bash_hits:
+            bits.append(f"bash patterns matched: {safety_bash_hits[:3]}")
+        if safety_tool_hits:
+            bits.append(f"mutation tools fired: {safety_tool_hits[:5]}")
+        rationale = "safety_critical: " + "; ".join(bits)
+    elif research_signal and "research_writing" in sets:
+        name = "research_writing"
+        rationale = (
+            f"research_writing: writes={research_writes} searches={research_searches} "
+            f"fetches={research_fetches}"
+        )
+    elif code_signals >= 2:
         name = "code_writing" if "code_writing" in sets else default_name
         rationale = f"code_writing: {code_signals} edit-shaped tool calls in turn history"
 
