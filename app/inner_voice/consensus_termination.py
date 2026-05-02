@@ -141,6 +141,46 @@ def _max_nudges_per_session() -> int:
     return int(tp.get("max_nudges_per_session", 2))
 
 
+# ---------------------------------------------------------------------------
+# Stage 6 helpers — shared with the steer-dispatch path in messages.py.
+# Exposing the per-session counter + cap check + bump op so the steer path
+# uses the SAME budget consensus_termination uses. Otherwise both paths
+# could each spend max_nudges_per_session on the same session.
+# ---------------------------------------------------------------------------
+
+
+def is_self_correct_on_nudge_enabled() -> bool:
+    """Config gate for Stage 6 steer dispatch (auto-fire ambient retry when
+    the post-loop ensemble lands in the nudge band [severity_threshold,
+    veto_severity_threshold)).
+
+    Default true. Set ``inner_voice.self_correct_on_nudge: false`` in
+    config.yaml to fall back to log-only behavior.
+    """
+    iv = CONFIG.get("inner_voice")
+    if not iv:
+        return False
+    return bool(iv.get("self_correct_on_nudge", True))
+
+
+def can_consume_nudge_budget(session_id: str) -> bool:
+    """Return True if this session has nudge headroom.
+
+    Steer dispatch + consensus_termination veto share this budget. The
+    cap is `inner_voice.throughput.max_nudges_per_session` (default 2).
+    """
+    return _session_nudge_counts.get(session_id, 0) < _max_nudges_per_session()
+
+
+def consume_nudge_budget(session_id: str) -> int:
+    """Increment the nudge counter for this session and return the new
+    value. Caller is responsible for having checked `can_consume_nudge_budget`
+    first; this only updates state.
+    """
+    _session_nudge_counts[session_id] = _session_nudge_counts.get(session_id, 0) + 1
+    return _session_nudge_counts[session_id]
+
+
 def _veto_severity_threshold() -> float:
     iv = CONFIG.get("inner_voice") or {}
     dis = iv.get("disagreement") or {}
