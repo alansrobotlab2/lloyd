@@ -73,6 +73,8 @@ from app.compaction import (
 from app import event_log as _event_log  # Inner Voice (#345) — brain1.* capture
 from app.inner_voice import heuristics as _iv_heuristics  # Inner Voice (#345) — Stage 1
 from app.inner_voice import ensemble as _iv_ensemble  # Inner Voice (#345) — Stage 2
+from app.inner_voice import consensus_termination as _iv_consensus  # Inner Voice (#345) — Stage 4
+from usage_store import record_inner_voice_intervention
 
 
 router = APIRouter()
@@ -222,8 +224,15 @@ async def _inner_voice_brain2_check(
 
     Best-effort. Handles all errors internally so the chat path never sees
     a Brain 2 failure. Stage 3 fans out 3 personas concurrently
-    (`completion_checker`, `drift_detector`, `continuation_drive` for the
-    `autonomy_default` ensemble) and runs threshold-driven aggregation.
+    (``completion_checker``, ``drift_detector``, ``continuation_drive``
+    for the ``autonomy_default`` ensemble) and runs threshold-driven
+    aggregation.
+
+    Stage 4 chains a *consensus-termination* check onto the back of the
+    ensemble: if the response carries ``SIGNAL:TASK_COMPLETE`` and the
+    aggregated severity crosses the veto threshold, we inject a
+    please-continue ambient. Four escape hatches keep the loop bounded
+    (Brain 2 timeout, three-strike, max_nudges, hard_max_turns).
 
     SSE delivery is racy — the turn's events queue receives the events but
     the consumer may already have closed by the time the 5s critic call
@@ -238,7 +247,7 @@ async def _inner_voice_brain2_check(
                 # Queue may be GC'd or closed; we don't care for SSE delivery.
                 pass
 
-        await _iv_ensemble.run_post_loop_critique(
+        critiques = await _iv_ensemble.run_post_loop_critique(
             session_id=session_id,
             turn_id=turn_id,
             turn_source=turn_source,
@@ -247,6 +256,158 @@ async def _inner_voice_brain2_check(
             tool_calls=list(tool_calls or []),
             emit_sse=_emit_via_turn,
         )
+
+        # Stage 4: consensus termination check. Only fires when the
+        # response actually emitted SIGNAL:TASK_COMPLETE — otherwise the
+        # turn was either still in progress, blocked, or stage-completing.
+        # The ensemble's own aggregation already fired and was logged;
+        # this is the *dispatch* layer (Stage 3 only logged proposals).
+        if not _iv_consensus.has_task_complete_signal(response_text or ""):
+            return
+        if turn_source != "ambient":
+            return  # mirror the Stage 1+2 ambient-only gate
+
+        # Re-derive ensemble_name from the same heuristic the ensemble
+        # used. Pure function over (turn_source, task, tool_calls) so the
+        # second call is deterministic and cheap.
+        ensemble_name, _personas, _rationale = _iv_ensemble._select_ensemble_for_turn(
+            turn_source, frozen_task_intent or "",
+            tool_calls=list(tool_calls or []),
+        )
+
+        try:
+            decision = await _iv_consensus.evaluate(
+                session_id=session_id,
+                turn_id=turn_id,
+                response_text=response_text or "",
+                critiques=list(critiques or []),
+                ensemble_name=ensemble_name,
+                hard_max_turns_hit=False,  # Stage 4 wires this in a
+                                           # follow-up: autonomy scheduler
+                                           # will signal via session meta.
+            )
+        except Exception as e:
+            logger.warning(
+                "[inner_voice] consensus_termination evaluate failed "
+                "(session=%s turn=%s): %s", session_id, turn_id, e,
+            )
+            return
+
+        # Surface the decision to the frontend immediately.
+        try:
+            await _emit_via_turn("inner_voice_consensus_decision", {
+                "action": decision.action,
+                "rationale": decision.rationale,
+                "severity_max": decision.severity_max,
+                "nudge_count": decision.nudge_count_after,
+                "hatch_fired": decision.hatch_fired,
+                "ensemble_name": ensemble_name,
+            })
+        except Exception:
+            pass
+
+        # Veto branch — enqueue please-continue ambient and record the
+        # intervention against the strongest disagreeing critique.
+        if decision.action == "vetoed" and decision.please_continue_kwargs:
+            try:
+                kw = decision.please_continue_kwargs
+                entry = AmbientPrefetchEntry(
+                    source=kw["source"],
+                    summary=kw["summary"],
+                    content=kw["content"],
+                    dedup_key=kw["dedup_key"],
+                    enqueued_at=time.time(),
+                )
+                result = enqueue_ambient_prefetch(session_id, entry)
+                _event_log.log_event(
+                    session_id,
+                    "inner_voice.intervention_dispatched",
+                    {
+                        "kind": "continue",
+                        "target_turn_id": turn_id,
+                        "trigger": "consensus_termination_vetoed",
+                        "severity": decision.severity_max,
+                        "queue_depth": result.get("queue_depth"),
+                        "deduped": result.get("deduped"),
+                    },
+                    turn_id=turn_id,
+                )
+                # Persist intervention row. action_taken='continue' on
+                # the inner_voice_interventions table.
+                try:
+                    record_inner_voice_intervention(
+                        session_id=session_id,
+                        kind="continue",
+                        target_turn_id=turn_id,
+                        content=kw["content"],
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[inner_voice] consensus intervention persist "
+                        "failed (session=%s turn=%s): %s",
+                        session_id, turn_id, e,
+                    )
+                logger.info(
+                    "[inner_voice] consensus VETO session=%s turn=%s "
+                    "(severity=%.2f nudge=%d/%d)",
+                    session_id, turn_id, decision.severity_max,
+                    decision.nudge_count_after, _iv_consensus._max_nudges_per_session(),
+                )
+            except Exception as e:
+                logger.warning(
+                    "[inner_voice] consensus please-continue enqueue "
+                    "failed (session=%s turn=%s): %s",
+                    session_id, turn_id, e,
+                )
+
+        # Escalation branch — write the escalations.jsonl row.
+        # Stage 4 keeps this a flat-file append; a follow-up task wires
+        # it to the MCP backlog API (we don't have a direct in-process
+        # call yet). The event log already carries the full payload.
+        elif decision.action.startswith("escalated_") and decision.escalation_kwargs:
+            try:
+                from app.paths import LLOYD_HOME
+                esc_dir = LLOYD_HOME / "_pipeline" / "inner_voice"
+                esc_dir.mkdir(parents=True, exist_ok=True)
+                esc_file = esc_dir / "escalations.jsonl"
+                row = {
+                    "ts": time.time(),
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "action": decision.action,
+                    "hatch_fired": decision.hatch_fired,
+                    "ensemble_name": ensemble_name,
+                    "severity_max": decision.severity_max,
+                    "nudge_count": decision.nudge_count_after,
+                    "kwargs": decision.escalation_kwargs,
+                }
+                with esc_file.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(row, separators=(",", ":")) + "\n")
+                # Persist as intervention row too — kind='escalate'
+                try:
+                    record_inner_voice_intervention(
+                        session_id=session_id,
+                        kind="escalate",
+                        target_turn_id=turn_id,
+                        content=json.dumps(decision.escalation_kwargs),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[inner_voice] escalation intervention persist "
+                        "failed (session=%s turn=%s): %s",
+                        session_id, turn_id, e,
+                    )
+                logger.warning(
+                    "[inner_voice] consensus ESCALATION session=%s turn=%s "
+                    "hatch=%s (nudge_count=%d)",
+                    session_id, turn_id, decision.hatch_fired,
+                    decision.nudge_count_after,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[inner_voice] escalation write failed "
+                    "(session=%s turn=%s): %s", session_id, turn_id, e,
+                )
     except Exception as e:
         logger.warning(
             "[inner_voice] brain2 check failed (session=%s turn=%s): %s",
