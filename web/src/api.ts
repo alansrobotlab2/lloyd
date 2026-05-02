@@ -59,6 +59,81 @@ export interface Session {
   preview?: string
   last_active: string
   platform?: string
+  // Inner Voice (#345): A/B linkage tag and Brain 2 opt-in flag.
+  experiment_id?: string | null
+  inner_voice?: boolean
+}
+
+// ── Inner Voice (#345) types ──────────────────────────────────────────
+
+export interface InnerVoiceCritique {
+  id: number
+  session_id: string
+  turn_id: string
+  persona: string
+  persona_version: string | null
+  model: string
+  input_tokens: number | null
+  output_tokens: number | null
+  latency_ms: number | null
+  disagrees: boolean | null
+  severity: number | null
+  reason: string | null
+  suggested_action: 'nudge' | 'veto' | 'escalate' | null
+  action_taken: 'log_only' | 'steer' | 'interrupt' | 'continue' | 'escalate' | 'agreement' | null
+  nudge_succeeded: boolean | null
+  anchor_response_excerpt: string | null
+  event_log_offset: number | null
+  raw_response_offset: number | null
+  prompt_hash: string | null
+  parse_attempts: number
+  created_at: string
+}
+
+export interface InnerVoiceIntervention {
+  id: number
+  session_id: string
+  triggered_by_critique_id: number | null
+  kind: 'steer' | 'interrupt' | 'continue' | 'escalate'
+  target_turn_id: string
+  content: string
+  created_at: string
+  outcome_turn_id: string | null
+  outcome_addressed: boolean | null
+  outcome_summary: string | null
+  graded_at: string | null
+}
+
+export interface InnerVoiceState {
+  session_id: string | null
+  inner_voice_enabled?: boolean
+  state: 'idle' | 'observing' | 'critiquing' | 'intervening'
+  active_ensemble: string | null
+  personas: string[]
+  configured_personas?: string[]
+  nudge_count: number
+  max_nudges_per_session?: number
+  last_critique_at?: string | null
+  stage: string
+}
+
+export interface InnerVoiceSession {
+  session_id: string
+  experiment_id: string | null
+  title: string
+  created_at: string | null
+  updated_at: string | null
+  message_count: number
+}
+
+export interface InnerVoiceEventLogEntry {
+  ts: string
+  session_id: string
+  turn_id?: string
+  event: string
+  // `data` is event-specific; large fields may be `{$blob: <sha>}` references
+  // when expand_blobs=false (the default).
+  data: Record<string, unknown>
 }
 
 export interface ModelInfo {
@@ -917,4 +992,79 @@ export const api = {
     fetch(`${API_BASE}/voice/tts-status`).then(r => r.json()),
   voiceTtsToggle: (): Promise<{ tts_enabled: boolean }> =>
     fetch(`${API_BASE}/voice/tts-toggle`, { method: 'POST' }).then(r => r.json()),
+
+  // ── Inner Voice (#345) ──
+  // Patch session metadata: experiment tag + Brain 2 opt-in flag. Both
+  // optional in the body — caller sends only what changed.
+  patchSession: (
+    sessionId: string,
+    patch: { experiment_id?: string | null; inner_voice?: boolean },
+  ): Promise<{ session_key: string; experiment_id: string | null; inner_voice: boolean }> =>
+    fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then(r => r.json()),
+
+  innerVoiceState: (sessionId?: string): Promise<InnerVoiceState> => {
+    const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+    return fetch(`${API_BASE}/inner_voice/state${params}`).then(r => r.json())
+  },
+
+  innerVoiceCritiques: (
+    sessionId?: string,
+    turnId?: string,
+  ): Promise<{ critiques: InnerVoiceCritique[]; count: number }> => {
+    const p = new URLSearchParams()
+    if (sessionId) p.set('session_id', sessionId)
+    if (turnId) p.set('turn_id', turnId)
+    return fetch(`${API_BASE}/inner_voice/critiques?${p}`).then(r => r.json())
+  },
+
+  innerVoiceInterventions: (
+    sessionId?: string,
+  ): Promise<{ interventions: InnerVoiceIntervention[]; count: number }> => {
+    const p = new URLSearchParams()
+    if (sessionId) p.set('session_id', sessionId)
+    return fetch(`${API_BASE}/inner_voice/interventions?${p}`).then(r => r.json())
+  },
+
+  innerVoiceEventLog: (
+    sessionId: string,
+    offset = 0,
+    limit = 200,
+    expandBlobs = false,
+  ): Promise<{
+    session_id: string
+    events: InnerVoiceEventLogEntry[]
+    offset: number
+    limit: number
+    returned: number
+    total: number
+  }> => {
+    const p = new URLSearchParams({
+      session_id: sessionId,
+      offset: String(offset),
+      limit: String(limit),
+      expand_blobs: String(expandBlobs),
+    })
+    return fetch(`${API_BASE}/inner_voice/event_log?${p}`).then(r => r.json())
+  },
+
+  // List sessions opted into Inner Voice (sessions whose JSON has
+  // `inner_voice: true`). Used by the InnerVoicePage session picker.
+  innerVoiceSessions: (
+    limit = 50,
+  ): Promise<{ sessions: InnerVoiceSession[]; count: number }> =>
+    fetch(`${API_BASE}/inner_voice/sessions?limit=${limit}`).then(r => r.json()),
+
+  // Resolve a single blob hash to its content. Returns 404 on miss.
+  innerVoiceEventLogBlob: (
+    sha: string,
+  ): Promise<{ sha: string; content: string; size: number }> =>
+    fetch(`${API_BASE}/inner_voice/event_log/blob/${encodeURIComponent(sha)}`)
+      .then(r => {
+        if (!r.ok) throw new Error(`blob ${sha} not found (${r.status})`)
+        return r.json()
+      }),
 }

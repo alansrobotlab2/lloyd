@@ -21,10 +21,11 @@ import {
   Volume2,
   VolumeX,
   Workflow,
+  Ear,
 } from 'lucide-react'
 import { api } from '../api'
 
-export type Page = 'chat' | 'services' | 'dashboard' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers'
+export type Page = 'chat' | 'services' | 'dashboard' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice'
 
 interface NavItem {
   id: Page
@@ -34,6 +35,9 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'chat', label: 'Chat', icon: MessageCircle },
+  // Inner Voice (#345) — sibling to Chat. Brain 2 ensemble runs only on
+  // sessions opened in this tab; existing Chat tab behavior is unchanged.
+  { id: 'inner_voice', label: 'Inner Voice', icon: Ear },
   { id: 'dashboard', label: 'Usage', icon: ChartArea },
   { id: 'backlog', label: 'Backlog', icon: LayoutGrid },
   { id: 'autonomy', label: 'Autonomy', icon: Lightbulb },

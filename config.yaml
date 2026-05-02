@@ -1,6 +1,87 @@
 agent:
   max_turns: 60
   permission_mode: bypassPermissions
+inner_voice:
+  # Inner Voice (#345) — parallel cognitive process. Stage 0 ships
+  # event-log infrastructure only; Brain 2 ensembles + heuristics land in
+  # Stages 1–5. The `enabled` flag gates Brain 2 — never on for Chat tab,
+  # only on for Inner Voice tab sessions (also flagged via session JSON
+  # `inner_voice: true`).
+  enabled: false
+  model: primary  # Brain 2 model alias; same endpoint as Brain 1 in v1.
+
+  # Stage 1 (no Brain 2). Wired in heuristics.py.
+  # Deny rules: regex-matched against the tool's input. Tool name must
+  # match exactly. Pattern is case-insensitive multi-line. Reason surfaces
+  # in the SDK's deny error to the model.
+  #
+  # The third rule's regex was rewritten from the spec — the original
+  # `> /dev/null \d?>?&?\d? <FILE>.md` shape didn't actually match any
+  # truncate-redirect against sentinel files. Current pattern matches any
+  # `>` redirect into a path ending in CONFIG.md / MEMORY.md / USER.md /
+  # SOUL.md, e.g. `> MEMORY.md`, `> ~/obsidian/lloyd/MEMORY.md`,
+  # `: > MEMORY.md`. See app/inner_voice/heuristics.py docstring.
+  pretooluse_deny:
+    - tool: Bash
+      pattern: 'rm\s+-rf\s+.*(?:obsidian|\.openclaw|agent-services|\.venvs|lloyd)'
+      reason: "destructive deletion against guarded path"
+    - tool: Bash
+      pattern: 'git\s+push\s+.*--force.*(?:main|master)'
+      reason: "force push to default branch"
+    - tool: Bash
+      pattern: '>\s*\S*(?:CONFIG|MEMORY|USER|SOUL)\.md\b'
+      reason: "redirect-truncate of sentinel file"
+  ambient_completion_check: true
+
+  # Stage 2+ (Brain 2 ensembles).
+  ensemble:
+    default: autonomy_default
+    sets:
+      autonomy_default: [completion_checker, drift_detector, continuation_drive]
+      safety_critical:  [adversarial_red_team, completion_checker, hallucination_flag]
+      code_writing:     [drift_detector, completion_checker]
+      research_writing: [hallucination_flag, completion_checker, drift_detector]
+
+  # Per-Brain-2-call inference parameters. Reasoning-token consumption is
+  # the dominant failure mode on local; prefill + max_tokens cap + closed
+  # thinking forces JSON commitment. See knowledge/local-llm-gotchas.
+  critic:
+    max_tokens: 2500
+    thinking_forced_open: false
+    prefill: '{"disagrees":'
+    timeout_seconds: 5
+    json_retry_on_parse_failure: 1
+    transcript_window_turns: 5
+    include_brain1_thinking: false   # do NOT anchor Brain 2 on Brain 1's reasoning
+
+  disagreement:
+    severity_threshold: 0.6        # min severity for steer
+    count_threshold: 2             # alt: N personas of M flag
+    veto_severity_threshold: 0.85  # required for interrupt or termination veto
+
+  consensus_termination:
+    enabled: true
+    brain2_timeout_default_to_brain1: true
+    three_strike_accept: true
+    hard_max_turns: 60
+
+  throughput:
+    max_concurrent_personas: 5
+    max_critiques_per_session: 50
+    max_nudges_per_session: 2
+    cool_down_after_escalation_seconds: 60
+
+  brain2_kv_cache_dtype: q4_0
+
+  # Event log — STAGE 0 OPERATIONAL. Captures `brain1.*` events on every
+  # session (Chat + Inner Voice tabs). Disk-cheap, never overwritten,
+  # exempt from session cleanup. Read with scripts/meta_review/replay.py
+  # or GET /api/inner_voice/event_log.
+  event_log:
+    enabled: true
+    stream_sample_tokens: 50      # currently sampled per-delta in messages.py
+    blob_threshold_bytes: 4096    # large fields → content-addressed store
+    rotation_days: 30             # gzip rotation TBD; manual prune for now
 autonomy:
   enabled: true
   task_dir: ~/obsidian/autonomy

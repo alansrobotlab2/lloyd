@@ -53,6 +53,10 @@ async def list_sessions():
                 "last_active": relative_time,
                 "platform": data.get("platform", "mission-control"),
                 "model": data.get("model", ""),
+                # Inner Voice (#345): surface experiment tag + opt-in flag
+                # for the Inner Voice tab's session list.
+                "experiment_id": data.get("experiment_id"),
+                "inner_voice": bool(data.get("inner_voice", False)),
             })
         except Exception:
             continue
@@ -71,6 +75,63 @@ async def get_messages(session_id: str):
         "session_key": session_id,
         "model": data.get("model", ""),
         "messages": data.get("messages", []),
+        # Inner Voice (#345): surface experiment tag + opt-in flag.
+        "experiment_id": data.get("experiment_id"),
+        "inner_voice": bool(data.get("inner_voice", False)),
+    })
+
+
+@router.patch("/api/sessions/{session_id}")
+async def patch_session(session_id: str, request: Request):
+    """Patch session metadata. Stage 0 (#345): supports `experiment_id`
+    (string or null) and `inner_voice` (bool) for Inner Voice opt-in.
+
+    Future fields can be added here without breaking the wire shape:
+    callers send a partial dict; only known keys are applied.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    # Whitelist of patchable keys. Anything else is silently ignored —
+    # keeps the endpoint forward-compatible with frontend builds that
+    # may try to send unknown fields.
+    allowed_keys = {"experiment_id", "inner_voice"}
+    patch: dict = {}
+    for k, v in body.items():
+        if k not in allowed_keys:
+            continue
+        if k == "experiment_id":
+            if v is not None and not isinstance(v, str):
+                raise HTTPException(status_code=400, detail="experiment_id must be string or null")
+            patch[k] = v
+        elif k == "inner_voice":
+            if not isinstance(v, bool):
+                raise HTTPException(status_code=400, detail="inner_voice must be bool")
+            patch[k] = v
+
+    if not patch:
+        return JSONResponse({"session_key": session_id, "patched": {}, "noop": True})
+
+    # Use mutate_session for atomic read-modify-write.
+    from app.sessions_io import mutate_session
+    def _apply(data):
+        for k, v in patch.items():
+            data[k] = v
+    ok = await mutate_session(session_id, _apply)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Re-read to return the canonical state.
+    data = json.loads(meta_path.read_text())
+    return JSONResponse({
+        "session_key": session_id,
+        "patched": patch,
+        "experiment_id": data.get("experiment_id"),
+        "inner_voice": bool(data.get("inner_voice", False)),
     })
 
 

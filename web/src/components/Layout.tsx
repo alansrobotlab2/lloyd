@@ -11,6 +11,7 @@ import ArchitecturePageFull from './pages/ArchitecturePage'
 import AutonomyPage from './pages/AutonomyPage'
 import UsagePage from './pages/UsagePage'
 import WorkersPage from './pages/WorkersPage'
+import InnerVoicePage from './pages/InnerVoicePage'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu, X } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
 import { api, type ModelInfo } from '../api'
@@ -41,6 +42,7 @@ const PAGES: Record<string, React.FC> = {
   architecture: ArchitecturePageFull,
   autonomy: AutonomyPage,
   workers: WorkersPage,
+  inner_voice: InnerVoicePage,  // Inner Voice (#345)
 }
 
 export default function Layout() {
