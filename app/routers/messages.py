@@ -105,6 +105,43 @@ def _session_inner_voice_enabled(session_id: str) -> bool:
         return False
 
 
+def _session_iv_evaluate_user_turns_enabled(session_id: str) -> bool:
+    """Read the `inner_voice_evaluate_user_turns` flag from the session JSON.
+
+    Stage 5+ — opt-in for firing the Brain 2 ensemble + grading + mid-turn
+    drift on user-typed turns (i.e. chat from the Inner Voice tab), not
+    just ambient/autonomy turns. Default off — chat sessions don't pay the
+    Brain 2 cost unless the user explicitly turns it on.
+
+    Consensus termination + Stage 1 completion-check stay ambient-only
+    regardless: SIGNAL:TASK_COMPLETE veto and premature-stop logic exist
+    to bound autonomous loops, not human-driven chat.
+    """
+    if not _session_inner_voice_enabled(session_id):
+        return False
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        return False
+    try:
+        data = json.loads(meta_path.read_text())
+        return bool(data.get("inner_voice_evaluate_user_turns", False))
+    except Exception:
+        return False
+
+
+def _iv_should_fire_on_turn(session_id: str, turn_source: str) -> bool:
+    """Single-source-of-truth gate for Brain 2 ensemble + grading + mid-turn
+    drift. Returns True iff the session is opted into Inner Voice AND
+    either the turn is ambient OR the session opted into user-turn
+    evaluation.
+    """
+    if not _session_inner_voice_enabled(session_id):
+        return False
+    if turn_source == "ambient":
+        return True
+    return _session_iv_evaluate_user_turns_enabled(session_id)
+
+
 def _inner_voice_hooks_dict(session_id: str) -> dict[str, list[HookMatcher]]:
     """Build the `hooks=` value for ClaudeAgentOptions on Inner Voice
     sessions.
@@ -837,10 +874,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
     # Inner Voice (#345 Stage 3) — mid-turn drift detection state. Fires
     # `drift_detector` every K accumulated chars on Inner-Voice-opted-in
-    # sessions only. State is per-turn; trackers reset implicitly on each
-    # new `_run_turn` invocation.
+    # sessions. Stage 5+ also fires on user turns when the session opted
+    # into `inner_voice_evaluate_user_turns`. State is per-turn; trackers
+    # reset implicitly on each new `_run_turn` invocation.
     _iv_mtd_enabled = (
-        _session_inner_voice_enabled(session_id)
+        _iv_should_fire_on_turn(session_id, turn.source)
         and _iv_ensemble._is_mid_turn_drift_enabled()
     )
     _iv_mtd_cfg = _iv_ensemble.get_mid_turn_drift_config() if _iv_mtd_enabled else {}
@@ -1219,24 +1257,28 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     asyncio.ensure_future(_post_session_capture(session_id))
                     asyncio.ensure_future(_maybe_extract_focus(session_id))
 
-                    # Inner Voice (#345 Stage 1+2) — post-loop checks.
-                    # Fires only on ambient turns of Inner-Voice-opted-in
-                    # sessions. The silent-decision path (above) is its own
-                    # terminal signal, so it intentionally doesn't run there.
-                    # Stage 1's heuristic and Stage 2's Brain 2 critic both
-                    # spawn here — they're independent (heuristic is a regex
-                    # gate, Brain 2 is an LLM call) and the event log records
-                    # both verdicts so we can A/B them post-hoc.
-                    if (
-                        turn.source == "ambient"
-                        and _session_inner_voice_enabled(session_id)
-                    ):
+                    # Inner Voice (#345 Stage 1–5) — post-loop checks.
+                    #
+                    # Stage 1's `_inner_voice_completion_check` (the regex
+                    # heuristic for premature SIGNAL:TASK_COMPLETE) stays
+                    # ambient-only — chat users stop themselves, so the
+                    # check is irrelevant on user turns and would just
+                    # noise the event log.
+                    #
+                    # Stage 2+5 — Brain 2 ensemble + grading pass — fire
+                    # on EITHER ambient turns OR user turns when the
+                    # session opted into `inner_voice_evaluate_user_turns`.
+                    # That flag is what makes the Inner Voice tab's chat
+                    # actually surface Brain 2 verdicts in real time.
+                    iv_should_fire = _iv_should_fire_on_turn(session_id, turn.source)
+                    if turn.source == "ambient" and _session_inner_voice_enabled(session_id):
                         asyncio.ensure_future(_inner_voice_completion_check(
                             session_id=session_id,
                             turn_id=turn.turn_id,
                             response_text=done_text,
                             tool_calls=list(tool_calls_log),
                         ))
+                    if iv_should_fire:
                         asyncio.ensure_future(_inner_voice_brain2_check(
                             session_id=session_id,
                             turn_id=turn.turn_id,

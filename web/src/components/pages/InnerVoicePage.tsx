@@ -1,22 +1,23 @@
 /**
- * Inner Voice (#345) — Stage 2 live UI.
+ * Inner Voice (#345) — Stage 5 chat-driven UI.
  *
- * Sibling tab to Chat. Shows Brain 2 critiques landing on Inner Voice
- * sessions. Stage 2 ships annotation cards from real `inner_voice_critiques`
- * rows + click-to-detail that loads the full Brain 2 prompt + raw response
- * from the per-session event log.
+ * Two-pane layout:
+ *   • Left:  ChatPanel (reused) bound to the selected Inner Voice session.
+ *   • Right: observation panel — state header, critique cards, grading
+ *     progress, recent interventions, click-to-detail.
  *
- * Stage 2 wire shape:
- *   /api/inner_voice/sessions      → list of opted-in sessions
- *   /api/inner_voice/state         → header status (state, ensemble, nudges)
- *   /api/inner_voice/critiques     → annotation cards
- *   /api/inner_voice/event_log     → click-to-detail (raw + prompt)
+ * The "+ New IV session" button calls POST /api/sessions/create with
+ * `inner_voice: true` AND `inner_voice_evaluate_user_turns: true` so
+ * Brain 2 fires on user-typed chat messages, not just ambient turns.
  *
- * SSE delivery is treated as a fast-path hint only — the persona response
- * arrives a few seconds AFTER the SSE stream closes (Brain 2 is fire-and-
- * forget post-loop), so polling /critiques is the source of truth. Future
- * stages may add a long-lived inner-voice SSE channel that doesn't piggy-
- * back on the per-turn stream.
+ * Polling sources of truth:
+ *   /api/inner_voice/state            → header status (every 4s)
+ *   /api/inner_voice/critiques        → annotation cards (every 3s)
+ *   /api/inner_voice/interventions    → bottom strip (every 5s)
+ *   /api/inner_voice/grading_summary  → addressed_rate (every 8s)
+ *
+ * SSE delivery is fire-and-forget post-loop; polling is the source of
+ * truth. Future: long-lived inner-voice SSE channel.
  */
 
 import { useCallback, useEffect, useState } from 'react'
@@ -29,8 +30,18 @@ import {
   XCircle,
   X,
   RefreshCw,
+  Plus,
+  MessageSquare,
 } from 'lucide-react'
-import { api, type InnerVoiceCritique, type InnerVoiceSession, type InnerVoiceState } from '../../api'
+import {
+  api,
+  type InnerVoiceCritique,
+  type InnerVoiceIntervention,
+  type InnerVoiceSession,
+  type InnerVoiceState,
+  type InnerVoiceGradingSummary,
+} from '../../api'
+import ChatPanel from '../ChatPanel'
 
 const DEFAULT_STATE: InnerVoiceState = {
   session_id: null,
@@ -53,7 +64,6 @@ const ACTION_STYLES: Record<ActionKind, { color: string; bg: string; border: str
 }
 
 function actionFromCritique(c: InnerVoiceCritique): ActionKind {
-  // Stage 2 always logs-only. Promote when later stages send a real action.
   if (c.action_taken && c.action_taken !== 'log_only') {
     if (c.action_taken === 'agreement') return 'agree'
     return c.action_taken as ActionKind
@@ -62,20 +72,27 @@ function actionFromCritique(c: InnerVoiceCritique): ActionKind {
   return 'log_only'
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Top-level page
+// ─────────────────────────────────────────────────────────────────────────
+
 export default function InnerVoicePage() {
   const [obsState, setObsState] = useState<InnerVoiceState>(DEFAULT_STATE)
   const [sessions, setSessions] = useState<InnerVoiceSession[]>([])
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
   const [critiques, setCritiques] = useState<InnerVoiceCritique[]>([])
+  const [interventions, setInterventions] = useState<InnerVoiceIntervention[]>([])
+  const [gradingSummary, setGradingSummary] = useState<InnerVoiceGradingSummary | null>(null)
   const [detail, setDetail] = useState<DetailState | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
 
-  // ── Session list ──
+  // ── Sessions list ──
   const loadSessions = useCallback(async () => {
     try {
       const r = await api.innerVoiceSessions(50)
       setSessions(r.sessions || [])
-      // Auto-select most recent if nothing chosen yet.
       if (!selectedSession && r.sessions && r.sessions.length > 0) {
         setSelectedSession(r.sessions[0].session_id)
       }
@@ -100,11 +117,11 @@ export default function InnerVoicePage() {
       }
     }
     poll()
-    const t = setInterval(poll, 5000)
+    const t = setInterval(poll, 4000)
     return () => { cancelled = true; clearInterval(t) }
-  }, [selectedSession])
+  }, [selectedSession, refreshKey])
 
-  // ── Critiques poll for selected session ──
+  // ── Critiques poll ──
   useEffect(() => {
     if (!selectedSession) { setCritiques([]); return }
     let cancelled = false
@@ -112,34 +129,92 @@ export default function InnerVoicePage() {
       try {
         const r = await api.innerVoiceCritiques(selectedSession)
         if (!cancelled) setCritiques(r.critiques || [])
-      } catch {
-        // best-effort
-      }
+      } catch { /* best-effort */ }
     }
     poll()
-    const t = setInterval(poll, 4000)
+    const t = setInterval(poll, 3000)
     return () => { cancelled = true; clearInterval(t) }
   }, [selectedSession, refreshKey])
 
-  const ensembleLabel = obsState.active_ensemble ?? 'autonomy_default'
-  const personaChips = obsState.personas.length ? obsState.personas : ['completion_checker']
-  const observingDot = obsState.state !== 'idle'
-  const dotColor =
-    obsState.state === 'intervening' ? 'bg-red-400' :
-    obsState.state === 'critiquing'  ? 'bg-amber-400' :
-    observingDot                     ? 'bg-green-400' :
-    'bg-slate-600'
-  const maxNudges = obsState.max_nudges_per_session ?? 2
+  // ── Interventions poll ──
+  useEffect(() => {
+    if (!selectedSession) { setInterventions([]); return }
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const r = await api.innerVoiceInterventions(selectedSession)
+        if (!cancelled) setInterventions(r.interventions || [])
+      } catch { /* best-effort */ }
+    }
+    poll()
+    const t = setInterval(poll, 5000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [selectedSession, refreshKey])
+
+  // ── Grading summary poll ──
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const r = await api.innerVoiceGradingSummary(selectedSession || undefined, 168)
+        if (!cancelled) setGradingSummary(r)
+      } catch { /* best-effort */ }
+    }
+    poll()
+    const t = setInterval(poll, 8000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [selectedSession, refreshKey])
+
+  // ── Create new IV session ──
+  const handleCreateSession = useCallback(async () => {
+    setCreateError(null)
+    setCreating(true)
+    try {
+      const r = await api.createSession({
+        model: 'primary',
+        platform: 'mission-control',
+        inner_voice: true,
+        inner_voice_evaluate_user_turns: true,
+      })
+      setSelectedSession(r.session_id)
+      setRefreshKey(k => k + 1)
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : 'create failed')
+    } finally {
+      setCreating(false)
+    }
+  }, [])
 
   // ── Render ──
   return (
-    <div className="flex-1 flex flex-col min-h-0 overflow-hidden p-6 gap-4">
-      {/* ── Header ── */}
-      <div className="flex items-center gap-3">
+    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+      {/* ── Header bar ── */}
+      <div className="flex items-center gap-3 px-6 py-3 border-b border-surface-3/30 flex-shrink-0">
         <Ear className="w-5 h-5 text-brand-400" />
         <h2 className="text-lg font-semibold text-slate-200">Inner Voice</h2>
         <span className="text-xs text-slate-500 font-mono">stage {obsState.stage}</span>
+
+        <SessionPicker
+          sessions={sessions}
+          selectedSession={selectedSession}
+          onSelect={setSelectedSession}
+        />
+
         <div className="ml-auto flex items-center gap-2">
+          {createError && (
+            <span className="text-xs text-red-400 font-mono" title={createError}>
+              create failed
+            </span>
+          )}
+          <button
+            onClick={handleCreateSession}
+            disabled={creating}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-brand-600/20 border border-brand-500/30 text-brand-300 text-xs font-medium hover:bg-brand-600/30 transition disabled:opacity-50"
+            title="Create a new Inner Voice chat session (Brain 2 fires on user turns)"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            {creating ? 'creating…' : 'new IV chat'}
+          </button>
           <button
             onClick={() => setRefreshKey(k => k + 1)}
             className="p-1.5 rounded-md hover:bg-surface-2 text-slate-400 hover:text-slate-200 transition"
@@ -150,92 +225,290 @@ export default function InnerVoicePage() {
         </div>
       </div>
 
-      {/* ── Session picker ── */}
-      <div className="flex items-center gap-3 px-4 py-2.5 bg-surface-1 border border-surface-3/40 rounded-xl text-sm">
-        <span className="text-slate-400 text-xs">session:</span>
-        <select
-          value={selectedSession ?? ''}
-          onChange={e => setSelectedSession(e.target.value || null)}
-          className="bg-surface-2 border border-surface-3/40 rounded-md px-2 py-1 text-xs font-mono text-slate-200 flex-1 min-w-0 max-w-md focus:outline-none focus:border-brand-500/50"
-        >
-          {sessions.length === 0 && <option value="">— no Inner Voice sessions yet —</option>}
-          {sessions.map(s => (
-            <option key={s.session_id} value={s.session_id}>
-              {s.session_id} {s.experiment_id ? `· ${s.experiment_id}` : ''}{s.title ? ` · ${s.title.slice(0, 30)}` : ''}
-            </option>
-          ))}
-        </select>
-        <span className="text-xs text-slate-500">
-          {critiques.length} critique{critiques.length === 1 ? '' : 's'}
-        </span>
+      {/* ── Split pane ── */}
+      <div className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden">
+        {/* Left: chat */}
+        <div className="flex-1 min-h-0 border-b lg:border-b-0 lg:border-r border-surface-3/30 flex flex-col overflow-hidden bg-surface-0/50">
+          {selectedSession ? (
+            <ChatPanel
+              key={selectedSession}
+              requestedSessionKey={selectedSession}
+              currentSessionKey={selectedSession}
+              visible={true}
+              onSessionLoaded={() => {}}
+              onActiveSessionChange={() => {}}
+            />
+          ) : (
+            <div className="flex-1 flex items-center justify-center p-8">
+              <div className="text-center max-w-md">
+                <MessageSquare className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                <div className="text-sm text-slate-400 mb-2">No Inner Voice session selected</div>
+                <div className="text-xs text-slate-500 mb-4">
+                  Click <span className="font-mono text-brand-400">+ new IV chat</span> above
+                  to start a session where Brain 2 fires on every chat turn,
+                  or pick an existing IV session from the dropdown.
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right: observation panel */}
+        <div className="w-full lg:w-[420px] xl:w-[480px] flex-shrink-0 flex flex-col min-h-0 overflow-hidden bg-surface-1/30">
+          <ObservationPanel
+            obsState={obsState}
+            critiques={critiques}
+            interventions={interventions}
+            gradingSummary={gradingSummary}
+            selectedSession={selectedSession}
+            onCardClick={(c) => openDetail(c, selectedSession!, setDetail)}
+          />
+        </div>
       </div>
 
-      {/* ── Status bar ── */}
-      <div className="flex items-center gap-3 px-4 py-3 bg-surface-1 border border-surface-3/40 rounded-xl text-sm">
-        <Activity className="w-4 h-4 text-slate-400" />
-        <span className="text-slate-300">ensemble:</span>
-        <span className="font-mono text-brand-400">{ensembleLabel}</span>
-        <div className="flex gap-1.5 ml-2">
+      {/* Detail panel modal */}
+      {detail && <DetailPanel detail={detail} onClose={() => setDetail(null)} />}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Session picker (compact, in header)
+// ─────────────────────────────────────────────────────────────────────────
+
+function SessionPicker({
+  sessions,
+  selectedSession,
+  onSelect,
+}: {
+  sessions: InnerVoiceSession[]
+  selectedSession: string | null
+  onSelect: (id: string | null) => void
+}) {
+  return (
+    <div className="flex items-center gap-2 ml-2">
+      <span className="text-xs text-slate-500">session:</span>
+      <select
+        value={selectedSession ?? ''}
+        onChange={e => onSelect(e.target.value || null)}
+        className="bg-surface-2 border border-surface-3/40 rounded-md px-2 py-1 text-xs font-mono text-slate-200 max-w-[280px] focus:outline-none focus:border-brand-500/50"
+      >
+        {sessions.length === 0 && <option value="">— none —</option>}
+        {sessions.map(s => (
+          <option key={s.session_id} value={s.session_id}>
+            {s.session_id}
+            {s.evaluate_user_turns ? ' [chat]' : ''}
+            {s.experiment_id ? ` · ${s.experiment_id}` : ''}
+            {s.message_count ? ` · ${s.message_count}msg` : ''}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Right-side observation panel
+// ─────────────────────────────────────────────────────────────────────────
+
+function ObservationPanel({
+  obsState,
+  critiques,
+  interventions,
+  gradingSummary,
+  selectedSession,
+  onCardClick,
+}: {
+  obsState: InnerVoiceState
+  critiques: InnerVoiceCritique[]
+  interventions: InnerVoiceIntervention[]
+  gradingSummary: InnerVoiceGradingSummary | null
+  selectedSession: string | null
+  onCardClick: (c: InnerVoiceCritique) => void
+}) {
+  const ensembleLabel = obsState.active_ensemble ?? 'autonomy_default'
+  const personaChips = obsState.personas.length ? obsState.personas : ['completion_checker']
+  const observingDot = obsState.state !== 'idle'
+  const dotColor =
+    obsState.state === 'intervening' ? 'bg-red-400' :
+    obsState.state === 'critiquing'  ? 'bg-amber-400' :
+    observingDot                     ? 'bg-green-400' :
+    'bg-slate-600'
+  const maxNudges = obsState.max_nudges_per_session ?? 2
+  const gp = obsState.grading_progress
+
+  return (
+    <>
+      {/* ── State header ── */}
+      <div className="flex flex-col gap-2 px-4 py-3 border-b border-surface-3/30 flex-shrink-0">
+        <div className="flex items-center gap-2 text-xs">
+          <Activity className="w-3.5 h-3.5 text-slate-400" />
+          <span className="text-slate-300">ensemble</span>
+          <span className="font-mono text-brand-400">{ensembleLabel}</span>
+          <span className="ml-auto flex items-center gap-1.5">
+            <span className={`w-2 h-2 rounded-full ${dotColor} ${observingDot ? 'animate-pulse' : ''}`} />
+            <span className="text-slate-400">{obsState.state}</span>
+          </span>
+        </div>
+
+        <div className="flex flex-wrap gap-1">
           {personaChips.map(p => (
             <span
               key={p}
-              className="px-2 py-0.5 rounded-md text-[11px] font-mono bg-surface-2 text-slate-400 border border-surface-3/30"
+              className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-surface-2 text-slate-400 border border-surface-3/30"
               title={`persona: ${p}`}
             >
               {p}
             </span>
           ))}
         </div>
-        <div className="ml-auto flex items-center gap-3 text-xs text-slate-400">
-          <span>nudges: {obsState.nudge_count}/{maxNudges}</span>
-          <span className="flex items-center gap-1.5">
-            <span className={`w-2 h-2 rounded-full ${dotColor} ${observingDot ? 'animate-pulse' : ''}`} />
-            {obsState.state}
-          </span>
+
+        <div className="grid grid-cols-3 gap-2 text-[11px] mt-1">
+          <Stat label="nudges" value={`${obsState.nudge_count}/${maxNudges}`} />
+          <Stat
+            label="vetoes"
+            value={String(obsState.consecutive_vetoes ?? 0)}
+            warn={(obsState.consecutive_vetoes ?? 0) >= 2}
+          />
+          <Stat
+            label="esc"
+            value={String(obsState.escalations_count ?? 0)}
+            warn={(obsState.escalations_count ?? 0) > 0}
+          />
         </div>
+
+        {/* Stage 5 grading progress */}
+        {gp && (gp.graded > 0 || gp.ungraded > 0) && (
+          <div className="mt-1 px-2 py-1.5 rounded-md bg-surface-2/60 border border-surface-3/30">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">
+              grading (this session)
+            </div>
+            <div className="flex items-center gap-3 text-[11px] font-mono">
+              <span className="text-slate-300">{gp.graded} graded</span>
+              <span className="text-slate-500">/ {gp.ungraded} pending</span>
+              <span className="ml-auto flex items-center gap-2">
+                <span className="text-green-400" title="addressed=true">
+                  ✓ {gp.addressed_true}
+                </span>
+                <span className="text-red-400" title="addressed=false">
+                  ✗ {gp.addressed_false}
+                </span>
+                <span className="text-slate-500" title="ambiguous">
+                  ? {gp.addressed_null}
+                </span>
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Aggregate grading summary (last 7d, all sessions) */}
+        {gradingSummary && gradingSummary.total_interventions > 0 && (
+          <div className="text-[10px] text-slate-500 font-mono">
+            7d global: {gradingSummary.graded}/{gradingSummary.total_interventions} graded
+            {' · '}
+            addressed_rate {(gradingSummary.addressed_rate * 100).toFixed(0)}%
+          </div>
+        )}
       </div>
 
-      {/* ── Spine: live critiques for selected session ── */}
-      <div className="flex-1 min-h-0 overflow-y-auto bg-surface-1 border border-surface-3/40 rounded-xl p-4 space-y-3">
+      {/* ── Critique cards ── */}
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+        <div className="text-[10px] uppercase tracking-wider text-slate-500 px-1 mb-1">
+          critiques ({critiques.length})
+        </div>
         {!selectedSession && (
-          <div className="text-sm text-slate-500 italic px-2 py-3">
-            Pick an Inner Voice session above. To create one, open a Chat session,
-            then PATCH <code className="font-mono text-slate-400">/api/sessions/&lt;id&gt;</code>{' '}
-            with <code className="font-mono text-slate-400">{`{"inner_voice":true}`}</code>.
+          <div className="text-xs text-slate-500 italic px-2 py-3">
+            No session selected. Pick one above or create a new IV chat.
           </div>
         )}
         {selectedSession && critiques.length === 0 && (
-          <div className="text-sm text-slate-500 italic px-2 py-3">
-            No critiques landed yet for this session. Brain 2 fires post-loop on
-            ambient turns of opted-in sessions — give it an autonomy task or an
-            ambient inject and refresh.
+          <div className="text-xs text-slate-500 italic px-2 py-3">
+            No critiques yet. Send a chat message — Brain 2 fires post-loop
+            and lands a card here a few seconds after Brain 1's response
+            finishes streaming.
           </div>
         )}
         {selectedSession && critiques.map(c => (
-          <CritiqueCard key={c.id} critique={c} onClick={() => openDetail(c, selectedSession, setDetail)} />
+          <CritiqueCard key={c.id} critique={c} onClick={() => onCardClick(c)} />
         ))}
       </div>
 
-      {/* ── Footer: intervention log strip (Stage 2 has none yet) ── */}
-      <div className="flex items-center gap-2 px-4 py-2 bg-surface-1 border border-surface-3/40 rounded-xl text-xs flex-shrink-0">
-        <span className="text-slate-500 font-medium">Intervention log:</span>
-        <span className="text-slate-500 italic">
-          Stage 2 is observation-only — interventions land in Stage 3+.
-        </span>
+      {/* ── Interventions strip ── */}
+      <div className="px-4 py-2 border-t border-surface-3/30 flex-shrink-0 bg-surface-1/50">
+        <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">
+          interventions ({interventions.length})
+        </div>
+        {interventions.length === 0 ? (
+          <div className="text-[11px] text-slate-500 italic">
+            none yet — interventions fire when Brain 2 ensembles veto a SIGNAL:TASK_COMPLETE (ambient turns only)
+          </div>
+        ) : (
+          <div className="space-y-1 max-h-32 overflow-y-auto">
+            {interventions.slice(0, 5).map(iv => (
+              <InterventionRow key={iv.id} intervention={iv} />
+            ))}
+          </div>
+        )}
         {obsState.last_critique_at && (
-          <span className="ml-auto text-slate-500">
-            last critique: <span className="font-mono">{obsState.last_critique_at}</span>
-          </span>
+          <div className="text-[10px] text-slate-500 font-mono mt-1">
+            last critique: {obsState.last_critique_at}
+          </div>
         )}
       </div>
+    </>
+  )
+}
 
-      {/* ── Detail panel (full prompt + raw response) ── */}
-      {detail && <DetailPanel detail={detail} onClose={() => setDetail(null)} />}
+function Stat({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
+  return (
+    <div className={`px-2 py-1 rounded bg-surface-2/60 border border-surface-3/30 ${warn ? 'border-amber-500/30' : ''}`}>
+      <div className="text-[9px] uppercase tracking-wider text-slate-500">{label}</div>
+      <div className={`font-mono text-xs ${warn ? 'text-amber-400' : 'text-slate-300'}`}>{value}</div>
     </div>
   )
 }
 
-// ── Critique card ────────────────────────────────────────────────────────
+function InterventionRow({ intervention }: { intervention: InnerVoiceIntervention }) {
+  const kindColor = {
+    continue:  'text-blue-400',
+    steer:     'text-amber-400',
+    interrupt: 'text-red-400',
+    escalate:  'text-red-400',
+  }[intervention.kind] ?? 'text-slate-400'
+
+  let outcomeIcon = '○'
+  let outcomeColor = 'text-slate-500'
+  if (intervention.outcome_addressed === true) {
+    outcomeIcon = '✓'
+    outcomeColor = 'text-green-400'
+  } else if (intervention.outcome_addressed === false) {
+    outcomeIcon = '✗'
+    outcomeColor = 'text-red-400'
+  } else if (intervention.outcome_turn_id) {
+    outcomeIcon = '?'
+    outcomeColor = 'text-slate-400'
+  }
+
+  return (
+    <div className="flex items-center gap-2 text-[11px] font-mono">
+      <span className={kindColor}>{intervention.kind}</span>
+      <span className={`${outcomeColor} text-sm leading-none`} title={
+        intervention.outcome_addressed === true ? 'addressed' :
+        intervention.outcome_addressed === false ? 'NOT addressed' :
+        intervention.outcome_turn_id ? 'ambiguous' : 'awaiting outcome turn'
+      }>
+        {outcomeIcon}
+      </span>
+      <span className="text-slate-500 truncate flex-1" title={intervention.outcome_summary || ''}>
+        {intervention.outcome_summary || '(no summary yet)'}
+      </span>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Critique card
+// ─────────────────────────────────────────────────────────────────────────
 
 function CritiqueCard({
   critique,
@@ -255,41 +528,34 @@ function CritiqueCard({
   return (
     <button
       onClick={onClick}
-      className={`block w-full text-left rounded-xl px-3.5 py-2.5 text-sm border ${s.bg} ${s.border} hover:bg-opacity-20 transition`}
+      className={`block w-full text-left rounded-lg px-3 py-2 text-sm border ${s.bg} ${s.border} hover:bg-opacity-20 transition`}
     >
-      <div className={`flex items-center gap-1.5 ${s.color} text-xs font-medium mb-1`}>
-        <Icon className="w-3.5 h-3.5" />
-        <span className="font-mono">{critique.persona}</span>
-        {critique.persona_version && (
-          <span className="text-[10px] text-slate-500 font-mono">{critique.persona_version}</span>
-        )}
-        <span className="text-slate-400">severity {sev.toFixed(2)}</span>
-        <span className="text-slate-500 ml-auto">
-          turn {critique.turn_id.slice(0, 8)}…
+      <div className={`flex items-center gap-1.5 ${s.color} text-xs font-medium mb-0.5`}>
+        <Icon className="w-3 h-3" />
+        <span className="font-mono truncate">{critique.persona}</span>
+        <span className="text-slate-400">{sev.toFixed(2)}</span>
+        <span className="text-slate-500 ml-auto text-[10px]">
+          {critique.turn_id.slice(0, 6)}
         </span>
       </div>
-      <div className="text-slate-300 text-xs italic">"{critique.reason || '(no reason given)'}"</div>
-      {critique.anchor_response_excerpt && (
-        <div className="text-[11px] text-slate-500 mt-1 font-mono truncate">
-          ↳ {critique.anchor_response_excerpt.slice(0, 200)}{critique.anchor_response_excerpt.length > 200 ? '…' : ''}
-        </div>
-      )}
-      <div className="flex items-center gap-3 mt-1.5 text-[11px] text-slate-500 font-mono">
+      <div className="text-slate-300 text-[11px] italic line-clamp-2">
+        "{critique.reason || '(no reason)'}"
+      </div>
+      <div className="flex items-center gap-2 mt-1 text-[10px] text-slate-500 font-mono">
         <span>{s.label}</span>
         {critique.latency_ms != null && <span>{critique.latency_ms}ms</span>}
-        {critique.input_tokens != null && critique.output_tokens != null && (
-          <span>{critique.input_tokens}/{critique.output_tokens} tok</span>
-        )}
         {critique.parse_attempts > 1 && (
           <span className="text-amber-400">retried {critique.parse_attempts - 1}x</span>
         )}
-        <span className="ml-auto text-brand-400">click for detail →</span>
+        <span className="ml-auto text-brand-400 text-[10px]">→ detail</span>
       </div>
     </button>
   )
 }
 
-// ── Detail panel ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// Detail panel (full prompt + raw response)
+// ─────────────────────────────────────────────────────────────────────────
 
 interface DetailState {
   critique: InnerVoiceCritique
@@ -308,8 +574,6 @@ function openDetail(
   sessionId: string,
   setDetail: SetDetailFn,
 ) {
-  // Initial state shows whatever we already have (anchor_excerpt, etc.) and
-  // kicks off a load for the full prompt + raw via the event log.
   setDetail({
     critique,
     sessionId,
@@ -322,9 +586,6 @@ function openDetail(
 
   ;(async () => {
     try {
-      // Fetch the persona_invoked event AND persona_response_raw event by
-      // their offsets. We use expand_blobs=true so the contents come back
-      // inline — the events reference content-addressed blobs by SHA.
       const offset = critique.event_log_offset ?? 0
       const r = await api.innerVoiceEventLog(sessionId, offset, 3, true)
       let systemPrompt: string | null = null
@@ -340,7 +601,6 @@ function openDetail(
           rawResponse = d.raw ?? null
         }
       }
-      // Fallback: if raw_response_offset points elsewhere, fetch it too.
       if (!rawResponse && critique.raw_response_offset != null) {
         const r2 = await api.innerVoiceEventLog(sessionId, critique.raw_response_offset, 1, true)
         const ev = r2.events[0]

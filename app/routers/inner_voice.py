@@ -260,6 +260,11 @@ async def list_inner_voice_sessions(
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
             "message_count": len(data.get("messages") or []),
+            # Stage 5: surface the user-turn-eval flag so the IV chat
+            # tab can show whether Brain 2 will fire on chat messages.
+            "evaluate_user_turns": bool(
+                data.get("inner_voice_evaluate_user_turns", False)
+            ),
         })
     return {"sessions": out, "count": len(out)}
 

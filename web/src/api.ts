@@ -104,6 +104,15 @@ export interface InnerVoiceIntervention {
   graded_at: string | null
 }
 
+export interface InnerVoiceGradingProgress {
+  enabled: boolean
+  graded: number
+  ungraded: number
+  addressed_true: number
+  addressed_false: number
+  addressed_null: number
+}
+
 export interface InnerVoiceState {
   session_id: string | null
   inner_voice_enabled?: boolean
@@ -112,7 +121,12 @@ export interface InnerVoiceState {
   personas: string[]
   configured_personas?: string[]
   nudge_count: number
+  consecutive_vetoes?: number          // Stage 4
+  escalations_count?: number           // Stage 4
   max_nudges_per_session?: number
+  veto_severity_threshold?: number     // Stage 4
+  hard_max_turns?: number              // Stage 4
+  grading_progress?: InnerVoiceGradingProgress  // Stage 5
   last_critique_at?: string | null
   stage: string
 }
@@ -124,6 +138,28 @@ export interface InnerVoiceSession {
   created_at: string | null
   updated_at: string | null
   message_count: number
+  evaluate_user_turns?: boolean        // Stage 5: chat-driven testing flag
+}
+
+export interface InnerVoiceGradingSummary {
+  session_id: string | null
+  window_hours: number
+  since_iso: string
+  total_interventions: number
+  graded: number
+  graded_rate: number
+  addressed_true: number
+  addressed_false: number
+  addressed_null: number
+  addressed_rate: number
+  by_persona: Record<string, {
+    total: number
+    graded: number
+    addressed_true: number
+    addressed_false: number
+    addressed_null: number
+    addressed_rate: number
+  }>
 }
 
 export interface InnerVoiceEventLogEntry {
@@ -994,17 +1030,56 @@ export const api = {
     fetch(`${API_BASE}/voice/tts-toggle`, { method: 'POST' }).then(r => r.json()),
 
   // ── Inner Voice (#345) ──
-  // Patch session metadata: experiment tag + Brain 2 opt-in flag. Both
-  // optional in the body — caller sends only what changed.
+  // Patch session metadata: experiment tag + Brain 2 opt-in flag + Stage 5
+  // user-turn evaluation flag. All optional — caller sends only what changed.
   patchSession: (
     sessionId: string,
-    patch: { experiment_id?: string | null; inner_voice?: boolean },
-  ): Promise<{ session_key: string; experiment_id: string | null; inner_voice: boolean }> =>
+    patch: {
+      experiment_id?: string | null
+      inner_voice?: boolean
+      inner_voice_evaluate_user_turns?: boolean
+    },
+  ): Promise<{
+    session_key: string
+    experiment_id: string | null
+    inner_voice: boolean
+    inner_voice_evaluate_user_turns?: boolean
+  }> =>
     fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     }).then(r => r.json()),
+
+  // Pre-create a session with Inner Voice flags set so Brain 2 fires on
+  // turn 1. The Inner Voice tab uses this for the "+ New IV session"
+  // button — regular Chat sessions are still created lazily via the
+  // streamMessage path.
+  createSession: (
+    body: {
+      model?: string
+      platform?: string
+      inner_voice?: boolean
+      inner_voice_evaluate_user_turns?: boolean
+      experiment_id?: string | null
+    } = {},
+  ): Promise<{
+    session_key: string
+    session_id: string
+    model: string
+    platform: string
+    inner_voice: boolean
+    inner_voice_evaluate_user_turns: boolean
+    experiment_id: string | null
+  }> =>
+    fetch(`${API_BASE}/sessions/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(r => {
+      if (!r.ok) throw new Error(`createSession failed: ${r.status}`)
+      return r.json()
+    }),
 
   innerVoiceState: (sessionId?: string): Promise<InnerVoiceState> => {
     const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
@@ -1067,4 +1142,16 @@ export const api = {
         if (!r.ok) throw new Error(`blob ${sha} not found (${r.status})`)
         return r.json()
       }),
+
+  // Stage 5 grading-pass aggregate. Powers the right-side metrics block
+  // on the Inner Voice tab.
+  innerVoiceGradingSummary: (
+    sessionId?: string,
+    hours = 168,
+  ): Promise<InnerVoiceGradingSummary> => {
+    const p = new URLSearchParams()
+    if (sessionId) p.set('session_id', sessionId)
+    p.set('hours', String(hours))
+    return fetch(`${API_BASE}/inner_voice/grading_summary?${p}`).then(r => r.json())
+  },
 }
