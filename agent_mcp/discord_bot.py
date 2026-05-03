@@ -75,9 +75,6 @@ NON_OWNER_DISALLOWED = [
     "mcp____browser_select",
     "mcp____browser_drag",
     "mcp____browser_cookies",
-    # Pipeline — block mutation, allow pipeline_status read
-    "mcp____pipeline_dispatch",
-    "mcp____pipeline_abort",
     # Thunderbird — dynamic tool names (prefixed with thunderbird_); block by pattern below
     # Built-in Claude tools
     "Bash",

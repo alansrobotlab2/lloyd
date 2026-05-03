@@ -30,7 +30,6 @@ from agent_mcp import (
     facts,
     http_tools,
     mission_control,
-    pipeline,
     session,
     skills,
     subliminal,
@@ -64,7 +63,6 @@ MODULES = [
     subliminal,
     http_tools,
     thunderbird,
-    pipeline,
 ]
 
 combined = Server("lloyd")
