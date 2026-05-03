@@ -23,7 +23,7 @@ from app.harness import events
 from app.harness.client import stream_chat
 from app.harness.errors import ParseError, ToolDispatchError
 from app.harness.events import NormalizedEvent
-from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, MCPPool
+from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
 from app.harness.tool_schema import build_tool_list
 
@@ -60,8 +60,11 @@ async def run_query(
         chat_messages.insert(0, {"role": "system", "content": options.system_prompt})
 
     pool = await _build_pool(options)
+    # Pool is process-shared (see mcp_pool.get_or_open_pool); do NOT
+    # aclose() it here — lifecycle.shutdown_cleanup tears down all
+    # pools at FastAPI shutdown.
     try:
-        tools = build_tool_list(pool.discovered, set(options.disallowed_tools))
+        tools = build_tool_list(list(pool.discovered), set(options.disallowed_tools))
 
         session_id = options.session_id or uuid.uuid4().hex
         yield events.system(session_id=session_id, model=options.model)
@@ -192,7 +195,8 @@ async def run_query(
             response_text=accumulated_text,
         )
     finally:
-        await pool.aclose()
+        # Pool is shared across turns — see comment above _build_pool call.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -201,32 +205,41 @@ async def run_query(
 
 
 async def _build_pool(options: RunOptions) -> MCPPool:
-    """Build an MCPPool from options.mcp_servers (or sensible default).
+    """Resolve options.mcp_servers (or sensible default) to a process-shared pool.
 
-    If mcp_servers is empty, fall back to the unified lloyd-mcp
-    aggregator on its default URL — almost every code path wants that
-    anyway.
+    Empty mcp_servers falls back to the unified lloyd-mcp aggregator on
+    its default URL — almost every code path wants that anyway.
     """
     cfg = dict(options.mcp_servers)
     if not cfg:
         cfg = {"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}}
-    pool = MCPPool(cfg)
-    await pool.open()
-    return pool
+    return await get_or_open_pool(cfg)
 
 
 def _has_system(messages: list[dict[str, Any]]) -> bool:
     return any(m.get("role") == "system" for m in messages)
 
 
+_USAGE_KEY_REMAP = {
+    "prompt_tokens": "input_tokens",
+    "completion_tokens": "output_tokens",
+}
+
+
 def _merge_usage(acc: dict[str, int], chunk: dict[str, Any]) -> dict[str, int]:
-    """Merge a usage chunk into the running total. vLLM emits the final
-    usage as cumulative for the request, so we replace rather than add.
+    """Merge a usage chunk into the running total.
+
+    vLLM emits the final usage as cumulative for the request, so we
+    replace rather than add. OpenAI-style keys (`prompt_tokens` /
+    `completion_tokens`) are normalized to the Anthropic-style keys
+    (`input_tokens` / `output_tokens`) every downstream consumer
+    (usage_store, messages.py stats panel) expects.
     """
     out = dict(acc)
     for k, v in chunk.items():
-        if isinstance(v, int):
-            out[k] = v
+        if not isinstance(v, int):
+            continue
+        out[_USAGE_KEY_REMAP.get(k, k)] = v
     return out
 
 

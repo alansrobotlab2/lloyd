@@ -3,13 +3,14 @@
 import asyncio
 import logging
 
+from app.harness.mcp_pool import close_all_pools
 from app.sessions_io import _session_queues
 
 logger = logging.getLogger("lloyd-server.lifecycle")
 
 
 async def shutdown_cleanup(grace_seconds: float = 2.0) -> None:
-    """Cancel in-flight turns and wait briefly for clean teardown."""
+    """Cancel in-flight turns, then close shared MCP pools."""
     consumer_tasks = []
     for session_id, q in list(_session_queues.items()):
         try:
@@ -30,3 +31,8 @@ async def shutdown_cleanup(grace_seconds: float = 2.0) -> None:
             )
         except asyncio.TimeoutError:
             logger.warning("Shutdown: consumer tasks did not finish within grace period")
+
+    try:
+        await close_all_pools()
+    except Exception as exc:
+        logger.warning("Shutdown: close_all_pools raised: %s", exc)

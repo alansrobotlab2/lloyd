@@ -134,10 +134,9 @@ def _iv_should_fire_on_turn(session_id: str, turn_source: str) -> bool:
 def _inner_voice_hooks_dict(session_id: str) -> HookRegistry:
     """Build a HookRegistry for Inner Voice sessions.
 
-    Wraps the existing old-style SDK callbacks (input_data, tool_use_id,
-    context) in thin adapters that match the harness callback signature
-    (input_data, session_id, ctx) so heuristics.py and intra_turn.py
-    need no functional changes.
+    The harness fires `cb(input_data, tool_use_id, None)` — same shape as
+    the old SDK contract — so heuristics.py / intra_turn.py callbacks plug
+    in without translation.
 
     Stage 1 wires only PreToolUse (Bash matcher). Stage 7 adds
     PostToolUse + PostToolUseFailure (no matcher, every tool) for
@@ -145,22 +144,11 @@ def _inner_voice_hooks_dict(session_id: str) -> HookRegistry:
     """
     reg = HookRegistry()
 
-    # Adapt old-style (input_data, tool_use_id, ctx) → harness (input_data, session_id, ctx)
-    old_pre = _iv_heuristics.make_pretooluse_callback(session_id)
-    async def _pre_adapter(input_data, s_id, ctx):
-        return await old_pre(input_data, ctx.get("tool_use_id"), {})
-    reg.add_pre_tool_use("Bash", _pre_adapter)
+    reg.add_pre_tool_use("Bash", _iv_heuristics.make_pretooluse_callback(session_id))
 
     if _iv_intra_turn.is_enabled():
-        old_post = _iv_intra_turn.make_post_tool_use_callback(session_id)
-        async def _post_adapter(input_data, s_id, ctx):
-            return await old_post(input_data, ctx.get("tool_use_id"), {})
-        reg.add_post_tool_use(_post_adapter)
-
-        old_fail = _iv_intra_turn.make_post_tool_use_failure_callback(session_id)
-        async def _fail_adapter(input_data, s_id, ctx):
-            return await old_fail(input_data, ctx.get("tool_use_id"), {})
-        reg.add_post_tool_use_failure(_fail_adapter)
+        reg.add_post_tool_use(_iv_intra_turn.make_post_tool_use_callback(session_id))
+        reg.add_post_tool_use_failure(_iv_intra_turn.make_post_tool_use_failure_callback(session_id))
 
     return reg
 
@@ -964,12 +952,39 @@ async def _emit(turn: SessionTurn, event: str, data: dict):
     await turn.events.put({"event": event, "data": data})
 
 
+def _content_to_string(content: Any) -> str:
+    """Flatten persisted content (string OR list[{type:text,text:...}]) to a string.
+
+    vLLM's OpenAI endpoint rejects list-shaped content on `role:"tool"`
+    and is unreliable on `role:"assistant"` when content is an empty
+    list alongside `tool_calls`. We normalize everywhere to a plain
+    string so the chat-completions server doesn't 400 us mid-turn.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                t = block.get("text") or block.get("content") or ""
+                if t:
+                    parts.append(t)
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
 async def _prepare_messages_for_harness(history: list[dict]) -> list[dict]:
     """Normalize a compacted session history for vLLM.
 
     Strips UI-only fields (id, timestamp, stats, source, cancelled,
-    subliminal, reasoning) and non-conversation roles (system, subliminal)
-    so the harness gets clean OpenAI-format messages.
+    subliminal, reasoning) and non-conversation roles (system, subliminal).
+    Coerces all content blocks to plain strings — vLLM rejects list
+    content on tool messages and on assistant messages that also carry
+    tool_calls.
     """
     keep_roles = {"user", "assistant", "tool"}
     out = []
@@ -978,20 +993,31 @@ async def _prepare_messages_for_harness(history: list[dict]) -> list[dict]:
         if role not in keep_roles:
             continue
         msg: dict[str, Any] = {"role": role}
-        content = m.get("content", "")
-        msg["content"] = content
+        msg["content"] = _content_to_string(m.get("content", ""))
         if role == "assistant":
             tcs = m.get("tool_calls")
             if tcs:
                 clean_tcs = []
                 for tc in tcs:
+                    fn = dict(tc.get("function", {}))
+                    # Arguments must be a string per OpenAI spec; some
+                    # persisted entries already store it as one, others
+                    # as a dict — coerce.
+                    args = fn.get("arguments", "")
+                    if isinstance(args, (dict, list)):
+                        fn["arguments"] = json.dumps(args)
+                    elif not isinstance(args, str):
+                        fn["arguments"] = str(args)
                     entry = {
                         "id": tc.get("id") or tc.get("call_id", ""),
                         "type": tc.get("type", "function"),
-                        "function": dict(tc.get("function", {})),
+                        "function": fn,
                     }
                     clean_tcs.append(entry)
                 msg["tool_calls"] = clean_tcs
+                # When tool_calls present, vLLM accepts empty content as "".
+                if not msg["content"]:
+                    msg["content"] = ""
         elif role == "tool":
             tc_id = m.get("tool_call_id", "")
             if tc_id:

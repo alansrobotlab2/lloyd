@@ -125,14 +125,18 @@ def test_has_system_false():
     assert not _has_system([{"role": "user", "content": "y"}])
 
 
-def test_merge_usage_replaces_int_keys():
-    out = _merge_usage({"prompt_tokens": 10, "completion_tokens": 5}, {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28})
-    assert out == {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28}
+def test_merge_usage_normalizes_openai_keys():
+    """vLLM emits OpenAI-style names; harness normalizes to Anthropic-style."""
+    out = _merge_usage(
+        {"input_tokens": 10, "output_tokens": 5},
+        {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+    )
+    assert out == {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28}
 
 
 def test_merge_usage_ignores_non_int():
     out = _merge_usage({}, {"prompt_tokens": 5, "model_name": "primary"})
-    assert out == {"prompt_tokens": 5}
+    assert out == {"input_tokens": 5}
 
 
 # ---------------------------------------------------------------------------
