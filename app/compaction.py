@@ -1,20 +1,12 @@
-"""Conversation compaction — client-side context management for local models.
+"""Conversation compaction — client-side context management.
 
-Design:
-  - Cloud (Anthropic API): the API handles auto-compaction and `resume`
-    gives the SDK a persistent session. This module is a no-op for cloud.
-  - Local (vLLM / llama-server / any `ANTHROPIC_BASE_URL != ""`): the
-    endpoint is stateless per request, so we reconstruct the conversation
-    from the persisted session JSON each turn, truncate to fit the
-    model's context window, and format it in the model's expected chat
-    template before passing as `prompt`.
-
-Gate: `is_local_model(base_url)` — `base_url` is the value of the model's
-`ANTHROPIC_BASE_URL` env var (empty for cloud).
+The harness is stateless per request, so we reconstruct the conversation
+from the persisted session JSON each turn, truncate to fit the model's
+context window, and return ready-to-send OpenAI-format messages.
 
 This module intentionally does NOT do LLM-based summarization. That's a
-future follow-up; for now "compaction" here means truncation with a
-synthetic omission marker.
+future follow-up; for now "compaction" means truncation with a synthetic
+omission marker.
 """
 
 from __future__ import annotations
@@ -123,21 +115,8 @@ def estimate_conversation_tokens(messages: list[dict], system_prompt: str = "") 
 
 
 # ---------------------------------------------------------------------------
-# Local/cloud detection + per-model window
+# Per-model context window
 # ---------------------------------------------------------------------------
-
-
-def is_local_model(base_url: str) -> bool:
-    """Return True if `base_url` points at a local/self-hosted endpoint.
-
-    Cloud = real Anthropic API: empty base_url, or any `*.anthropic.com`
-    host (e.g. api.anthropic.com, api2.anthropic.com). Anything else
-    (localhost, custom domain, etc.) is treated as local.
-    """
-    if not base_url:
-        return False
-    lower = base_url.lower()
-    return "anthropic.com" not in lower
 
 
 def get_context_window(model: str) -> int:
@@ -251,99 +230,7 @@ def truncate_conversation(
 
 
 # ---------------------------------------------------------------------------
-# Chat-template formatting
-# ---------------------------------------------------------------------------
-
-# Per-family template config. Each family emits the same shape:
-#   <open><role>\n<content><close>\n
-# and the full output ends with `gen_cue` to prompt generation.
-#
-# Qwen/Mistral: ChatML (<|im_start|> / <|im_end|>).
-# Llama 3/4: header-based (<|start_header_id|> / <|end_header_id|> + <|eot_id|>).
-
-_CHAT_TEMPLATES: dict[str, dict[str, Any]] = {
-    "qwen": {
-        "role_map": {"user": "user", "assistant": "assistant", "system": "system", "tool": "user"},
-        "message_open": "<|im_start|>{role}\n",
-        "message_close": "<|im_end|>\n",
-        "gen_cue": "<|im_start|>assistant\n",
-    },
-    "mistral": {
-        "role_map": {"user": "user", "assistant": "assistant", "system": "system", "tool": "user"},
-        "message_open": "<|im_start|>{role}\n",
-        "message_close": "<|im_end|>\n",
-        "gen_cue": "<|im_start|>assistant\n",
-    },
-    "llama": {
-        "role_map": {"user": "user", "assistant": "assistant", "system": "system", "tool": "user"},
-        "message_open": "<|start_header_id|>{role}<|end_header_id|>\n\n",
-        "message_close": "<|eot_id|>",
-        "gen_cue": "<|start_header_id|>assistant<|end_header_id|>\n\n",
-    },
-}
-
-_DEFAULT_TEMPLATE_KEY = "qwen"
-
-
-def _pick_template(model: str) -> dict[str, Any]:
-    lower = (model or "").lower()
-    if "qwen" in lower:
-        return _CHAT_TEMPLATES["qwen"]
-    if "llama" in lower or "metallama" in lower or "xwin" in lower:
-        return _CHAT_TEMPLATES["llama"]
-    if "mistral" in lower:
-        return _CHAT_TEMPLATES["mistral"]
-    return _CHAT_TEMPLATES[_DEFAULT_TEMPLATE_KEY]
-
-
-def _format_one(msg: dict, template: dict[str, Any]) -> str:
-    role_raw = msg.get("role", "user")
-    mapped = template["role_map"].get(role_raw, role_raw)
-    content = _message_text(msg)
-    return template["message_open"].format(role=mapped) + content + template["message_close"]
-
-
-def format_conversation_for_local(
-    history: list[dict],
-    current_user_text: str = "",
-    model: str = "",
-) -> str:
-    """Render history + current turn as a chat-template-formatted prompt.
-
-    `history` is the persisted message list. If its last message is a
-    user message, that message is replaced by `current_user_text` (which
-    is expected to be the prefetch-enhanced text for the current turn —
-    includes subliminal context the persisted copy doesn't have).
-
-    Output ends with the template's generation cue (e.g.
-    `<|im_start|>assistant\\n` for ChatML) so the local model starts
-    emitting the reply immediately.
-
-    If both `history` and `current_user_text` are empty, returns the
-    bare generation cue (edge case; callers should avoid this).
-    """
-    template = _pick_template(model)
-
-    # Strip trailing user msg — caller will re-add it with fresh context.
-    working = list(history)
-    if current_user_text and working and working[-1].get("role") == "user":
-        working = working[:-1]
-
-    pieces: list[str] = [_format_one(m, template) for m in working]
-
-    if current_user_text:
-        pieces.append(
-            template["message_open"].format(role="user")
-            + current_user_text
-            + template["message_close"]
-        )
-
-    pieces.append(template["gen_cue"])
-    return "".join(pieces)
-
-
-# ---------------------------------------------------------------------------
-# Session-level helper — read JSON, truncate, return ready-to-format history
+# Session-level helper — read JSON, truncate, return ready-to-send history
 # ---------------------------------------------------------------------------
 
 
@@ -417,11 +304,9 @@ __all__ = [
     "estimate_tokens",
     "estimate_message_tokens",
     "estimate_conversation_tokens",
-    "is_local_model",
     "get_context_window",
     "truncation_threshold",
     "truncate_conversation",
-    "format_conversation_for_local",
     "load_and_compact_session",
     "TOKENS_PER_CHAR",
     "OUTPUT_TOKENS_RESERVED",

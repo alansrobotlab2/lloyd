@@ -2,7 +2,6 @@
 plus the background scheduler ticker registered at app startup.
 """
 
-import asyncio
 import logging
 import re
 from datetime import datetime
@@ -33,7 +32,7 @@ async def autonomy_run(request: Request):
         task_id = data.get("task_id")
         if not task_id:
             raise HTTPException(status_code=400, detail="task_id required")
-        result = await asyncio.get_event_loop().run_in_executor(None, run_task, int(task_id))
+        result = await run_task(int(task_id))
         return JSONResponse(result)
     except ImportError:
         raise HTTPException(status_code=501, detail="Autonomy module not available")

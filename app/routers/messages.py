@@ -20,13 +20,6 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from claude_agent_sdk import (
-    query, ClaudeAgentOptions,
-    SystemMessage, AssistantMessage, UserMessage, ResultMessage,
-    HookMatcher,
-)
-from claude_agent_sdk import TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock
-from claude_agent_sdk.types import StreamEvent
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -34,11 +27,10 @@ import usage_store
 from app.config import (
     CONFIG,
     _get_model_env,
-    _resolve_effort,
-    _resolve_thinking,
     _model_base_url,
     _resolve_model_name,
 )
+from app.harness import run_query, RunOptions, HookRegistry
 from app.paths import SESSIONS_DIR, PIPELINE_RUNS_DIR
 from app.sessions_io import (
     SessionTurn,
@@ -65,11 +57,7 @@ from app.routers.voice import (
 )
 from prompt_builder import build_system_prompt
 from prefetch import prefetch_context
-from app.compaction import (
-    format_conversation_for_local,
-    is_local_model,
-    load_and_compact_session,
-)
+from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice (#345) — brain1.* capture
 from app.inner_voice import heuristics as _iv_heuristics  # Inner Voice (#345) — Stage 1
 from app.inner_voice import ensemble as _iv_ensemble  # Inner Voice (#345) — Stage 2
@@ -143,54 +131,38 @@ def _iv_should_fire_on_turn(session_id: str, turn_source: str) -> bool:
     return _session_iv_evaluate_user_turns_enabled(session_id)
 
 
-def _inner_voice_hooks_dict(session_id: str) -> dict[str, list[HookMatcher]]:
-    """Build the `hooks=` value for ClaudeAgentOptions on Inner Voice
-    sessions.
+def _inner_voice_hooks_dict(session_id: str) -> HookRegistry:
+    """Build a HookRegistry for Inner Voice sessions.
 
-    The PreToolUse callback is bound to Lloyd's `session_id` via closure —
-    `PreToolUseHookInput.session_id` carries the Claude CLI's UUID, which
-    is useless for finding the events.jsonl file. The closure ensures
-    `inner_voice.pre_tool_use_evaluated` events land in the same file as
-    the rest of this turn's `brain1.*` events.
+    Wraps the existing old-style SDK callbacks (input_data, tool_use_id,
+    context) in thin adapters that match the harness callback signature
+    (input_data, session_id, ctx) so heuristics.py and intra_turn.py
+    need no functional changes.
 
-    Stage 1 wires only PreToolUse (Bash matcher — the deny rules currently
-    only target Bash). Stage 7 adds PostToolUse + PostToolUseFailure
-    (no matcher — fires on every tool) for ``tool_result_grader`` /
-    ``progress_monitor`` dispatch.
+    Stage 1 wires only PreToolUse (Bash matcher). Stage 7 adds
+    PostToolUse + PostToolUseFailure (no matcher, every tool) for
+    ``tool_result_grader`` / ``progress_monitor`` dispatch.
     """
-    hooks: dict[str, list[HookMatcher]] = {
-        "PreToolUse": [
-            HookMatcher(
-                matcher="Bash",
-                hooks=[_iv_heuristics.make_pretooluse_callback(session_id)],
-            ),
-        ],
-    }
+    reg = HookRegistry()
+
+    # Adapt old-style (input_data, tool_use_id, ctx) → harness (input_data, session_id, ctx)
+    old_pre = _iv_heuristics.make_pretooluse_callback(session_id)
+    async def _pre_adapter(input_data, s_id, ctx):
+        return await old_pre(input_data, ctx.get("tool_use_id"), {})
+    reg.add_pre_tool_use("Bash", _pre_adapter)
+
     if _iv_intra_turn.is_enabled():
-        # PostToolUse fires after every successful tool result. No matcher
-        # = matches every tool. The closure-bound callback records the
-        # tool boundary into per-turn state and possibly fires
-        # `tool_result_grader` / `progress_monitor` via
-        # `asyncio.ensure_future`. Tool flow is NOT blocked.
-        hooks["PostToolUse"] = [
-            HookMatcher(
-                matcher=None,
-                hooks=[_iv_intra_turn.make_post_tool_use_callback(session_id)],
-            ),
-        ]
-        # PostToolUseFailure fires when SDK validation rejects the call
-        # (missing required param, schema mismatch, tool raise). Same
-        # closure pattern, but the input carries `error: str` instead of
-        # `tool_response`. Critical for the validation-loop catch — the
-        # failed Read calls from session 20260502_044548_iv5f83 only
-        # surface here, not in PostToolUse.
-        hooks["PostToolUseFailure"] = [
-            HookMatcher(
-                matcher=None,
-                hooks=[_iv_intra_turn.make_post_tool_use_failure_callback(session_id)],
-            ),
-        ]
-    return hooks
+        old_post = _iv_intra_turn.make_post_tool_use_callback(session_id)
+        async def _post_adapter(input_data, s_id, ctx):
+            return await old_post(input_data, ctx.get("tool_use_id"), {})
+        reg.add_post_tool_use(_post_adapter)
+
+        old_fail = _iv_intra_turn.make_post_tool_use_failure_callback(session_id)
+        async def _fail_adapter(input_data, s_id, ctx):
+            return await old_fail(input_data, ctx.get("tool_use_id"), {})
+        reg.add_post_tool_use_failure(_fail_adapter)
+
+    return reg
 
 
 # ---------------------------------------------------------------------------
@@ -992,8 +964,44 @@ async def _emit(turn: SessionTurn, event: str, data: dict):
     await turn.events.put({"event": event, "data": data})
 
 
+async def _prepare_messages_for_harness(history: list[dict]) -> list[dict]:
+    """Normalize a compacted session history for vLLM.
+
+    Strips UI-only fields (id, timestamp, stats, source, cancelled,
+    subliminal, reasoning) and non-conversation roles (system, subliminal)
+    so the harness gets clean OpenAI-format messages.
+    """
+    keep_roles = {"user", "assistant", "tool"}
+    out = []
+    for m in history:
+        role = m.get("role", "")
+        if role not in keep_roles:
+            continue
+        msg: dict[str, Any] = {"role": role}
+        content = m.get("content", "")
+        msg["content"] = content
+        if role == "assistant":
+            tcs = m.get("tool_calls")
+            if tcs:
+                clean_tcs = []
+                for tc in tcs:
+                    entry = {
+                        "id": tc.get("id") or tc.get("call_id", ""),
+                        "type": tc.get("type", "function"),
+                        "function": dict(tc.get("function", {})),
+                    }
+                    clean_tcs.append(entry)
+                msg["tool_calls"] = clean_tcs
+        elif role == "tool":
+            tc_id = m.get("tool_call_id", "")
+            if tc_id:
+                msg["tool_call_id"] = tc_id
+        out.append(msg)
+    return out
+
+
 async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None:
-    """Run a single turn through the SDK, persisting as we go.
+    """Run a single turn through the harness, persisting as we go.
 
     Does not format SSE wire bytes — that's the subscriber's job. On
     return, the consumer pushes the sentinel `None` to close the stream.
@@ -1002,9 +1010,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     text: str = payload["text"]
     prefetched_text: str = payload["prefetched_text"]
     model: str = payload["model"]
-    options: ClaudeAgentOptions = payload["options"]
+    options: RunOptions = payload["options"]
     meta_path = payload["meta_path"]
-    resume_id = payload.get("resume_id")
     cancel_event = q.cancel_event
 
     t_query_start = time.perf_counter()
@@ -1021,18 +1028,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         "text": text,
         "source": turn.source,
         "model": model,
-        "resume_id": resume_id,
         "has_prefetched_context": prefetched_text != text,
     }, turn_id=turn.turn_id)
-    # `options_built` reaches here pre-baked by post_message_stream; we can
-    # surface its salient fields without dumping callbacks/closures.
     _event_log.log_event(session_id, "brain1.options_built", {
         "model": model,
-        "max_turns": getattr(options, "max_turns", None),
-        "permission_mode": getattr(options, "permission_mode", None),
-        "env_keys": sorted(list((options.env or {}).keys())) if hasattr(options, "env") else [],
-        "mcp_server_keys": sorted(list((options.mcp_servers or {}).keys())) if hasattr(options, "mcp_servers") else [],
-        "disallowed_tools": list(getattr(options, "disallowed_tools", []) or []),
+        "max_turns": options.max_turns,
+        "permission_mode": options.permission_mode,
+        "env_keys": sorted(options.env.keys()),
+        "mcp_server_keys": sorted(options.mcp_servers.keys()),
+        "disallowed_tools": list(options.disallowed_tools),
     }, turn_id=turn.turn_id)
 
     full_response = ""
@@ -1049,8 +1053,6 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         "cost_usd": None, "duration_ms": None, "num_turns": None,
         "model": model,
     }
-    # stream_stats["input_tokens"] gets overwritten per turn, but ResultMessage later
-    # replaces it with the cumulative total — we need both values.
     last_turn_input: int = 0
 
     # TTS-on-response: cumulative buffer across all text segments in this turn
@@ -1088,38 +1090,32 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
             [_build_subliminal_entry(turn, subl_prefix, now_ts)],
         )
 
-    # ------------------------------------------------------------------
-    # Local-model compaction: local endpoints (vLLM/llama-server) are
-    # stateless, so we reconstruct the conversation from the persisted
-    # session JSON each turn, truncate to fit the model's context window,
-    # and render it in the model's native chat template. Cloud models
-    # skip this block entirely — the Anthropic API manages context via
-    # `resume`.
-    # ------------------------------------------------------------------
-    base_url = (options.env or {}).get("ANTHROPIC_BASE_URL", "")
-    is_local = is_local_model(base_url)
-    conv_text = ""
-
-    if is_local:
-        comp = load_and_compact_session(meta_path, model=model)
-        conv_text = format_conversation_for_local(
-            comp["history"],
-            current_user_text=prefetched_text,
-            model=model,
+    # Build OpenAI-format messages from the compacted session history.
+    # The harness is stateless per request — we reconstruct the full
+    # conversation each turn, truncate to the model's context window,
+    # and append the current user message.
+    comp = load_and_compact_session(meta_path, model=model)
+    if comp["truncated"]:
+        logger.info(
+            "[compaction] %s: dropped %d tokens (%d → %d, window=%d, threshold=%d)",
+            session_id,
+            comp["tokens_before"] - comp["tokens_after"],
+            comp["tokens_before"],
+            comp["tokens_after"],
+            comp["context_window"],
+            comp["threshold"],
         )
-        if comp["truncated"]:
-            logger.info(
-                "[compaction] %s: dropped %d tokens (%d → %d, window=%d, threshold=%d)",
-                session_id,
-                comp["tokens_before"] - comp["tokens_after"],
-                comp["tokens_before"],
-                comp["tokens_after"],
-                comp["context_window"],
-                comp["threshold"],
-            )
-        # Local endpoints don't support SDK resume; drive context purely
-        # from our reconstructed prompt.
-        options.resume = None
+    harness_messages = await _prepare_messages_for_harness(comp["history"])
+    # Strip trailing user message if present — we'll append the fresh
+    # prefetched version (includes subliminal context the persisted copy lacks).
+    if harness_messages and harness_messages[-1].get("role") == "user":
+        harness_messages = harness_messages[:-1]
+    harness_messages.append({"role": "user", "content": prefetched_text})
+
+    # Wire cancel_event and session_id into options at run time
+    # (they're not available when options is built in post_message_stream).
+    options.cancel_event = cancel_event
+    options.session_id = session_id
 
     # Inner Voice (#345) — sampled stream-event capture. K=50 deltas; each
     # firing captures position + delta length so we can reconstruct the
@@ -1165,134 +1161,98 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,
-        "is_local": is_local,
-        "prompt_chars": len(conv_text if is_local else prefetched_text),
+        "prompt_chars": len(prefetched_text),
+        "history_messages": len(harness_messages) - 1,
     }, turn_id=turn.turn_id)
 
     cancelled_mid_stream = False
     try:
-        async for message in query(
-            prompt=conv_text if is_local else prefetched_text,
-            options=options,
-        ):
-            if cancel_event.is_set():
-                logger.info(f"Session {session_id} turn {turn.turn_id} cancelled via API/IV")
-                cancelled_mid_stream = True
-                break
+        async for evt in run_query(harness_messages, options):
+            etype = evt["type"]
 
-            if first_event:
+            if first_event and etype not in ("system",):
                 logger.info(
-                    f"[TIMING] first SDK event after {time.perf_counter() - t_query_start:.3f}s "
-                    f"(SDK+MCP startup)  resume={'yes' if resume_id else 'no'}"
+                    f"[TIMING] first harness event ({etype}) after "
+                    f"{time.perf_counter() - t_query_start:.3f}s"
                 )
                 first_event = False
-            if isinstance(message, StreamEvent):
-                evt = message.event
-                etype = evt.get("type", "")
-                if etype == "content_block_delta":
-                    delta = evt.get("delta", {})
-                    dtype = delta.get("type", "")
-                    if dtype == "text_delta":
-                        delta_text = delta.get("text", "")
-                        if delta_text:
-                            if not full_response:
-                                logger.info(
-                                    f"[TIMING] first text token after "
-                                    f"{time.perf_counter() - t_query_start:.3f}s (model TTFT)"
-                                )
-                            full_response += delta_text
-                            await _emit(turn, "text_delta", {"text": delta_text})
-                            # Inner Voice — sampled stream event every K deltas.
-                            _stream_delta_count += 1
-                            if _stream_delta_count % _stream_sample_every == 0:
-                                _event_log.log_event(session_id, "brain1.stream_event", {
-                                    "kind": "text_delta",
-                                    "delta_index": _stream_delta_count,
-                                    "position_chars": len(full_response),
-                                    "delta_chars": len(delta_text),
-                                }, turn_id=turn.turn_id)
-                            # Inner Voice (#345 Stage 3) — mid-turn drift
-                            # detection. Fires `drift_detector` against the
-                            # accumulated partial response on two surfaces:
-                            #   1. First check at len >= min_chars_before_first_check
-                            #   2. Subsequent checks every check_every_chars after
-                            # The spawned task may set `cancel_event` and enqueue
-                            # an ambient nudge if the verdict crosses the
-                            # veto threshold. Fire-and-forget — text streaming
-                            # must not block on a 5s Brain 2 call.
-                            _iv_mtd_first_check_due = (
-                                _iv_mtd_checks_fired == 0
-                                and len(full_response) >= _iv_mtd_min_first
-                            )
-                            _iv_mtd_followup_due = (
-                                _iv_mtd_checks_fired > 0
-                                and (len(full_response) - _iv_mtd_chars_at_last_check) >= _iv_mtd_every
-                            )
-                            if (
-                                _iv_mtd_enabled
-                                and _iv_mtd_checks_fired < _iv_mtd_max_checks
-                                and not cancel_event.is_set()
-                                and (_iv_mtd_first_check_due or _iv_mtd_followup_due)
-                            ):
-                                _iv_mtd_chars_at_last_check = len(full_response)
-                                _iv_mtd_checks_fired += 1
-                                asyncio.ensure_future(_inner_voice_mid_turn_drift_check(
-                                    session_id=session_id,
-                                    turn=turn,
-                                    frozen_task_intent=text,
-                                    partial_response=full_response,
-                                    stream_position_chars=len(full_response),
-                                    delta_index=_stream_delta_count,
-                                    cancel_event=cancel_event,
-                                ))
-                            # Inner Voice (#345 Stage 7) — also pulse the
-                            # progress_monitor's time trigger from the
-                            # text-delta path. Without this, a turn that
-                            # stalls with NO tool calls (long thinking +
-                            # long text emission) never fires the periodic
-                            # synthesizer. Sample every K=50 deltas to
-                            # avoid per-token check overhead — same cadence
-                            # as the brain1.stream_event sampling above.
-                            if (
-                                _iv_intra_active
-                                and not cancel_event.is_set()
-                                and _stream_delta_count % _stream_sample_every == 0
-                            ):
-                                _iv_intra_turn._maybe_fire_progress_monitor(
-                                    session_id, trigger_check=False,
-                                )
-                            # Fire TTS for the first two sentences as soon as
-                            # they land. Re-check `tts_is_enabled()` per delta
-                            # so toggling mid-turn takes effect.
-                            if tts_should_speak and not tts_spoken and tts_is_enabled():
-                                tts_buffer += delta_text
-                                spoken_chunk = extract_first_two_sentences(tts_buffer)
-                                if spoken_chunk:
-                                    tts_spoken = True
-                                    asyncio.create_task(speak_text(spoken_chunk))
-                    elif dtype == "thinking_delta":
-                        thinking_text = delta.get("thinking", "")
-                        if thinking_text:
-                            accumulated_thinking += thinking_text
-                            await _emit(turn, "thinking_delta", {"text": thinking_text})
-                elif etype == "message_start":
-                    msg_usage = evt.get("message", {}).get("usage", {})
-                    stream_stats["input_tokens"] = msg_usage.get("input_tokens", 0)
-                    last_turn_input = stream_stats["input_tokens"]
-                    stream_stats["cache_create"] = msg_usage.get("cache_creation_input_tokens", 0)
-                    stream_stats["cache_read"] = msg_usage.get("cache_read_input_tokens", 0)
-                elif etype == "message_delta":
-                    stream_stats["output_tokens"] = evt.get("usage", {}).get("output_tokens", 0)
-                continue
 
-            if isinstance(message, SystemMessage):
-                sdk_session = message.data.get("session_id")
-                if sdk_session:
-                    await mutate_session(session_id, lambda d: d.__setitem__("sdk_session_id", sdk_session))
+            if etype == "text_delta":
+                delta_text = evt["text"]
+                if delta_text:
+                    if not full_response:
+                        logger.info(
+                            f"[TIMING] first text token after "
+                            f"{time.perf_counter() - t_query_start:.3f}s (model TTFT)"
+                        )
+                    full_response += delta_text
+                    await _emit(turn, "text_delta", {"text": delta_text})
+                    _stream_delta_count += 1
+                    if _stream_delta_count % _stream_sample_every == 0:
+                        _event_log.log_event(session_id, "brain1.stream_event", {
+                            "kind": "text_delta",
+                            "delta_index": _stream_delta_count,
+                            "position_chars": len(full_response),
+                            "delta_chars": len(delta_text),
+                        }, turn_id=turn.turn_id)
+                    _iv_mtd_first_check_due = (
+                        _iv_mtd_checks_fired == 0
+                        and len(full_response) >= _iv_mtd_min_first
+                    )
+                    _iv_mtd_followup_due = (
+                        _iv_mtd_checks_fired > 0
+                        and (len(full_response) - _iv_mtd_chars_at_last_check) >= _iv_mtd_every
+                    )
+                    if (
+                        _iv_mtd_enabled
+                        and _iv_mtd_checks_fired < _iv_mtd_max_checks
+                        and not cancel_event.is_set()
+                        and (_iv_mtd_first_check_due or _iv_mtd_followup_due)
+                    ):
+                        _iv_mtd_chars_at_last_check = len(full_response)
+                        _iv_mtd_checks_fired += 1
+                        asyncio.ensure_future(_inner_voice_mid_turn_drift_check(
+                            session_id=session_id,
+                            turn=turn,
+                            frozen_task_intent=text,
+                            partial_response=full_response,
+                            stream_position_chars=len(full_response),
+                            delta_index=_stream_delta_count,
+                            cancel_event=cancel_event,
+                        ))
+                    if (
+                        _iv_intra_active
+                        and not cancel_event.is_set()
+                        and _stream_delta_count % _stream_sample_every == 0
+                    ):
+                        _iv_intra_turn._maybe_fire_progress_monitor(
+                            session_id, trigger_check=False,
+                        )
+                    if tts_should_speak and not tts_spoken and tts_is_enabled():
+                        tts_buffer += delta_text
+                        spoken_chunk = extract_first_two_sentences(tts_buffer)
+                        if spoken_chunk:
+                            tts_spoken = True
+                            asyncio.create_task(speak_text(spoken_chunk))
 
-            elif isinstance(message, AssistantMessage):
-                has_tool_use = any(isinstance(b, ToolUseBlock) for b in message.content)
-                if has_tool_use and full_response.strip():
+            elif etype == "thinking_delta":
+                thinking_text = evt.get("text", "")
+                if thinking_text:
+                    accumulated_thinking += thinking_text
+                    await _emit(turn, "thinking_delta", {"text": thinking_text})
+
+            elif etype == "thinking_done":
+                thinking_text = evt.get("text", "")
+                accumulated_thinking = thinking_text
+                await _emit(turn, "thinking_done", {"text": thinking_text})
+                _event_log.log_event(session_id, "brain1.thinking_block_emitted", {
+                    "thinking": thinking_text,
+                    "chars": len(thinking_text),
+                }, turn_id=turn.turn_id)
+
+            elif etype == "assistant_message":
+                # Flush text segment to disk if tool calls follow it.
+                if evt.get("tool_calls") and full_response.strip():
                     seg_ts = datetime.now().isoformat()
                     seg_entry: dict = {
                         "id": uuid.uuid4().hex[:8],
@@ -1305,173 +1265,141 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     await _append_messages(session_id, [seg_entry])
                     full_response = ""
                     accumulated_thinking = ""
-                for block in message.content:
-                    if isinstance(block, ThinkingBlock):
-                        accumulated_thinking = block.thinking
-                        await _emit(turn, "thinking_done", {"text": block.thinking})
-                        # Inner Voice (#345) — full thinking text is the
-                        # strongest anchoring vector for Brain 2; we capture
-                        # it here for forensic replay but later stages must
-                        # NOT include this in Brain 2's context (see
-                        # `include_brain1_thinking: false` in config).
-                        _event_log.log_event(session_id, "brain1.thinking_block_emitted", {
-                            "thinking": block.thinking,
-                            "chars": len(block.thinking),
-                        }, turn_id=turn.turn_id)
-                    elif isinstance(block, ToolUseBlock):
-                        args_str = json.dumps(block.input) if isinstance(block.input, dict) else str(block.input)
-                        tool_calls_log.append({
-                            "id": block.id, "call_id": block.id, "type": "function",
-                            "function": {"name": block.name, "arguments": args_str},
-                        })
-                        await _emit(turn, "tool_start", {
-                            "call_id": block.id, "name": block.name,
-                            "args": args_str, "context_tokens": last_turn_input,
-                        })
-                        # Inner Voice (#345) — pre-PreToolUse capture. In
-                        # Stage 1 the deny-rule evaluation will land between
-                        # this event and the tool's actual execution.
-                        _event_log.log_event(session_id, "brain1.tool_call_proposed", {
-                            "tool_call_id": block.id,
-                            "name": block.name,
-                            "args": args_str,
-                            "context_tokens": last_turn_input,
-                        }, turn_id=turn.turn_id)
-                        if block.name.endswith("pipeline_dispatch"):
-                            pending_pipeline_wires[block.id] = session_id
-                            logger.info(f"Tracking pipeline_dispatch call {block.id!r} for session {session_id}")
 
-            elif isinstance(message, UserMessage):
-                for block in message.content:
-                    if isinstance(block, ToolResultBlock):
-                        result_str = ""
-                        if hasattr(block, "content"):
-                            if isinstance(block.content, str):
-                                result_str = block.content
-                            elif isinstance(block.content, list):
-                                result_str = " ".join(
-                                    getattr(c, "text", str(c)) for c in block.content
-                                )
-                        if len(result_str) > 2000:
-                            result_str = result_str[:2000] + "...(truncated)"
-                        call_id = getattr(block, 'tool_use_id', '')
-                        tool_results_log.append({"call_id": call_id, "result": result_str})
-                        await _emit(turn, "tool_complete", {
-                            "call_id": call_id, "name": "", "result": result_str,
-                        })
-                        # Inner Voice (#345) — tool result captured to the
-                        # event log. Truncated to 2KB inline (same as the
-                        # SSE wire path); full result lives in the chat
-                        # transcript for replay.
-                        _event_log.log_event(session_id, "brain1.tool_result_received", {
-                            "tool_call_id": call_id,
-                            "result": result_str,
-                            "result_chars": len(result_str),
-                        }, turn_id=turn.turn_id)
-                        if call_id in pending_pipeline_wires:
-                            req_session = pending_pipeline_wires.pop(call_id)
-                            try:
-                                # result_str may be JSON or str() of a dict (single-quote repr)
-                                import ast as _ast
+            elif etype == "tool_call":
+                call_id = evt["call_id"]
+                name = evt["name"]
+                args_json = evt.get("args_json", "{}")
+                tc = {
+                    "id": call_id, "call_id": call_id, "type": "function",
+                    "function": {"name": name, "arguments": args_json},
+                }
+                tool_calls_log.append(tc)
+                await _emit(turn, "tool_start", {
+                    "call_id": call_id, "name": name,
+                    "args": args_json, "context_tokens": last_turn_input,
+                })
+                _event_log.log_event(session_id, "brain1.tool_call_proposed", {
+                    "tool_call_id": call_id,
+                    "name": name,
+                    "args": args_json,
+                    "context_tokens": last_turn_input,
+                }, turn_id=turn.turn_id)
+                if name.endswith("pipeline_dispatch"):
+                    pending_pipeline_wires[call_id] = session_id
+                    logger.info(f"Tracking pipeline_dispatch call {call_id!r} for session {session_id}")
+
+            elif etype == "tool_result":
+                call_id = evt["call_id"]
+                result_str = evt.get("content", "")
+                if len(result_str) > 2000:
+                    result_str = result_str[:2000] + "...(truncated)"
+                tool_results_log.append({"call_id": call_id, "result": result_str})
+                await _emit(turn, "tool_complete", {
+                    "call_id": call_id, "name": evt.get("name", ""), "result": result_str,
+                })
+                _event_log.log_event(session_id, "brain1.tool_result_received", {
+                    "tool_call_id": call_id,
+                    "result": result_str,
+                    "result_chars": len(result_str),
+                }, turn_id=turn.turn_id)
+                if call_id in pending_pipeline_wires:
+                    req_session = pending_pipeline_wires.pop(call_id)
+                    try:
+                        import ast as _ast
+                        try:
+                            res_data = json.loads(result_str)
+                        except json.JSONDecodeError:
+                            res_data = _ast.literal_eval(result_str)
+                        if isinstance(res_data, dict) and "text" in res_data:
+                            inner = res_data["text"]
+                            if isinstance(inner, str):
                                 try:
-                                    res_data = json.loads(result_str)
-                                except json.JSONDecodeError:
-                                    res_data = _ast.literal_eval(result_str)
-                                # Unwrap if result_str was str({'type':'text','text':'{...}'})
-                                if isinstance(res_data, dict) and "text" in res_data:
-                                    inner = res_data["text"]
-                                    if isinstance(inner, str):
-                                        try:
-                                            res_data = json.loads(inner)
-                                        except Exception:
-                                            pass
-                                run_id = res_data.get("run_id")
-                                if run_id:
-                                    run_path = PIPELINE_RUNS_DIR / f"{run_id}.json"
-                                    if run_path.exists():
-                                        run_json = json.loads(run_path.read_text(encoding="utf-8"))
-                                        run_json["requester_session_id"] = req_session
-                                        run_path.write_text(json.dumps(run_json, indent=2), encoding="utf-8")
-                                        logger.info(f"Linked pipeline run #{run_id} → session {req_session}")
-                                    else:
-                                        logger.warning(f"Pipeline run file {run_id}.json not found for wiring")
-                                else:
-                                    logger.warning(f"No run_id in pipeline_dispatch result: {result_str[:200]}")
-                            except Exception as _we:
-                                logger.warning(f"Failed to wire pipeline session: {_we} | result={result_str[:200]}")
+                                    res_data = json.loads(inner)
+                                except Exception:
+                                    pass
+                        run_id = res_data.get("run_id")
+                        if run_id:
+                            run_path = PIPELINE_RUNS_DIR / f"{run_id}.json"
+                            if run_path.exists():
+                                run_json = json.loads(run_path.read_text(encoding="utf-8"))
+                                run_json["requester_session_id"] = req_session
+                                run_path.write_text(json.dumps(run_json, indent=2), encoding="utf-8")
+                                logger.info(f"Linked pipeline run #{run_id} → session {req_session}")
+                            else:
+                                logger.warning(f"Pipeline run file {run_id}.json not found for wiring")
+                        else:
+                            logger.warning(f"No run_id in pipeline_dispatch result: {result_str[:200]}")
+                    except Exception as _we:
+                        logger.warning(f"Failed to wire pipeline session: {_we} | result={result_str[:200]}")
+                # Eager per-pair persistence
+                tc = next((t for t in tool_calls_log if t["call_id"] == call_id), None)
+                if tc and call_id not in persisted_tool_ids:
+                    persisted_tool_ids.add(call_id)
+                    pair_ts = datetime.now().isoformat()
+                    await _append_messages(session_id, [
+                        {
+                            "id": f"msg_{call_id}_tc",
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": ""}],
+                            "tool_calls": [tc],
+                            "timestamp": pair_ts,
+                        },
+                        {
+                            "id": f"msg_{call_id}_result",
+                            "role": "tool",
+                            "content": [{"type": "text", "text": result_str}],
+                            "tool_call_id": call_id,
+                            "timestamp": pair_ts,
+                        },
+                    ])
 
-                        # Eager per-pair persistence so a mid-stream error doesn't
-                        # lose tool history.
-                        tc = next((t for t in tool_calls_log if t["call_id"] == call_id), None)
-                        if tc and call_id not in persisted_tool_ids:
-                            persisted_tool_ids.add(call_id)
-                            pair_ts = datetime.now().isoformat()
-                            await _append_messages(session_id, [
-                                {
-                                    "id": f"msg_{call_id}_tc",
-                                    "role": "assistant",
-                                    "content": [{"type": "text", "text": ""}],
-                                    "tool_calls": [tc],
-                                    "timestamp": pair_ts,
-                                },
-                                {
-                                    "id": f"msg_{call_id}_result",
-                                    "role": "tool",
-                                    "content": [{"type": "text", "text": result_str}],
-                                    "tool_call_id": call_id,
-                                    "timestamp": pair_ts,
-                                },
-                            ])
+            elif etype == "result":
+                usage = evt.get("usage") or {}
+                # Map vLLM's OpenAI-style keys → legacy internal keys
+                input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens", 0)
+                output_tokens = usage.get("output_tokens") or usage.get("completion_tokens", 0)
+                stop_reason = evt.get("stop_reason", "stop")
+                duration_ms = evt.get("duration_ms", 0)
+                num_turns_val = evt.get("num_turns", 0)
+                done_text = evt.get("response_text") or full_response
+                cancelled_mid_stream = stop_reason == "cancelled"
 
-            elif isinstance(message, ResultMessage):
                 try:
-                    usage = getattr(message, "usage", None) or {}
                     usage_store.record_usage(
                         session_id=session_id,
                         model=model,
-                        input_tokens=usage.get("input_tokens", 0),
-                        output_tokens=usage.get("output_tokens", 0),
-                        cache_create=usage.get("cache_creation_input_tokens", 0),
-                        cache_read=usage.get("cache_read_input_tokens", 0),
-                        cost_usd=getattr(message, "total_cost_usd", None),
-                        duration_ms=getattr(message, "duration_ms", None),
-                        duration_api_ms=getattr(message, "duration_api_ms", None),
-                        num_turns=getattr(message, "num_turns", None),
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cache_create=0,
+                        cache_read=0,
+                        cost_usd=0.0,
+                        duration_ms=duration_ms,
+                        duration_api_ms=None,
+                        num_turns=num_turns_val,
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
 
-                # Inner Voice (#345) — final ResultMessage capture. Includes
-                # usage + duration + stop_reason. Brain 2 ensemble dispatch
-                # in Stage 2+ keys off this event (post-loop seam).
                 _event_log.log_event(session_id, "brain1.result_message", {
-                    "usage": dict(usage) if usage else {},
-                    "stop_reason": getattr(message, "stop_reason", None),
-                    "duration_ms": getattr(message, "duration_ms", None),
-                    "duration_api_ms": getattr(message, "duration_api_ms", None),
-                    "num_turns": getattr(message, "num_turns", None),
-                    "total_cost_usd": getattr(message, "total_cost_usd", None),
+                    "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+                    "stop_reason": stop_reason,
+                    "duration_ms": duration_ms,
+                    "num_turns": num_turns_val,
                     "response_chars": len(full_response),
                     "had_tool_calls": bool(tool_calls_log),
                 }, turn_id=turn.turn_id)
 
-                if message.session_id:
-                    try:
-                        await mutate_session(
-                            session_id,
-                            lambda d, sid=message.session_id: d.__setitem__("sdk_session_id", sid),
-                        )
-                    except Exception as se:
-                        logger.warning(f"Failed to save sdk_session_id: {se}")
+                stream_stats.update({
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "duration_ms": duration_ms,
+                    "num_turns": num_turns_val,
+                    "peak_input_tokens": last_turn_input,
+                })
+                stats_dict = stream_stats
 
-                # Persisted text reflects only the post-last-tool segment;
-                # earlier segments were already flushed mid-stream. The done
-                # payload still surfaces message.result for callers that want
-                # the full concatenated turn.
                 result_text = full_response
-                done_text = full_response
-                if hasattr(message, "result") and message.result:
-                    done_text = message.result
 
                 end_ts = datetime.now().isoformat()
                 tail: list[dict] = []
@@ -1486,17 +1414,29 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         tail.append({"id": f"msg_{cid}_result", "role": "tool",
                                      "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
                                      "tool_call_id": cid, "timestamp": end_ts})
-                stream_stats.update({
-                    "input_tokens":  usage.get("input_tokens", 0) or stream_stats["input_tokens"],
-                    "output_tokens": usage.get("output_tokens", 0) or stream_stats["output_tokens"],
-                    "cache_create":  usage.get("cache_creation_input_tokens", 0),
-                    "cache_read":    usage.get("cache_read_input_tokens", 0),
-                    "cost_usd":      getattr(message, "total_cost_usd", None),
-                    "duration_ms":   getattr(message, "duration_ms", None),
-                    "num_turns":     getattr(message, "num_turns", None),
-                    "peak_input_tokens": last_turn_input,
-                })
-                stats_dict = stream_stats
+
+                # Cancelled path: persist and emit done(cancelled=True).
+                if cancelled_mid_stream:
+                    stream_stats["peak_input_tokens"] = last_turn_input
+                    if full_response.strip():
+                        cancel_msg: dict = {
+                            "id": uuid.uuid4().hex[:8], "role": "assistant",
+                            "content": [{"type": "text", "text": full_response}],
+                            "timestamp": end_ts, "stats": stream_stats, "cancelled": True,
+                        }
+                        if accumulated_thinking:
+                            cancel_msg["reasoning"] = accumulated_thinking
+                        tail.append(cancel_msg)
+                    if tail:
+                        await _append_messages(session_id, tail)
+                    final_persisted = True
+                    await _emit(turn, "done", {
+                        "response": full_response,
+                        "session_id": session_id,
+                        "stats": stream_stats,
+                        "cancelled": True,
+                    })
+                    continue  # skip the normal completion path below
 
                 # Ambient turns only: if the agent called `ambient_decide`
                 # mid-turn to opt out of surfacing, replace the assistant
@@ -1607,71 +1547,14 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         done_payload['reasoning'] = accumulated_thinking
                     await _emit(turn, "done", done_payload)
 
-        # Clean cancel exit (no exception, just a `break` from the
-        # `if cancel_event.is_set()` check at the top of the loop).
-        # Without this block the SSE stream hangs forever — the chat UI
-        # waits for a `done` event that never arrives, the partial
-        # response Brain 1 had accumulated never gets persisted, and the
-        # input field stays disabled.
-        #
-        # Fires for BOTH API cancels (sessions/cancel) AND Inner Voice
-        # mid-turn drift cancels (the IV check sets cancel_event after
-        # logging cancel_event_fired + intervention_dispatched).
-        if cancelled_mid_stream and not final_persisted:
-            cancel_ts = datetime.now().isoformat()
-            tail = []
-            results_by_id = {r["call_id"]: r["result"] for r in tool_results_log}
-            for tc in tool_calls_log:
-                cid = tc["call_id"]
-                if cid not in persisted_tool_ids:
-                    tail.append({
-                        "id": f"msg_{cid}_tc", "role": "assistant",
-                        "content": [{"type": "text", "text": ""}],
-                        "tool_calls": [tc], "timestamp": cancel_ts,
-                    })
-                    tail.append({
-                        "id": f"msg_{cid}_result", "role": "tool",
-                        "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
-                        "tool_call_id": cid, "timestamp": cancel_ts,
-                    })
-            stream_stats["peak_input_tokens"] = last_turn_input
-            if full_response.strip():
-                cancel_msg: dict = {
-                    "id": uuid.uuid4().hex[:8], "role": "assistant",
-                    "content": [{"type": "text", "text": full_response}],
-                    "timestamp": cancel_ts, "stats": stream_stats,
-                    "cancelled": True,
-                }
-                if accumulated_thinking:
-                    cancel_msg["reasoning"] = accumulated_thinking
-                tail.append(cancel_msg)
-            if tail:
-                await _append_messages(session_id, tail)
-            try:
-                if stream_stats["input_tokens"] or stream_stats["output_tokens"]:
-                    usage_store.record_usage(
-                        session_id=session_id,
-                        model=model,
-                        input_tokens=stream_stats["input_tokens"],
-                        output_tokens=stream_stats["output_tokens"],
-                        cache_create=stream_stats["cache_create"],
-                        cache_read=stream_stats["cache_read"],
-                    )
-            except Exception as ue:
-                logger.warning(f"Failed to record usage on cancel: {ue}")
-            final_persisted = True
-            await _emit(turn, "done", {
-                "response": full_response,
-                "session_id": session_id,
-                "stats": stream_stats,
-                "cancelled": True,
-            })
+        # The harness always emits a `result` event (even on cancel), so
+        # the post-loop cancel block from the old SDK path is not needed.
+        # cancelled_mid_stream is set in the `result` handler and handled there.
 
     except Exception as e:
         if not final_persisted:
             if full_response or tool_calls_log:
-                # SDK exit-code-1 after completion, or mid-stream error with content.
-                logger.warning(f"Turn {turn.turn_id} ended without ResultMessage (content delivered): {e}")
+                logger.warning(f"Turn {turn.turn_id} harness error with content: {e}")
                 err_ts = datetime.now().isoformat()
                 tail = []
                 results_by_id = {r["call_id"]: r["result"] for r in tool_results_log}
@@ -1715,11 +1598,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     'response': full_response, 'session_id': session_id, 'stats': stream_stats,
                 })
             else:
-                logger.error(f"Turn {turn.turn_id} SDK error: {e}")
+                logger.error(f"Turn {turn.turn_id} harness error: {e}")
                 await _emit(turn, "error", {"detail": str(e)})
-        else:
-            # Normal: SDK exited with code 1 after clean completion — ignore
-            logger.debug(f"Post-completion SDK exit (ignored): {e}")
 
 
 
@@ -1730,11 +1610,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 async def _session_consumer(session_id: str) -> None:
     """Drain the queue for a single session. Exits when queue empties.
 
-    Pop order: user tier first, then ambient. This plus the preempt set
-    at enqueue time (see `enqueue_turn`) is how "user always wins" is
-    enforced — the currently running ambient gets its cancel_event fired,
-    breaks out of its SDK loop, and the consumer immediately pops the
-    newly-enqueued user turn.
+    Pop order: user tier first, then ambient. A user turn arriving while
+    an ambient is running preempts it via the queue's cancel_event.
     """
     q = _session_queues.get(session_id)
     if q is None:
@@ -1873,17 +1750,11 @@ async def post_message_stream(request: Request):
     t_prefetch = time.perf_counter()
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"
-    resume_id = None
     session_turn_count = 0
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
             session_turn_count = sum(1 for m in existing.get("messages", []) if m.get("role") == "user")
-            session_model = _resolve_model_name(existing.get("model", ""))
-            # Thinking block signatures are tied to the originating endpoint,
-            # so crossing local↔remote boundaries causes a 400.
-            if _model_base_url(session_model) == _model_base_url(model):
-                resume_id = existing.get("sdk_session_id")
         except Exception:
             pass
 
@@ -1904,25 +1775,20 @@ async def post_message_stream(request: Request):
         or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
     )
 
-    # Inner Voice (#345 Stage 1): wire PreToolUse hook only on opted-in
-    # sessions. Existing Chat-tab sessions have `inner_voice: false` and
-    # see no behavior change.
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else None
 
-    options = ClaudeAgentOptions(
+    options = RunOptions(
         model=model,
+        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
         system_prompt=system_prompt,
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
         permission_mode=permission_mode,
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools() + extra_disallowed,
         env=model_env,
-        effort=_resolve_effort(model, think_level),
-        thinking=_resolve_thinking(model),
-        resume=resume_id,
-        include_partial_messages=True,
         hooks=iv_hooks,
+        # cancel_event and session_id wired in _run_turn at run time
     )
 
     await _save_session_meta(session_id, model, preview=text)
@@ -1930,7 +1796,7 @@ async def post_message_stream(request: Request):
     logger.info(
         f"[TIMING] pre-enqueue overhead: prompt={t_prompt - t0:.3f}s  "
         f"prefetch={t_prefetch - t_prompt:.3f}s  "
-        f"total={time.perf_counter() - t0:.3f}s  resume={'yes' if resume_id else 'no'}"
+        f"total={time.perf_counter() - t0:.3f}s"
     )
 
     turn = SessionTurn(
@@ -1942,7 +1808,6 @@ async def post_message_stream(request: Request):
             "model": model,
             "options": options,
             "meta_path": meta_path,
-            "resume_id": resume_id,
         },
         enqueued_at=datetime.now(),
     )
@@ -1995,34 +1860,20 @@ async def build_ambient_turn(
     model = _resolve_model_name(existing.get("model", "") or CONFIG.get("model", {}).get("default", ""))
     model_env = _get_model_env(model)
 
-    resume_id = None
-    try:
-        session_model = _resolve_model_name(existing.get("model", ""))
-        if _model_base_url(session_model) == _model_base_url(model):
-            resume_id = existing.get("sdk_session_id")
-    except Exception:
-        pass
-
     system_prompt = build_system_prompt()
 
-    # Inner Voice (#345 Stage 1): same opt-in gate as the user-stream path.
-    # Ambient turns on Inner Voice sessions are the highest-value targets
-    # for safety hooks — autonomy fires there with no human watching.
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else None
 
-    options = ClaudeAgentOptions(
+    options = RunOptions(
         model=model,
+        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
         system_prompt=system_prompt,
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
         permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools(),
         env=model_env,
-        effort=_resolve_effort(model),
-        thinking=_resolve_thinking(model),
-        resume=resume_id,
-        include_partial_messages=True,
         hooks=iv_hooks,
     )
 
@@ -2048,7 +1899,6 @@ async def build_ambient_turn(
         "model": model,
         "options": options,
         "meta_path": meta_path,
-        "resume_id": resume_id,
         "priority": priority,
         "producer_source": source,
         "summary": summary,
@@ -2111,16 +1961,7 @@ async def post_message(request: Request):
     system_prompt = build_system_prompt()
     prefetched_text = prefetch_context(text, session_id=session_id)
 
-    resume_id = None
     meta_path = SESSIONS_DIR / f"{session_id}.json"
-    if meta_path.exists():
-        try:
-            existing = json.loads(meta_path.read_text())
-            session_model = _resolve_model_name(existing.get("model", ""))
-            if _model_base_url(session_model) == _model_base_url(model):
-                resume_id = existing.get("sdk_session_id")
-        except Exception:
-            pass
 
     sync_extra_disallowed: list[str] = data.get("extra_disallowed", [])
     sync_permission_mode: str = (
@@ -2128,90 +1969,74 @@ async def post_message(request: Request):
         or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
     )
 
-    # Inner Voice (#345 Stage 1): same opt-in gate. The sync endpoint is
-    # rarely used (clients prefer /stream) but symmetry matters — a
-    # dangerous Bash via /api/message bypasses the safety net otherwise.
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else None
 
-    options = ClaudeAgentOptions(
+    options = RunOptions(
         model=model,
+        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
         system_prompt=system_prompt,
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
         permission_mode=sync_permission_mode,
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools() + sync_extra_disallowed,
         env=model_env,
-        effort=_resolve_effort(model),
-        thinking=_resolve_thinking(model),
-        resume=resume_id,
         hooks=iv_hooks,
+        session_id=session_id,
     )
 
-    # --- Sync endpoint: local-model compaction ---
-    base_url = (options.env or {}).get("ANTHROPIC_BASE_URL", "")
-    is_local = is_local_model(base_url)
-    conv_text = ""
-
-    if is_local:
-        comp = load_and_compact_session(meta_path, model=model)
-        conv_text = format_conversation_for_local(
-            comp["history"],
-            current_user_text=prefetched_text,
-            model=model,
+    comp = load_and_compact_session(meta_path, model=model)
+    if comp["truncated"]:
+        logger.info(
+            "[compaction] %s: dropped %d tokens (%d → %d)",
+            session_id,
+            comp["tokens_before"] - comp["tokens_after"],
+            comp["tokens_before"],
+            comp["tokens_after"],
         )
-        if comp["truncated"]:
-            logger.info(
-                "[compaction] %s: dropped %d tokens (%d → %d)",
-                session_id,
-                comp["tokens_before"] - comp["tokens_after"],
-                comp["tokens_before"],
-                comp["tokens_after"],
-            )
-        options.resume = None
+    messages = await _prepare_messages_for_harness(comp["history"])
+    if messages and messages[-1].get("role") == "user":
+        messages = messages[:-1]
+    messages.append({"role": "user", "content": prefetched_text})
 
     await _save_session_meta(session_id, model, preview=text)
 
     try:
         full_response = ""
         turn_stats: dict | None = None
-        async for message in query(prompt=conv_text if is_local else prefetched_text, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        full_response += block.text
-            elif isinstance(message, ResultMessage):
-                if hasattr(message, "result") and message.result:
-                    full_response = message.result
-                usage = getattr(message, "usage", None) or {}
+        async for evt in run_query(messages, options):
+            if evt["type"] == "text_delta":
+                full_response += evt["text"]
+            elif evt["type"] == "result":
+                usage = evt.get("usage") or {}
+                input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens", 0)
+                output_tokens = usage.get("output_tokens") or usage.get("completion_tokens", 0)
                 turn_stats = {
-                    "input_tokens":  usage.get("input_tokens", 0),
-                    "output_tokens": usage.get("output_tokens", 0),
-                    "cache_create":  usage.get("cache_creation_input_tokens", 0),
-                    "cache_read":    usage.get("cache_read_input_tokens", 0),
-                    "cost_usd":      getattr(message, "total_cost_usd", None),
-                    "duration_ms":   getattr(message, "duration_ms", None),
-                    "num_turns":     getattr(message, "num_turns", None),
-                    "model":         model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "cost_usd": 0.0,
+                    "duration_ms": evt.get("duration_ms"),
+                    "num_turns": evt.get("num_turns"),
+                    "model": model,
                 }
                 try:
                     usage_store.record_usage(
                         session_id=session_id,
                         model=model,
-                        input_tokens=turn_stats["input_tokens"],
-                        output_tokens=turn_stats["output_tokens"],
-                        cache_create=turn_stats["cache_create"],
-                        cache_read=turn_stats["cache_read"],
-                        cost_usd=turn_stats["cost_usd"],
-                        duration_ms=turn_stats["duration_ms"],
-                        duration_api_ms=getattr(message, "duration_api_ms", None),
-                        num_turns=turn_stats["num_turns"],
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cache_create=0,
+                        cache_read=0,
+                        cost_usd=0.0,
+                        duration_ms=evt.get("duration_ms"),
+                        num_turns=evt.get("num_turns"),
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
 
-        # Persist assistant response for local models (no SDK resume)
-        if is_local and full_response:
+        if full_response:
             await _append_messages(session_id, [{
                 "id": uuid.uuid4().hex[:8],
                 "role": "assistant",

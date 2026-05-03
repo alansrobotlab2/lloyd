@@ -19,7 +19,7 @@ async def get_models():
             "name": name,
             "alias": cfg.get("alias", ""),
             "display_name": cfg.get("display_name", name),
-            "provider": "local" if cfg.get("base_url") else "anthropic",
+            "provider": "local",
             "base_url": cfg.get("base_url", ""),
             "context_length": cfg.get("context_length", 0),
         })

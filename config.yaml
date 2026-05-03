@@ -210,23 +210,27 @@ mcp_servers:
     url: http://127.0.0.1:8500/sse
 model:
   default: primary
+harness:
+  # Timeout for a single SSE chunk from vLLM before the stream is considered stalled.
+  stream_chunk_timeout_seconds: 60
+  # Hard cap on tool calls advertised per request (safety valve for tool-list growth).
+  max_tools_per_request: 128
+
+subagents:
+  general-purpose:
+    system_prompt: ""
+    max_turns: 20
+    disallowed_tools: []
+    model: primary
+    base_url: ""
+  read-only:
+    system_prompt: "You are a read-only research assistant. You may use Read, Grep, Glob, and Bash (read-only commands only). Do not write, edit, or delete files."
+    max_turns: 15
+    disallowed_tools: [Write, Edit, Bash]
+    model: primary
+    base_url: ""
+
 models:
-  claude-haiku-4-5-20251001:
-    alias: haiku
-    context_length: 200000
-    display_name: Claude Haiku 4.5
-    env: {}
-  claude-opus-4-7:
-    alias: opus
-    context_length: 200000
-    display_name: Claude Opus 4.7
-    effort: high
-    env: {}
-  claude-sonnet-4-6:
-    alias: sonnet
-    context_length: 200000
-    display_name: Claude Sonnet 4.6
-    env: {}
   primary:
     alias: primary
     base_url: http://127.0.0.1:8096

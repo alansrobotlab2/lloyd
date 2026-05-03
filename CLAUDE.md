@@ -2,12 +2,13 @@
 
 ## Project Overview
 
-Lloyd is a clean-slate AI agent built on the **Claude Agent SDK** (`claude-agent-sdk`). It replaces the legacy `hermes-agent` system. The backend is FastAPI + SSE, the frontend is React (Vite), and all custom tools are exposed as MCP servers.
+Lloyd is a fully local AI agent. It runs its own in-process agent loop (`app/harness/`) against a local vLLM server and exposes all tools through a unified MCP aggregator (`agent_mcp/`). The backend is FastAPI + SSE; the frontend is React (Vite).
 
 - **Backend**: `server.py` (FastAPI, port 8080)
 - **Frontend**: `web/` (Vite dev server, proxied through backend)
 - **Config**: `config.yaml`
-- **MCP servers**: `mcp-servers/*.py`
+- **MCP aggregator**: `agent_mcp/main.py` (unified `Server("lloyd")` on `:8500/sse`)
+- **Agent harness**: `app/harness/` (`run_query(messages, options)` — async generator)
 - **Venv**: `.venvs/lloyd/bin/python`
 
 ## Service Management
@@ -35,15 +36,23 @@ After editing frontend files, Vite HMR usually picks up changes automatically (n
 ├── autonomy.py          # Task scheduler
 ├── usage_store.py       # SQLite usage tracking
 │
-├── mcp-servers/         # Custom tools as MCP servers (stdio JSON-RPC)
-│   ├── autonomy.py
-│   ├── backlog.py
-│   ├── memory.py
-│   ├── mission_control.py
-│   ├── subliminal.py
-│   ├── http_tools.py
-│   ├── thunderbird.py   # Wraps mcp-bridge.cjs → Thunderbird HTTP extension
-│   └── pipeline.py
+├── app/harness/         # In-process agent loop (replaces claude-agent-sdk)
+│   ├── __init__.py      # Exports: run_query, RunOptions, HookRegistry
+│   ├── options.py       # RunOptions dataclass
+│   ├── events.py        # NormalizedEvent TypedDict types
+│   ├── client.py        # httpx SSE stream → vLLM /v1/chat/completions
+│   ├── loop.py          # Agent loop: stream → tool dispatch → loop
+│   ├── hooks.py         # HookRegistry (pre/post tool-use callbacks)
+│   ├── mcp_pool.py      # Persistent SSE client to lloyd-mcp aggregator
+│   ├── tool_schema.py   # MCP tools → OpenAI tool schema translation
+│   └── errors.py        # ParseError, ToolDispatchError, MaxTurnsExceeded
+│
+├── agent_mcp/           # Unified MCP aggregator (Server("lloyd") on :8500/sse)
+│   ├── main.py          # Aggregates all modules; MCP SSE endpoint
+│   ├── builtin_bash.py  # Bash tool (timeout, truncation)
+│   ├── builtin_fs.py    # Read, Write, Edit, Grep, Glob tools
+│   ├── builtin_task.py  # Task subagent (in-process, recursion cap = 1)
+│   └── ...              # Domain modules: ambient, facts, vault, session, etc.
 │
 ├── web/src/
 │   ├── api.ts           # All API calls + TypeScript types
@@ -54,22 +63,30 @@ After editing frontend files, Vite HMR usually picks up changes automatically (n
 └── logs/                # server.log, server.err, frontend.log
 ```
 
-## Thunderbird MCP Server
+## Agent Harness
 
-The `mcp-servers/thunderbird.py` server is a proxy — it spawns `~/agent-services/services/thunderbird-mcp/mcp-bridge.cjs` as a subprocess, which forwards JSON-RPC over HTTP to the Thunderbird extension at `localhost:8765`.
+`run_query(messages: list[dict], options: RunOptions) -> AsyncIterator[NormalizedEvent]`
 
-**Known bug (fixed)**: The `_ensure_bridge()` function previously used `time.sleep(1)` after sending the MCP `initialize` message. During that sleep, the bridge wrote the init response to stdout. The subsequent `_discover_tools()` call would read that stale init response instead of the `tools/list` response, causing zero tools to be discovered. The fix: call `_bridge_receive()` inside `_ensure_bridge()` to consume the init response immediately.
+Events yielded by type:
+- `text_delta` — `{type, text}` — streaming text chunk
+- `thinking_delta` — `{type, text}` — vLLM reasoning content chunk
+- `thinking_done` — `{type}` — reasoning phase complete
+- `tool_call` — `{type, id, name, input}` — tool invocation
+- `tool_result` — `{type, tool_call_id, content, is_error}` — tool result
+- `assistant_message` — `{type, content, tool_calls}` — full assistant turn
+- `result` — `{type, stop_reason, usage}` — turn complete
+- `stream_raw` — `{type, line}` — raw SSE line on parse failure
 
-## Tools Tab
+**Tool naming**: Built-in tools (Bash, Read, Write, Edit, Grep, Glob, Task) are advertised to vLLM under bare names. This keeps session JSON, SOUL.md deny rules, and Inner Voice `pretooluse_deny` patterns working unchanged.
 
-`/api/tools` discovers tools from each MCP server by spawning it as a subprocess, sending `initialize` + `tools/list` JSON-RPC, and parsing the response. Results are cached for 5 minutes (`_tools_cache`, TTL=300s).
+## Tools
 
 Tool enable/disable state is stored in `config.yaml`:
 - Server-level: `mcp_servers.<name>.enabled: false`
 - Tool-level: `mcp_servers.<name>.disabled_tools: [tool_name, ...]`
 - Built-in: `tools.disabled_builtin: [ToolName, ...]`
 
-Disabled tools are enforced via the SDK's `disallowed_tools` option (format: `mcp__<server>__<tool>` for MCP tools, plain name for built-ins).
+Disabled tools are enforced via `RunOptions.disallowed_tools` (format: `mcp__<server>__<tool>` for MCP tools, plain name for built-ins).
 
 ## Config Structure (config.yaml)
 
@@ -81,21 +98,32 @@ models:
   primary:
     alias: primary
     base_url: http://127.0.0.1:8096
+    context_length: 262144
     env:
       ANTHROPIC_BASE_URL: "http://127.0.0.1:8096"
       ANTHROPIC_API_KEY: "no-key-required"
       ANTHROPIC_CUSTOM_MODEL_OPTION: "primary"
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: "Primary"
 
+harness:
+  stream_chunk_timeout_seconds: 60
+  max_tools_per_request: 128
+
+subagents:
+  general-purpose:
+    system_prompt: ""
+    max_turns: 20
+    disallowed_tools: []
+    model: primary
+
 mcp_servers:
-  thunderbird:
-    command: /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
-    args: ["/home/alansrobotlab/lloyd/mcp-servers/thunderbird.py"]
-    enabled: true          # optional, defaults to true
-    disabled_tools: []     # optional, list of tool names to block
+  lloyd-mcp:
+    type: sse
+    url: http://127.0.0.1:8500/sse
+    disabled_tools: []
 
 tools:
-  disabled_builtin: []     # Claude built-in tools to block (Bash, Read, Write, etc.)
+  disabled_builtin: []
 
 agent:
   max_turns: 60
@@ -104,7 +132,7 @@ agent:
 
 ## Development Notes
 
-- The SDK's `query()` call spawns a `claude` CLI subprocess per session. MCP servers are passed via `ClaudeAgentOptions.mcp_servers`.
-- Local models (Qwen) are selected by passing env vars: `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_MODEL_OPTION`, etc.
-- Session continuity: the SDK session ID from `SystemMessage` is stored in `sessions/<id>.json` as `sdk_session_id`, then passed as `resume=` on subsequent turns.
-- The `/api/message/stream` endpoint uses SSE. The frontend connects via `fetch` + `ReadableStream`, not `EventSource`, to allow `POST`.
+- Each turn reconstructs the full conversation from the persisted session JSON (`load_and_compact_session`) and sends it as an OpenAI-format `messages` list to vLLM.
+- vLLM tool calling: `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3`
+- Session continuity: no `resume=` — history is rebuilt from `sessions/<id>.json` each turn.
+- The `/api/message/stream` endpoint uses SSE. The frontend connects via `fetch` + `ReadableStream`.

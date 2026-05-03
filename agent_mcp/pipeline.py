@@ -2,8 +2,8 @@
 """
 Lloyd MCP Server: Pipeline — multi-stage worker coordination.
 
-Dispatches multi-stage pipeline runs where each stage runs as a
-claude subprocess via the Claude Agent SDK.
+Dispatches multi-stage pipeline runs where each stage runs via the
+local harness (app.harness.run_query).
 
 Stage files: ~/obsidian/lloyd/stages/<name>.md
 Skills dir:  ~/obsidian/skills/
@@ -232,7 +232,7 @@ def _parse_result_block(output: str) -> Optional[dict]:
         return None
 
 
-def _run_stage_sdk(
+async def _run_stage(
     prompt: str,
     system_prompt: str,
     model: str,
@@ -240,30 +240,22 @@ def _run_stage_sdk(
     log_path: Optional[Path] = None,
     stage_name: str = "",
 ) -> str:
-    """Run a single stage via Claude Agent SDK (called from background thread)."""
+    """Run a single stage via the local harness."""
     import asyncio
-    import claude_agent_sdk._internal.transport.subprocess_cli as _cli_transport
-    from claude_agent_sdk import query, ClaudeAgentOptions
-    from claude_agent_sdk import AssistantMessage, UserMessage
-    from claude_agent_sdk.types import TextBlock, ToolUseBlock, ToolResultBlock
-
-    # The SDK's subprocess transport buffers stdout line-by-line and enforces a 1MB
-    # limit per JSON message. Large tool results (e.g. WebFetch on a big page) can
-    # exceed this. Raise the limit to 32MB — it's just a runaway-buffer guard.
-    _cli_transport._DEFAULT_MAX_BUFFER_SIZE = 32 * 1024 * 1024
+    from app.harness import run_query, RunOptions
+    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL
+    from app.harness.errors import ParseError
 
     env_vars = _get_model_env(model)
-    # For local models, pass model=None so SDK uses its default, but the
-    # env vars (ANTHROPIC_BASE_URL + ANTHROPIC_CUSTOM_MODEL_OPTION) route
-    # to the correct local endpoint with the correct model loaded.
-    sdk_model = None if model in ("primary", "secondary") else (model or None)
-    options = ClaudeAgentOptions(
+
+    options = RunOptions(
+        model=model,
+        base_url=env_vars.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
         system_prompt=system_prompt,
         max_turns=80,
         permission_mode="bypassPermissions",
-        model=sdk_model,
+        mcp_servers={"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}},
         env=env_vars,
-        include_partial_messages=True,
     )
 
     def _log(text: str) -> None:
@@ -274,59 +266,35 @@ def _run_stage_sdk(
             except Exception:
                 pass
 
-    async def _inner():
-        from claude_agent_sdk._errors import MessageParseError
-        result_text = ""
-        current_tool: Optional[str] = None
+    result_text = ""
+    messages = [{"role": "user", "content": prompt}]
 
-        # The SDK's query() generator can raise MessageParseError on unknown
-        # message types (e.g. rate_limit_event). We need to catch these per-message
-        # rather than letting them kill the entire stage. Since async generators
-        # don't support try/except around individual yields, we wrap the iteration.
-        stream = query(prompt=prompt, options=options).__aiter__()
-        while True:
-            try:
-                msg = await stream.__anext__()
-            except StopAsyncIteration:
-                break
-            except MessageParseError as e:
-                _log(f"\n[sdk: skipped unknown message: {e}]\n")
-                continue
+    try:
+        async with asyncio.timeout(timeout):
+            async for evt in run_query(messages, options):
+                etype = evt["type"]
+                if etype == "text_delta":
+                    chunk = evt.get("text", "")
+                    if chunk:
+                        result_text += chunk
+                        _log(chunk)
+                elif etype == "tool_call":
+                    name = evt.get("name", "")
+                    args_preview = str(evt.get("input", {}))[:120].replace("\n", " ")
+                    _log(f"\n[tool: {name}] {args_preview}\n")
+                elif etype == "tool_result":
+                    content = evt.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(
+                            c.get("text", str(c)) if isinstance(c, dict) else str(c)
+                            for c in content
+                        )
+                    _log(f"[result] {str(content)[:200].strip()}\n\n")
+    except asyncio.TimeoutError:
+        logger.warning("Pipeline stage '%s' timed out after %ds", stage_name, timeout)
+        raise
 
-            from claude_agent_sdk.types import StreamEvent
-            if isinstance(msg, StreamEvent):
-                evt = msg.event
-                if evt.get("type") == "content_block_delta":
-                    delta = evt.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        chunk = delta.get("text", "")
-                        if chunk:
-                            result_text += chunk
-                            _log(chunk)
-            elif isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        if block.text:
-                            result_text += block.text
-                            _log(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        current_tool = block.name
-                        args_preview = str(block.input)[:120].replace("\n", " ")
-                        _log(f"\n[tool: {block.name}] {args_preview}\n")
-            elif isinstance(msg, UserMessage):
-                for block in msg.content:
-                    if isinstance(block, ToolResultBlock):
-                        result_str = ""
-                        if hasattr(block, "content"):
-                            if isinstance(block.content, str):
-                                result_str = block.content[:200]
-                            elif isinstance(block.content, list):
-                                result_str = " ".join(getattr(c, "text", str(c)) for c in block.content)[:200]
-                        _log(f"[result] {result_str.strip()}\n\n")
-                        current_tool = None
-        return result_text
-
-    return asyncio.run(_inner())
+    return result_text
 
 
 def _log_path(run_id: int) -> Path:
@@ -426,7 +394,7 @@ def _notify_requester_session(run: dict) -> None:
 
 
 def _run_pipeline(run_id: int) -> None:
-    """Background thread: execute all stages via Claude Agent SDK."""
+    """Background thread: execute all stages via the local harness."""
     run = _load_run(run_id)
     if not run:
         return
@@ -490,7 +458,8 @@ def _run_pipeline(run_id: int) -> None:
             pass
 
         try:
-            output = _run_stage_sdk(prompt, system_prompt, model, timeout, log_path=log_path, stage_name=stage_name)
+            import asyncio
+            output = asyncio.run(_run_stage(prompt, system_prompt, model, timeout, log_path=log_path, stage_name=stage_name))
         except Exception as exc:
             with _runs_lock:
                 run = _load_run(run_id) or run

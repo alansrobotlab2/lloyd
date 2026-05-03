@@ -62,8 +62,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     if task_id is None:
         raise RuntimeError("scheduled-task item has no task_id in payload")
 
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, run_task, int(task_id))
+    result = await run_task(int(task_id))
 
     preview = (result.get("response_preview") or "")
     if result.get("success") and preview and "[SILENT]" not in preview:
