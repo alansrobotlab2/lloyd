@@ -32,7 +32,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'chat', label: 'Chat', icon: MessageCircle },
-  // Inner Voice (#345) — sibling to Chat. Brain 2 ensemble runs only on
+  // Inner Voice — sibling to Chat. The critic ensemble runs only on
   // sessions opened in this tab; existing Chat tab behavior is unchanged.
   { id: 'inner_voice', label: 'Inner Voice', icon: BrainCircuit },
   { id: 'backlog', label: 'Backlog', icon: LayoutGrid },

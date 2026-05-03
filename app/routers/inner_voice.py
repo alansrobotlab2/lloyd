@@ -1,7 +1,7 @@
 """Inner Voice (#345) REST endpoints.
 
 Stage 0 shipped the event-log endpoint live and the others as
-stable-shape stubs. Stage 2 wires Brain 2, so `/critiques` now serves
+stable-shape stubs. Stage 2 wires the critic, so `/critiques` now serves
 real rows and `/state` reports observation state from session metadata
 + recent critiques.
 
@@ -44,7 +44,7 @@ router = APIRouter(prefix="/api/inner_voice", tags=["inner_voice"])
 
 
 # ---------------------------------------------------------------------------
-# Critiques — Stage 2 live (Brain 2 fires + persists from messages.py)
+# Critiques — Stage 2 live (the critic fires + persists from messages.py)
 # ---------------------------------------------------------------------------
 
 @router.get("/critiques")
@@ -90,7 +90,7 @@ async def list_interventions(
 
 
 # ---------------------------------------------------------------------------
-# Observation state — what is Brain 2 doing right now?
+# Observation state — what is the critic doing right now?
 # ---------------------------------------------------------------------------
 
 @router.get("/state")
@@ -273,8 +273,8 @@ async def list_inner_voice_sessions(
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
             "message_count": len(data.get("messages") or []),
-            # Stage 5: surface the user-turn-eval flag so the IV chat
-            # tab can show whether Brain 2 will fire on chat messages.
+            # surface the user-turn-eval flag so the Inner Voice chat
+            # tab can show whether the critic will fire on chat messages.
             "evaluate_user_turns": bool(
                 data.get("inner_voice_evaluate_user_turns", False)
             ),
@@ -283,8 +283,9 @@ async def list_inner_voice_sessions(
 
 
 # ---------------------------------------------------------------------------
-# Event log — populated from Stage 0 onward (brain1.* on every session).
-# This is the only endpoint with real data in Stage 0.
+# Event log — populated on every session. The persisted event names
+# still use the historical `brain1.*` prefix for backward compatibility
+# with existing logs and dashboards; do not rename without a migration.
 # ---------------------------------------------------------------------------
 
 @router.get("/event_log")

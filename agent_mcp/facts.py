@@ -623,13 +623,31 @@ def _fact_path(params: dict) -> dict:
         return _err(str(exc), ErrorCode.INTERNAL)
 
 
+# Soft caps on fact_neighbors result size. The harness spills any result
+# above ~50KB to disk (app.harness.tool_result_spill), so the model never
+# loses information — but explicit caps + a `hint` field steer the model
+# toward narrower queries (hops=1, higher min_confidence) BEFORE it pays
+# the spill cost. Defaults are generous; hub-entity hops=2 still hits them.
+_FACT_NEIGHBORS_MAX_NODES = 1000
+_FACT_NEIGHBORS_MAX_EDGES = 2000
+
+
 def _fact_neighbors(params: dict) -> dict:
-    """Get neighborhood subgraph around an entity within N hops."""
+    """Get neighborhood subgraph around an entity within N hops.
+
+    Truncates at ``_FACT_NEIGHBORS_MAX_NODES`` / ``_FACT_NEIGHBORS_MAX_EDGES``
+    to bound result size. When truncated, sets ``truncated=True`` and adds
+    a ``hint`` field telling the caller to narrow with ``hops=1`` or a
+    higher ``min_confidence`` threshold. Without this cap, hub-entity
+    queries return tens of thousands of nodes in a single tool result.
+    """
     entity = params.get("entity", "").strip()
     if not entity:
         return _err("entity is required", ErrorCode.MISSING_PARAM)
     hops = int(params.get("hops", 1))
     min_confidence = float(params.get("min_confidence", 0.5))
+    max_nodes = int(params.get("max_nodes", _FACT_NEIGHBORS_MAX_NODES))
+    max_edges = int(params.get("max_edges", _FACT_NEIGHBORS_MAX_EDGES))
     try:
         resolved, _ = _resolve_entity(entity, mode="read")
         data = _load_relationships()
@@ -640,20 +658,29 @@ def _fact_neighbors(params: dict) -> dict:
             s, t = edge["source"], edge["target"]
             adj.setdefault(s, []).append((t, edge))
             adj.setdefault(t, []).append((s, edge))
-        from collections import deque  # noqa: F401
         visited = {resolved}
         current_layer = [resolved]
-        all_edges = []
+        all_edges: list[dict] = []
+        truncated = False
         for _ in range(hops):
             next_layer = []
             for node in current_layer:
                 for neighbor, edge in adj.get(node, []):
-                    edge_key = (edge["source"], edge["target"], edge["type"])  # noqa: F841
+                    if len(all_edges) >= max_edges:
+                        truncated = True
+                        break
                     all_edges.append({"source": edge["source"], "target": edge["target"],
                                       "type": edge["type"], "confidence": edge.get("confidence", 1.0)})
                     if neighbor not in visited:
+                        if len(visited) >= max_nodes:
+                            truncated = True
+                            continue
                         visited.add(neighbor)
                         next_layer.append(neighbor)
+                if truncated and len(all_edges) >= max_edges:
+                    break
+            if truncated and len(all_edges) >= max_edges:
+                break
             current_layer = next_layer
         seen_edges = set()
         unique_edges = []
@@ -662,8 +689,22 @@ def _fact_neighbors(params: dict) -> dict:
             if key not in seen_edges:
                 seen_edges.add(key)
                 unique_edges.append(e)
-        return {"entity": resolved, "nodes": sorted(visited),
-                "edges": unique_edges, "node_count": len(visited), "edge_count": len(unique_edges)}
+        result: dict = {
+            "entity": resolved,
+            "nodes": sorted(visited),
+            "edges": unique_edges,
+            "node_count": len(visited),
+            "edge_count": len(unique_edges),
+        }
+        if truncated:
+            result["truncated"] = True
+            result["hint"] = (
+                f"Result truncated at {max_nodes} nodes / {max_edges} edges. "
+                f"Hub entity '{resolved}' has too many connections at hops={hops}. "
+                f"Retry with hops=1, raise min_confidence (currently {min_confidence}), "
+                f"or pass smaller max_nodes/max_edges."
+            )
+        return result
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
 
@@ -811,8 +852,14 @@ async def list_tools():
             "type": "object", "properties": {"entity": {"type": "string"}, "direction": {"type": "string", "enum": ["in", "out", "both"]}, "type": {"type": "string"}}, "required": ["entity"]}),
         Tool(name="fact_path", description="Find shortest path between two entities via relationship graph.", inputSchema={
             "type": "object", "properties": {"source": {"type": "string"}, "target": {"type": "string"}, "max_hops": {"type": "integer"}}, "required": ["source", "target"]}),
-        Tool(name="fact_neighbors", description="Get neighborhood subgraph around an entity within N hops.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "hops": {"type": "integer"}, "min_confidence": {"type": "number"}}, "required": ["entity"]}),
+        Tool(name="fact_neighbors", description="Get neighborhood subgraph around an entity within N hops. Truncates at 200 nodes / 500 edges by default; hub entities at hops=2 will be truncated — narrow with hops=1 or higher min_confidence.", inputSchema={
+            "type": "object", "properties": {
+                "entity": {"type": "string"},
+                "hops": {"type": "integer"},
+                "min_confidence": {"type": "number"},
+                "max_nodes": {"type": "integer", "description": "Cap on returned nodes (default 200)"},
+                "max_edges": {"type": "integer", "description": "Cap on returned edges (default 500)"},
+            }, "required": ["entity"]}),
     ]
 
 

@@ -8,11 +8,11 @@ Pulled out of `messages.py` to keep the router slim. Public surface that
   * `_iv_should_fire_on_turn`                — single-source-of-truth gate
   * `_inner_voice_hooks_dict`                — build the HookRegistry
   * `_inner_voice_completion_check`          — Stage-1 post-loop heuristic
-  * `_inner_voice_brain2_check`              — Stage-2/4/6 critique + dispatch
+  * `_inner_voice_critic_check`              — Stage-2/4/6 critique + dispatch
   * `_inner_voice_grading_pass`              — Stage-5 outcome grading
   * `_inner_voice_mid_turn_drift_check`      — Stage-3 drift veto
 
-`_maybe_dispatch_steer` is the Stage-6 helper invoked by the brain2 path.
+`_maybe_dispatch_steer` is the helper invoked by the critic path.
 
 `build_ambient_turn` and `enqueue_ambient` are imported lazily inside
 `_maybe_dispatch_steer` because they live in `messages.py` and a top-level
@@ -56,7 +56,7 @@ def _session_inner_voice_enabled(session_id: str) -> bool:
     """Read the `inner_voice` flag from the session JSON.
 
     Returns False on any miss (no session yet, malformed JSON, missing
-    field). Stage 1 is opt-in only — Brain 2 ensembles never fire on a
+    field). Stage 1 is opt-in only — the critic ensembles never fire on a
     session whose JSON doesn't explicitly say `inner_voice: true`.
     """
     if not session_id:
@@ -74,10 +74,10 @@ def _session_inner_voice_enabled(session_id: str) -> bool:
 def _session_iv_evaluate_user_turns_enabled(session_id: str) -> bool:
     """Read the `inner_voice_evaluate_user_turns` flag from the session JSON.
 
-    Stage 5+ — opt-in for firing the Brain 2 ensemble + grading + mid-turn
+    Stage 5+ — opt-in for firing the critic ensemble + grading + mid-turn
     drift on user-typed turns (i.e. chat from the Inner Voice tab), not
     just ambient/autonomy turns. Default off — chat sessions don't pay the
-    Brain 2 cost unless the user explicitly turns it on.
+    the critic cost unless the user explicitly turns it on.
 
     Consensus termination + Stage 1 completion-check stay ambient-only
     regardless: SIGNAL:TASK_COMPLETE veto and premature-stop logic exist
@@ -96,10 +96,11 @@ def _session_iv_evaluate_user_turns_enabled(session_id: str) -> bool:
 
 
 def _iv_should_fire_on_turn(session_id: str, turn_source: str) -> bool:
-    """Single-source-of-truth gate for Brain 2 ensemble + grading + mid-turn
-    drift. Returns True iff the session is opted into Inner Voice AND
-    either the turn is ambient OR the session opted into user-turn
-    evaluation.
+    """Single-source-of-truth gate for Inner Voice post-turn checks
+    (completion-check, critic ensemble, grading, mid-turn drift).
+
+    Returns True iff the session is opted into Inner Voice AND either
+    the turn is ambient OR the session opted into user-turn evaluation.
     """
     if not _session_inner_voice_enabled(session_id):
         return False
@@ -131,7 +132,7 @@ def _inner_voice_hooks_dict(session_id: str) -> HookRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1 — post-loop completion check (heuristic only, no Brain 2)
+# Stage 1 — post-loop completion check (heuristic only, no the critic)
 # ---------------------------------------------------------------------------
 
 async def _inner_voice_completion_check(
@@ -153,7 +154,7 @@ async def _inner_voice_completion_check(
             return
         verdict = _iv_heuristics.evaluate_completion(response_text, tool_calls)
         # Always log the evaluation — passes are forensic data for tuning
-        # the heuristic and later A/B'ing against Brain 2 ensembles.
+        # the heuristic and later A/B'ing against the critic ensembles.
         _event_log.log_event(
             session_id,
             "inner_voice.completion_check_evaluated",
@@ -209,10 +210,10 @@ async def _inner_voice_completion_check(
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 / 4 / 6 — Brain 2 critique + consensus + steer dispatch
+# Stage 2 / 4 / 6 — the critic critique + consensus + steer dispatch
 # ---------------------------------------------------------------------------
 
-async def _inner_voice_brain2_check(
+async def _inner_voice_critic_check(
     session_id: str,
     turn_id: str,
     turn_source: str,
@@ -221,10 +222,10 @@ async def _inner_voice_brain2_check(
     tool_calls: list[dict],
     turn: SessionTurn,
 ) -> None:
-    """Spawn Brain 2 against the just-finished ambient turn.
+    """Spawn the critic against the just-finished ambient turn.
 
     Best-effort. Handles all errors internally so the chat path never sees
-    a Brain 2 failure. Stage 3 fans out 3 personas concurrently
+    a the critic failure. Stage 3 fans out 3 personas concurrently
     (``completion_checker``, ``drift_detector``, ``continuation_drive``
     for the ``autonomy_default`` ensemble) and runs threshold-driven
     aggregation.
@@ -233,7 +234,7 @@ async def _inner_voice_brain2_check(
     ensemble: if the response carries ``SIGNAL:TASK_COMPLETE`` and the
     aggregated severity crosses the veto threshold, we inject a
     please-continue ambient. Four escape hatches keep the loop bounded
-    (Brain 2 timeout, three-strike, max_nudges, hard_max_turns).
+    (the critic timeout, three-strike, max_nudges, hard_max_turns).
 
     SSE delivery is racy — the turn's events queue receives the events but
     the consumer may already have closed by the time the 5s critic call
@@ -297,8 +298,8 @@ async def _inner_voice_brain2_check(
         # Fires when the ensemble landed in [severity_threshold,
         # veto_severity_threshold) — flagged but below the consensus veto
         # floor. Without this branch, every chat critique with severity
-        # 0.6-0.85 was log_only with no follow-up. Brain 2 had feedback,
-        # Brain 1 never saw it.
+        # 0.6-0.85 was log_only with no follow-up. the critic had feedback,
+        # the agent never saw it.
         #
         # Skipped when consensus_termination already vetoed (it owns the
         # please-continue dispatch in that case — no double-fire).
@@ -438,7 +439,7 @@ async def _inner_voice_brain2_check(
                 )
     except Exception as e:
         logger.warning(
-            "[inner_voice] brain2 check failed (session=%s turn=%s): %s",
+            "[inner_voice] critic check failed (session=%s turn=%s): %s",
             session_id, turn_id, e,
         )
 
@@ -475,7 +476,7 @@ async def _maybe_dispatch_steer(
       3. Build the steer ambient kwargs via `make_steer_ambient`.
       4. Enqueue an ambient prefetch (surfaces in next user turn's
          `<context>` if the ambient turn races a user message).
-      5. Build + enqueue an actual ambient turn so Brain 1 picks up the
+      5. Build + enqueue an actual ambient turn so the agent picks up the
          retry immediately rather than waiting for the user.
       6. Record an `inner_voice_interventions` row (kind='steer') so the
          grading pass picks it up on the next outcome turn.
@@ -561,7 +562,7 @@ async def _maybe_dispatch_steer(
             "(session=%s turn=%s): %s", session_id, turn_id, e,
         )
 
-    # 2. Enqueue an ambient turn so Brain 1 actually retries. The body is
+    # 2. Enqueue an ambient turn so the agent actually retries. The body is
     #    the steer content — `build_ambient_turn` wraps it in its standard
     #    `<ambient ...>` envelope which is fine; the inner-voice tag is
     #    explicit enough.
@@ -649,7 +650,7 @@ async def _inner_voice_grading_pass(
     """Run the Stage 5 grading pass against the just-finished ambient turn.
 
     Spawned via `asyncio.ensure_future` from the result branch in
-    `_run_turn`, alongside the Stage 1 heuristic and Stage 2 Brain 2 check.
+    `_run_turn`, alongside the Stage 1 heuristic and Stage 2 the critic check.
     Best-effort. The grading module catches every internal error; this
     wrapper exists only to bound logging.
 
@@ -741,7 +742,7 @@ async def _inner_voice_mid_turn_drift_check(
             return
 
         # Re-check cancel_event — another mid-turn fire may have set it
-        # while this Brain 2 call was in flight. First-cancel-wins.
+        # while this the critic call was in flight. First-cancel-wins.
         if cancel_event.is_set():
             return
 

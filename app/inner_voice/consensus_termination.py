@@ -1,18 +1,18 @@
 """Inner Voice (#345) Stage 4 — consensus termination + escape hatches.
 
-When Brain 1 emits ``SIGNAL:TASK_COMPLETE`` on an ambient turn, this module
-runs a last-mile check: does the Brain 2 ensemble actually agree that the
+When agent emits ``SIGNAL:TASK_COMPLETE`` on an ambient turn, this module
+runs a last-mile check: does the critic ensemble actually agree that the
 task is done? If the aggregated severity crosses the veto threshold, we
 inject a ``<inner-voice kind='please-continue'>…</inner-voice>`` ambient and
-Brain 1 gets one more turn. Otherwise we accept termination.
+agent gets one more turn. Otherwise we accept termination.
 
 The four escape hatches that keep this loop bounded:
 
-  1. **Brain 2 timeout** — every persona errored (HTTP timeout, parse
+  1. **critic timeout** — every persona errored (HTTP timeout, parse
      failure-after-retry, etc). We have no signal so we accept. Per
-     ``inner_voice.consensus_termination.brain2_timeout_default_to_brain1``.
+     ``inner_voice.consensus_termination.critic_timeout_defaults_to_agent``.
   2. **Three-strike accept** — three consecutive vetoes for this session
-     with no progress signal between them. Brain 1 is probably stuck, not
+     with no progress signal between them. agent is probably stuck, not
      lying; further nudges won't unstick it. Accept, log, escalate later
      if it persists. Per ``inner_voice.consensus_termination.three_strike_accept``.
   3. **Max nudges per session** — the session's ``nudge_count`` already
@@ -129,7 +129,7 @@ def _ct_cfg() -> dict[str, Any]:
     iv = CONFIG.get("inner_voice") or {}
     ct = dict(iv.get("consensus_termination") or {})
     ct.setdefault("enabled", True)
-    ct.setdefault("brain2_timeout_default_to_brain1", True)
+    ct.setdefault("critic_timeout_defaults_to_agent", True)
     ct.setdefault("three_strike_accept", True)
     ct.setdefault("hard_max_turns", 60)
     return ct
@@ -202,7 +202,7 @@ class TerminationDecision:
 
     ``action`` is one of:
       - ``accepted`` — termination accepted. No injection.
-      - ``vetoed`` — Brain 2 ensemble disagrees at veto severity.
+      - ``vetoed`` — critic ensemble disagrees at veto severity.
         Caller should enqueue ``please_continue_kwargs`` and record the
         intervention.
       - ``accepted_brain2_timeout`` — every persona errored. We have no
@@ -288,7 +288,7 @@ def make_please_continue_ambient(
     ``AmbientPrefetchEntry(**kwargs, enqueued_at=…)``.
 
     The wrapping ``<inner-voice kind='please-continue'>`` tag is what the
-    spec requested. Brain 1 sees this as the leading content of its next
+    spec requested. agent sees this as the leading content of its next
     ambient turn (via ``<context>`` injection).
     """
     excerpt = (response_excerpt or "")[:300]
@@ -297,12 +297,12 @@ def make_please_continue_ambient(
         "source": "inner_voice:consensus_termination:vetoed",
         "summary": (
             f"Previous ambient turn ({turn_id}) emitted SIGNAL:TASK_COMPLETE "
-            f"but Brain 2 ensemble vetoed at severity {severity:.2f}."
+            f"but critic ensemble vetoed at severity {severity:.2f}."
         ),
         "content": (
             "<inner-voice kind='please-continue'>\n"
             "Inner Voice (#345 Stage 4) vetoed your last SIGNAL:TASK_COMPLETE. "
-            "The Brain 2 ensemble disagreed at veto severity — the deliverable "
+            "The critic ensemble disagreed at veto severity — the deliverable "
             "doesn't look done.\n\n"
             "Reasons:\n"
             f"{reason_block}\n\n"
@@ -338,7 +338,7 @@ def make_escalation_backlog_kwargs(
     )
     body = (
         f"Inner Voice (#345 Stage 4) escalated this session because the "
-        f"Brain 2 ensemble vetoed termination {nudge_count} times — the "
+        f"critic ensemble vetoed termination {nudge_count} times — the "
         f"max_nudges_per_session ceiling. The agent is either confidently "
         f"asserting completion that the ensemble disagrees with, OR genuinely "
         f"stuck.\n\n"
@@ -390,7 +390,7 @@ async def evaluate(
 
     Caller is expected to:
       1. Have already run the post-loop ensemble (so ``critiques`` is
-         the actual Brain 2 verdict, not a freshly-fired pass).
+         the actual critic verdict, not a freshly-fired pass).
       2. Have detected ``SIGNAL:TASK_COMPLETE`` in ``response_text`` via
          ``has_task_complete_signal()``.
       3. Pass ``hard_max_turns_hit=True`` if the autonomy scheduler is
@@ -472,12 +472,12 @@ async def evaluate(
         await _maybe_fire_escalation_hook(decision, session_id=session_id, turn_id=turn_id)
         return decision
 
-    # ── Hatch 1: Brain 2 timeout ─────────────────────────────────────────
+    # ── Hatch 1: critic timeout ─────────────────────────────────────────
     # Every persona errored. We have no signal — the spec says
-    # "default to Brain 1" (accept termination). No streak update; this
+    # "default to agent" (accept termination). No streak update; this
     # is an infrastructure failure, not a model decision.
     if persona_count > 0 and error_count == persona_count:
-        if _ct_cfg().get("brain2_timeout_default_to_brain1", True):
+        if _ct_cfg().get("critic_timeout_defaults_to_agent", True):
             decision = TerminationDecision(
                 action="accepted_brain2_timeout",
                 rationale=(

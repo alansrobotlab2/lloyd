@@ -2,10 +2,10 @@
 
 When Inner Voice fires an intervention (kind ``continue`` / ``escalate``)
 on turn N, the verdict's quality can only be measured *after* turn N+1
-lands — did Brain 1 actually address the critique, or did it ignore /
+lands — did the agent actually address the critique, or did it ignore /
 restate / dodge it?
 
-This module is the *grading pass*: a third Brain 2 call that fires after
+This module is the *grading pass*: a third the critic call that fires after
 every ambient turn completes, looks up any ungraded interventions in
 the session, and asks the ``grader`` persona to judge whether the
 just-finished turn (the "outcome turn") addressed each one.
@@ -530,7 +530,7 @@ async def _call_grader(
     persona_system_prompt: str,
     user_prompt: str,
 ) -> dict[str, Any]:
-    """Single Brain 2 round-trip for the grader persona.
+    """Single the critic round-trip for the grader persona.
 
     Returns:
         {
@@ -542,12 +542,12 @@ async def _call_grader(
     import asyncio
     import httpx
 
-    # Reuse the critic config block — Brain 2 endpoint, timeout, max_tokens
+    # Reuse the critic config block — the critic endpoint, timeout, max_tokens
     # are the same. Only the prefill differs.
     crit_cfg = _critic._critic_cfg()  # type: ignore[attr-defined]
-    base_url, model_name = _critic._brain2_endpoint()  # type: ignore[attr-defined]
+    base_url, model_name = _critic._critic_endpoint()  # type: ignore[attr-defined]
     if not base_url:
-        return {"parsed": None, "raw": "", "error": "brain2 endpoint unconfigured"}
+        return {"parsed": None, "raw": "", "error": "critic endpoint unconfigured"}
 
     messages = [
         {"role": "system", "content": persona_system_prompt},

@@ -1,7 +1,7 @@
-"""Inner Voice (#345) Stage 2 — single-persona Brain 2 call wrapper.
+"""Inner Voice (#345) Stage 2 — single-persona the critic call wrapper.
 
-Brain 2 is a separate inference call against the same local model endpoint
-that Brain 1 uses (primary at :8096 by default). It does NOT go through the
+the critic is a separate inference call against the same local model endpoint
+that the agent uses (primary at :8096 by default). It does NOT go through the
 SDK; it goes directly to the OpenAI-compatible chat-completions endpoint so
 we can:
 
@@ -16,7 +16,7 @@ returns a `Critique` dataclass with both the parsed verdict and the forensic
 fields the event log + SQLite tables want (raw response, prompt hash,
 parse-attempts, latency).
 
-Same-model anchoring (Brain 1 and Brain 2 are the same model family) is
+Same-model anchoring (the agent and the critic are the same model family) is
 mitigated by the *caller*, not here — see `ensemble._build_user_prompt` for
 the "frozen task intent + recent transcript without thinking blocks" recipe.
 
@@ -27,7 +27,7 @@ Failure modes handled:
   * Empty response (model used all max_tokens on hidden reasoning) → same
     as parse failure path
 
-None of these raise into the consumer. Brain 2 is best-effort by design;
+None of these raise into the consumer. the critic is best-effort by design;
 it's a critic, not a load-bearing service.
 """
 
@@ -56,7 +56,7 @@ logger = logging.getLogger("lloyd-server")
 
 @dataclass
 class Critique:
-    """Outcome of one Brain 2 call. Both the parsed verdict and forensic
+    """Outcome of one the critic call. Both the parsed verdict and forensic
     metadata. Persisted to `inner_voice_critiques`; raw fields go to the
     event log (potentially blob-store deduped).
     """
@@ -87,7 +87,7 @@ class Critique:
     parse_attempts: int = 1      # 1 = first try worked; 2 = retry needed
     error: str | None = None     # non-None if HTTP/timeout error
 
-    # Excerpt of Brain 1's response that Brain 2 reviewed (first 500 chars).
+    # Excerpt of the agent's response that the critic reviewed (first 500 chars).
     anchor_response_excerpt: str = ""
 
 
@@ -99,7 +99,7 @@ class Critique:
 def _critic_cfg() -> dict[str, Any]:
     """Return the `inner_voice.critic` block, with defaults for any missing
     keys. Called per invocation so config.yaml edits take effect on the next
-    Brain 2 call (no restart needed for tuning).
+    the critic call (no restart needed for tuning).
     """
     iv = CONFIG.get("inner_voice") or {}
     crit = dict(iv.get("critic") or {})
@@ -109,19 +109,19 @@ def _critic_cfg() -> dict[str, Any]:
     crit.setdefault("timeout_seconds", 5)
     crit.setdefault("json_retry_on_parse_failure", 1)
     crit.setdefault("transcript_window_turns", 5)
-    crit.setdefault("include_brain1_thinking", False)
+    crit.setdefault("include_agent_thinking", False)
     return crit
 
 
-def _brain2_endpoint(model_alias: str | None = None) -> tuple[str, str]:
-    """Resolve (base_url, model_name) for the Brain 2 model.
+def _critic_endpoint(model_alias: str | None = None) -> tuple[str, str]:
+    """Resolve (base_url, model_name) for the critic model.
 
     Reads `inner_voice.model` first, falls back to the global default.
     Prefers the model's top-level `base_url`, falls back to its
     `env.ANTHROPIC_BASE_URL`.
 
     Returns ('', '') if no resolvable URL — the caller should treat that as
-    a hard config error and skip the Brain 2 call entirely.
+    a hard config error and skip the critic call entirely.
     """
     iv = CONFIG.get("inner_voice") or {}
     name = model_alias or iv.get("model") or CONFIG.get("model", {}).get("default", "")
@@ -138,7 +138,7 @@ def _brain2_endpoint(model_alias: str | None = None) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
-# Brain 2 receives the prefill `{"disagrees":` so its output should start
+# the critic receives the prefill `{"disagrees":` so its output should start
 # with the rest of that object. We accept either a continuation ("true,...")
 # OR a full repeat-from-the-top object. Be generous — local models are
 # inconsistent about the prefill convention.
@@ -299,7 +299,7 @@ async def _post_chat_completion(
         "temperature": 0.3,
         "max_tokens": max_tokens,
         # vLLM/llama-server convention; harmless on endpoints that don't
-        # honor it. Forces thinking OFF — Brain 2 must not eat its output
+        # honor it. Forces thinking OFF — the critic must not eat its output
         # budget on hidden reasoning. This is documented in
         # knowledge/local-llm-gotchas.
         "chat_template_kwargs": {"enable_thinking": False},
@@ -342,7 +342,7 @@ async def call_critic(
     response_excerpt: str,
     model_alias: str | None = None,
 ) -> Critique:
-    """Run one Brain 2 call. Single round-trip, no retries beyond the JSON
+    """Run one the critic call. Single round-trip, no retries beyond the JSON
     parse-failure retry the spec allows.
 
     On any unrecoverable failure (HTTP error, timeout, total parse failure
@@ -352,7 +352,7 @@ async def call_critic(
     drop.
     """
     cfg = _critic_cfg()
-    base_url, model_name = _brain2_endpoint(model_alias)
+    base_url, model_name = _critic_endpoint(model_alias)
     full_prompt = persona_system_prompt + "\n\n" + user_prompt
     prompt_hash = _hash_prompt(persona_system_prompt, user_prompt)
 
@@ -366,7 +366,7 @@ async def call_critic(
     )
 
     if not base_url:
-        base_critique.error = "brain2 endpoint unconfigured"
+        base_critique.error = "critic endpoint unconfigured"
         return base_critique
 
     messages = [
@@ -490,6 +490,6 @@ __all__ = [
     "Critique",
     "call_critic",
     "_parse_critic_json",
-    "_brain2_endpoint",
+    "_critic_endpoint",
     "_critic_cfg",
 ]

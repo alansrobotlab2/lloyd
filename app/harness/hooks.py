@@ -28,7 +28,7 @@ PreToolUse callback contract (preserved from SDK):
 
 PostToolUse / PostToolUseFailure callbacks always return `{}` —
 they're observers, not gates. They commonly spawn `asyncio.ensure_future`
-work to fire Brain 2 personas without blocking the primary loop.
+work to fire the critic personas without blocking the primary loop.
 """
 
 from __future__ import annotations

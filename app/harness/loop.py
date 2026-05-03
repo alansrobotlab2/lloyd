@@ -21,7 +21,11 @@ from typing import Any, AsyncIterator
 
 from app.harness import events
 from app.harness.client import stream_chat
-from app.harness.errors import ParseError, ToolDispatchError
+from app.harness.errors import ContextOverflowError, ParseError, ToolDispatchError
+from app.harness.tool_result_spill import (
+    fallback_for_empty_result,
+    maybe_spill,
+)
 from app.harness.events import NormalizedEvent
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
@@ -70,9 +74,19 @@ async def run_query(
         yield events.system(session_id=session_id, model=options.model)
 
         accumulated_text = ""
-        cumulative_usage: dict[str, int] = {}
+        # Two distinct usage trackers:
+        #   iteration_usage — populated freshly each loop pass; reflects
+        #     ONE chat-completion's tokens. Emitted on assistant_message
+        #     so the UI can attach per-row stats.
+        #   total_usage — cross-iteration aggregate. input_tokens is max
+        #     (peak), everything else is summed. Reported on the final
+        #     `result` event so usage_store/UI see the whole turn.
+        total_usage: dict[str, int] = {}
+        last_iteration_usage: dict[str, int] = {}
         num_turns = 0
         stop_reason = "stop"
+        context_overflow_recoveries = 0
+        max_context_overflow_recoveries = 2
 
         while True:
             num_turns += 1
@@ -84,6 +98,8 @@ async def run_query(
                 stop_reason = "cancelled"
                 break
 
+            iteration_started_at = time.perf_counter()
+            iteration_usage: dict[str, int] = {}
             assistant_text = ""
             thinking_text = ""
             tool_calls_acc: dict[int, dict[str, Any]] = {}
@@ -102,9 +118,11 @@ async def run_query(
                 ):
                     # Usage chunk arrives as the last event when
                     # stream_options.include_usage=True. vLLM emits it
-                    # with choices=[].
+                    # with choices=[]. Fold into per-iteration only;
+                    # cross-iteration total is computed once we know
+                    # this iteration is final (after the stream loop).
                     if usage := chunk.get("usage"):
-                        cumulative_usage = _merge_usage(cumulative_usage, usage)
+                        iteration_usage = _merge_usage(iteration_usage, usage)
 
                     choices = chunk.get("choices") or []
                     if not choices:
@@ -133,6 +151,41 @@ async def run_query(
                 # Treat parse failure as an end-of-turn with whatever we
                 # accumulated. The model can retry next turn.
                 finish_reason = finish_reason or "stop"
+            except ContextOverflowError as exc:
+                # vLLM rejected the prompt for exceeding context. Recovery:
+                # truncate the largest tool result(s) in chat_messages,
+                # append a synthetic tool note explaining the truncation,
+                # and let the loop retry the same turn. Bounded by
+                # ``max_context_overflow_recoveries`` to avoid an infinite
+                # loop if truncation can't free enough budget.
+                if context_overflow_recoveries >= max_context_overflow_recoveries:
+                    logger.error(
+                        "loop: context overflow after %d recovery attempts — giving up",
+                        context_overflow_recoveries,
+                    )
+                    raise
+                context_overflow_recoveries += 1
+                truncated_count, freed_chars = _truncate_largest_tool_results(
+                    chat_messages, target_chars=80_000,
+                )
+                logger.warning(
+                    "loop: context overflow (requested=%s tokens), recovery #%d: "
+                    "truncated %d tool result(s), freed ~%d chars",
+                    exc.requested_input_tokens,
+                    context_overflow_recoveries,
+                    truncated_count,
+                    freed_chars,
+                )
+                yield events.stream_raw(
+                    "",
+                    error=(
+                        f"context_overflow_recovery: attempt={context_overflow_recoveries}, "
+                        f"truncated={truncated_count}, freed_chars={freed_chars}, "
+                        f"requested_input_tokens={exc.requested_input_tokens}"
+                    ),
+                )
+                num_turns -= 1   # don't count the recovered attempt against max_turns
+                continue
 
             if options.cancel_event is not None and options.cancel_event.is_set():
                 stop_reason = "cancelled"
@@ -144,10 +197,16 @@ async def run_query(
 
             tool_calls_committed = _commit_tool_calls(tool_calls_acc)
 
+            iteration_duration_ms = int((time.perf_counter() - iteration_started_at) * 1000)
+            last_iteration_usage = iteration_usage
+            total_usage = _accumulate_iteration_usage(total_usage, iteration_usage)
             yield events.assistant_message(
                 text=assistant_text,
                 tool_calls=tool_calls_committed,
                 thinking=thinking_text,
+                usage=iteration_usage,
+                duration_ms=iteration_duration_ms,
+                iteration=num_turns,
             )
 
             accumulated_text += assistant_text
@@ -189,7 +248,7 @@ async def run_query(
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         yield events.result(
             stop_reason=stop_reason,
-            usage=cumulative_usage,
+            usage=total_usage,
             num_turns=num_turns,
             duration_ms=duration_ms,
             response_text=accumulated_text,
@@ -227,7 +286,7 @@ _USAGE_KEY_REMAP = {
 
 
 def _merge_usage(acc: dict[str, int], chunk: dict[str, Any]) -> dict[str, int]:
-    """Merge a usage chunk into the running total.
+    """Merge a usage chunk into the running total for ONE request.
 
     vLLM emits the final usage as cumulative for the request, so we
     replace rather than add. OpenAI-style keys (`prompt_tokens` /
@@ -240,6 +299,31 @@ def _merge_usage(acc: dict[str, int], chunk: dict[str, Any]) -> dict[str, int]:
         if not isinstance(v, int):
             continue
         out[_USAGE_KEY_REMAP.get(k, k)] = v
+    return out
+
+
+def _accumulate_iteration_usage(
+    total: dict[str, int], iteration: dict[str, int],
+) -> dict[str, int]:
+    """Fold one iteration's usage into the cross-iteration total.
+
+    Each chat-completion request reports its own input/output counts.
+    Across the agent loop we want:
+      - ``input_tokens``: the peak (last iteration is typically largest
+        because tool results keep appending; max is conservative).
+      - ``output_tokens``, ``cache_read``, ``cache_create``: SUM —
+        every iteration writes new tokens and may hit cache.
+    Without this, the final ``result`` event would show only the LAST
+    iteration's usage (replace semantics from ``_merge_usage``).
+    """
+    out = dict(total)
+    for k, v in iteration.items():
+        if not isinstance(v, int):
+            continue
+        if k == "input_tokens":
+            out[k] = max(out.get(k, 0), v)
+        else:
+            out[k] = out.get(k, 0) + v
     return out
 
 
@@ -297,6 +381,12 @@ def _commit_tool_calls(acc: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
                 tc["function"]["name"], exc, raw_args,
             )
             args_dict = {"__parse_error__": True, "raw": raw_args, "error": str(exc)}
+            # vLLM ingests assistant tool_calls back as conversation
+            # history on the next turn and re-parses `arguments`. If we
+            # leave the malformed string, the next request 400s and the
+            # loop dies. Replace with valid empty JSON — the tool_result
+            # we'll emit already tells the model what went wrong.
+            tc["function"]["arguments"] = "{}"
         tc["_args_dict"] = args_dict
         committed.append(tc)
     return committed
@@ -402,20 +492,40 @@ async def _dispatch_one_tool_call(
             content=f"Tool dispatch failed: {exc}", is_error=True,
         )
 
+    # Tool-result post-processing — applies in this order:
+    #   1) empty-result fallback: some local models treat "" as a stop
+    #      signal; replace with an explicit "(<tool> completed with no
+    #      output)" marker.
+    #   2) disk spill: results above SPILL_THRESHOLD_CHARS go to
+    #      <SESSIONS_DIR>/<sid>.tool-results/<call_id>.<ext>, replaced
+    #      in-prompt with a <persisted-output> preview block. Modeled on
+    #      Claude Code's tool-result storage. The model can re-read the
+    #      full file with the Read tool if it needs more than the preview.
+    content = result["content"]
+    is_error = result["is_error"]
+    if not is_error and isinstance(content, str):
+        content = fallback_for_empty_result(content, name)
+        content = maybe_spill(
+            content,
+            tool_name=name,
+            tool_use_id=call_id,
+            session_id=session_id,
+        )
+
     if options.hooks is not None:
         await options.hooks.fire_post_tool_use(
             session_id=session_id,
             tool_name=name,
             tool_input=args_dict,
-            tool_response=result["content"],
+            tool_response=content,
             tool_use_id=call_id,
         )
 
     return events.tool_result(
         call_id=call_id,
         name=name,
-        content=result["content"],
-        is_error=result["is_error"],
+        content=content,
+        is_error=is_error,
     )
 
 
@@ -425,3 +535,63 @@ def _namespaced_form(bare_name: str) -> str:
     callers ought to use bare names in disallowed_tools for built-ins.
     """
     return f"mcp__lloyd-mcp__{bare_name}"
+
+
+
+
+def _truncate_largest_tool_results(
+    chat_messages: list[dict[str, Any]],
+    *,
+    target_chars: int,
+) -> tuple[int, int]:
+    """Replace the largest tool-result message contents with a truncation
+    notice until at least ``target_chars`` of content has been freed.
+
+    Operates in-place on ``chat_messages`` (each dict's ``content`` field
+    is overwritten). Returns ``(num_truncated, total_chars_freed)``.
+
+    Strategy: rank tool messages by content length descending, walk from
+    the largest down, replacing each with a short error string that
+    surfaces what happened to the model. Stop as soon as we've freed
+    ``target_chars`` chars cumulatively, OR after we've replaced every
+    tool message that's > 4KB (smaller results aren't worth touching).
+    """
+    candidates: list[tuple[int, int]] = []   # (size, message_index)
+    for i, msg in enumerate(chat_messages):
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            size = len(content)
+        elif isinstance(content, list):
+            size = sum(
+                len(b.get("text", "")) for b in content
+                if isinstance(b, dict)
+            )
+        else:
+            size = 0
+        if size > 4096:
+            candidates.append((size, i))
+    candidates.sort(reverse=True)
+
+    freed = 0
+    truncated = 0
+    for size, idx in candidates:
+        original_size = size
+        notice = (
+            f"[harness: tool result truncated by context-overflow recovery — "
+            f"original was {original_size} chars. The combined tool history "
+            f"exceeded the model's context window. Re-run the call with a "
+            f"narrower query (smaller hops, higher min_confidence, fewer "
+            f"max_results) or use a more targeted tool.]"
+        )
+        msg = chat_messages[idx]
+        if isinstance(msg.get("content"), list):
+            msg["content"] = [{"type": "text", "text": notice}]
+        else:
+            msg["content"] = notice
+        freed += original_size - len(notice)
+        truncated += 1
+        if freed >= target_chars:
+            break
+    return truncated, freed

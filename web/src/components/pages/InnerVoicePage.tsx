@@ -1,14 +1,15 @@
 /**
- * Inner Voice (#345) — Stage 5 chat-driven UI.
+ * Inner Voice — chat-driven UI.
  *
  * Two-pane layout:
  *   • Left:  ChatPanel (reused) bound to the selected Inner Voice session.
  *   • Right: observation panel — state header, critique cards, grading
  *     progress, recent interventions, click-to-detail.
  *
- * The "+ New IV session" button calls POST /api/sessions/create with
+ * The "+ New session" button calls POST /api/sessions/create with
  * `inner_voice: true` AND `inner_voice_evaluate_user_turns: true` so
- * Brain 2 fires on user-typed chat messages, not just ambient turns.
+ * the critic ensemble fires on user-typed chat messages, not just
+ * ambient turns.
  *
  * Polling sources of truth:
  *   /api/inner_voice/state            → header status (every 4s)
@@ -167,7 +168,7 @@ export default function InnerVoicePage() {
     return () => { cancelled = true; clearInterval(t) }
   }, [selectedSession, refreshKey])
 
-  // ── Create new IV session ──
+  // ── Create new Inner Voice session ──
   const handleCreateSession = useCallback(async () => {
     setCreateError(null)
     setCreating(true)
@@ -223,7 +224,7 @@ export default function InnerVoicePage() {
             onClick={handleCreateSession}
             disabled={creating}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-brand-600 border border-brand-500 text-white text-xs font-medium hover:bg-brand-500 transition disabled:opacity-50"
-            title="Create a new Inner Voice chat session (Brain 2 fires on user turns)"
+            title="Create a new Inner Voice chat session (critic fires on user turns)"
           >
             <Plus className="w-3.5 h-3.5" />
             {creating ? 'creating…' : 'new chat'}
@@ -259,7 +260,7 @@ export default function InnerVoicePage() {
                 <div className="text-sm text-slate-400 mb-2">No Inner Voice session selected</div>
                 <div className="text-xs text-slate-500 mb-4">
                   Click <span className="font-mono text-brand-400">+ new chat</span> above
-                  to start a session where Brain 2 fires on every chat turn,
+                  to start a session where the critic fires on every chat turn,
                   or pick an existing session from the dropdown.
                 </div>
               </div>
@@ -437,9 +438,9 @@ function ObservationPanel({
         )}
         {selectedSession && critiques.length === 0 && (
           <div className="text-xs text-slate-500 italic px-2 py-3">
-            No critiques yet. Send a chat message — Brain 2 fires post-loop
-            and lands a card here a few seconds after Brain 1's response
-            finishes streaming.
+            No critiques yet. Send a chat message — the critic fires
+            post-loop and lands a card here a few seconds after the
+            agent's response finishes streaming.
           </div>
         )}
         {selectedSession && critiques.map(c => (
@@ -454,7 +455,7 @@ function ObservationPanel({
         </div>
         {interventions.length === 0 ? (
           <div className="text-[11px] text-slate-500 italic">
-            none yet — interventions fire when Brain 2 ensembles veto a SIGNAL:TASK_COMPLETE (ambient turns only)
+            none yet — interventions fire when the critic ensemble vetoes a SIGNAL:TASK_COMPLETE (ambient turns only)
           </div>
         ) : (
           <div className="space-y-1 max-h-32 overflow-y-auto">
@@ -728,14 +729,14 @@ function DetailPanel({
             </DetailRow>
           )}
           {rawResponse && (
-            <DetailRow label="Brain 2 raw response">
+            <DetailRow label="Critic raw response">
               <pre className="text-xs font-mono whitespace-pre-wrap bg-surface-2 border border-surface-3/40 rounded-md p-3 max-h-72 overflow-y-auto text-slate-300">
                 {rawResponse}
               </pre>
             </DetailRow>
           )}
           {critique.anchor_response_excerpt && (
-            <DetailRow label="Brain 1 response excerpt (first 500 chars)">
+            <DetailRow label="Agent response excerpt (first 500 chars)">
               <pre className="text-xs font-mono whitespace-pre-wrap bg-surface-2 border border-surface-3/40 rounded-md p-3 max-h-48 overflow-y-auto text-slate-300">
                 {critique.anchor_response_excerpt}
               </pre>

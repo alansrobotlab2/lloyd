@@ -474,7 +474,7 @@ async def _save_session_meta(session_id: str, model: str, preview: str = ""):
                 # experiment_id (typically Chat-tab + Inner-Voice-tab runs
                 # of the same task) can be joined for meta-review.
                 "experiment_id": None,
-                # Inner Voice opt-in flag — Brain 2 ensemble fires only on
+                # Inner Voice opt-in flag — the critic ensemble fires only on
                 # sessions where this is True. Stage 0 always False.
                 "inner_voice": False,
             }

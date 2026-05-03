@@ -58,12 +58,12 @@ from app.routers.voice import (
 from prompt_builder import build_system_prompt
 from prefetch import prefetch_context
 from app.compaction import load_and_compact_session
-from app import event_log as _event_log  # Inner Voice (#345) — brain1.* capture
-from app.inner_voice import heuristics as _iv_heuristics  # Inner Voice (#345) — Stage 1
-from app.inner_voice import ensemble as _iv_ensemble  # Inner Voice (#345) — Stage 2
-from app.inner_voice import consensus_termination as _iv_consensus  # Inner Voice (#345) — Stage 4
-from app.inner_voice import grading as _iv_grading  # Inner Voice (#345) — Stage 5
-from app.inner_voice import intra_turn as _iv_intra_turn  # Inner Voice (#345) — Stage 7
+from app import event_log as _event_log  # Inner Voice — agent-side event capture
+from app.inner_voice import heuristics as _iv_heuristics
+from app.inner_voice import ensemble as _iv_ensemble
+from app.inner_voice import consensus_termination as _iv_consensus
+from app.inner_voice import grading as _iv_grading
+from app.inner_voice import intra_turn as _iv_intra_turn
 from usage_store import record_inner_voice_intervention
 
 
@@ -94,7 +94,7 @@ from app.routers._messages_inner_voice import (
     _iv_should_fire_on_turn,
     _inner_voice_hooks_dict,
     _inner_voice_completion_check,
-    _inner_voice_brain2_check,
+    _inner_voice_critic_check,
     _inner_voice_grading_pass,
     _inner_voice_mid_turn_drift_check,
 )
@@ -128,8 +128,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # Initial queue snapshot so the client doesn't need a separate poll.
     await turn.events.put({"event": "queue_state", "data": get_queue_state(session_id)})
 
-    # Inner Voice (#345) — capture turn-entry events to the per-session
-    # event log. Best-effort; event_log.log_event swallows exceptions.
+    # Inner Voice — capture turn-entry events to the per-session event
+    # log. Best-effort; event_log.log_event swallows exceptions. Event
+    # names use the historical `brain1.*` prefix (= "agent side") for
+    # backward-compatibility with existing logs and dashboards; do not
+    # rename without a migration.
     _event_log.log_event(session_id, "brain1.user_prompt_received", {
         "text": text,
         "source": turn.source,
@@ -159,6 +162,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         "model": model,
     }
     last_turn_input: int = 0
+
+    # Per-iteration LLM usage from the harness's `assistant_message` event.
+    # Persisted onto each tool-call/tool-result row so the UI can show
+    # tokens-in/out/cached for every LLM-output row, not just the final one.
+    current_iteration_stats: dict[str, Any] = {}
 
     # TTS-on-response: cumulative buffer across all text segments in this turn
     # (full_response resets on tool-use; this doesn't). When voice mode's TTS
@@ -262,6 +270,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
             turn.turn_id,
             turn_source=turn.source,
             frozen_task_intent=text,
+            cancel_event=cancel_event,
         )
 
     _event_log.log_event(session_id, "brain1.query_started", {
@@ -356,6 +365,24 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 }, turn_id=turn.turn_id)
 
             elif etype == "assistant_message":
+                # Capture per-iteration usage so subsequent tool_call /
+                # tool_result rows can carry their own stats block.
+                iter_usage = evt.get("usage") or {}
+                iter_input = iter_usage.get("input_tokens") or iter_usage.get("prompt_tokens", 0)
+                iter_output = iter_usage.get("output_tokens") or iter_usage.get("completion_tokens", 0)
+                if iter_input or iter_output:
+                    last_turn_input = iter_input or last_turn_input
+                current_iteration_stats = {
+                    "input_tokens": iter_input,
+                    "output_tokens": iter_output,
+                    "cache_read": iter_usage.get("cache_read", 0)
+                        or iter_usage.get("prompt_tokens_cached", 0)
+                        or 0,
+                    "cache_create": iter_usage.get("cache_create", 0) or 0,
+                    "duration_ms": evt.get("duration_ms", 0),
+                    "iteration": evt.get("iteration", 0),
+                    "model": model,
+                }
                 # Flush text segment to disk if tool calls follow it.
                 if evt.get("tool_calls") and full_response.strip():
                     seg_ts = datetime.now().isoformat()
@@ -364,6 +391,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         "role": "assistant",
                         "content": [{"type": "text", "text": full_response}],
                         "timestamp": seg_ts,
+                        "stats": dict(current_iteration_stats),
                     }
                     if accumulated_thinking:
                         seg_entry["reasoning"] = accumulated_thinking
@@ -405,27 +433,35 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     "result": result_str,
                     "result_chars": len(result_str),
                 }, turn_id=turn.turn_id)
-                # Eager per-pair persistence
+                # Eager per-pair persistence. Per-iteration LLM usage
+                # rides on the assistant tool-call row (the LLM produced
+                # the tool_call); the result row carries result_chars
+                # only since MCP dispatch has no token cost.
                 tc = next((t for t in tool_calls_log if t["call_id"] == call_id), None)
                 if tc and call_id not in persisted_tool_ids:
                     persisted_tool_ids.add(call_id)
                     pair_ts = datetime.now().isoformat()
-                    await _append_messages(session_id, [
-                        {
-                            "id": f"msg_{call_id}_tc",
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": ""}],
-                            "tool_calls": [tc],
-                            "timestamp": pair_ts,
+                    tc_msg: dict = {
+                        "id": f"msg_{call_id}_tc",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": ""}],
+                        "tool_calls": [tc],
+                        "timestamp": pair_ts,
+                    }
+                    if current_iteration_stats:
+                        tc_msg["stats"] = dict(current_iteration_stats)
+                    result_msg: dict = {
+                        "id": f"msg_{call_id}_result",
+                        "role": "tool",
+                        "content": [{"type": "text", "text": result_str}],
+                        "tool_call_id": call_id,
+                        "timestamp": pair_ts,
+                        "stats": {
+                            "result_chars": len(result_str),
+                            "is_error": bool(evt.get("is_error", False)),
                         },
-                        {
-                            "id": f"msg_{call_id}_result",
-                            "role": "tool",
-                            "content": [{"type": "text", "text": result_str}],
-                            "tool_call_id": call_id,
-                            "timestamp": pair_ts,
-                        },
-                    ])
+                    }
+                    await _append_messages(session_id, [tc_msg, result_msg])
 
             elif etype == "result":
                 usage = evt.get("usage") or {}
@@ -481,12 +517,17 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     cid = tc["call_id"]
                     if cid not in persisted_tool_ids:
                         persisted_tool_ids.add(cid)
-                        tail.append({"id": f"msg_{cid}_tc", "role": "assistant",
+                        fallback_tc: dict = {"id": f"msg_{cid}_tc", "role": "assistant",
                                      "content": [{"type": "text", "text": ""}],
-                                     "tool_calls": [tc], "timestamp": end_ts})
+                                     "tool_calls": [tc], "timestamp": end_ts}
+                        if current_iteration_stats:
+                            fallback_tc["stats"] = dict(current_iteration_stats)
+                        result_text_str = results_by_id.get(cid, "")
+                        tail.append(fallback_tc)
                         tail.append({"id": f"msg_{cid}_result", "role": "tool",
-                                     "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
-                                     "tool_call_id": cid, "timestamp": end_ts})
+                                     "content": [{"type": "text", "text": result_text_str}],
+                                     "tool_call_id": cid, "timestamp": end_ts,
+                                     "stats": {"result_chars": len(result_text_str)}})
 
                 # Cancelled path: persist and emit done(cancelled=True).
                 if cancelled_mid_stream:
@@ -563,21 +604,22 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     asyncio.ensure_future(_post_session_capture(session_id))
                     asyncio.ensure_future(_maybe_extract_focus(session_id))
 
-                    # Inner Voice (#345 Stage 1–5) — post-loop checks.
+                    # Inner Voice — post-loop checks.
                     #
-                    # Stage 1's `_inner_voice_completion_check` (the regex
-                    # heuristic for premature SIGNAL:TASK_COMPLETE) stays
-                    # ambient-only — chat users stop themselves, so the
-                    # check is irrelevant on user turns and would just
-                    # noise the event log.
-                    #
-                    # Stage 2+5 — Brain 2 ensemble + grading pass — fire
-                    # on EITHER ambient turns OR user turns when the
+                    # The completion-check regex heuristic catches turns
+                    # that ended with non-empty text but neither a
+                    # SIGNAL token nor a terminal tool call (i.e. the
+                    # model said "Let me X" then stopped). Fires on
+                    # ambient turns whenever the session has Inner Voice
+                    # on, and on user turns additionally when the
                     # session opted into `inner_voice_evaluate_user_turns`.
-                    # That flag is what makes the Inner Voice tab's chat
-                    # actually surface Brain 2 verdicts in real time.
+                    #
+                    # The critic ensemble + grading pass fires on the
+                    # same set of turns — that flag is what makes the
+                    # Inner Voice tab's chat surface critic verdicts in
+                    # real time.
                     iv_should_fire = _iv_should_fire_on_turn(session_id, turn.source)
-                    if turn.source == "ambient" and _session_inner_voice_enabled(session_id):
+                    if iv_should_fire:
                         asyncio.ensure_future(_inner_voice_completion_check(
                             session_id=session_id,
                             turn_id=turn.turn_id,
@@ -585,7 +627,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             tool_calls=list(tool_calls_log),
                         ))
                     if iv_should_fire:
-                        asyncio.ensure_future(_inner_voice_brain2_check(
+                        asyncio.ensure_future(_inner_voice_critic_check(
                             session_id=session_id,
                             turn_id=turn.turn_id,
                             turn_source=turn.source,
@@ -594,9 +636,9 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             tool_calls=list(tool_calls_log),
                             turn=turn,
                         ))
-                        # Stage 5 — grading pass against any ungraded
-                        # interventions from PRIOR turns. The brain2 check
-                        # above may write a new intervention for THIS turn;
+                        # Grading pass against any ungraded interventions
+                        # from PRIOR turns. The critic check above may
+                        # write a new intervention for THIS turn;
                         # the grading pass filters it out via
                         # `exclude_target_turn_id` so the new row stays in
                         # the queue for the next outcome turn.
@@ -634,12 +676,17 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 for tc in tool_calls_log:
                     cid = tc["call_id"]
                     if cid not in persisted_tool_ids:
-                        tail.append({"id": f"msg_{cid}_tc", "role": "assistant",
+                        err_tc: dict = {"id": f"msg_{cid}_tc", "role": "assistant",
                                      "content": [{"type": "text", "text": ""}],
-                                     "tool_calls": [tc], "timestamp": err_ts})
+                                     "tool_calls": [tc], "timestamp": err_ts}
+                        if current_iteration_stats:
+                            err_tc["stats"] = dict(current_iteration_stats)
+                        result_text_str = results_by_id.get(cid, "")
+                        tail.append(err_tc)
                         tail.append({"id": f"msg_{cid}_result", "role": "tool",
-                                     "content": [{"type": "text", "text": results_by_id.get(cid, "")}],
-                                     "tool_call_id": cid, "timestamp": err_ts})
+                                     "content": [{"type": "text", "text": result_text_str}],
+                                     "tool_call_id": cid, "timestamp": err_ts,
+                                     "stats": {"result_chars": len(result_text_str)}})
                 stream_stats["peak_input_tokens"] = last_turn_input
                 if full_response.strip():
                     err_msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
