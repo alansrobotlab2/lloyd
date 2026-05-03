@@ -64,71 +64,59 @@ export interface Session {
   inner_voice?: boolean
 }
 
-// ── Inner Voice types ─────────────────────────────────────────────────
+// ── Inner Voice types (thin observer) ───────────────────────────────
 
-export interface InnerVoiceCritique {
+// One observation = one decision the observer made on one significant
+// event in the primary's stream. action enumerates the lever pulled.
+export type InnerVoiceObservationAction =
+  | 'noop'
+  | 'inject'
+  | 'cancel'
+  | 'ambient'
+  | 'clarify'
+  | 'deny_tool'
+  | 'allow'
+  | 'noop_budget_exhausted'
+  | 'noop_empty_content'
+  | 'noop_no_ambient_channel'
+  | 'noop_ambient_failed'
+  | 'noop_no_clarify_channel'
+  | 'noop_clarify_failed'
+  | 'noop_inject_on_result'
+  | 'noop_cancel_on_result'
+  | 'noop_clarify_on_result'
+
+export type InnerVoiceObservationTrigger =
+  | 'assistant_message'
+  | 'tool_call'
+  | 'tool_result'
+  | 'result'
+  | 'pretool'
+
+export interface InnerVoiceObservation {
   id: number
   session_id: string
   turn_id: string
-  persona: string
-  persona_version: string | null
-  model: string
+  sequence_in_turn: number
+  trigger: InnerVoiceObservationTrigger
+  action: InnerVoiceObservationAction
+  reason: string | null
+  content: string | null
+  related_tool: string | null
   input_tokens: number | null
   output_tokens: number | null
   latency_ms: number | null
-  disagrees: boolean | null
-  severity: number | null
-  reason: string | null
-  suggested_action: 'nudge' | 'veto' | 'escalate' | null
-  action_taken: 'log_only' | 'steer' | 'interrupt' | 'continue' | 'escalate' | 'agreement' | null
-  nudge_succeeded: boolean | null
-  anchor_response_excerpt: string | null
-  event_log_offset: number | null
-  raw_response_offset: number | null
-  prompt_hash: string | null
-  parse_attempts: number
+  model: string | null
+  error: string | null
   created_at: string
-}
-
-export interface InnerVoiceIntervention {
-  id: number
-  session_id: string
-  triggered_by_critique_id: number | null
-  kind: 'steer' | 'interrupt' | 'continue' | 'escalate'
-  target_turn_id: string
-  content: string
-  created_at: string
-  outcome_turn_id: string | null
-  outcome_addressed: boolean | null
-  outcome_summary: string | null
-  graded_at: string | null
-}
-
-export interface InnerVoiceGradingProgress {
-  enabled: boolean
-  graded: number
-  ungraded: number
-  addressed_true: number
-  addressed_false: number
-  addressed_null: number
 }
 
 export interface InnerVoiceState {
   session_id: string | null
-  inner_voice_enabled?: boolean
-  state: 'idle' | 'observing' | 'critiquing' | 'intervening'
-  active_ensemble: string | null
-  personas: string[]
-  configured_personas?: string[]
-  nudge_count: number
-  consecutive_vetoes?: number          // Stage 4
-  escalations_count?: number           // Stage 4
-  max_nudges_per_session?: number
-  veto_severity_threshold?: number     // Stage 4
-  hard_max_turns?: number              // Stage 4
-  grading_progress?: InnerVoiceGradingProgress  // Stage 5
-  last_critique_at?: string | null
-  stage: string
+  inner_voice_enabled: boolean
+  evaluate_user_turns: boolean
+  observations_count_by_action: Record<string, number>
+  last_observation_at: string | null
 }
 
 export interface InnerVoiceSession {
@@ -138,28 +126,7 @@ export interface InnerVoiceSession {
   created_at: string | null
   updated_at: string | null
   message_count: number
-  evaluate_user_turns?: boolean        // Stage 5: chat-driven testing flag
-}
-
-export interface InnerVoiceGradingSummary {
-  session_id: string | null
-  window_hours: number
-  since_iso: string
-  total_interventions: number
-  graded: number
-  graded_rate: number
-  addressed_true: number
-  addressed_false: number
-  addressed_null: number
-  addressed_rate: number
-  by_persona: Record<string, {
-    total: number
-    graded: number
-    addressed_true: number
-    addressed_false: number
-    addressed_null: number
-    addressed_rate: number
-  }>
+  evaluate_user_turns?: boolean
 }
 
 export interface InnerVoiceEventLogEntry {
@@ -479,15 +446,6 @@ export const api = {
       onError?: (detail: string) => void
       onAborted?: () => void
       onQueueState?: (state: QueueState) => void
-      onInnerVoiceDriftCancel?: (info: {
-        persona: string
-        persona_version: string | null
-        severity: number
-        reason: string
-        stream_position_chars: number
-        partial_excerpt: string
-        turn_id: string
-      }) => void
     },
     model?: string,
     think?: string,
@@ -543,7 +501,6 @@ export const api = {
               case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats, payload.reasoning, payload.cancelled); break
               case 'error': callbacks.onError?.(payload.detail); break
               case 'queue_state': callbacks.onQueueState?.(payload as QueueState); break
-              case 'inner_voice_drift_cancel': callbacks.onInnerVoiceDriftCancel?.(payload); break
             }
           } catch { /* skip malformed */ }
         }
@@ -966,22 +923,16 @@ export const api = {
     return fetch(`${API_BASE}/inner_voice/state${params}`).then(r => r.json())
   },
 
-  innerVoiceCritiques: (
+  innerVoiceObservations: (
     sessionId?: string,
     turnId?: string,
-  ): Promise<{ critiques: InnerVoiceCritique[]; count: number }> => {
+    limit = 200,
+  ): Promise<{ observations: InnerVoiceObservation[]; count: number }> => {
     const p = new URLSearchParams()
     if (sessionId) p.set('session_id', sessionId)
     if (turnId) p.set('turn_id', turnId)
-    return fetch(`${API_BASE}/inner_voice/critiques?${p}`).then(r => r.json())
-  },
-
-  innerVoiceInterventions: (
-    sessionId?: string,
-  ): Promise<{ interventions: InnerVoiceIntervention[]; count: number }> => {
-    const p = new URLSearchParams()
-    if (sessionId) p.set('session_id', sessionId)
-    return fetch(`${API_BASE}/inner_voice/interventions?${p}`).then(r => r.json())
+    p.set('limit', String(limit))
+    return fetch(`${API_BASE}/inner_voice/observations?${p}`).then(r => r.json())
   },
 
   innerVoiceEventLog: (
@@ -1022,16 +973,4 @@ export const api = {
         if (!r.ok) throw new Error(`blob ${sha} not found (${r.status})`)
         return r.json()
       }),
-
-  // Stage 5 grading-pass aggregate. Powers the right-side metrics block
-  // on the Inner Voice tab.
-  innerVoiceGradingSummary: (
-    sessionId?: string,
-    hours = 168,
-  ): Promise<InnerVoiceGradingSummary> => {
-    const p = new URLSearchParams()
-    if (sessionId) p.set('session_id', sessionId)
-    p.set('hours', String(hours))
-    return fetch(`${API_BASE}/inner_voice/grading_summary?${p}`).then(r => r.json())
-  },
 }

@@ -1,14 +1,10 @@
-"""Inner Voice (#345) — parallel cognitive process for Lloyd.
+"""Inner Voice — thin observer that watches the primary agent.
 
-Stage 0 ships scaffolding + event-log infrastructure only. the critic
-ensembles, heuristics, and intervention dispatch land in later stages.
+One LLM, one prompt, four levers (inject / cancel / ambient / deny_tool).
+All judgment lives in `observer_prompt.SYSTEM_PROMPT`. The Python here is
+plumbing.
 
-Module layout (planned):
-    heuristics.py  — PreToolUse regex deny rules + post-loop completion
-                     heuristic. Stage 1.
-    critic.py      — single-persona the critic call wrapper. Stage 2.
-    ensemble.py    — concurrent persona runner + aggregation. Stage 3.
-
-This package is intentionally empty in Stage 0 — see the router at
-`app/routers/inner_voice.py` and the event log at `app/event_log.py`.
+Public surface:
+    observer.install_observer(...)  — wire onto a HookRegistry per turn
+    observer.close_observer(state)  — best-effort cleanup
 """

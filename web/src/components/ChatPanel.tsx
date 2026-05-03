@@ -877,27 +877,6 @@ export default function ChatPanel({
         }])
         inputRef.current?.focus()
       },
-      onInnerVoiceDriftCancel: (info) => {
-        // Inner Voice — drift_detector cancelled the turn mid-stream
-        // because severity crossed the veto threshold. The partial
-        // response that did stream is preserved by the backend's
-        // cancel-finalization block; this callback adds a visible
-        // banner so the user knows WHY the stream cut off.
-        //
-        // The `done(cancelled=true)` event arrives next and unlocks the
-        // input — we don't touch thinking/sending state here.
-        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
-        const sev = info.severity?.toFixed?.(2) ?? '?'
-        setMessages(prev => [...prev, {
-          id: `msg_${Date.now()}_iv_drift_cancel`,
-          role: 'tool' as const,
-          content: [{
-            type: 'text' as const,
-            text: `🛑 **Inner Voice cancelled this turn** (${info.persona}, severity ${sev})\n\n*${info.reason}*\n\nThe partial response above is what the agent had streamed before the cancel. Type a new message or refine your prompt — the cancel context is queued and will surface in your next turn's context block.`,
-          }],
-          timestamp: new Date().toISOString(),
-        }])
-      },
     }, !sessionKey ? pendingModel : undefined, thinkLevel !== 'off' ? thinkLevel : undefined)
     abortControllerRef.current = controller
   }
