@@ -59,7 +59,15 @@ async def run_query(
     # Prepend system prompt as a system message so vLLM sees it. We do
     # this here so callers don't have to worry about it; if they already
     # supplied a system message, theirs wins (we don't double-add).
-    chat_messages = list(messages)
+    # When the caller supplies a shared chat_messages buffer (used by the
+    # Inner Voice observer to inject system messages mid-turn), use it
+    # directly. Otherwise copy `messages` into a private list as before.
+    if options.chat_messages_handle is not None:
+        chat_messages = options.chat_messages_handle
+        if not chat_messages:
+            chat_messages.extend(messages)
+    else:
+        chat_messages = list(messages)
     if options.system_prompt and not _has_system(chat_messages):
         chat_messages.insert(0, {"role": "system", "content": options.system_prompt})
 
@@ -200,7 +208,7 @@ async def run_query(
             iteration_duration_ms = int((time.perf_counter() - iteration_started_at) * 1000)
             last_iteration_usage = iteration_usage
             total_usage = _accumulate_iteration_usage(total_usage, iteration_usage)
-            yield events.assistant_message(
+            asst_evt = events.assistant_message(
                 text=assistant_text,
                 tool_calls=tool_calls_committed,
                 thinking=thinking_text,
@@ -208,6 +216,16 @@ async def run_query(
                 duration_ms=iteration_duration_ms,
                 iteration=num_turns,
             )
+            yield asst_evt
+            # Snapshot chat_messages length before firing OnEvent. The
+            # observer may append a system message ("inject" lever); if it
+            # does AND the model is otherwise about to terminate this turn
+            # (no tool calls), we continue the loop so the inject takes
+            # effect on the next iteration instead of being lost.
+            chat_msgs_len_before_hook = len(chat_messages)
+            if options.hooks is not None:
+                await options.hooks.fire_on_event(asst_evt)
+            observer_injected = len(chat_messages) > chat_msgs_len_before_hook
 
             accumulated_text += assistant_text
 
@@ -218,18 +236,28 @@ async def run_query(
             ))
 
             if not tool_calls_committed:
+                if observer_injected:
+                    # Observer injected a system message. Continue the loop
+                    # so the model gets to read it and respond.
+                    logger.info(
+                        "loop: observer injected on terminal iteration — continuing loop",
+                    )
+                    continue
                 stop_reason = finish_reason or "stop"
                 break
 
             # Dispatch each tool call; accumulate results so we can
             # append them to history before looping back.
             for tc in tool_calls_committed:
-                yield events.tool_call(
+                tc_evt = events.tool_call(
                     call_id=tc["id"],
                     name=tc["function"]["name"],
                     args_json=tc["function"]["arguments"],
                     args_dict=tc["_args_dict"],
                 )
+                yield tc_evt
+                if options.hooks is not None:
+                    await options.hooks.fire_on_event(tc_evt)
 
                 result_evt = await _dispatch_one_tool_call(
                     tc=tc,
@@ -238,6 +266,8 @@ async def run_query(
                     session_id=session_id,
                 )
                 yield result_evt
+                if options.hooks is not None:
+                    await options.hooks.fire_on_event(result_evt)
 
                 chat_messages.append({
                     "role": "tool",
@@ -246,13 +276,16 @@ async def run_query(
                 })
 
         duration_ms = int((time.perf_counter() - started_at) * 1000)
-        yield events.result(
+        result_done_evt = events.result(
             stop_reason=stop_reason,
             usage=total_usage,
             num_turns=num_turns,
             duration_ms=duration_ms,
             response_text=accumulated_text,
         )
+        yield result_done_evt
+        if options.hooks is not None:
+            await options.hooks.fire_on_event(result_done_evt)
     finally:
         # Pool is shared across turns — see comment above _build_pool call.
         pass

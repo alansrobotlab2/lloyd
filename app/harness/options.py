@@ -43,6 +43,12 @@ class RunOptions:
     # Hooks
     hooks: "HookRegistry | None" = None
 
+    # Shared chat messages buffer. When supplied, the harness uses this
+    # list directly instead of copying `history` into a private buffer.
+    # Lets the Inner Voice observer mutate (e.g. inject a system message)
+    # between iterations, with the harness picking it up on the next loop pass.
+    chat_messages_handle: list[dict[str, Any]] | None = None
+
     # Cancellation — the consumer (messages._run_turn) sets this to
     # interrupt mid-stream. The loop checks between SSE chunks AND
     # before each tool dispatch.

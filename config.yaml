@@ -3,91 +3,18 @@ agent:
   permission_mode: bypassPermissions
 inner_voice:
   model: primary
-  pretooluse_deny:
-  - tool: Bash
-    pattern: rm\s+-rf\s+.*(?:obsidian|\.openclaw|agent-services|\.venvs|lloyd)
-    reason: destructive deletion against guarded path
-  - tool: Bash
-    pattern: git\s+push\s+.*--force.*(?:main|master)
-    reason: force push to default branch
-  - tool: Bash
-    pattern: '>\s*\S*(?:CONFIG|MEMORY|USER|SOUL)\.md\b'
-    reason: redirect-truncate of sentinel file
-  ambient_completion_check: true
-  ensemble:
-    default: autonomy_default
-    sets:
-      autonomy_default:
-      - completion_checker
-      - drift_detector
-      - continuation_drive
-      - skill_recall_checker
-      safety_critical:
-      - adversarial_red_team
-      - completion_checker
-      - hallucination_flag
-      code_writing:
-      - drift_detector
-      - completion_checker
-      research_writing:
-      - hallucination_flag
-      - completion_checker
-      - drift_detector
-      - skill_recall_checker
-  critic:
-    max_tokens: 2500
-    thinking_forced_open: false
-    prefill: '{"disagrees":'
+  observer:
+    # Per-call cap on observer LLM output (it answers in JSON; no need for more).
+    max_tokens: 400
+    # Wall-clock cap for the observer's call on iteration / tool boundaries.
     timeout_seconds: 5
-    json_retry_on_parse_failure: 1
-    transcript_window_turns: 5
-    include_agent_thinking: false
-  disagreement:
-    severity_threshold: 0.6
-    count_threshold: 2
-    veto_severity_threshold: 0.85
-  mid_turn_drift:
-    enabled: true
-    min_chars_before_first_check: 250
-    check_every_chars: 500
-    max_checks_per_turn: 4
-    # Mid-turn vetoes kill the turn outright; bias toward letting turns
-    # complete by requiring "egregious" (≥0.9) rather than "strong" (≥0.85).
-    # End-of-turn vetoes still use disagreement.veto_severity_threshold.
-    veto_severity_threshold: 0.9
-  consensus_termination:
-    enabled: true
-    critic_timeout_defaults_to_agent: true
-    three_strike_accept: true
-    hard_max_turns: 60
-  self_correct_on_nudge: true
-  intra_turn:
-    enabled: true
-    post_tool_use:
-      enabled: true
-      severity_floor_for_steer: 0.7
-      severity_floor_for_cancel: 0.95
-      max_calls_per_turn: 5
-    progress_monitor:
-      enabled: true
-      every_n_tool_calls: 5
-      every_n_seconds: 60
-      severity_floor_for_steer: 0.6
-      max_calls_per_turn: 4
-  grading:
-    enabled: true
-    persona: grader
-    max_per_session_per_run: 3
-    only_grade_within_turns: 5
-  throughput:
-    max_concurrent_personas: 5
-    max_critiques_per_session: 50
-    max_nudges_per_session: 2
-    cool_down_after_escalation_seconds: 60
-  event_log:
-    enabled: true
-    stream_sample_tokens: 50
-    blob_threshold_bytes: 4096
+    # Tighter cap for the synchronous PreToolUse gate (blocks tool dispatch).
+    pretool_timeout_seconds: 3
+    # Per-turn intervention budget. After this many inject/cancel/ambient
+    # actions, the observer can only noop. Pretool denies don't count.
+    intervention_budget: 3
+    # Window of accumulated primary text the observer sees in its prompt.
+    primary_text_window_chars: 4000
     rotation_days: 30
 autonomy:
   enabled: true

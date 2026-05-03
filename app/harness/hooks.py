@@ -55,6 +55,9 @@ class HookRegistry:
         self._pre: list[tuple[str | None, HookCallback]] = []
         self._post: list[HookCallback] = []
         self._post_failure: list[HookCallback] = []
+        # OnEvent callbacks fire on every NormalizedEvent the loop yields.
+        # Used by the Inner Voice observer to tap the primary's stream.
+        self._on_event: list[Callable[[dict[str, Any]], Awaitable[None]]] = []
 
     # ------------------------------------------------------------------
     # Registration
@@ -68,6 +71,14 @@ class HookRegistry:
 
     def add_post_tool_use_failure(self, cb: HookCallback) -> None:
         self._post_failure.append(cb)
+
+    def add_on_event(
+        self, cb: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        """Register a callback that fires for every NormalizedEvent the
+        harness loop yields. Cheap: typical usage is `queue.put_nowait`.
+        """
+        self._on_event.append(cb)
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -132,6 +143,18 @@ class HookRegistry:
             except Exception as exc:
                 logger.warning(
                     "PostToolUse callback raised on %s: %s", tool_name, exc, exc_info=True
+                )
+
+    async def fire_on_event(self, evt: dict[str, Any]) -> None:
+        """Fire all OnEvent callbacks. Errors are swallowed so an observer
+        bug never breaks the primary stream."""
+        for cb in self._on_event:
+            try:
+                await cb(evt)
+            except Exception as exc:
+                logger.warning(
+                    "OnEvent callback raised on %s: %s",
+                    evt.get("type"), exc, exc_info=True,
                 )
 
     async def fire_post_tool_use_failure(

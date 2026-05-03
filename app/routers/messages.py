@@ -59,12 +59,6 @@ from prompt_builder import build_system_prompt
 from prefetch import prefetch_context
 from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
-from app.inner_voice import heuristics as _iv_heuristics
-from app.inner_voice import ensemble as _iv_ensemble
-from app.inner_voice import consensus_termination as _iv_consensus
-from app.inner_voice import grading as _iv_grading
-from app.inner_voice import intra_turn as _iv_intra_turn
-from usage_store import record_inner_voice_intervention
 
 
 router = APIRouter()
@@ -93,10 +87,7 @@ from app.routers._messages_inner_voice import (
     _session_iv_evaluate_user_turns_enabled,
     _iv_should_fire_on_turn,
     _inner_voice_hooks_dict,
-    _inner_voice_completion_check,
-    _inner_voice_critic_check,
-    _inner_voice_grading_pass,
-    _inner_voice_mid_turn_drift_check,
+    attach_observer_for_turn,
 )
 
 
@@ -244,45 +235,54 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     _stream_sample_every = 50
     _stream_delta_count = 0
 
-    # Inner Voice (#345 Stage 3) — mid-turn drift detection state. Fires
-    # `drift_detector` every K accumulated chars on Inner-Voice-opted-in
-    # sessions. Stage 5+ also fires on user turns when the session opted
-    # into `inner_voice_evaluate_user_turns`. State is per-turn; trackers
-    # reset implicitly on each new `_run_turn` invocation.
-    _iv_mtd_enabled = (
-        _iv_should_fire_on_turn(session_id, turn.source)
-        and _iv_ensemble._is_mid_turn_drift_enabled()
-    )
-    _iv_mtd_cfg = _iv_ensemble.get_mid_turn_drift_config() if _iv_mtd_enabled else {}
-    _iv_mtd_min_first = int(_iv_mtd_cfg.get("min_chars_before_first_check", 250))
-    _iv_mtd_every = max(50, int(_iv_mtd_cfg.get("check_every_chars", 500)))
-    _iv_mtd_max_checks = max(1, int(_iv_mtd_cfg.get("max_checks_per_turn", 4)))
-    _iv_mtd_chars_at_last_check = 0
-    _iv_mtd_checks_fired = 0
-
-    # Inner Voice (#345 Stage 7) — intra-turn progress monitoring state.
-    # Records tool-boundary events from the SDK PostToolUse hooks and
-    # decides when to fire `tool_result_grader` / `progress_monitor`.
-    # State is keyed by Lloyd session_id and reset every turn; the hook
-    # callbacks read from it via the closure-bound session_id. Fires only
-    # on opted-in sessions AND only when the master kill switch is on.
-    _iv_intra_active = (
-        _iv_should_fire_on_turn(session_id, turn.source)
-        and _iv_intra_turn.is_enabled()
-    )
-    if _iv_intra_active:
-        _iv_intra_turn.start_intra_turn(
-            session_id,
-            turn.turn_id,
-            turn_source=turn.source,
-            frozen_task_intent=text,
-            cancel_event=cancel_event,
+    # Inner Voice — install the observer for this turn (no-op if the
+    # session isn't opted in). The observer registers a PreToolUse hook
+    # for the deny-tool gate and an OnEvent hook to tap the primary's
+    # NormalizedEvent stream. It mutates `harness_messages` directly when
+    # it injects, so we hand it the same list the harness reads.
+    async def _iv_enqueue_ambient_cb(content: str, reason: str) -> None:
+        ambient_turn_obj = await build_ambient_turn(
+            session_id=session_id,
+            text=content,
+            priority="notable",
+            source="inner_voice",
+            summary=(reason or "")[:120],
         )
+        await enqueue_ambient(session_id, ambient_turn_obj)
+
+    async def _iv_clarify_cb(question: str, reason: str) -> None:
+        """Surface a clarification question from the observer as an
+        assistant message in the session, then signal the primary to stop.
+
+        The cancel_event setting is handled by the observer's _apply_lever
+        right after this callback returns, not here.
+        """
+        clarify_msg = {
+            "id": uuid.uuid4().hex[:8],
+            "role": "assistant",
+            "content": [{"type": "text", "text": "[INNER VOICE] " + question.strip()}],
+            "timestamp": datetime.now().isoformat(),
+            "source": "inner_voice_clarify",
+        }
+        await _append_messages(session_id, [clarify_msg])
+
+    iv_observer_state = await attach_observer_for_turn(
+        session_id=session_id,
+        turn_id=turn.turn_id,
+        turn_source=turn.source,
+        user_request=text,
+        options=options,
+        chat_messages_handle=harness_messages,
+        cancel_event=cancel_event,
+        enqueue_ambient_callback=_iv_enqueue_ambient_cb,
+        clarify_callback=_iv_clarify_cb,
+    )
 
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,
         "prompt_chars": len(prefetched_text),
         "history_messages": len(harness_messages) - 1,
+        "inner_voice_observer_attached": iv_observer_state is not None,
     }, turn_id=turn.turn_id)
 
     cancelled_mid_stream = False
@@ -315,39 +315,6 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             "position_chars": len(full_response),
                             "delta_chars": len(delta_text),
                         }, turn_id=turn.turn_id)
-                    _iv_mtd_first_check_due = (
-                        _iv_mtd_checks_fired == 0
-                        and len(full_response) >= _iv_mtd_min_first
-                    )
-                    _iv_mtd_followup_due = (
-                        _iv_mtd_checks_fired > 0
-                        and (len(full_response) - _iv_mtd_chars_at_last_check) >= _iv_mtd_every
-                    )
-                    if (
-                        _iv_mtd_enabled
-                        and _iv_mtd_checks_fired < _iv_mtd_max_checks
-                        and not cancel_event.is_set()
-                        and (_iv_mtd_first_check_due or _iv_mtd_followup_due)
-                    ):
-                        _iv_mtd_chars_at_last_check = len(full_response)
-                        _iv_mtd_checks_fired += 1
-                        asyncio.ensure_future(_inner_voice_mid_turn_drift_check(
-                            session_id=session_id,
-                            turn=turn,
-                            frozen_task_intent=text,
-                            partial_response=full_response,
-                            stream_position_chars=len(full_response),
-                            delta_index=_stream_delta_count,
-                            cancel_event=cancel_event,
-                        ))
-                    if (
-                        _iv_intra_active
-                        and not cancel_event.is_set()
-                        and _stream_delta_count % _stream_sample_every == 0
-                    ):
-                        _iv_intra_turn._maybe_fire_progress_monitor(
-                            session_id, trigger_check=False,
-                        )
                     if tts_should_speak and not tts_spoken and tts_is_enabled():
                         tts_buffer += delta_text
                         spoken_chunk = extract_first_two_sentences(tts_buffer)
@@ -603,6 +570,46 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         if turn.source != "user":
                             msg_entry["source"] = turn.source
                         tail.append(msg_entry)
+                    elif tool_calls_log and turn.source == "user" and not cancelled_mid_stream:
+                        # Empty terminal iteration after tool calls. The
+                        # model called tools, got results, and stopped
+                        # without summarizing. Surface a synthetic
+                        # placeholder so the user sees the turn ended
+                        # rather than a silent stall. The Inner Voice
+                        # observer should usually catch this first via
+                        # `inject`; this is the safety net for IV-off
+                        # sessions or cases the observer missed.
+                        placeholder_text = (
+                            "*(Lloyd completed its tool calls but did not produce a summary. "
+                            "Ask again if you'd like an answer.)*"
+                        )
+                        placeholder = {
+                            "id": uuid.uuid4().hex[:8],
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": placeholder_text}],
+                            "timestamp": end_ts,
+                            "stats": stats_dict,
+                            "synthetic_empty_terminal": True,
+                        }
+                        if turn.source != "user":
+                            placeholder["source"] = turn.source
+                        tail.append(placeholder)
+                        done_text = placeholder_text
+                        logger.warning(
+                            "[empty_terminal] session=%s turn=%s — "
+                            "surfaced synthetic placeholder after %d tool calls "
+                            "with no final assistant text",
+                            session_id, turn.turn_id, len(tool_calls_log),
+                        )
+                        _event_log.log_event(
+                            session_id,
+                            "harness.empty_terminal_iteration",
+                            {
+                                "tool_call_count": len(tool_calls_log),
+                                "stop_reason": stop_reason,
+                            },
+                            turn_id=turn.turn_id,
+                        )
                     if tail:
                         await _append_messages(session_id, tail)
                     final_persisted = True
@@ -610,51 +617,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     asyncio.ensure_future(_post_session_capture(session_id))
                     asyncio.ensure_future(_maybe_extract_focus(session_id))
 
-                    # Inner Voice — post-loop checks.
-                    #
-                    # The completion-check regex heuristic catches turns
-                    # that ended with non-empty text but neither a
-                    # SIGNAL token nor a terminal tool call (i.e. the
-                    # model said "Let me X" then stopped). Fires on
-                    # ambient turns whenever the session has Inner Voice
-                    # on, and on user turns additionally when the
-                    # session opted into `inner_voice_evaluate_user_turns`.
-                    #
-                    # The critic ensemble + grading pass fires on the
-                    # same set of turns — that flag is what makes the
-                    # Inner Voice tab's chat surface critic verdicts in
-                    # real time.
-                    iv_should_fire = _iv_should_fire_on_turn(session_id, turn.source)
-                    if iv_should_fire:
-                        asyncio.ensure_future(_inner_voice_completion_check(
-                            session_id=session_id,
-                            turn_id=turn.turn_id,
-                            response_text=done_text,
-                            tool_calls=list(tool_calls_log),
-                        ))
-                    if iv_should_fire:
-                        asyncio.ensure_future(_inner_voice_critic_check(
-                            session_id=session_id,
-                            turn_id=turn.turn_id,
-                            turn_source=turn.source,
-                            frozen_task_intent=text,
-                            response_text=done_text,
-                            tool_calls=list(tool_calls_log),
-                            turn=turn,
-                        ))
-                        # Grading pass against any ungraded interventions
-                        # from PRIOR turns. The critic check above may
-                        # write a new intervention for THIS turn;
-                        # the grading pass filters it out via
-                        # `exclude_target_turn_id` so the new row stays in
-                        # the queue for the next outcome turn.
-                        asyncio.ensure_future(_inner_voice_grading_pass(
-                            session_id=session_id,
-                            outcome_turn_id=turn.turn_id,
-                            outcome_response_text=done_text,
-                            outcome_tool_calls=list(tool_calls_log),
-                            frozen_task_intent=text,
-                        ))
+                    # Inner Voice — observer ran inline as the turn streamed
+                    # via the OnEvent hook. Its `result`-trigger decision
+                    # has already fired by the time we reach this branch
+                    # (the harness yielded `result` before this `result`
+                    # event reached _run_turn). Nothing else to do here.
 
                     # End-of-turn TTS fallback: response was shorter than two
                     # sentences (e.g. "Done.") so the mid-stream trigger never
@@ -786,13 +753,6 @@ async def _session_consumer(session_id: str) -> None:
                         }])
                     except Exception as ce:
                         logger.warning(f"Failed to write ambient-cancel marker: {ce}")
-                # Inner Voice (#345 Stage 7) — clear intra-turn state.
-                # Idempotent + turn_id-checked so a stale finally doesn't
-                # clobber a fresh turn's state.
-                try:
-                    _iv_intra_turn.end_intra_turn(session_id, turn.turn_id)
-                except Exception as ce:
-                    logger.warning(f"end_intra_turn failed: {ce}")
                 # Sentinel: tells the SSE subscriber to close cleanly.
                 try:
                     await turn.events.put(None)
