@@ -75,8 +75,8 @@ async def get_messages(session_id: str):
         "session_key": session_id,
         "model": data.get("model", ""),
         "messages": data.get("messages", []),
-        # Inner Voice (#345): surface experiment tag + opt-in flag +
-        # Stage 5 user-turn evaluation flag for the IV chat tab.
+        # Inner Voice: surface experiment tag + opt-in flag +
+        # user-turn evaluation flag for the Inner Voice chat tab.
         "experiment_id": data.get("experiment_id"),
         "inner_voice": bool(data.get("inner_voice", False)),
         "inner_voice_evaluate_user_turns": bool(
@@ -144,7 +144,7 @@ async def patch_session(session_id: str, request: Request):
 
 # ---------------------------------------------------------------------------
 # Stub session creation — Inner Voice tab needs to pre-create sessions with
-# `inner_voice: true` BEFORE the first turn so Brain 2 fires on turn 1.
+# `inner_voice: true` BEFORE the first turn so the critic fires on turn 1.
 # Regular Chat sessions are still created lazily via post_message_stream;
 # this endpoint is for callers that need flags set ahead of time.
 # ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ async def create_session(request: Request):
       {
         "model": "primary" | "haiku" | ...           — default model alias
         "platform": "mission-control" | "autonomy" | "inner_voice"
-        "inner_voice": true,                          — opt into Brain 2
+        "inner_voice": true,                          — opt into the critic
         "inner_voice_evaluate_user_turns": true,      — fire on chat turns
         "experiment_id": "stage5-bench-001"           — A/B tag
       }

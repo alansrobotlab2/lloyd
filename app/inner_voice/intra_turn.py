@@ -7,7 +7,7 @@ not covered is *tool-boundary observation* — the agent firing 11 failed
 write, the wrong-tool-for-the-job pattern that an end-of-turn ensemble
 catches too late.
 
-Stage 7 wires two new Brain 2 personas into the SDK's tool-execution
+Stage 7 wires two new the critic personas into the SDK's tool-execution
 flow:
 
   1. ``tool_result_grader`` — fires from the ``PostToolUse`` /
@@ -51,7 +51,7 @@ carries the Claude-CLI UUID, not Lloyd's id.
 
 Failure mode: the module never raises into the SDK callback path. Any
 exception in the dispatcher is caught, logged, and the turn proceeds.
-Tool execution must not block on a Brain 2 call; the persona dispatch
+Tool execution must not block on a the critic call; the persona dispatch
 is always ``asyncio.ensure_future``.
 """
 
@@ -87,6 +87,7 @@ class _ToolCallRecord:
     tool_name: str
     input_summary: str         # ``name(arg_keys)`` shape — never raw values
     result_excerpt: str        # first 500 chars of result or error
+    full_result_chars: int     # full untrucated result length (drives oversize guard)
     is_error: bool
     when: float                # monotonic timestamp
 
@@ -107,6 +108,12 @@ class _IntraTurnState:
     progress_monitor_fired: int = 0              # fires of progress_monitor
     last_progress_check_at: float = 0.0          # monotonic seconds of last fire
     last_progress_check_tool_count: int = 0      # tool_call_count at last fire
+    # Cancel hook for the harness loop. Set by start_intra_turn when the
+    # caller wants oversize-result / pathological-loop guards to actually
+    # interrupt the turn (vs just logging). When None, the deterministic
+    # cancel-band degrades to log+steer.
+    cancel_event: asyncio.Event | None = None
+    cancel_dispatched: bool = False              # one cancel per turn
 
 
 _session_intra_state: dict[str, _IntraTurnState] = {}
@@ -118,14 +125,19 @@ def start_intra_turn(
     *,
     turn_source: str,
     frozen_task_intent: str,
+    cancel_event: asyncio.Event | None = None,
 ) -> None:
     """Initialize per-turn state. Called from ``_run_turn`` BEFORE the
     SDK ``query()`` loop begins.
 
     Replaces any existing state for this session — a turn boundary is a
-    hard reset. If a previous Brain 2 call is still in flight when this
+    hard reset. If a previous the critic call is still in flight when this
     runs, that call's reference to the old state object stays valid
     (Python GC keeps it alive as long as the call holds it).
+
+    ``cancel_event`` (optional): the harness's per-turn ``asyncio.Event``.
+    When provided, the deterministic oversize-result guard can actually
+    interrupt the turn by setting this event before the next vLLM call.
     """
     now = time.monotonic()
     _session_intra_state[session_id] = _IntraTurnState(
@@ -134,6 +146,7 @@ def start_intra_turn(
         frozen_task_intent=frozen_task_intent or "",
         started_at=now,
         last_progress_check_at=now,
+        cancel_event=cancel_event,
     )
 
 
@@ -159,6 +172,44 @@ def get_state(session_id: str) -> _IntraTurnState | None:
     return _session_intra_state.get(session_id)
 
 
+def format_turn_tool_history_for_drift(
+    session_id: str,
+    *,
+    turn_id: str | None = None,
+    max_calls: int = 12,
+    excerpt_cap: int = 400,
+) -> str:
+    """Render the active turn's tool boundaries as a block suitable for
+    drift_detector's user prompt. Returns "" when there's no active turn,
+    no tool calls, or the turn_id mismatches.
+
+    Used by ``ensemble.run_mid_turn_drift_check`` to give the drift
+    persona the tool evidence it would otherwise be blind to. The
+    ``recent_transcript`` block is filtered to user/assistant text and
+    drops tool results entirely; the persona's rubric explicitly treats
+    tool calls as evidence, so we surface them here in a block of their
+    own.
+    """
+    state = _session_intra_state.get(session_id)
+    if state is None:
+        return ""
+    if turn_id is not None and state.turn_id != turn_id:
+        return ""
+    if not state.tool_calls:
+        return ""
+    # Keep the most recent N calls — earlier calls in a long turn are less
+    # likely to be the evidence for a partial-response claim.
+    recent = state.tool_calls[-max_calls:]
+    lines: list[str] = []
+    for rec in recent:
+        excerpt = rec.result_excerpt[:excerpt_cap]
+        if rec.is_error:
+            lines.append(f"- `{rec.input_summary}` → (error: {excerpt})")
+        else:
+            lines.append(f"- `{rec.input_summary}` → {excerpt}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
@@ -173,6 +224,12 @@ def _intra_cfg() -> dict[str, Any]:
     cfg["post_tool_use"].setdefault("severity_floor_for_steer", 0.7)
     cfg["post_tool_use"].setdefault("severity_floor_for_cancel", 0.95)
     cfg["post_tool_use"].setdefault("max_calls_per_turn", 5)
+    # Deterministic oversize-result cancel guard. Runs at every tool
+    # boundary BEFORE firing the persona — much cheaper than waiting for
+    # an LLM verdict on something the size threshold makes unambiguous.
+    cfg["post_tool_use"].setdefault("oversize_cancel_enabled", True)
+    cfg["post_tool_use"].setdefault("oversize_single_result_chars", 30000)
+    cfg["post_tool_use"].setdefault("oversize_cumulative_chars", 120000)
     cfg.setdefault("progress_monitor", {})
     cfg["progress_monitor"].setdefault("enabled", True)
     cfg["progress_monitor"].setdefault("every_n_tool_calls", 5)
@@ -222,37 +279,101 @@ def _input_summary(tool_name: str, tool_input: Any) -> str:
     return f"{short}({','.join(keys[:6])})"
 
 
-def _result_excerpt(tool_response: Any, *, cap: int = 500) -> str:
-    """Return a string excerpt of the tool response, truncated to ``cap``
-    chars. Handles SDK shape variations: list-of-blocks, str, dict, None.
+def _full_result_text(tool_response: Any) -> str:
+    """Render the full tool response as a string (no truncation). Used to
+    compute size for the oversize-result guard; do NOT pass this to a
+    persona prompt.
     """
     if tool_response is None:
-        return "(null)"
+        return ""
     if isinstance(tool_response, str):
-        text = tool_response
-    elif isinstance(tool_response, dict):
-        # Common SDK shape: {"content": [{"type":"text","text":"..."}], ...}
+        return tool_response
+    if isinstance(tool_response, dict):
         if isinstance(tool_response.get("content"), list):
             parts: list[str] = []
             for block in tool_response["content"]:
                 if isinstance(block, dict) and isinstance(block.get("text"), str):
                     parts.append(block["text"])
-            text = "\n".join(parts) if parts else json.dumps(tool_response, default=str)
-        else:
-            text = json.dumps(tool_response, default=str)
-    elif isinstance(tool_response, list):
+            return "\n".join(parts) if parts else json.dumps(tool_response, default=str)
+        return json.dumps(tool_response, default=str)
+    if isinstance(tool_response, list):
         parts = []
         for block in tool_response:
             if isinstance(block, dict) and isinstance(block.get("text"), str):
                 parts.append(block["text"])
             else:
                 parts.append(str(block))
-        text = "\n".join(parts)
-    else:
-        text = str(tool_response)
+        return "\n".join(parts)
+    return str(tool_response)
+
+
+def _result_excerpt(tool_response: Any, *, cap: int = 500) -> str:
+    """Return a string excerpt of the tool response, truncated to ``cap``
+    chars. Handles SDK shape variations: list-of-blocks, str, dict, None.
+    """
+    text = _full_result_text(tool_response)
+    if not text:
+        return "(null)"
     if len(text) > cap:
         text = text[: cap - 3] + "..."
     return text
+
+
+# ---------------------------------------------------------------------------
+# Deterministic oversize-result guard — runs at every tool boundary.
+# ---------------------------------------------------------------------------
+
+
+def _maybe_fire_oversize_guard(
+    session_id: str,
+    state: _IntraTurnState,
+    record: _ToolCallRecord,
+) -> None:
+    """Log an event when a tool result crosses the configured size
+    threshold. Used to be a hard cancel; superseded by the harness's
+    disk-spill mechanism (``app.harness.tool_result_spill``) which keeps
+    the turn alive while preventing context overflow. We keep the event
+    log entry for forensics — meta-review wants to know which tools are
+    consistently producing huge results so we can tune their MCP-layer
+    caps or steer the model toward narrower queries up-front.
+    """
+    pt_cfg = _intra_cfg()["post_tool_use"]
+    if not pt_cfg.get("oversize_cancel_enabled", True):
+        return
+
+    single_threshold = int(pt_cfg.get("oversize_single_result_chars", 30000))
+    cumulative_threshold = int(pt_cfg.get("oversize_cumulative_chars", 120000))
+
+    cumulative = sum(rec.full_result_chars for rec in state.tool_calls)
+    single_trigger = record.full_result_chars >= single_threshold
+    cumulative_trigger = cumulative >= cumulative_threshold
+
+    if not (single_trigger or cumulative_trigger):
+        return
+    if state.cancel_dispatched:
+        return  # already logged once this turn
+
+    state.cancel_dispatched = True   # repurposed: "already-logged" flag
+    trigger_kind = "single_result" if single_trigger else "cumulative"
+
+    try:
+        _event_log.log_event(
+            session_id,
+            "inner_voice.intra_turn_oversize_observed",
+            {
+                "trigger_kind": trigger_kind,
+                "tool_name": record.tool_name,
+                "single_result_chars": record.full_result_chars,
+                "cumulative_chars": cumulative,
+                "single_threshold": single_threshold,
+                "cumulative_threshold": cumulative_threshold,
+                "tool_call_index": len(state.tool_calls),
+                "note": "harness disk-spill handles the actual mitigation; this event is forensic only",
+            },
+            turn_id=state.turn_id,
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -716,10 +837,15 @@ async def _record_tool_result(
     if state is None:
         return False  # turn not started; nothing to record
 
+    if error is not None:
+        full_text = error
+    else:
+        full_text = _full_result_text(tool_response)
     record = _ToolCallRecord(
         tool_name=tool_name,
         input_summary=_input_summary(tool_name, tool_input),
         result_excerpt=(error if error is not None else _result_excerpt(tool_response)),
+        full_result_chars=len(full_text),
         is_error=(error is not None),
         when=time.monotonic(),
     )
@@ -735,12 +861,23 @@ async def _record_tool_result(
                 "input_summary": record.input_summary,
                 "is_error": record.is_error,
                 "result_chars": len(record.result_excerpt),
+                "full_result_chars": record.full_result_chars,
                 "tool_call_index": len(state.tool_calls),
             },
             turn_id=state.turn_id,
         )
     except Exception:
         pass
+
+    # Deterministic oversize-result guard. Fires BEFORE the persona is
+    # invoked so we don't waste an LLM call on a verdict we can compute
+    # from result size alone. Two thresholds:
+    #   - single_result_chars: one tool returned more than X chars
+    #   - cumulative_chars: total tool output this turn is approaching
+    #     the model's context window
+    # On either, set the cancel_event (if available) and enqueue a steer
+    # ambient explaining what happened. The next turn will pick it up.
+    _maybe_fire_oversize_guard(session_id, state, record)
 
     # Decide whether to fire tool_result_grader.
     if not is_post_tool_use_enabled():
@@ -835,7 +972,7 @@ def make_post_tool_use_callback(lloyd_session_id: str):
     Fires on every successful tool result. Records the boundary into
     state, then optionally spawns ``tool_result_grader`` (and possibly
     ``progress_monitor``) via ``asyncio.ensure_future``. Returns
-    immediately — the SDK's tool flow does NOT block on Brain 2 calls.
+    immediately — the SDK's tool flow does NOT block on the critic calls.
     """
     async def _bound(
         input_data: dict[str, Any],   # PostToolUseHookInput TypedDict
@@ -920,6 +1057,7 @@ __all__ = [
     "start_intra_turn",
     "end_intra_turn",
     "get_state",
+    "format_turn_tool_history_for_drift",
     "get_intra_turn_summary",
     "is_enabled",
     "is_post_tool_use_enabled",

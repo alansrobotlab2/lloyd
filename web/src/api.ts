@@ -59,12 +59,12 @@ export interface Session {
   preview?: string
   last_active: string
   platform?: string
-  // Inner Voice (#345): A/B linkage tag and Brain 2 opt-in flag.
+  // Inner Voice: A/B linkage tag and critic opt-in flag.
   experiment_id?: string | null
   inner_voice?: boolean
 }
 
-// ── Inner Voice (#345) types ──────────────────────────────────────────
+// ── Inner Voice types ─────────────────────────────────────────────────
 
 export interface InnerVoiceCritique {
   id: number
@@ -909,8 +909,8 @@ export const api = {
   voiceTtsToggle: (): Promise<{ tts_enabled: boolean }> =>
     fetch(`${API_BASE}/voice/tts-toggle`, { method: 'POST' }).then(r => r.json()),
 
-  // ── Inner Voice (#345) ──
-  // Patch session metadata: experiment tag + Brain 2 opt-in flag + Stage 5
+  // ── Inner Voice ──
+  // Patch session metadata: experiment tag + critic opt-in flag +
   // user-turn evaluation flag. All optional — caller sends only what changed.
   patchSession: (
     sessionId: string,
@@ -931,9 +931,9 @@ export const api = {
       body: JSON.stringify(patch),
     }).then(r => r.json()),
 
-  // Pre-create a session with Inner Voice flags set so Brain 2 fires on
-  // turn 1. The Inner Voice tab uses this for the "+ New IV session"
-  // button — regular Chat sessions are still created lazily via the
+  // Pre-create a session with Inner Voice flags set so the critic fires
+  // on turn 1. The Inner Voice tab uses this for the "+ new chat" button
+  // — regular Chat sessions are still created lazily via the
   // streamMessage path.
   createSession: (
     body: {

@@ -26,8 +26,8 @@ What Stage 3 deliberately does NOT do:
   - End-of-turn intervention dispatch (steer / escalate). That ships in
     Stage 4 alongside consensus termination. Stage 3 records what the
     ensemble would do but doesn't move the agent.
-  - Cross-family disposition diversity. Brain 2 still hits the same local
-    endpoint as Brain 1; mitigation is purely context-asymmetry techniques
+  - Cross-family disposition diversity. the critic still hits the same local
+    endpoint as the agent; mitigation is purely context-asymmetry techniques
     1+2+3 from the Disagreement Engineering recipe.
   - Lensed past-failure context (technique 3). That lights up in Stage 4
     for `confidence_calibrator` / `hallucination_flag`.
@@ -121,10 +121,10 @@ def _read_persona_file(persona_name: str) -> tuple[dict[str, Any], str] | None:
 def _extract_text_only(content: Any) -> str:
     """Return the human-readable text from a message's `content` field.
 
-    Skips `thinking` blocks unconditionally — Brain 2 must NOT see Brain 1's
+    Skips `thinking` blocks unconditionally — the critic must NOT see the agent's
     chain of thought (technique 2 from the Disagreement Engineering recipe).
-    Tool-use blocks are summarized as `[tool: name]` (no args) so Brain 2
-    knows what fired without being anchored to Brain 1's tool-call shape.
+    Tool-use blocks are summarized as `[tool: name]` (no args) so the critic
+    knows what fired without being anchored to the agent's tool-call shape.
     """
     if isinstance(content, str):
         return content
@@ -147,7 +147,7 @@ def _extract_text_only(content: Any) -> str:
             parts.append(f"[tool: {name}]")
         elif btype == "tool_result":
             # Show that a tool returned, but not its content (to keep
-            # context tight; Brain 2 can ask via the event log if needed).
+            # context tight; the critic can ask via the event log if needed).
             parts.append("[tool_result]")
         # `thinking` and `image` blocks: skip.
     return "\n".join(p for p in parts if p)
@@ -236,13 +236,13 @@ def _load_recent_transcript(
 
 
 # ---------------------------------------------------------------------------
-# User-prompt assembly for Brain 2
+# User-prompt assembly for the critic
 # ---------------------------------------------------------------------------
 
 
 _TRANSCRIPT_TEXT_CAP = 800   # chars per transcript message
-_RESPONSE_TEXT_CAP = 4000    # chars of Brain 1's final response
-_PARTIAL_TEXT_CAP = 4000     # chars of Brain 1's partial (mid-turn) response
+_RESPONSE_TEXT_CAP = 4000    # chars of the agent's final response
+_PARTIAL_TEXT_CAP = 4000     # chars of the agent's partial (mid-turn) response
 _TASK_INTENT_CAP = 1500      # chars of frozen task intent
 
 
@@ -339,8 +339,9 @@ def _build_user_prompt(
     transcript: list[dict[str, Any]],
     mode: str = "final",
     matched_skills: list[tuple[str, str, float]] | None = None,
+    turn_tool_history: str = "",
 ) -> str:
-    """Assemble the Brain 2 user-message body.
+    """Assemble the critic user-message body.
 
     Layout (mode='final', the end-of-turn case):
         <task>...</task>
@@ -353,13 +354,18 @@ def _build_user_prompt(
     Layout (mode='partial', the mid-turn case):
         <task>...</task>
         <recent_transcript>...</recent_transcript>
+        <turn_tool_history>...</turn_tool_history>   (only when populated)
         <partial_response>
         text: ...
-        (no tool_calls list — mid-turn drift is text-only by design)
         </partial_response>
 
     Fixed layout — the persona prompts' examples reference these tag names.
     Changing them invalidates calibration; do not.
+
+    ``turn_tool_history`` (mid-turn only): pre-rendered block of this
+    turn's tool calls + result excerpts. Mid-turn ``recent_transcript``
+    drops tool messages, so without this block the drift_detector is
+    structurally blind to the evidence Brain 1 just gathered.
     """
     transcript_lines: list[str] = []
     for entry in transcript:
@@ -368,6 +374,13 @@ def _build_user_prompt(
     transcript_block = "\n".join(transcript_lines) if transcript_lines else "(no prior turns)"
 
     if mode == "partial":
+        tool_history_block = ""
+        if turn_tool_history:
+            tool_history_block = (
+                "<turn_tool_history>\n"
+                f"{turn_tool_history}\n"
+                "</turn_tool_history>\n\n"
+            )
         return (
             "<task>\n"
             f"{_truncate(frozen_task_intent or '(no task text)', _TASK_INTENT_CAP)}\n"
@@ -375,6 +388,7 @@ def _build_user_prompt(
             "<recent_transcript>\n"
             f"{transcript_block}\n"
             "</recent_transcript>\n\n"
+            f"{tool_history_block}"
             "<partial_response>\n"
             f"text: {_truncate(response_text or '(empty)', _PARTIAL_TEXT_CAP)}\n"
             "</partial_response>"
@@ -524,7 +538,7 @@ def _select_ensemble_for_turn(
 
       1. `safety_critical` — destructive Bash patterns OR ≥1 mutation
          tool from `_DESTRUCTIVE_TOOLS`. Highest priority because the
-         blast radius justifies the extra Brain 2 cost.
+         blast radius justifies the extra the critic cost.
       2. `research_writing` — vault writes, many vault searches, or web/
          arxiv fetches. Catches knowledge-build turns where
          `hallucination_flag` is the most informative voice.
@@ -760,7 +774,7 @@ async def run_post_loop_critique(
         )
 
     # ─── Stage 3: concurrent fan-out ────────────────────────────────────
-    # Semaphore bounds in-flight Brain 2 calls. Cap is per-process, not
+    # Semaphore bounds in-flight the critic calls. Cap is per-process, not
     # per-turn — if multiple turns are concurrent on the same process
     # the cap still holds. `gather(return_exceptions=True)` so a single
     # persona's blowup doesn't take down its siblings.
@@ -933,12 +947,26 @@ async def run_mid_turn_drift_check(
         exclude_turn_id=turn_id,
         window_turns=transcript_window_turns,
     )
+    # Surface this turn's tool boundaries to the drift persona. The
+    # mid-turn recent_transcript drops tool entries, so without this the
+    # persona penalizes Brain 1 for citing files/facts it actually just
+    # read. Lazy-import to break the intra_turn ↔ ensemble cycle.
+    turn_tool_history = ""
+    try:
+        from app.inner_voice import intra_turn as _intra_turn  # noqa: WPS433
+        turn_tool_history = _intra_turn.format_turn_tool_history_for_drift(
+            session_id, turn_id=turn_id,
+        )
+    except Exception as e:
+        logger.warning("[inner_voice] tool history fetch failed: %s", e)
+
     user_prompt = _build_user_prompt(
         frozen_task_intent=frozen_task_intent,
         response_text=partial_response,
         tool_calls=[],   # mid-turn checks are text-only
         transcript=transcript,
         mode="partial",
+        turn_tool_history=turn_tool_history,
     )
 
     critique = await _run_one_persona(
@@ -958,8 +986,18 @@ async def run_mid_turn_drift_check(
     # threshold; `log_only` otherwise (the post-loop ensemble may still
     # flag it). The actual cancel-and-inject dispatch happens in the
     # caller (messages.py); this field just records what we'd recommend.
-    iv_dis = (CONFIG.get("inner_voice") or {}).get("disagreement") or {}
-    veto_floor = float(iv_dis.get("veto_severity_threshold", 0.85))
+    # Mid-turn vetoes kill the turn outright, so they get a higher bar
+    # than end-of-turn vetoes. Prefer the mid-turn-specific knob if set,
+    # else fall back to the shared disagreement threshold.
+    iv_root = CONFIG.get("inner_voice") or {}
+    iv_dis = iv_root.get("disagreement") or {}
+    iv_mtd = iv_root.get("mid_turn_drift") or {}
+    veto_floor = float(
+        iv_mtd.get(
+            "veto_severity_threshold",
+            iv_dis.get("veto_severity_threshold", 0.85),
+        )
+    )
     if (
         critique.disagrees
         and critique.severity >= veto_floor
@@ -1377,7 +1415,7 @@ def _is_mid_turn_drift_enabled() -> bool:
     """Read `inner_voice.mid_turn_drift.enabled` (defaults true).
 
     Independent of the post-loop critic gate so the two can be A/B'd
-    separately. Cost note: each fire is one Brain 2 call, gated by
+    separately. Cost note: each fire is one the critic call, gated by
     `max_concurrent_personas` and `max_critiques_per_session` like the
     end-of-turn personas.
     """
@@ -1423,11 +1461,11 @@ def make_steer_ambient(
     Unlike consensus_termination's please-continue (which only fires on
     SIGNAL:TASK_COMPLETE), this fires whenever the ensemble landed a
     nudge-level disagreement — chat or autonomy, signal or no signal. The
-    intent is "Brain 1 finished a turn, Brain 2 has feedback short of a
-    veto, surface it so Brain 1 can self-correct on the next pass."
+    intent is "the agent finished a turn, the critic has feedback short of a
+    veto, surface it so the agent can self-correct on the next pass."
 
     The caller is responsible for actually enqueueing this as a real
-    ambient turn (not just a prefetch) so Brain 1 picks it up immediately
+    ambient turn (not just a prefetch) so the agent picks it up immediately
     rather than waiting for the next user message. Pair with
     ``build_ambient_turn(text=content, ...)`` + ``enqueue_ambient(...)``.
 
@@ -1436,7 +1474,7 @@ def make_steer_ambient(
         severity_max: highest severity across the disagreeing personas.
         reasons: list of `(persona, reason_text)` pairs from the
                  disagreeing critiques. Top 3 are surfaced.
-        response_excerpt: tail of Brain 1's response so the agent has an
+        response_excerpt: tail of the agent's response so the agent has an
                           anchor to "the last thing I said."
 
     Returns kwargs compatible with both ``AmbientPrefetchEntry(**kwargs)``
@@ -1487,7 +1525,7 @@ def make_drift_cancel_ambient(
 ) -> dict[str, str]:
     """Build the AmbientPrefetchEntry kwargs that surface a mid-turn cancel.
 
-    The producer here is the Brain 2 verdict: drift_detector saw Brain 1
+    The producer here is the critic verdict: drift_detector saw the agent
     confabulating partway through the turn and recommended `veto`. The
     prefetch entry describes (a) that the prior turn was cancelled, (b)
     why, and (c) what the agent should do on the next attempt.

@@ -50,6 +50,7 @@ class MCPPool:
         self._exit_stack = AsyncExitStack()
         self._sessions: dict[str, ClientSession] = {}
         self._tool_routes: dict[str, str] = {}  # bare_name → server_name
+        self._schemas: dict[str, dict[str, Any]] = {}  # bare_name → inputSchema
         self._discovered: list[tuple[str, list[dict[str, Any]]]] = []
         self._opened = False
         self._open_lock = asyncio.Lock()
@@ -86,6 +87,9 @@ class MCPPool:
                         )
                         continue
                     self._tool_routes[bare] = server_name
+                    schema = tool.get("inputSchema")
+                    if isinstance(schema, dict):
+                        self._schemas[bare] = schema
             self._opened = True
 
     async def aclose(self) -> None:
@@ -93,6 +97,7 @@ class MCPPool:
         await self._exit_stack.aclose()
         self._sessions.clear()
         self._tool_routes.clear()
+        self._schemas.clear()
         self._discovered = []
         self._opened = False
 
@@ -136,8 +141,9 @@ class MCPPool:
         if session is None:
             raise ToolDispatchError(name, f"server {server_name!r} not open")
 
+        coerced = _coerce_args(args, self._schemas.get(bare))
         try:
-            result = await session.call_tool(bare, args)
+            result = await session.call_tool(bare, coerced)
         except Exception as exc:
             raise ToolDispatchError(name, f"transport error: {exc}") from exc
 
@@ -189,6 +195,85 @@ class MCPPool:
             }
             for t in result.tools
         ]
+
+
+# ---------------------------------------------------------------------------
+# Argument coercion
+# ---------------------------------------------------------------------------
+
+
+def _coerce_args(args: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
+    """Coerce primitive args to match the tool's inputSchema.
+
+    vLLM occasionally emits string-shaped scalars (`"5"` for an integer
+    field, `"true"` for a boolean) and MCP's strict jsonschema validator
+    rejects them. We coerce best-effort using the declared `type` of each
+    top-level property; anything ambiguous is passed through untouched
+    so the validator can still surface real errors.
+    """
+    if not isinstance(args, dict) or not isinstance(schema, dict):
+        return args
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return args
+    out = dict(args)
+    for k, v in args.items():
+        prop = props.get(k)
+        if not isinstance(prop, dict):
+            continue
+        target = prop.get("type")
+        if isinstance(target, list):
+            target = next((t for t in target if t != "null"), None)
+        out[k] = _coerce_one(v, target)
+    return out
+
+
+def _coerce_one(v: Any, target: Any) -> Any:
+    if v is None or target is None:
+        return v
+    if target == "integer":
+        if isinstance(v, bool) or isinstance(v, int):
+            return v
+        if isinstance(v, float) and v.is_integer():
+            return int(v)
+        if isinstance(v, str):
+            s = v.strip()
+            if s.lstrip("-").isdigit():
+                try:
+                    return int(s)
+                except ValueError:
+                    return v
+        return v
+    if target == "number":
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return v
+        if isinstance(v, str):
+            try:
+                return float(v.strip())
+            except ValueError:
+                return v
+        return v
+    if target == "boolean":
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("true", "1", "yes"):
+                return True
+            if s in ("false", "0", "no", ""):
+                return False
+        if isinstance(v, int):
+            return bool(v)
+        return v
+    if target == "string":
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return str(v)
+        return v
+    return v
 
 
 # ---------------------------------------------------------------------------

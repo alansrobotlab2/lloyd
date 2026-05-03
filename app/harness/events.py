@@ -66,6 +66,7 @@ class NormalizedEvent(TypedDict, total=False):
     # assistant_message
     tool_calls: list[dict[str, Any]]
     thinking: str
+    iteration: int
 
     # result
     stop_reason: Literal["stop", "tool_calls", "max_turns", "cancelled", "error"]
@@ -115,12 +116,34 @@ def tool_result(*, call_id: str, name: str, content: str, is_error: bool = False
     }
 
 
-def assistant_message(*, text: str, tool_calls: list[dict[str, Any]], thinking: str = "") -> NormalizedEvent:
+def assistant_message(
+    *,
+    text: str,
+    tool_calls: list[dict[str, Any]],
+    thinking: str = "",
+    usage: dict[str, int] | None = None,
+    duration_ms: int = 0,
+    iteration: int = 0,
+) -> NormalizedEvent:
+    """Emitted at end of each agent-loop iteration.
+
+    ``usage`` carries the vLLM completion's token counts for THIS
+    iteration only (input/output/cached). Per-iteration usage lets the
+    UI surface stats on every persisted LLM-output row instead of only
+    the final assistant message.
+
+    ``duration_ms`` is the wall-clock duration of just this iteration's
+    chat completion. ``iteration`` is the 1-based index inside the
+    agent loop.
+    """
     return {
         "type": "assistant_message",
         "text": text,
         "tool_calls": tool_calls,
         "thinking": thinking,
+        "usage": usage or {},
+        "duration_ms": duration_ms,
+        "iteration": iteration,
     }
 
 

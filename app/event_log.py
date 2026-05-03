@@ -2,7 +2,7 @@
 
 The chat-transcript JSON (`~/lloyd/sessions/<id>.json`) is the human-facing
 record. This module is the *machine-facing* record — every machination on
-both Brain 1 and Brain 2 sides is captured here, append-only, never
+both the agent and the critic sides is captured here, append-only, never
 overwritten.
 
 Storage layout:
@@ -15,7 +15,7 @@ Why:
     They discard prompts, raw responses, intermediate parse failures, and
     the causal chain between critique → intervention → outcome. The event
     log is the authoritative substrate for forensic analysis. Ships in
-    Stage 0, before Brain 2 is even wired up, so we have baseline data
+    Stage 0, before the critic is even wired up, so we have baseline data
     from session 1.
 
 Design constraints:

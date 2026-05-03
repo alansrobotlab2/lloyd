@@ -20,7 +20,9 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from app.harness.errors import ParseError
+import re
+
+from app.harness.errors import ContextOverflowError, ParseError
 
 logger = logging.getLogger("lloyd-harness-client")
 
@@ -69,8 +71,28 @@ async def stream_chat(
         async with cli.stream("POST", url, headers=headers, json=payload) as resp:
             if resp.status_code >= 400:
                 body = await resp.aread()
+                body_text = body.decode("utf-8", errors="replace")
+                # Specifically detect context-overflow so the loop can
+                # recover by truncating tool results and retrying. vLLM's
+                # error string contains "maximum context length" + the
+                # token counts; match conservatively.
+                if (
+                    resp.status_code == 400
+                    and "maximum context length" in body_text
+                ):
+                    requested = None
+                    m = re.search(r"prompt contains at least (\d+) input tokens", body_text)
+                    if m:
+                        try:
+                            requested = int(m.group(1))
+                        except ValueError:
+                            pass
+                    raise ContextOverflowError(
+                        f"vLLM returned {resp.status_code}: {body_text}",
+                        requested_input_tokens=requested,
+                    )
                 raise httpx.HTTPStatusError(
-                    f"vLLM returned {resp.status_code}: {body.decode('utf-8', errors='replace')}",
+                    f"vLLM returned {resp.status_code}: {body_text}",
                     request=resp.request,
                     response=resp,
                 )

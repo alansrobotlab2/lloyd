@@ -2,7 +2,6 @@ agent:
   max_turns: 60
   permission_mode: bypassPermissions
 inner_voice:
-  enabled: false
   model: primary
   pretooluse_deny:
   - tool: Bash
@@ -42,7 +41,7 @@ inner_voice:
     timeout_seconds: 5
     json_retry_on_parse_failure: 1
     transcript_window_turns: 5
-    include_brain1_thinking: false
+    include_agent_thinking: false
   disagreement:
     severity_threshold: 0.6
     count_threshold: 2
@@ -52,9 +51,13 @@ inner_voice:
     min_chars_before_first_check: 250
     check_every_chars: 500
     max_checks_per_turn: 4
+    # Mid-turn vetoes kill the turn outright; bias toward letting turns
+    # complete by requiring "egregious" (≥0.9) rather than "strong" (≥0.85).
+    # End-of-turn vetoes still use disagreement.veto_severity_threshold.
+    veto_severity_threshold: 0.9
   consensus_termination:
     enabled: true
-    brain2_timeout_default_to_brain1: true
+    critic_timeout_defaults_to_agent: true
     three_strike_accept: true
     hard_max_turns: 60
   self_correct_on_nudge: true
@@ -81,7 +84,6 @@ inner_voice:
     max_critiques_per_session: 50
     max_nudges_per_session: 2
     cool_down_after_escalation_seconds: 60
-  brain2_kv_cache_dtype: q4_0
   event_log:
     enabled: true
     stream_sample_tokens: 50

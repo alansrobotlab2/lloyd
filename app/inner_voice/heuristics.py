@@ -1,4 +1,4 @@
-"""Inner Voice (#345) Stage 1 — mechanical heuristics, no Brain 2.
+"""Inner Voice (#345) Stage 1 — mechanical heuristics, no the critic.
 
 Two responsibilities, both deterministic and runtime-cheap:
 
@@ -12,8 +12,8 @@ Two responsibilities, both deterministic and runtime-cheap:
      without a terminal tool call. When premature, builds an ambient
      prefetch entry that nudges the agent on its next user turn.
 
-Stage 2+ replaces the post-loop heuristic with a Brain 2 ensemble call.
-The PreToolUse callback stays — it runs ahead of any Brain 2 inference
+Stage 2+ replaces the post-loop heuristic with a the critic ensemble call.
+The PreToolUse callback stays — it runs ahead of any the critic inference
 and never costs an LLM call, so it's the cheapest possible safety layer.
 
 ## Rule shape (config.yaml `inner_voice.pretooluse_deny[]`)
@@ -394,7 +394,7 @@ def make_completion_nudge_entry(
     Stage 1 uses the passive prefetch path: the nudge surfaces in the
     `<context>` block of the next user turn rather than firing a fresh
     ambient turn (which would cost an SDK invocation). Stage 2+ may
-    upgrade to active interruption when Brain 2 disagreement crosses
+    upgrade to active interruption when the critic disagreement crosses
     the veto threshold.
 
     `dedup_key` collapses repeat nudges for the same turn — if the

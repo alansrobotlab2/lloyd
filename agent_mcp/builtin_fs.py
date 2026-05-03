@@ -31,13 +31,25 @@ LINE_PREFIX_FMT = "%6d\t%s"
 GREP_BIN = "rg"
 
 
+def _expand(path: str) -> str:
+    """Expand ~ and $VARS so callers can pass `~/obsidian` etc.
+
+    Subprocesses don't expand `~`, and the absolute-path checks below
+    reject tilde paths outright. Models reach for `~/...` constantly,
+    so normalize at the boundary.
+    """
+    if not path:
+        return path
+    return os.path.expanduser(os.path.expandvars(path))
+
+
 # ---------------------------------------------------------------------------
 # Read
 # ---------------------------------------------------------------------------
 
 
 def _read(args: dict) -> str:
-    file_path = args.get("file_path", "")
+    file_path = _expand(args.get("file_path", ""))
     if not file_path:
         return json.dumps({"error": "file_path is required"})
     if not os.path.isabs(file_path):
@@ -83,7 +95,7 @@ def _read(args: dict) -> str:
 
 
 def _write(args: dict) -> str:
-    file_path = args.get("file_path", "")
+    file_path = _expand(args.get("file_path", ""))
     content = args.get("content", "")
     if not file_path:
         return json.dumps({"error": "file_path is required"})
@@ -104,7 +116,7 @@ def _write(args: dict) -> str:
 
 
 def _edit(args: dict) -> str:
-    file_path = args.get("file_path", "")
+    file_path = _expand(args.get("file_path", ""))
     old_string = args.get("old_string", "")
     new_string = args.get("new_string", "")
     replace_all = bool(args.get("replace_all", False))
@@ -155,7 +167,7 @@ async def _grep(args: dict) -> str:
     pattern = args.get("pattern", "")
     if not pattern:
         return json.dumps({"error": "pattern is required"})
-    path = args.get("path", os.getcwd())
+    path = _expand(args.get("path", "")) or os.getcwd()
     output_mode = args.get("output_mode", "files_with_matches")
     head_limit = int(args.get("head_limit", 0) or 0)
     multiline = bool(args.get("multiline", False))
@@ -213,6 +225,10 @@ async def _grep(args: dict) -> str:
     out = stdout.decode("utf-8", errors="replace")
     if head_limit > 0:
         out = "\n".join(out.splitlines()[:head_limit])
+    # Note: results above ~50K chars get spilled to disk by the harness
+    # (app.harness.tool_result_spill). We deliberately do NOT truncate
+    # here — the spill mechanism preserves the full output on disk so the
+    # model can Read it back if it needs more than the preview.
     return out or "(no matches)"
 
 
@@ -225,7 +241,7 @@ def _glob(args: dict) -> str:
     pattern = args.get("pattern", "")
     if not pattern:
         return json.dumps({"error": "pattern is required"})
-    base = args.get("path", os.getcwd())
+    base = _expand(args.get("path", "")) or os.getcwd()
     if not os.path.isabs(base):
         return json.dumps({"error": f"path must be absolute, got {base!r}"})
     base_p = Path(base)

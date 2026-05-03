@@ -10,8 +10,9 @@ both share these primitives:
   * `_prepare_messages_for_harness` — strip UI-only fields and normalize
                                       a session-history slice for vLLM
 
-Pulled out of `messages.py` so the IV module can reuse `_emit` without
-re-importing the chat router (which would close the import cycle).
+Pulled out of `messages.py` so the inner_voice module can reuse `_emit`
+without re-importing the chat router (which would close the import
+cycle).
 """
 
 from __future__ import annotations

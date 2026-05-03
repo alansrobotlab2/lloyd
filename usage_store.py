@@ -46,7 +46,7 @@ def _init_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(model);
 
         -- ── Inner Voice (#345) ──
-        -- Two tables. `inner_voice_critiques` captures "what Brain 2 thought"
+        -- Two tables. `inner_voice_critiques` captures "what the critic thought"
         -- per persona invocation. `inner_voice_interventions` captures "what
         -- was done about it" — the actual injected steer/interrupt/continue.
         -- Linked via FK so we can query each independently and join when we
