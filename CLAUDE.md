@@ -81,12 +81,12 @@ Events yielded by type:
 
 ## Tools
 
-Tool enable/disable state is stored in `config.yaml`:
-- Server-level: `mcp_servers.<name>.enabled: false`
-- Tool-level: `mcp_servers.<name>.disabled_tools: [tool_name, ...]`
-- Built-in: `tools.disabled_builtin: [ToolName, ...]`
+Every tool lives inside an MCP server — built-ins (Bash/Read/Write/Edit/Grep/Glob/Task) live inside the lloyd-mcp aggregator. Tool enable/disable state is stored in `config.yaml`:
 
-Disabled tools are enforced via `RunOptions.disallowed_tools` (format: `mcp__<server>__<tool>` for MCP tools, plain name for built-ins).
+- Server-level: `mcp_servers.<name>.enabled: false`
+- Tool-level: `mcp_servers.<name>.disabled_tools: [tool_name, ...]` (use the bare tool name)
+
+Disabled tools are enforced via `RunOptions.disallowed_tools` as `mcp__<server>__<tool>`. The harness's bare-name aliasing in `tool_schema.py` blocks both the bare and namespaced form at advertise + dispatch time, so disabling `Bash` via `mcp_servers.lloyd-mcp.disabled_tools: [Bash]` blocks the model from calling either `Bash` or `mcp__lloyd-mcp__Bash`.
 
 ## Config Structure (config.yaml)
 
@@ -120,10 +120,7 @@ mcp_servers:
   lloyd-mcp:
     type: sse
     url: http://127.0.0.1:8500/sse
-    disabled_tools: []
-
-tools:
-  disabled_builtin: []
+    disabled_tools: []  # bare tool names, e.g. [Bash, browser_screenshot]
 
 agent:
   max_turns: 60

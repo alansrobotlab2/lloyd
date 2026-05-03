@@ -283,13 +283,6 @@ export interface LloydServicesData {
   timestamp: string
 }
 
-export interface ToolEntry {
-  name: string
-  label: string
-  description: string
-  enabled: boolean
-}
-
 export interface McpTool {
   name: string
   description: string
@@ -306,7 +299,6 @@ export interface McpServer {
 }
 
 export interface ToolsData {
-  builtin: ToolEntry[]
   servers: McpServer[]
 }
 
@@ -796,7 +788,6 @@ export const api = {
 
   tools(): Promise<ToolsData> {
     return fetch(`${API_BASE}/tools`).then(r => r.json()).then(d => ({
-      builtin: Array.isArray(d?.builtin) ? d.builtin : [],
       servers: Array.isArray(d?.servers) ? d.servers : [],
     }))
   },
@@ -805,7 +796,6 @@ export const api = {
     payload:
       | { type: 'server'; server: string; enabled: boolean }
       | { type: 'tool'; server: string; tool: string; enabled: boolean }
-      | { type: 'builtin'; tool: string; enabled: boolean }
   ): Promise<void> {
     await fetch(`${API_BASE}/tool-toggle`, {
       method: 'POST',
