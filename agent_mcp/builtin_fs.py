@@ -48,7 +48,10 @@ def _read(args: dict) -> str:
     if p.is_dir():
         return json.dumps({"error": f"path is a directory, not a file: {file_path}"})
 
-    offset = max(0, int(args.get("offset", 0) or 0))
+    # offset is 1-based per the schema (matches the line numbers shown in
+    # the output). Default 0 means "start at line 1". Coerce 0 → 1 so the
+    # math below is uniform.
+    offset = max(1, int(args.get("offset", 0) or 1))
     limit = int(args.get("limit", DEFAULT_READ_LINES) or DEFAULT_READ_LINES)
     if limit <= 0:
         limit = DEFAULT_READ_LINES
@@ -62,10 +65,11 @@ def _read(args: dict) -> str:
     if not lines:
         return "<system-reminder>File exists but is empty.</system-reminder>"
 
-    end = min(len(lines), offset + limit) if limit else len(lines)
-    selected = lines[offset:end]
+    start_idx = offset - 1
+    end = min(len(lines), start_idx + limit)
+    selected = lines[start_idx:end]
     out_lines = []
-    for i, raw in enumerate(selected, start=offset + 1):
+    for i, raw in enumerate(selected, start=offset):
         # Match the SDK's behavior: strip the trailing newline before
         # joining so the prefix lines up cleanly.
         text = raw.rstrip("\n")

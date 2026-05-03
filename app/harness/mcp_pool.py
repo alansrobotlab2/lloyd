@@ -2,11 +2,14 @@
 
 The lloyd-mcp aggregator at http://127.0.0.1:8500/sse owns every MCP
 tool — built-ins (Bash, Read, Edit, Write, Grep, Glob, Task) plus the
-existing 14 modules. We hold one long-lived SSE session for the lifetime
-of the harness process; per-turn dispatchers borrow it.
+existing domain modules. The harness `loop.py` reuses one process-wide
+pool keyed by mcp_servers config (see `get_or_open_pool`); cleanup is
+handled at FastAPI shutdown via `lifecycle.shutdown_cleanup`.
 
-Stdio fallback exists for any future external MCP server declared in
-config.yaml (none today — the consolidated aggregator is the only entry).
+Only SSE / HTTP transports are implemented today — stdio is not wired
+because every active config uses the consolidated aggregator. Adding
+stdio means importing `mcp.client.stdio.stdio_client` and branching in
+`_open_session`; nobody needs it yet, so it raises NotImplementedError.
 """
 
 from __future__ import annotations
@@ -186,3 +189,45 @@ class MCPPool:
             }
             for t in result.tools
         ]
+
+
+# ---------------------------------------------------------------------------
+# Process-wide pool cache
+# ---------------------------------------------------------------------------
+
+_POOL_CACHE: dict[str, MCPPool] = {}
+_POOL_CACHE_LOCK = asyncio.Lock()
+
+
+def _config_key(server_configs: dict[str, dict[str, Any]]) -> str:
+    """Stable hashable key for a server-config dict."""
+    return json.dumps(server_configs, sort_keys=True, default=str)
+
+
+async def get_or_open_pool(server_configs: dict[str, dict[str, Any]]) -> MCPPool:
+    """Return a process-wide MCPPool for `server_configs`, opening on first use.
+
+    Concurrent callers serialize on a lock so the SSE handshake +
+    `tools/list` only runs once per unique config. Subsequent turns reuse
+    the open sessions.
+    """
+    key = _config_key(server_configs)
+    async with _POOL_CACHE_LOCK:
+        pool = _POOL_CACHE.get(key)
+        if pool is not None:
+            return pool
+        pool = MCPPool(server_configs)
+        await pool.open()
+        _POOL_CACHE[key] = pool
+        return pool
+
+
+async def close_all_pools() -> None:
+    """Close every cached pool. Call from FastAPI shutdown."""
+    async with _POOL_CACHE_LOCK:
+        for pool in list(_POOL_CACHE.values()):
+            try:
+                await pool.aclose()
+            except Exception as exc:
+                logger.warning("close_all_pools: %s", exc)
+        _POOL_CACHE.clear()
