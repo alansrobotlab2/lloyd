@@ -15,18 +15,16 @@ import uuid
 from datetime import datetime
 
 import httpx
-from claude_agent_sdk import ClaudeAgentOptions
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.config import (
     CONFIG,
     _get_model_env,
-    _resolve_effort,
-    _resolve_thinking,
     _model_base_url,
     _resolve_model_name,
 )
+from app.harness import RunOptions
 from app.paths import SESSIONS_DIR, LLOYD_HOME
 from app.sessions_io import (
     SessionTurn,
@@ -277,38 +275,26 @@ async def voice_inject(request: Request):
         else text
     )
 
-    # Resolve model: prefer the model the session already uses, fall back
-    # to the default. This keeps resume_id valid across voice/typed turns.
     model = ""
     meta_path = SESSIONS_DIR / f"{session_id}.json"
-    resume_id = None
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
             model = existing.get("model", "") or ""
         except Exception:
-            existing = {}
-    else:
-        existing = {}
+            pass
 
     if not model:
         model = CONFIG.get("model", {}).get("default", "")
     model = _resolve_model_name(model)
     model_env = _get_model_env(model)
 
-    if existing:
-        try:
-            session_model = _resolve_model_name(existing.get("model", ""))
-            if _model_base_url(session_model) == _model_base_url(model):
-                resume_id = existing.get("sdk_session_id")
-        except Exception:
-            resume_id = None
-
     system_prompt = build_system_prompt()
     prefetched_text = prefetch_context(prompt_text, session_id=session_id)
 
-    options = ClaudeAgentOptions(
+    options = RunOptions(
         model=model,
+        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
         system_prompt=system_prompt,
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
         permission_mode=CONFIG.get("agent", {}).get(
@@ -317,18 +303,10 @@ async def voice_inject(request: Request):
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools(),
         env=model_env,
-        effort=_resolve_effort(model),
-        thinking=_resolve_thinking(model),
-        resume=resume_id,
-        include_partial_messages=True,
     )
 
     await _save_session_meta(session_id, model, preview=prompt_text)
 
-    # Build the user turn and hand it to the same queue /api/message/stream
-    # uses. `_session_consumer` drains user turns first (preempting any
-    # ambient), `_run_turn` persists the transcript as a user message and
-    # speaks the first two sentences of the reply when TTS is on.
     turn = SessionTurn(
         turn_id=uuid.uuid4().hex[:12],
         source="user",
@@ -338,7 +316,6 @@ async def voice_inject(request: Request):
             "model": model,
             "options": options,
             "meta_path": meta_path,
-            "resume_id": resume_id,
         },
         enqueued_at=datetime.now(),
     )

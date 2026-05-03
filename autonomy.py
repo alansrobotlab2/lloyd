@@ -9,7 +9,6 @@ This module provides the task-file CRUD + `run_task()` that the
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import datetime
 import json
 import subprocess
@@ -333,7 +332,7 @@ def _to_bg_url(env: dict) -> dict:
     return env
 
 
-def run_task(task_id) -> dict:
+async def run_task(task_id) -> dict:
     """Execute a single autonomy task via Claude Agent SDK."""
     path = _find_task_file(task_id)
     if not path:
@@ -383,104 +382,42 @@ def run_task(task_id) -> dict:
     started_at = now_iso
 
     try:
-        from claude_agent_sdk import query as sdk_query, ClaudeAgentOptions
+        from app.harness import run_query, RunOptions
+        from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL
         from prompt_builder import build_system_prompt
 
         system_prompt = build_system_prompt()
 
         config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
-        mcp_servers = {}
         disallowed_tools = list(config.get("tools", {}).get("disabled_builtin", []))
         for name, cfg in config.get("mcp_servers", {}).items():
-            if not cfg.get("enabled", True):
-                continue
-            server_type = cfg.get("type", "stdio")
-            if server_type in ("sse", "http"):
-                mcp_servers[name] = {"type": server_type, "url": cfg["url"]}
-            else:
-                mcp_servers[name] = {"command": cfg.get("command", "python"), "args": cfg.get("args", [])}
             for tool_name in cfg.get("disabled_tools", []):
                 disallowed_tools.append(f"mcp__{name}__{tool_name}")
 
-        # Bounded stderr capture so SDK subprocess crashes surface the real
-        # diagnostic lines instead of the SDK's placeholder
-        # ("Check stderr output for details").
-        _stderr_buf: list[str] = []
-        _STDERR_MAX = 40
-
-        def _capture_stderr(line: str) -> None:
-            _stderr_buf.append(line)
-            if len(_stderr_buf) > _STDERR_MAX:
-                del _stderr_buf[: len(_stderr_buf) - _STDERR_MAX]
-
-        options = ClaudeAgentOptions(
+        options = RunOptions(
             model=task_model,
+            base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
             system_prompt=system_prompt,
             max_turns=config.get("agent", {}).get("max_turns", 60),
             permission_mode="bypassPermissions",
-            mcp_servers=mcp_servers,
+            mcp_servers={"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}},
             disallowed_tools=disallowed_tools,
-            stderr=_capture_stderr,
+            env=model_env,
         )
 
-        old_env = {}
-        for key, value in model_env.items():
-            old_env[key] = os.environ.get(key)
-            os.environ[key] = value
+        messages = [{"role": "user", "content": prompt}]
+        final_response = ""
 
         try:
-            final_response = ""
-
-            async def _run():
-                nonlocal final_response
-                async for message in sdk_query(prompt=prompt, options=options):
-                    if hasattr(message, "content"):
-                        for block in message.content:
-                            if hasattr(block, "text"):
-                                final_response += block.text
-
-            try:
-                # asyncio.run() fails when called from an already-running
-                # event loop (e.g. inside the MCP server's call_tool).
-                # Run the SDK query in a separate thread so it gets its
-                # own event loop, handling both scheduler and MCP callers.
-                def _sdk_worker():
-                    nonlocal final_response
-                    async def _run_inner():
-                        nonlocal final_response
-                        async for msg in sdk_query(prompt=prompt, options=options):
-                            if hasattr(msg, "content"):
-                                for block in msg.content:
-                                    if hasattr(block, "text"):
-                                        final_response += block.text
-                    asyncio.run(_run_inner())
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(_sdk_worker)
-                    future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError:
-                future.cancel()
-                logger.warning("Task #%s timed out after %ds", task_id, timeout)
-                return {
-                    "success": False, "error": f"Task #{task_id} timed out after {timeout}s",
-                }
-            except Exception as e:
-                if _stderr_buf:
-                    tail = "\n".join(_stderr_buf[-_STDERR_MAX:])
-                    logger.error(
-                        "Task #%s SDK subprocess failed: %s\n--- CLI stderr tail ---\n%s\n--- end ---",
-                        task_id, e, tail,
-                    )
-                    raise RuntimeError(
-                        f"{type(e).__name__}: {e}\n--- CLI stderr tail ---\n{tail}"
-                    ) from e
-                raise
-        finally:
-            for key, old_val in old_env.items():
-                if old_val is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = old_val
+            async with asyncio.timeout(timeout):
+                async for evt in run_query(messages, options):
+                    if evt["type"] == "text_delta":
+                        final_response += evt["text"]
+        except asyncio.TimeoutError:
+            logger.warning("Task #%s timed out after %ds", task_id, timeout)
+            return {
+                "success": False, "error": f"Task #{task_id} timed out after {timeout}s",
+            }
 
         if not final_response:
             final_response = "(No response)"

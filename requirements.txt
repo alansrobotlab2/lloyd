@@ -1,12 +1,6 @@
 # Lloyd Python dependencies
 # Install in venv: python -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-# Claude Agent SDK
-claude-agent-sdk>=0.1.60
-
-# Anthropic SDK (for usage ping / rate-limit headers)
-anthropic>=0.89.0
-
 # FastAPI server
 fastapi>=0.115.0
 uvicorn>=0.34.0

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Lloyd Mission Control Server — FastAPI app factory.
 
-Applies the claude_agent_sdk parse_message monkeypatch, creates the app,
-mounts every router under app/routers/, wires the autonomy startup ticker,
-and starts uvicorn. All business logic lives in app/.
+Creates the FastAPI app, mounts every router under app/routers/, wires the
+autonomy startup ticker, and starts uvicorn. All business logic lives in app/.
 """
 
 import logging
@@ -12,9 +11,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-import app.sdk_patch  # noqa: F401 — applies SDK parse_message monkeypatch on import
 from app.config import CONFIG
-from app.lifecycle import reap_orphaned_sdk_subprocesses, shutdown_cleanup
+from app.lifecycle import shutdown_cleanup
 
 from app.routers import skills as _skills_router
 from app.routers import memory as _memory_router
@@ -64,7 +62,6 @@ app.include_router(_voice_router.router)
 app.include_router(_workers_router.router)
 app.include_router(_inner_voice_router.router)
 
-app.on_event("startup")(reap_orphaned_sdk_subprocesses)
 app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
 app.on_event("startup")(_workers_router.start_worker_pool)
 app.on_event("shutdown")(shutdown_cleanup)

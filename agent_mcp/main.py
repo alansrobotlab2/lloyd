@@ -23,6 +23,9 @@ from agent_mcp import (
     autoresearch,
     backlog,
     browser,
+    builtin_bash,
+    builtin_fs,
+    builtin_task,
     discord_bot,
     facts,
     http_tools,
@@ -42,6 +45,11 @@ PORT = 8500
 # (prefetch.py, app/post_capture.py) but is NOT in MODULES — including it
 # would double-register every tool.
 MODULES = [
+    # Built-in tool replicas (formerly provided by claude-agent-sdk)
+    builtin_bash,
+    builtin_fs,
+    builtin_task,
+    # Domain modules
     ambient,
     autonomy,
     autoresearch,

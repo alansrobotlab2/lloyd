@@ -17,8 +17,6 @@ from app.compaction import (  # noqa: E402
     TURNS_TO_KEEP,
     estimate_conversation_tokens,
     estimate_tokens,
-    format_conversation_for_local,
-    is_local_model,
     load_and_compact_session,
     truncate_conversation,
     truncation_threshold,
@@ -55,20 +53,6 @@ def test_estimate_conversation_no_double_count():
     msgs = [{"role": "user", "content": "u" * 400}]  # 100 tokens
     got = estimate_conversation_tokens(msgs, sys_prompt)
     assert got == 200, f"expected 200, got {got} (double-count regression?)"
-
-
-# ---------------------------------------------------------------------------
-# Local/cloud detection
-# ---------------------------------------------------------------------------
-
-
-def test_is_local_model_cloud_vs_local():
-    assert is_local_model("") is False
-    assert is_local_model("https://api.anthropic.com") is False
-    assert is_local_model("https://api2.anthropic.com/v1") is False
-    assert is_local_model("http://127.0.0.1:8096") is True
-    assert is_local_model("http://localhost:8080") is True
-    assert is_local_model("https://my-custom-llm.example.com") is True
 
 
 # ---------------------------------------------------------------------------
@@ -117,65 +101,6 @@ def test_truncate_keeps_last_turn_minimum():
     # Should contain the final turn (2 msgs) plus possibly a synthetic note.
     assert len(out) >= 2
     assert out[-1]["role"] == "assistant"
-
-
-# ---------------------------------------------------------------------------
-# Chat-template formatting
-# ---------------------------------------------------------------------------
-
-
-def test_format_qwen_chatml_has_correct_markers():
-    history = [
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "hello"},
-    ]
-    out = format_conversation_for_local(history, current_user_text="how are you?", model="qwen-30b")
-
-    # ChatML markers
-    assert "<|im_start|>user\nhi<|im_end|>" in out
-    assert "<|im_start|>assistant\nhello<|im_end|>" in out
-    assert "<|im_start|>user\nhow are you?<|im_end|>" in out
-    # Ends with generation cue (no closing marker after it)
-    assert out.endswith("<|im_start|>assistant\n")
-
-
-def test_format_picks_template_by_model_name():
-    history = [{"role": "user", "content": "test"}]
-
-    qwen_out = format_conversation_for_local(history, current_user_text="q", model="qwen-coder")
-    assert "<|im_start|>" in qwen_out
-    assert "<|start_header_id|>" not in qwen_out
-
-    llama_out = format_conversation_for_local(history, current_user_text="q", model="llama-3.3-70b")
-    assert "<|start_header_id|>" in llama_out
-    assert "<|eot_id|>" in llama_out
-
-
-def test_format_strips_trailing_user_when_current_provided():
-    # Persisted history ends with a user turn (just-appended by messages.py).
-    # Caller passes prefetched current_user_text — the trailing persisted
-    # copy should be dropped so we don't duplicate.
-    history = [
-        {"role": "user", "content": "old msg"},
-        {"role": "assistant", "content": "old reply"},
-        {"role": "user", "content": "latest msg"},
-    ]
-    out = format_conversation_for_local(history, current_user_text="latest msg with prefetch", model="qwen")
-
-    # The persisted "latest msg" should NOT appear — only the prefetched version.
-    assert "latest msg with prefetch" in out
-    assert out.count("latest msg") == 1, f"expected exactly one copy of user msg, got:\n{out}"
-
-
-def test_format_structured_content_extracts_text():
-    # Structured content on a non-trailing user turn should survive
-    # template formatting (text extracted from the content blocks).
-    history = [
-        {"role": "user", "content": [{"type": "text", "text": "structured"}]},
-        {"role": "assistant", "content": "reply"},
-    ]
-    out = format_conversation_for_local(history, current_user_text="new", model="qwen")
-    assert "structured" in out, f"expected 'structured' in output, got:\n{out}"
 
 
 # ---------------------------------------------------------------------------
@@ -281,14 +206,9 @@ _TESTS = [
     test_estimate_tokens_empty_string,
     test_estimate_tokens_proportional,
     test_estimate_conversation_no_double_count,
-    test_is_local_model_cloud_vs_local,
     test_truncate_under_threshold_is_noop,
     test_truncate_drops_old_turns_above_threshold,
     test_truncate_keeps_last_turn_minimum,
-    test_format_qwen_chatml_has_correct_markers,
-    test_format_picks_template_by_model_name,
-    test_format_strips_trailing_user_when_current_provided,
-    test_format_structured_content_extracts_text,
     test_load_and_compact_missing_file,
     test_load_and_compact_no_truncation_needed,
     test_load_and_compact_triggers_truncation,

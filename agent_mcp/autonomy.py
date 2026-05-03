@@ -276,9 +276,7 @@ async def call_tool(name: str, arguments: dict):
     elif name == "autonomy_config":
         return [TextContent(type="text", text=_handle_config(arguments))]
     elif name == "autonomy_run_task":
-        # run_task() internally calls asyncio.run(), so it must run in a
-        # worker thread — we're already inside the MCP event loop here.
-        text = await asyncio.to_thread(_handle_run, arguments)
+        text = await _handle_run(arguments)
         return [TextContent(type="text", text=text)]
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
@@ -444,17 +442,16 @@ def _handle_config(params: dict) -> str:
         return json.dumps({"error": f"Config key not found: {key}"})
 
 
-def _handle_run(params: dict) -> str:
+async def _handle_run(params: dict) -> str:
     task_id = params.get("id", 0)
     if task_id == 0:
         return json.dumps({"error": "id is required"})
-    # Delegate to autonomy.py scheduler (imported at runtime)
     try:
         lloyd_home = Path.home() / "lloyd"
         if str(lloyd_home) not in sys.path:
             sys.path.insert(0, str(lloyd_home))
         from autonomy import run_task
-        result = run_task(task_id)
+        result = await run_task(task_id)
         return json.dumps(result)
     except ImportError as e:
         return json.dumps({"error": f"autonomy scheduler module not available: {e}"})

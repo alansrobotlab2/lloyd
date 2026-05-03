@@ -22,14 +22,6 @@ def _load_config() -> dict:
 CONFIG = _load_config()
 MODEL_CONFIGS = CONFIG.get("models", {})
 
-_LOCAL_MODEL_VARS = [
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
-]
-
-
 def _get_model_cfg(model_name: str) -> dict:
     """Resolve the full model config dict for a model name or alias."""
     if model_name in MODEL_CONFIGS:
@@ -41,58 +33,9 @@ def _get_model_cfg(model_name: str) -> dict:
 
 
 def _get_model_env(model_name: str) -> dict:
-    """Get environment variable overrides for a model.
-
-    If the model doesn't set ANTHROPIC_BASE_URL (i.e. it's a real Anthropic
-    model, not a local one), clear any inherited local-model vars so the
-    subprocess doesn't accidentally hit the Qwen server.
-    """
+    """Return environment variable overrides for a model."""
     cfg = _get_model_cfg(model_name)
-    model_env = dict(cfg.get("env", {}))
-
-    if "ANTHROPIC_BASE_URL" not in model_env:
-        for var in _LOCAL_MODEL_VARS:
-            if var not in model_env:
-                model_env[var] = ""
-
-    return model_env
-
-
-def _resolve_effort(model_name: str, think_level: str | None = None) -> str:
-    """Resolve effort level for a model, with optional /think override.
-
-    Resolution order for base effort:
-      per-model `effort` config > global `agent.effort` > 'medium'
-
-    /think override behavior:
-      - "off" → force "low" (minimal thinking)
-      - "low"/"medium"/"high" on Anthropic models → pass through
-      - Any non-off level on local models → "high" (local is binary on/off)
-    """
-    cfg = _get_model_cfg(model_name)
-    effort = (
-        cfg.get("effort")
-        or CONFIG.get("agent", {}).get("effort", "medium")
-    )
-    if think_level == "off":
-        return "low"
-    if think_level and think_level != "off":
-        is_local = bool(cfg.get("env", {}).get("ANTHROPIC_BASE_URL"))
-        return "high" if is_local else think_level
-    return effort
-
-
-def _resolve_thinking(model_name: str) -> dict | None:
-    """Return the SDK `thinking` config for a model.
-
-    Opus 4.7 requires explicit `thinking: {type: "adaptive"}` to enable thinking
-    at all — the default with no config is thinking OFF. Opus 4.6 and Sonnet 4.6
-    also accept adaptive as the recommended mode. Local Qwen models (vLLM /
-    llama-server behind an Anthropic-compatible gateway) also accept the adaptive
-    thinking flag and return visible thinking content — unlike Opus 4.7 which
-    defaults `display` to "omitted". Return adaptive for all models.
-    """
-    return {"type": "adaptive"}
+    return dict(cfg.get("env", {}))
 
 
 def _model_base_url(model_name: str) -> str:
