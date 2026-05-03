@@ -136,6 +136,36 @@ mcp_servers:
     url: http://127.0.0.1:8500/sse
 model:
   default: primary
+compaction:
+  # mode: summarize | truncate
+  #   summarize → LLM-based summarization of older history when above
+  #               threshold (falls back to truncate on any failure)
+  #   truncate  → drop-oldest only (legacy behavior; no LLM call)
+  mode: summarize
+  # Model alias used for summarization. Empty/null → falls back to the
+  # global default model (primary). Setting this lets you point compact
+  # at a smaller/cheaper local model if one is configured.
+  summary_model: primary
+  # Number of most-recent turns kept verbatim past the summary boundary.
+  # The summary covers everything older.
+  keep_recent_turns: 5
+  microcompact:
+    enabled: true
+    keep_recent_tools: 5     # most-recent compactable tool results kept inline
+    count_threshold: 20      # microcompact fires when count exceeds this
+    # Compactable tool list. Falls back to module default if null/empty.
+    compactable_tools: [Read, Bash, Grep, Glob, Edit, Write]
+  restore:
+    enabled: true
+    budget_tokens: 50000     # total budget across all restored files
+    max_per_file: 5000
+    max_files: 5
+  manual:
+    # Manual /compact uses a tighter buffer than auto, since the user
+    # explicitly asked to compact and is willing to fill more of the
+    # context window. Currently informational; the manual handler
+    # bypasses the threshold check entirely.
+    buffer_tokens: 3000
 harness:
   stream_chunk_timeout_seconds: 60
   max_tools_per_request: 128

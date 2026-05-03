@@ -1,12 +1,29 @@
 """Conversation compaction — client-side context management.
 
 The harness is stateless per request, so we reconstruct the conversation
-from the persisted session JSON each turn, truncate to fit the model's
+from the persisted session JSON each turn, fit it to the model's
 context window, and return ready-to-send OpenAI-format messages.
 
-This module intentionally does NOT do LLM-based summarization. That's a
-future follow-up; for now "compaction" means truncation with a synthetic
-omission marker.
+Three defensive layers, in order of cost (cheapest first):
+
+  1. **Microcompaction** (:mod:`app.harness.microcompact`) — clears
+     stale compactable-tool results inline. Pure structural pass, no
+     LLM call. Runs every load.
+  2. **LLM summarization** (:mod:`app.compaction_llm`) — when
+     microcompact alone doesn't get under threshold, summarize the
+     dropped block via a non-streaming POST to the local vLLM. Falls
+     back to truncation on any failure so the user's turn always
+     completes.
+  3. **Truncation** — last resort. Drops oldest turns past
+     ``TURNS_TO_KEEP``, prepends a ``[compaction: N tokens omitted]``
+     marker. This is what the module did historically and remains the
+     fallback when ``compaction.mode`` is ``truncate`` or when
+     summarization fails.
+
+Behind everything else, the harness loop has a reactive 413 recovery
+path (``app.harness.loop._truncate_largest_tool_results``) that fires
+if vLLM still rejects the prompt. That's the safety net under all of
+the above.
 """
 
 from __future__ import annotations
@@ -14,7 +31,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 logger = logging.getLogger("lloyd-server")
 
@@ -169,6 +186,31 @@ def _group_into_turns(messages: list[dict]) -> list[list[dict]]:
     return turns
 
 
+def _flatten_turns(turns: list[list[dict]]) -> list[dict]:
+    """Flatten a turn-grouped message list back into a flat list."""
+    out: list[dict] = []
+    for t in turns:
+        out.extend(t)
+    return out
+
+
+def _split_for_summary(
+    messages: list[dict],
+    keep_recent_turns: int,
+) -> tuple[list[dict], list[dict]]:
+    """Partition ``messages`` into (older, recent) along turn boundaries.
+
+    The ``recent`` block — last ``keep_recent_turns`` turns — is kept
+    verbatim past the summary boundary. The ``older`` block is what
+    gets summarized.
+    """
+    turns = _group_into_turns(messages)
+    if len(turns) <= keep_recent_turns:
+        return [], _flatten_turns(turns)
+    cutoff = len(turns) - keep_recent_turns
+    return _flatten_turns(turns[:cutoff]), _flatten_turns(turns[cutoff:])
+
+
 def truncate_conversation(
     messages: list[dict],
     max_tokens: int,
@@ -197,17 +239,11 @@ def truncate_conversation(
     # Start by keeping the last N turns.
     kept = turns[-turns_to_keep:] if len(turns) > turns_to_keep else turns[:]
 
-    def _flatten(ts: list[list[dict]]) -> list[dict]:
-        out: list[dict] = []
-        for t in ts:
-            out.extend(t)
-        return out
-
     # Drop oldest turns until under budget, but never drop the last turn.
-    while len(kept) > 1 and estimate_conversation_tokens(_flatten(kept), system_prompt) > max_tokens:
+    while len(kept) > 1 and estimate_conversation_tokens(_flatten_turns(kept), system_prompt) > max_tokens:
         kept.pop(0)
 
-    truncated = _flatten(kept)
+    truncated = _flatten_turns(kept)
     dropped_tokens = current_tokens - estimate_conversation_tokens(truncated, system_prompt)
 
     if dropped_tokens > 0:
@@ -230,28 +266,84 @@ def truncate_conversation(
 
 
 # ---------------------------------------------------------------------------
+# Config helper
+# ---------------------------------------------------------------------------
+
+
+def _compaction_cfg() -> dict[str, Any]:
+    """Read the ``compaction:`` block from config.yaml with defaults.
+
+    Called per invocation so config edits take effect on the next
+    turn (no restart needed for tuning).
+    """
+    try:
+        from app.config import CONFIG  # type: ignore
+    except Exception:
+        return {}
+    cfg = dict(CONFIG.get("compaction") or {})
+    cfg.setdefault("mode", "summarize")          # summarize | truncate
+    cfg.setdefault("summary_model", None)        # None → falls back to default model
+    cfg.setdefault("keep_recent_turns", 5)
+    micro = dict(cfg.get("microcompact") or {})
+    micro.setdefault("enabled", True)
+    micro.setdefault("keep_recent_tools", 5)
+    micro.setdefault("count_threshold", 20)
+    micro.setdefault("compactable_tools", None)  # None → use module default
+    cfg["microcompact"] = micro
+    restore = dict(cfg.get("restore") or {})
+    restore.setdefault("enabled", True)
+    restore.setdefault("budget_tokens", 50_000)
+    restore.setdefault("max_per_file", 5_000)
+    restore.setdefault("max_files", 5)
+    cfg["restore"] = restore
+    manual = dict(cfg.get("manual") or {})
+    manual.setdefault("buffer_tokens", 3_000)
+    cfg["manual"] = manual
+    return cfg
+
+
+# ---------------------------------------------------------------------------
 # Session-level helper — read JSON, truncate, return ready-to-send history
 # ---------------------------------------------------------------------------
 
 
-def load_and_compact_session(
+async def load_and_compact_session(
     session_path: Path | str,
     model: str = "",
     system_prompt: str = "",
+    *,
+    mode_override: str | None = None,
 ) -> dict[str, Any]:
-    """Read a persisted session and return a compaction result.
+    """Read a persisted session, apply the compaction stack, and return
+    ready-to-send history plus metadata.
+
+    Layer order (cheapest first):
+
+      1. Load + filter to conversation roles.
+      2. Microcompact pre-pass (clears stale tool results).
+      3. If still over threshold and ``mode == "summarize"``:
+         try LLM summarization; on success, replace dropped block with
+         the summary and re-inject recent files (Layer C).
+      4. If still over threshold (or summary failed, or mode is
+         ``"truncate"``): fall through to the historical drop-oldest
+         truncation path.
 
     Returns a dict with:
-      - history:        list[dict], possibly truncated
+      - history:        list[dict], possibly compacted
       - tokens_before:  int, estimated tokens in the original history
-      - tokens_after:   int, estimated tokens after truncation
-      - truncated:      bool, True if any turns were dropped
+      - tokens_after:   int, estimated tokens after compaction
+      - truncated:      bool, True if any turns were dropped (compat-name)
+      - summarized:     bool, True if LLM summarization replaced a block
+      - microcompacted: int, count of tool results cleared by the pre-pass
+      - restored_files: int, count of files re-injected post-summary
       - context_window: int, the model's configured window
-      - threshold:      int, the truncation threshold in use
+      - threshold:      int, the compaction threshold in use
 
     On any error (missing file, malformed JSON), returns an empty result
-    with `history=[]` and logs a warning.
+    with ``history=[]`` and logs a warning. Summarization failures are
+    handled transparently — the user's turn always completes.
     """
+    cfg = _compaction_cfg()
     context_window = get_context_window(model)
     threshold = truncation_threshold(context_window)
 
@@ -260,6 +352,9 @@ def load_and_compact_session(
         "tokens_before": 0,
         "tokens_after": 0,
         "truncated": False,
+        "summarized": False,
+        "microcompacted": 0,
+        "restored_files": 0,
         "context_window": context_window,
         "threshold": threshold,
     }
@@ -282,6 +377,90 @@ def load_and_compact_session(
     convo = [m for m in messages if m.get("role") in ("user", "assistant", "tool", "system")]
 
     tokens_before = estimate_conversation_tokens(convo, system_prompt)
+
+    # ---- Layer B: microcompaction pre-pass ----------------------------
+    micro_cleared = 0
+    if cfg["microcompact"].get("enabled", True):
+        # Lazy import — keeps app.compaction importable without the
+        # harness module tree (e.g. for unit tests of truncation alone).
+        try:
+            from app.harness.microcompact import (
+                DEFAULT_COMPACTABLE_TOOLS,
+                microcompact,
+            )
+            mc_cfg = cfg["microcompact"]
+            tools: Iterable[str] = (
+                mc_cfg.get("compactable_tools") or DEFAULT_COMPACTABLE_TOOLS
+            )
+            convo, micro_cleared = microcompact(
+                convo,
+                keep_recent_tools=int(mc_cfg.get("keep_recent_tools", 5)),
+                count_threshold=int(mc_cfg.get("count_threshold", 20)),
+                compactable_tools=tools,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("microcompact pre-pass failed: %s", e)
+
+    # If microcompact alone got us under threshold, we're done.
+    cur_tokens = estimate_conversation_tokens(convo, system_prompt)
+    summarized = False
+    restored_count = 0
+
+    # ---- Layer A: LLM summarization -----------------------------------
+    mode = (mode_override or cfg.get("mode") or "summarize").lower()
+    if cur_tokens > threshold and mode == "summarize":
+        try:
+            from app.compaction_llm import (
+                restore_recent_files,
+                summarize_history,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("compaction_llm import failed, falling back to truncate: %s", e)
+            summarize_history = None  # type: ignore[assignment]
+            restore_recent_files = None  # type: ignore[assignment]
+
+        if summarize_history is not None:
+            keep_recent_turns = int(cfg.get("keep_recent_turns", 5))
+            older, recent = _split_for_summary(convo, keep_recent_turns)
+            if older:
+                summary = await summarize_history(
+                    older,
+                    model=cfg.get("summary_model") or model or None,
+                )
+                if summary:
+                    summarized = True
+                    summary_msg = {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "[compaction summary — earlier conversation "
+                                    "summarized to fit context window]\n\n"
+                                    + summary
+                                ),
+                            }
+                        ],
+                    }
+                    new_convo: list[dict] = [summary_msg]
+                    # ---- Layer C: post-compact restore ----------------
+                    if cfg["restore"].get("enabled", True) and restore_recent_files is not None:
+                        try:
+                            restored = restore_recent_files(
+                                older,
+                                budget_tokens=int(cfg["restore"].get("budget_tokens", 50_000)),
+                                max_per_file=int(cfg["restore"].get("max_per_file", 5_000)),
+                                max_files=int(cfg["restore"].get("max_files", 5)),
+                            )
+                            new_convo.extend(restored)
+                            restored_count = len(restored)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("restore_recent_files failed: %s", e)
+                    new_convo.extend(recent)
+                    convo = new_convo
+                    cur_tokens = estimate_conversation_tokens(convo, system_prompt)
+
+    # ---- Layer (fallback): truncation ---------------------------------
     truncated_msgs, dropped = truncate_conversation(
         convo,
         max_tokens=threshold,
@@ -295,6 +474,9 @@ def load_and_compact_session(
         "tokens_before": tokens_before,
         "tokens_after": tokens_after,
         "truncated": dropped > 0,
+        "summarized": summarized,
+        "microcompacted": micro_cleared,
+        "restored_files": restored_count,
         "context_window": context_window,
         "threshold": threshold,
     }

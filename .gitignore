@@ -10,17 +10,15 @@ __pycache__/
 
 # Logs
 /logs/
+/event_logs/
 
 # Sessions (runtime state)
 /sessions/
 
 # Pipeline runs (runtime state)
 /pipeline-runs/
-
 /autonomy-runs/
-
 /_pipeline/
-
 
 # Environment
 .env
@@ -28,21 +26,14 @@ __pycache__/
 # OS
 .DS_Store
 
-/_pipeline/
-
+# Databases (runtime state)
 /usage.db
 /usage.db-shm
 /usage.db-wal
-
 /workers.db
 /workers.db-shm
 /workers.db-wal
 
+# Misc runtime state
 state.json
-
-# Voice runtime: TTS-on-response toggle persistence
 /voice_runtime_state.json
-
-/event_logs/
-
-/_pipeline/

@@ -205,16 +205,22 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
     # Build OpenAI-format messages from the compacted session history.
     # The harness is stateless per request — we reconstruct the full
-    # conversation each turn, truncate to the model's context window,
-    # and append the current user message.
-    comp = load_and_compact_session(meta_path, model=model)
-    if comp["truncated"]:
+    # conversation each turn, fit it to the model's context window via
+    # the compaction stack (microcompact → summary → truncate), and
+    # append the current user message.
+    comp = await load_and_compact_session(meta_path, model=model)
+    if comp["truncated"] or comp.get("summarized") or comp.get("microcompacted"):
         logger.info(
-            "[compaction] %s: dropped %d tokens (%d → %d, window=%d, threshold=%d)",
+            "[compaction] %s: %d→%d tokens "
+            "(microcompacted=%d, summarized=%s, restored=%d, truncated=%s, "
+            "window=%d, threshold=%d)",
             session_id,
-            comp["tokens_before"] - comp["tokens_after"],
             comp["tokens_before"],
             comp["tokens_after"],
+            comp.get("microcompacted", 0),
+            comp.get("summarized", False),
+            comp.get("restored_files", 0),
+            comp["truncated"],
             comp["context_window"],
             comp["threshold"],
         )
@@ -832,9 +838,168 @@ async def _turn_sse_generator(turn: SessionTurn):
 # HTTP handlers
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Slash commands — handled inline by post_message_stream before the queue.
+# ---------------------------------------------------------------------------
+
+
+async def _slash_compact_sse(
+    session_id: str,
+    model_override: str,
+    instructions: str | None,
+):
+    """One-shot SSE generator for the ``/compact`` slash command.
+
+    Force-summarizes the session (no threshold check — the user
+    explicitly asked) and rewrites the session JSON in place. Yields
+    SSE events tracking progress so the UI can show what happened:
+
+      * ``compact_start``  — { instructions }
+      * ``compact_done``   — { microcompacted, summarized, restored,
+                               truncated, tokens_before, tokens_after }
+      * ``error``          — { detail } on unrecoverable failure
+
+    Heavy lifting (summarize_history) runs OUTSIDE mutate_session so
+    we don't hold the per-session lock across an LLM call.
+    """
+    from app.compaction import (
+        _compaction_cfg,
+        _split_for_summary,
+        estimate_conversation_tokens,
+        get_context_window,
+    )
+    from app.compaction_llm import (
+        restore_recent_files,
+        summarize_history,
+    )
+    from app.harness.microcompact import (
+        DEFAULT_COMPACTABLE_TOOLS,
+        microcompact,
+    )
+
+    def _sse(event: str, payload: dict[str, Any]) -> str:
+        return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+    yield _sse("compact_start", {
+        "session_id": session_id,
+        "instructions": instructions or "",
+    })
+
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        yield _sse("error", {"detail": f"session {session_id} not found"})
+        return
+
+    try:
+        raw = json.loads(meta_path.read_text())
+    except Exception as e:
+        yield _sse("error", {"detail": f"failed to read session: {e}"})
+        return
+
+    messages = raw.get("messages") or []
+    convo = [m for m in messages if m.get("role") in ("user", "assistant", "tool", "system")]
+    if not convo:
+        yield _sse("error", {"detail": "session has no conversation history"})
+        return
+
+    cfg = _compaction_cfg()
+    model = model_override or raw.get("model", "") or CONFIG.get("model", {}).get("default", "")
+    tokens_before = estimate_conversation_tokens(convo)
+
+    # Layer B — microcompact pre-pass (cheap, runs first)
+    micro_cleared = 0
+    if cfg["microcompact"].get("enabled", True):
+        mc = cfg["microcompact"]
+        tools = mc.get("compactable_tools") or DEFAULT_COMPACTABLE_TOOLS
+        convo, micro_cleared = microcompact(
+            convo,
+            keep_recent_tools=int(mc.get("keep_recent_tools", 5)),
+            count_threshold=int(mc.get("count_threshold", 20)),
+            compactable_tools=tools,
+        )
+
+    # Layer A — force LLM summary regardless of threshold
+    keep_recent = int(cfg.get("keep_recent_turns", 5))
+    older, recent = _split_for_summary(convo, keep_recent)
+    summarized = False
+    restored_count = 0
+    if older:
+        summary = await summarize_history(
+            older,
+            model=cfg.get("summary_model") or model or None,
+            instructions=instructions,
+        )
+        if summary:
+            summarized = True
+            new_convo: list[dict] = [{
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "[compaction summary — manual /compact"
+                        + (f" focus: {instructions}" if instructions else "")
+                        + "]\n\n"
+                        + summary
+                    ),
+                }],
+            }]
+            # Layer C — restore recent files
+            if cfg["restore"].get("enabled", True):
+                restored = restore_recent_files(
+                    older,
+                    budget_tokens=int(cfg["restore"].get("budget_tokens", 50_000)),
+                    max_per_file=int(cfg["restore"].get("max_per_file", 5_000)),
+                    max_files=int(cfg["restore"].get("max_files", 5)),
+                )
+                new_convo.extend(restored)
+                restored_count = len(restored)
+            new_convo.extend(recent)
+            convo = new_convo
+        else:
+            yield _sse("error", {"detail": "summarization failed; session unchanged"})
+            return
+
+    tokens_after = estimate_conversation_tokens(convo)
+
+    # Persist back to disk. mutate_session enforces the per-session
+    # lock; the callback here is sync + fast (just swaps the messages
+    # list and updates last_active).
+    new_messages = list(convo)
+
+    def _swap(data: dict) -> None:
+        # Preserve UI-only roles (subliminal, etc.) by keeping the
+        # tail of the original list as-is — actually no, the safer
+        # contract is "messages now equals the compacted set." UI-only
+        # entries that lived in the dropped block were already filtered
+        # out at convo-build time, so we don't try to re-merge them.
+        data["messages"] = new_messages
+        data["last_active"] = datetime.now().isoformat()
+        data["message_count"] = len(new_messages)
+
+    await mutate_session(session_id, _swap)
+
+    yield _sse("compact_done", {
+        "session_id": session_id,
+        "microcompacted": micro_cleared,
+        "summarized": summarized,
+        "restored_files": restored_count,
+        "truncated": False,
+        "tokens_before": tokens_before,
+        "tokens_after": tokens_after,
+        "context_window": get_context_window(model),
+    })
+
+
 @router.post("/api/message/stream")
 async def post_message_stream(request: Request):
-    """SSE endpoint. Enqueues a user turn; consumer streams events back."""
+    """SSE endpoint. Enqueues a user turn; consumer streams events back.
+
+    Slash commands (handled inline before queueing):
+      * ``/compact [optional instructions]`` — force a context summary
+        of the current session, replacing older history with the
+        9-section summary + restored files. Returns a one-shot SSE
+        response without enqueueing an agent turn.
+    """
     data = await request.json()
     text = data.get("text", "").strip()
     session_id = data.get("session_id", "")
@@ -843,6 +1008,22 @@ async def post_message_stream(request: Request):
 
     if not text:
         raise HTTPException(status_code=400, detail="Message text required")
+
+    # ------- /compact slash command (Layer D) -------------------------
+    if text.split()[0].lower() == "/compact":
+        if not session_id:
+            raise HTTPException(
+                status_code=400,
+                detail="/compact requires an active session",
+            )
+        # Everything after the command word is treated as a focus
+        # instruction passed through to the summarization prompt.
+        instructions = text[len("/compact"):].strip() or None
+        return StreamingResponse(
+            _slash_compact_sse(session_id, model_override, instructions),
+            media_type="text/event-stream",
+        )
+    # ------------------------------------------------------------------
 
     model = model_override or ""
     if session_id:
@@ -1105,14 +1286,18 @@ async def post_message(request: Request):
         session_id=session_id,
     )
 
-    comp = load_and_compact_session(meta_path, model=model)
-    if comp["truncated"]:
+    comp = await load_and_compact_session(meta_path, model=model)
+    if comp["truncated"] or comp.get("summarized") or comp.get("microcompacted"):
         logger.info(
-            "[compaction] %s: dropped %d tokens (%d → %d)",
+            "[compaction] %s: %d→%d tokens "
+            "(microcompacted=%d, summarized=%s, restored=%d, truncated=%s)",
             session_id,
-            comp["tokens_before"] - comp["tokens_after"],
             comp["tokens_before"],
             comp["tokens_after"],
+            comp.get("microcompacted", 0),
+            comp.get("summarized", False),
+            comp.get("restored_files", 0),
+            comp["truncated"],
         )
     messages = await _prepare_messages_for_harness(comp["history"])
     if messages and messages[-1].get("role") == "user":
