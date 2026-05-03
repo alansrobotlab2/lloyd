@@ -21,11 +21,9 @@ from app.routers import entities as _entities_router
 from app.routers import backlog as _backlog_router
 from app.routers import services as _services_router
 from app.routers import tools as _tools_router
-from app.routers import pipelines as _pipelines_router
 from app.routers import autonomy as _autonomy_router
 from app.routers import sessions as _sessions_router
 from app.routers import models as _models_router
-from app.routers import usage as _usage_router
 from app.routers import voice as _voice_router
 from app.routers import messages as _messages_router
 from app.routers import workers as _workers_router
@@ -48,7 +46,6 @@ app.add_middleware(
 app.include_router(_messages_router.router)
 app.include_router(_sessions_router.router)
 app.include_router(_models_router.router)
-app.include_router(_usage_router.router)
 app.include_router(_autonomy_router.router)
 app.include_router(_skills_router.router)
 app.include_router(_memory_router.router)
@@ -57,7 +54,6 @@ app.include_router(_entities_router.router)
 app.include_router(_backlog_router.router)
 app.include_router(_services_router.router)
 app.include_router(_tools_router.router)
-app.include_router(_pipelines_router.router)
 app.include_router(_voice_router.router)
 app.include_router(_workers_router.router)
 app.include_router(_inner_voice_router.router)

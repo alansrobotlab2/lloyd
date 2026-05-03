@@ -31,7 +31,7 @@ from app.config import (
     _resolve_model_name,
 )
 from app.harness import run_query, RunOptions, HookRegistry
-from app.paths import SESSIONS_DIR, PIPELINE_RUNS_DIR
+from app.paths import SESSIONS_DIR
 from app.sessions_io import (
     SessionTurn,
     SessionQueue,
@@ -152,7 +152,6 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     persisted_tool_ids: set[str] = set()
     final_persisted = False
     first_event = True
-    pending_pipeline_wires: dict[str, str] = {}
     stream_stats: dict[str, Any] = {
         "input_tokens": 0, "output_tokens": 0,
         "cache_create": 0, "cache_read": 0,
@@ -391,9 +390,6 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     "args": args_json,
                     "context_tokens": last_turn_input,
                 }, turn_id=turn.turn_id)
-                if name.endswith("pipeline_dispatch"):
-                    pending_pipeline_wires[call_id] = session_id
-                    logger.info(f"Tracking pipeline_dispatch call {call_id!r} for session {session_id}")
 
             elif etype == "tool_result":
                 call_id = evt["call_id"]
@@ -409,35 +405,6 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     "result": result_str,
                     "result_chars": len(result_str),
                 }, turn_id=turn.turn_id)
-                if call_id in pending_pipeline_wires:
-                    req_session = pending_pipeline_wires.pop(call_id)
-                    try:
-                        import ast as _ast
-                        try:
-                            res_data = json.loads(result_str)
-                        except json.JSONDecodeError:
-                            res_data = _ast.literal_eval(result_str)
-                        if isinstance(res_data, dict) and "text" in res_data:
-                            inner = res_data["text"]
-                            if isinstance(inner, str):
-                                try:
-                                    res_data = json.loads(inner)
-                                except Exception:
-                                    pass
-                        run_id = res_data.get("run_id")
-                        if run_id:
-                            run_path = PIPELINE_RUNS_DIR / f"{run_id}.json"
-                            if run_path.exists():
-                                run_json = json.loads(run_path.read_text(encoding="utf-8"))
-                                run_json["requester_session_id"] = req_session
-                                run_path.write_text(json.dumps(run_json, indent=2), encoding="utf-8")
-                                logger.info(f"Linked pipeline run #{run_id} → session {req_session}")
-                            else:
-                                logger.warning(f"Pipeline run file {run_id}.json not found for wiring")
-                        else:
-                            logger.warning(f"No run_id in pipeline_dispatch result: {result_str[:200]}")
-                    except Exception as _we:
-                        logger.warning(f"Failed to wire pipeline session: {_we} | result={result_str[:200]}")
                 # Eager per-pair persistence
                 tc = next((t for t in tool_calls_log if t["call_id"] == call_id), None)
                 if tc and call_id not in persisted_tool_ids:

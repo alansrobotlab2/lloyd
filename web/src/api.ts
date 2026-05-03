@@ -408,87 +408,6 @@ export interface EntityGraphData {
   edges: EntityGraphEdge[];
 }
 
-// ── Usage types ─────────────────────────────────────────────────────────
-
-export interface UsageSummary {
-  requests: number
-  input_tokens: number
-  output_tokens: number
-  cache_create: number
-  cache_read: number
-  cost_usd: number
-  duration_ms: number
-  duration_api_ms: number
-}
-
-export interface UsageBucket {
-  bucket: string
-  requests: number
-  input_tokens: number
-  output_tokens: number
-  cache_create: number
-  cache_read: number
-  cost_usd: number
-}
-
-export interface UsageAllocation {
-  tokens: number
-  cost_usd: number
-}
-
-export interface UsageRateLimits {
-  '5h-utilization'?: number
-  '5h-status'?: string
-  '5h-reset'?: number
-  '7d-utilization'?: number
-  '7d-status'?: string
-  '7d-reset'?: number
-  'fallback-percentage'?: number
-  'overage-status'?: string
-  [key: string]: string | number | undefined
-}
-
-export interface UsagePing {
-  rate_limits: UsageRateLimits
-  local_5h: UsageSummary
-  local_7d: UsageSummary
-  pinged_at: string
-  error?: string
-}
-
-export interface UsageWindows {
-  four_hour: UsageSummary
-  seven_day: UsageSummary
-  allocations: {
-    '4h': UsageAllocation
-    '7d': UsageAllocation
-  }
-}
-
-export interface UsageModelBreakdown {
-  model: string
-  requests: number
-  input_tokens: number
-  output_tokens: number
-  cache_create: number
-  cache_read: number
-  cost_usd: number
-}
-
-export interface UsageRecord {
-  id: number
-  ts: string
-  session_id: string
-  model: string
-  input_tokens: number
-  output_tokens: number
-  cache_create: number
-  cache_read: number
-  cost_usd: number | null
-  duration_ms: number | null
-  num_turns: number | null
-}
-
 // ── Autonomy types ──────────────────────────────────────────────────────
 
 export interface AutonomyTask {
@@ -520,21 +439,6 @@ export interface AutonomyTask {
   frequency: string | null;
   cron_id: string | null;
   last_run: string | null;
-}
-
-export interface PipelineRun {
-  run_id: number
-  status: 'running' | 'complete' | 'aborted' | 'blocked' | string
-  task_preview: string
-  current_stage: string
-  stage_index: number
-  stage_count: number
-  stages: string[]
-  model: string
-  created_at: string
-  updated_at: string
-  completed_at: string
-  blocked_reason: string
 }
 
 export interface ActiveProc {
@@ -980,35 +884,11 @@ export const api = {
       body: JSON.stringify({ path }),
     }).then(r => r.json()),
 
-  // Usage
-  usagePing: (): Promise<UsagePing> =>
-    fetch(`${API_BASE}/usage/ping`).then(r => r.json()),
-  usageWindows: (): Promise<UsageWindows> =>
-    fetch(`${API_BASE}/usage/windows`).then(r => r.json()),
-  usageHistory: (period: '4h' | '24h' | '7d' | '30d' = '4h'): Promise<{ period: string; buckets: UsageBucket[] }> =>
-    fetch(`${API_BASE}/usage/history?period=${period}`).then(r => r.json()),
-  usageModels: (hours?: number, days?: number): Promise<{ models: UsageModelBreakdown[] }> => {
-    const params = new URLSearchParams()
-    if (hours) params.set('hours', String(hours))
-    if (days) params.set('days', String(days))
-    return fetch(`${API_BASE}/usage/models?${params}`).then(r => r.json())
-  },
-  usageRecent: (limit = 20): Promise<{ records: UsageRecord[] }> =>
-    fetch(`${API_BASE}/usage/recent?limit=${limit}`).then(r => r.json()),
-
   // Active SDK session subprocesses
   getActiveProcs: (): Promise<{ procs: ActiveProc[] }> =>
     fetch(`${API_BASE}/sessions/active-procs`).then(r => r.json()),
   killSessionProc: (sessionId: string): Promise<{ killed: boolean; session_id: string }> =>
     fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/kill-proc`, { method: 'POST' }).then(r => r.json()),
-
-  // Pipeline runs
-  listPipelines: (status?: string): Promise<{ runs: PipelineRun[] }> =>
-    fetch(`${API_BASE}/pipelines${status ? `?status=${status}` : ''}`).then(r => r.json()),
-  getPipeline: (runId: number): Promise<PipelineRun & { task: string; stage_outputs: Record<string, string>; skills: string[]; live_log: string }> =>
-    fetch(`${API_BASE}/pipelines/${runId}`).then(r => r.json()),
-  abortPipeline: (runId: number): Promise<{ success: boolean; message: string; killed_pids: number[] }> =>
-    fetch(`${API_BASE}/pipelines/${runId}/abort`, { method: 'POST' }).then(r => r.json()),
 
   // Voice Mode
   voiceStatus: (): Promise<{ state: string; voice_enabled: boolean; last_transcript: string }> =>

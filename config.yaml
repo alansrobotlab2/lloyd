@@ -128,9 +128,6 @@ display:
 mcp_servers:
   lloyd-mcp:
     disabled_tools:
-    - pipeline_dispatch
-    - pipeline_status
-    - pipeline_abort
     - browser_screenshot
     name: lloyd-mcp
     type: sse

@@ -9,7 +9,6 @@ import SkillsPage from './pages/SkillsPage'
 import ToolsPage from './pages/ToolsPage'
 import ArchitecturePageFull from './pages/ArchitecturePage'
 import AutonomyPage from './pages/AutonomyPage'
-import UsagePage from './pages/UsagePage'
 import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu, X } from 'lucide-react'
@@ -26,13 +25,11 @@ interface Slot {
 let slotCounter = 0
 const nextSlotId = () => `slot_${Date.now()}_${++slotCounter}`
 
-const DashboardPage = UsagePage
 const GraphPage = () => <div className="p-6"><h2 className="text-xl font-bold">Graph</h2><p className="text-slate-400 mt-2">Coming soon...</p></div>
 const SettingsPage = () => <div className="p-6"><h2 className="text-xl font-bold">Settings</h2><p className="text-slate-400 mt-2">Coming soon...</p></div>
 
 const PAGES: Record<string, React.FC> = {
   services: ServicesPage,
-  dashboard: DashboardPage,
   backlog: BacklogPage,
   memory: MemoryPage,
   graph: GraphPage,
