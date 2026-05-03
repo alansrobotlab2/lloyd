@@ -2,6 +2,7 @@
 
 Run: .venvs/lloyd/bin/python -m tests.test_compaction
 """
+import asyncio
 import json
 import sys
 import tempfile
@@ -21,6 +22,12 @@ from app.compaction import (  # noqa: E402
     truncate_conversation,
     truncation_threshold,
 )
+
+
+def _run(coro):
+    """Sync runner for the now-async load_and_compact_session."""
+    return asyncio.get_event_loop().run_until_complete(coro) if False \
+        else asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +120,7 @@ def _write_session(path: Path, messages: list[dict]) -> None:
 
 
 def test_load_and_compact_missing_file():
-    out = load_and_compact_session(Path("/nonexistent/path.json"), model="qwen")
+    out = _run(load_and_compact_session(Path("/nonexistent/path.json"), model="qwen"))
     assert out["history"] == []
     assert out["tokens_before"] == 0
     assert out["truncated"] is False
@@ -126,7 +133,7 @@ def test_load_and_compact_no_truncation_needed():
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hello"},
         ])
-        out = load_and_compact_session(p, model="qwen")
+        out = _run(load_and_compact_session(p, model="qwen"))
         assert len(out["history"]) == 2
         assert out["truncated"] is False
         assert out["tokens_before"] == out["tokens_after"]
@@ -144,7 +151,11 @@ def test_load_and_compact_triggers_truncation():
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "s.json"
         _write_session(p, messages)
-        out = load_and_compact_session(p, model="qwen-unknown")  # unknown → default window
+        # Force truncate mode so the LLM summarization path doesn't fire
+        # in unit tests (it would try to hit a real vLLM endpoint).
+        out = _run(load_and_compact_session(
+            p, model="qwen-unknown", mode_override="truncate",
+        ))
         assert out["truncated"] is True
         assert out["tokens_after"] < out["tokens_before"]
         # Synthetic compaction note should be the first history entry
@@ -162,7 +173,7 @@ def test_load_and_compact_accepts_str_path():
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "s.json"
         _write_session(p, [{"role": "user", "content": "hi"}])
-        out = load_and_compact_session(str(p), model="qwen")
+        out = _run(load_and_compact_session(str(p), model="qwen"))
         assert len(out["history"]) == 1
 
 
@@ -176,11 +187,64 @@ def test_load_and_compact_filters_ui_only_roles():
             {"role": "subliminal", "content": "injected context"},
             {"role": "assistant", "content": "real reply"},
         ])
-        out = load_and_compact_session(p, model="qwen")
+        out = _run(load_and_compact_session(p, model="qwen"))
         roles = [m["role"] for m in out["history"]]
         assert "subliminal" not in roles
         assert "user" in roles
         assert "assistant" in roles
+
+
+# ---------------------------------------------------------------------------
+# Microcompaction pre-pass
+# ---------------------------------------------------------------------------
+
+
+def test_microcompact_clears_old_tool_results_when_over_count():
+    """Build a session with 30 Read tool-call/result pairs; expect the
+    pre-pass to clear the older ones, leaving the most recent 5."""
+    msgs: list[dict] = [{"role": "user", "content": "read these files"}]
+    for i in range(30):
+        cid = f"call_{i:03d}"
+        msgs.append({
+            "role": "assistant",
+            "content": [{"type": "text", "text": ""}],
+            "tool_calls": [{
+                "id": cid,
+                "type": "function",
+                "function": {"name": "Read", "arguments": json.dumps({"file_path": f"/f{i}.py"})},
+            }],
+        })
+        msgs.append({
+            "role": "tool",
+            "tool_call_id": cid,
+            "content": f"contents of file {i}\n" * 50,
+        })
+    msgs.append({"role": "user", "content": "now what?"})
+    msgs.append({"role": "assistant", "content": "..."})
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.json"
+        _write_session(p, msgs)
+        # mode=truncate so the LLM path is skipped; we're testing
+        # microcompact in isolation.
+        out = _run(load_and_compact_session(
+            p, model="qwen", mode_override="truncate",
+        ))
+        # Expect 30 - 5 = 25 cleared.
+        assert out["microcompacted"] == 25, (
+            f"expected 25 cleared, got {out['microcompacted']}"
+        )
+        # Sanity check: the cleared marker text appears in older tool messages.
+        from app.harness.microcompact import CLEARED_MARKER
+        cleared_count = sum(
+            1 for m in out["history"]
+            if m.get("role") == "tool"
+            and CLEARED_MARKER in (
+                m["content"] if isinstance(m.get("content"), str)
+                else (m["content"][0].get("text", "") if m.get("content") else "")
+            )
+        )
+        assert cleared_count == 25, f"expected 25 marker hits, got {cleared_count}"
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +278,7 @@ _TESTS = [
     test_load_and_compact_triggers_truncation,
     test_load_and_compact_accepts_str_path,
     test_load_and_compact_filters_ui_only_roles,
+    test_microcompact_clears_old_tool_results_when_over_count,
     test_truncation_threshold_math,
 ]
 
