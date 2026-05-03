@@ -194,7 +194,6 @@ export default function InnerVoicePage() {
       <div className="flex items-center gap-3 px-6 py-3 border-b border-surface-3/30 flex-shrink-0">
         <Ear className="w-5 h-5 text-brand-400" />
         <h2 className="text-lg font-semibold text-slate-200">Inner Voice</h2>
-        <span className="text-xs text-slate-500 font-mono">stage {obsState.stage}</span>
 
         <SessionPicker
           sessions={sessions}
@@ -227,7 +226,7 @@ export default function InnerVoicePage() {
             title="Create a new Inner Voice chat session (Brain 2 fires on user turns)"
           >
             <Plus className="w-3.5 h-3.5" />
-            {creating ? 'creating…' : 'new IV chat'}
+            {creating ? 'creating…' : 'new chat'}
           </button>
           <button
             onClick={() => setRefreshKey(k => k + 1)}
@@ -259,9 +258,9 @@ export default function InnerVoicePage() {
                 <MessageSquare className="w-12 h-12 text-slate-600 mx-auto mb-3" />
                 <div className="text-sm text-slate-400 mb-2">No Inner Voice session selected</div>
                 <div className="text-xs text-slate-500 mb-4">
-                  Click <span className="font-mono text-brand-400">+ new IV chat</span> above
+                  Click <span className="font-mono text-brand-400">+ new chat</span> above
                   to start a session where Brain 2 fires on every chat turn,
-                  or pick an existing IV session from the dropdown.
+                  or pick an existing session from the dropdown.
                 </div>
               </div>
             </div>
@@ -433,7 +432,7 @@ function ObservationPanel({
         </div>
         {!selectedSession && (
           <div className="text-xs text-slate-500 italic px-2 py-3">
-            No session selected. Pick one above or create a new IV chat.
+            No session selected. Pick one above or create a new chat.
           </div>
         )}
         {selectedSession && critiques.length === 0 && (
