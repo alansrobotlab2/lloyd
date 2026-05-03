@@ -64,7 +64,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
     system_prompt = build_system_prompt()
     cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
 
-    disallowed = list(cfg.get("tools", {}).get("disabled_builtin", []))
+    disallowed: list[str] = []
     for name, sc in cfg.get("mcp_servers", {}).items():
         for tname in sc.get("disabled_tools", []):
             disallowed.append(f"mcp__{name}__{tname}")

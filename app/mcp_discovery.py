@@ -1,9 +1,16 @@
 """MCP server configuration + tool discovery.
 
-`_get_mcp_servers()` builds the live server-config dict for the SDK from
-`CONFIG`. We deliberately do not cache this at module scope — callers
-invoke the function each request so config edits via `/api/tool-toggle`
-take effect immediately without requiring any module-level rebinding.
+`_get_mcp_servers()` builds the live server-config dict for the harness
+from `CONFIG`. We deliberately do not cache this at module scope —
+callers invoke the function each request so config edits via
+`/api/tool-toggle` take effect immediately without requiring any
+module-level rebinding.
+
+Built-in tools (Bash, Read, Write, Edit, Grep, Glob, Task) live inside
+the lloyd-mcp aggregator (agent_mcp/builtin_*.py). To disable any of
+them, add the bare name to `mcp_servers.lloyd-mcp.disabled_tools` —
+the harness's bare-name aliasing in `tool_schema.py` blocks both the
+bare and namespaced forms at advertise + dispatch time.
 """
 
 import asyncio
@@ -11,22 +18,11 @@ import json
 
 from app.config import CONFIG
 
-_BUILTIN_TOOLS = [
-    {"name": "Bash",         "description": "Execute bash commands"},
-    {"name": "Read",         "description": "Read file contents"},
-    {"name": "Write",        "description": "Write files"},
-    {"name": "Edit",         "description": "Precise string replacement in files"},
-    {"name": "Glob",         "description": "Find files by glob pattern"},
-    {"name": "Grep",         "description": "Search file content with regex"},
-    {"name": "WebFetch",     "description": "Fetch web page content"},
-    {"name": "WebSearch",    "description": "Search the web"},
-    {"name": "TodoWrite",    "description": "Manage task list"},
-    {"name": "NotebookEdit", "description": "Edit Jupyter notebooks"},
-    {"name": "Agent",        "description": "Spawn sub-agents for complex tasks"},
-]
-
 _MCP_SERVER_META: dict[str, dict] = {
-    "": {"label": "Tools", "description": "Autonomy, backlog, browser, memory, mission control, subliminal, HTTP tools, Thunderbird, pipeline"},
+    "lloyd-mcp": {
+        "label": "Lloyd MCP",
+        "description": "Unified aggregator: built-in tools (Bash/Read/Write/Edit/Grep/Glob/Task) + domain modules (autonomy, backlog, browser, facts, vault, mission control, subliminal, HTTP, Thunderbird, pipeline, ambient, autoresearch, skills, session)",
+    },
 }
 
 _tools_cache: dict[str, dict] = {}  # {server_name: {tools, error, ts}}
@@ -51,8 +47,8 @@ def _get_mcp_servers() -> dict[str, dict]:
 
 
 def _get_disallowed_tools() -> list[str]:
-    """Build disallowed_tools list from config for SDK options."""
-    disallowed: list[str] = list(CONFIG.get("tools", {}).get("disabled_builtin", []))
+    """Build disallowed_tools list from config for harness RunOptions."""
+    disallowed: list[str] = []
     for server_name, cfg in CONFIG.get("mcp_servers", {}).items():
         if not cfg.get("enabled", True):
             continue

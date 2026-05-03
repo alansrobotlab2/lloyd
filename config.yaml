@@ -2,54 +2,39 @@ agent:
   max_turns: 60
   permission_mode: bypassPermissions
 inner_voice:
-  # Inner Voice (#345) — parallel cognitive process. Stage 0 ships
-  # event-log infrastructure only; Brain 2 ensembles + heuristics land in
-  # Stages 1–5. The `enabled` flag gates Brain 2 — never on for Chat tab,
-  # only on for Inner Voice tab sessions (also flagged via session JSON
-  # `inner_voice: true`).
   enabled: false
-  model: primary  # Brain 2 model alias; same endpoint as Brain 1 in v1.
-
-  # Stage 1 (no Brain 2). Wired in heuristics.py.
-  # Deny rules: regex-matched against the tool's input. Tool name must
-  # match exactly. Pattern is case-insensitive multi-line. Reason surfaces
-  # in the SDK's deny error to the model.
-  #
-  # The third rule's regex was rewritten from the spec — the original
-  # `> /dev/null \d?>?&?\d? <FILE>.md` shape didn't actually match any
-  # truncate-redirect against sentinel files. Current pattern matches any
-  # `>` redirect into a path ending in CONFIG.md / MEMORY.md / USER.md /
-  # SOUL.md, e.g. `> MEMORY.md`, `> ~/obsidian/lloyd/MEMORY.md`,
-  # `: > MEMORY.md`. See app/inner_voice/heuristics.py docstring.
+  model: primary
   pretooluse_deny:
-    - tool: Bash
-      pattern: 'rm\s+-rf\s+.*(?:obsidian|\.openclaw|agent-services|\.venvs|lloyd)'
-      reason: "destructive deletion against guarded path"
-    - tool: Bash
-      pattern: 'git\s+push\s+.*--force.*(?:main|master)'
-      reason: "force push to default branch"
-    - tool: Bash
-      pattern: '>\s*\S*(?:CONFIG|MEMORY|USER|SOUL)\.md\b'
-      reason: "redirect-truncate of sentinel file"
+  - tool: Bash
+    pattern: rm\s+-rf\s+.*(?:obsidian|\.openclaw|agent-services|\.venvs|lloyd)
+    reason: destructive deletion against guarded path
+  - tool: Bash
+    pattern: git\s+push\s+.*--force.*(?:main|master)
+    reason: force push to default branch
+  - tool: Bash
+    pattern: '>\s*\S*(?:CONFIG|MEMORY|USER|SOUL)\.md\b'
+    reason: redirect-truncate of sentinel file
   ambient_completion_check: true
-
-  # Stage 2+ (Brain 2 ensembles).
   ensemble:
     default: autonomy_default
     sets:
-      # Stage 5: skill_recall_checker added to autonomy_default and
-      # research_writing. Pre-computed `<matched_skills>` block in the
-      # user prompt; persona returns disagrees=false cheaply when no
-      # skill matches (per its decision rule #1) so the persona is
-      # always-on with negligible noise on non-skill turns.
-      autonomy_default: [completion_checker, drift_detector, continuation_drive, skill_recall_checker]
-      safety_critical:  [adversarial_red_team, completion_checker, hallucination_flag]
-      code_writing:     [drift_detector, completion_checker]
-      research_writing: [hallucination_flag, completion_checker, drift_detector, skill_recall_checker]
-
-  # Per-Brain-2-call inference parameters. Reasoning-token consumption is
-  # the dominant failure mode on local; prefill + max_tokens cap + closed
-  # thinking forces JSON commitment. See knowledge/local-llm-gotchas.
+      autonomy_default:
+      - completion_checker
+      - drift_detector
+      - continuation_drive
+      - skill_recall_checker
+      safety_critical:
+      - adversarial_red_team
+      - completion_checker
+      - hallucination_flag
+      code_writing:
+      - drift_detector
+      - completion_checker
+      research_writing:
+      - hallucination_flag
+      - completion_checker
+      - drift_detector
+      - skill_recall_checker
   critic:
     max_tokens: 2500
     thinking_forced_open: false
@@ -57,65 +42,28 @@ inner_voice:
     timeout_seconds: 5
     json_retry_on_parse_failure: 1
     transcript_window_turns: 5
-    include_brain1_thinking: false   # do NOT anchor Brain 2 on Brain 1's reasoning
-
+    include_brain1_thinking: false
   disagreement:
-    severity_threshold: 0.6        # min severity for steer
-    count_threshold: 2             # alt: N personas of M flag
-    veto_severity_threshold: 0.85  # required for interrupt or termination veto
-
-  # Stage 3 — mid-turn drift detection. Subscribes to the SDK's text_delta
-  # stream and fires `drift_detector` against the partial response every
-  # `check_every_chars`. On a `disagrees=True` verdict at severity ≥
-  # `disagreement.veto_severity_threshold`, the spawned task sets
-  # `cancel_event` (interrupting the SDK message loop) AND enqueues an
-  # ambient nudge so the next turn sees the drift verdict.
+    severity_threshold: 0.6
+    count_threshold: 2
+    veto_severity_threshold: 0.85
   mid_turn_drift:
     enabled: true
-    min_chars_before_first_check: 250  # don't critique a 2-word warmup
-    check_every_chars: 500             # cadence after the first check
-    max_checks_per_turn: 4             # ceiling on Brain 2 calls per turn
-
+    min_chars_before_first_check: 250
+    check_every_chars: 500
+    max_checks_per_turn: 4
   consensus_termination:
     enabled: true
     brain2_timeout_default_to_brain1: true
     three_strike_accept: true
     hard_max_turns: 60
-
-  # Stage 6 — auto-fire a steer ambient retry when the post-loop ensemble
-  # lands on `nudge_proposed` (severity in [severity_threshold,
-  # veto_severity_threshold)). Without this, every nudge-band critique is
-  # log-only — Brain 2 has feedback that Brain 1 never sees.
-  #
-  # Shares the `max_nudges_per_session` budget with consensus_termination
-  # so the two paths can't both burn the cap on one session.
   self_correct_on_nudge: true
-
-  # Stage 7 — intra-turn progress monitoring. Two new personas fire from
-  # SDK tool-boundary hooks (`PostToolUse` / `PostToolUseFailure`) and
-  # from a periodic timer pulse:
-  #
-  #   * `tool_result_grader` — fires after every tool result. Catches
-  #     validation loops (Read with missing file_path repeated 3+ times),
-  #     hallucination-imminent patterns (file-not-found about to be
-  #     fabricated), wrong-tool choices, and tool thrash. Capped at
-  #     `post_tool_use.max_calls_per_turn` per turn.
-  #
-  #   * `progress_monitor` — fires every K tool calls or every M seconds
-  #     (whichever first) and synthesizes "are we making progress vs the
-  #     original task?" Catches scope_drift, stalled, search_thrash,
-  #     thinking_loop. Capped at `progress_monitor.max_calls_per_turn`.
-  #
-  # Both share the Stage 6 steer dispatch infrastructure (same nudge
-  # budget, same intervention table). Disagreed verdicts at severity ≥
-  # the floor enqueue an ambient retry that Brain 1 picks up after the
-  # current turn finishes.
   intra_turn:
     enabled: true
     post_tool_use:
       enabled: true
       severity_floor_for_steer: 0.7
-      severity_floor_for_cancel: 0.95   # reserved; not used in v1 (no mid-turn cancel from grader)
+      severity_floor_for_cancel: 0.95
       max_calls_per_turn: 5
     progress_monitor:
       enabled: true
@@ -123,36 +71,22 @@ inner_voice:
       every_n_seconds: 60
       severity_floor_for_steer: 0.6
       max_calls_per_turn: 4
-
-  # Stage 5 — intervention grading pass. After every ambient turn, look up
-  # ungraded interventions for the session and grade each against the just-
-  # finished outcome turn. One Brain 2 call per ungraded intervention.
-  # `max_per_session_per_run` caps the work per turn so a session that
-  # accumulated many interventions doesn't blow the throughput budget on a
-  # single grading sweep.
   grading:
     enabled: true
     persona: grader
     max_per_session_per_run: 3
-    only_grade_within_turns: 5      # skip if more than N turns elapsed since intervention
-
+    only_grade_within_turns: 5
   throughput:
     max_concurrent_personas: 5
     max_critiques_per_session: 50
     max_nudges_per_session: 2
     cool_down_after_escalation_seconds: 60
-
   brain2_kv_cache_dtype: q4_0
-
-  # Event log — STAGE 0 OPERATIONAL. Captures `brain1.*` events on every
-  # session (Chat + Inner Voice tabs). Disk-cheap, never overwritten,
-  # exempt from session cleanup. Read with scripts/meta_review/replay.py
-  # or GET /api/inner_voice/event_log.
   event_log:
     enabled: true
-    stream_sample_tokens: 50      # currently sampled per-delta in messages.py
-    blob_threshold_bytes: 4096    # large fields → content-addressed store
-    rotation_days: 30             # gzip rotation TBD; manual prune for now
+    stream_sample_tokens: 50
+    blob_threshold_bytes: 4096
+    rotation_days: 30
 autonomy:
   enabled: true
   task_dir: ~/obsidian/autonomy
@@ -165,13 +99,6 @@ autoresearch:
   ledger_path: ~/lloyd/_pipeline/research/ledger.jsonl
   max_variants_per_round: 7
   promotion:
-    # Lowered from 0.6 to 0.5 on 2026-05-01 per #344 investigation —
-    # bench composition makes 0.6 unreachable (avg variant win rate ~30%
-    # across 1,557 variants). 89 of 208 variants in last 30 rounds beat
-    # baseline mean composite but were rejected; 46 of those held purely
-    # on win-fraction. See knowledge/lloyd/autoresearch-promotion-floor.md
-    # for full analysis. Watch promotion rate + false-positive rate over
-    # next 30 rounds; raise to 0.55 if false-positive rate > 30%.
     min_bench_win_fraction: 0.5
     min_composite_delta: 0.05
     require_safety_pass: true
@@ -201,35 +128,35 @@ display:
 mcp_servers:
   lloyd-mcp:
     disabled_tools:
-    - browser_screenshot
     - pipeline_dispatch
     - pipeline_status
     - pipeline_abort
+    - browser_screenshot
     name: lloyd-mcp
     type: sse
     url: http://127.0.0.1:8500/sse
 model:
   default: primary
 harness:
-  # Timeout for a single SSE chunk from vLLM before the stream is considered stalled.
   stream_chunk_timeout_seconds: 60
-  # Hard cap on tool calls advertised per request (safety valve for tool-list growth).
   max_tools_per_request: 128
-
 subagents:
   general-purpose:
-    system_prompt: ""
+    system_prompt: ''
     max_turns: 20
     disallowed_tools: []
     model: primary
-    base_url: ""
+    base_url: ''
   read-only:
-    system_prompt: "You are a read-only research assistant. You may use Read, Grep, Glob, and Bash (read-only commands only). Do not write, edit, or delete files."
+    system_prompt: You are a read-only research assistant. You may use Read, Grep,
+      Glob, and Bash (read-only commands only). Do not write, edit, or delete files.
     max_turns: 15
-    disallowed_tools: [Write, Edit, Bash]
+    disallowed_tools:
+    - Write
+    - Edit
+    - Bash
     model: primary
-    base_url: ""
-
+    base_url: ''
 models:
   primary:
     alias: primary
@@ -258,10 +185,6 @@ skills:
   directories:
   - ~/obsidian/skills
   - ~/lloyd/skills
-tools:
-  disabled_builtin:
-  - WebSearch
-  - WebFetch
 workers:
   db_path: ~/lloyd/workers.db
   enabled: true

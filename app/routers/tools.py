@@ -1,4 +1,11 @@
-"""Tools tab endpoints — MCP server inspection and tool enable/disable."""
+"""Tools tab endpoints — MCP server inspection and tool enable/disable.
+
+Built-in tools (Bash/Read/Write/Edit/Grep/Glob/Task) live inside the
+lloyd-mcp aggregator now, so this router has only two real concepts:
+servers and the tools each server exposes. Disabling a built-in is the
+same operation as disabling any other tool: write its bare name into
+the parent server's `disabled_tools` list.
+"""
 
 import time
 
@@ -9,7 +16,6 @@ from fastapi.responses import JSONResponse
 from app.config import CONFIG
 from app.paths import LLOYD_HOME
 from app.mcp_discovery import (
-    _BUILTIN_TOOLS,
     _MCP_SERVER_META,
     _tools_cache,
     _TOOLS_CACHE_TTL,
@@ -22,18 +28,7 @@ router = APIRouter()
 
 @router.get("/api/tools")
 async def get_tools():
-    """List all available tools: builtin Claude tools + each MCP server with its tools."""
-    disabled_builtin = set(CONFIG.get("tools", {}).get("disabled_builtin", []))
-    builtin = [
-        {
-            "name": t["name"],
-            "label": t["name"],
-            "description": t["description"],
-            "enabled": t["name"] not in disabled_builtin,
-        }
-        for t in _BUILTIN_TOOLS
-    ]
-
+    """List every MCP server with its discovered tools."""
     now = time.time()
     servers = []
     for server_name, cfg in CONFIG.get("mcp_servers", {}).items():
@@ -68,14 +63,14 @@ async def get_tools():
             "error": error,
         })
 
-    return JSONResponse({"builtin": builtin, "servers": servers})
+    return JSONResponse({"servers": servers})
 
 
 @router.post("/api/tool-toggle")
 async def toggle_tool(request: Request):
     """Toggle a server or individual tool, persisting changes to config.yaml."""
     data = await request.json()
-    toggle_type = data.get("type")  # "server" | "tool" | "builtin"
+    toggle_type = data.get("type")  # "server" | "tool"
     enabled = bool(data.get("enabled", True))
     config_path = LLOYD_HOME / "config.yaml"
 
@@ -99,16 +94,6 @@ async def toggle_tool(request: Request):
             disabled.remove(tool_name)
         cfg["disabled_tools"] = disabled
 
-    elif toggle_type == "builtin":
-        tool_name = data.get("tool", "")
-        tools_cfg = CONFIG.setdefault("tools", {})
-        disabled = tools_cfg.get("disabled_builtin", [])
-        if not enabled and tool_name not in disabled:
-            disabled.append(tool_name)
-        elif enabled and tool_name in disabled:
-            disabled.remove(tool_name)
-        tools_cfg["disabled_builtin"] = disabled
-
     else:
         raise HTTPException(status_code=400, detail=f"Unknown type: {toggle_type}")
 
@@ -117,4 +102,4 @@ async def toggle_tool(request: Request):
 
     _tools_cache.clear()
 
-    return JSONResponse({"success": True})
+    return JSONResponse({"servers_updated": True})

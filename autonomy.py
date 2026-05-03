@@ -389,7 +389,7 @@ async def run_task(task_id) -> dict:
         system_prompt = build_system_prompt()
 
         config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
-        disallowed_tools = list(config.get("tools", {}).get("disabled_builtin", []))
+        disallowed_tools: list[str] = []
         for name, cfg in config.get("mcp_servers", {}).items():
             for tool_name in cfg.get("disabled_tools", []):
                 disallowed_tools.append(f"mcp__{name}__{tool_name}")
