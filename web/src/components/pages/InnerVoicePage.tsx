@@ -32,6 +32,7 @@ import {
   RefreshCw,
   Plus,
   MessageSquare,
+  Bot,
 } from 'lucide-react'
 import {
   api,
@@ -87,6 +88,7 @@ export default function InnerVoicePage() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  const [showAgentDetails, setShowAgentDetails] = useState(false)
 
   // ── Sessions list ──
   const loadSessions = useCallback(async () => {
@@ -207,9 +209,21 @@ export default function InnerVoicePage() {
             </span>
           )}
           <button
+            onClick={() => setShowAgentDetails((v) => !v)}
+            title={showAgentDetails ? 'Hide agent details' : 'Show agent details'}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              showAgentDetails
+                ? 'text-brand-400 bg-brand-500/15'
+                : 'text-slate-400 hover:text-brand-400 hover:bg-brand-500/10'
+            }`}
+          >
+            <Bot className="w-3.5 h-3.5" />
+            Agent Details
+          </button>
+          <button
             onClick={handleCreateSession}
             disabled={creating}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-brand-600/20 border border-brand-500/30 text-brand-300 text-xs font-medium hover:bg-brand-600/30 transition disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-brand-600 border border-brand-500 text-white text-xs font-medium hover:bg-brand-500 transition disabled:opacity-50"
             title="Create a new Inner Voice chat session (Brain 2 fires on user turns)"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -235,6 +249,7 @@ export default function InnerVoicePage() {
               requestedSessionKey={selectedSession}
               currentSessionKey={selectedSession}
               visible={true}
+              showAgentDetails={showAgentDetails}
               onSessionLoaded={() => {}}
               onActiveSessionChange={() => {}}
             />
