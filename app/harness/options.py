@@ -63,3 +63,12 @@ class RunOptions:
     # extra_body if ever needed.
     effort: str | None = None
     thinking: dict | None = None
+
+    # Tool search / progressive disclosure. When activated, the harness
+    # advertises a small baseline + ToolSearch instead of the full catalog,
+    # and the model loads tool schemas on demand. See app/harness/tool_search.py.
+    tool_search_enabled: bool = True
+    tool_search_threshold_tools: int = 30
+    tool_search_baseline: list[str] = field(default_factory=list)
+    tool_search_max_results_default: int = 5
+    tool_search_max_results_cap: int = 20

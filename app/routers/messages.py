@@ -48,7 +48,7 @@ from app.sessions_io import (
     enqueue_ambient_prefetch,
     AmbientPrefetchEntry,
 )
-from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools
+from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_tool_search_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
 from app.routers.voice import (
     extract_first_two_sentences,
@@ -1050,6 +1050,7 @@ async def post_message_stream(request: Request):
         env=model_env,
         hooks=iv_hooks,
         # cancel_event and session_id wired in _run_turn at run time
+        **_get_tool_search_kwargs(),
     )
 
     await _save_session_meta(session_id, model, preview=text)
@@ -1136,6 +1137,8 @@ async def build_ambient_turn(
         disallowed_tools=_get_disallowed_tools(),
         env=model_env,
         hooks=iv_hooks,
+        session_id=session_id,
+        **_get_tool_search_kwargs(),
     )
 
     # Envelope the raw producer text so the agent sees framing + knows it
@@ -1244,6 +1247,7 @@ async def post_message(request: Request):
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
+        **_get_tool_search_kwargs(),
     )
 
     comp = await load_and_compact_session(meta_path, model=model)

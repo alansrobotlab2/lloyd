@@ -32,7 +32,7 @@ from app.sessions_io import (
     enqueue_turn,
     set_last_user_session,
 )
-from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools
+from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_tool_search_kwargs
 from prompt_builder import build_system_prompt
 from prefetch import prefetch_context
 
@@ -303,6 +303,8 @@ async def voice_inject(request: Request):
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools(),
         env=model_env,
+        session_id=session_id,
+        **_get_tool_search_kwargs(),
     )
 
     await _save_session_meta(session_id, model, preview=prompt_text)

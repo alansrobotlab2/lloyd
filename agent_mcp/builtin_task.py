@@ -19,6 +19,7 @@ import contextvars
 import json
 import logging
 import os
+import uuid
 from typing import Any
 
 import yaml
@@ -90,7 +91,10 @@ async def _task(args: dict[str, Any]) -> str:
         max_turns=profile["max_turns"],
         disallowed_tools=disallowed,
         mcp_servers={"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}},
-        session_id=f"task:{subagent_type}",
+        # Per-invocation session id so each subagent run gets its own
+        # tool_search LoadedToolSet — different disallowed_tools profiles
+        # would otherwise share one cache entry.
+        session_id=f"task:{subagent_type}:{uuid.uuid4().hex[:8]}",
     )
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
