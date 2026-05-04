@@ -54,6 +54,15 @@ class MCPPool:
         self._discovered: list[tuple[str, list[dict[str, Any]]]] = []
         self._opened = False
         self._open_lock = asyncio.Lock()
+        # Set when call_tool hits a transport-shaped failure. The cache
+        # layer evicts poisoned pools so the next caller opens fresh.
+        # We don't aclose() the dead pool because its AsyncExitStack is
+        # bound to whatever asyncio task originally opened it; closing
+        # from a different task raises "Attempted to exit cancel scope
+        # in a different task than it was entered in." Letting the pool
+        # be GC'd is imperfect (streams leak until process exit) but is
+        # the only safe option without restructuring lifetime ownership.
+        self._poisoned = False
 
     async def open(self) -> None:
         """Open sessions to every configured server and discover tools.
@@ -146,6 +155,17 @@ class MCPPool:
         try:
             result = await session.call_tool(bare, coerced)
         except Exception as exc:
+            # Mark this pool poisoned and evict it from the process-wide
+            # cache so the next caller opens a fresh pool. The current
+            # turn still fails — we can't safely reconnect in-place
+            # because the AsyncExitStack is bound to the task that opened
+            # it. See `_poisoned` doc on __init__ for the full reasoning.
+            self._poisoned = True
+            _evict_pool(self)
+            logger.warning(
+                "mcp_pool: %s on %s failed (%s); pool evicted from cache",
+                bare, server_name, exc,
+            )
             raise ToolDispatchError(name, f"transport error: {exc}") from exc
 
         # MCP CallToolResult.content is a list of TextContent /
@@ -296,16 +316,40 @@ async def get_or_open_pool(server_configs: dict[str, dict[str, Any]]) -> MCPPool
     Concurrent callers serialize on a lock so the SSE handshake +
     `tools/list` only runs once per unique config. Subsequent turns reuse
     the open sessions.
+
+    Pools that hit transport failures are marked `_poisoned` and evicted
+    via `_evict_pool` from `call_tool`. If a poisoned pool is somehow
+    still in the cache when a new caller arrives (race: evicted but the
+    same instance got re-cached), we treat it as missing and rebuild.
     """
     key = _config_key(server_configs)
     async with _POOL_CACHE_LOCK:
         pool = _POOL_CACHE.get(key)
-        if pool is not None:
+        if pool is not None and not pool._poisoned:
             return pool
         pool = MCPPool(server_configs)
         await pool.open()
         _POOL_CACHE[key] = pool
         return pool
+
+
+def _evict_pool(pool: MCPPool) -> None:
+    """Drop a poisoned pool from the cache.
+
+    Called from `MCPPool.call_tool` when the underlying SSE session has
+    failed in a way we can't recover from in-place. We don't aclose()
+    the pool here — its AsyncExitStack is bound to the task that opened
+    it, and closing from a different task raises. The streams leak until
+    process exit; in practice that's a few file descriptors per restart,
+    not a meaningful resource leak.
+
+    Synchronous and best-effort: we accept a small race where two threads
+    evict simultaneously. Python dict ops are atomic under the GIL.
+    """
+    for k, p in list(_POOL_CACHE.items()):
+        if p is pool:
+            _POOL_CACHE.pop(k, None)
+            return
 
 
 async def close_all_pools() -> None:

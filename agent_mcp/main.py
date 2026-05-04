@@ -18,6 +18,7 @@ from starlette.responses import Response
 from starlette.routing import Mount, Route
 
 from agent_mcp import (
+    _task_registry,
     ambient,
     autonomy,
     autoresearch,
@@ -88,9 +89,21 @@ async def call_tool(name: str, arguments: dict):
     if not _dispatch:
         await list_tools()
     mod = _dispatch.get(name)
-    if mod:
+    if not mod:
+        return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+    # Harness-injected session correlation. Strip it from args before
+    # the per-tool handler validates so module schemas don't have to
+    # advertise an internal field, and stash it in a contextvar for
+    # tools that want to record it (e.g. background bash tasks tagged
+    # with the originating session for between-turn drain).
+    sid = ""
+    if isinstance(arguments, dict):
+        sid = arguments.pop("_session_id", "") or ""
+    token = _task_registry.current_session_id.set(sid)
+    try:
         return await mod.call_tool(name, arguments)
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+    finally:
+        _task_registry.current_session_id.reset(token)
 
 
 transport = SseServerTransport("/messages/")
@@ -105,8 +118,13 @@ async def handle_sse(request):
 @asynccontextmanager
 async def lifespan(app):
     await discord_bot.start_bot_task()
-    yield
-    await discord_bot.stop_bot()
+    try:
+        yield
+    finally:
+        try:
+            await discord_bot.stop_bot()
+        finally:
+            await _task_registry.terminate_all()
 
 
 starlette_app = Starlette(

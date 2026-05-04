@@ -14,10 +14,12 @@ directly via mcp-cli — denial does not apply. That's by design: the
 deny ruleset is bound to a Lloyd session_id and lives at the agent
 layer, not the tool layer.
 
-Backgrounded shells (`run_in_background=true`) are not yet supported —
-return an error so the model knows to retry without that flag. The
-SDK's BashOutput / KillShell pair would be added alongside if a real
-workflow needs them.
+Background mode (``run_in_background=true``) spawns the command with
+stdout/stderr redirected to a file under ``~/lloyd/_pipeline/tasks/``,
+returns the task id and output path immediately, and lets the harness
+loop drain a completion notification on a later turn. See
+``agent_mcp/_task_registry.py`` for the registry and the harness drain
+hook in ``app/harness/loop.py``.
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ from typing import Any
 
 from mcp.server import Server
 from mcp.types import TextContent, Tool
+
+from agent_mcp import _task_registry
 
 logger = logging.getLogger("lloyd-builtin-bash")
 
@@ -52,10 +56,7 @@ async def _bash(args: dict[str, Any]) -> str:
     timeout_s = timeout_ms / 1000.0
 
     if args.get("run_in_background"):
-        return json.dumps({
-            "error": "run_in_background is not supported by this Bash server. "
-                     "Re-issue without that flag, or wrap your command in nohup/disown."
-        })
+        return await _spawn_background(command, args.get("description", ""))
 
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -105,6 +106,74 @@ async def _bash(args: dict[str, Any]) -> str:
     return output if output else "(no output)"
 
 
+async def _spawn_background(command: str, description: str) -> str:
+    """Spawn the command detached, log to disk, return task descriptor.
+
+    The subprocess inherits its own stdout/stderr (the open file fd we
+    pass via ``create_subprocess_exec``), so output flushes to disk in
+    real time without the harness in the loop. A waiter task watches
+    `proc.wait()` and pushes a completion record onto the registry; the
+    harness drains it on the next turn boundary.
+    """
+    session_id = _task_registry.current_session_id.get()
+    record, log_fd = await _task_registry.register(
+        session_id=session_id, command=command, description=description,
+    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c", command,
+            stdout=log_fd,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=os.getcwd(),
+            close_fds=True,
+        )
+    except Exception as exc:
+        try:
+            os.close(log_fd)
+        except OSError:
+            pass
+        return json.dumps({"error": f"failed to spawn shell: {exc}"})
+
+    _task_registry.attach_process(record, proc)
+    _task_registry.start_waiter(record)
+
+    return json.dumps({
+        "task_id": record.task_id,
+        "output_file": str(record.output_path),
+        "started_at": record.started_at,
+        "session_id": session_id,
+        "note": (
+            f"Command running in background. Read {record.output_path} "
+            "to inspect progress. A <task_notification> will appear on a "
+            "later turn when it completes."
+        ),
+    })
+
+
+async def _bg_task_drain(args: dict[str, Any]) -> str:
+    """Internal harness helper: pop pending background-task completions
+    for the calling session and return them as JSON.
+
+    Hidden from the LLM (filtered by the leading-underscore rule in
+    ``app.harness.tool_schema.build_tool_list``); only the harness's
+    between-turn drain hook calls this.
+    """
+    session_id = _task_registry.current_session_id.get()
+    records = await _task_registry.drain_completed_for_session(session_id)
+    return json.dumps({
+        "notifications": [
+            {
+                "task_id": r.task_id,
+                "status": r.status,
+                "exit_code": r.exit_code,
+                "output_file": str(r.output_path),
+                "xml": _task_registry.format_notification(r),
+            }
+            for r in records
+        ]
+    })
+
+
 @app.list_tools()
 async def list_tools():
     return [
@@ -129,11 +198,26 @@ async def list_tools():
                     },
                     "run_in_background": {
                         "type": "boolean",
-                        "description": "Not supported — must be false or omitted",
+                        "description": (
+                            "If true, spawn the command detached and return "
+                            "immediately with a task_id and output_file path. "
+                            "Read the output_file to inspect progress; a "
+                            "<task_notification> message will appear on a later "
+                            "turn when the command exits."
+                        ),
                     },
                 },
                 "required": ["command"],
             },
+        ),
+        Tool(
+            name="_BackgroundTaskDrain",
+            description=(
+                "Internal: pop pending background-task completion records "
+                "for the current session. Hidden from the model; called by "
+                "the harness drain hook between turns."
+            ),
+            inputSchema={"type": "object", "properties": {}},
         ),
     ]
 
@@ -142,6 +226,8 @@ async def list_tools():
 async def call_tool(name: str, arguments: dict):
     if name == "Bash":
         text = await _bash(arguments)
+    elif name == "_BackgroundTaskDrain":
+        text = await _bg_task_drain(arguments)
     else:
         text = json.dumps({"error": f"Unknown tool: {name}"})
     return [TextContent(type="text", text=text)]

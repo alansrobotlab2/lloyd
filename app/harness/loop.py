@@ -117,6 +117,23 @@ async def run_query(
                 stop_reason = "cancelled"
                 break
 
+            # Background-task completion drain. Splices any pending
+            # <task_notification> messages into chat_messages so the
+            # model sees them on this iteration. The callback also
+            # persists them into the session JSON so reconstruction on
+            # subsequent turns stays consistent.
+            if options.notification_drain is not None:
+                try:
+                    drained = await options.notification_drain()
+                except Exception as exc:
+                    logger.warning("loop: notification_drain raised: %s", exc)
+                    drained = []
+                if drained:
+                    chat_messages.extend(drained)
+                    logger.info(
+                        "loop: drained %d background-task notification(s)", len(drained),
+                    )
+
             iteration_started_at = time.perf_counter()
             iteration_usage: dict[str, int] = {}
             assistant_text = ""
@@ -618,9 +635,15 @@ async def _dispatch_one_tool_call(
                 content=f"Tool call denied: {reason}", is_error=True,
             )
 
-    # Dispatch.
+    # Dispatch. Inject session correlation as `_session_id` on a copy of
+    # the args — the per-tool handler in agent_mcp/main.py pops it before
+    # schema validation. Don't mutate args_dict itself: it's also the
+    # source for the persisted tool_call event and any next-turn replay.
+    dispatch_args = dict(args_dict)
+    if session_id:
+        dispatch_args["_session_id"] = session_id
     try:
-        result = await pool.call_tool(name, args_dict)
+        result = await pool.call_tool(name, dispatch_args)
     except ToolDispatchError as exc:
         if options.hooks is not None:
             await options.hooks.fire_post_tool_use_failure(

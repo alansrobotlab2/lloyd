@@ -117,6 +117,13 @@ def _recent_exchanges_for_goal_extraction(
         role = m.get("role")
         if role not in ("user", "assistant"):
             continue
+        # Skip the observer's own breadcrumbs (inner_voice_inject,
+        # inner_voice_cancel, ...). They wear role=user/assistant but are
+        # IV-generated; feeding them back makes the next turn's goal card
+        # anchor on IV's own hallucinated demands.
+        src = m.get("source") or ""
+        if isinstance(src, str) and src.startswith("inner_voice_"):
+            continue
         text = ""
         for chunk in m.get("content") or []:
             if isinstance(chunk, dict) and chunk.get("type") == "text":

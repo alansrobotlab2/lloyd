@@ -83,6 +83,11 @@ def build_tool_list(
     for server_name, mcp_tools in discovered:
         for mcp_tool in mcp_tools:
             bare = mcp_tool["name"]
+            # Internal-only tools — harness can dispatch them via direct
+            # pool.call_tool, but we never advertise them to the model.
+            # Background-task drain is the first user (#async-bash).
+            if bare.startswith("_"):
+                continue
             if bare in disallowed:
                 continue
             if f"mcp__{server_name}__{bare}" in disallowed:

@@ -97,6 +97,76 @@ from app.routers._messages_inner_voice import (
 
 
 
+def _build_notification_drain(session_id: str, turn_id: str):
+    """Build the closure handed to ``RunOptions.notification_drain``.
+
+    Called by the harness at the top of each agent-loop iteration. Pops
+    pending background-task completion records from the MCP-side
+    registry via the internal ``_BackgroundTaskDrain`` tool, formats
+    each as a user-role harness message wrapping a ``<task_notification>``
+    XML body, persists a parallel session-shape message under
+    ``source: "bg_task_notification"``, and returns the harness shapes
+    for the loop to splice into ``chat_messages``.
+    """
+    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, get_or_open_pool
+
+    async def drain() -> list[dict[str, Any]]:
+        try:
+            pool = await get_or_open_pool(
+                {"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}}
+            )
+            result = await pool.call_tool(
+                "_BackgroundTaskDrain", {"_session_id": session_id}
+            )
+        except Exception as exc:
+            logger.warning(f"bg-task drain: dispatch failed: {exc}")
+            return []
+        if result.get("is_error"):
+            return []
+        try:
+            payload = json.loads(result["content"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return []
+        notifications = payload.get("notifications") or []
+        if not notifications:
+            return []
+        harness_msgs: list[dict[str, Any]] = []
+        persist_msgs: list[dict[str, Any]] = []
+        now_iso = datetime.now().isoformat()
+        for n in notifications:
+            xml = n.get("xml") or ""
+            if not xml:
+                continue
+            harness_msgs.append({"role": "user", "content": xml})
+            persist_msgs.append({
+                "id": uuid.uuid4().hex[:8],
+                "role": "user",
+                "content": [{"type": "text", "text": xml}],
+                "timestamp": now_iso,
+                "source": "bg_task_notification",
+                "task_id": n.get("task_id", ""),
+            })
+            _event_log.log_event(
+                session_id,
+                "brain1.bg_task_completed",
+                {
+                    "task_id": n.get("task_id"),
+                    "status": n.get("status"),
+                    "exit_code": n.get("exit_code"),
+                    "output_file": n.get("output_file"),
+                },
+                turn_id=turn_id,
+            )
+        if persist_msgs:
+            try:
+                await _append_messages(session_id, persist_msgs)
+            except Exception as exc:
+                logger.warning(f"bg-task drain: persistence failed: {exc}")
+        return harness_msgs
+
+    return drain
+
+
 async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None:
     """Run a single turn through the harness, persisting as we go.
 
@@ -312,6 +382,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         persist_intervention_callback=_iv_persist_intervention_cb,
         subliminal_context=subl_prefix or "",
     )
+
+    # Background-task completion drain. Calls the internal MCP tool
+    # `_BackgroundTaskDrain` (hidden from the model — see
+    # app/harness/tool_schema.py) to pop any task notifications that
+    # finished while the harness wasn't looking, then persists each as
+    # a user-role message tagged ``source: "bg_task_notification"`` so
+    # the UI can style them and so session reconstruction includes
+    # them on later turns.
+    options.notification_drain = _build_notification_drain(session_id, turn.turn_id)
 
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,

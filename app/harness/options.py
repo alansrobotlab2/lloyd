@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from app.harness.hooks import HookRegistry
@@ -57,6 +57,15 @@ class RunOptions:
     # Session correlation — closure-bound into hook callbacks so
     # heuristics/intra_turn write to the right event log file.
     session_id: str = ""
+
+    # Background-task notification drain. When set, the loop calls this
+    # at the top of each iteration; the callable returns a list of
+    # OpenAI-format messages (typically role: "user" with a
+    # <task_notification> XML body) to splice into chat_messages before
+    # the next vLLM request. The callback is also expected to persist
+    # the messages into the session JSON, since the harness no longer
+    # owns persistence past run_query's entry.
+    notification_drain: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
 
     # Forwarded to vLLM unchanged. Most local deployments ignore these,
     # but we keep them so config-driven thinking knobs can survive into
