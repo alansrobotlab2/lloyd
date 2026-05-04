@@ -828,7 +828,11 @@ def install_observer(
         return {}
 
     async def on_event_cb(evt: dict[str, Any]) -> None:
-        if state.closed:
+        # Mirror the pretool guard: if the user (or IV itself) cancelled the
+        # turn, stop observing. Otherwise the observer keeps issuing LLM
+        # judgment calls and applying levers (injects, ambients) for a turn
+        # the user already abandoned.
+        if state.closed or state.cancel_event.is_set():
             return
         etype = evt.get("type")
         if etype == "text_delta":
@@ -857,6 +861,14 @@ def install_observer(
             decision = await _call_observer(
                 user_prompt=user_prompt, cfg=state.cfg,
             )
+            if state.closed or state.cancel_event.is_set():
+                decision.action = "noop_assistant_after_cancel"
+                decision.reason = (
+                    (decision.reason or "")
+                    + " [skipped: turn cancelled while observer LLM was in flight]"
+                ).strip()
+                _persist(state, decision, trigger="assistant_message")
+                return
             # Block cancel-for-completion. There are two failure modes the
             # IV has been hitting:
             #
@@ -943,6 +955,14 @@ def install_observer(
             decision = await _call_observer(
                 user_prompt=user_prompt, cfg=state.cfg,
             )
+            if state.closed or state.cancel_event.is_set():
+                decision.action = "noop_tool_result_after_cancel"
+                decision.reason = (
+                    (decision.reason or "")
+                    + " [skipped: turn cancelled while observer LLM was in flight]"
+                ).strip()
+                _persist(state, decision, trigger="tool_result", related_tool=tool_name)
+                return
             await _apply_lever(state, decision, trigger="tool_result", related_tool=tool_name)
             _persist(state, decision, trigger="tool_result", related_tool=tool_name)
             return
@@ -955,6 +975,15 @@ def install_observer(
             decision = await _call_observer(
                 user_prompt=user_prompt, cfg=state.cfg,
             )
+            if state.cancel_event.is_set():
+                decision.action = "noop_result_after_cancel"
+                decision.reason = (
+                    (decision.reason or "")
+                    + " [skipped: turn cancelled while observer LLM was in flight]"
+                ).strip()
+                _persist(state, decision, trigger="result")
+                state.closed = True
+                return
             await _apply_lever(state, decision, trigger="result")
             _persist(state, decision, trigger="result")
             state.closed = True

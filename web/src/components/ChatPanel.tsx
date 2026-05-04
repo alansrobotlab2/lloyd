@@ -995,11 +995,17 @@ export default function ChatPanel({
               type="button"
               onClick={() => {
                 if (abortControllerRef.current) {
-                  // Local stream — abort the fetch directly
+                  // Local stream — abort the fetch directly. Also call the
+                  // backend cancel API so the harness sees cancel_event and
+                  // Inner Voice stops observing/injecting; drain any queued
+                  // ambient turns IV may have enqueued for the cancelled work.
                   abortControllerRef.current.abort()
+                  if (sessionKey) {
+                    api.cancelSession(sessionKey, { drainPending: true }).catch(() => {})
+                  }
                 } else if (sessionKey) {
                   // Restored session with no local stream — cancel via API
-                  api.cancelSession(sessionKey).then(() => {
+                  api.cancelSession(sessionKey, { drainPending: true }).then(() => {
                     setThinking(false)
                     setSending(false)
                     setMessages(prev => [...prev, {

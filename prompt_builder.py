@@ -74,6 +74,18 @@ def build_system_prompt(include_skills_index: bool = True, overlay_dir: str | Pa
     )
     parts.append(platform)
 
+    bg_tasks = (
+        "Background bash tasks: pass run_in_background=true to Bash for any "
+        "long-running command (builds, finds, deploys, monitoring loops). The "
+        "tool returns a task_id and an output_file path immediately so you can "
+        "keep working. When the command exits, a <task_notification> message "
+        "appears in the conversation on a later turn carrying the same task_id, "
+        "the final status, and the output_file path. Use Read on the output_file "
+        "to inspect what the command produced. Do not respond directly to a "
+        "<task_notification> unless its result changes your plan."
+    )
+    parts.append(bg_tasks)
+
     return "\n\n".join(parts)
 
 
