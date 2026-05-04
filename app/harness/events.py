@@ -67,6 +67,7 @@ class NormalizedEvent(TypedDict, total=False):
     tool_calls: list[dict[str, Any]]
     thinking: str
     iteration: int
+    finish_reason: str  # vLLM's stop reason for THIS iteration: "stop" | "tool_calls" | "length" | ...
 
     # result
     stop_reason: Literal["stop", "tool_calls", "max_turns", "cancelled", "error"]
@@ -124,6 +125,7 @@ def assistant_message(
     usage: dict[str, int] | None = None,
     duration_ms: int = 0,
     iteration: int = 0,
+    finish_reason: str = "stop",
 ) -> NormalizedEvent:
     """Emitted at end of each agent-loop iteration.
 
@@ -135,6 +137,13 @@ def assistant_message(
     ``duration_ms`` is the wall-clock duration of just this iteration's
     chat completion. ``iteration`` is the 1-based index inside the
     agent loop.
+
+    ``finish_reason`` is vLLM's stop reason for the assistant turn:
+    ``"stop"`` (model emitted EOS — harness will terminate iff there
+    are no tool_calls), ``"tool_calls"`` (model wants to dispatch
+    tools — harness will loop), ``"length"`` (max_tokens hit — also a
+    terminal state). IV uses this to distinguish "primary done" from
+    "primary mid-thought" on text-only iterations.
     """
     return {
         "type": "assistant_message",
@@ -144,6 +153,7 @@ def assistant_message(
         "usage": usage or {},
         "duration_ms": duration_ms,
         "iteration": iteration,
+        "finish_reason": finish_reason,
     }
 
 
