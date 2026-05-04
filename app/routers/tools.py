@@ -19,6 +19,7 @@ from app.mcp_discovery import (
     _MCP_SERVER_META,
     _tools_cache,
     _TOOLS_CACHE_TTL,
+    _categorize_tool,
     _discover_mcp_tools,
 )
 
@@ -57,6 +58,7 @@ async def get_tools():
                     "name": t["name"],
                     "description": t["description"],
                     "enabled": t["name"] not in disabled_tools,
+                    "category": _categorize_tool(t["name"]),
                 }
                 for t in raw_tools
             ],

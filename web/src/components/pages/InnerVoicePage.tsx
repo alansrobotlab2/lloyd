@@ -69,6 +69,9 @@ const ACTION_STYLES: Record<string, { color: string; bg: string; border: string;
   noop_inject_on_result:      { color: 'text-slate-500', bg: 'bg-slate-600/5',   border: 'border-slate-500/15', label: 'noop (late)',  Icon: Info },
   noop_cancel_on_result:      { color: 'text-slate-500', bg: 'bg-slate-600/5',   border: 'border-slate-500/15', label: 'noop (late)',  Icon: Info },
   noop_clarify_on_result:     { color: 'text-slate-500', bg: 'bg-slate-600/5',   border: 'border-slate-500/15', label: 'noop (late)',  Icon: Info },
+  noop_cancel_with_pending_tools:        { color: 'text-amber-500', bg: 'bg-amber-600/5', border: 'border-amber-500/20', label: 'noop (mid-tool)', Icon: AlertTriangle },
+  noop_pretool_after_cancel:             { color: 'text-slate-500', bg: 'bg-slate-600/5', border: 'border-slate-500/15', label: 'noop (cancelled)', Icon: Info },
+  acknowledge_complete:       { color: 'text-emerald-400', bg: 'bg-emerald-600/10', border: 'border-emerald-500/30', label: 'agree: complete', Icon: CheckCircle2 },
 }
 
 const TRIGGER_LABEL: Record<InnerVoiceObservationTrigger, string> = {

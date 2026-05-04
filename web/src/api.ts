@@ -254,6 +254,7 @@ export interface McpTool {
   name: string
   description: string
   enabled: boolean
+  category?: string
 }
 
 export interface McpServer {

@@ -310,6 +310,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         enqueue_ambient_callback=_iv_enqueue_ambient_cb,
         clarify_callback=_iv_clarify_cb,
         persist_intervention_callback=_iv_persist_intervention_cb,
+        subliminal_context=subl_prefix or "",
     )
 
     _event_log.log_event(session_id, "brain1.query_started", {

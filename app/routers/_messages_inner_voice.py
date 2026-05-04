@@ -87,6 +87,54 @@ def _iv_should_fire_on_turn(session_id: str, turn_source: str) -> bool:
     return _session_iv_evaluate_user_turns_enabled(session_id)
 
 
+def _recent_exchanges_for_goal_extraction(
+    session_id: str, *, current_user_text: str, max_messages: int = 6,
+) -> list[dict[str, str]]:
+    """Return the last few user/assistant text exchanges from the session,
+    excluding the just-appended current user message.
+
+    Used to give the goal extractor context for follow-up messages like
+    "yeah do it" or "still broken" so it can resolve them against the
+    prior thread instead of producing an empty goal card.
+
+    Returns [] on any miss (no session yet, parse error, no prior turns).
+    """
+    if not session_id:
+        return []
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        return []
+    try:
+        data = json.loads(meta_path.read_text())
+    except Exception:
+        return []
+    msgs = data.get("messages") or []
+    out: list[dict[str, str]] = []
+    # Walk backwards collecting user/assistant text. Stop after we drop
+    # the trailing current-user-message and find max_messages priors.
+    seen_current = False
+    for m in reversed(msgs):
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = ""
+        for chunk in m.get("content") or []:
+            if isinstance(chunk, dict) and chunk.get("type") == "text":
+                text += chunk.get("text") or ""
+        text = text.strip()
+        if not text:
+            continue
+        # Skip the just-appended copy of the current request.
+        if not seen_current and role == "user" and text == current_user_text.strip():
+            seen_current = True
+            continue
+        out.append({"role": role, "text": text})
+        if len(out) >= max_messages:
+            break
+    out.reverse()
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Hook registry (per-turn)
 # ---------------------------------------------------------------------------
@@ -124,6 +172,7 @@ async def attach_observer_for_turn(
     enqueue_ambient_callback: Callable[[str, str], Awaitable[None]] | None = None,
     clarify_callback: Callable[[str, str], Awaitable[None]] | None = None,
     persist_intervention_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
+    subliminal_context: str = "",
 ) -> ObserverState | None:
     """Install the observer onto `options.hooks` for one turn.
 
@@ -145,7 +194,13 @@ async def attach_observer_for_turn(
 
     # Goal extraction — one LLM call before the primary turn starts. Best-
     # effort; on failure observer runs in lighter-touch mode (no goal card).
-    goal_card = await extract_goal_card(user_request)
+    # Pass the last few user/assistant exchanges so follow-up messages
+    # ("yeah do it", "still broken") get resolved against the prior
+    # thread instead of yielding an empty goal card.
+    recent = _recent_exchanges_for_goal_extraction(
+        session_id, current_user_text=user_request,
+    )
+    goal_card = await extract_goal_card(user_request, recent_exchanges=recent)
 
     state = install_observer(
         hooks=options.hooks,
@@ -159,6 +214,7 @@ async def attach_observer_for_turn(
         clarify_callback=clarify_callback,
         persist_intervention_callback=persist_intervention_callback,
         goal_card=goal_card,
+        subliminal_context=subliminal_context,
     )
     logger.info(
         "[iv.observer] attached session=%s turn=%s source=%s budget=%d "
