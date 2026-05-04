@@ -149,15 +149,38 @@ function ServerGroup({
               {server.error}
             </div>
           )}
-          {server.tools.map((tool) => (
-            <ToolRow
-              key={tool.name}
-              tool={tool}
-              serverEnabled={server.enabled}
-              toggling={togglingKey === `tool:${server.name}:${tool.name}`}
-              onToggle={() => onToolToggle(tool.name)}
-            />
-          ))}
+          {(() => {
+            const grouped = new Map<string, McpTool[]>();
+            for (const t of server.tools) {
+              const cat = t.category ?? "Other";
+              const list = grouped.get(cat);
+              if (list) list.push(t);
+              else grouped.set(cat, [t]);
+            }
+            const categories = [...grouped.keys()].sort();
+            const showHeaders = categories.length > 1;
+            return categories.map((cat) => {
+              const tools = grouped.get(cat)!.slice().sort((a, b) => a.name.localeCompare(b.name));
+              return (
+                <div key={cat} className="mt-1 first:mt-0">
+                  {showHeaders && (
+                    <div className="pl-10 pr-4 pt-2 pb-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                      {cat}
+                    </div>
+                  )}
+                  {tools.map((tool) => (
+                    <ToolRow
+                      key={tool.name}
+                      tool={tool}
+                      serverEnabled={server.enabled}
+                      toggling={togglingKey === `tool:${server.name}:${tool.name}`}
+                      onToggle={() => onToolToggle(tool.name)}
+                    />
+                  ))}
+                </div>
+              );
+            });
+          })()}
           {server.tools.length === 0 && !server.error && (
             <div className="pl-10 pr-4 py-2 text-xs text-slate-600 italic">
               {server.enabled ? "No tools discovered" : "Enable server to discover tools"}

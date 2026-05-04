@@ -251,6 +251,16 @@ async def _post_chat_completion(
         "temperature": 0.2,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
+        # Make the prefill a genuine in-progress assistant turn the model
+        # continues, rather than a closed prior turn after which the model
+        # starts a fresh one. Without these, vLLM appends a new
+        # `<|im_start|>assistant\n` after the prefill — the model then
+        # under-reasons (returns a bare action word like "noop") or parrots
+        # the prefill back as `{"action":`, which parse_fails. With both,
+        # the model emits ` "inject", "reason":..., "content":...}` and
+        # JSON_PREFILL + raw parses cleanly.
+        "continue_final_message": True,
+        "add_generation_prompt": False,
     }
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         resp = await client.post(

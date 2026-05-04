@@ -118,9 +118,44 @@ GOAL_EXTRACTION_SYSTEM_PROMPT = _load_prompt_file(
 GOAL_EXTRACTION_PREFILL = '{"success_criteria":'
 
 
-def build_goal_extraction_user_prompt(user_request: str) -> str:
+def _format_recent_exchanges(exchanges: list[dict[str, str]] | None) -> str:
+    """Render the last few user/assistant messages so goal extraction can
+    recognize follow-up turns ("yeah do it", "still broken") as continuing
+    a prior request rather than treating them in isolation.
+    """
+    if not exchanges:
+        return ""
+    lines = ["PRIOR CONVERSATION (most recent last):"]
+    for ex in exchanges[-6:]:
+        role = ex.get("role", "?")
+        text = (ex.get("text") or "").strip()
+        if not text:
+            continue
+        if len(text) > 400:
+            text = text[:400] + "..."
+        lines.append(f"  [{role}] {text}")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines) + "\n\n"
+
+
+def build_goal_extraction_user_prompt(
+    user_request: str,
+    recent_exchanges: list[dict[str, str]] | None = None,
+) -> str:
+    prior = _format_recent_exchanges(recent_exchanges)
+    continuation_hint = ""
+    if prior:
+        continuation_hint = (
+            "If the latest USER REQUEST is a brief follow-up (\"yeah\", "
+            "\"do it\", \"still broken\", \"clear those too\"), it continues "
+            "the prior thread — extract the goal in light of what the user "
+            "and assistant were just doing, not from the literal words alone.\n\n"
+        )
     return (
+        f"{prior}"
         f"USER REQUEST:\n{user_request}\n\n"
+        f"{continuation_hint}"
         f"Extract the goal card. Return JSON only."
     )
 
@@ -172,6 +207,33 @@ def _format_goal_card(goal_card: dict[str, Any] | None) -> str:
     return "\n".join(parts)
 
 
+# Cap the subliminal context surfaced to the observer per event. The full
+# prefix can be 6-8 KB on skill-heavy turns; the observer doesn't need
+# every byte to judge "is the primary following documented procedure."
+_SUBLIMINAL_PROMPT_CHAR_CAP = 4000
+
+
+def _format_subliminal_context(subliminal: str | None) -> str:
+    """Render the prefetched subliminal block (skills, vault, facts, ...)
+    so the observer sees what context the primary actually had.
+
+    The primary's request often makes sense only in light of a documented
+    skill or recent vault hit. Without this, the observer judges actions
+    in a vacuum and labels documented procedures as "destructive" or
+    "ambiguous."
+    """
+    if not subliminal or not subliminal.strip():
+        return ""
+    body = subliminal.strip()
+    if len(body) > _SUBLIMINAL_PROMPT_CHAR_CAP:
+        body = body[:_SUBLIMINAL_PROMPT_CHAR_CAP] + "\n...(truncated)"
+    return (
+        "CONTEXT THE PRIMARY SAW (prefetched skills/vault/facts — same "
+        "block was injected into the primary's user message):\n"
+        f"{body}\n"
+    )
+
+
 def _format_prior_decisions(decisions: list[dict[str, Any]] | None) -> str:
     """Render the observer's prior decisions this turn."""
     if not decisions:
@@ -196,6 +258,7 @@ def build_user_prompt_for_event(
     interventions_used: int,
     interventions_budget: int,
     prior_decisions: list[dict[str, Any]] | None = None,
+    subliminal_context: str | None = None,
 ) -> str:
     """Assemble the per-event user prompt the observer evaluates."""
     budget_line = (
@@ -209,9 +272,12 @@ def build_user_prompt_for_event(
         )
     prior_block = _format_prior_decisions(prior_decisions)
     prior_section = f"\n{prior_block}" if prior_block else ""
+    subliminal_block = _format_subliminal_context(subliminal_context)
+    subliminal_section = f"\n{subliminal_block}" if subliminal_block else ""
     return (
         f"USER REQUEST:\n{user_request}\n\n"
-        f"{_format_goal_card(goal_card)}\n\n"
+        f"{_format_goal_card(goal_card)}\n"
+        f"{subliminal_section}\n"
         f"PRIMARY'S RESPONSE SO FAR (visible text):\n"
         f"{primary_text_so_far or '(none yet)'}\n"
         f"{prior_section}\n"
