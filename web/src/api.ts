@@ -68,14 +68,17 @@ export interface Session {
 
 // One observation = one decision the observer made on one significant
 // event in the primary's stream. action enumerates the lever pulled.
+//
+// v4 (current) levers: noop | inject | cancel | ambient | clarify, plus
+// noop_* variants for guarded/skipped decisions. Pre-v4 rows may also
+// contain `deny_tool` and `allow` — kept in the union for historical
+// render fidelity. New rows never use them.
 export type InnerVoiceObservationAction =
   | 'noop'
   | 'inject'
   | 'cancel'
   | 'ambient'
   | 'clarify'
-  | 'deny_tool'
-  | 'allow'
   | 'noop_budget_exhausted'
   | 'noop_empty_content'
   | 'noop_no_ambient_channel'
@@ -85,6 +88,10 @@ export type InnerVoiceObservationAction =
   | 'noop_inject_on_result'
   | 'noop_cancel_on_result'
   | 'noop_clarify_on_result'
+  | 'noop_pretool_after_cancel'
+  // historical (v3-only) — render with a v3 affix
+  | 'deny_tool'
+  | 'allow'
 
 export type InnerVoiceObservationTrigger =
   | 'assistant_message'

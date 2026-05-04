@@ -26,11 +26,9 @@ from app.inner_voice.observer import (
     _apply_lever,
     _bash_command_is_safely_readonly,
     _build_event_user_prompt,
+    _extract_tool_call,
     _fast_path_pretool,
     _fast_path_tool_result,
-    _normalize_action,
-    _parse_goal_card,
-    _parse_observer_json,
     extract_goal_card,
     install_observer,
 )
@@ -66,91 +64,67 @@ def _make_state(
 
 
 # ---------------------------------------------------------------------------
-# JSON parsing
+# Tool-call extraction (v4)
 # ---------------------------------------------------------------------------
 
 
-def test_parse_full_object():
-    raw = '{"action":"noop","reason":"on track"}'
-    p = _parse_observer_json(raw)
-    assert p == {"action": "noop", "reason": "on track"}, p
-    print("test_parse_full_object: OK")
+def test_extract_tool_call_well_formed():
+    body = {
+        "choices": [{
+            "message": {
+                "tool_calls": [{
+                    "function": {
+                        "name": "inject",
+                        "arguments": '{"reason":"loop","content":"Try Grep instead."}',
+                    },
+                }],
+            },
+        }],
+    }
+    extracted = _extract_tool_call(body)
+    assert extracted is not None
+    name, args = extracted
+    assert name == "inject"
+    assert args["content"] == "Try Grep instead."
+    print("test_extract_tool_call_well_formed: OK")
 
 
-def test_parse_with_prefill():
-    # Model returned just the continuation
-    raw = '"inject","reason":"empty","content":"answer the user"}'
-    p = _parse_observer_json(raw)
-    assert p["action"] == "inject", p
-    assert p["content"] == "answer the user", p
-    print("test_parse_with_prefill: OK")
+def test_extract_tool_call_dict_arguments():
+    """Some vLLM versions return arguments as a dict, not a JSON string."""
+    body = {
+        "choices": [{
+            "message": {
+                "tool_calls": [{"function": {"name": "noop", "arguments": {"reason": "ok"}}}],
+            },
+        }],
+    }
+    extracted = _extract_tool_call(body)
+    assert extracted == ("noop", {"reason": "ok"})
+    print("test_extract_tool_call_dict_arguments: OK")
 
 
-def test_parse_embedded():
-    raw = 'Here\'s my decision: {"action":"cancel","reason":"loop"} done.'
-    p = _parse_observer_json(raw)
-    assert p["action"] == "cancel", p
-    print("test_parse_embedded: OK")
+def test_extract_tool_call_no_tool_calls():
+    body = {"choices": [{"message": {"content": "text only"}}]}
+    assert _extract_tool_call(body) is None
+    print("test_extract_tool_call_no_tool_calls: OK")
 
 
-def test_parse_garbage():
-    p = _parse_observer_json("complete nonsense")
-    assert p is None, p
-    print("test_parse_garbage: OK")
+def test_extract_tool_call_bad_args_json():
+    body = {
+        "choices": [{
+            "message": {
+                "tool_calls": [{"function": {"name": "inject", "arguments": "{not-json}"}}],
+            },
+        }],
+    }
+    assert _extract_tool_call(body) is None
+    print("test_extract_tool_call_bad_args_json: OK")
 
 
-def test_parse_bare_word():
-    """Model sometimes returns just `noop` after the prefill — no JSON."""
-    p = _parse_observer_json("noop")
-    assert p == {"action": "noop", "reason": "bare-word fallback"}, p
-    p2 = _parse_observer_json("noop\"}")
-    assert p2["action"] == "noop", p2
-    print("test_parse_bare_word: OK")
-
-
-def test_parse_dropped_opening_quote():
-    """Local models sometimes honor the prefill but drop the value's opening
-    quote — e.g. return `inject","reason":"...","content":"..."}` after
-    prefill `{"action":` (which would otherwise yield invalid JSON).
-    """
-    raw = 'inject","reason":"empty terminal","content":"answer the user"}'
-    p = _parse_observer_json(raw)
-    assert p is not None, p
-    assert p["action"] == "inject", p
-    assert p["content"] == "answer the user", p
-    print("test_parse_dropped_opening_quote: OK")
-
-
-# ---------------------------------------------------------------------------
-# Action normalization
-# ---------------------------------------------------------------------------
-
-
-def test_normalize_noop_path():
-    assert _normalize_action("noop", allow_deny_tool=False) == "noop"
-    assert _normalize_action("inject", allow_deny_tool=False) == "inject"
-    assert _normalize_action("cancel", allow_deny_tool=False) == "cancel"
-    assert _normalize_action("ambient", allow_deny_tool=False) == "ambient"
-    # pretool actions out-of-context → noop
-    assert _normalize_action("allow", allow_deny_tool=False) == "noop"
-    assert _normalize_action("deny_tool", allow_deny_tool=False) == "noop"
-    # Garbage → noop
-    assert _normalize_action("WAT", allow_deny_tool=False) == "noop"
-    assert _normalize_action(None, allow_deny_tool=False) == "noop"
-    print("test_normalize_noop_path: OK")
-
-
-def test_normalize_pretool_path():
-    assert _normalize_action("allow", allow_deny_tool=True) == "allow"
-    assert _normalize_action("deny_tool", allow_deny_tool=True) == "deny_tool"
-    # Common variant
-    assert _normalize_action("deny", allow_deny_tool=True) == "deny_tool"
-    # Post-event actions in pretool context → fail open (allow)
-    assert _normalize_action("inject", allow_deny_tool=True) == "allow"
-    assert _normalize_action("noop", allow_deny_tool=True) == "allow"
-    # Garbage in pretool context → fail open (allow)
-    assert _normalize_action("WAT", allow_deny_tool=True) == "allow"
-    print("test_normalize_pretool_path: OK")
+def test_extract_tool_call_empty_choices():
+    assert _extract_tool_call({}) is None
+    assert _extract_tool_call({"choices": []}) is None
+    print("test_extract_tool_call_empty_choices: OK")
 
 
 # ---------------------------------------------------------------------------
@@ -364,60 +338,86 @@ def test_budget_exhausted():
 # ---------------------------------------------------------------------------
 
 
-def test_call_observer_parses_response():
-    fake_body = {
-        "choices": [
-            {"message": {"content": '"inject","reason":"empty","content":"answer the user"}'}}
-        ],
-        "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+def _fake_tool_call_body(name: str, args: dict, *, in_tok: int = 100, out_tok: int = 20) -> dict:
+    """Build a fake vLLM tool-call response body for tests."""
+    import json as _j
+    return {
+        "choices": [{
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_test",
+                    "type": "function",
+                    "function": {"name": name, "arguments": _j.dumps(args)},
+                }],
+            },
+        }],
+        "usage": {"prompt_tokens": in_tok, "completion_tokens": out_tok},
     }
 
-    async def fake_post(**kwargs):
-        return fake_body
 
-    with patch.object(obs_mod, "_post_chat_completion", new=fake_post):
+def test_call_observer_parses_tool_call():
+    body = _fake_tool_call_body("inject", {
+        "reason": "empty terminal", "content": "answer the user",
+    })
+
+    async def fake_post(**kwargs):
+        return body
+
+    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
         decision = run_async(
-            obs_mod._call_observer(
-                user_prompt="hi", allow_deny_tool=False, cfg=obs_mod._observer_cfg(),
-            )
+            obs_mod._call_observer(user_prompt="hi", cfg=obs_mod._observer_cfg())
         )
     assert decision.action == "inject", decision
     assert decision.content == "answer the user", decision
     assert decision.input_tokens == 100, decision
     assert decision.output_tokens == 20, decision
-    print("test_call_observer_parses_response: OK")
+    print("test_call_observer_parses_tool_call: OK")
 
 
 def test_call_observer_timeout_falls_back_to_noop():
     async def fake_post(**kwargs):
         raise asyncio.TimeoutError()
 
-    with patch.object(obs_mod, "_post_chat_completion", new=fake_post):
+    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
         decision = run_async(
-            obs_mod._call_observer(
-                user_prompt="hi", allow_deny_tool=False, cfg=obs_mod._observer_cfg(),
-            )
+            obs_mod._call_observer(user_prompt="hi", cfg=obs_mod._observer_cfg())
         )
     assert decision.action == "noop", decision
     assert decision.error == "timeout", decision
     print("test_call_observer_timeout_falls_back_to_noop: OK")
 
 
-def test_call_observer_pretool_timeout_fails_open():
-    async def fake_post(**kwargs):
-        raise asyncio.TimeoutError()
+def test_call_observer_no_tool_call_falls_back_to_noop():
+    """If vLLM returns no tool_call (parser quirk), we noop with error tag."""
+    body = {"choices": [{"message": {"content": "weird text"}}]}
 
-    with patch.object(obs_mod, "_post_chat_completion", new=fake_post):
+    async def fake_post(**kwargs):
+        return body
+
+    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
         decision = run_async(
-            obs_mod._call_observer(
-                user_prompt="hi",
-                allow_deny_tool=True,
-                cfg=obs_mod._observer_cfg(),
-            )
+            obs_mod._call_observer(user_prompt="hi", cfg=obs_mod._observer_cfg())
         )
-    assert decision.action == "allow", decision
-    assert decision.error == "timeout", decision
-    print("test_call_observer_pretool_timeout_fails_open: OK")
+    assert decision.action == "noop", decision
+    assert decision.error == "no_tool_call", decision
+    print("test_call_observer_no_tool_call_falls_back_to_noop: OK")
+
+
+def test_call_observer_unknown_lever_coerces_noop():
+    """If vLLM somehow returns a tool name outside LEVER_TOOLS, fall back."""
+    body = _fake_tool_call_body("deny_tool", {"reason": "old habits"})
+
+    async def fake_post(**kwargs):
+        return body
+
+    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
+        decision = run_async(
+            obs_mod._call_observer(user_prompt="hi", cfg=obs_mod._observer_cfg())
+        )
+    assert decision.action == "noop", decision
+    assert decision.error == "unknown_lever", decision
+    print("test_call_observer_unknown_lever_coerces_noop: OK")
 
 
 # ---------------------------------------------------------------------------
@@ -425,98 +425,51 @@ def test_call_observer_pretool_timeout_fails_open():
 # ---------------------------------------------------------------------------
 
 
-def test_install_observer_pretool_deny():
-    """Simulate the harness firing PreToolUse → observer denies a destructive
-    Bash with grounded content (quotes the actual command)."""
-    fake_body = {
-        "choices": [
-            {"message": {"content": '"deny_tool","reason":"rm -rf on user data","content":"Refusing rm -rf /home/alansrobotlab/lloyd — would wipe the project tree"}'}}
-        ],
-        "usage": {"prompt_tokens": 50, "completion_tokens": 15},
-    }
+def test_install_observer_pretool_does_not_block():
+    """v4: pretool callback never returns a deny dict — destructive Bash
+    is hard-blocked at the harness layer (app/harness/safety.py), not by IV.
+    Even if IV's LLM tried to deny, the schema doesn't include deny_tool."""
+    body = _fake_tool_call_body("inject", {
+        "reason": "off-task tool",
+        "content": "Use Read to inspect the file instead of running migrations.",
+    })
 
     async def fake_post(**kwargs):
-        return fake_body
+        return body
 
     hooks = HookRegistry()
     chat = []
     cancel = asyncio.Event()
-    state = install_observer(
+    install_observer(
         hooks=hooks,
         session_id="test_sess",
-        turn_id="test_turn_pretool",
-        user_request="clean some files",
+        turn_id="test_turn_pretool_v4",
+        user_request="inspect framework code",
         chat_messages_handle=chat,
         cancel_event=cancel,
         primary_model="primary",
     )
-    with patch.object(obs_mod, "_post_chat_completion", new=fake_post):
+    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
         out = run_async(
             hooks.fire_pre_tool_use(
                 session_id="test_sess",
                 tool_name="Bash",
-                tool_input={"command": "rm -rf /home/alansrobotlab/lloyd"},
+                tool_input={"command": "python migrations/run.py"},
             )
         )
-    assert out, out
-    hso = out.get("hookSpecificOutput") or {}
-    assert hso.get("permissionDecision") == "deny", hso
-    assert "rm -rf" in (hso.get("permissionDecisionReason") or ""), hso
-    # PreToolUse denials don't count against budget
-    assert state.interventions_used == 0
-    print("test_install_observer_pretool_deny: OK")
-
-
-def test_install_observer_pretool_deny_downgrades_ungrounded():
-    """An IV deny_tool whose content is pure boilerplate (doesn't quote
-    anything from the actual args) gets downgraded to allow by the harness.
-    This catches hallucinated denials like 'destructive action; requires
-    confirmation' that don't actually reference what the command does.
-    """
-    fake_body = {
-        "choices": [
-            {"message": {"content": '"deny_tool","reason":"feels destructive","content":"Refusing this destructive action; requires explicit user confirmation."}'}}
-        ],
-        "usage": {"prompt_tokens": 50, "completion_tokens": 15},
-    }
-
-    async def fake_post(**kwargs):
-        return fake_body
-
-    hooks = HookRegistry()
-    chat = []
-    cancel = asyncio.Event()
-    state = install_observer(
-        hooks=hooks,
-        session_id="test_sess",
-        turn_id="test_turn_ungrounded",
-        user_request="clear poisoned workers",
-        chat_messages_handle=chat,
-        cancel_event=cancel,
-        primary_model="primary",
-    )
-    with patch.object(obs_mod, "_post_chat_completion", new=fake_post):
-        out = run_async(
-            hooks.fire_pre_tool_use(
-                session_id="test_sess",
-                tool_name="Bash",
-                tool_input={"command": "python -c 'import sqlite3; sqlite3.connect(\"workers.db\").execute(\"DELETE FROM queue WHERE state=poisoned\")'"},
-            )
-        )
-    # Empty hook output = no deny = the call goes through.
+    # Pretool never blocks in v4 — must return {} regardless of IV decision.
     assert out == {}, out
-    print("test_install_observer_pretool_deny_downgrades_ungrounded: OK")
+    # IV's inject still landed in the chat messages (will be next user msg).
+    assert any("[INNER VOICE]" in (m.get("content") or "") for m in chat), chat
+    print("test_install_observer_pretool_does_not_block: OK")
 
 
 def test_install_observer_assistant_message_inject():
     """Simulate harness firing OnEvent for an empty assistant_message →
-    observer injects a system message into chat history."""
-    fake_body = {
-        "choices": [
-            {"message": {"content": '"inject","reason":"empty terminal","content":"answer the user"}'}}
-        ],
-        "usage": {"prompt_tokens": 50, "completion_tokens": 15},
-    }
+    observer injects a user message into chat history."""
+    fake_body = _fake_tool_call_body("inject", {
+        "reason": "empty terminal", "content": "answer the user",
+    }, in_tok=50, out_tok=15)
 
     async def fake_post(**kwargs):
         return fake_body
@@ -539,7 +492,7 @@ def test_install_observer_assistant_message_inject():
         "tool_calls": [],
         "iteration": 3,
     }
-    with patch.object(obs_mod, "_post_chat_completion", new=fake_post):
+    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
         run_async(hooks.fire_on_event(evt))
     assert len(chat) == 1, chat
     assert chat[0]["role"] == "user", chat[0]
@@ -549,145 +502,21 @@ def test_install_observer_assistant_message_inject():
 
 
 # ---------------------------------------------------------------------------
-# Deny-content grounding (#fix4)
-# ---------------------------------------------------------------------------
-
-
-def test_deny_content_grounded_passes_real_quote():
-    from app.inner_voice.observer import _deny_content_is_grounded
-    args = {"command": "rm -rf /home/x/important"}
-    assert _deny_content_is_grounded(
-        "Refusing rm -rf /home/x — would wipe persisted state", "Bash", args,
-    )
-    print("test_deny_content_grounded_passes_real_quote: OK")
-
-
-def test_deny_content_grounded_rejects_pure_boilerplate():
-    from app.inner_voice.observer import _deny_content_is_grounded
-    args = {"command": "python -c 'sqlite3.connect(\"workers.db\").execute(\"DELETE FROM queue\")'"}
-    assert not _deny_content_is_grounded(
-        "Refusing this destructive action; requires explicit user confirmation.",
-        "Bash", args,
-    )
-    print("test_deny_content_grounded_rejects_pure_boilerplate: OK")
-
-
-def test_deny_content_grounded_rejects_empty():
-    from app.inner_voice.observer import _deny_content_is_grounded
-    assert not _deny_content_is_grounded("", "Bash", {"command": "rm -rf /"})
-    assert not _deny_content_is_grounded("   ", "Bash", {"command": "rm -rf /"})
-    print("test_deny_content_grounded_rejects_empty: OK")
-
-
-# ---------------------------------------------------------------------------
-# Cancel-after-deadlock guard (#fix3)
-# ---------------------------------------------------------------------------
-
-
-def test_cancel_after_deadlock_blocks_completion_claim():
-    from app.inner_voice.observer import _is_cancel_after_self_induced_deadlock
-    state = _make_state()
-    state.decisions_this_turn = [
-        {"trigger": "pretool", "action": "deny_tool", "reason": "destructive"},
-        {"trigger": "pretool", "action": "deny_tool", "reason": "destructive"},
-        {"trigger": "pretool", "action": "deny_tool", "reason": "destructive"},
-    ]
-    decision = ObserverDecision(
-        action="cancel",
-        reason="all success criteria met, stopping to avoid padding",
-    )
-    assert _is_cancel_after_self_induced_deadlock(state, decision)
-    print("test_cancel_after_deadlock_blocks_completion_claim: OK")
-
-
-def test_cancel_after_deadlock_allows_real_completion():
-    """Successful tool_results in the recent window mean the primary actually
-    made progress — the cancel is real completion, not deadlock."""
-    from app.inner_voice.observer import _is_cancel_after_self_induced_deadlock
-    state = _make_state()
-    state.decisions_this_turn = [
-        {"trigger": "pretool", "action": "deny_tool", "reason": "x"},
-        {"trigger": "pretool", "action": "allow", "reason": "y"},
-        {"trigger": "tool_result", "action": "noop", "reason": "z"},
-        {"trigger": "pretool", "action": "deny_tool", "reason": "w"},
-    ]
-    decision = ObserverDecision(action="cancel", reason="all done")
-    assert not _is_cancel_after_self_induced_deadlock(state, decision)
-    print("test_cancel_after_deadlock_allows_real_completion: OK")
-
-
-def test_cancel_after_deadlock_ignores_non_completion_reasons():
-    """Cancel for legitimate reasons (off-the-rails behavior) shouldn't be
-    blocked even if there were prior denies."""
-    from app.inner_voice.observer import _is_cancel_after_self_induced_deadlock
-    state = _make_state()
-    state.decisions_this_turn = [
-        {"trigger": "pretool", "action": "deny_tool", "reason": "x"},
-        {"trigger": "pretool", "action": "deny_tool", "reason": "y"},
-    ]
-    decision = ObserverDecision(action="cancel", reason="primary went off the rails entirely")
-    assert not _is_cancel_after_self_induced_deadlock(state, decision)
-    print("test_cancel_after_deadlock_ignores_non_completion_reasons: OK")
-
-
-def test_apply_lever_blocks_deadlock_cancel():
-    """End-to-end: _apply_lever should not set cancel_event when the cancel
-    is post-deadlock-with-completion-claim."""
-    state = _make_state()
-    state.decisions_this_turn = [
-        {"trigger": "pretool", "action": "deny_tool", "reason": "x"},
-        {"trigger": "pretool", "action": "deny_tool", "reason": "y"},
-    ]
-    decision = ObserverDecision(action="cancel", reason="all success criteria met")
-    run_async(_apply_lever(state, decision, trigger="tool_result"))
-    assert not state.cancel_event.is_set()
-    assert decision.action == "noop_cancel_after_deadlock"
-    print("test_apply_lever_blocks_deadlock_cancel: OK")
-
-
-# ---------------------------------------------------------------------------
 # Goal extraction
 # ---------------------------------------------------------------------------
 
 
-def test_parse_goal_card_full():
-    raw = '{"success_criteria":["a","b"],"out_of_scope":["c"],"completion_signals":["d"]}'
-    p = _parse_goal_card(raw)
-    assert p == {
-        "success_criteria": ["a", "b"],
-        "out_of_scope": ["c"],
-        "completion_signals": ["d"],
-    }, p
-    print("test_parse_goal_card_full: OK")
-
-
-def test_parse_goal_card_with_prefill():
-    # Model honored prefill; raw is the continuation
-    raw = '["a"],"out_of_scope":[],"completion_signals":["d"]}'
-    p = _parse_goal_card(raw)
-    assert p is not None
-    assert p["success_criteria"] == ["a"], p
-    print("test_parse_goal_card_with_prefill: OK")
-
-
-def test_parse_goal_card_garbage():
-    p = _parse_goal_card("nonsense")
-    assert p is None
-    print("test_parse_goal_card_garbage: OK")
-
-
 def test_extract_goal_card_calls_llm():
-    fake_body = {
-        "choices": [
-            {"message": {"content": '["check disk","check services"],"out_of_scope":[],"completion_signals":["all checks reported"]}'}}
-        ],
-        "usage": {"prompt_tokens": 100, "completion_tokens": 30},
-    }
+    fake_body = _fake_tool_call_body("record_goal_card", {
+        "success_criteria": ["check disk", "check services"],
+        "out_of_scope": [],
+        "completion_signals": ["all checks reported"],
+    }, in_tok=100, out_tok=30)
 
     async def fake_post(**kwargs):
         return fake_body
 
-    with patch.object(obs_mod, "_post_chat_completion", new=fake_post):
+    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
         gc = run_async(extract_goal_card("Run a full systems check please"))
     assert gc is not None
     assert gc["success_criteria"] == ["check disk", "check services"]
@@ -707,10 +536,24 @@ def test_extract_goal_card_returns_none_on_error():
     async def fake_post(**kwargs):
         raise asyncio.TimeoutError()
 
-    with patch.object(obs_mod, "_post_chat_completion", new=fake_post):
+    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
         gc = run_async(extract_goal_card("any request"))
     assert gc is None
     print("test_extract_goal_card_returns_none_on_error: OK")
+
+
+def test_extract_goal_card_returns_none_when_no_tool_call():
+    """If vLLM returned no tool_call (parser quirk), goal extraction
+    falls back to None and observer runs in lighter-touch mode."""
+    body = {"choices": [{"message": {"content": "weird text"}}]}
+
+    async def fake_post(**kwargs):
+        return body
+
+    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
+        gc = run_async(extract_goal_card("Run a full systems check please"))
+    assert gc is None
+    print("test_extract_goal_card_returns_none_when_no_tool_call: OK")
 
 
 def test_event_prompt_includes_goal_card():
@@ -838,15 +681,15 @@ def test_intra_turn_microcompact_skips_under_threshold():
 # ---------------------------------------------------------------------------
 
 
-def test_fast_path_pretool_allows_read_glob_grep():
+def test_fast_path_pretool_noops_read_glob_grep():
     for tool in ("Read", "Glob", "Grep"):
         d = _fast_path_pretool(tool, {"path": "/etc/hosts"})
         assert d is not None
-        assert d.action == "allow", (tool, d)
-    print("test_fast_path_pretool_allows_read_glob_grep: OK")
+        assert d.action == "noop", (tool, d)
+    print("test_fast_path_pretool_noops_read_glob_grep: OK")
 
 
-def test_fast_path_pretool_allows_safe_bash():
+def test_fast_path_pretool_noops_safe_bash():
     safe_cmds = [
         "ls -la /tmp",
         "cat /etc/hostname",
@@ -860,8 +703,8 @@ def test_fast_path_pretool_allows_safe_bash():
     ]
     for cmd in safe_cmds:
         d = _fast_path_pretool("Bash", {"command": cmd})
-        assert d is not None and d.action == "allow", (cmd, d)
-    print("test_fast_path_pretool_allows_safe_bash: OK")
+        assert d is not None and d.action == "noop", (cmd, d)
+    print("test_fast_path_pretool_noops_safe_bash: OK")
 
 
 def test_fast_path_pretool_escalates_destructive_bash():
@@ -893,12 +736,12 @@ def test_bash_safety_classifier():
     print("test_bash_safety_classifier: OK")
 
 
-def test_fast_path_pretool_allows_safe_mcp():
+def test_fast_path_pretool_noops_safe_mcp():
     d = _fast_path_pretool("fact_get", {"entity": "lloyd"})
-    assert d is not None and d.action == "allow", d
+    assert d is not None and d.action == "noop", d
     d2 = _fast_path_pretool("memory_search", {"query": "x"})
-    assert d2 is not None and d2.action == "allow", d2
-    print("test_fast_path_pretool_allows_safe_mcp: OK")
+    assert d2 is not None and d2.action == "noop", d2
+    print("test_fast_path_pretool_noops_safe_mcp: OK")
 
 
 def test_fast_path_pretool_escalates_unknown_mcp():
@@ -1017,14 +860,13 @@ def test_clarify_on_result_degrades():
 
 
 TESTS = [
-    test_parse_full_object,
-    test_parse_with_prefill,
-    test_parse_embedded,
-    test_parse_garbage,
-    test_parse_bare_word,
-    test_parse_dropped_opening_quote,
-    test_normalize_noop_path,
-    test_normalize_pretool_path,
+    # Tool-call extraction (v4)
+    test_extract_tool_call_well_formed,
+    test_extract_tool_call_dict_arguments,
+    test_extract_tool_call_no_tool_calls,
+    test_extract_tool_call_bad_args_json,
+    test_extract_tool_call_empty_choices,
+    # Lever dispatch
     test_inject_appends_user_message,
     test_cancel_sets_event,
     test_cancel_works_when_budget_exhausted,
@@ -1039,26 +881,19 @@ TESTS = [
     test_inject_on_result_degrades_when_no_callback,
     test_cancel_on_result_degrades_to_noop,
     test_budget_exhausted,
-    test_call_observer_parses_response,
+    # _call_observer (tools-mode mocked)
+    test_call_observer_parses_tool_call,
     test_call_observer_timeout_falls_back_to_noop,
-    test_call_observer_pretool_timeout_fails_open,
-    test_install_observer_pretool_deny,
-    test_install_observer_pretool_deny_downgrades_ungrounded,
+    test_call_observer_no_tool_call_falls_back_to_noop,
+    test_call_observer_unknown_lever_coerces_noop,
+    # install_observer end-to-end
+    test_install_observer_pretool_does_not_block,
     test_install_observer_assistant_message_inject,
-    test_deny_content_grounded_passes_real_quote,
-    test_deny_content_grounded_rejects_pure_boilerplate,
-    test_deny_content_grounded_rejects_empty,
-    test_cancel_after_deadlock_blocks_completion_claim,
-    test_cancel_after_deadlock_allows_real_completion,
-    test_cancel_after_deadlock_ignores_non_completion_reasons,
-    test_apply_lever_blocks_deadlock_cancel,
-    # Goal extraction
-    test_parse_goal_card_full,
-    test_parse_goal_card_with_prefill,
-    test_parse_goal_card_garbage,
+    # Goal extraction (tools-mode)
     test_extract_goal_card_calls_llm,
     test_extract_goal_card_skips_empty_request,
     test_extract_goal_card_returns_none_on_error,
+    test_extract_goal_card_returns_none_when_no_tool_call,
     test_event_prompt_includes_goal_card,
     test_event_prompt_handles_missing_goal_card,
     test_tool_result_summary_detects_spilled_payload,
@@ -1066,12 +901,12 @@ TESTS = [
     test_tool_result_summary_keeps_error_path_for_errors,
     test_intra_turn_microcompact_clears_in_place,
     test_intra_turn_microcompact_skips_under_threshold,
-    # Tiered triggering
-    test_fast_path_pretool_allows_read_glob_grep,
-    test_fast_path_pretool_allows_safe_bash,
+    # Tiered triggering (fast-path noop)
+    test_fast_path_pretool_noops_read_glob_grep,
+    test_fast_path_pretool_noops_safe_bash,
     test_fast_path_pretool_escalates_destructive_bash,
     test_bash_safety_classifier,
-    test_fast_path_pretool_allows_safe_mcp,
+    test_fast_path_pretool_noops_safe_mcp,
     test_fast_path_pretool_escalates_unknown_mcp,
     test_fast_path_tool_result_skips_small_benign,
     test_fast_path_tool_result_skips_parse_errors,

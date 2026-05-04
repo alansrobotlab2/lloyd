@@ -58,8 +58,9 @@ const ACTION_STYLES: Record<string, { color: string; bg: string; border: string;
   cancel:                     { color: 'text-red-400',   bg: 'bg-red-600/10',    border: 'border-red-500/30',   label: 'cancel',       Icon: XCircle },
   ambient:                    { color: 'text-blue-400',  bg: 'bg-blue-600/10',   border: 'border-blue-500/30',  label: 'ambient',      Icon: Activity },
   clarify:                    { color: 'text-purple-400',bg: 'bg-purple-600/10', border: 'border-purple-500/30',label: 'clarify',      Icon: HelpCircle },
-  deny_tool:                  { color: 'text-red-400',   bg: 'bg-red-700/15',    border: 'border-red-500/30',   label: 'deny',         Icon: Ban },
-  allow:                      { color: 'text-slate-500', bg: 'bg-slate-600/5',   border: 'border-slate-500/15', label: 'allow',        Icon: CheckCircle2 },
+  // v3-only — never written by current code; kept for historical render
+  deny_tool:                  { color: 'text-red-400',   bg: 'bg-red-700/15',    border: 'border-red-500/30',   label: 'deny (v3)',    Icon: Ban },
+  allow:                      { color: 'text-slate-500', bg: 'bg-slate-600/5',   border: 'border-slate-500/15', label: 'allow (v3)',   Icon: CheckCircle2 },
   noop_budget_exhausted:      { color: 'text-amber-500', bg: 'bg-amber-600/5',   border: 'border-amber-500/20', label: 'noop (budget)',Icon: AlertTriangle },
   noop_empty_content:         { color: 'text-slate-500', bg: 'bg-slate-600/5',   border: 'border-slate-500/15', label: 'noop (empty)', Icon: Info },
   noop_no_ambient_channel:    { color: 'text-slate-500', bg: 'bg-slate-600/5',   border: 'border-slate-500/15', label: 'noop (no ch)', Icon: Info },
@@ -312,12 +313,14 @@ function ObservationPanel({
   const counts = obsState.observations_count_by_action || {}
   const totalRows = Object.values(counts).reduce((a, b) => a + b, 0)
   const noopCount = (counts.noop || 0)
-    + (counts.allow || 0)
+    + (counts.allow || 0)            // v3 historical
     + (counts.noop_budget_exhausted || 0)
     + (counts.noop_empty_content || 0)
     + (counts.noop_no_ambient_channel || 0)
     + (counts.noop_ambient_failed || 0)
-  const interventionCount = (counts.inject || 0) + (counts.cancel || 0) + (counts.ambient || 0) + (counts.clarify || 0) + (counts.deny_tool || 0)
+    + (counts.noop_pretool_after_cancel || 0)
+  const interventionCount = (counts.inject || 0) + (counts.cancel || 0) + (counts.ambient || 0) + (counts.clarify || 0)
+    + (counts.deny_tool || 0)        // v3 historical
 
   // Group observations by turn for compact display
   const grouped = useMemo(() => {

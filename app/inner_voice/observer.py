@@ -1,16 +1,18 @@
-"""Inner Voice observer — a thin second-agent harness.
+"""Inner Voice observer — a thin second-agent harness (v4).
 
 One observer per primary turn. The observer:
 
-1. At turn start, runs ONE goal-extraction LLM call to produce a goal card
-   (success criteria, out-of-scope, completion signals).
+1. At turn start, runs ONE goal-extraction tool-call to produce a goal
+   card (success criteria, out-of-scope, completion signals).
 2. Subscribes to the primary's NormalizedEvent stream via an OnEvent hook.
 3. For each significant event, runs a cheap pre-filter; if interesting,
-   calls a focused LLM with the goal card + prior decisions threaded in.
-4. Has five levers: inject, cancel, ambient, clarify, deny_tool.
+   forces the LLM to call exactly one of the lever tools.
+4. Has five soft levers: noop, inject, cancel, ambient, clarify. No
+   deny_tool — destructive Bash is hard-blocked deterministically by
+   `app/harness/safety.py` (default PreToolUse hook), independent of IV.
 
-All judgment lives in `observer_prompt.SYSTEM_PROMPT`. The Python here is
-plumbing.
+All judgment lives in `observer_prompt.SYSTEM_PROMPT` and the tool-schema
+descriptions in `lever_tools.LEVER_TOOLS`. The Python here is plumbing.
 """
 
 from __future__ import annotations
@@ -28,6 +30,12 @@ import httpx
 from app import event_log as _event_log
 from app.config import CONFIG, _get_model_cfg
 from app.inner_voice import observer_prompt as _prompt
+from app.inner_voice.lever_tools import (
+    GOAL_EXTRACTION_TOOL_NAME,
+    GOAL_EXTRACTION_TOOLS,
+    LEVER_NAMES,
+    LEVER_TOOLS,
+)
 from usage_store import record_inner_voice_observation
 
 logger = logging.getLogger("lloyd-iv-observer")
@@ -63,7 +71,6 @@ def _observer_cfg() -> dict[str, Any]:
     obs = dict(iv.get("observer") or {})
     obs.setdefault("max_tokens", _prompt.DEFAULT_MAX_TOKENS)
     obs.setdefault("timeout_seconds", _prompt.DEFAULT_TIMEOUT_SECONDS)
-    obs.setdefault("pretool_timeout_seconds", _prompt.DEFAULT_PRETOOL_TIMEOUT_SECONDS)
     obs.setdefault("intervention_budget", _prompt.DEFAULT_INTERVENTION_BUDGET)
     obs.setdefault("primary_text_window_chars", 4000)
     obs.setdefault("goal_extraction_timeout_seconds", _prompt.DEFAULT_GOAL_EXTRACTION_TIMEOUT_SECONDS)
@@ -87,180 +94,69 @@ def _resolve_endpoint(model_alias: str | None = None) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# JSON parsing
+# Tool-call extraction
 # ---------------------------------------------------------------------------
 
 
-def _extract_first_json_object(text: str) -> str | None:
-    if not text:
-        return None
-    in_str = False
-    esc = False
-    depth = 0
-    start = -1
-    for i, ch in enumerate(text):
-        if esc:
-            esc = False
-            continue
-        if ch == "\\" and in_str:
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start >= 0:
-                return text[start : i + 1]
-            if depth < 0:
-                return None
-    return None
+def _extract_tool_call(body: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """Pull the single forced tool call out of a vLLM response.
 
-
-def _parse_observer_json(raw: str) -> dict[str, Any] | None:
-    """Parse the observer's JSON response, tolerant of prefill conventions.
-
-    Handles five shapes:
-      1. Complete JSON object (model didn't honor prefill).
-      2. Prefill continuation (model returned `"value","field":...}`).
-      3. Prefill continuation but model dropped the opening quote (returned
-         `value","field":...}` — common with local models). We synthesize
-         the missing `"`.
-      4. JSON object embedded in surrounding prose.
-      5. Bare action word (e.g. `noop` or `noop"}`).
+    Returns `(tool_name, args_dict)` or None if vLLM returned no tool call
+    or the args don't parse. The caller decides how to fall back.
     """
-    if not raw:
+    choices = body.get("choices") or []
+    if not choices:
         return None
-    candidates = [raw, _prompt.JSON_PREFILL + raw]
-    raw_stripped = raw.lstrip()
-    if raw_stripped and raw_stripped[0].isalpha():
-        candidates.append(_prompt.JSON_PREFILL + '"' + raw)
-    for c in candidates:
+    msg = choices[0].get("message") or {}
+    tool_calls = msg.get("tool_calls") or []
+    if not tool_calls:
+        return None
+    tc = tool_calls[0]
+    fn = tc.get("function") or {}
+    name = fn.get("name") or ""
+    if not name:
+        return None
+    raw_args = fn.get("arguments")
+    if isinstance(raw_args, dict):
+        return (name, raw_args)
+    if isinstance(raw_args, str):
         try:
-            v = json.loads(c.strip())
-            if isinstance(v, dict) and "action" in v:
-                return v
+            args = json.loads(raw_args)
         except json.JSONDecodeError:
-            pass
-    blob = _extract_first_json_object(raw)
-    if blob:
-        try:
-            v = json.loads(blob)
-            if isinstance(v, dict) and "action" in v:
-                return v
-        except json.JSONDecodeError:
-            pass
-    blob2 = _extract_first_json_object(_prompt.JSON_PREFILL + raw)
-    if blob2:
-        try:
-            v = json.loads(blob2)
-            if isinstance(v, dict) and "action" in v:
-                return v
-        except json.JSONDecodeError:
-            pass
-    bare = raw.strip().strip('",}{ ').lower()
-    if bare in ("noop", "allow", "inject", "cancel", "ambient", "clarify", "deny_tool", "deny"):
-        # Log a sample of the raw response so we can see why the model isn't
-        # producing well-formed JSON — common causes are dropped prefill
-        # continuation, premature stop, or the model writing the action word
-        # without the surrounding object structure.
-        logger.info(
-            "[iv.observer] bare-word parse: action=%s raw=%r",
-            bare, raw[:200],
-        )
-        return {"action": bare, "reason": "concise: bare action word"}
+            return None
+        if isinstance(args, dict):
+            return (name, args)
     return None
 
 
-def _normalize_action(raw_action: Any, *, allow_deny_tool: bool) -> str:
-    """Normalize observer action string. Falls back safely on garbage."""
-    if not isinstance(raw_action, str):
-        return "noop"
-    a = raw_action.strip().lower()
-    valid_post = {"noop", "inject", "cancel", "ambient", "clarify"}
-    valid_pre = {"allow", "deny_tool"}
-    if allow_deny_tool:
-        if a in valid_pre:
-            return a
-        if a == "deny":
-            return "deny_tool"
-        # Out of context for pretool — coerce to allow (fail-open).
-        return "allow"
-    if a in valid_post:
-        return a
-    if a in valid_pre:
-        return "noop"
-    return "noop"
-
-
-# ---------------------------------------------------------------------------
-# Goal extraction (one call per turn)
-# ---------------------------------------------------------------------------
-
-
-def _parse_goal_card(raw: str) -> dict[str, Any] | None:
-    """Parse the goal-extraction JSON response."""
-    if not raw:
-        return None
-    candidates = [raw, _prompt.GOAL_EXTRACTION_PREFILL + raw]
-    raw_stripped = raw.lstrip()
-    if raw_stripped and raw_stripped[0] == "[":
-        candidates.append(_prompt.GOAL_EXTRACTION_PREFILL + raw)
-    for c in candidates:
-        try:
-            v = json.loads(c.strip())
-            if isinstance(v, dict):
-                return v
-        except json.JSONDecodeError:
-            pass
-    blob = _extract_first_json_object(raw)
-    if blob:
-        try:
-            v = json.loads(blob)
-            if isinstance(v, dict):
-                return v
-        except json.JSONDecodeError:
-            pass
-    return None
-
-
-async def _post_chat_completion(
+async def _post_chat_completion_with_tools(
     *,
     base_url: str,
     model_name: str,
     system_prompt: str,
     user_prompt: str,
+    tools: list[dict[str, Any]],
     max_tokens: int,
     timeout_seconds: float,
-    prefill: str,
 ) -> dict[str, Any]:
+    """POST a chat completion with `tools` + `tool_choice="required"`.
+
+    Returns the raw response body. Caller extracts the single forced tool
+    call from `body["choices"][0]["message"]["tool_calls"][0]`. The model
+    cannot return free-form content under this contract.
+    """
     url = f"{base_url}/v1/chat/completions"
     payload = {
         "model": model_name,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": prefill},
         ],
+        "tools": tools,
+        "tool_choice": "required",
         "temperature": 0.2,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
-        # Make the prefill a genuine in-progress assistant turn the model
-        # continues, rather than a closed prior turn after which the model
-        # starts a fresh one. Without these, vLLM appends a new
-        # `<|im_start|>assistant\n` after the prefill — the model then
-        # under-reasons (returns a bare action word like "noop") or parrots
-        # the prefill back as `{"action":`, which parse_fails. With both,
-        # the model emits ` "inject", "reason":..., "content":...}` and
-        # JSON_PREFILL + raw parses cleanly.
-        "continue_final_message": True,
-        "add_generation_prompt": False,
     }
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         resp = await client.post(
@@ -283,6 +179,9 @@ async def extract_goal_card(
 ) -> dict[str, Any] | None:
     """Run one LLM call at turn start to extract the goal card.
 
+    Tool-call mode: forces a single `record_goal_card` invocation; reads
+    the three array fields directly from tool args. No JSON parsing.
+
     Returns None on any failure. Best-effort — observer falls back to
     "no goal card" mode (lighter-touch oversight) on extraction failure.
 
@@ -302,37 +201,36 @@ async def extract_goal_card(
     timeout = float(cfg.get("goal_extraction_timeout_seconds", _prompt.DEFAULT_GOAL_EXTRACTION_TIMEOUT_SECONDS))
     max_tokens = int(cfg.get("goal_extraction_max_tokens", _prompt.DEFAULT_GOAL_EXTRACTION_MAX_TOKENS))
     user_prompt = _prompt.build_goal_extraction_user_prompt(user_request, recent_exchanges)
-    raw = ""
     started = time.perf_counter()
     try:
-        body = await _post_chat_completion(
+        body = await _post_chat_completion_with_tools(
             base_url=base_url,
             model_name=model_name,
             system_prompt=_prompt.GOAL_EXTRACTION_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            tools=GOAL_EXTRACTION_TOOLS,
             max_tokens=max_tokens,
             timeout_seconds=timeout,
-            prefill=_prompt.GOAL_EXTRACTION_PREFILL,
         )
-        choices = body.get("choices") or []
-        if choices:
-            raw = (choices[0].get("message", {}).get("content") or "").strip()
     except Exception as e:  # noqa: BLE001 — best-effort
         logger.warning("[iv.observer] goal extraction failed: %s", e)
         return None
-    parsed = _parse_goal_card(raw)
     latency_ms = int((time.perf_counter() - started) * 1000)
-    if parsed is None:
+    extracted = _extract_tool_call(body)
+    if extracted is None:
+        logger.warning("[iv.observer] goal extraction: no tool_call in %dms", latency_ms)
+        return None
+    name, args = extracted
+    if name != GOAL_EXTRACTION_TOOL_NAME:
         logger.warning(
-            "[iv.observer] goal extraction parse_failed in %dms raw=%r",
-            latency_ms, raw[:300],
+            "[iv.observer] goal extraction: unexpected tool %r in %dms",
+            name, latency_ms,
         )
         return None
-    # Normalize lists
     out = {
-        "success_criteria": _coerce_str_list(parsed.get("success_criteria")),
-        "out_of_scope": _coerce_str_list(parsed.get("out_of_scope")),
-        "completion_signals": _coerce_str_list(parsed.get("completion_signals")),
+        "success_criteria": _coerce_str_list(args.get("success_criteria")),
+        "out_of_scope": _coerce_str_list(args.get("out_of_scope")),
+        "completion_signals": _coerce_str_list(args.get("completion_signals")),
     }
     logger.info(
         "[iv.observer] goal_card extracted in %dms: %d criteria, %d oos, %d signals",
@@ -414,26 +312,30 @@ _FAST_ALLOW_TOOL_NAMES = frozenset({"Read", "Glob", "Grep"})
 
 
 def _fast_path_pretool(tool_name: str, tool_args: dict) -> ObserverDecision | None:
-    """Cheap deterministic check for benign tool calls. Returns an
-    'allow' ObserverDecision when safe, or None to escalate to LLM.
+    """Cheap deterministic check for benign tool calls. Returns a `noop`
+    ObserverDecision (skip the LLM call) when safe, or None to escalate.
+
+    v4: pretool is no longer a gate, just an observation trigger. The
+    fast-path is purely a perf optimization that avoids spending an LLM
+    call on tools that obviously don't need IV's attention.
     """
     if not tool_name:
         return None
     if tool_name in _FAST_ALLOW_TOOL_NAMES:
-        return ObserverDecision(action="allow", reason="fast-path: read-only tool")
+        return ObserverDecision(action="noop", reason="fast-path: read-only tool")
     if tool_name == "Bash":
         cmd = (tool_args.get("command") or "") if isinstance(tool_args, dict) else ""
         if _bash_command_is_safely_readonly(cmd):
-            return ObserverDecision(action="allow", reason="fast-path: read-only Bash")
+            return ObserverDecision(action="noop", reason="fast-path: read-only Bash")
         return None
-    # MCP tools: fast-allow when name contains a clearly read/list verb,
+    # MCP tools: fast-noop when name contains a clearly read/list verb,
     # AND args are small (large args are usually writes). Names are bare
     # (no `mcp__server__` prefix) since the harness drops the namespace.
     name_lower = tool_name.lower()
     if any(kw in name_lower for kw in _SAFE_TOOL_NAME_KEYWORDS):
         args_str = json.dumps(tool_args, default=str) if isinstance(tool_args, dict) else str(tool_args)
         if len(args_str) < 1000:
-            return ObserverDecision(action="allow", reason="fast-path: read-shaped MCP tool")
+            return ObserverDecision(action="noop", reason="fast-path: read-shaped MCP tool")
     return None
 
 
@@ -473,20 +375,21 @@ def _fast_path_assistant_message(text: str, tool_calls: list) -> ObserverDecisio
 async def _call_observer(
     *,
     user_prompt: str,
-    allow_deny_tool: bool,
     cfg: dict[str, Any] | None = None,
     timeout_override: float | None = None,
 ) -> ObserverDecision:
     """One observer LLM call. Returns a parsed ObserverDecision.
 
-    Errors and parse failures fold into a noop / allow decision so the
-    primary stream is never blocked by observer faults.
+    Tool-call mode: vLLM is forced to emit exactly one of the LEVER_TOOLS
+    function calls. The tool name IS the action; args carry reason/content.
+    Errors fold into a noop decision so the primary stream is never blocked
+    by observer faults.
     """
     cfg = cfg or _observer_cfg()
     base_url, model_name = _resolve_endpoint()
     if not base_url:
         return ObserverDecision(
-            action=("allow" if allow_deny_tool else "noop"),
+            action="noop",
             reason="observer endpoint unresolved",
             error="no base_url",
         )
@@ -498,24 +401,20 @@ async def _call_observer(
     max_tokens = int(cfg.get("max_tokens", _prompt.DEFAULT_MAX_TOKENS))
 
     started = time.perf_counter()
-    raw = ""
+    body: dict[str, Any] | None = None
     err: str | None = None
     in_tok = 0
     out_tok = 0
     try:
-        body = await _post_chat_completion(
+        body = await _post_chat_completion_with_tools(
             base_url=base_url,
             model_name=model_name,
             system_prompt=_prompt.SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            tools=LEVER_TOOLS,
             max_tokens=max_tokens,
             timeout_seconds=timeout,
-            prefill=_prompt.JSON_PREFILL,
         )
-        choices = body.get("choices") or []
-        if choices:
-            msg = choices[0].get("message") or {}
-            raw = (msg.get("content") or "").strip()
         usage = body.get("usage") or {}
         in_tok = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
         out_tok = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
@@ -530,39 +429,34 @@ async def _call_observer(
 
     if err is not None:
         return ObserverDecision(
-            action=("allow" if allow_deny_tool else "noop"),
-            reason=err,
-            raw_response=raw,
-            input_tokens=in_tok,
-            output_tokens=out_tok,
-            latency_ms=latency_ms,
-            error=err,
+            action="noop", reason=err,
+            input_tokens=in_tok, output_tokens=out_tok,
+            latency_ms=latency_ms, error=err,
         )
 
-    parsed = _parse_observer_json(raw)
-    if parsed is None:
+    extracted = _extract_tool_call(body or {})
+    if extracted is None:
         logger.warning(
-            "[iv.observer] parse_failed (allow_deny_tool=%s) raw=%r",
-            allow_deny_tool, raw[:300],
+            "[iv.observer] no_tool_call response in %dms body_keys=%s",
+            latency_ms, list((body or {}).keys()),
         )
         return ObserverDecision(
-            action=("allow" if allow_deny_tool else "noop"),
-            reason="parse_failed",
-            raw_response=raw,
-            input_tokens=in_tok,
-            output_tokens=out_tok,
-            latency_ms=latency_ms,
-            error="parse_failed",
+            action="noop", reason="no_tool_call",
+            input_tokens=in_tok, output_tokens=out_tok,
+            latency_ms=latency_ms, error="no_tool_call",
         )
-
-    action = _normalize_action(parsed.get("action"), allow_deny_tool=allow_deny_tool)
-    reason = str(parsed.get("reason") or "")[:500]
-    content = str(parsed.get("content") or "")[:4000]
+    name, args = extracted
+    if name not in LEVER_NAMES:
+        logger.warning("[iv.observer] unknown lever %r — coercing to noop", name)
+        return ObserverDecision(
+            action="noop", reason=f"unknown_lever:{name}",
+            input_tokens=in_tok, output_tokens=out_tok,
+            latency_ms=latency_ms, error="unknown_lever",
+        )
     return ObserverDecision(
-        action=action,
-        reason=reason,
-        content=content,
-        raw_response=raw,
+        action=name,
+        reason=str(args.get("reason") or "")[:500],
+        content=str(args.get("content") or "")[:4000],
         input_tokens=in_tok,
         output_tokens=out_tok,
         latency_ms=latency_ms,
@@ -615,83 +509,11 @@ class ObserverState:
 # ---------------------------------------------------------------------------
 
 
-# Words that, on their own, are too generic to count as a grounded
-# justification for a deny_tool. Hallucinated denies tend to be built
-# entirely from these.
-_DENY_GENERIC_TOKENS = frozenset({
-    "tool", "call", "this", "that", "would", "could", "might", "may",
-    "destructive", "dangerous", "risky", "unsafe", "block", "blocks",
-    "blocked", "deny", "denied", "refuse", "refusing", "reject", "rejected",
-    "primary", "agent", "user", "request", "without", "first", "before",
-    "confirmation", "explicit", "explicitly", "clarify", "clarification",
-    "ambiguous", "out", "scope", "goal", "card", "criteria", "action",
-    "operation", "command", "execute", "executes", "executing", "execution",
-    "should", "must", "needs", "need", "instead", "rather", "directly",
-    "data", "loss", "state", "change", "modify", "modifies", "modifying",
-    "from", "with", "into", "onto", "over", "under",
-})
-
-
-def _arg_token_set(tool_name: str, tool_args: dict | None) -> set[str]:
-    """Return a set of substantive lowercase tokens drawn from the tool's
-    name and serialized args, used to verify a deny_tool content actually
-    references what the primary proposed.
-
-    We extract two flavors of token:
-      - Plain alphanumeric tokens of length >= 3 (so short-but-loaded ops
-        like "rm", "dd", "sudo", "git" survive the generic-word filter).
-      - Path-shaped substrings (containing "/" or ".") of length >= 5,
-        kept intact AND split into segments so partial-path mentions like
-        "/home/x" still match a content reference to "home" or "x".
-    """
-    out: set[str] = set()
-    if tool_name:
-        out.add(tool_name.lower())
-        for piece in re.split(r"[^A-Za-z0-9]+", tool_name.lower()):
-            if len(piece) >= 3:
-                out.add(piece)
-    try:
-        blob = json.dumps(tool_args, default=str) if isinstance(tool_args, dict) else str(tool_args or "")
-    except Exception:
-        blob = str(tool_args or "")
-    blob_lower = blob.lower()
-    # Plain alphanumeric tokens.
-    for piece in re.split(r"[^A-Za-z0-9]+", blob_lower):
-        if len(piece) >= 3 and piece not in _DENY_GENERIC_TOKENS:
-            out.add(piece)
-    # Path-shaped substrings — keep intact AND split into segments.
-    for path_match in re.findall(r"[A-Za-z0-9_./\-]{5,}", blob_lower):
-        if "/" in path_match or "." in path_match:
-            out.add(path_match)
-            for seg in re.split(r"[^A-Za-z0-9]+", path_match):
-                if len(seg) >= 3 and seg not in _DENY_GENERIC_TOKENS:
-                    out.add(seg)
-    return out
-
-
-def _deny_content_is_grounded(
-    content: str, tool_name: str, tool_args: dict | None,
-) -> bool:
-    """True if the deny_tool content quotes at least one substantive token
-    from the actual tool name or args. False denies ("destructive action",
-    "requires confirmation") fail this check.
-    """
-    if not content or not content.strip():
-        return False
-    arg_tokens = _arg_token_set(tool_name, tool_args)
-    if not arg_tokens:
-        # Nothing concrete to reference — accept any non-empty content.
-        return True
-    content_lower = content.lower()
-    for tok in arg_tokens:
-        if tok in content_lower:
-            return True
-    return False
-
-
 # Reason-text patterns that look like a "task complete, stopping early"
-# cancel. Used to detect deadlock cancels where the IV's own denials
-# stopped the primary and it then claimed completion.
+# cancel. Still used by the cancel-for-completion guard in `on_event_cb`
+# (a cancel claimed-as-complete on the first text-only iteration is
+# usually the IV being wrong; the harness terminates naturally on its
+# own without needing a force-stop).
 _COMPLETION_REASON_PATTERN = re.compile(
     r"\b(complete|completed|done|criteria met|all met|success criteria"
     r"|stopping early|stop early|avoid padding|no more (?:work|tools)"
@@ -706,35 +528,6 @@ _COMPLETION_REASON_PATTERN = re.compile(
 _INNER_VOICE_PREFIX_RE = re.compile(
     r"^\[\s*INNER\s*VOICE\s*\]\s*", re.IGNORECASE,
 )
-
-
-def _is_cancel_after_self_induced_deadlock(
-    state: ObserverState, decision: ObserverDecision,
-) -> bool:
-    """True if a cancel-with-completion-claim is firing right after the IV
-    has been denying the primary's tool calls — i.e. the "completion" is
-    really deadlock from the observer's own gating, not a real done state.
-
-    Heuristic: the cancel reason matches a "completion" claim AND the IV
-    issued >= 2 deny_tool decisions in the recent window with no successful
-    (non-error) tool_result in between to evidence forward progress.
-    """
-    if not _COMPLETION_REASON_PATTERN.search(decision.reason or ""):
-        return False
-    recent = state.decisions_this_turn[-6:]
-    deny_count = 0
-    saw_successful_result = False
-    for d in recent:
-        action = d.get("action") or ""
-        trig = d.get("trigger") or ""
-        if action == "deny_tool":
-            deny_count += 1
-        # A noop on a tool_result trigger means the IV let the result land
-        # — implies the primary actually got data back. (deny_tool fires on
-        # pretool, not tool_result, so a noop here is the success signal.)
-        if trig == "tool_result" and action in ("noop", "noop_budget_exhausted"):
-            saw_successful_result = True
-    return deny_count >= 2 and not saw_successful_result
 
 
 async def _apply_lever(
@@ -815,30 +608,6 @@ async def _apply_lever(
         return
 
     if a == "cancel":
-        # Block "task complete" cancels that fire right after the IV's own
-        # denials stopped the primary — that's deadlock, not completion.
-        # Letting the cancel through would lock in the IV's mistake and
-        # silently abandon a still-incomplete task.
-        if _is_cancel_after_self_induced_deadlock(state, decision):
-            decision.action = "noop_cancel_after_deadlock"
-            decision.reason = (
-                (decision.reason or "")
-                + " [blocked: IV denied recent tool calls; not real completion]"
-            ).strip()
-            logger.warning(
-                "[iv.observer] blocked cancel-after-deadlock session=%s turn=%s "
-                "reason=%s recent=%s",
-                state.session_id, state.turn_id, decision.reason,
-                [d.get("action") for d in state.decisions_this_turn[-6:]],
-            )
-            _event_log.log_event(
-                state.session_id,
-                "inner_voice.cancel_blocked_deadlock",
-                {"trigger": trigger, "reason": decision.reason,
-                 "recent_actions": [d.get("action") for d in state.decisions_this_turn[-6:]]},
-                turn_id=state.turn_id,
-            )
-            return
         # Cancel does NOT increment interventions_used — see budget gate above.
         # The lever ends the turn; counting it would only matter if it could
         # fire repeatedly, which it can't.
@@ -1022,73 +791,40 @@ def install_observer(
     async def pretool_cb(
         input_data: dict[str, Any], tool_use_id: str | None, _ctx: Any
     ) -> dict[str, Any]:
-        # Short-circuit if the turn was cancelled (either by us in a prior
-        # event handler, or externally). Applying a deny here would surface
-        # a confusing "Tool call denied" message to the user *after* the
-        # cancel breadcrumb already explained why the turn stopped.
+        # v4: pretool is observation-only. IV cannot block tool dispatch.
+        # Hard safety on destructive Bash is enforced upstream by the
+        # harness's default safety hook (app/harness/safety.py), which
+        # runs regardless of whether IV is opted in.
         if state.closed or state.cancel_event.is_set():
             return {}
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input") or {}
 
-        # Tier 1: cheap deterministic check for benign tools.
+        # Tier 1: cheap deterministic noop for benign tools — saves an LLM
+        # call. The harness will dispatch the tool either way.
         if fast_path_enabled:
             fp = _fast_path_pretool(tool_name, tool_input)
             if fp is not None:
                 _persist(state, fp, trigger="pretool", related_tool=tool_name)
-                return {}  # allow
+                return {}
 
-        # Tier 2: LLM judgment for everything else.
+        # Tier 2: LLM judgment with soft-lever-only tools. Decision can be
+        # noop / inject / cancel / ambient / clarify. An inject here lands
+        # as the next user message after the tool dispatches; a cancel
+        # ends the turn after this tool finishes. Neither blocks dispatch.
         summary = _prompt.build_pretool_event_summary(tool_name, tool_input)
         user_prompt = _build_event_user_prompt(state, summary)
-        decision = await _call_observer(
-            user_prompt=user_prompt,
-            allow_deny_tool=True,
-            cfg=state.cfg,
-            timeout_override=float(
-                state.cfg.get("pretool_timeout_seconds", _prompt.DEFAULT_PRETOOL_TIMEOUT_SECONDS)
-            ),
-        )
-        # Re-check cancel state after the LLM call. A concurrent on_event_cb
-        # for the same iteration's assistant_message may have cancelled the
-        # turn while we were awaiting the observer — applying a deny now
-        # would land *after* the cancel breadcrumb, which is incoherent.
+        decision = await _call_observer(user_prompt=user_prompt, cfg=state.cfg)
         if state.closed or state.cancel_event.is_set():
             decision.action = "noop_pretool_after_cancel"
-            decision.reason = ((decision.reason or "")
-                               + " [skipped: turn cancelled while pretool LLM was in flight]").strip()
+            decision.reason = (
+                (decision.reason or "")
+                + " [skipped: turn cancelled while pretool LLM was in flight]"
+            ).strip()
             _persist(state, decision, trigger="pretool", related_tool=tool_name)
             return {}
-        if decision.action == "deny_tool" and not _deny_content_is_grounded(
-            decision.content, tool_name, tool_input,
-        ):
-            logger.warning(
-                "[iv.observer] downgrading ungrounded deny_tool session=%s "
-                "turn=%s tool=%s reason=%r content=%r",
-                state.session_id, state.turn_id, tool_name,
-                decision.reason, decision.content,
-            )
-            _event_log.log_event(
-                state.session_id,
-                "inner_voice.deny_tool_downgraded",
-                {"tool": tool_name, "reason": decision.reason,
-                 "content": decision.content},
-                turn_id=state.turn_id,
-            )
-            decision.action = "allow"
-            decision.reason = ((decision.reason or "")
-                               + " [downgraded: deny content not grounded in args]").strip()
+        await _apply_lever(state, decision, trigger="pretool", related_tool=tool_name)
         _persist(state, decision, trigger="pretool", related_tool=tool_name)
-        if decision.action == "deny_tool":
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": decision.content
-                    or decision.reason
-                    or "Inner Voice denied this tool call.",
-                }
-            }
         return {}
 
     async def on_event_cb(evt: dict[str, Any]) -> None:
@@ -1116,7 +852,7 @@ def install_observer(
             summary = _prompt.build_assistant_message_summary(iteration, text, tool_calls)
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
-                user_prompt=user_prompt, allow_deny_tool=False, cfg=state.cfg,
+                user_prompt=user_prompt, cfg=state.cfg,
             )
             # Block cancel-for-completion. There are two failure modes the
             # IV has been hitting:
@@ -1202,7 +938,7 @@ def install_observer(
             summary = _prompt.build_tool_result_summary(tool_name, content, is_error)
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
-                user_prompt=user_prompt, allow_deny_tool=False, cfg=state.cfg,
+                user_prompt=user_prompt, cfg=state.cfg,
             )
             await _apply_lever(state, decision, trigger="tool_result", related_tool=tool_name)
             _persist(state, decision, trigger="tool_result", related_tool=tool_name)
@@ -1214,7 +950,7 @@ def install_observer(
             summary = _prompt.build_result_summary(stop_reason, response_text)
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
-                user_prompt=user_prompt, allow_deny_tool=False, cfg=state.cfg,
+                user_prompt=user_prompt, cfg=state.cfg,
             )
             await _apply_lever(state, decision, trigger="result")
             _persist(state, decision, trigger="result")
