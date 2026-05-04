@@ -112,6 +112,49 @@ def test_commit_rejects_non_object_args():
     assert committed[0]["_args_dict"]["__parse_error__"] is True
 
 
+def test_commit_repairs_qwen3_trailing_brace():
+    """vLLM's qwen3_xml tool parser sometimes appends an extra `}` to args.
+    The harness now repairs this transparently via raw_decode + trailing-
+    junk tolerance, so the dispatched tool call works AND the next-turn
+    replay sees clean args.
+    """
+    acc: dict = {}
+    bad = '{"file_path": "/home/alansrobotlab/obsidian/lloyd/SOUL.md"}}'
+    _accumulate_tool_call(acc, {"index": 0, "id": "c1", "function": {"name": "Read", "arguments": bad}})
+    committed = _commit_tool_calls(acc)
+    assert len(committed) == 1
+    # Args parsed correctly.
+    assert committed[0]["_args_dict"] == {"file_path": "/home/alansrobotlab/obsidian/lloyd/SOUL.md"}
+    # And the stored arguments string is sanitized for replay.
+    assert committed[0]["function"]["arguments"] == '{"file_path": "/home/alansrobotlab/obsidian/lloyd/SOUL.md"}'
+
+
+def test_commit_repairs_qwen3_trailing_brace_complex_args():
+    """Same repair on a multi-key args string with the trailing-brace bug."""
+    acc: dict = {}
+    bad = ('{"path": "/home/alansrobotlab/obsidian/knowledge", '
+           '"output_mode": "files_with_matches", '
+           '"pattern": "lloyd|framework", "head_limit": 30}}')
+    _accumulate_tool_call(acc, {"index": 0, "id": "c1", "function": {"name": "Grep", "arguments": bad}})
+    committed = _commit_tool_calls(acc)
+    assert len(committed) == 1
+    assert committed[0]["_args_dict"]["head_limit"] == 30
+    assert committed[0]["_args_dict"]["pattern"] == "lloyd|framework"
+    # Replay-safe args.
+    assert committed[0]["function"]["arguments"].endswith("}")
+    assert not committed[0]["function"]["arguments"].endswith("}}")
+
+
+def test_commit_unrepairable_garbage_still_falls_through():
+    """When the raw really can't be salvaged, fall through to the
+    __parse_error__ path (existing behavior preserved)."""
+    acc: dict = {}
+    _accumulate_tool_call(acc, {"index": 0, "id": "c1", "function": {"name": "Bash", "arguments": '{not valid json}'}})
+    committed = _commit_tool_calls(acc)
+    assert committed[0]["_args_dict"]["__parse_error__"] is True
+    assert committed[0]["function"]["arguments"] == "{}"  # sanitized for replay
+
+
 # ---------------------------------------------------------------------------
 # Misc loop helpers
 # ---------------------------------------------------------------------------

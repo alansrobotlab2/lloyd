@@ -425,6 +425,48 @@ def _accumulate_tool_call(
             cur["function"]["arguments"] += args
 
 
+_TOOL_ARGS_DECODER = json.JSONDecoder()
+
+
+def _parse_tool_args_tolerant(raw: str) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Parse a tool-call `arguments` string, tolerating common qwen3_xml
+    parser quirks (most often a trailing ``}}`` instead of ``}``).
+
+    Returns ``(args_dict, repaired_raw, error)``:
+      * On clean parse: ``(dict, None, None)``.
+      * On repair: ``(dict, repaired_raw_string, None)`` — the caller
+        should overwrite the `arguments` field with `repaired_raw_string`
+        so the next-turn rebuild doesn't re-trigger the parse failure.
+      * On total failure: ``(None, None, error_string)``.
+    """
+    if not raw:
+        return ({}, None, None)
+    # Happy path.
+    try:
+        v = json.loads(raw)
+        if isinstance(v, dict):
+            return (v, None, None)
+        return (None, None, "tool arguments must be a JSON object")
+    except json.JSONDecodeError as e:
+        first_err = str(e)
+
+    # Repair: parse the first JSON value and accept if the rest is just
+    # noise (extra `}`, whitespace). Catches the qwen3_xml trailing-brace
+    # pattern: `{"file_path": "..."}}`.
+    try:
+        v, end = _TOOL_ARGS_DECODER.raw_decode(raw)
+    except json.JSONDecodeError:
+        return (None, None, first_err)
+    if not isinstance(v, dict):
+        return (None, None, "tool arguments must be a JSON object")
+    trailing = raw[end:].strip()
+    # Allow any combination of stray `}`, `,`, whitespace as trailing junk.
+    if trailing and any(c not in "}, \t\r\n" for c in trailing):
+        return (None, None, first_err)
+    repaired = raw[:end]
+    return (v, repaired, None)
+
+
 def _commit_tool_calls(acc: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
     """Finalize accumulated tool calls.
 
@@ -442,22 +484,28 @@ def _commit_tool_calls(acc: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
         if not tc["id"]:
             tc["id"] = f"call_{uuid.uuid4().hex[:12]}"
         raw_args = tc["function"]["arguments"] or "{}"
-        try:
-            args_dict = json.loads(raw_args)
-            if not isinstance(args_dict, dict):
-                raise ValueError("tool arguments must be a JSON object")
-        except (json.JSONDecodeError, ValueError) as exc:
+        args_dict, repaired, err = _parse_tool_args_tolerant(raw_args)
+        if args_dict is None:
             logger.warning(
                 "loop: tool_call args parse failed for %s: %s (raw=%r)",
-                tc["function"]["name"], exc, raw_args,
+                tc["function"]["name"], err, raw_args,
             )
-            args_dict = {"__parse_error__": True, "raw": raw_args, "error": str(exc)}
+            args_dict = {"__parse_error__": True, "raw": raw_args, "error": err}
             # vLLM ingests assistant tool_calls back as conversation
             # history on the next turn and re-parses `arguments`. If we
             # leave the malformed string, the next request 400s and the
             # loop dies. Replace with valid empty JSON — the tool_result
             # we'll emit already tells the model what went wrong.
             tc["function"]["arguments"] = "{}"
+        elif repaired is not None:
+            # Quirk-recovered. Log at INFO so we can track frequency, and
+            # rewrite the stored arguments string so next-turn replay sees
+            # clean JSON instead of re-tripping the parser.
+            logger.info(
+                "loop: tool_call args quirk-repaired for %s (was %d chars, now %d)",
+                tc["function"]["name"], len(raw_args), len(repaired),
+            )
+            tc["function"]["arguments"] = repaired
         tc["_args_dict"] = args_dict
         committed.append(tc)
     return committed
