@@ -203,7 +203,9 @@ def build_user_prompt_for_event(
     )
     if interventions_used >= interventions_budget:
         budget_line += (
-            " You have exhausted your intervention budget — only `noop` or `allow` responses will take effect."
+            " You have used your inject/ambient/clarify budget — only `noop`, `cancel`, or `allow` "
+            "will take effect from here on. If the primary is still off-track or looping, "
+            "this is the moment to use `cancel` to end the turn."
         )
     prior_block = _format_prior_decisions(prior_decisions)
     prior_section = f"\n{prior_block}" if prior_block else ""
@@ -254,12 +256,63 @@ def build_assistant_message_summary(
     )
 
 
+_PERSISTED_OUTPUT_TAG = "<persisted-output>"
+
+
+def _format_spilled_summary(tool_name: str, content: str) -> str | None:
+    """If `content` is a spill envelope (large tool result persisted to
+    disk), return a richer one-line summary that names the size + path
+    explicitly. Returns None if not a spill envelope.
+    """
+    if _PERSISTED_OUTPUT_TAG not in content:
+        return None
+    # Extract size and file path from the envelope's first lines without
+    # reading the spilled file. The envelope shape is:
+    #   <persisted-output>
+    #   Output too large (68.3 KB, 69,943 chars). Full output saved to: /path/to/file
+    #   ...
+    head_lines = content.splitlines()[:6]
+    size_line = next((l for l in head_lines if "Output too large" in l), "")
+    path_line = next((l for l in head_lines if "saved to:" in l), "")
+    size = ""
+    if size_line:
+        # Pull "(68.3 KB, 69,943 chars)" tail
+        try:
+            size = size_line.split("(", 1)[1].split(")", 1)[0]
+        except IndexError:
+            pass
+    path = ""
+    if path_line:
+        path = path_line.split("saved to:", 1)[-1].strip()
+    # First few content chars (after the envelope header) for flavor
+    first_data = ""
+    in_preview = False
+    for line in content.splitlines():
+        if "Preview" in line and ":" in line:
+            in_preview = True
+            continue
+        if in_preview and line.strip():
+            first_data = line[:120]
+            break
+    return (
+        f"Tool {tool_name} returned a SPILLED result ({size or 'large'}); "
+        f"full content at {path or 'disk'}. Primary saw a small preview; "
+        f"can re-Read on demand. Preview opener: {first_data!r}. "
+        f"Judge whether the primary is making progress with the data — not "
+        f"whether it 'should' read more."
+    )
+
+
 def build_tool_result_summary(
     tool_name: str,
     result_preview: str,
     is_error: bool,
 ) -> str:
     """One-line summary of a tool_result event for review."""
+    if not is_error:
+        spilled = _format_spilled_summary(tool_name, result_preview)
+        if spilled is not None:
+            return spilled
     label = "ERROR" if is_error else "result"
     preview = result_preview[:300] + ("..." if len(result_preview) > 300 else "")
     return (

@@ -22,6 +22,7 @@ from typing import Any, AsyncIterator
 from app.harness import events
 from app.harness.client import stream_chat
 from app.harness.errors import ContextOverflowError, ParseError, ToolDispatchError
+from app.harness.microcompact import microcompact as _intra_microcompact
 from app.harness.tool_result_spill import (
     fallback_for_empty_result,
     maybe_spill,
@@ -285,6 +286,32 @@ async def run_query(
                     "tool_call_id": tc["id"],
                     "content": result_evt["content"],
                 })
+
+            # Mid-turn microcompaction. After this iteration's tool calls
+            # land, check whether tool results have piled up enough to
+            # warrant clearing stale ones. Mutates `chat_messages` in
+            # place so the observer's chat_messages_handle stays pointing
+            # at the same list.
+            if (
+                tool_calls_committed
+                and getattr(options, "intra_turn_microcompact_enabled", True)
+            ):
+                threshold = getattr(options, "intra_turn_microcompact_threshold", 15)
+                keep = getattr(options, "intra_turn_microcompact_keep_recent", 5)
+                tool_count = sum(1 for m in chat_messages if m.get("role") == "tool")
+                if tool_count >= threshold:
+                    compacted, cleared = _intra_microcompact(
+                        chat_messages,
+                        keep_recent_tools=keep,
+                        count_threshold=threshold,
+                    )
+                    if cleared:
+                        chat_messages[:] = compacted
+                        logger.info(
+                            "loop: intra-turn microcompact cleared %d/%d tool results "
+                            "(kept last %d, iter=%d)",
+                            cleared, tool_count, keep, num_turns,
+                        )
 
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         result_done_evt = events.result(
