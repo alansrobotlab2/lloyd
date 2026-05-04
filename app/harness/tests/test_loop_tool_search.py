@@ -161,7 +161,7 @@ def test_disabled_mode_sends_full_catalog(monkeypatch):
     names = {t["function"]["name"] for t in sent}
     # Full catalog — no ToolSearch added.
     assert "Bash" in names
-    assert "mcp__lloyd-mcp__domain_tool_000" in names
+    assert "domain_tool_000" in names
     assert TOOLSEARCH_TOOL_NAME not in names
     assert len(names) == 50
 
@@ -189,7 +189,7 @@ def test_enabled_first_turn_sends_only_baseline_plus_toolsearch(monkeypatch):
     assert TOOLSEARCH_TOOL_NAME in names
     assert "Bash" in names
     # Domain tools are NOT advertised yet.
-    assert not any(n.startswith("mcp__lloyd-mcp__domain_tool_") for n in names)
+    assert not any(n.startswith("domain_tool_") for n in names)
 
 
 def test_threshold_below_count_keeps_full_catalog(monkeypatch):
@@ -225,12 +225,12 @@ def test_toolsearch_call_loads_matched_tools_for_next_turn(monkeypatch):
         ("", [{
             "id": "call_a",
             "name": TOOLSEARCH_TOOL_NAME,
-            "arguments": {"query": "select:mcp__lloyd-mcp__domain_tool_007", "max_results": 5},
+            "arguments": {"query": "select:domain_tool_007", "max_results": 5},
         }]),
         # Turn 2: model calls the now-loaded tool
         ("", [{
             "id": "call_b",
-            "name": "mcp__lloyd-mcp__domain_tool_007",
+            "name": "domain_tool_007",
             "arguments": {},
         }]),
         # Turn 3: model finishes
@@ -248,14 +248,14 @@ def test_toolsearch_call_loads_matched_tools_for_next_turn(monkeypatch):
 
     # Turn 2 sees the loaded tool in tools=
     turn2_names = {t["function"]["name"] for t in script.captured_tools[1]}
-    assert "mcp__lloyd-mcp__domain_tool_007" in turn2_names
+    assert "domain_tool_007" in turn2_names
     assert TOOLSEARCH_TOOL_NAME in turn2_names
 
     # Turn 1's tool_result for ToolSearch was synthesized by the harness,
     # not by the MCP pool.
     assert all(name != TOOLSEARCH_TOOL_NAME for name, _ in pool.call_log)
     # The MCP pool DID get the second tool call.
-    assert ("mcp__lloyd-mcp__domain_tool_007", {}) in pool.call_log
+    assert ("domain_tool_007", {}) in pool.call_log
 
     # The synthesized ToolSearch result is a tool_result event with a
     # <functions> block in its content.
@@ -312,7 +312,7 @@ def test_unloaded_tool_call_returns_guidance(monkeypatch):
         # Model calls a domain tool without first using ToolSearch.
         ("", [{
             "id": "call_x",
-            "name": "mcp__lloyd-mcp__domain_tool_005",
+            "name": "domain_tool_005",
             "arguments": {},
         }]),
         ("acknowledged", []),
@@ -334,7 +334,7 @@ def test_unloaded_tool_call_returns_guidance(monkeypatch):
     assert results
     assert results[0]["is_error"]
     assert "ToolSearch" in results[0]["content"]
-    assert "select:mcp__lloyd-mcp__domain_tool_005" in results[0]["content"]
+    assert "select:domain_tool_005" in results[0]["content"]
 
 
 def test_session_scoped_loaded_set_persists_across_run_query(monkeypatch):
@@ -348,7 +348,7 @@ def test_session_scoped_loaded_set_persists_across_run_query(monkeypatch):
         ("", [{
             "id": "c_a",
             "name": TOOLSEARCH_TOOL_NAME,
-            "arguments": {"query": "select:mcp__lloyd-mcp__domain_tool_002"},
+            "arguments": {"query": "select:domain_tool_002"},
         }]),
         ("done a", []),
     ])
@@ -369,7 +369,7 @@ def test_session_scoped_loaded_set_persists_across_run_query(monkeypatch):
     asyncio.run(_drain([{"role": "user", "content": "again"}], opts))
 
     first_turn_names = {t["function"]["name"] for t in script_b.captured_tools[0]}
-    assert "mcp__lloyd-mcp__domain_tool_002" in first_turn_names
+    assert "domain_tool_002" in first_turn_names
 
 
 def test_toolsearch_in_disallowed_falls_back_to_full_catalog(monkeypatch):
@@ -393,4 +393,4 @@ def test_toolsearch_in_disallowed_falls_back_to_full_catalog(monkeypatch):
     names = {t["function"]["name"] for t in sent}
     assert TOOLSEARCH_TOOL_NAME not in names
     # Full domain catalog is advertised again.
-    assert "mcp__lloyd-mcp__domain_tool_010" in names
+    assert "domain_tool_010" in names

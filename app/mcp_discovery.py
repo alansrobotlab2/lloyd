@@ -6,11 +6,9 @@ callers invoke the function each request so config edits via
 `/api/tool-toggle` take effect immediately without requiring any
 module-level rebinding.
 
-Built-in tools (Bash, Read, Write, Edit, Grep, Glob, Task) live inside
-the lloyd-mcp aggregator (agent_mcp/builtin_*.py). To disable any of
-them, add the bare name to `mcp_servers.lloyd-mcp.disabled_tools` —
-the harness's bare-name aliasing in `tool_schema.py` blocks both the
-bare and namespaced forms at advertise + dispatch time.
+All tools (built-in + domain) are advertised to the model under their
+bare MCP name. To disable any tool, add its bare name to
+`mcp_servers.<server>.disabled_tools`.
 """
 
 import asyncio
@@ -27,6 +25,54 @@ _MCP_SERVER_META: dict[str, dict] = {
 
 _tools_cache: dict[str, dict] = {}  # {server_name: {tools, error, ts}}
 _TOOLS_CACHE_TTL = 300.0  # 5 minutes
+
+
+# Tool → category mapping. Categories are derived from the source agent_mcp
+# module each tool lives in (e.g., facts.py → "Memory: Facts"). Built-in
+# tools are bare-named; everything else uses a stable module prefix.
+# Order matters for prefix rules — first match wins.
+_TOOL_EXACT_CATEGORY: dict[str, str] = {
+    "Bash": "Shell",
+    "Read": "Filesystem",
+    "Write": "Filesystem",
+    "Edit": "Filesystem",
+    "Grep": "Filesystem",
+    "Glob": "Filesystem",
+    "Task": "Agents",
+    "session_recall": "Memory: Session",
+    "session_inject_context": "Memory: Session",
+    "ambient_decide": "Ambient",
+}
+
+_TOOL_PREFIX_CATEGORY: list[tuple[str, str]] = [
+    ("fact_", "Memory: Facts"),
+    ("vault_", "Memory: Vault"),
+    ("memory_", "Memory: Session"),
+    ("ambient_", "Ambient"),
+    ("autonomy_", "Autonomy"),
+    ("autoresearch_", "Autoresearch"),
+    ("backlog_", "Backlog"),
+    ("browser_", "Browser"),
+    ("discord_", "Discord"),
+    ("chat_", "Mission Control"),
+    ("skills_", "Skills"),
+    ("subliminal_", "Subliminal"),
+    ("http_", "HTTP"),
+    ("tb_", "Thunderbird"),
+    ("email_", "Email"),
+    ("calendar_", "Calendar"),
+    ("contacts_", "Contacts"),
+]
+
+
+def _categorize_tool(name: str) -> str:
+    """Return the user-facing category label for a tool name."""
+    if name in _TOOL_EXACT_CATEGORY:
+        return _TOOL_EXACT_CATEGORY[name]
+    for prefix, label in _TOOL_PREFIX_CATEGORY:
+        if name.startswith(prefix):
+            return label
+    return "Other"
 
 
 def _get_mcp_servers() -> dict[str, dict]:
@@ -47,13 +93,18 @@ def _get_mcp_servers() -> dict[str, dict]:
 
 
 def _get_disallowed_tools() -> list[str]:
-    """Build disallowed_tools list from config for harness RunOptions."""
+    """Build disallowed_tools list from config for harness RunOptions.
+
+    Tools are advertised by bare name, so the disallow list uses bare
+    names too. The legacy ``mcp__server__tool`` form is also recognized
+    by ``build_tool_list`` for any rolled-forward configs.
+    """
     disallowed: list[str] = []
-    for server_name, cfg in CONFIG.get("mcp_servers", {}).items():
+    for _server_name, cfg in CONFIG.get("mcp_servers", {}).items():
         if not cfg.get("enabled", True):
             continue
         for tool_name in cfg.get("disabled_tools", []):
-            disallowed.append(f"mcp__{server_name}__{tool_name}")
+            disallowed.append(tool_name)
     return disallowed
 
 

@@ -30,7 +30,7 @@ from app.harness.tool_result_spill import (
 from app.harness.events import NormalizedEvent
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
-from app.harness.tool_schema import BUILTIN_BARE_NAMES, build_tool_list
+from app.harness.tool_schema import build_tool_list
 from app.harness import tool_search_cache
 from app.harness.tool_search import (
     LoadedToolSet,
@@ -556,10 +556,7 @@ async def _dispatch_one_tool_call(
         msg = f"Tool call arguments could not be parsed as JSON: {args_dict.get('error', 'unknown')}"
         return events.tool_result(call_id=call_id, name=name, content=msg, is_error=True)
 
-    if options.disallowed_tools and (
-        name in options.disallowed_tools
-        or _namespaced_form(name) in options.disallowed_tools
-    ):
+    if options.disallowed_tools and name in options.disallowed_tools:
         return events.tool_result(
             call_id=call_id, name=name,
             content=f"Tool {name!r} is disabled by configuration.",
@@ -687,17 +684,14 @@ async def _dispatch_one_tool_call(
     )
 
 
-def _namespaced_form(bare_name: str) -> str:
-    """Best-guess of the namespaced form for disallowed-tools matching.
-    We don't actually know which server the tool came from at deny time;
-    callers ought to use bare names in disallowed_tools for built-ins.
-    """
-    return f"mcp__lloyd-mcp__{bare_name}"
-
-
 # ---------------------------------------------------------------------------
 # Tool search wiring
 # ---------------------------------------------------------------------------
+
+# Default always-visible tools when ToolSearch is on. The seven built-in
+# file/shell tools are useful enough on every turn that lazy-loading them
+# would just waste a ToolSearch round-trip.
+_DEFAULT_BASELINE_TOOLS = ("Bash", "Read", "Write", "Edit", "Grep", "Glob", "Task")
 
 
 async def _resolve_loaded_tool_set(
@@ -716,7 +710,7 @@ async def _resolve_loaded_tool_set(
     if options.tool_search_baseline:
         baseline_candidates = options.tool_search_baseline
     else:
-        baseline_candidates = list(BUILTIN_BARE_NAMES)
+        baseline_candidates = list(_DEFAULT_BASELINE_TOOLS)
     baseline = {
         n for n in baseline_candidates
         if n in catalog_names and n not in disallowed

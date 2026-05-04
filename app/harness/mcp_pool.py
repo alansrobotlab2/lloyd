@@ -39,10 +39,10 @@ class MCPPool:
     `app.mcp_discovery._get_mcp_servers()` returns — a dict of
     {server_name: {"type": "sse"|"stdio", "url"|"command"|"args": ...}}.
 
-    Built-in tools (Bash/Read/Edit/...) advertise to the model under
-    bare names (no `mcp__server__` prefix). The pool resolves them by
-    asking each server for its tools/list and building a name → server
-    map. On dispatch, bare names route to whichever server claims them.
+    All tools advertise to the model under bare MCP names. The pool
+    resolves them by asking each server for its tools/list and building
+    a bare-name → server map. On dispatch, bare names route to whichever
+    server claims them.
     """
 
     def __init__(self, server_configs: dict[str, dict[str, Any]]):
@@ -111,11 +111,12 @@ class MCPPool:
     async def call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Dispatch a tool call to the right server.
 
-        `name` may be either a bare tool name (`"Bash"`) or namespaced
-        (`"mcp__lloyd-mcp__memory_add"`). Returns
-        `{"content": str, "is_error": bool}`. Raises ToolDispatchError
+        `name` is normally a bare tool name (`"Bash"`, `"email_recent"`).
+        The legacy ``mcp__server__tool`` form is still accepted so old
+        persisted session JSON replays cleanly. Returns
+        ``{"content": str, "is_error": bool}``. Raises ToolDispatchError
         when routing or transport fails — caller maps to a tool_result
-        with `is_error=True`.
+        with ``is_error=True``.
         """
         if not self._opened:
             await self.open()

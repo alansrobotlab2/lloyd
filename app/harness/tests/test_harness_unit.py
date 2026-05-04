@@ -24,7 +24,6 @@ from app.harness.loop import (
     _merge_usage,
 )
 from app.harness.tool_schema import (
-    BUILTIN_BARE_NAMES,
     build_tool_list,
     mcp_tool_to_openai,
     resolve_tool_name,
@@ -187,32 +186,27 @@ def test_merge_usage_ignores_non_int():
 # ---------------------------------------------------------------------------
 
 
-def test_builtin_bare_names_set():
-    # If this set drifts, builtin tools stop matching prior session
-    # JSON / SOUL.md references silently. Lock the contents here.
-    assert BUILTIN_BARE_NAMES == {"Bash", "Read", "Write", "Edit", "Grep", "Glob", "Task"}
-
-
-def test_mcp_tool_to_openai_bare_name_for_builtin():
-    t = mcp_tool_to_openai("lloyd-mcp", {"name": "Bash", "description": "shell", "inputSchema": {"type": "object"}})
+def test_mcp_tool_to_openai_uses_bare_name():
+    t = mcp_tool_to_openai({"name": "Bash", "description": "shell", "inputSchema": {"type": "object"}})
     assert t["function"]["name"] == "Bash"
 
 
-def test_mcp_tool_to_openai_namespaces_non_builtin():
-    t = mcp_tool_to_openai("lloyd-mcp", {"name": "memory_add", "description": "x", "inputSchema": {}})
-    assert t["function"]["name"] == "mcp__lloyd-mcp__memory_add"
+def test_mcp_tool_to_openai_does_not_namespace_domain_tools():
+    t = mcp_tool_to_openai({"name": "memory_add", "description": "x", "inputSchema": {}})
+    assert t["function"]["name"] == "memory_add"
 
 
 def test_mcp_tool_to_openai_rejects_long_names():
     with pytest.raises(ValueError):
-        mcp_tool_to_openai("a" * 50, {"name": "b" * 50, "description": "", "inputSchema": {}})
+        mcp_tool_to_openai({"name": "b" * 80, "description": "", "inputSchema": {}})
 
 
 def test_resolve_tool_name_bare():
     assert resolve_tool_name("Bash") == (None, "Bash")
 
 
-def test_resolve_tool_name_namespaced():
+def test_resolve_tool_name_legacy_namespaced():
+    # Old persisted sessions still carry mcp__server__tool names.
     assert resolve_tool_name("mcp__lloyd-mcp__memory_add") == ("lloyd-mcp", "memory_add")
 
 
@@ -232,7 +226,8 @@ def test_build_tool_list_filters_disallowed_bare():
     assert [t["function"]["name"] for t in out] == ["Read"]
 
 
-def test_build_tool_list_filters_disallowed_namespaced():
+def test_build_tool_list_accepts_legacy_namespaced_disallow():
+    # Rolled-forward configs may still spell disallowed tools the old way.
     discovered = [
         ("lloyd-mcp", [
             {"name": "memory_add", "description": "", "inputSchema": {}},
@@ -240,6 +235,15 @@ def test_build_tool_list_filters_disallowed_namespaced():
     ]
     out = build_tool_list(discovered, disallowed={"mcp__lloyd-mcp__memory_add"})
     assert out == []
+
+
+def test_build_tool_list_raises_on_cross_server_collision():
+    discovered = [
+        ("server-a", [{"name": "shared", "description": "", "inputSchema": {}}]),
+        ("server-b", [{"name": "shared", "description": "", "inputSchema": {}}]),
+    ]
+    with pytest.raises(ValueError, match="collision"):
+        build_tool_list(discovered, disallowed=set())
 
 
 # ---------------------------------------------------------------------------

@@ -426,10 +426,11 @@ def test_call_observer_pretool_timeout_fails_open():
 
 
 def test_install_observer_pretool_deny():
-    """Simulate the harness firing PreToolUse → observer denies a destructive Bash."""
+    """Simulate the harness firing PreToolUse → observer denies a destructive
+    Bash with grounded content (quotes the actual command)."""
     fake_body = {
         "choices": [
-            {"message": {"content": '"deny_tool","reason":"rm -rf on user data","content":"refusing"}'}}
+            {"message": {"content": '"deny_tool","reason":"rm -rf on user data","content":"Refusing rm -rf /home/alansrobotlab/lloyd — would wipe the project tree"}'}}
         ],
         "usage": {"prompt_tokens": 50, "completion_tokens": 15},
     }
@@ -460,10 +461,51 @@ def test_install_observer_pretool_deny():
     assert out, out
     hso = out.get("hookSpecificOutput") or {}
     assert hso.get("permissionDecision") == "deny", hso
-    assert "refusing" in (hso.get("permissionDecisionReason") or ""), hso
+    assert "rm -rf" in (hso.get("permissionDecisionReason") or ""), hso
     # PreToolUse denials don't count against budget
     assert state.interventions_used == 0
     print("test_install_observer_pretool_deny: OK")
+
+
+def test_install_observer_pretool_deny_downgrades_ungrounded():
+    """An IV deny_tool whose content is pure boilerplate (doesn't quote
+    anything from the actual args) gets downgraded to allow by the harness.
+    This catches hallucinated denials like 'destructive action; requires
+    confirmation' that don't actually reference what the command does.
+    """
+    fake_body = {
+        "choices": [
+            {"message": {"content": '"deny_tool","reason":"feels destructive","content":"Refusing this destructive action; requires explicit user confirmation."}'}}
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 15},
+    }
+
+    async def fake_post(**kwargs):
+        return fake_body
+
+    hooks = HookRegistry()
+    chat = []
+    cancel = asyncio.Event()
+    state = install_observer(
+        hooks=hooks,
+        session_id="test_sess",
+        turn_id="test_turn_ungrounded",
+        user_request="clear poisoned workers",
+        chat_messages_handle=chat,
+        cancel_event=cancel,
+        primary_model="primary",
+    )
+    with patch.object(obs_mod, "_post_chat_completion", new=fake_post):
+        out = run_async(
+            hooks.fire_pre_tool_use(
+                session_id="test_sess",
+                tool_name="Bash",
+                tool_input={"command": "python -c 'import sqlite3; sqlite3.connect(\"workers.db\").execute(\"DELETE FROM queue WHERE state=poisoned\")'"},
+            )
+        )
+    # Empty hook output = no deny = the call goes through.
+    assert out == {}, out
+    print("test_install_observer_pretool_deny_downgrades_ungrounded: OK")
 
 
 def test_install_observer_assistant_message_inject():
@@ -504,6 +546,103 @@ def test_install_observer_assistant_message_inject():
     assert "answer the user" in chat[0]["content"]
     assert state.interventions_used == 1
     print("test_install_observer_assistant_message_inject: OK")
+
+
+# ---------------------------------------------------------------------------
+# Deny-content grounding (#fix4)
+# ---------------------------------------------------------------------------
+
+
+def test_deny_content_grounded_passes_real_quote():
+    from app.inner_voice.observer import _deny_content_is_grounded
+    args = {"command": "rm -rf /home/x/important"}
+    assert _deny_content_is_grounded(
+        "Refusing rm -rf /home/x — would wipe persisted state", "Bash", args,
+    )
+    print("test_deny_content_grounded_passes_real_quote: OK")
+
+
+def test_deny_content_grounded_rejects_pure_boilerplate():
+    from app.inner_voice.observer import _deny_content_is_grounded
+    args = {"command": "python -c 'sqlite3.connect(\"workers.db\").execute(\"DELETE FROM queue\")'"}
+    assert not _deny_content_is_grounded(
+        "Refusing this destructive action; requires explicit user confirmation.",
+        "Bash", args,
+    )
+    print("test_deny_content_grounded_rejects_pure_boilerplate: OK")
+
+
+def test_deny_content_grounded_rejects_empty():
+    from app.inner_voice.observer import _deny_content_is_grounded
+    assert not _deny_content_is_grounded("", "Bash", {"command": "rm -rf /"})
+    assert not _deny_content_is_grounded("   ", "Bash", {"command": "rm -rf /"})
+    print("test_deny_content_grounded_rejects_empty: OK")
+
+
+# ---------------------------------------------------------------------------
+# Cancel-after-deadlock guard (#fix3)
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_after_deadlock_blocks_completion_claim():
+    from app.inner_voice.observer import _is_cancel_after_self_induced_deadlock
+    state = _make_state()
+    state.decisions_this_turn = [
+        {"trigger": "pretool", "action": "deny_tool", "reason": "destructive"},
+        {"trigger": "pretool", "action": "deny_tool", "reason": "destructive"},
+        {"trigger": "pretool", "action": "deny_tool", "reason": "destructive"},
+    ]
+    decision = ObserverDecision(
+        action="cancel",
+        reason="all success criteria met, stopping to avoid padding",
+    )
+    assert _is_cancel_after_self_induced_deadlock(state, decision)
+    print("test_cancel_after_deadlock_blocks_completion_claim: OK")
+
+
+def test_cancel_after_deadlock_allows_real_completion():
+    """Successful tool_results in the recent window mean the primary actually
+    made progress — the cancel is real completion, not deadlock."""
+    from app.inner_voice.observer import _is_cancel_after_self_induced_deadlock
+    state = _make_state()
+    state.decisions_this_turn = [
+        {"trigger": "pretool", "action": "deny_tool", "reason": "x"},
+        {"trigger": "pretool", "action": "allow", "reason": "y"},
+        {"trigger": "tool_result", "action": "noop", "reason": "z"},
+        {"trigger": "pretool", "action": "deny_tool", "reason": "w"},
+    ]
+    decision = ObserverDecision(action="cancel", reason="all done")
+    assert not _is_cancel_after_self_induced_deadlock(state, decision)
+    print("test_cancel_after_deadlock_allows_real_completion: OK")
+
+
+def test_cancel_after_deadlock_ignores_non_completion_reasons():
+    """Cancel for legitimate reasons (off-the-rails behavior) shouldn't be
+    blocked even if there were prior denies."""
+    from app.inner_voice.observer import _is_cancel_after_self_induced_deadlock
+    state = _make_state()
+    state.decisions_this_turn = [
+        {"trigger": "pretool", "action": "deny_tool", "reason": "x"},
+        {"trigger": "pretool", "action": "deny_tool", "reason": "y"},
+    ]
+    decision = ObserverDecision(action="cancel", reason="primary went off the rails entirely")
+    assert not _is_cancel_after_self_induced_deadlock(state, decision)
+    print("test_cancel_after_deadlock_ignores_non_completion_reasons: OK")
+
+
+def test_apply_lever_blocks_deadlock_cancel():
+    """End-to-end: _apply_lever should not set cancel_event when the cancel
+    is post-deadlock-with-completion-claim."""
+    state = _make_state()
+    state.decisions_this_turn = [
+        {"trigger": "pretool", "action": "deny_tool", "reason": "x"},
+        {"trigger": "pretool", "action": "deny_tool", "reason": "y"},
+    ]
+    decision = ObserverDecision(action="cancel", reason="all success criteria met")
+    run_async(_apply_lever(state, decision, trigger="tool_result"))
+    assert not state.cancel_event.is_set()
+    assert decision.action == "noop_cancel_after_deadlock"
+    print("test_apply_lever_blocks_deadlock_cancel: OK")
 
 
 # ---------------------------------------------------------------------------
@@ -755,18 +894,18 @@ def test_bash_safety_classifier():
 
 
 def test_fast_path_pretool_allows_safe_mcp():
-    d = _fast_path_pretool("mcp__lloyd-mcp__fact_get", {"entity": "lloyd"})
+    d = _fast_path_pretool("fact_get", {"entity": "lloyd"})
     assert d is not None and d.action == "allow", d
-    d2 = _fast_path_pretool("mcp__lloyd-mcp__memory_search", {"query": "x"})
+    d2 = _fast_path_pretool("memory_search", {"query": "x"})
     assert d2 is not None and d2.action == "allow", d2
     print("test_fast_path_pretool_allows_safe_mcp: OK")
 
 
 def test_fast_path_pretool_escalates_unknown_mcp():
     # No safe verb in name → escalate
-    d = _fast_path_pretool("mcp__lloyd-mcp__autonomy_write_task", {"title": "x"})
+    d = _fast_path_pretool("autonomy_write_task", {"title": "x"})
     assert d is None, d
-    d2 = _fast_path_pretool("mcp__lloyd-mcp__memory_add", {"text": "x"})
+    d2 = _fast_path_pretool("memory_add", {"text": "x"})
     assert d2 is None, d2
     print("test_fast_path_pretool_escalates_unknown_mcp: OK")
 
@@ -904,7 +1043,15 @@ TESTS = [
     test_call_observer_timeout_falls_back_to_noop,
     test_call_observer_pretool_timeout_fails_open,
     test_install_observer_pretool_deny,
+    test_install_observer_pretool_deny_downgrades_ungrounded,
     test_install_observer_assistant_message_inject,
+    test_deny_content_grounded_passes_real_quote,
+    test_deny_content_grounded_rejects_pure_boilerplate,
+    test_deny_content_grounded_rejects_empty,
+    test_cancel_after_deadlock_blocks_completion_claim,
+    test_cancel_after_deadlock_allows_real_completion,
+    test_cancel_after_deadlock_ignores_non_completion_reasons,
+    test_apply_lever_blocks_deadlock_cancel,
     # Goal extraction
     test_parse_goal_card_full,
     test_parse_goal_card_with_prefill,

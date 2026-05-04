@@ -360,7 +360,8 @@ def _extract_file_paths_from_dropped(
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function") or {}
             name = fn.get("name") or tc.get("name") or ""
-            # Match bare name or namespaced (mcp__lloyd-mcp__Read)
+            # Tolerate the legacy mcp__server__name form found in old
+            # session JSON; current advertise is bare-named.
             bare = name.rsplit("__", 1)[-1] if "__" in name else name
             if bare not in _RESTORE_TOOL_NAMES:
                 continue
