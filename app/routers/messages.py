@@ -30,7 +30,7 @@ from app.config import (
     _model_base_url,
     _resolve_model_name,
 )
-from app.harness import run_query, RunOptions, HookRegistry
+from app.harness import run_query, RunOptions, HookRegistry, install_default_safety_hook
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
     SessionTurn,
@@ -1072,7 +1072,8 @@ async def post_message_stream(request: Request):
     )
 
     iv_enabled = _session_inner_voice_enabled(session_id)
-    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else None
+    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
+    install_default_safety_hook(iv_hooks)
 
     options = RunOptions(
         model=model,
@@ -1160,7 +1161,8 @@ async def build_ambient_turn(
     system_prompt = build_system_prompt()
 
     iv_enabled = _session_inner_voice_enabled(session_id)
-    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else None
+    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
+    install_default_safety_hook(iv_hooks)
 
     options = RunOptions(
         model=model,
@@ -1269,7 +1271,8 @@ async def post_message(request: Request):
     )
 
     iv_enabled = _session_inner_voice_enabled(session_id)
-    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else None
+    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
+    install_default_safety_hook(iv_hooks)
 
     options = RunOptions(
         model=model,

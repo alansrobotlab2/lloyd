@@ -46,19 +46,21 @@ def _init_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(model);
 
         -- ── Inner Voice (thin observer) ──
-        -- One table per observer decision. Each row captures one observation:
-        -- the trigger (assistant_message | tool_call | tool_result | result | pretool),
-        -- the action (noop | inject | cancel | ambient | deny_tool), the reason,
-        -- and any content (injected text, ambient body, deny reason).
+        -- One table per observer decision. Each row captures one observation.
+        -- v4 actions: noop | inject | cancel | ambient | clarify, plus
+        -- noop_* variants for guarded/skipped decisions. Pre-v4 rows may
+        -- also contain deny_tool | allow — these stay in the table for
+        -- historical render but are never written by current code.
+        -- Triggers: assistant_message | tool_call | tool_result | result | pretool.
         CREATE TABLE IF NOT EXISTS inner_voice_observations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL,
             turn_id TEXT NOT NULL,
             sequence_in_turn INTEGER NOT NULL,
             trigger TEXT NOT NULL,                -- assistant_message | tool_call | tool_result | result | pretool
-            action TEXT NOT NULL,                 -- noop | inject | cancel | ambient | deny_tool | allow
+            action TEXT NOT NULL,                 -- v4: noop | inject | cancel | ambient | clarify (+ noop_*)
             reason TEXT,
-            content TEXT,                         -- inject text | ambient body | deny reason
+            content TEXT,                         -- inject text | ambient body | clarify question
             related_tool TEXT,                    -- for pretool / tool_call observations
             input_tokens INTEGER,
             output_tokens INTEGER,

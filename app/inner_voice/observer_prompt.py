@@ -84,16 +84,12 @@ def _load_prompt_file(path: Path, fallback: str, *, label: str) -> str:
 # functional on a fresh checkout or when the vault isn't mounted, but the
 # vault copy is the source of truth. Edit the markdown in the vault, not
 # these.
-_FALLBACK_SYSTEM_PROMPT = """You are Lloyd's Inner Voice — watch the primary agent and intervene only when it's drifting, looping, or about to do something destructive.
+_FALLBACK_SYSTEM_PROMPT = """You are Lloyd's Inner Voice — watch the primary agent and intervene only when it's drifting, looping, or about to terminate without answering.
 
-Levers: noop (default), inject (chat history nudge), cancel (stop iteration; also use when goal complete), ambient (queue follow-up turn), clarify (ask user a question, pauses primary). For pretool: allow or deny_tool.
-
-Output a single JSON object: {"action":"...","reason":"...","content":"..."}. Most events should be noop.
+Respond by calling exactly one of the lever tools loaded into your context: noop (default), inject (chat-history nudge), cancel (stop iteration), ambient (queue follow-up turn), clarify (ask user a question, pauses primary). Most events should be noop. Hard safety on destructive Bash is enforced by the harness; you do not gate.
 """
 
-_FALLBACK_GOAL_EXTRACTION_PROMPT = """Extract a goal card from the user's request. Output a single JSON object on one line:
-{"success_criteria":["..."],"out_of_scope":["..."],"completion_signals":["..."]}
-Empty lists if the request is conversational or has no actionable goal.
+_FALLBACK_GOAL_EXTRACTION_PROMPT = """Extract a goal card from the user's request and call the `record_goal_card` tool with three array fields: success_criteria, out_of_scope, completion_signals. Empty lists if the request is conversational or has no actionable goal.
 """
 
 
@@ -111,11 +107,8 @@ GOAL_EXTRACTION_SYSTEM_PROMPT = _load_prompt_file(
 
 
 # ---------------------------------------------------------------------------
-# Goal extraction user-prompt builder (kept in code — small, format-coupled
-# to the response parser in observer.py).
+# Goal extraction user-prompt builder
 # ---------------------------------------------------------------------------
-
-GOAL_EXTRACTION_PREFILL = '{"success_criteria":'
 
 
 def _format_recent_exchanges(exchanges: list[dict[str, str]] | None) -> str:
@@ -156,28 +149,24 @@ def build_goal_extraction_user_prompt(
         f"{prior}"
         f"USER REQUEST:\n{user_request}\n\n"
         f"{continuation_hint}"
-        f"Extract the goal card. Return JSON only."
+        f"Extract the goal card by calling the `record_goal_card` tool."
     )
 
 
 # Cap on interventions per turn. After this, the observer can only `noop`
-# or `allow`. Prevents runaway intervention loops.
+# or `cancel`. Prevents runaway intervention loops.
 DEFAULT_INTERVENTION_BUDGET = 3
 
-# Response token cap. Observer answers are short JSON; no need for more.
+# Response token cap — tool-call args are short.
 DEFAULT_MAX_TOKENS = 400
 
-# Per-call timeout. Pretool calls especially must be tight.
+# Per-call timeout. Pretool no longer has a separate sync deadline (v4
+# pretool can't block dispatch), so the same default applies everywhere.
 DEFAULT_TIMEOUT_SECONDS = 5.0
-DEFAULT_PRETOOL_TIMEOUT_SECONDS = 3.0
 
 # Goal extraction call gets its own (slightly larger) budget.
 DEFAULT_GOAL_EXTRACTION_TIMEOUT_SECONDS = 8.0
 DEFAULT_GOAL_EXTRACTION_MAX_TOKENS = 600
-
-# JSON prefill so the model returns structured output even when its first
-# token would otherwise be commentary.
-JSON_PREFILL = '{"action":'
 
 
 # ---------------------------------------------------------------------------
