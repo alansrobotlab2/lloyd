@@ -123,6 +123,7 @@ async def attach_observer_for_turn(
     cancel_event: asyncio.Event,
     enqueue_ambient_callback: Callable[[str, str], Awaitable[None]] | None = None,
     clarify_callback: Callable[[str, str], Awaitable[None]] | None = None,
+    persist_intervention_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
 ) -> ObserverState | None:
     """Install the observer onto `options.hooks` for one turn.
 
@@ -156,6 +157,7 @@ async def attach_observer_for_turn(
         primary_model=options.model,
         enqueue_ambient_callback=enqueue_ambient_callback,
         clarify_callback=clarify_callback,
+        persist_intervention_callback=persist_intervention_callback,
         goal_card=goal_card,
     )
     logger.info(

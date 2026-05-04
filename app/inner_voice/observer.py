@@ -545,6 +545,10 @@ class ObserverState:
     cancel_event: asyncio.Event
     enqueue_ambient_callback: Callable[[str, str], Awaitable[None]] | None
     clarify_callback: Callable[[str, str], Awaitable[None]] | None = None
+    # persist_intervention_callback(kind, content, reason) — writes a
+    # user-visible breadcrumb to the session JSON for inject/cancel actions
+    # so the user sees what the observer did. Optional; None = no breadcrumb.
+    persist_intervention_callback: Callable[[str, str, str], Awaitable[None]] | None = None
     primary_model: str = ""
     accumulated_text: str = ""
     interventions_used: int = 0
@@ -609,6 +613,17 @@ async def _apply_lever(
         state.chat_messages_handle.append(
             {"role": "user", "content": "[INNER VOICE] " + decision.content.strip()}
         )
+        # Persist a user-visible breadcrumb to the session JSON so the
+        # user (and the persisted history) records the intervention. The
+        # chat_messages_handle append above is transient — it lives only
+        # in the harness's in-memory buffer for the next iteration.
+        if state.persist_intervention_callback is not None:
+            try:
+                await state.persist_intervention_callback(
+                    "inject", decision.content, decision.reason or "",
+                )
+            except Exception as e:
+                logger.warning("[iv.observer] inject persist failed: %s", e)
         state.interventions_used += 1
         logger.info(
             "[iv.observer] inject session=%s turn=%s reason=%s",
@@ -627,6 +642,15 @@ async def _apply_lever(
         # The lever ends the turn; counting it would only matter if it could
         # fire repeatedly, which it can't.
         state.cancel_event.set()
+        # Persist a user-visible breadcrumb so the user sees WHY the turn
+        # stopped instead of an apparent silent stall.
+        if state.persist_intervention_callback is not None:
+            try:
+                await state.persist_intervention_callback(
+                    "cancel", "", decision.reason or "",
+                )
+            except Exception as e:
+                logger.warning("[iv.observer] cancel persist failed: %s", e)
         logger.info(
             "[iv.observer] cancel session=%s turn=%s reason=%s",
             state.session_id, state.turn_id, decision.reason,
@@ -760,6 +784,7 @@ def install_observer(
     primary_model: str,
     enqueue_ambient_callback: Callable[[str, str], Awaitable[None]] | None = None,
     clarify_callback: Callable[[str, str], Awaitable[None]] | None = None,
+    persist_intervention_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
     goal_card: dict[str, Any] | None = None,
 ) -> ObserverState:
     """Install observer hooks onto a HookRegistry for one primary turn.
@@ -777,6 +802,7 @@ def install_observer(
         cancel_event=cancel_event,
         enqueue_ambient_callback=enqueue_ambient_callback,
         clarify_callback=clarify_callback,
+        persist_intervention_callback=persist_intervention_callback,
         primary_model=primary_model,
         intervention_budget=int(cfg.get("intervention_budget", _prompt.DEFAULT_INTERVENTION_BUDGET)),
         cfg=cfg,

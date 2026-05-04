@@ -266,6 +266,39 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         }
         await _append_messages(session_id, [clarify_msg])
 
+    async def _iv_persist_intervention_cb(kind: str, content: str, reason: str) -> None:
+        """Persist a visible breadcrumb for an observer intervention.
+
+        kind ∈ {"inject", "cancel"}. Inject lands as a `[INNER VOICE]`
+        user message so the user sees the nudge in chat (and so the
+        primary's persisted history records the redirection). Cancel
+        lands as an assistant message explaining why the turn stopped.
+        Idempotent best-effort — failures are logged and swallowed.
+        """
+        try:
+            if kind == "inject":
+                msg: dict = {
+                    "id": uuid.uuid4().hex[:8],
+                    "role": "user",
+                    "content": [{"type": "text", "text": "[INNER VOICE] " + content.strip()}],
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "inner_voice_inject",
+                }
+            elif kind == "cancel":
+                body = "*(Inner Voice stopped this turn — " + (reason.strip() or "no reason given") + ")*"
+                msg = {
+                    "id": uuid.uuid4().hex[:8],
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": body}],
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "inner_voice_cancel",
+                }
+            else:
+                return
+            await _append_messages(session_id, [msg])
+        except Exception as e:
+            logger.warning(f"_iv_persist_intervention_cb({kind}) failed: {e}")
+
     iv_observer_state = await attach_observer_for_turn(
         session_id=session_id,
         turn_id=turn.turn_id,
@@ -276,6 +309,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         cancel_event=cancel_event,
         enqueue_ambient_callback=_iv_enqueue_ambient_cb,
         clarify_callback=_iv_clarify_cb,
+        persist_intervention_callback=_iv_persist_intervention_cb,
     )
 
     _event_log.log_event(session_id, "brain1.query_started", {
