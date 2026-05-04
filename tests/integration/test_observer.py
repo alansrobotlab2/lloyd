@@ -41,7 +41,14 @@ from app.inner_voice.observer import (
 # ---------------------------------------------------------------------------
 
 
-def _make_state(*, ambient_callback=None, clarify_callback=None, budget=3, goal_card=None) -> ObserverState:
+def _make_state(
+    *,
+    ambient_callback=None,
+    clarify_callback=None,
+    persist_intervention_callback=None,
+    budget=3,
+    goal_card=None,
+) -> ObserverState:
     state = ObserverState(
         session_id="test_sess",
         turn_id="test_turn",
@@ -50,6 +57,7 @@ def _make_state(*, ambient_callback=None, clarify_callback=None, budget=3, goal_
         cancel_event=asyncio.Event(),
         enqueue_ambient_callback=ambient_callback,
         clarify_callback=clarify_callback,
+        persist_intervention_callback=persist_intervention_callback,
         primary_model="primary",
         intervention_budget=budget,
         goal_card=goal_card,
@@ -197,6 +205,70 @@ def test_cancel_works_when_budget_exhausted():
     assert cancel_dec.action == "cancel", cancel_dec
     assert state.cancel_event.is_set()
     print("test_cancel_works_when_budget_exhausted: OK")
+
+
+def test_inject_invokes_persist_intervention_callback():
+    """When inject fires, the persist callback gets ('inject', content, reason).
+    This makes the intervention visible in the session JSON and chat UI."""
+    persisted = []
+
+    async def persist_cb(kind, content, reason):
+        persisted.append((kind, content, reason))
+
+    state = _make_state(persist_intervention_callback=persist_cb)
+    decision = ObserverDecision(action="inject", reason="drift", content="please answer")
+    run_async(_apply_lever(state, decision, trigger="assistant_message"))
+    assert persisted == [("inject", "please answer", "drift")], persisted
+    # Transient chat_messages_handle still got the in-memory copy.
+    assert len(state.chat_messages_handle) == 1
+    print("test_inject_invokes_persist_intervention_callback: OK")
+
+
+def test_cancel_invokes_persist_intervention_callback():
+    """When cancel fires, the persist callback gets ('cancel', '', reason).
+    Gives the user a visible explanation of why the turn stopped."""
+    persisted = []
+
+    async def persist_cb(kind, content, reason):
+        persisted.append((kind, content, reason))
+
+    state = _make_state(persist_intervention_callback=persist_cb)
+    decision = ObserverDecision(action="cancel", reason="stuck in loop")
+    run_async(_apply_lever(state, decision, trigger="assistant_message"))
+    assert persisted == [("cancel", "", "stuck in loop")], persisted
+    assert state.cancel_event.is_set()
+    print("test_cancel_invokes_persist_intervention_callback: OK")
+
+
+def test_inject_persist_failure_does_not_break_lever():
+    """If the persist callback raises, the intervention still fires (the
+    in-memory chat_messages_handle still gets the inject) — persistence is
+    best-effort breadcrumb only."""
+
+    async def broken_persist(kind, content, reason):
+        raise RuntimeError("disk full")
+
+    state = _make_state(persist_intervention_callback=broken_persist)
+    decision = ObserverDecision(action="inject", reason="x", content="msg")
+    run_async(_apply_lever(state, decision, trigger="assistant_message"))
+    # Intervention still landed in the live chat buffer.
+    assert len(state.chat_messages_handle) == 1
+    assert state.interventions_used == 1
+    print("test_inject_persist_failure_does_not_break_lever: OK")
+
+
+def test_cancel_persist_failure_does_not_break_lever():
+    """If the persist callback raises on cancel, the cancel still fires
+    (cancel_event still gets set)."""
+
+    async def broken_persist(kind, content, reason):
+        raise RuntimeError("disk full")
+
+    state = _make_state(persist_intervention_callback=broken_persist)
+    decision = ObserverDecision(action="cancel", reason="x")
+    run_async(_apply_lever(state, decision, trigger="assistant_message"))
+    assert state.cancel_event.is_set()
+    print("test_cancel_persist_failure_does_not_break_lever: OK")
 
 
 def test_ambient_fires_callback():
@@ -817,6 +889,10 @@ TESTS = [
     test_inject_appends_user_message,
     test_cancel_sets_event,
     test_cancel_works_when_budget_exhausted,
+    test_inject_invokes_persist_intervention_callback,
+    test_cancel_invokes_persist_intervention_callback,
+    test_inject_persist_failure_does_not_break_lever,
+    test_cancel_persist_failure_does_not_break_lever,
     test_ambient_fires_callback,
     test_ambient_with_no_callback_degrades_to_noop,
     test_inject_empty_content_degrades_to_noop,
