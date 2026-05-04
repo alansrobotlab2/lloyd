@@ -29,7 +29,14 @@ from app.harness.tool_result_spill import (
 from app.harness.events import NormalizedEvent
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
-from app.harness.tool_schema import build_tool_list
+from app.harness.tool_schema import BUILTIN_BARE_NAMES, build_tool_list
+from app.harness import tool_search_cache
+from app.harness.tool_search import (
+    LoadedToolSet,
+    TOOLSEARCH_TOOL_NAME,
+    format_catalog_reminder,
+    search_tools,
+)
 
 logger = logging.getLogger("lloyd-harness-loop")
 
@@ -76,7 +83,10 @@ async def run_query(
     # aclose() it here — lifecycle.shutdown_cleanup tears down all
     # pools at FastAPI shutdown.
     try:
-        tools = build_tool_list(list(pool.discovered), set(options.disallowed_tools))
+        catalog = build_tool_list(list(pool.discovered), set(options.disallowed_tools))
+        loaded_set = await _resolve_loaded_tool_set(options, catalog)
+        if loaded_set.enabled:
+            _inject_catalog_reminder(chat_messages, loaded_set)
 
         session_id = options.session_id or uuid.uuid4().hex
         yield events.system(session_id=session_id, model=options.model)
@@ -118,7 +128,7 @@ async def run_query(
                     base_url=options.base_url,
                     model=options.model,
                     messages=chat_messages,
-                    tools=tools,
+                    tools=loaded_set.visible_tools(),
                     extra_body=options.extra_body,
                     cancel_event=options.cancel_event,
                     timeout_s=options.request_timeout_s,
@@ -264,6 +274,7 @@ async def run_query(
                     pool=pool,
                     options=options,
                     session_id=session_id,
+                    loaded_set=loaded_set,
                 )
                 yield result_evt
                 if options.hooks is not None:
@@ -455,6 +466,7 @@ async def _dispatch_one_tool_call(
     pool: MCPPool,
     options: RunOptions,
     session_id: str,
+    loaded_set: LoadedToolSet,
 ) -> NormalizedEvent:
     """Run hooks → MCP dispatch → hooks for a single tool call.
 
@@ -478,6 +490,44 @@ async def _dispatch_one_tool_call(
             content=f"Tool {name!r} is disabled by configuration.",
             is_error=True,
         )
+
+    # ToolSearch — intercept locally, no MCP round-trip. The matched tools
+    # are added to the LoadedToolSet so subsequent turns see them in
+    # ``visible_tools()`` (and thus in vLLM's ``tools=`` array).
+    if name == TOOLSEARCH_TOOL_NAME and loaded_set.enabled:
+        query = str(args_dict.get("query", "") or "")
+        max_results = args_dict.get("max_results")
+        if not isinstance(max_results, int) or max_results < 1:
+            max_results = options.tool_search_max_results_default
+        max_results = min(max_results, options.tool_search_max_results_cap)
+        matched_names, content = search_tools(
+            query, max_results=max_results, catalog=loaded_set.catalog,
+        )
+        loaded_set.mark_loaded(matched_names)
+        logger.info(
+            "loop: ToolSearch query=%r max_results=%d matched=%d (loaded set now %d)",
+            query, max_results, len(matched_names), len(loaded_set.loaded),
+        )
+        return events.tool_result(
+            call_id=call_id, name=name, content=content, is_error=False,
+        )
+
+    # Defensive intercept: vLLM should only dispatch tools that are in the
+    # ``tools=`` array we sent, but the qwen3_xml parser is lenient and may
+    # let an unadvertised name through. Catch it before MCP and guide the
+    # model back to ToolSearch instead of failing opaquely.
+    if loaded_set.enabled and not loaded_set.is_visible(name):
+        catalog_names = {t["function"]["name"] for t in loaded_set.catalog}
+        if name in catalog_names:
+            return events.tool_result(
+                call_id=call_id, name=name,
+                content=(
+                    f"Tool {name!r} requires schema loading before it can be "
+                    f"called. Call ToolSearch(query=\"select:{name}\") first, "
+                    f"then retry."
+                ),
+                is_error=True,
+            )
 
     # PreToolUse — first deny wins.
     if options.hooks is not None:
@@ -568,6 +618,95 @@ def _namespaced_form(bare_name: str) -> str:
     callers ought to use bare names in disallowed_tools for built-ins.
     """
     return f"mcp__lloyd-mcp__{bare_name}"
+
+
+# ---------------------------------------------------------------------------
+# Tool search wiring
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_loaded_tool_set(
+    options: RunOptions, catalog: list[dict[str, Any]],
+) -> LoadedToolSet:
+    """Build the per-session LoadedToolSet, honoring activation thresholds.
+
+    Activation rule:
+      enabled = options.tool_search_enabled
+                AND ToolSearch is not in disallowed_tools
+                AND len(catalog) >= options.tool_search_threshold_tools
+    """
+    catalog_names = {t["function"]["name"] for t in catalog}
+    disallowed = set(options.disallowed_tools or [])
+
+    if options.tool_search_baseline:
+        baseline_candidates = options.tool_search_baseline
+    else:
+        baseline_candidates = list(BUILTIN_BARE_NAMES)
+    baseline = {
+        n for n in baseline_candidates
+        if n in catalog_names and n not in disallowed
+    }
+
+    enabled = (
+        options.tool_search_enabled
+        and TOOLSEARCH_TOOL_NAME not in disallowed
+        and len(catalog) >= options.tool_search_threshold_tools
+    )
+    if options.tool_search_enabled and not enabled and TOOLSEARCH_TOOL_NAME in disallowed:
+        logger.warning(
+            "loop: tool_search requested but ToolSearch is in disallowed_tools — "
+            "falling back to full catalog (%d tools).",
+            len(catalog),
+        )
+
+    return await tool_search_cache.get_or_create(
+        session_id=options.session_id or "",
+        catalog=catalog,
+        baseline=baseline,
+        enabled=enabled,
+    )
+
+
+_CATALOG_REMINDER_MARKER = "<!--lloyd-toolsearch-catalog-reminder-->"
+
+
+def _inject_catalog_reminder(
+    chat_messages: list[dict[str, Any]], loaded_set: LoadedToolSet,
+) -> None:
+    """Append the deferred-tools catalog to the leading system message.
+
+    Idempotent: tagged with a marker the function greps for before
+    appending, so re-running on the same chat_messages list is a no-op.
+
+    Why append instead of insert a second system message: vLLM's chat
+    templates (qwen3, gpt-oss, etc.) require exactly one system message
+    at position 0. A second ``role: system`` anywhere — including
+    immediately after the first — gets rejected with
+    ``"System message must be at the beginning."``. Appending into the
+    existing system message's content is the only safe shape.
+
+    If no system message exists yet, one is inserted at position 0 with
+    only the reminder body — same constraint, just no leading content
+    to merge into.
+    """
+    body = format_catalog_reminder(loaded_set.catalog)
+    if not body:
+        return
+    addendum = f"\n\n{_CATALOG_REMINDER_MARKER}\n{body}"
+
+    for m in chat_messages:
+        if m.get("role") == "system" and _CATALOG_REMINDER_MARKER in (m.get("content") or ""):
+            return
+
+    for i, m in enumerate(chat_messages):
+        if m.get("role") == "system":
+            existing = m.get("content") or ""
+            m["content"] = existing + addendum
+            return
+        # First non-system message — no system to merge into; insert one.
+        break
+
+    chat_messages.insert(0, {"role": "system", "content": addendum.lstrip()})
 
 
 

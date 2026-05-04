@@ -57,6 +57,28 @@ def _get_disallowed_tools() -> list[str]:
     return disallowed
 
 
+def _get_tool_search_kwargs() -> dict:
+    """Resolve harness.tool_search.* config into RunOptions kwargs.
+
+    Splatted into RunOptions(**...) at every construction site (chat
+    streaming, ambient, sync, voice). Defaults align with RunOptions's
+    own dataclass defaults so missing config keys behave sanely.
+    """
+    cfg = (CONFIG.get("harness") or {}).get("tool_search") or {}
+    out: dict = {}
+    if "enabled" in cfg:
+        out["tool_search_enabled"] = bool(cfg["enabled"])
+    if "threshold_tools" in cfg:
+        out["tool_search_threshold_tools"] = int(cfg["threshold_tools"])
+    if cfg.get("baseline_tools"):
+        out["tool_search_baseline"] = list(cfg["baseline_tools"])
+    if "max_results_default" in cfg:
+        out["tool_search_max_results_default"] = int(cfg["max_results_default"])
+    if "max_results_cap" in cfg:
+        out["tool_search_max_results_cap"] = int(cfg["max_results_cap"])
+    return out
+
+
 async def _discover_mcp_tools(server_name: str, cfg: dict) -> tuple[list[dict], str | None]:
     """Discover tools from an MCP server. Supports SSE and stdio transports."""
     server_type = cfg.get("type", "stdio")
