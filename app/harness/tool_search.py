@@ -91,8 +91,8 @@ class LoadedToolSet:
     sync with ``enabled``.
 
     ``baseline`` is the set of advertised names that are always visible
-    (typically the BUILTIN_BARE_NAMES intersected with what's in the
-    catalog).
+    (typically the seven file/shell built-ins intersected with what's
+    in the catalog).
 
     ``loaded`` accumulates names the model has revealed via ToolSearch.
     Persists for the life of the session (see ``tool_search_cache``).

@@ -36,47 +36,46 @@ SESSIONS_DIR = LLOYD_HOME / "sessions"
 LLOYD_BACKEND = "http://127.0.0.1:8080"
 DISCORD_API = "https://discord.com/api/v10"
 
-# Tools blocked for non-owner Discord users.
-# The combined SSE server has name "" in config.yaml, so tool IDs are mcp____toolname.
+# Tools blocked for non-owner Discord users. All entries are bare MCP
+# tool names — the harness advertises tools without a namespace prefix.
 NON_OWNER_DISALLOWED = [
     # Memory — block writes, allow reads
-    "mcp____fact_add",
-    "mcp____fact_resolve",
-    "mcp____vault_write",
+    "fact_add",
+    "fact_resolve",
+    "vault_write",
     # Autonomy (all)
-    "mcp____autonomy_tasks",
-    "mcp____autonomy_write_task",
-    "mcp____autonomy_get_task",
-    "mcp____autonomy_delete_task",
-    "mcp____autonomy_config",
-    "mcp____autonomy_run_task",
+    "autonomy_tasks",
+    "autonomy_write_task",
+    "autonomy_get_task",
+    "autonomy_delete_task",
+    "autonomy_config",
+    "autonomy_run_task",
     # Mission control (all)
-    "mcp____chat_list_sessions",
-    "mcp____chat_get_session",
+    "chat_list_sessions",
+    "chat_get_session",
     # Backlog (all)
-    "mcp____backlog_boards",
-    "mcp____backlog_tasks",
-    "mcp____backlog_get_task",
-    "mcp____backlog_write_task",
+    "backlog_boards",
+    "backlog_tasks",
+    "backlog_get_task",
+    "backlog_write_task",
     # Subliminal (all)
-    "mcp____subliminal_recall",
+    "subliminal_recall",
     # Browser (all)
-    "mcp____browser_navigate",
-    "mcp____browser_snapshot",
-    "mcp____browser_click",
-    "mcp____browser_type",
-    "mcp____browser_scroll",
-    "mcp____browser_press",
-    "mcp____browser_tabs",
-    "mcp____browser_screenshot",
-    "mcp____browser_evaluate",
-    "mcp____browser_fill",
-    "mcp____browser_wait",
-    "mcp____browser_select",
-    "mcp____browser_drag",
-    "mcp____browser_cookies",
-    # Thunderbird — dynamic tool names (prefixed with thunderbird_); block by pattern below
-    # Built-in Claude tools
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_scroll",
+    "browser_press",
+    "browser_tabs",
+    "browser_screenshot",
+    "browser_evaluate",
+    "browser_fill",
+    "browser_wait",
+    "browser_select",
+    "browser_drag",
+    "browser_cookies",
+    # Built-in shell/file tools
     "Bash",
     "Read",
     "Write",
