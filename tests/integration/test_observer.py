@@ -169,12 +169,34 @@ def test_inject_appends_user_message():
 
 
 def test_cancel_sets_event():
+    """Cancel sets cancel_event AND does NOT consume the intervention budget.
+    Cancel is the escape hatch — rationing it would prevent recovery from
+    'primary keeps ignoring my injects' cases."""
     state = _make_state()
     decision = ObserverDecision(action="cancel", reason="loop")
     run_async(_apply_lever(state, decision, trigger="assistant_message"))
     assert state.cancel_event.is_set()
-    assert state.interventions_used == 1
+    assert state.interventions_used == 0, "cancel must not count against budget"
     print("test_cancel_sets_event: OK")
+
+
+def test_cancel_works_when_budget_exhausted():
+    """Cancel must remain available after inject/ambient/clarify budget hits.
+    This is the fix for the temporal-knowledge-graph stall: observer was
+    blocked from cancelling a runaway loop because budget was exhausted on
+    earlier injects."""
+    state = _make_state(budget=2)
+    # Burn the budget on injects.
+    for i in range(2):
+        d = ObserverDecision(action="inject", reason=f"r{i}", content=f"msg{i}")
+        run_async(_apply_lever(state, d, trigger="assistant_message"))
+    assert state.interventions_used == 2
+    # Now cancel — must still fire.
+    cancel_dec = ObserverDecision(action="cancel", reason="injects ignored, force-stop")
+    run_async(_apply_lever(state, cancel_dec, trigger="assistant_message"))
+    assert cancel_dec.action == "cancel", cancel_dec
+    assert state.cancel_event.is_set()
+    print("test_cancel_works_when_budget_exhausted: OK")
 
 
 def test_ambient_fires_callback():
@@ -501,6 +523,105 @@ def test_event_prompt_handles_missing_goal_card():
     print("test_event_prompt_handles_missing_goal_card: OK")
 
 
+def test_tool_result_summary_detects_spilled_payload():
+    """When a tool result is a `<persisted-output>` envelope, the summary
+    should explicitly name the size + path so the observer can judge
+    progress against the data, not nag about reading more."""
+    from app.inner_voice.observer_prompt import build_tool_result_summary
+    spilled = (
+        "<persisted-output>\n"
+        "Output too large (68.3 KB, 69,943 chars). Full output saved to: /tmp/test/spill.json\n\n"
+        "Preview (first 2.0 KB):\n"
+        '{"entity": "lloyd", "category": "overview"...\n'
+        "...\n"
+        "Read the full file with the Read tool if you need more than the preview.\n"
+    )
+    summary = build_tool_result_summary("Read", spilled, is_error=False)
+    assert "SPILLED" in summary, summary
+    assert "68.3 KB" in summary, summary
+    assert "/tmp/test/spill.json" in summary, summary
+    assert "lloyd" in summary, "preview opener should be visible"
+    print("test_tool_result_summary_detects_spilled_payload: OK")
+
+
+def test_tool_result_summary_falls_back_for_normal_result():
+    """Normal small results use the existing format."""
+    from app.inner_voice.observer_prompt import build_tool_result_summary
+    summary = build_tool_result_summary("Bash", "hello\nworld\n", is_error=False)
+    assert "SPILLED" not in summary
+    assert "result" in summary
+    assert "hello" in summary
+    print("test_tool_result_summary_falls_back_for_normal_result: OK")
+
+
+def test_tool_result_summary_keeps_error_path_for_errors():
+    """Even if an error message contains the spill tag, the error path wins
+    (we always want the observer to see ERROR for error results)."""
+    from app.inner_voice.observer_prompt import build_tool_result_summary
+    summary = build_tool_result_summary("Bash", "Permission denied", is_error=True)
+    assert "ERROR" in summary
+    print("test_tool_result_summary_keeps_error_path_for_errors: OK")
+
+
+# ---------------------------------------------------------------------------
+# Mid-turn microcompaction (harness ↔ observer shared list contract)
+# ---------------------------------------------------------------------------
+
+
+def test_intra_turn_microcompact_clears_in_place():
+    """The harness mutates chat_messages in-place (chat_messages[:] = ...)
+    so the observer's shared list reference still sees the cleared
+    results. This pins that contract.
+    """
+    from app.harness.microcompact import microcompact, CLEARED_MARKER
+    # Build a chat with 18 compactable tool results (>15 threshold).
+    msgs: list[dict] = []
+    for i in range(18):
+        msgs.append({
+            "role": "assistant",
+            "tool_calls": [{"id": f"tc{i}", "function": {"name": "Read"}}],
+        })
+        msgs.append({
+            "role": "tool",
+            "tool_call_id": f"tc{i}",
+            "content": f"file content {i}",
+        })
+    handle = msgs  # observer would hold this reference
+    original_id = id(handle)
+    compacted, cleared = microcompact(handle, keep_recent_tools=5, count_threshold=15)
+    assert cleared >= 13, cleared  # 18 - 5 kept = 13 cleared
+    # Simulate the loop's in-place replace.
+    handle[:] = compacted
+    # The observer's reference is still valid AND sees the cleared content.
+    assert id(handle) == original_id, "in-place replace must preserve list identity"
+    cleared_msgs = [m for m in handle if m.get("role") == "tool" and CLEARED_MARKER in str(m.get("content", ""))]
+    assert len(cleared_msgs) == cleared
+    # Most recent 5 stay inline.
+    recent_msgs = [m for m in handle if m.get("role") == "tool" and "file content" in str(m.get("content", ""))]
+    assert len(recent_msgs) == 5, recent_msgs
+    print("test_intra_turn_microcompact_clears_in_place: OK")
+
+
+def test_intra_turn_microcompact_skips_under_threshold():
+    """Under the threshold, microcompact does nothing (no spill markers)."""
+    from app.harness.microcompact import microcompact
+    msgs: list[dict] = []
+    for i in range(5):  # 5 << 15 threshold
+        msgs.append({
+            "role": "assistant",
+            "tool_calls": [{"id": f"tc{i}", "function": {"name": "Read"}}],
+        })
+        msgs.append({
+            "role": "tool",
+            "tool_call_id": f"tc{i}",
+            "content": f"file content {i}",
+        })
+    compacted, cleared = microcompact(msgs, keep_recent_tools=5, count_threshold=15)
+    assert cleared == 0
+    assert compacted == msgs  # unchanged
+    print("test_intra_turn_microcompact_skips_under_threshold: OK")
+
+
 # ---------------------------------------------------------------------------
 # Tiered triggering — fast-path
 # ---------------------------------------------------------------------------
@@ -695,6 +816,7 @@ TESTS = [
     test_normalize_pretool_path,
     test_inject_appends_user_message,
     test_cancel_sets_event,
+    test_cancel_works_when_budget_exhausted,
     test_ambient_fires_callback,
     test_ambient_with_no_callback_degrades_to_noop,
     test_inject_empty_content_degrades_to_noop,
@@ -716,6 +838,11 @@ TESTS = [
     test_extract_goal_card_returns_none_on_error,
     test_event_prompt_includes_goal_card,
     test_event_prompt_handles_missing_goal_card,
+    test_tool_result_summary_detects_spilled_payload,
+    test_tool_result_summary_falls_back_for_normal_result,
+    test_tool_result_summary_keeps_error_path_for_errors,
+    test_intra_turn_microcompact_clears_in_place,
+    test_intra_turn_microcompact_skips_under_threshold,
     # Tiered triggering
     test_fast_path_pretool_allows_read_glob_grep,
     test_fast_path_pretool_allows_safe_bash,

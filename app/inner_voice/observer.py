@@ -593,7 +593,10 @@ async def _apply_lever(
             decision.action = "noop_clarify_on_result"
             return
 
-    if state.interventions_used >= state.intervention_budget:
+    # Budget gate — applies to inject/ambient/clarify only. Cancel is the
+    # escape hatch lever: it terminates the loop and exits, so rationing it
+    # would prevent recovery from "primary keeps ignoring my injects" cases.
+    if a != "cancel" and state.interventions_used >= state.intervention_budget:
         decision.action = "noop_budget_exhausted"
         decision.reason = ((decision.reason or "") + " [budget exhausted]").strip()
         return
@@ -620,8 +623,10 @@ async def _apply_lever(
         return
 
     if a == "cancel":
+        # Cancel does NOT increment interventions_used — see budget gate above.
+        # The lever ends the turn; counting it would only matter if it could
+        # fire repeatedly, which it can't.
         state.cancel_event.set()
-        state.interventions_used += 1
         logger.info(
             "[iv.observer] cancel session=%s turn=%s reason=%s",
             state.session_id, state.turn_id, decision.reason,

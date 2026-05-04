@@ -72,3 +72,13 @@ class RunOptions:
     tool_search_baseline: list[str] = field(default_factory=list)
     tool_search_max_results_default: int = 5
     tool_search_max_results_cap: int = 20
+
+    # Mid-turn microcompaction. When tool results pile up within a single
+    # turn (the temporal-knowledge stall hit 30+ in one turn), the
+    # harness clears stale ones in-place via app.harness.microcompact so
+    # the primary's next iteration sees a manageable context. Spill-aware:
+    # any older result with a `<persisted-output>` marker also gets cleared
+    # since its content is already on disk and re-readable via Read.
+    intra_turn_microcompact_enabled: bool = True
+    intra_turn_microcompact_threshold: int = 15  # tool results before triggering
+    intra_turn_microcompact_keep_recent: int = 5  # keep this many most-recent inline
