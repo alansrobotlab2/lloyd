@@ -86,6 +86,8 @@ def _load_prompt_file(path: Path, fallback: str, *, label: str) -> str:
 # these.
 _FALLBACK_SYSTEM_PROMPT = """You are Lloyd's Inner Voice — watch the primary agent and intervene only when it's drifting, looping, or about to terminate without answering.
 
+Each assistant_message event includes `finish_reason`. When finish_reason="stop" and the iteration has no tool_calls, the harness is about to terminate the turn — that is your last chance to redirect. The harness has an inject-extends-turn mechanism: an inject on the terminal iteration restarts the loop so primary reads your nudge. Use this when the final text is a stub announce ("Let me check X:") or otherwise fails to actually deliver an answer.
+
 Respond by calling exactly one of the lever tools loaded into your context: noop (default), inject (chat-history nudge), cancel (stop iteration), ambient (queue follow-up turn), clarify (ask user a question, pauses primary). Most events should be noop. Hard safety on destructive Bash is enforced by the harness; you do not gate.
 """
 
@@ -291,23 +293,46 @@ def build_assistant_message_summary(
     iteration: int,
     text: str,
     tool_calls: list[dict],
+    finish_reason: str = "stop",
 ) -> str:
-    """One-line summary of an assistant_message event for review."""
+    """One-line summary of an assistant_message event for review.
+
+    Includes vLLM's `finish_reason` so IV can distinguish "primary done"
+    (`finish_reason=stop` + no tool_calls → harness terminates) from
+    "primary mid-thought" (`finish_reason=tool_calls` → harness will
+    loop). When finish_reason == "stop" and there are no tool calls,
+    THIS is the last chance to inject; the harness uses
+    inject-extends-turn (loop.py:236-256) so an inject here continues
+    the loop instead of letting primary terminate.
+    """
     text_preview = text[:300] + ("..." if len(text) > 300 else "")
     if tool_calls:
         names = [tc.get("function", {}).get("name") or tc.get("name") or "?" for tc in tool_calls]
         return (
-            f"Iteration {iteration} finished. Text: {text_preview!r}. "
-            f"Tool calls proposed: {names}."
+            f"Iteration {iteration} finished (finish_reason={finish_reason!r}). "
+            f"Text: {text_preview!r}. Tool calls proposed: {names}. "
+            f"Primary will continue after tool dispatch."
         )
-    if not text.strip():
+    if finish_reason == "stop":
+        if not text.strip():
+            return (
+                f"Iteration {iteration} finished with EMPTY text and NO tool calls "
+                f"(finish_reason=stop). PRIMARY IS ABOUT TO TERMINATE WITHOUT "
+                f"ANSWERING. This is your last chance to inject — the harness "
+                f"will continue the loop if you do."
+            )
         return (
-            f"Iteration {iteration} finished with EMPTY text and NO tool calls. "
-            f"Primary is about to terminate without answering."
+            f"Iteration {iteration} finished with text only, NO tool calls "
+            f"(finish_reason=stop). PRIMARY IS ABOUT TO TERMINATE. "
+            f"Text: {text_preview!r}. If this text actually delivers an answer "
+            f"to the user's request, noop. If it's a stub/announce ('Let me X', "
+            f"'Now I'll Y'), or otherwise fails to answer, inject — the harness "
+            f"will continue the loop and primary will read your nudge."
         )
+    # finish_reason in {length, tool_calls without committed tools, error, ...}
     return (
-        f"Iteration {iteration} finished with text only (no tool calls). "
-        f"Text: {text_preview!r}. Primary will terminate after this iteration."
+        f"Iteration {iteration} finished (finish_reason={finish_reason!r}). "
+        f"Text: {text_preview!r}. No tool calls. Primary may or may not continue."
     )
 
 

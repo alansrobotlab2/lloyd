@@ -226,6 +226,7 @@ async def run_query(
                 usage=iteration_usage,
                 duration_ms=iteration_duration_ms,
                 iteration=num_turns,
+                finish_reason=finish_reason or "stop",
             )
             yield asst_evt
             # Snapshot chat_messages length before firing OnEvent. The

@@ -849,7 +849,10 @@ def install_observer(
                     _persist(state, fp, trigger="assistant_message")
                     return
 
-            summary = _prompt.build_assistant_message_summary(iteration, text, tool_calls)
+            finish_reason = str(evt.get("finish_reason") or "stop")
+            summary = _prompt.build_assistant_message_summary(
+                iteration, text, tool_calls, finish_reason,
+            )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
                 user_prompt=user_prompt, cfg=state.cfg,
