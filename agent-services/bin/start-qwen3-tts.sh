@@ -10,7 +10,7 @@ set -euo pipefail
 # API: POST /v1/audio/speech
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VENV="$PROJECT_DIR/.venvs/qwen3-tts"
+VENV="$HOME/lloyd/.venvs/qwen3-tts"
 QWEN3_TTS_DIR="$PROJECT_DIR/services/tts/qwen3-tts"
 
 if [[ ! -x "$VENV/bin/python" ]]; then

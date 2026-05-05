@@ -20,7 +20,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-VLLM_VENV="$PROJECT_DIR/.venvs/vllm-experimental"
+VLLM_VENV="$HOME/lloyd/.venvs/vllm-experimental"
 MODEL_DIR="/home/alansrobotlab/Projects/Model-Optimizer/workspaces/minimax-m2.7-reap-nvfp4/output"
 
 if [[ ! -x "$VLLM_VENV/bin/python" ]]; then

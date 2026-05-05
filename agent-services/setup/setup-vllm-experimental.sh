@@ -14,7 +14,7 @@ set -euo pipefail
 #   supervisorctl -c supervisor/supervisord.conf start agent-llm-122b-experimental
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VLLM_VENV="$PROJECT_DIR/.venvs/vllm-experimental"
+VLLM_VENV="$HOME/lloyd/.venvs/vllm-experimental"
 PATCH_DIR="$PROJECT_DIR/setup/patches"
 
 echo "=== Experimental vLLM Setup (Nightly + SPARK Patches) ==="
