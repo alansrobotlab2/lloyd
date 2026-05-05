@@ -289,11 +289,58 @@ def build_pretool_event_summary(tool_name: str, tool_args: dict) -> str:
     )
 
 
+def _format_goal_eval_block(
+    goal_card: dict[str, Any] | None,
+    *,
+    on_unmet: str,
+) -> str:
+    """Render the goal-card-driven completion check appended to terminal
+    event summaries.
+
+    The block restates the goal card's success_criteria and
+    completion_signals item-by-item and asks the IV to evaluate each
+    against the response under review. ``on_unmet`` is the lever name to
+    fire when any item is unaddressed (``inject`` at the terminal
+    assistant_message, ``ambient`` at the result event).
+
+    Returns "" when there's no actionable goal card — caller falls back
+    to its existing judgment-based language.
+    """
+    if not goal_card:
+        return ""
+    sc = goal_card.get("success_criteria") or []
+    cs = goal_card.get("completion_signals") or []
+    if not sc and not cs:
+        return ""
+    lines = ["", "GOAL-COMPLETION CHECK (REQUIRED — do not skip):"]
+    if sc:
+        lines.append("  Success criteria:")
+        lines.extend(f"    - {s}" for s in sc)
+    if cs:
+        lines.append("  Completion signals:")
+        lines.extend(f"    - {s}" for s in cs)
+    lines.extend([
+        "",
+        "Walk each item above. For each, decide: did the response under review "
+        "actually address it (yes), or is it still unaddressed (no)?",
+        "",
+        f"  - ALL items addressed → noop (the response delivered).",
+        f"  - ANY item unaddressed → {on_unmet} — the work is not done.",
+        "",
+        "Do NOT noop on the basis that the primary 'announced intent' or "
+        "'will dispatch tools next.' The harness has terminated this iteration; "
+        "there is no next dispatch unless you act now. Treat textual promises "
+        "of future action as evidence the work was NOT done.",
+    ])
+    return "\n".join(lines)
+
+
 def build_assistant_message_summary(
     iteration: int,
     text: str,
     tool_calls: list[dict],
     finish_reason: str = "stop",
+    goal_card: dict[str, Any] | None = None,
 ) -> str:
     """One-line summary of an assistant_message event for review.
 
@@ -304,6 +351,12 @@ def build_assistant_message_summary(
     THIS is the last chance to inject; the harness uses
     inject-extends-turn (loop.py:236-256) so an inject here continues
     the loop instead of letting primary terminate.
+
+    On the terminal branch (stop + no tool_calls + non-empty text), the
+    goal card is restated inline and the IV is required to walk each
+    success_criterion / completion_signal against the iteration text.
+    Without this, the IV pattern-matches on textual promises of future
+    action ("I'll fetch X") and noops, missing the stall.
     """
     text_preview = text[:300] + ("..." if len(text) > 300 else "")
     if tool_calls:
@@ -321,13 +374,12 @@ def build_assistant_message_summary(
                 f"ANSWERING. This is your last chance to inject — the harness "
                 f"will continue the loop if you do."
             )
+        eval_block = _format_goal_eval_block(goal_card, on_unmet="inject")
         return (
-            f"Iteration {iteration} finished with text only, NO tool calls "
-            f"(finish_reason=stop). PRIMARY IS ABOUT TO TERMINATE. "
-            f"Text: {text_preview!r}. If this text actually delivers an answer "
-            f"to the user's request, noop. If it's a stub/announce ('Let me X', "
-            f"'Now I'll Y'), or otherwise fails to answer, inject — the harness "
-            f"will continue the loop and primary will read your nudge."
+            f"Iteration {iteration} TERMINAL (finish_reason=stop, NO tool calls). "
+            f"The harness EXITS the turn at this event unless you inject. "
+            f"There is no next iteration. Tools are not coming.\n"
+            f"Iteration text: {text_preview!r}.{eval_block}"
         )
     # finish_reason in {length, tool_calls without committed tools, error, ...}
     return (
@@ -401,10 +453,32 @@ def build_tool_result_summary(
     )
 
 
-def build_result_summary(stop_reason: str, response_text: str) -> str:
-    """One-line summary of the terminal `result` event."""
+def build_result_summary(
+    stop_reason: str,
+    response_text: str,
+    goal_card: dict[str, Any] | None = None,
+) -> str:
+    """Summary of the terminal `result` event with goal-completion check.
+
+    The harness has already exited by the time this event fires — inject
+    is a no-op here and only ``ambient`` (queue follow-up turn) takes
+    effect. The summary restates the goal card and forces an explicit
+    item-by-item completion check, so the IV can't carry over a stale
+    "will dispatch tools next" judgment from the assistant_message event.
+    """
     txt = response_text[:300] + ("..." if len(response_text) > 300 else "")
+    eval_block = _format_goal_eval_block(goal_card, on_unmet="ambient")
+    if eval_block:
+        return (
+            f"Turn ENDED (stop_reason={stop_reason}). The harness has already "
+            f"terminated. There will be no more text or tool calls. "
+            f"Final visible response: {txt!r}.{eval_block}"
+        )
+    # No goal card — fall back to lighter-touch judgment.
     return (
-        f"Turn ended (stop_reason={stop_reason}). Final visible response: {txt!r}. "
-        f"This is your last chance to ambient a follow-up."
+        f"Turn ENDED (stop_reason={stop_reason}). The harness has already "
+        f"terminated. Final visible response: {txt!r}. "
+        f"If the response delivers a substantive answer → noop. If it's a "
+        f"stub announce ('I'll X', 'Let me Y') or otherwise fails to deliver, "
+        f"ambient a follow-up turn that completes the work."
     )
