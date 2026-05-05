@@ -19,7 +19,7 @@ except ImportError:
     distance = None
 
 FACTS_DIR = Path("/home/alansrobotlab/obsidian/facts")
-EXCLUDE_DIRS = {".openclaw", "_pipeline", "_relationships.json"}
+EXCLUDE_DIRS = {"_pipeline", "_relationships.json"}
 
 def normalize_name(name: str) -> str:
     """Normalize entity name for comparison."""

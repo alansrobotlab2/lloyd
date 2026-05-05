@@ -11,6 +11,50 @@ set -euo pipefail
 # bump to confirm decode rates / MTP optimum still hold.
 #
 # Tuning history (most recent first):
+#   2026-05-05  num_speculative_tokens 4 → 3 after a third crash signature,
+#               distinct from the two addressed earlier today and recurring.
+#               agent-llm-primary.err contains 12 cudaErrorIllegalAddress
+#               matches across 6 EngineCore PIDs in the last ~12h, all with
+#               the same trace: gpu_worker.sample_tokens →
+#               gpu_model_runner._bookkeeping_sync (line 3450) →
+#               RejectionSampler.parse_output (rejection_sampler.py:265,
+#               output_token_ids.cpu().numpy()).  The .cpu() is just where
+#               the async kernel error finally synchronizes; the offending
+#               kernel is upstream in the MTP draft/verify path.  Not OOM:
+#               zero "out of memory" / cudaErrorMemoryAllocation hits, and
+#               the GDN chunk_fwd_o signature from earlier today is absent.
+#               Known issue cluster: vllm-project/vllm#36031 (Qwen3.5-122B
+#               + MTP regression bisected to commit 28ef9ba / PR #34552, no
+#               fix), #36498 (122B-FP8 + MTP K=2 illegal access on 0.17),
+#               #36613 (Qwen3.5-397B + qwen3_next_mtp under concurrency,
+#               resolved only by removing --speculative-config), #35288
+#               (MTP V1 illegal access at concurrency≥4, ngram fix #13673
+#               doesn't cover MTP), #36331 (this exact model+GPU: 0% MTP
+#               accept + FlashInfer cutlass TMA WS init failures), and
+#               NVIDIA devforum thread on Nemotron-3-Super-120B-NVFP4 +
+#               cu130-nightly + MTP K=3 with the same crash class on first
+#               request (workaround: K=2).  Pending fix cluster tracked in
+#               #37113 (PRs #39550, #39632-#39635) targets MTP draft load,
+#               metadata reuse, DCP-aware draft, SM120 NVFP4 MoE, and
+#               FlashInfer MLA DCP/MTP decode — not yet integrated and
+#               validated only on GLM-5.1, not Qwen3.5-122B-NVFP4.  Also
+#               relevant: Sehyo NVFP4 model HF discussion #10 (chadbek
+#               2026-03-05) reports BatchPrefillWithPagedKVCache illegal
+#               access on this exact RTX PRO 6000 Blackwell hardware with
+#               MTP, suggesting the FlashInfer attention backend is part
+#               of the failure surface here too.
+#               Dropping K 4 → 3 is a cheap probe — narrows the rejection
+#               sampler's working set without giving up MTP entirely.
+#               Per the 2026-04-07 sweep at max_tokens=200: 171.6 → 160.0
+#               t/s (-7%); the K=4..6 long-form plateau suggests similar
+#               or smaller regression at K=3.  If illegal-address recurs:
+#               step down to K=2 (Nemotron thread's confirmed survival
+#               point on cu130-nightly), then remove --speculative-config
+#               entirely (vllm#36613's confirmed fix path).  Don't try
+#               --enforce-eager / FlashInfer→Triton swap until the K
+#               step-down is exhausted: those discard the cudagraph and
+#               attention tuning that this script's TTFT/decode numbers
+#               depend on.
 #   2026-05-05  Stability fix after supervisord crash-loop (37 EngineCore
 #               restarts in ~12h, autorestart=true).  Two changes:
 #                 (a) --gpu-memory-utilization 0.95 → 0.92.  Every crash had
@@ -165,4 +209,4 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --tool-call-parser qwen3_xml \
   --reasoning-parser qwen3 \
   --performance-mode interactivity \
-  --speculative-config '{"method": "mtp", "num_speculative_tokens": 4}'
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'

@@ -80,7 +80,9 @@ def save_task(task: dict) -> bool:
         if isinstance(value, bool):
             fm_lines.append(f"{key}: {str(value).lower()}")
         elif isinstance(value, list):
-            fm_lines.append(f"{key}: {value}")
+            fm_lines.append(f"{key}:")
+            for item in value:
+                fm_lines.append(f"  - {item}")
         elif isinstance(value, datetime):
             fm_lines.append(f"{key}: {value.isoformat()}")
         else:
