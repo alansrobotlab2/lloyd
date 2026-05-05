@@ -857,6 +857,7 @@ def install_observer(
             finish_reason = str(evt.get("finish_reason") or "stop")
             summary = _prompt.build_assistant_message_summary(
                 iteration, text, tool_calls, finish_reason,
+                goal_card=state.goal_card,
             )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
@@ -971,7 +972,9 @@ def install_observer(
         if etype == "result":
             stop_reason = evt.get("stop_reason", "") or ""
             response_text = evt.get("response_text", "") or ""
-            summary = _prompt.build_result_summary(stop_reason, response_text)
+            summary = _prompt.build_result_summary(
+                stop_reason, response_text, goal_card=state.goal_card,
+            )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
                 user_prompt=user_prompt, cfg=state.cfg,
