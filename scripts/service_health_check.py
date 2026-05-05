@@ -12,7 +12,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
-SUPervisor_CONF = "/home/alansrobotlab/agent-services/supervisor/supervisord.conf"
+SUPervisor_CONF = "/home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf"
 
 SERVICES = {
     # Supervisor services — no HTTP check (inside container)
