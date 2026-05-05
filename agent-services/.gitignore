@@ -1,0 +1,97 @@
+/acknowledgements/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venvs/
+venv/
+ENV/
+
+# Distribution / packaging
+sdist/
+wheels/
+*.whl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.*
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# mypy / type checking
+.mypy_cache/
+.pytype/
+
+# uv
+.python-version
+
+# LLM infrastructure (large binaries, model symlinks, and nested third-party repos)
+llm/llama.cpp/
+llm/models
+llm/llama-b8746-unsloth/
+llm/ik_llama.cpp/
+llm/flashinfer-k64/
+llm/vllm-mistral/
+
+# Wakeword / smart-turn / TTS reference assets (binary models + audio)
+models/
+services/tts/references/
+
+# Nested third-party repo (has its own .git; track at upstream)
+services/thunderbird-mcp/
+
+# Local backups, trash, runtime state
+.backups/
+.trash/
+*.backup
+.claude/
+llama.log
+
+/references/*
+
+/acknowledgements/*
+
+# TTS service venvs/models (multi-GB each, recreated by setup scripts)
+services/tts/index-tts/
+services/tts/qwen3-tts/
+services/tts/fish-speech/
+services/tts/vibevoice/
+
+# Config with secrets (tokens) — use voice_bridge_config.example.json
+voice_bridge_config.json
+
+# Archives
+*.zip
+
+# Runtime logs directory
+logs/
+
+# Supervisor runtime logs
+supervisor/*.log
+supervisor/*.err
+
+/agent-services/benchmarks

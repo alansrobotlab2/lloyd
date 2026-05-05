@@ -16,9 +16,9 @@ Lloyd is a fully local AI agent. It runs its own in-process agent loop (`app/har
 Lloyd runs under **supervisord inside the `lloyd` distrobox container**. We are already inside the container — use supervisorctl directly:
 
 ```bash
-/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-backend
-/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-frontend
-/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/agent-services/supervisor/supervisord.conf status
+/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-backend
+/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-frontend
+/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf status
 ```
 
 The process group is `lloyd-mc`, not `lloyd-backend` bare. Always use `lloyd-mc:lloyd-backend` and `lloyd-mc:lloyd-frontend`.

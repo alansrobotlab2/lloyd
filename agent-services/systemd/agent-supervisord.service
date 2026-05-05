@@ -1,0 +1,16 @@
+[Unit]
+Description=Lloyd Agent Services (supervisord)
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/bash /home/alansrobotlab/lloyd/agent-services/bin/cleanup-orphans.sh
+ExecStart=/usr/bin/distrobox enter lloyd -- supervisord -n -c /home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf
+ExecStop=/usr/bin/distrobox enter lloyd -- supervisorctl -c /home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf shutdown
+ExecReload=/usr/bin/distrobox enter lloyd -- supervisorctl -c /home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf reread
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

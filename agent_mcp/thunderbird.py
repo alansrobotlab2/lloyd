@@ -18,7 +18,7 @@ from typing import Any, Optional
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
-BRIDGE_PATH = Path.home() / "agent-services" / "services" / "thunderbird-mcp" / "mcp-bridge.cjs"
+BRIDGE_PATH = Path.home() / "lloyd" / "agent-services" / "services" / "thunderbird-mcp" / "mcp-bridge.cjs"
 
 TOOL_NAME_MAP = {
     "listAccounts": "email_accounts",
