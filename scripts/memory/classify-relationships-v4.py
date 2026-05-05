@@ -531,9 +531,12 @@ def _call_llm_v4(endpoint: str, model: str, system: str, prompt: str, timeout: i
         print(f"[llm] request failed: {e!r}", file=sys.stderr)
         return None
     try:
-        content = data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"].get("content")
     except Exception:
         print(f"[llm] unexpected response shape: {str(data)[:200]}", file=sys.stderr)
+        return None
+    if not content:
+        print(f"[llm] empty content; finish_reason={data['choices'][0].get('finish_reason')!r}", file=sys.stderr)
         return None
     return _v2._extract_json(content)
 

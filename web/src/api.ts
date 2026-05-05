@@ -416,6 +416,12 @@ export interface AutonomyTask {
   last_run: string | null;
 }
 
+export interface TodoItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+  activeForm: string
+}
+
 export interface ActiveProc {
   pid: number
   sdk_session_id: string | null
@@ -539,6 +545,13 @@ export const api = {
   async getSessionStatus(sessionId: string): Promise<{ streaming: boolean }> {
     const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/status`)
     return response.json()
+  },
+
+  async getSessionTodos(sessionId: string): Promise<TodoItem[]> {
+    const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/todos`)
+    if (!response.ok) return []
+    const data = await response.json()
+    return Array.isArray(data?.todos) ? data.todos : []
   },
 
   async cancelSession(

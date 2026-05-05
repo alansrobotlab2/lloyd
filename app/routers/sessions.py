@@ -64,6 +64,21 @@ async def list_sessions():
     return JSONResponse({"sessions": sessions[:50], "count": len(sessions)})
 
 
+@router.get("/api/sessions/{session_id}/todos")
+async def get_session_todos(session_id: str):
+    """Return the session's TodoWrite checklist (empty list if unset).
+
+    The TodoWrite MCP tool persists the array under the ``todos`` key in
+    the session JSON. The frontend re-fetches this endpoint after every
+    TodoWrite tool result; no SSE event needed.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    data = json.loads(meta_path.read_text())
+    return JSONResponse({"todos": data.get("todos", [])})
+
+
 @router.get("/api/messages/{session_id}")
 async def get_messages(session_id: str):
     """Load messages for a session from stored session metadata."""

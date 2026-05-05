@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
 import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench, Square, Sparkles } from 'lucide-react'
 import { marked } from 'marked'
 import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState } from '../api'
+import TodoList from './TodoList'
 
 // Configure marked
 marked.setOptions({ breaks: true, gfm: true })
@@ -315,6 +316,10 @@ export default function ChatPanel({
   const [activeToolName, setActiveToolName] = useState<string | null>(null)
   const [thinkLevel, setThinkLevel] = useState<string>(() => localStorage.getItem('mc_think_level') || 'off')
   const [queueState, setQueueState] = useState<QueueState | null>(null)
+  // Bumped to force <TodoList> to re-fetch from /api/sessions/<id>/todos.
+  // Bumped on session change (initial load) and on every TodoWrite tool
+  // result so the panel reflects the model's latest checklist.
+  const [todoRefreshKey, setTodoRefreshKey] = useState(0)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -777,6 +782,7 @@ export default function ChatPanel({
           if (!stillPending) setActiveToolName(null)
           return updated
         })
+        if (_name === 'TodoWrite') setTodoRefreshKey(k => k + 1)
       },
       onThinkingDelta: (delta) => {
         accumulatedThinking += delta
@@ -932,6 +938,8 @@ export default function ChatPanel({
         
         <div ref={messagesEndRef} />
       </main>
+
+      <TodoList sessionId={sessionKey} refreshKey={todoRefreshKey} />
 
       {/* Input */}
       <footer className="p-3 border-t border-surface-3/50 relative">
