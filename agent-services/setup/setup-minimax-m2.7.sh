@@ -12,7 +12,7 @@ LLAMA_DIR="$PROJECT_DIR/llm/llama.cpp"
 MODELS_LINK="$PROJECT_DIR/llm/models"
 MODEL_REPO="unsloth/MiniMax-M2.7-GGUF"
 MODEL_DIR="$HOME/models/MiniMax-M2.7-UD-IQ3_XXS"
-HF_CLI="$PROJECT_DIR/.venvs/vllm-experimental/bin/huggingface-cli"
+HF_CLI="$HOME/lloyd/.venvs/vllm-experimental/bin/huggingface-cli"
 
 echo "=== MiniMax-M2.7 Setup (Unsloth IQ3_XXS GGUF) ==="
 
