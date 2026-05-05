@@ -1,0 +1,52 @@
+[project]
+name = "lloyd-services"
+version = "0.1.0"
+description = "Lloyd voice pipeline services — MCP server and TUI"
+requires-python = "==3.11.*"
+dependencies = [
+    "textual>=8.0.0",
+    "rich>=14.0.0",
+    "numpy",
+    "sounddevice",
+    "scipy",
+    "openwakeword",
+    "speexdsp-ns",
+    "silero-vad",
+    "useful-moonshine-onnx",
+    "resemblyzer",
+    "setuptools<82",
+    "requests",
+    "onnxruntime-gpu",
+    "faster-whisper",
+    "websockets",
+]
+
+[project.optional-dependencies]
+mcp = [
+    "mcp[cli]>=1.0.0",
+    "httpx>=0.28.0",
+    "uvicorn>=0.34.0",
+    "starlette>=0.45.0",
+    "sse-starlette>=2.0",
+]
+openclaw-mcp = [
+    "mcp[cli]>=1.0.0",
+    "httpx>=0.28.0",
+    "pyyaml>=6.0",
+    "ddgs>=7.0",
+    "readability-lxml>=0.8",
+    "html2text>=2024.0",
+    "uvicorn>=0.34.0",
+    "starlette>=0.45.0",
+    "sse-starlette>=2.0",
+]
+
+[project.scripts]
+voice-tui = "voice_tui:main"
+
+[tool.setuptools]
+py-modules = ["voice_tui", "voice_pipeline", "voice_mcp_server", "openclaw_mcp_server"]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"

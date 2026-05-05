@@ -37,3 +37,6 @@ __pycache__/
 # Misc runtime state
 state.json
 /voice_runtime_state.json
+
+# Vendored agent-services: bench output (kept out of lloyd repo)
+/agent-services/benchmarks/

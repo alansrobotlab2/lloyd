@@ -1,0 +1,32 @@
+--- a/vllm/platforms/__init__.py
++++ b/vllm/platforms/__init__.py
+@@ -86,15 +86,28 @@
+         finally:
+             pynvml.nvmlShutdown()
+     except Exception as e:
+         logger.debug("Exception happens when checking CUDA platform: %s", str(e))
+         if "nvml" not in e.__class__.__name__.lower():
+             # If the error is not related to NVML, re-raise it.
+             raise e
+
++        # NVML can fail (e.g. NVMLError_LibRmVersionMismatch) when the host
++        # userspace libnvidia-ml.so was upgraded but the kernel nvidia.ko
++        # module wasn't reloaded.  CUDA runtime usually still works in this
++        # state, so fall back to torch.cuda before giving up — otherwise
++        # vLLM 0.20+ refuses to start with "Failed to infer device type".
++        try:
++            import torch
++
++            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
++                logger.debug("CUDA platform available via torch.cuda fallback (NVML init failed: %s).", e)
++                return "vllm.platforms.cuda.CudaPlatform"
++        except Exception:
++            pass
++
+         # CUDA is supported on Jetson, but NVML may not be.
+         import os
+
+         def cuda_is_jetson() -> bool:
+             return os.path.isfile("/etc/nv_tegra_release") or os.path.exists(
+                 "/sys/class/tegra-firmware"
+             )

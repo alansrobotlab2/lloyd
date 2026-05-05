@@ -22,7 +22,7 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   exit 1
 fi
 
-MODEL="${MODEL:-$HOME/agent-services/llm/models/Sehyo-Qwen3.5-122B-A10B-NVFP4}"
+MODEL="${MODEL:-$HOME/lloyd/agent-services/llm/models/Sehyo-Qwen3.5-122B-A10B-NVFP4}"
 PORT="${PORT:-8096}"
 TP_SIZE=1
 CONTEXT_LENGTH=65536

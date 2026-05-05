@@ -1,0 +1,14 @@
+[Unit]
+Description=Idler Autonomy Board Heartbeat Service
+After=network.target
+
+[Service]
+Type=simple
+User=alansrobotlab
+WorkingDirectory=/home/alansrobotlab/obsidian/agents/idler
+ExecStart=/home/alansrobotlab/lloyd/agent-services/venvs/idler/bin/python3 /home/alansrobotlab/obsidian/agents/idler/main.py
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

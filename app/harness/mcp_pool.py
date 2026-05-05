@@ -47,21 +47,21 @@ class MCPPool:
 
     def __init__(self, server_configs: dict[str, dict[str, Any]]):
         self._configs = server_configs
-        self._exit_stack = AsyncExitStack()
         self._sessions: dict[str, ClientSession] = {}
         self._tool_routes: dict[str, str] = {}  # bare_name → server_name
         self._schemas: dict[str, dict[str, Any]] = {}  # bare_name → inputSchema
         self._discovered: list[tuple[str, list[dict[str, Any]]]] = []
         self._opened = False
         self._open_lock = asyncio.Lock()
-        # Set when call_tool hits a transport-shaped failure. The cache
-        # layer evicts poisoned pools so the next caller opens fresh.
-        # We don't aclose() the dead pool because its AsyncExitStack is
-        # bound to whatever asyncio task originally opened it; closing
-        # from a different task raises "Attempted to exit cancel scope
-        # in a different task than it was entered in." Letting the pool
-        # be GC'd is imperfect (streams leak until process exit) but is
-        # the only safe option without restructuring lifetime ownership.
+        # Owner-task pattern: a single dedicated task holds the AsyncExitStack
+        # for the SSE clients and ClientSessions. All cleanup happens in that
+        # same task, avoiding anyio's "cancel scope exited in a different task"
+        # error that previously left the task group spinning in
+        # _deliver_cancellation at 100 % CPU.
+        self._owner_task: asyncio.Task[None] | None = None
+        self._shutdown_event = asyncio.Event()
+        self._opened_event = asyncio.Event()
+        self._open_error: BaseException | None = None
         self._poisoned = False
 
     async def open(self) -> None:
@@ -73,37 +73,77 @@ class MCPPool:
         async with self._open_lock:
             if self._opened:
                 return
-            for server_name, cfg in self._configs.items():
-                try:
-                    session = await self._open_session(server_name, cfg)
-                except Exception as exc:
-                    logger.warning(
-                        "mcp_pool: failed to open %s: %s", server_name, exc
-                    )
-                    continue
-                self._sessions[server_name] = session
-                tools = await self._list_tools(server_name, session)
-                self._discovered.append((server_name, tools))
-                for tool in tools:
-                    bare = tool["name"]
-                    if bare in self._tool_routes:
-                        # First server wins; log the collision.
-                        logger.warning(
-                            "mcp_pool: tool name collision on %r — %s wins over %s",
-                            bare,
-                            self._tool_routes[bare],
-                            server_name,
-                        )
-                        continue
-                    self._tool_routes[bare] = server_name
-                    schema = tool.get("inputSchema")
-                    if isinstance(schema, dict):
-                        self._schemas[bare] = schema
+            self._owner_task = asyncio.create_task(
+                self._owner_loop(), name="mcp_pool_owner"
+            )
+            await self._opened_event.wait()
+            if self._open_error is not None:
+                # Owner task already exited; surface the error and reset.
+                err = self._open_error
+                self._open_error = None
+                raise err
             self._opened = True
 
+    async def _owner_loop(self) -> None:
+        """Hold every SSE/ClientSession context for the pool's lifetime.
+
+        Opens all configured servers under one AsyncExitStack, signals the
+        opener via `_opened_event`, then parks on `_shutdown_event`. When
+        shutdown fires (or any context raises), the AsyncExitStack unwinds
+        in this same task — keeping anyio's cancel scopes consistent.
+        """
+        try:
+            async with AsyncExitStack() as stack:
+                for server_name, cfg in self._configs.items():
+                    try:
+                        session = await self._open_session(stack, server_name, cfg)
+                    except Exception as exc:
+                        logger.warning(
+                            "mcp_pool: failed to open %s: %s", server_name, exc
+                        )
+                        continue
+                    self._sessions[server_name] = session
+                    tools = await self._list_tools(server_name, session)
+                    self._discovered.append((server_name, tools))
+                    for tool in tools:
+                        bare = tool["name"]
+                        if bare in self._tool_routes:
+                            logger.warning(
+                                "mcp_pool: tool name collision on %r — %s wins over %s",
+                                bare,
+                                self._tool_routes[bare],
+                                server_name,
+                            )
+                            continue
+                        self._tool_routes[bare] = server_name
+                        schema = tool.get("inputSchema")
+                        if isinstance(schema, dict):
+                            self._schemas[bare] = schema
+                self._opened_event.set()
+                await self._shutdown_event.wait()
+        except BaseException as exc:
+            # Open failed, or a child task in one of the SSE task groups
+            # propagated. Surface to whoever's awaiting open(), then let
+            # the AsyncExitStack finish unwinding in this task.
+            self._open_error = exc
+            self._opened_event.set()
+            self._poisoned = True
+            if not isinstance(exc, Exception):
+                raise
+
     async def aclose(self) -> None:
-        """Close every open session."""
-        await self._exit_stack.aclose()
+        """Signal the owner task to tear down, then await it.
+
+        Cleanup runs in the owner task — never in the caller's task — so
+        anyio cancel scopes always exit in the task that entered them.
+        """
+        self._shutdown_event.set()
+        if self._owner_task is not None:
+            try:
+                await self._owner_task
+            except Exception as exc:
+                logger.warning("mcp_pool: owner task exited with %s", exc)
+            self._owner_task = None
         self._sessions.clear()
         self._tool_routes.clear()
         self._schemas.clear()
@@ -155,13 +195,13 @@ class MCPPool:
         try:
             result = await session.call_tool(bare, coerced)
         except Exception as exc:
-            # Mark this pool poisoned and evict it from the process-wide
-            # cache so the next caller opens a fresh pool. The current
-            # turn still fails — we can't safely reconnect in-place
-            # because the AsyncExitStack is bound to the task that opened
-            # it. See `_poisoned` doc on __init__ for the full reasoning.
+            # Transport-shaped failure. Mark poisoned, evict from cache,
+            # and signal the owner task to tear the pool down in its own
+            # context. The owner task closes the AsyncExitStack — that's
+            # the task that entered the cancel scopes, so anyio is happy.
             self._poisoned = True
             _evict_pool(self)
+            self._shutdown_event.set()
             logger.warning(
                 "mcp_pool: %s on %s failed (%s); pool evicted from cache",
                 bare, server_name, exc,
@@ -186,14 +226,21 @@ class MCPPool:
     # ------------------------------------------------------------------
 
     async def _open_session(
-        self, server_name: str, cfg: dict[str, Any]
+        self,
+        stack: AsyncExitStack,
+        server_name: str,
+        cfg: dict[str, Any],
     ) -> ClientSession:
+        """Enter the SSE client + ClientSession contexts on the supplied
+        ``stack``. The stack belongs to the owner task, so cleanup runs in
+        the same task that entered the contexts.
+        """
         server_type = cfg.get("type", "stdio")
         if server_type in ("sse", "http"):
             url = cfg["url"]
             ctx = sse_client(url)
-            read_stream, write_stream = await self._exit_stack.enter_async_context(ctx)
-            session = await self._exit_stack.enter_async_context(
+            read_stream, write_stream = await stack.enter_async_context(ctx)
+            session = await stack.enter_async_context(
                 ClientSession(read_stream, write_stream)
             )
             await session.initialize()
@@ -336,15 +383,13 @@ async def get_or_open_pool(server_configs: dict[str, dict[str, Any]]) -> MCPPool
 def _evict_pool(pool: MCPPool) -> None:
     """Drop a poisoned pool from the cache.
 
-    Called from `MCPPool.call_tool` when the underlying SSE session has
-    failed in a way we can't recover from in-place. We don't aclose()
-    the pool here — its AsyncExitStack is bound to the task that opened
-    it, and closing from a different task raises. The streams leak until
-    process exit; in practice that's a few file descriptors per restart,
-    not a meaningful resource leak.
+    Synchronous best-effort: drop the cache entry only. Closing the pool
+    is handled by the owner task once `_shutdown_event` is set (see
+    ``MCPPool.call_tool``); we never await across tasks here, so we don't
+    need to do any async work in this function.
 
-    Synchronous and best-effort: we accept a small race where two threads
-    evict simultaneously. Python dict ops are atomic under the GIL.
+    Two concurrent evictions race harmlessly: dict ops are atomic under
+    the GIL, and the second pop sees the entry already gone.
     """
     for k, p in list(_POOL_CACHE.items()):
         if p is pool:

@@ -50,7 +50,7 @@ async def get_service_detail(id: str = ""):
     proc = procs.get(id, {})
     active, sub = _sup_state(proc)
     pid = proc.get("pid") or None
-    log_path = f"/home/alansrobotlab/agent-services/logs/{id}.log"
+    log_path = f"/home/alansrobotlab/lloyd/agent-services/logs/{id}.log"
     log_lines = _read_log_tail(log_path)
     raw = f"state={proc.get('statename','?')} pid={pid} desc={proc.get('description','')}"
     return JSONResponse({

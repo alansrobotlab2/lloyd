@@ -15,8 +15,8 @@
 
 set -euo pipefail
 
-VENV="/home/alansrobotlab/agent-services/.venvs/vllm-19-turboquant"
-MODEL="/home/alansrobotlab/agent-services/llm/models/Sehyo-Qwen3.5-122B-A10B-NVFP4"
+VENV="/home/alansrobotlab/lloyd/agent-services/.venvs/vllm-19-turboquant"
+MODEL="/home/alansrobotlab/lloyd/agent-services/llm/models/Sehyo-Qwen3.5-122B-A10B-NVFP4"
 PORT="${PORT:-8098}"
 
 echo "==> vLLM + TurboQuant (CUSTOM backend)"
