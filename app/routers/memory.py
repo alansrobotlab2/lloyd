@@ -2,7 +2,7 @@
 
 import json
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
@@ -11,6 +11,17 @@ from fastapi.responses import JSONResponse
 
 
 router = APIRouter()
+
+
+def _jsonable(obj):
+    """Recursively convert yaml.safe_load output to JSON-serializable types."""
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    return obj
 
 _VAULT = Path.home() / "obsidian"
 _VAULT_SEGMENTS = ["memory", "knowledge", "projects", "agents", "personal", "work", "skills"]
@@ -114,7 +125,10 @@ async def memory_read(path: str = ""):
     if content.startswith("---"):
         parts = content.split("---", 2)
         if len(parts) >= 3:
-            fm = yaml.safe_load(parts[1]) or {}
+            try:
+                fm = _jsonable(yaml.safe_load(parts[1]) or {})
+            except yaml.YAMLError:
+                fm = {}
             body = parts[2].strip()
     return JSONResponse({
         "path": path,
@@ -139,5 +153,13 @@ async def memory_save(request: Request):
         out = f"---\n{yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)}---\n\n{content}"
     else:
         out = content
+        # Validate embedded frontmatter when content contains its own --- block
+        if out.startswith("---"):
+            parts = out.split("---", 2)
+            if len(parts) >= 3:
+                try:
+                    yaml.safe_load(parts[1])
+                except yaml.YAMLError as e:
+                    raise HTTPException(status_code=422, detail=f"Invalid frontmatter YAML: {e}")
     filepath.write_text(out, encoding="utf-8")
     return JSONResponse({"ok": True})

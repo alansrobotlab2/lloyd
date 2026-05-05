@@ -36,9 +36,6 @@ fi
 # Create log directory
 mkdir -p "$LOG_DIR"
 
-# Set environment
-export NODE_EXTRA_CA_CERTS=/home/alansrobotlab/.openclaw/certs/mc.crt
-
 echo "Starting monitoring daemon..."
 echo "Log file: $LOG_FILE"
 
