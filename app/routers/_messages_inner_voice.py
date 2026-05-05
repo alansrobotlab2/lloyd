@@ -74,15 +74,24 @@ def _session_iv_evaluate_user_turns_enabled(session_id: str) -> bool:
         return False
 
 
-def _iv_should_fire_on_turn(session_id: str, turn_source: str) -> bool:
+def _iv_should_fire_on_turn(
+    session_id: str, turn_source: str, producer_source: str = "",
+) -> bool:
     """Single gate: should the observer fire for this turn?
 
     True iff the session opted into Inner Voice AND either the turn is
     ambient OR the session opted into user-turn evaluation.
+
+    Ambient turns whose producer is `inner_voice` are skipped: those are
+    nudges IV itself enqueued (via the result-trigger inject→ambient
+    downgrade), and attaching a fresh observer to them lets IV re-judge
+    its own follow-up and inject a duplicate of the same nudge.
     """
     if not _session_inner_voice_enabled(session_id):
         return False
     if turn_source == "ambient":
+        if producer_source == "inner_voice":
+            return False
         return True
     return _session_iv_evaluate_user_turns_enabled(session_id)
 
@@ -180,6 +189,7 @@ async def attach_observer_for_turn(
     clarify_callback: Callable[[str, str], Awaitable[None]] | None = None,
     persist_intervention_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
     subliminal_context: str = "",
+    producer_source: str = "",
 ) -> ObserverState | None:
     """Install the observer onto `options.hooks` for one turn.
 
@@ -192,7 +202,7 @@ async def attach_observer_for_turn(
       * Sets `options.chat_messages_handle = chat_messages_handle` so the
         harness reads from the same list the observer mutates.
     """
-    if not _iv_should_fire_on_turn(session_id, turn_source):
+    if not _iv_should_fire_on_turn(session_id, turn_source, producer_source):
         return None
 
     if options.hooks is None:
