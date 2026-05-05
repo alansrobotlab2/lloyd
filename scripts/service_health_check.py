@@ -2,7 +2,7 @@
 """Service Health Check Skill
 
 Bundle multiple service status checks into a single call.
-Returns structured status for LLM, MCP, priority proxy, and other Lloyd services.
+Returns structured status for LLM, MCP, and other Lloyd services.
 """
 
 import argparse
@@ -23,16 +23,11 @@ SERVICES = {
     # LLM inference servers — no HTTP check (inside container)
     "agent-llm-primary": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-llm-primary"], "category": "supervisor"},
     "agent-llm-secondary": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-llm-secondary"], "category": "supervisor"},
-
-    # Priority proxy — only 122b runs on host loopback for HTTP check
-    "priority-proxy-122b": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "lloyd-priority-proxy:lloyd-priority-proxy-122b"], "category": "priority-proxy", "port": 8097},
-    "priority-proxy-35b": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "lloyd-priority-proxy:lloyd-priority-proxy-35b"], "category": "priority-proxy"},
 }
 
 CATEGORIES = {
     "llm": ["agent-llm-primary", "agent-llm-secondary"],
     "lloyd": ["lloyd-backend", "lloyd-frontend", "lloyd-mcp"],
-    "priority-proxy": ["priority-proxy-122b", "priority-proxy-35b"],
     "all": list(SERVICES.keys()),
 }
 

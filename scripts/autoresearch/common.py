@@ -253,28 +253,22 @@ def ledger_append(path: Path, entry: dict[str, Any]) -> None:
         logger.warning("ledger_append failed: %s", exc)
 
 
-AUTORESEARCH_PRIORITY = 2  # user=0, pipeline/autonomy SDK=1 (via proxy), autoresearch=2
+AUTORESEARCH_PRIORITY = 1  # interactive (chat, inner voice) = 0; all background workers = 1
 
 
-def get_model_env(model: str, priority_proxy: bool = False) -> dict[str, str]:
-    """Resolve model → env vars.
-
-    Autoresearch talks to vLLM directly (8096/8091) and sets `"priority": 2`
-    in each request body. The `priority_proxy` kwarg is kept for callers that
-    want the proxy's priority=1 behavior, but autoresearch defaults to direct.
-    """
+def get_model_env(model: str) -> dict[str, str]:
+    """Resolve model → env vars. All callers talk to vLLM directly and
+    set `"priority": AUTORESEARCH_PRIORITY` in the request body."""
     if model == "primary":
-        base = "http://127.0.0.1:8097" if priority_proxy else "http://127.0.0.1:8096"
         return {
-            "ANTHROPIC_BASE_URL": base,
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8096",
             "ANTHROPIC_API_KEY": "no-key-required",
             "ANTHROPIC_CUSTOM_MODEL_OPTION": "primary",
             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Primary",
         }
     if model == "secondary":
-        base = "http://127.0.0.1:8093" if priority_proxy else "http://127.0.0.1:8091"
         return {
-            "ANTHROPIC_BASE_URL": base,
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8091",
             "ANTHROPIC_API_KEY": "no-key-required",
             "ANTHROPIC_CUSTOM_MODEL_OPTION": "secondary",
             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Secondary",

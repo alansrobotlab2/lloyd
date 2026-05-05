@@ -1,7 +1,7 @@
 """Bench runner — hits the primary vLLM directly for each (variant, bench task).
 
-We bypass the claude-agent-sdk subprocess path: every trial is a single-turn
-OpenAI-compatible chat completion against the priority-proxy (port 8097).
+Every trial is a single-turn OpenAI-compatible chat completion against vLLM
+(port 8096) at low priority (AUTORESEARCH_PRIORITY=1) so chat preempts.
 For prompt-surface optimization this is all we need (system_prompt × user
 message → response), and it lets us parallelize much harder without spawning
 a CLI per trial.

@@ -40,6 +40,11 @@ class RunOptions:
     extra_body: dict[str, Any] = field(default_factory=dict)
     api_key: str = "no-key-required"
 
+    # vLLM scheduling priority (lower = higher priority). Requires vLLM
+    # launched with `--scheduling-policy priority`. Convention: 0 for
+    # interactive (chat, inner voice), 1 for background (workers, autonomy).
+    priority: int | None = None
+
     # Hooks
     hooks: "HookRegistry | None" = None
 

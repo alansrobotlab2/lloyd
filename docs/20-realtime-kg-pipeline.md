@@ -70,7 +70,7 @@ Iterates `REALTIME_PIPELINE_STEPS` in order. Per-pipeline coalescing via `_realt
 ## Reused Existing Code
 
 - `autonomy.py:316-331` `_get_model_env()` — resolves `secondary`'s env vars.
-- `autonomy.py:342-348` `_to_bg_url()` — rewrites 8091 → 8093 priority proxy, so realtime runs yield to interactive.
+- `RunOptions(priority=1)` on the harness call — vLLM preempts realtime runs in favor of interactive chat (priority=0).
 - `autonomy.py:146-159` `_write_run_record()` + `autonomy.py:116-129` `_update_task_field()` — reused by `run_task_realtime()`.
 
 ## Verification

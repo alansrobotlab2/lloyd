@@ -151,6 +151,7 @@ async def run_query(
                     cancel_event=options.cancel_event,
                     timeout_s=options.request_timeout_s,
                     api_key=options.api_key,
+                    priority=options.priority,
                 ):
                     # Usage chunk arrives as the last event when
                     # stream_options.include_usage=True. vLLM emits it

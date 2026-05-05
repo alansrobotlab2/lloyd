@@ -2,7 +2,8 @@
 
 All these sources follow the same pattern:
   1. enqueue_if_due scans some watermark / input and enqueues items
-  2. execute builds a prompt for the primary model via the priority proxy
+  2. execute builds a prompt for the primary model at low vLLM priority (1)
+     so interactive chat can preempt it.
   3. response lands under ~/obsidian/pending-research/{source}/{yyyy-mm-dd}/
 """
 
@@ -55,11 +56,11 @@ def write_staging_note(
 
 
 async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
-    """Dispatch a prompt to the primary model through the priority proxy."""
+    """Dispatch a prompt to the primary model at low vLLM priority."""
     from app.harness import run_query, RunOptions
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL
     from prompt_builder import build_system_prompt
-    from autonomy import _get_model_env, _to_bg_url
+    from autonomy import _get_model_env
 
     system_prompt = build_system_prompt()
     cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
@@ -69,7 +70,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
         for tname in sc.get("disabled_tools", []):
             disallowed.append(f"mcp__{name}__{tname}")
 
-    model_env = _to_bg_url(_get_model_env("primary"))
+    model_env = _get_model_env("primary")
 
     options = RunOptions(
         model="primary",
@@ -80,6 +81,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
         mcp_servers={"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}},
         disallowed_tools=disallowed,
         env=model_env,
+        priority=1,
     )
 
     messages = [{"role": "user", "content": prompt}]
