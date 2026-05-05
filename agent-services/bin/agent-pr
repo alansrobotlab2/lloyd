@@ -1,0 +1,206 @@
+#!/bin/bash
+# agent-pr - Review and merge agent-submitted branches
+set -e
+
+WORKSPACES="$HOME/workspaces"
+REGISTRY="$WORKSPACES/.registry"
+
+show_help() {
+    cat <<'EOF'
+agent-pr - Review and merge agent-submitted branches
+
+COMMANDS:
+    list [name]               Show pending branches (all repos or specific)
+    diff <name> <branch>      Show diff vs main
+    log <name> <branch>       Show commit log vs main
+    merge <name> <branch>     Fast-forward merge to main, clean up branch
+    reject <name> <branch>    Delete branch without merging
+    mergeall                  Merge all pending branches (with confirmation)
+
+OPTIONS:
+    merge --no-ff             Allow merge commits if ff not possible
+
+EXAMPLES:
+    agent-pr list
+    agent-pr diff openclaw task-123-fix-bug
+    agent-pr merge openclaw task-123-fix-bug
+    agent-pr reject openclaw stale-branch
+EOF
+}
+
+die() { echo "Error: $1" >&2; exit 1; }
+
+registry_get() {
+    [[ -f "$REGISTRY" ]] && grep "^$1=" "$REGISTRY" | cut -d= -f2- || true
+}
+
+# Get live repo path for a workspace name
+live_repo() {
+    local path
+    path=$(registry_get "$1")
+    [[ -z "$path" ]] && die "Workspace '$1' not in registry."
+    [[ -d "$path/.git" ]] || die "Live repo not found at $path"
+    echo "$path"
+}
+
+# List non-main branches in a repo
+repo_branches() {
+    git -C "$1" branch --format='%(refname:short)' 2>/dev/null | grep -v '^main$' | grep -v '^master$' || true
+}
+
+# Clean up branch from both live repo and workspace clone
+cleanup_branch() {
+    local name="$1" branch="$2" live="$3"
+    # Delete from live repo
+    git -C "$live" branch -D "$branch" 2>/dev/null && echo "  ✓ Deleted from live repo" || true
+
+    # Delete from workspace clone (checkout main first to avoid "cannot delete checked out branch")
+    if [[ -d "$WORKSPACES/$name" ]]; then
+        (cd "$WORKSPACES/$name" && git checkout main 2>/dev/null || git checkout master 2>/dev/null) &>/dev/null || true
+        git -C "$WORKSPACES/$name" branch -D "$branch" 2>/dev/null && echo "  ✓ Deleted from workspace" || true
+    fi
+}
+
+cmd_list() {
+    local filter="$1"
+    [[ ! -f "$REGISTRY" ]] && die "No workspaces registered."
+
+    local found=0
+    while IFS='=' read -r name path; do
+        [[ -z "$name" ]] && continue
+        [[ -n "$filter" && "$name" != "$filter" ]] && continue
+        [[ ! -d "$path/.git" ]] && continue
+
+        local branches
+        branches=$(repo_branches "$path")
+        [[ -z "$branches" ]] && continue
+
+        echo "=== $name ==="
+        while IFS= read -r branch; do
+            [[ -z "$branch" ]] && continue
+            local info
+            info=$(git -C "$path" log "$branch" -1 --format='%cr  %s' 2>/dev/null || echo "?")
+            printf "  %-30s %s\n" "$branch" "$info"
+            found=1
+        done <<< "$branches"
+        echo ""
+    done < "$REGISTRY"
+
+    [[ $found -eq 0 ]] && echo "No pending branches."
+}
+
+cmd_diff() {
+    local name="$1" branch="$2"
+    [[ -z "$name" || -z "$branch" ]] && die "Usage: agent-pr diff <name> <branch>"
+    local live
+    live=$(live_repo "$name")
+
+    echo "=== $name: $branch vs main ==="
+    echo ""
+    git -C "$live" diff main.."$branch" --stat
+    echo ""
+    git -C "$live" diff main.."$branch"
+}
+
+cmd_log() {
+    local name="$1" branch="$2"
+    [[ -z "$name" || -z "$branch" ]] && die "Usage: agent-pr log <name> <branch>"
+    local live
+    live=$(live_repo "$name")
+
+    git -C "$live" log main.."$branch" --oneline
+}
+
+cmd_merge() {
+    local name="$1" branch="$2" noff="$3"
+    [[ -z "$name" || -z "$branch" ]] && die "Usage: agent-pr merge <name> <branch>"
+    local live
+    live=$(live_repo "$name")
+
+    echo "Merging $name/$branch → main"
+
+    local merge_flag="--ff-only"
+    [[ "$noff" == "--no-ff" || "$branch" == "--no-ff" ]] && merge_flag="--no-ff"
+    # Handle: agent-pr merge name --no-ff branch
+    if [[ "$branch" == "--no-ff" ]]; then
+        branch="$noff"
+        merge_flag="--no-ff"
+    fi
+
+    if (cd "$live" && git merge "$branch" $merge_flag); then
+        echo "✓ Merge successful"
+        cleanup_branch "$name" "$branch" "$live"
+    else
+        echo ""
+        echo "✗ Fast-forward merge failed. Options:"
+        echo "  agent-pr merge $name $branch --no-ff    (create merge commit)"
+        echo "  agent-pr diff $name $branch             (review changes)"
+        exit 1
+    fi
+}
+
+cmd_reject() {
+    local name="$1" branch="$2"
+    [[ -z "$name" || -z "$branch" ]] && die "Usage: agent-pr reject <name> <branch>"
+    local live
+    live=$(live_repo "$name")
+
+    echo "Rejecting $name/$branch"
+    cleanup_branch "$name" "$branch" "$live"
+    echo "✓ Branch deleted"
+}
+
+cmd_mergeall() {
+    [[ ! -f "$REGISTRY" ]] && die "No workspaces registered."
+
+    # Collect all pending branches
+    local pending=()
+    while IFS='=' read -r name path; do
+        [[ -z "$name" || ! -d "$path/.git" ]] && continue
+        local branches
+        branches=$(repo_branches "$path")
+        while IFS= read -r branch; do
+            [[ -z "$branch" ]] && continue
+            pending+=("$name:$branch")
+        done <<< "$branches"
+    done < "$REGISTRY"
+
+    if [[ ${#pending[@]} -eq 0 ]]; then
+        echo "No pending branches."
+        return
+    fi
+
+    echo "Pending branches:"
+    for entry in "${pending[@]}"; do
+        echo "  $entry"
+    done
+    echo ""
+    read -rp "Merge all with ff-only? (y/n) " answer
+    [[ "$answer" != "y" && "$answer" != "Y" ]] && { echo "Aborted."; return; }
+
+    for entry in "${pending[@]}"; do
+        local name="${entry%%:*}" branch="${entry#*:}"
+        local live
+        live=$(live_repo "$name")
+        echo ""
+        echo "--- $name/$branch ---"
+        if (cd "$live" && git merge "$branch" --ff-only 2>/dev/null); then
+            echo "✓ Merged"
+            cleanup_branch "$name" "$branch" "$live"
+        else
+            echo "✗ ff-only failed, skipping"
+        fi
+    done
+}
+
+case "${1:-}" in
+    list)     shift; cmd_list "$@" ;;
+    diff)     shift; cmd_diff "$@" ;;
+    log)      shift; cmd_log "$@" ;;
+    merge)    shift; cmd_merge "$@" ;;
+    reject)   shift; cmd_reject "$@" ;;
+    mergeall) cmd_mergeall ;;
+    help|--help|-h) show_help ;;
+    "") show_help; exit 1 ;;
+    *) die "Unknown command '$1'. Run 'agent-pr help'." ;;
+esac

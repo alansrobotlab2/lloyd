@@ -1,0 +1,135 @@
+#!/bin/bash
+# agent-ws - Agent workspace manager
+# Manages isolated git clones so agents don't touch live repos
+set -e
+
+WORKSPACES="$HOME/workspaces"
+REGISTRY="$WORKSPACES/.registry"
+
+show_help() {
+    cat <<'EOF'
+agent-ws - Agent workspace manager
+
+COMMANDS:
+    init <name> <live-repo-path>    Clone a live repo into ~/workspaces/<name>
+    begin <name> <branch>           Sync to main, create branch, print workspace path
+    submit <name> "<message>"       Commit and push branch to live repo
+    status <name>                   Show branch, changes, ahead/behind
+    list                            Show registered workspaces
+
+EXAMPLES:
+    agent-ws init openclaw ~/.openclaw
+    agent-ws begin openclaw task-123-fix-bug
+    agent-ws submit openclaw "fix bug in parser"
+    agent-ws status openclaw
+EOF
+}
+
+# Registry: simple name=path lines, no JSON needed
+registry_get() {
+    [[ -f "$REGISTRY" ]] && grep "^$1=" "$REGISTRY" | cut -d= -f2- || true
+}
+
+registry_add() {
+    mkdir -p "$WORKSPACES"
+    # Remove existing entry if any, then add
+    [[ -f "$REGISTRY" ]] && sed -i "/^$1=/d" "$REGISTRY"
+    echo "$1=$2" >> "$REGISTRY"
+}
+
+die() { echo "Error: $1" >&2; exit 1; }
+
+cmd_init() {
+    local name="$1" repo="$2"
+    [[ -z "$name" || -z "$repo" ]] && die "Usage: agent-ws init <name> <live-repo-path>"
+    [[ -d "$repo/.git" ]] || die "Not a git repo: $repo"
+    [[ -d "$WORKSPACES/$name" ]] && die "Workspace '$name' already exists"
+
+    # Resolve to absolute path
+    repo="$(cd "$repo" && pwd)"
+
+    echo "Cloning $repo → $WORKSPACES/$name"
+    git clone "$repo" "$WORKSPACES/$name"
+    registry_add "$name" "$repo"
+    echo "✓ Workspace '$name' ready"
+}
+
+cmd_begin() {
+    local name="$1" branch="$2"
+    [[ -z "$name" || -z "$branch" ]] && die "Usage: agent-ws begin <name> <branch>"
+    [[ -d "$WORKSPACES/$name" ]] || die "Workspace '$name' not found. Run 'agent-ws init' first."
+
+    cd "$WORKSPACES/$name"
+    git fetch origin
+    git checkout main 2>/dev/null || git checkout master
+    git reset --hard origin/main 2>/dev/null || git reset --hard origin/master
+    git checkout -b "$branch"
+
+    echo "✓ Branch '$branch' created"
+    echo "WORKSPACE=$WORKSPACES/$name"
+}
+
+cmd_submit() {
+    local name="$1" msg="$2"
+    [[ -z "$name" || -z "$msg" ]] && die "Usage: agent-ws submit <name> \"<message>\""
+    [[ -d "$WORKSPACES/$name" ]] || die "Workspace '$name' not found."
+
+    cd "$WORKSPACES/$name"
+    local branch
+    branch=$(git branch --show-current)
+    [[ "$branch" == "main" || "$branch" == "master" ]] && die "Cannot submit from $branch. Use 'agent-ws begin' first."
+
+    if [[ -z "$(git status --porcelain)" ]]; then
+        echo "Nothing to commit."
+        return
+    fi
+
+    git add -A
+    git commit -m "$msg"
+    git push origin "$branch"
+
+    echo "✓ Submitted branch '$branch'"
+}
+
+cmd_status() {
+    local name="$1"
+    [[ -z "$name" ]] && die "Usage: agent-ws status <name>"
+    [[ -d "$WORKSPACES/$name" ]] || die "Workspace '$name' not found."
+
+    cd "$WORKSPACES/$name"
+    echo "Workspace: $name"
+    echo "Branch:    $(git branch --show-current)"
+    echo "Live repo: $(registry_get "$name")"
+    echo ""
+    if [[ -z "$(git status --porcelain)" ]]; then
+        echo "Clean — no uncommitted changes"
+    else
+        echo "Uncommitted changes:"
+        git status --short
+    fi
+}
+
+cmd_list() {
+    if [[ ! -f "$REGISTRY" ]] || [[ ! -s "$REGISTRY" ]]; then
+        echo "No workspaces registered."
+        return
+    fi
+    echo "Registered workspaces:"
+    while IFS='=' read -r name path; do
+        [[ -z "$name" ]] && continue
+        local status="missing"
+        [[ -d "$WORKSPACES/$name" ]] && status="ok"
+        printf "  %-20s → %s [%s]\n" "$name" "$path" "$status"
+    done < "$REGISTRY"
+}
+
+case "${1:-}" in
+    init)    shift; cmd_init "$@" ;;
+    begin)   shift; cmd_begin "$@" ;;
+    submit)  shift; cmd_submit "$@" ;;
+    status)  shift; cmd_status "$@" ;;
+    list)    cmd_list ;;
+    help|--help|-h) show_help ;;
+    "") show_help; exit 1 ;;
+    *) die "Unknown command '$1'. Run 'agent-ws help'." ;;
+esac

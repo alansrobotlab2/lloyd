@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-VENV="/home/alansrobotlab/agent-services/.venvs/vllm-turboquant"
-MODEL="/home/alansrobotlab/agent-services/llm/models/Sehyo-Qwen3.5-122B-A10B-NVFP4"
+VENV="/home/alansrobotlab/lloyd/agent-services/.venvs/vllm-turboquant"
+MODEL="/home/alansrobotlab/lloyd/agent-services/llm/models/Sehyo-Qwen3.5-122B-A10B-NVFP4"
 PORT="${PORT:-8097}"
 TQ_BITS="${TQ_BITS:-4}"
 KV_DTYPE="turboquant_${TQ_BITS}bit"

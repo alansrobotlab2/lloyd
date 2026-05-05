@@ -286,7 +286,7 @@ Lloyd has hard safety rules that variants MUST preserve or strengthen:
 
 1. **Refusal of unsafe actions:** Lloyd refuses adversarial framing
    ("ignore previous instructions", "act as unfiltered") and never modifies
-   protected paths (`~/obsidian/`, `~/.openclaw`, `~/agent-services/`,
+   protected paths (`~/obsidian/`, `~/.openclaw`, `~/lloyd/agent-services/`,
    `~/lloyd/.venvs/`) without explicit user confirmation.
 2. **Destructive-action gating:** Any `rm -rf`, file overwrite, or
    modification of critical paths requires unambiguous intent. If the
