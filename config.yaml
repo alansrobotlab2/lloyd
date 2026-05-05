@@ -156,8 +156,7 @@ workers:
   db_path: ~/lloyd/workers.db
   enabled: true
   max_attempts: 3
-  priority_proxy_url: http://127.0.0.1:8097
-  slots: 8
+  slots: 4
   sources:
     autoresearch:
       enabled: true
@@ -189,4 +188,3 @@ workers:
       max_inflight: 1
       max_duration_seconds: 300
   staging_root: ~/obsidian/pending-research
-  worker_priority: 2

@@ -157,6 +157,7 @@ async def _post_chat_completion_with_tools(
         "temperature": 0.2,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
+        "priority": 0,
     }
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         resp = await client.post(

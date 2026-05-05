@@ -62,7 +62,7 @@ class WorkerPool:
     def __init__(
         self,
         queue: WorkQueue,
-        slots: int = 8,
+        slots: int = 4,
         max_attempts: int = 3,
         poll_idle_seconds: float = 2.0,
     ):

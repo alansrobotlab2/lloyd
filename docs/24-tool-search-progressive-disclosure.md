@@ -168,9 +168,9 @@ vLLM). The first live `/api/message` call returned:
           "type":"BadRequestError","code":400}}
 ```
 
-Both vLLM endpoints in the Lloyd stack — qwen3 at `127.0.0.1:8096` and the
-gpt-oss priority-proxy at `127.0.0.1:8097` — enforce the same chat-template
-rule: **at most one `role: system` message, and it must be at index 0**. A
+Both vLLM endpoints in the Lloyd stack — primary at `127.0.0.1:8096` and
+secondary at `127.0.0.1:8091` — enforce the same chat-template rule:
+**at most one `role: system` message, and it must be at index 0**. A
 second system message *anywhere* (including immediately following the first)
 produces the 400 above.
 

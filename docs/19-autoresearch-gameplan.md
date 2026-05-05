@@ -27,8 +27,8 @@ Related prior work: [12-meta-optimization-gameplan.md](12-meta-optimization-game
 │           │                             into _pipeline/research/variants/<id>/)
 │           │
 │           ├─[3] Parallel Executor      (fan out variants × bench tasks
-│           │                             through priority proxy @ 8097,
-│           │                             priority=2, 7-way parallelism)
+│           │                             direct to vLLM @ 8096,
+│           │                             priority=1, 7-way parallelism)
 │           │
 │           ├─[4] Two-Layer Judge        (objective checks + 122B rubric)
 │           │                             → composite score per (variant, task)

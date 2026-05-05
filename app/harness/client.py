@@ -37,6 +37,7 @@ async def stream_chat(
     cancel_event: asyncio.Event | None,
     timeout_s: float,
     api_key: str = "no-key-required",
+    priority: int | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream raw OpenAI-format chunks from vLLM.
 
@@ -58,6 +59,8 @@ async def stream_chat(
         payload["tool_choice"] = "auto"
     if extra_body:
         payload.update(extra_body)
+    if priority is not None:
+        payload["priority"] = priority
 
     url = f"{base_url.rstrip('/')}/v1/chat/completions"
     headers = {

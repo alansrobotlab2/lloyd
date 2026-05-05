@@ -304,6 +304,7 @@ async def voice_inject(request: Request):
         disallowed_tools=_get_disallowed_tools(),
         env=model_env,
         session_id=session_id,
+        priority=0,
         **_get_tool_search_kwargs(),
     )
 

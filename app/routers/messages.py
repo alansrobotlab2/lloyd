@@ -1164,6 +1164,7 @@ async def post_message_stream(request: Request):
         disallowed_tools=_get_disallowed_tools() + extra_disallowed,
         env=model_env,
         hooks=iv_hooks,
+        priority=0,
         # cancel_event and session_id wired in _run_turn at run time
         **_get_tool_search_kwargs(),
     )
@@ -1254,6 +1255,7 @@ async def build_ambient_turn(
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
+        priority=0,
         **_get_tool_search_kwargs(),
     )
 
@@ -1364,6 +1366,7 @@ async def post_message(request: Request):
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
+        priority=0,
         **_get_tool_search_kwargs(),
     )
 

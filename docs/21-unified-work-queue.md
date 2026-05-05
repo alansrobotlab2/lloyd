@@ -27,7 +27,7 @@ On top of that, `label=gap` facts accumulate from live sessions with no resolver
 | `POST /api/autonomy/vault-change` endpoint | Removed |
 | qmd-watcher's post-embed curl hook | Removed (the watcher still does `qmd update && qmd embed`; KG pipeline runs from queue on timer) |
 | `_realtime_pipeline_running` lock + `_rerun_pending` flag | Removed. Dedup key `kg-pipeline:chain` handles coalescing |
-| Secondary Gemma as realtime target (port 8091/8093) | KG steps run on primary 122B at `priority=2` alongside everything else |
+| Secondary Gemma as realtime target (port 8091) | KG steps run on primary 122B at `priority=1` alongside everything else |
 | Autoresearch as nightly 120-min window | Autoresearch enqueues hourly via the queue |
 | `_pipeline/autonomy-watermarks.json` | Kept for now (memory_capture session mtime, etc.); new sources use SQL `watermarks` table |
 
@@ -35,19 +35,19 @@ Latency tradeoff on KG: vault change → KG graph update goes from ~2s (inotify)
 
 ## Approach
 
-A long-lived asyncio worker pool inside the existing [server.py](server.py) process, drained from a SQLite-backed queue. Each source owns its own `enqueue_if_due()` (evaluated every 60s via `autonomy_tick`); up to 8 workers claim + execute items concurrently. Autoresearch, KG pipeline, and scheduled tasks are **wrapped**, not redesigned.
+A long-lived asyncio worker pool inside the existing [server.py](server.py) process, drained from a SQLite-backed queue. Each source owns its own `enqueue_if_due()` (evaluated every 60s via `autonomy_tick`); up to 4 workers claim + execute items concurrently. Autoresearch, KG pipeline, and scheduled tasks are **wrapped**, not redesigned.
 
 ```
 autonomy_tick (60s)
     └─→ for source in sources: source.enqueue_if_due(queue)
 
-worker_pool (N=8 asyncio tasks, always running)
+worker_pool (N=4 asyncio tasks, always running)
     └─→ claim highest-priority queued item
-    └─→ source.execute(item) via priority-proxy @ priority=2
+    └─→ source.execute(item) at vLLM priority=1
     └─→ write run record + artifact
 ```
 
-All agent LLM calls route through the existing priority proxy at port 8097 with `priority=2`. vLLM's priority scheduler preempts them for interactive `priority=0` user traffic.
+All agent LLM calls hit vLLM directly (port 8096) with `"priority": 1` in the request body. vLLM's `--scheduling-policy priority` preempts them for interactive `priority=0` user traffic (chat, inner voice).
 
 ## Work sources
 
@@ -145,12 +145,10 @@ Priority defaults: `scheduled-task`=30 (task frontmatter can override), `kg-pipe
 ```yaml
 workers:
   enabled: false              # opt-in; flip on per phase
-  slots: 8                    # depth = all vLLM slots; vLLM preempts on priority=0
+  slots: 4                    # background depth; chat (priority=0) preempts workers (priority=1)
   db_path: ~/lloyd/workers.db
   staging_root: ~/obsidian/pending-research
   max_attempts: 3
-  priority_proxy_url: http://127.0.0.1:8097
-  worker_priority: 2
   sources:
     scheduled-task:  { enabled: true,  interval_seconds: 60 }
     autoresearch:    { enabled: true,  interval_seconds: 3600, max_inflight: 1 }
@@ -189,8 +187,8 @@ Mitigation:
 
 1. **Phase 1 parity** — after migration, confirm each existing autonomy task runs on its prior schedule (Task #25 hourly memory-capture, Task #59 nightly knowledge-health-report, reflection chain 38→39a→39→40→47→48). Compare last 24h of run records to pre-migration baseline.
 2. **Queue mechanics** — `POST /api/workers/enqueue` a dummy `kind=noop` item; observe claim/complete; inspect via `GET /api/workers/runs`.
-3. **Priority proxy path** — start a worker round, tail priority-proxy logs at 8097, confirm `priority=2` tags.
-4. **User-session non-interference** — with 8 workers saturating the pool, submit a real chat turn; verify TTFT/throughput match baseline (measure via `usage_store.py`).
+3. **Priority preemption path** — start a worker round, tail vLLM logs, confirm worker requests carry `priority=1` while chat carries `priority=0` and preempts.
+4. **User-session non-interference** — with 4 workers saturating the pool, submit a real chat turn; verify TTFT/throughput match baseline (measure via `usage_store.py`).
 5. **KG latency** — touch a vault file, confirm a `kg-pipeline:chain` item enqueues within 60s and the 4-step chain completes.
 6. **Autoresearch end-to-end** — enqueue one round via MCP tool; confirm ledger entry at `_pipeline/research/ledger.jsonl` and round summary at `_pipeline/research/rounds/<id>.md`.
 7. **Gap-fill e2e** — synthetically insert a `label=gap` fact via `fact_add`; within 5 minutes, observe a resolution note at `pending-research/gaps/<date>/<fact_id>.md`.
