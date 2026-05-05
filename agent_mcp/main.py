@@ -27,6 +27,7 @@ from agent_mcp import (
     builtin_bash,
     builtin_fs,
     builtin_task,
+    builtin_todo,
     discord_bot,
     facts,
     http_tools,
@@ -49,6 +50,7 @@ MODULES = [
     builtin_bash,
     builtin_fs,
     builtin_task,
+    builtin_todo,
     # Domain modules
     ambient,
     autonomy,

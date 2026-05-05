@@ -188,6 +188,9 @@ async def entity_detail(name: str = ""):
     for edge in _load_active_edges():
         src = edge.get("source", "")
         tgt = edge.get("target", "")
+        etype = edge.get("type", "related_to")
+        if etype == "mentions":
+            continue
         if src == name or tgt == name:
             relationships.append({
                 "source": src,
@@ -249,6 +252,7 @@ async def entity_graph():
 
     # Pull typed edges. Collapse directional duplicates into one edge per
     # unordered pair, keeping the highest-confidence direction as dominant.
+    # Skip co-occurrence "mentions" edges — they're structural noise.
     pair_edges: dict[tuple[str, str], dict] = {}
     for edge in _load_active_edges():
         src = edge.get("source", "")
@@ -256,6 +260,8 @@ async def entity_graph():
         if not src or not tgt or src == tgt:
             continue
         etype = edge.get("type", "related_to")
+        if etype == "mentions":
+            continue
         conf = float(edge.get("confidence", 1.0))
         key = (min(src, tgt), max(src, tgt))
         existing = pair_edges.get(key)
