@@ -381,6 +381,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         clarify_callback=_iv_clarify_cb,
         persist_intervention_callback=_iv_persist_intervention_cb,
         subliminal_context=subl_prefix or "",
+        producer_source=(turn.payload or {}).get("producer_source", "") or "",
     )
 
     # Background-task completion drain. Calls the internal MCP tool
