@@ -26,17 +26,19 @@ __pycache__/
 # OS
 .DS_Store
 
-# Databases (runtime state)
-/usage.db
-/usage.db-shm
-/usage.db-wal
-/workers.db
-/workers.db-shm
-/workers.db-wal
+# Databases (runtime state) — all SQLite DBs, anywhere in tree
+*.db
+*.db-shm
+*.db-wal
+
+# JSON files: lockfiles, runtime state, logs — may contain personal data
+*.json
 
 # Misc runtime state
-state.json
 /voice_runtime_state.json
+
+# Large archive (scrubbed from history 2026-05-06)
+ada.zip
 
 # Vendored agent-services: bench output (kept out of lloyd repo)
 /agent-services/benchmarks/
