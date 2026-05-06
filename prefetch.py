@@ -68,6 +68,18 @@ VAULT_COLLECTIONS = ["memory", "knowledge", "projects", "lloyd", "work", "sessio
 _TASK_REF_RE = re.compile(r'(?:#(\d{2,4})|(?<!\d)(\d{3,4})(?!\d))')
 BACKLOG_MAX_REFS = 3            # cap per turn to avoid token bloat
 BACKLOG_CACHE_TTL = 60.0        # re-scan backlog dir every minute
+BACKLOG_BODY_EXCERPT_MAX = 300  # chars of task body to include in injection
+
+# Continuation messages don't benefit from a skills_search nudge.
+# Matches openers like "ok", "please continue", "yes please", "let's go", etc.
+_CONTINUATION_RE = re.compile(
+    r"^\s*(ok\.?|okay\.?|yes\.?|yeah\.?|sure\.?|yep\.?|yup\.?|nope\.?|great\.?|"
+    r"perfect\.?|alright\.?|got\s+it|sounds\s+good|please\s+\w+|continue|proceed|"
+    r"carry\s+on|let'?s\s+\w+|go\s+ahead|thank\s+you|thanks\.?|cool\.?|"
+    r"we'?re\s+back|we'?re\s+good|that'?s\s+(right|correct|good|fine)|"
+    r"makes\s+sense|sounds\s+right)\b",
+    re.IGNORECASE,
+)
 
 # Conversation focus tracking
 FOCUS_DECAY = 0.75              # decay factor per turn for keyword weights
@@ -267,18 +279,23 @@ def _get_backlog_index() -> dict[int, dict]:
                     fm, body = _parse_backlog_frontmatter(content)
                     # Title = first non-empty line of body, stripping leading "# "
                     title = ""
-                    for line in body.splitlines():
+                    body_lines = body.splitlines()
+                    for line in body_lines:
                         stripped = line.strip()
                         if stripped:
                             title = stripped.lstrip("#").strip()
                             break
                     if not title:
                         title = f.stem
+                    # Body excerpt: everything after the title line, stripped of
+                    # headings/bullets, up to BACKLOG_BODY_EXCERPT_MAX chars.
+                    body_rest = "\n".join(body_lines[1:]).strip() if body_lines else ""
                     new_cache[tid] = {
-                        "title":    title,
-                        "status":   fm.get("status", "?"),
-                        "priority": fm.get("priority", "?"),
-                        "board":    fm.get("board", "?"),
+                        "title":        title,
+                        "status":       fm.get("status", "?"),
+                        "priority":     fm.get("priority", "?"),
+                        "board":        fm.get("board", "?"),
+                        "body_excerpt": body_rest[:BACKLOG_BODY_EXCERPT_MAX],
                     }
                 except Exception:
                     continue
@@ -332,10 +349,16 @@ def _search_backlog_refs(text: str) -> list[str]:
         title = (t.get("title") or "").strip()
         if len(title) > 100:
             title = title[:97] + "..."
-        lines.append(
+        line = (
             f'- [Task #{tid}] "{title}" — {t["status"]}, {t["priority"]} priority, '
             f'{t["board"]} board'
         )
+        excerpt = (t.get("body_excerpt") or "").strip()
+        if excerpt:
+            if len(excerpt) >= BACKLOG_BODY_EXCERPT_MAX:
+                excerpt = excerpt[:BACKLOG_BODY_EXCERPT_MAX] + "…"
+            line += f"\n  {excerpt}"
+        lines.append(line)
     return lines
 
 
@@ -454,7 +477,8 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
                     session_results: list[dict] = None,
                     ambient_entries: list = None,
                     backlog_refs: list[str] = None,
-                    had_query: bool = True) -> str:
+                    had_query: bool = True,
+                    show_skill_hint: bool = True) -> str:
     parts = []
 
     # Ambient prefetch drain — background signals from autonomy/cron/etc.
@@ -534,30 +558,16 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
         if session_lines:
             parts.append("<recent-sessions>\n" + "\n".join(session_lines) + "\n</recent-sessions>")
 
-    # Skill-hint nudges. Two firing conditions:
-    # 1. No skill matched at all → ask the agent to consider an explicit search.
-    # 2. Top skill matched but with low confidence → tell the agent the
-    #    auto-pick is tentative and a real search may surface a better fit.
-    #    This is the failure mode that bit us 2026-04-22: "full systems check"
-    #    auto-picked claude-sdk-check (6.8) when system-health-check was the
-    #    canonical skill — keyword-match alone wasn't enough.
-    if had_query:
-        if not skills:
-            parts.append(
-                "<skill-hint>No skills matched automatically. "
-                "If this task involves a repeatable workflow, consider calling "
-                "skills_search to check for applicable skills.</skill-hint>"
-            )
-        elif skills[0][0] < SKILL_HIGH_CONFIDENCE:
-            top_score = skills[0][0]
-            top_name = skills[0][1]["name"]
-            parts.append(
-                f"<skill-hint>Auto-picked skill '{top_name}' is a "
-                f"low-confidence keyword match (score {top_score:.1f} < "
-                f"{SKILL_HIGH_CONFIDENCE}). Verify it actually covers your "
-                f"task — share both verb and noun stems with the request? "
-                f"If not, call skills_search with task-specific terms.</skill-hint>"
-            )
+    # Skill-hint nudge: fires only when no skill matched AND the message is a
+    # genuine new task (not a continuation). Low-confidence auto-picks are
+    # trusted by the model ~95% of the time regardless of a hint, so the
+    # low-conf branch was dropped (pure noise, ~65 tokens/firing).
+    if had_query and show_skill_hint and not skills:
+        parts.append(
+            "<skill-hint>No skills matched automatically. "
+            "If this looks like a repeatable workflow, call skills_search "
+            "before proceeding.</skill-hint>"
+        )
 
     if not parts:
         return ""
@@ -670,10 +680,20 @@ def prefetch_context(text: str, session_id: str | None = None) -> str:
             logger.info("prefetch budget=%dms exceeded, dropped=%s",
                         PREFETCH_BUDGET_MS, ",".join(dropped))
 
+    # Suppress the no-match skill hint for continuation messages ("ok", "yes
+    # please", "let's go", etc.) — they're never starting a new workflow, so
+    # the nudge is pure noise.  Also suppress for very short messages (<15
+    # chars) that lack enough signal to warrant a skills_search prompt.
+    is_continuation = (
+        len(text.strip()) < 15
+        or bool(_CONTINUATION_RE.match(text.strip()))
+    )
+
     context = _format_context(skills_result, facts_result, vault_result,
                               session_result, ambient_entries=ambient_entries,
                               backlog_refs=backlog_result,
-                              had_query=True)
+                              had_query=True,
+                              show_skill_hint=not is_continuation)
     if not context:
         return text
 

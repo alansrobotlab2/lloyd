@@ -193,6 +193,7 @@ async def attach_observer_for_turn(
     persist_intervention_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
     subliminal_context: str = "",
     producer_source: str = "",
+    todos: list[dict[str, Any]] | None = None,
 ) -> ObserverState | None:
     """Install the observer onto `options.hooks` for one turn.
 
@@ -252,6 +253,7 @@ async def attach_observer_for_turn(
         persist_intervention_callback=persist_intervention_callback,
         goal_card=goal_card,
         subliminal_context=subliminal_context,
+        todos=todos,
     )
     logger.info(
         "[iv.observer] attached session=%s turn=%s source=%s budget=%d "

@@ -82,6 +82,18 @@ def _observer_cfg() -> dict[str, Any]:
     return obs
 
 
+def _todo_stewardship_cfg() -> dict[str, Any]:
+    """Plan A — todo stewardship feature flags. Defaults match config.yaml."""
+    iv = CONFIG.get("inner_voice") or {}
+    ts = dict(iv.get("todo_stewardship") or {})
+    ts.setdefault("enabled", True)
+    ts.setdefault("completion_gate", True)
+    ts.setdefault("mark_without_evidence", True)
+    ts.setdefault("stalled_progress", False)
+    ts.setdefault("stalled_after_turns", 5)
+    return ts
+
+
 def _resolve_endpoint(model_alias: str | None = None) -> tuple[str, str]:
     """Resolve (base_url, model_name) for the observer's vLLM endpoint."""
     iv = CONFIG.get("inner_voice") or {}
@@ -514,6 +526,17 @@ class ObserverState:
     # to the observer so it can recognize when the primary is following
     # documented procedure rather than freelancing.
     subliminal_context: str = ""
+    # Plan A — TodoWrite stewardship reference artifact.
+    # `todos` is the snapshot at turn start; the on_event_cb tool_result
+    # branch refreshes it after each TodoWrite call so the observer's
+    # mid-turn judgments see the live list. `prior_todo_status` is keyed
+    # by todo `content` and tracks the prior status so we can detect
+    # in_progress→completed flips for the mark-without-evidence behavior
+    # (A.5, Phase A2). `todo_stewardship_cfg` is a snapshot of the
+    # config block so per-turn behavior toggles are deterministic.
+    todos: list[dict[str, Any]] = field(default_factory=list)
+    prior_todo_status: dict[str, str] = field(default_factory=dict)
+    todo_stewardship_cfg: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +773,7 @@ def _build_event_user_prompt(
     # what determines completeness; chopping it off makes every long response
     # look "cut off mid-sentence" to the IV.
     cap = state.cfg.get("primary_text_window_chars", 4000)
+    todos_for_prompt = state.todos if state.todo_stewardship_cfg.get("enabled", True) else []
     return _prompt.build_user_prompt_for_event(
         user_request=state.user_request,
         goal_card=state.goal_card,
@@ -759,6 +783,7 @@ def _build_event_user_prompt(
         interventions_budget=state.intervention_budget,
         prior_decisions=state.decisions_this_turn,
         subliminal_context=state.subliminal_context,
+        todos=todos_for_prompt,
     )
 
 
@@ -781,14 +806,27 @@ def install_observer(
     persist_intervention_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
     goal_card: dict[str, Any] | None = None,
     subliminal_context: str = "",
+    todos: list[dict[str, Any]] | None = None,
 ) -> ObserverState:
     """Install observer hooks onto a HookRegistry for one primary turn.
 
     Returns the ObserverState. `goal_card` may be None if extraction was
     skipped or failed; the observer will still run with lighter-touch
     judgment.
+
+    `todos` (Plan A) — snapshot of `session.todos` at turn start. When
+    non-empty, the observer's per-event prompt includes a TODOS block and,
+    at the terminal `assistant_message` event, a PENDING TODOS gate that
+    asks IV to inject if primary is about to stop with work undone.
     """
     cfg = _observer_cfg()
+    ts_cfg = _todo_stewardship_cfg()
+    todos_snapshot = list(todos or [])
+    prior_status = {
+        (t.get("content") or ""): (t.get("status") or "")
+        for t in todos_snapshot
+        if t.get("content")
+    }
     state = ObserverState(
         session_id=session_id,
         turn_id=turn_id,
@@ -803,6 +841,9 @@ def install_observer(
         cfg=cfg,
         goal_card=goal_card,
         subliminal_context=subliminal_context or "",
+        todos=todos_snapshot,
+        prior_todo_status=prior_status,
+        todo_stewardship_cfg=ts_cfg,
     )
     fast_path_enabled = bool(cfg.get("fast_path_enabled", True))
 
@@ -872,9 +913,18 @@ def install_observer(
                     return
 
             finish_reason = str(evt.get("finish_reason") or "stop")
+            # Plan A.4 — completion gate. Pass todos so the terminal-iteration
+            # summary appends a PENDING TODOS block when stewardship is on.
+            ts = state.todo_stewardship_cfg
+            todos_for_gate = (
+                state.todos
+                if ts.get("enabled", True) and ts.get("completion_gate", True)
+                else []
+            )
             summary = _prompt.build_assistant_message_summary(
                 iteration, text, tool_calls, finish_reason,
                 goal_card=state.goal_card,
+                todos=todos_for_gate,
             )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
@@ -1023,8 +1073,18 @@ def install_observer(
         if etype == "result":
             stop_reason = evt.get("stop_reason", "") or ""
             response_text = evt.get("response_text", "") or ""
+            # Plan A.4 — at the result event the harness has already exited;
+            # inject is a no-op here, so pending-todos drives an `ambient`
+            # follow-up turn instead.
+            ts = state.todo_stewardship_cfg
+            todos_for_gate = (
+                state.todos
+                if ts.get("enabled", True) and ts.get("completion_gate", True)
+                else []
+            )
             summary = _prompt.build_result_summary(
                 stop_reason, response_text, goal_card=state.goal_card,
+                todos=todos_for_gate,
             )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(

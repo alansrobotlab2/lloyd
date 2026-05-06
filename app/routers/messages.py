@@ -97,6 +97,25 @@ from app.routers._messages_inner_voice import (
 
 
 
+def _load_session_todos(session_id: str) -> list[dict]:
+    """Read `session.todos` from disk for system-prompt anchoring (Plan A.2).
+
+    Returns [] when the session doesn't exist yet, the file is unreadable,
+    or the session simply has no todos. The empty case is the common case
+    for a fresh session — `build_system_prompt(todos=[])` then renders no
+    `<active_todos>` block, so the cache stays warm.
+    """
+    if not session_id:
+        return []
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        return []
+    try:
+        return json.loads(meta_path.read_text()).get("todos") or []
+    except Exception:
+        return []
+
+
 def _build_notification_drain(session_id: str, turn_id: str):
     """Build the closure handed to ``RunOptions.notification_drain``.
 
@@ -382,6 +401,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         persist_intervention_callback=_iv_persist_intervention_cb,
         subliminal_context=subl_prefix or "",
         producer_source=(turn.payload or {}).get("producer_source", "") or "",
+        todos=_load_session_todos(session_id),
     )
 
     # Background-task completion drain. Calls the internal MCP tool
@@ -1119,7 +1139,7 @@ async def post_message_stream(request: Request):
 
     t0 = time.perf_counter()
 
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(todos=_load_session_todos(session_id))
     t_prompt = time.perf_counter()
 
     prefetched_text = prefetch_context(text, session_id=session_id)
@@ -1239,7 +1259,7 @@ async def build_ambient_turn(
     model = _resolve_model_name(existing.get("model", "") or CONFIG.get("model", {}).get("default", ""))
     model_env = _get_model_env(model)
 
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(todos=existing.get("todos") or [])
 
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
@@ -1341,7 +1361,7 @@ async def post_message(request: Request):
     if not session_id:
         session_id = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
 
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(todos=_load_session_todos(session_id))
     prefetched_text = prefetch_context(text, session_id=session_id)
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"

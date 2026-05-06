@@ -38,13 +38,43 @@ MEMORIES_DIR = _CANON_MEMORIES_DIR
 SKILLS_DIRS = _CANON_SKILLS_DIRS
 
 
-def build_system_prompt(include_skills_index: bool = True, overlay_dir: str | Path | None = None) -> str:
+def _format_active_todos(todos: list[dict] | None) -> str | None:
+    """Render the persisted todo list as a compact prompt block.
+
+    Anchors primary across turns even after compaction shrinks the message
+    history. Cache-friendly: the block changes only when the todo list
+    changes, not per-turn. Returns None when there are no todos.
+    """
+    if not todos:
+        return None
+    lines = ["<active_todos>", "Current progress (kept here so you stay anchored across turns):"]
+    for t in todos:
+        status = t.get("status", "?")
+        content = (t.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"  - [{status}] {content}")
+    if len(lines) == 2:
+        return None
+    lines.append("</active_todos>")
+    return "\n".join(lines)
+
+
+def build_system_prompt(
+    include_skills_index: bool = True,
+    overlay_dir: str | Path | None = None,
+    todos: list[dict] | None = None,
+) -> str:
     """Build the full system prompt for a Lloyd session.
 
     `overlay_dir` (or the LLOYD_OVERLAY_DIR env var as fallback) redirects
     SOUL.md / MEMORY.md / USER.md / skills/ reads to a variant sandbox, with
     fallthrough to the canonical vault for any file the overlay doesn't
     provide. Thread-safe when callers pass `overlay_dir` explicitly.
+
+    `todos` (Plan A) — when non-empty, an `<active_todos>` block is appended
+    so primary stays anchored to its committed plan even after compaction.
+    Pass the list straight from `session.todos`.
     """
     overlay = _resolve_overlay(overlay_dir)
     parts = []
@@ -61,6 +91,10 @@ def build_system_prompt(include_skills_index: bool = True, overlay_dir: str | Pa
         skills = _load_skills_index(overlay)
         if skills:
             parts.append(f"<available_skills>\n{skills}\n</available_skills>\nNote: relevant skill content is automatically injected into each user message as <context> when matched.")
+
+    todos_block = _format_active_todos(todos)
+    if todos_block:
+        parts.append(todos_block)
 
     # Platform hints — NOTE: no timestamp here; a per-minute timestamp busts
     # vLLM's prefix cache, forcing full re-prefill of the system prompt every turn.

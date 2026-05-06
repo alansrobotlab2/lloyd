@@ -242,6 +242,78 @@ def _format_subliminal_context(subliminal: str | None) -> str:
     )
 
 
+def _format_todos_block(todos: list[dict[str, Any]] | None) -> str:
+    """Plan A — render `session.todos` as a compact reference block.
+
+    This is the ongoing-context block included on every IV per-event
+    prompt when stewardship is on. Distinct from the gating block in
+    `_format_pending_todos_block`, which fires only at terminal events
+    and forces a completion check.
+    """
+    if not todos:
+        return ""
+    lines = ["TODOS (primary's committed plan — reference artifact):"]
+    for t in todos:
+        status = (t.get("status") or "?").strip()
+        content = (t.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"  - [{status}] {content}")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+
+def _format_pending_todos_block(
+    todos: list[dict[str, Any]] | None,
+    *,
+    on_unmet: str,
+) -> str:
+    """Plan A.4 — the completion-gate eval block appended at terminal events.
+
+    Walks the todo list and asks IV to fire `on_unmet` (`inject` at
+    assistant_message, `ambient` at result) when any todo remains pending
+    or in_progress and the response under review doesn't actually finish
+    them. Returns "" when there are no todos or all are completed —
+    caller falls back to the goal-card eval block alone.
+    """
+    if not todos:
+        return ""
+    pending = [t for t in todos if (t.get("status") or "") in ("pending", "in_progress")]
+    if not pending:
+        return ""
+    lines = ["", "PENDING TODOS (REQUIRED — primary is about to stop with these unresolved):"]
+    for t in pending:
+        status = (t.get("status") or "?").strip()
+        content = (t.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"    - [{status}] {content}")
+    lines.extend([
+        "",
+        "Walk each pending/in_progress todo above. For each, decide: did the "
+        "response under review actually accomplish it (yes), or is it still "
+        "pending (no)?",
+        "",
+        f"  - ALL pending todos addressed → noop (the work is done).",
+        f"  - ANY pending todo unaddressed → {on_unmet}, naming the specific "
+        "todo and what's missing.",
+        "",
+        "Do NOT noop on the basis that the primary 'announced intent' or "
+        "'will dispatch tools next.' The harness has terminated this iteration; "
+        "there is no next dispatch unless you act now. A textual promise to "
+        "do work later is evidence the work was NOT done.",
+        "",
+        f"Equally, do NOT {on_unmet} just because a todo isn't echoed verbatim. "
+        "A response that delivers the substance of a todo (rephrased, "
+        "synthesized, or bundled with another) is sufficient — match meaning, "
+        f"not exact wording. Only {on_unmet} when a todo is plainly "
+        "unaddressed AND the response shows stub-announce or mid-cutoff "
+        "symptoms.",
+    ])
+    return "\n".join(lines)
+
+
 def _format_prior_decisions(decisions: list[dict[str, Any]] | None) -> str:
     """Render the observer's prior decisions this turn."""
     if not decisions:
@@ -267,6 +339,7 @@ def build_user_prompt_for_event(
     interventions_budget: int,
     prior_decisions: list[dict[str, Any]] | None = None,
     subliminal_context: str | None = None,
+    todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """Assemble the per-event user prompt the observer evaluates."""
     budget_line = (
@@ -282,9 +355,12 @@ def build_user_prompt_for_event(
     prior_section = f"\n{prior_block}" if prior_block else ""
     subliminal_block = _format_subliminal_context(subliminal_context)
     subliminal_section = f"\n{subliminal_block}" if subliminal_block else ""
+    todos_block = _format_todos_block(todos)
+    todos_section = f"\n{todos_block}\n" if todos_block else ""
     return (
         f"USER REQUEST:\n{user_request}\n\n"
         f"{_format_goal_card(goal_card)}\n"
+        f"{todos_section}"
         f"{subliminal_section}\n"
         f"PRIMARY'S RESPONSE SO FAR (visible text):\n"
         f"{primary_text_so_far or '(none yet)'}\n"
@@ -368,6 +444,7 @@ def build_assistant_message_summary(
     tool_calls: list[dict],
     finish_reason: str = "stop",
     goal_card: dict[str, Any] | None = None,
+    todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """One-line summary of an assistant_message event for review.
 
@@ -398,19 +475,20 @@ def build_assistant_message_summary(
             f"Primary will continue after tool dispatch."
         )
     if finish_reason == "stop":
+        pending_block = _format_pending_todos_block(todos, on_unmet="inject")
         if not text.strip():
             return (
                 f"Iteration {iteration} finished with EMPTY text and NO tool calls "
                 f"(finish_reason=stop). PRIMARY IS ABOUT TO TERMINATE WITHOUT "
                 f"ANSWERING. This is your last chance to inject — the harness "
-                f"will continue the loop if you do."
+                f"will continue the loop if you do.{pending_block}"
             )
         eval_block = _format_goal_eval_block(goal_card, on_unmet="inject")
         return (
             f"Iteration {iteration} TERMINAL (finish_reason=stop, NO tool calls). "
             f"The harness EXITS the turn at this event unless you inject. "
             f"There is no next iteration. Tools are not coming.\n"
-            f"Iteration text: {text_preview!r}.{eval_block}"
+            f"Iteration text: {text_preview!r}.{eval_block}{pending_block}"
         )
     # finish_reason in {length, tool_calls without committed tools, error, ...}
     return (
@@ -488,6 +566,7 @@ def build_result_summary(
     stop_reason: str,
     response_text: str,
     goal_card: dict[str, Any] | None = None,
+    todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """Summary of the terminal `result` event with goal-completion check.
 
@@ -499,13 +578,14 @@ def build_result_summary(
     """
     txt = windowed_text(response_text, 1200)
     eval_block = _format_goal_eval_block(goal_card, on_unmet="ambient")
-    if eval_block:
+    pending_block = _format_pending_todos_block(todos, on_unmet="ambient")
+    if eval_block or pending_block:
         return (
             f"Turn ENDED (stop_reason={stop_reason}). The harness has already "
             f"terminated. There will be no more text or tool calls. "
-            f"Final visible response: {txt!r}.{eval_block}"
+            f"Final visible response: {txt!r}.{eval_block}{pending_block}"
         )
-    # No goal card — fall back to lighter-touch judgment.
+    # No goal card or todos — fall back to lighter-touch judgment.
     return (
         f"Turn ENDED (stop_reason={stop_reason}). The harness has already "
         f"terminated. Final visible response: {txt!r}. "
