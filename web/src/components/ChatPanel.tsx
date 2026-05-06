@@ -3,6 +3,7 @@ import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench, Square
 import { marked } from 'marked'
 import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState, type InnerVoiceObservation } from '../api'
 import TodoList from './TodoList'
+import PlanHeader from './PlanHeader'
 import ObservationBubble from './ObservationBubble'
 import { actionStyle, parseObservationTime } from './innerVoiceStyles'
 
@@ -808,7 +809,14 @@ export default function ChatPanel({
           if (!stillPending) setActiveToolName(null)
           return updated
         })
-        if (_name === 'TodoWrite') setTodoRefreshKey(k => k + 1)
+        // TodoWrite mutates session.todos; ExitPlanMode/EnterPlanMode mutate
+        // session.plan AND (on commit) session.todos. Bump the refresh key
+        // for any of them so TodoList + PlanHeader re-fetch.
+        if (
+          _name === 'TodoWrite'
+          || _name === 'EnterPlanMode'
+          || _name === 'ExitPlanMode'
+        ) setTodoRefreshKey(k => k + 1)
       },
       onThinkingDelta: (delta) => {
         accumulatedThinking += delta
@@ -1040,6 +1048,11 @@ export default function ChatPanel({
         <div ref={messagesEndRef} />
       </main>
 
+      <PlanHeader
+        sessionId={sessionKey}
+        refreshKey={todoRefreshKey}
+        onExitPlanMode={() => setTodoRefreshKey(k => k + 1)}
+      />
       <TodoList sessionId={sessionKey} refreshKey={todoRefreshKey} />
 
       {/* Input */}
