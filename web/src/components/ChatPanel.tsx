@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
 import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench, Square, Sparkles } from 'lucide-react'
 import { marked } from 'marked'
-import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState } from '../api'
+import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState, type InnerVoiceObservation } from '../api'
 import TodoList from './TodoList'
+import ObservationBubble from './ObservationBubble'
+import { actionStyle, parseObservationTime } from './innerVoiceStyles'
 
 // Configure marked
 marked.setOptions({ breaks: true, gfm: true })
@@ -46,6 +48,7 @@ interface MessageRowProps {
   thinkLevel: string
   isMobile: boolean
   toolCallIndex: Map<string, ToolCallRef>
+  forceLeftAlign?: boolean
 }
 
 const MessageRow = memo(function MessageRow({
@@ -54,6 +57,7 @@ const MessageRow = memo(function MessageRow({
   thinkLevel,
   isMobile,
   toolCallIndex,
+  forceLeftAlign = false,
 }: MessageRowProps) {
   // Skip messages with empty content
   const hasContent = msg.content?.some(c => c.text?.trim())
@@ -77,8 +81,8 @@ const MessageRow = memo(function MessageRow({
   }, [textJoined, msg.role])
 
   return (
-    <div className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}>
-      {msg.role !== 'user' && !isMobile && (
+    <div className={`flex gap-3 ${!forceLeftAlign && msg.role === 'user' ? 'justify-end' : ''}`}>
+      {!forceLeftAlign && msg.role !== 'user' && !isMobile && (
         <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
           {msg.role === 'tool'
             ? <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Wrench className="w-3.5 h-3.5 text-slate-400" /></div>
@@ -88,7 +92,7 @@ const MessageRow = memo(function MessageRow({
           }
         </div>
       )}
-      <div className={`max-w-[80%] ${msg.role === 'user' ? 'min-w-0' : 'flex-1 min-w-0'}`}>
+      <div className={`${forceLeftAlign ? 'flex-1 min-w-0' : `max-w-[80%] ${msg.role === 'user' ? 'min-w-0' : 'flex-1 min-w-0'}`}`}>
         <div
           className={`rounded-xl ${
             msg.role === 'tool' || msg.role === 'subliminal' ? 'px-2.5 py-1.5' : 'px-3.5 py-2.5'
@@ -227,7 +231,7 @@ const MessageRow = memo(function MessageRow({
           })()}
         </div>
       </div>
-      {msg.role === 'user' && !isMobile && (
+      {!forceLeftAlign && msg.role === 'user' && !isMobile && (
         <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5 hidden sm:flex">
           <User className="w-3.5 h-3.5 text-slate-300" />
         </div>
@@ -247,6 +251,10 @@ interface ChatPanelProps {
   visible?: boolean
   onThinkingChange?: (thinking: boolean, toolName: string | null) => void
   isMobile?: boolean
+  // When provided, switch to centerline-timeline mode: primary actions on
+  // the left of a vertical line, IV observations on the right, ordered
+  // chronologically. Used by the Inner Voice page.
+  timelineRight?: InnerVoiceObservation[]
 }
 
 // Mock slash commands (will be replaced with actual backend fetch)
@@ -303,6 +311,7 @@ export default function ChatPanel({
   visible = true,
   onThinkingChange,
   isMobile = false,
+  timelineRight,
 }: ChatPanelProps = {}) {
   const [sessionKey, setSessionKey] = useState<string | null>(null)
   const [messages, setMessages] = useState<ApiMessage[]>([])
@@ -613,6 +622,23 @@ export default function ChatPanel({
     return map
   }, [messages])
 
+  type TimelineItem =
+    | { kind: 'msg'; ts: number; key: string; msg: ApiMessage }
+    | { kind: 'obs'; ts: number; key: string; obs: InnerVoiceObservation }
+
+  // Chronological merge of primary messages and IV observations. Returns
+  // null when the panel is not in timeline mode (preserving the default
+  // right-aligned chat rendering for the regular Chat page).
+  const timeline = useMemo<TimelineItem[] | null>(() => {
+    if (!timelineRight) return null
+    const items: TimelineItem[] = [
+      ...messages.map(m => ({ kind: 'msg' as const, ts: Date.parse(m.timestamp), key: m.id, msg: m })),
+      ...timelineRight.map(o => ({ kind: 'obs' as const, ts: parseObservationTime(o.created_at), key: `obs_${o.id}`, obs: o })),
+    ]
+    items.sort((a, b) => a.ts - b.ts)
+    return items
+  }, [messages, timelineRight])
+
   const filteredCommands = useMemo(() => {
     if (!showCommands || !commandFilter) {
       setSelectedCommandIndex(0)
@@ -887,10 +913,29 @@ export default function ChatPanel({
     abortControllerRef.current = controller
   }
 
+  const thinkingIndicatorBody = (
+    <div className="bg-surface-2 border border-surface-3/50 px-3.5 py-2.5 rounded-xl">
+      <div className="flex items-center gap-2 text-sm text-slate-400">
+        <Loader2 className="w-4 h-4 animate-spin text-brand-400" />
+        {queueState?.current?.source === 'ambient'
+          ? <span><span className="text-amber-400">Ambient context</span> — Lloyd is processing background input...</span>
+          : activeToolName
+            ? <span>Working: <span className="font-mono text-brand-300">{activeToolName}</span>...</span>
+            : <span>Thinking...</span>
+        }
+        {queueState && queueState.depth > 0 && (
+          <span className="ml-2 text-xs text-slate-500 font-mono">
+            (queue: {queueState.pending_user}u + {queueState.pending_ambient}a)
+          </span>
+        )}
+      </div>
+    </div>
+  )
+
   return (
     <div className="flex flex-col h-full">
       {/* Messages */}
-      <main ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+      <main ref={messagesContainerRef} className={`flex-1 overflow-y-auto p-4 ${timeline === null ? 'space-y-4' : ''}`}>
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full">
             <div className="text-center text-slate-500">
@@ -900,8 +945,8 @@ export default function ChatPanel({
             </div>
           </div>
         )}
-        
-        {messages.map((msg) => (
+
+        {timeline === null && messages.map((msg) => (
           <MessageRow
             key={msg.id}
             msg={msg}
@@ -912,27 +957,83 @@ export default function ChatPanel({
           />
         ))}
 
-        {thinking && (
+        {timeline === null && thinking && (
           <div className="flex gap-3">
             <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
               <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
             </div>
-            <div className="bg-surface-2 border border-surface-3/50 px-3.5 py-2.5 rounded-xl">
-              <div className="flex items-center gap-2 text-sm text-slate-400">
-                <Loader2 className="w-4 h-4 animate-spin text-brand-400" />
-                {queueState?.current?.source === 'ambient'
-                  ? <span><span className="text-amber-400">Ambient context</span> — Lloyd is processing background input...</span>
-                  : activeToolName
-                    ? <span>Working: <span className="font-mono text-brand-300">{activeToolName}</span>...</span>
-                    : <span>Thinking...</span>
-                }
-                {queueState && queueState.depth > 0 && (
-                  <span className="ml-2 text-xs text-slate-500 font-mono">
-                    (queue: {queueState.pending_user}u + {queueState.pending_ambient}a)
-                  </span>
-                )}
+            {thinkingIndicatorBody}
+          </div>
+        )}
+
+        {timeline !== null && (
+          <div className="flex flex-col">
+            {timeline.map(item => {
+              // Mirror MessageRow's visibility rules — drop items that would
+              // render nothing so the centerline doesn't sprout orphan dots.
+              // The most common case: assistant rows that carry tool_calls
+              // but no text (the tool result row alongside renders the bubble).
+              if (item.kind === 'msg') {
+                const m = item.msg
+                const hasContent = m.content?.some(c => c.text?.trim())
+                if (!hasContent) return null
+                const isError = m.role === 'tool' && m.content?.some(c => c.text?.startsWith('Error:'))
+                if (!showAgentDetails && m.role === 'tool' && !isError) return null
+                if (!showAgentDetails && m.role === 'subliminal') return null
+              }
+              return (
+              <div key={item.key} className="grid grid-cols-[1fr_28px_1fr] gap-x-3 py-1.5">
+                {/* Left half — primary actions */}
+                <div className="flex justify-end min-w-0">
+                  {item.kind === 'msg' && (
+                    <div className="w-full max-w-[94%] min-w-0">
+                      <MessageRow
+                        msg={item.msg}
+                        showAgentDetails={showAgentDetails}
+                        thinkLevel={thinkLevel}
+                        isMobile={isMobile}
+                        toolCallIndex={toolCallIndex}
+                        forceLeftAlign
+                      />
+                    </div>
+                  )}
+                </div>
+                {/* Centerline column with dot */}
+                <div className="relative flex justify-center">
+                  <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 border-l border-surface-3/40" />
+                  <div className={`relative mt-3 w-2 h-2 rounded-full ring-2 ring-surface-1 ${
+                    item.kind === 'obs'
+                      ? (item.obs.trigger === 'result' && item.obs.action === 'noop'
+                          ? 'bg-emerald-400'
+                          : actionStyle(item.obs.action).dot)
+                      : 'bg-brand-400'
+                  }`} />
+                </div>
+                {/* Right half — IV observations */}
+                <div className="flex justify-start min-w-0">
+                  {item.kind === 'obs' && (
+                    <div className="w-full max-w-[94%] min-w-0">
+                      <ObservationBubble obs={item.obs} />
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
+              )
+            })}
+            {thinking && (
+              <div className="grid grid-cols-[1fr_28px_1fr] gap-x-3 py-1.5">
+                <div className="flex justify-end min-w-0">
+                  <div className="w-full max-w-[94%] min-w-0">
+                    {thinkingIndicatorBody}
+                  </div>
+                </div>
+                <div className="relative flex justify-center">
+                  <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 border-l border-surface-3/40" />
+                  <div className="relative mt-3 w-2 h-2 rounded-full ring-2 ring-surface-1 bg-brand-400 animate-pulse" />
+                </div>
+                <div />
+              </div>
+            )}
           </div>
         )}
         

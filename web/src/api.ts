@@ -112,10 +112,18 @@ export interface InnerVoiceObservation {
   related_tool: string | null
   input_tokens: number | null
   output_tokens: number | null
+  cache_read: number | null
+  cache_create: number | null
   latency_ms: number | null
   model: string | null
   error: string | null
   created_at: string
+}
+
+export interface InnerVoiceGoalCard {
+  success_criteria?: string[]
+  out_of_scope?: string[]
+  completion_signals?: string[]
 }
 
 export interface InnerVoiceState {
@@ -124,6 +132,12 @@ export interface InnerVoiceState {
   evaluate_user_turns: boolean
   observations_count_by_action: Record<string, number>
   last_observation_at: string | null
+  // Most recent goal-card extraction for this session (logged on each turn
+  // start). Null when IV hasn't run yet, or when extraction failed. The UI
+  // renders the user_request on the left and goal_card on the right.
+  latest_goal_card: InnerVoiceGoalCard | null
+  latest_user_request: string | null
+  latest_turn_id: string | null
 }
 
 export interface InnerVoiceSession {

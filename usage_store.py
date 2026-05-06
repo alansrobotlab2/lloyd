@@ -64,6 +64,8 @@ def _init_schema(conn: sqlite3.Connection):
             related_tool TEXT,                    -- for pretool / tool_call observations
             input_tokens INTEGER,
             output_tokens INTEGER,
+            cache_read INTEGER,
+            cache_create INTEGER,
             latency_ms INTEGER,
             model TEXT,
             error TEXT,
@@ -78,6 +80,11 @@ def _init_schema(conn: sqlite3.Connection):
         DROP TABLE IF EXISTS inner_voice_critiques;
         DROP TABLE IF EXISTS inner_voice_interventions;
     """)
+    existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(inner_voice_observations)").fetchall()}
+    if "cache_read" not in existing_cols:
+        conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN cache_read INTEGER")
+    if "cache_create" not in existing_cols:
+        conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN cache_create INTEGER")
 
 
 def record_usage(
@@ -271,21 +278,30 @@ def record_inner_voice_observation(
     related_tool: Optional[str] = None,
     input_tokens: Optional[int] = None,
     output_tokens: Optional[int] = None,
+    cache_read: Optional[int] = None,
+    cache_create: Optional[int] = None,
     latency_ms: Optional[int] = None,
     model: Optional[str] = None,
     error: Optional[str] = None,
 ) -> int:
     """Insert one Inner Voice observation row. Returns the new row's id."""
+    # `created_at` is written explicitly as local-naive ISO (`datetime.now().isoformat()`)
+    # to match the format used by primary message timestamps. The SQLite default
+    # `CURRENT_TIMESTAMP` would store UTC-naive in `YYYY-MM-DD HH:MM:SS`, which
+    # the frontend timeline merge would then mis-parse as local time and shift
+    # observations into the future by the local TZ offset.
     conn = _conn()
     cur = conn.execute(
         """INSERT INTO inner_voice_observations
            (session_id, turn_id, sequence_in_turn, trigger, action,
             reason, content, related_tool,
-            input_tokens, output_tokens, latency_ms, model, error)
-           VALUES (?, ?, ?, ?, ?,  ?, ?, ?,  ?, ?, ?, ?, ?)""",
+            input_tokens, output_tokens, cache_read, cache_create,
+            latency_ms, model, error, created_at)
+           VALUES (?, ?, ?, ?, ?,  ?, ?, ?,  ?, ?, ?, ?,  ?, ?, ?, ?)""",
         (session_id, turn_id, sequence_in_turn, trigger, action,
          reason, content, related_tool,
-         input_tokens, output_tokens, latency_ms, model, error),
+         input_tokens, output_tokens, cache_read, cache_create,
+         latency_ms, model, error, datetime.now().isoformat()),
     )
     conn.commit()
     return cur.lastrowid
@@ -310,7 +326,8 @@ def list_inner_voice_observations(
     rows = conn.execute(
         f"""SELECT id, session_id, turn_id, sequence_in_turn, trigger, action,
                    reason, content, related_tool,
-                   input_tokens, output_tokens, latency_ms, model, error,
+                   input_tokens, output_tokens, cache_read, cache_create,
+                   latency_ms, model, error,
                    created_at
             FROM inner_voice_observations{where_sql}
             ORDER BY id DESC LIMIT ?""",

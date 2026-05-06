@@ -57,6 +57,8 @@ class ObserverDecision:
     raw_response: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read: int = 0
+    cache_create: int = 0
     latency_ms: int = 0
     error: str | None = None
 
@@ -406,6 +408,8 @@ async def _call_observer(
     err: str | None = None
     in_tok = 0
     out_tok = 0
+    cache_read = 0
+    cache_create = 0
     try:
         body = await _post_chat_completion_with_tools(
             base_url=base_url,
@@ -419,6 +423,8 @@ async def _call_observer(
         usage = body.get("usage") or {}
         in_tok = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
         out_tok = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        cache_read = int(usage.get("cache_read") or usage.get("prompt_tokens_cached") or 0)
+        cache_create = int(usage.get("cache_create") or 0)
     except asyncio.TimeoutError:
         err = "timeout"
     except httpx.HTTPError as e:
@@ -432,6 +438,7 @@ async def _call_observer(
         return ObserverDecision(
             action="noop", reason=err,
             input_tokens=in_tok, output_tokens=out_tok,
+            cache_read=cache_read, cache_create=cache_create,
             latency_ms=latency_ms, error=err,
         )
 
@@ -444,6 +451,7 @@ async def _call_observer(
         return ObserverDecision(
             action="noop", reason="no_tool_call",
             input_tokens=in_tok, output_tokens=out_tok,
+            cache_read=cache_read, cache_create=cache_create,
             latency_ms=latency_ms, error="no_tool_call",
         )
     name, args = extracted
@@ -452,6 +460,7 @@ async def _call_observer(
         return ObserverDecision(
             action="noop", reason=f"unknown_lever:{name}",
             input_tokens=in_tok, output_tokens=out_tok,
+            cache_read=cache_read, cache_create=cache_create,
             latency_ms=latency_ms, error="unknown_lever",
         )
     return ObserverDecision(
@@ -460,6 +469,8 @@ async def _call_observer(
         content=str(args.get("content") or "")[:4000],
         input_tokens=in_tok,
         output_tokens=out_tok,
+        cache_read=cache_read,
+        cache_create=cache_create,
         latency_ms=latency_ms,
     )
 
@@ -710,6 +721,8 @@ def _persist(
             related_tool=related_tool,
             input_tokens=decision.input_tokens,
             output_tokens=decision.output_tokens,
+            cache_read=decision.cache_read,
+            cache_create=decision.cache_create,
             latency_ms=decision.latency_ms,
             model=state.primary_model,
             error=decision.error,
@@ -733,11 +746,15 @@ def _persist(
 def _build_event_user_prompt(
     state: ObserverState, event_summary: str,
 ) -> str:
+    # Head+tail windowing instead of head-only truncation. The conclusion is
+    # what determines completeness; chopping it off makes every long response
+    # look "cut off mid-sentence" to the IV.
+    cap = state.cfg.get("primary_text_window_chars", 4000)
     return _prompt.build_user_prompt_for_event(
         user_request=state.user_request,
         goal_card=state.goal_card,
         event_summary=event_summary,
-        primary_text_so_far=state.accumulated_text[: state.cfg.get("primary_text_window_chars", 4000)],
+        primary_text_so_far=_prompt.windowed_text(state.accumulated_text, cap),
         interventions_used=state.interventions_used,
         interventions_budget=state.intervention_budget,
         prior_decisions=state.decisions_this_turn,
@@ -871,6 +888,40 @@ def install_observer(
                 ).strip()
                 _persist(state, decision, trigger="assistant_message")
                 return
+            # Block consecutive injects. The prompt's escalation rule asks the
+            # IV to convert a second-on-same-theme decision to cancel/noop, but
+            # small models reliably ignore that. If the immediately previous
+            # assistant_message decision was also an inject, force this one to
+            # noop — give the primary at least one full iteration to act on the
+            # earlier nudge before we fire again. The IV can still escalate to
+            # cancel through the normal path; this only suppresses inject-on-inject.
+            if decision.action == "inject":
+                last_inject_idx = -1
+                for i in range(len(state.decisions_this_turn) - 1, -1, -1):
+                    d = state.decisions_this_turn[i]
+                    if d.get("trigger") != "assistant_message":
+                        continue
+                    if d.get("action") == "inject":
+                        last_inject_idx = i
+                    break
+                if last_inject_idx >= 0:
+                    logger.info(
+                        "[iv.observer] suppressed consecutive inject session=%s "
+                        "turn=%s reason=%r",
+                        state.session_id, state.turn_id, decision.reason,
+                    )
+                    _event_log.log_event(
+                        state.session_id,
+                        "inner_voice.inject_suppressed_consecutive",
+                        {"reason": decision.reason, "content": decision.content},
+                        turn_id=state.turn_id,
+                    )
+                    decision.action = "noop_inject_after_inject"
+                    decision.reason = (
+                        (decision.reason or "")
+                        + " [suppressed: prior assistant_message decision was inject; "
+                        "give primary one iteration to respond]"
+                    ).strip()
             # Block cancel-for-completion. There are two failure modes the
             # IV has been hitting:
             #

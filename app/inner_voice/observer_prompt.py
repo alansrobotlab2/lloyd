@@ -204,6 +204,23 @@ def _format_goal_card(goal_card: dict[str, Any] | None) -> str:
 _SUBLIMINAL_PROMPT_CHAR_CAP = 4000
 
 
+def windowed_text(text: str, cap: int) -> str:
+    """Trim long text to the head + tail with a marker between.
+
+    Head-only truncation hides the response's conclusion, which is what
+    the observer needs to judge completeness. For any text longer than
+    `cap` chars, return the first half + "[N chars trimmed]" + the last
+    half so the IV always sees how the response opens AND closes.
+    """
+    if not text:
+        return text
+    if len(text) <= cap:
+        return text
+    half = cap // 2
+    trimmed = len(text) - cap
+    return f"{text[:half]}\n... [{trimmed} chars trimmed] ...\n{text[-half:]}"
+
+
 def _format_subliminal_context(subliminal: str | None) -> str:
     """Render the prefetched subliminal block (skills, vault, facts, ...)
     so the observer sees what context the primary actually had.
@@ -331,6 +348,16 @@ def _format_goal_eval_block(
         "'will dispatch tools next.' The harness has terminated this iteration; "
         "there is no next dispatch unless you act now. Treat textual promises "
         "of future action as evidence the work was NOT done.",
+        "",
+        f"Equally, do NOT {on_unmet} just because a success_criterion isn't "
+        "echoed verbatim. A response that delivers the intent of a criterion "
+        "(rephrased, synthesized, or covered alongside another item) is "
+        f"sufficient — match meaning, not exact wording. Only {on_unmet} when "
+        "an item is plainly unaddressed AND the response shows stub-announce "
+        "or mid-cutoff symptoms. A response ending with terminal punctuation "
+        "(`.`, `?`, `!`) and a recommendation, summary, list, or offer-to-help "
+        "is the natural close of the turn and gets `noop`, not "
+        f"`{on_unmet}` — even if you would have structured it differently.",
     ])
     return "\n".join(lines)
 
@@ -358,7 +385,11 @@ def build_assistant_message_summary(
     Without this, the IV pattern-matches on textual promises of future
     action ("I'll fetch X") and noops, missing the stall.
     """
-    text_preview = text[:300] + ("..." if len(text) > 300 else "")
+    # Head+tail windowing: head-only truncation hides the conclusion, which
+    # is exactly the signal the IV needs to judge completeness. 1200 char
+    # budget ≈ enough for an opening paragraph + the closing paragraph for
+    # any response shape we expect.
+    text_preview = windowed_text(text, 1200)
     if tool_calls:
         names = [tc.get("function", {}).get("name") or tc.get("name") or "?" for tc in tool_calls]
         return (
@@ -466,7 +497,7 @@ def build_result_summary(
     item-by-item completion check, so the IV can't carry over a stale
     "will dispatch tools next" judgment from the assistant_message event.
     """
-    txt = response_text[:300] + ("..." if len(response_text) > 300 else "")
+    txt = windowed_text(response_text, 1200)
     eval_block = _format_goal_eval_block(goal_card, on_unmet="ambient")
     if eval_block:
         return (
