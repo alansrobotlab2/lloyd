@@ -1,44 +1,33 @@
-# Python
+# ─── Toolchain caches ───────────────────────────────
 .venv/
 .venvs/
 __pycache__/
 *.pyc
-
-# Node
 /web/node_modules/
-/web/dist/
 
-# Logs
+# ─── Build output ───────────────────────────────────
+/web/dist/
+/agent-services/benchmarks/
+
+# ─── Runtime state ──────────────────────────────────
 /logs/
 /event_logs/
-
-# Sessions (runtime state)
 /sessions/
-
-# Pipeline runs (runtime state)
 /pipeline-runs/
 /autonomy-runs/
 /_pipeline/
 
-# Environment
-.env
-
-# OS
-.DS_Store
-
-# Databases (runtime state) — all SQLite DBs, anywhere in tree
+# Databases (SQLite + WAL/SHM), anywhere in tree
 *.db
 *.db-shm
 *.db-wal
 
-# JSON files: lockfiles, runtime state, logs — may contain personal data
+# All JSON: lockfiles, runtime state, logs — may contain personal data
 *.json
 
-# Misc runtime state
-/voice_runtime_state.json
+# ─── Secrets ────────────────────────────────────────
+.env
 
-# Large archive (scrubbed from history 2026-05-06)
+# ─── OS / misc ──────────────────────────────────────
+.DS_Store
 ada.zip
-
-# Vendored agent-services: bench output (kept out of lloyd repo)
-/agent-services/benchmarks/
