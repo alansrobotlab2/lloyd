@@ -544,21 +544,94 @@ def _format_spilled_summary(tool_name: str, content: str) -> str | None:
     )
 
 
+def _format_mark_without_evidence_block(
+    flips: list[dict[str, str]] | None,
+    recent_decisions: list[dict[str, Any]] | None,
+) -> str:
+    """Plan A.5 — challenge an in_progress→completed flip without evidence.
+
+    Lists the flips and the last few tool calls (via the IV's own decisions
+    log, which carries `related_tool` for each prior event). Asks the IV
+    to judge whether the recent work plausibly accomplished each completed
+    todo. Returns "" when there are no flips — caller falls back to the
+    normal tool_result summary.
+    """
+    if not flips:
+        return ""
+    lines = ["", "MARK-WITHOUT-EVIDENCE CHECK (REQUIRED — do not skip):"]
+    lines.append("Primary just flipped these todos to `completed`:")
+    for f in flips:
+        c = (f.get("content") or "").strip()
+        if not c:
+            continue
+        lines.append(f"  - {c}")
+    # Pull the last ~6 tool-related decisions so IV can judge "did real
+    # work happen recently?" The decisions log carries one entry per IV
+    # decision; we filter to those tied to a tool (related_tool != None)
+    # and surface the tool names + IV's reasoning at the time.
+    if recent_decisions:
+        tool_decisions = [
+            d for d in recent_decisions
+            if (d.get("related_tool") or "").strip()
+        ]
+        if tool_decisions:
+            lines.append("")
+            lines.append("Recent tool activity this turn (most recent last):")
+            for d in tool_decisions[-6:]:
+                tool = d.get("related_tool", "?")
+                trig = d.get("trigger", "?")
+                rsn = (d.get("reason") or "")[:80]
+                lines.append(f"  - [{trig}] {tool} — {rsn}")
+    lines.extend([
+        "",
+        "Walk each completed todo against the recent tool activity. For each:",
+        "",
+        "  - The tool calls plausibly accomplished the todo → noop "
+        "(advancement is real, primary's bookkeeping is honest).",
+        "  - No plausible work behind the flip → inject naming the specific "
+        "todo and what's missing (e.g. \"You marked X completed but no "
+        "tool call shows that work happening — what evidence do you have?\").",
+        "",
+        "Be specific about the tool-call evidence you saw. A vague \"primary "
+        "did some work\" reasoning is the failure mode this check exists to "
+        "prevent. If the evidence is genuinely thin (fewer than 1-2 tool "
+        "calls on the relevant subject since the last flip), that's the "
+        "signal to inject. If the tool calls are unrelated to the todo "
+        "content, that's also the signal to inject.",
+        "",
+        "TodoWrite itself does not count as evidence of the todo's work — "
+        "it's just bookkeeping. Look for Read/Write/Bash/Edit/skill calls "
+        "or the equivalent that actually performed the action.",
+    ])
+    return "\n".join(lines)
+
+
 def build_tool_result_summary(
     tool_name: str,
     result_preview: str,
     is_error: bool,
+    todo_flips: list[dict[str, str]] | None = None,
+    recent_decisions: list[dict[str, Any]] | None = None,
 ) -> str:
-    """One-line summary of a tool_result event for review."""
+    """One-line summary of a tool_result event for review.
+
+    `todo_flips` (Plan A.5) — when TodoWrite caused an in_progress→completed
+    flip, the summary appends a mark-without-evidence check. Empty list /
+    None disables the check (fast-path noop fallback in observer.py covers
+    the common case). `recent_decisions` is `state.decisions_this_turn`
+    so the eval block can list recent tool activity.
+    """
     if not is_error:
         spilled = _format_spilled_summary(tool_name, result_preview)
         if spilled is not None:
-            return spilled
+            return spilled + _format_mark_without_evidence_block(todo_flips, recent_decisions)
     label = "ERROR" if is_error else "result"
     preview = result_preview[:300] + ("..." if len(result_preview) > 300 else "")
+    eval_block = _format_mark_without_evidence_block(todo_flips, recent_decisions)
     return (
         f"Tool {tool_name} returned {label}: {preview!r}. "
         f"Primary will see this and decide its next move."
+        f"{eval_block}"
     )
 
 

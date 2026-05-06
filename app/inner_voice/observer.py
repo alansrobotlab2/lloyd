@@ -36,6 +36,7 @@ from app.inner_voice.lever_tools import (
     LEVER_NAMES,
     LEVER_TOOLS,
 )
+from app.paths import SESSIONS_DIR
 from usage_store import record_inner_voice_observation
 
 logger = logging.getLogger("lloyd-iv-observer")
@@ -92,6 +93,26 @@ def _todo_stewardship_cfg() -> dict[str, Any]:
     ts.setdefault("stalled_progress", False)
     ts.setdefault("stalled_after_turns", 5)
     return ts
+
+
+def _load_todos_from_session(session_id: str) -> list[dict[str, Any]]:
+    """Read live `session.todos` from disk for mid-turn refresh (Plan A.5).
+
+    Called from on_event_cb's tool_result branch when TodoWrite lands so
+    the observer's state.todos snapshot stays current as primary advances
+    through its committed plan. Cheap on a hot path (one JSON read), and
+    lock-free is fine — the session JSON is written via mutate_session
+    which provides atomicity at the file level.
+    """
+    if not session_id:
+        return []
+    p = SESSIONS_DIR / f"{session_id}.json"
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text()).get("todos") or []
+    except Exception:
+        return []
 
 
 def _resolve_endpoint(model_alias: str | None = None) -> tuple[str, str]:
@@ -1045,15 +1066,68 @@ def install_observer(
             content = evt.get("content", "") or ""
             is_error = bool(evt.get("is_error", False))
 
+            # Plan A.5 — mid-turn TodoWrite refresh + flip detection. The
+            # static reference TODOS block in IV's prompt is sourced from
+            # `state.todos`, which is snapshotted at install_observer.
+            # Without this refresh, multi-flip turns show IV a stale list.
+            # Also detect in_progress→completed flips here so the LLM
+            # judgment below can challenge marks-without-evidence.
+            todo_flips: list[dict[str, str]] = []
+            ts_cfg = state.todo_stewardship_cfg
+            if (
+                tool_name == "TodoWrite"
+                and not is_error
+                and ts_cfg.get("enabled", True)
+            ):
+                fresh = _load_todos_from_session(state.session_id)
+                # Diff fresh vs prior; surface only in_progress→completed
+                # flips. pending→in_progress is normal advancement and
+                # never needs a challenge. completed→completed is a
+                # no-op resubmission. Anything else (newly added, removed)
+                # we ignore for the mark-without-evidence detector.
+                if ts_cfg.get("mark_without_evidence", True):
+                    fresh_status = {
+                        (t.get("content") or ""): (t.get("status") or "")
+                        for t in fresh
+                        if t.get("content")
+                    }
+                    for content_key, new_status in fresh_status.items():
+                        old_status = state.prior_todo_status.get(content_key)
+                        if old_status == "in_progress" and new_status == "completed":
+                            todo_flips.append({
+                                "content": content_key,
+                                "from": old_status,
+                                "to": new_status,
+                            })
+                # Update snapshot + status map. Done unconditionally on
+                # successful TodoWrite so even pending→in_progress flips
+                # propagate to the next IV prompt's reference block.
+                state.todos = fresh
+                state.prior_todo_status = {
+                    (t.get("content") or ""): (t.get("status") or "")
+                    for t in fresh
+                    if t.get("content")
+                }
+
             # Tier 1: cheap check for benign small results / parse-retry errors.
-            if fast_path_enabled:
+            # When TodoWrite produced an in_progress→completed flip we want
+            # IV to evaluate evidence, so skip the fast-path noop in that case.
+            if fast_path_enabled and not todo_flips:
                 fp = _fast_path_tool_result(tool_name, content, is_error)
                 if fp is not None:
                     _persist(state, fp, trigger="tool_result", related_tool=tool_name)
                     return
 
-            # Tier 2: LLM judgment.
-            summary = _prompt.build_tool_result_summary(tool_name, content, is_error)
+            # Tier 2: LLM judgment. When `todo_flips` is non-empty, the
+            # summary builder appends a mark-without-evidence eval block
+            # so the LLM is forced to walk each completed-todo against
+            # the recent tool calls and inject a challenge if there's no
+            # plausible work behind the flip.
+            summary = _prompt.build_tool_result_summary(
+                tool_name, content, is_error,
+                todo_flips=todo_flips,
+                recent_decisions=state.decisions_this_turn,
+            )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
                 user_prompt=user_prompt, cfg=state.cfg,
