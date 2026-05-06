@@ -92,12 +92,24 @@ def _get_mcp_servers() -> dict[str, dict]:
     return servers
 
 
-def _get_disallowed_tools() -> list[str]:
+# Plan B — tools that primary cannot use while in plan mode. The plan
+# ritual is research-only: read tools, ToolSearch, TodoWrite, and the
+# plan-mode tools themselves stay allowed; the actuator tools are
+# blocked until ExitPlanMode commits or cancel flips plan_mode off.
+PLAN_MODE_BLOCKED_TOOLS = ("Write", "Edit", "Bash")
+
+
+def _get_disallowed_tools(plan_mode: bool = False) -> list[str]:
     """Build disallowed_tools list from config for harness RunOptions.
 
     Tools are advertised by bare name, so the disallow list uses bare
     names too. The legacy ``mcp__server__tool`` form is also recognized
     by ``build_tool_list`` for any rolled-forward configs.
+
+    `plan_mode` (Plan B) — when true, append the actuator tools
+    (Write, Edit, Bash) so primary cannot mutate state while drafting
+    a plan. Read tools, TodoWrite, ToolSearch, EnterPlanMode, and
+    ExitPlanMode all remain allowed.
     """
     disallowed: list[str] = []
     for _server_name, cfg in CONFIG.get("mcp_servers", {}).items():
@@ -105,6 +117,8 @@ def _get_disallowed_tools() -> list[str]:
             continue
         for tool_name in cfg.get("disabled_tools", []):
             disallowed.append(tool_name)
+    if plan_mode:
+        disallowed.extend(PLAN_MODE_BLOCKED_TOOLS)
     return disallowed
 
 

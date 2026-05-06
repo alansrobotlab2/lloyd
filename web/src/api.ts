@@ -434,6 +434,23 @@ export interface TodoItem {
   content: string
   status: 'pending' | 'in_progress' | 'completed'
   activeForm: string
+  stage?: number
+}
+
+export interface PlanStage {
+  n: number
+  title: string
+  summary?: string
+}
+
+export interface SessionPlan {
+  plan_mode: boolean
+  plan_md_path?: string
+  stages?: PlanStage[]
+  created_at?: string
+  drafted_at?: string
+  committed_at?: string
+  cancelled_at?: string
 }
 
 export interface ActiveProc {
@@ -566,6 +583,35 @@ export const api = {
     if (!response.ok) return []
     const data = await response.json()
     return Array.isArray(data?.todos) ? data.todos : []
+  },
+
+  async getSessionPlan(sessionId: string): Promise<SessionPlan> {
+    const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/plan`)
+    if (!response.ok) return { plan_mode: false }
+    const data = await response.json()
+    return (data?.plan as SessionPlan) || { plan_mode: false }
+  },
+
+  async getSessionPlanDocument(sessionId: string): Promise<{ plan_md_path: string; plan_md: string }> {
+    const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/plan/document`)
+    if (!response.ok) return { plan_md_path: '', plan_md: '' }
+    return response.json()
+  },
+
+  async enterPlanMode(sessionId: string): Promise<{ plan_mode: boolean; session_id: string }> {
+    const response = await fetch(
+      `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/plan_mode/enter`,
+      { method: 'POST' },
+    )
+    return response.json()
+  },
+
+  async exitPlanMode(sessionId: string): Promise<{ plan_mode: boolean; session_id: string }> {
+    const response = await fetch(
+      `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/plan_mode/exit`,
+      { method: 'POST' },
+    )
+    return response.json()
   },
 
   async cancelSession(

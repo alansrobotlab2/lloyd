@@ -242,6 +242,137 @@ def _format_subliminal_context(subliminal: str | None) -> str:
     )
 
 
+def _format_plan_artifact(plan: dict[str, Any] | None) -> str:
+    """Plan B — render the committed plan or plan_mode state for IV.
+
+    When `plan_mode=True`, emit a PLANNING-MODE banner so the IV knows
+    to evaluate plan quality (Phase B2 will pair this with the
+    iv-plan-review skill). When a committed plan exists, render a
+    compact reference block with stages so IV can judge whether the
+    primary's actions advance the plan or drift from it. Empty when
+    no plan and not in planning mode — caller falls back to the
+    todos-only flow.
+    """
+    if not plan:
+        return ""
+    if plan.get("plan_mode"):
+        return (
+            "PLANNING MODE ACTIVE — evaluate plan QUALITY, not execution drift. "
+            "Primary is drafting a plan via the plan-mode-authoring playbook. "
+            "Use this rubric (see iv-plan-review skill for the full version):\n"
+            "  • No clarifying questions asked → inject 'Ask 3 questions or "
+            "state 3 assumptions before drafting plan_md.'\n"
+            "  • Vague stage (goal, not deliverable) → inject 'How will we "
+            "know stage X is done?'\n"
+            "  • Missing acceptance criteria → inject 'What proves this stage "
+            "worked?'\n"
+            "  • Premature ExitPlanMode (pretool with obvious gaps) → inject "
+            "BEFORE the commit lands, naming the gap.\n"
+            "  • TodoWrite called instead of ExitPlanMode → inject 'Roll the "
+            "todos into ExitPlanMode along with plan_md; TodoWrite alone "
+            "leaves the session stuck in plan_mode.'\n"
+            "  • Plan is overkill for a trivial request → inject 'Consider "
+            "ExitPlanMode(cancel=true) and just do the work.'\n"
+            "Off-plan tool calls during research are NOT drift — Read/Grep/"
+            "skills_search exploration is the playbook. Noop unless one of "
+            "the rubric triggers is concretely present."
+        )
+    stages = plan.get("stages") or []
+    if not stages:
+        return ""
+    lines = ["PLAN ARTIFACT (committed plan — primary's stable cross-turn anchor):"]
+    for s in stages:
+        if not isinstance(s, dict):
+            continue
+        n = s.get("n", "?")
+        title = (s.get("title") or "").strip()
+        if not title:
+            continue
+        lines.append(f"  Stage {n}: {title}")
+    if len(lines) == 1:
+        return ""
+    lines.append(
+        "Use the plan as an additional progress reference. The TODOS "
+        "block (when present) is the live state; the plan is the "
+        "frame. Off-plan tool calls aren't automatic drift, but if "
+        "primary is clearly working outside the plan's scope, that's "
+        "the signal to inject."
+    )
+    return "\n".join(lines)
+
+
+def _format_todos_block(todos: list[dict[str, Any]] | None) -> str:
+    """Plan A — render `session.todos` as a compact reference block.
+
+    This is the ongoing-context block included on every IV per-event
+    prompt when stewardship is on. Distinct from the gating block in
+    `_format_pending_todos_block`, which fires only at terminal events
+    and forces a completion check.
+    """
+    if not todos:
+        return ""
+    lines = ["TODOS (primary's committed plan — reference artifact):"]
+    for t in todos:
+        status = (t.get("status") or "?").strip()
+        content = (t.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"  - [{status}] {content}")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+
+def _format_pending_todos_block(
+    todos: list[dict[str, Any]] | None,
+    *,
+    on_unmet: str,
+) -> str:
+    """Plan A.4 — the completion-gate eval block appended at terminal events.
+
+    Walks the todo list and asks IV to fire `on_unmet` (`inject` at
+    assistant_message, `ambient` at result) when any todo remains pending
+    or in_progress and the response under review doesn't actually finish
+    them. Returns "" when there are no todos or all are completed —
+    caller falls back to the goal-card eval block alone.
+    """
+    if not todos:
+        return ""
+    pending = [t for t in todos if (t.get("status") or "") in ("pending", "in_progress")]
+    if not pending:
+        return ""
+    lines = ["", "PENDING TODOS (REQUIRED — primary is about to stop with these unresolved):"]
+    for t in pending:
+        status = (t.get("status") or "?").strip()
+        content = (t.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"    - [{status}] {content}")
+    lines.extend([
+        "",
+        "Walk each pending/in_progress todo above. For each, decide: did the "
+        "response under review actually accomplish it (yes), or is it still "
+        "pending (no)?",
+        "",
+        f"  - ALL pending todos addressed → noop (the work is done).",
+        f"  - ANY pending todo unaddressed → {on_unmet}, naming the specific "
+        "todo and what's missing.",
+        "",
+        "Do NOT noop on the basis that the primary 'announced intent' or "
+        "'will dispatch tools next.' The harness has terminated this iteration; "
+        "there is no next dispatch unless you act now. A textual promise to "
+        "do work later is evidence the work was NOT done.",
+        "",
+        f"Equally, do NOT {on_unmet} just because a todo isn't echoed verbatim. "
+        "A response that delivers the substance of a todo (rephrased, "
+        "synthesized, or bundled with another) is sufficient — match meaning, "
+        f"not exact wording. Only {on_unmet} when a todo is plainly "
+        "unaddressed AND the response shows stub-announce or mid-cutoff "
+        "symptoms.",
+    ])
+    return "\n".join(lines)
+
+
 def _format_prior_decisions(decisions: list[dict[str, Any]] | None) -> str:
     """Render the observer's prior decisions this turn."""
     if not decisions:
@@ -267,6 +398,8 @@ def build_user_prompt_for_event(
     interventions_budget: int,
     prior_decisions: list[dict[str, Any]] | None = None,
     subliminal_context: str | None = None,
+    todos: list[dict[str, Any]] | None = None,
+    plan_artifact: dict[str, Any] | None = None,
 ) -> str:
     """Assemble the per-event user prompt the observer evaluates."""
     budget_line = (
@@ -282,9 +415,15 @@ def build_user_prompt_for_event(
     prior_section = f"\n{prior_block}" if prior_block else ""
     subliminal_block = _format_subliminal_context(subliminal_context)
     subliminal_section = f"\n{subliminal_block}" if subliminal_block else ""
+    plan_block = _format_plan_artifact(plan_artifact)
+    plan_section = f"\n{plan_block}\n" if plan_block else ""
+    todos_block = _format_todos_block(todos)
+    todos_section = f"\n{todos_block}\n" if todos_block else ""
     return (
         f"USER REQUEST:\n{user_request}\n\n"
         f"{_format_goal_card(goal_card)}\n"
+        f"{plan_section}"
+        f"{todos_section}"
         f"{subliminal_section}\n"
         f"PRIMARY'S RESPONSE SO FAR (visible text):\n"
         f"{primary_text_so_far or '(none yet)'}\n"
@@ -368,6 +507,7 @@ def build_assistant_message_summary(
     tool_calls: list[dict],
     finish_reason: str = "stop",
     goal_card: dict[str, Any] | None = None,
+    todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """One-line summary of an assistant_message event for review.
 
@@ -398,19 +538,20 @@ def build_assistant_message_summary(
             f"Primary will continue after tool dispatch."
         )
     if finish_reason == "stop":
+        pending_block = _format_pending_todos_block(todos, on_unmet="inject")
         if not text.strip():
             return (
                 f"Iteration {iteration} finished with EMPTY text and NO tool calls "
                 f"(finish_reason=stop). PRIMARY IS ABOUT TO TERMINATE WITHOUT "
                 f"ANSWERING. This is your last chance to inject — the harness "
-                f"will continue the loop if you do."
+                f"will continue the loop if you do.{pending_block}"
             )
         eval_block = _format_goal_eval_block(goal_card, on_unmet="inject")
         return (
             f"Iteration {iteration} TERMINAL (finish_reason=stop, NO tool calls). "
             f"The harness EXITS the turn at this event unless you inject. "
             f"There is no next iteration. Tools are not coming.\n"
-            f"Iteration text: {text_preview!r}.{eval_block}"
+            f"Iteration text: {text_preview!r}.{eval_block}{pending_block}"
         )
     # finish_reason in {length, tool_calls without committed tools, error, ...}
     return (
@@ -466,21 +607,167 @@ def _format_spilled_summary(tool_name: str, content: str) -> str | None:
     )
 
 
+def _format_mark_without_evidence_block(
+    flips: list[dict[str, str]] | None,
+    recent_decisions: list[dict[str, Any]] | None,
+) -> str:
+    """Plan A.5 — challenge an in_progress→completed flip without evidence.
+
+    Lists the flips and the last few tool calls (via the IV's own decisions
+    log, which carries `related_tool` for each prior event). Asks the IV
+    to judge whether the recent work plausibly accomplished each completed
+    todo. Returns "" when there are no flips — caller falls back to the
+    normal tool_result summary.
+    """
+    if not flips:
+        return ""
+    lines = ["", "MARK-WITHOUT-EVIDENCE CHECK (REQUIRED — do not skip):"]
+    lines.append("Primary just flipped these todos to `completed`:")
+    for f in flips:
+        c = (f.get("content") or "").strip()
+        if not c:
+            continue
+        lines.append(f"  - {c}")
+    # Pull the last ~6 tool-related decisions so IV can judge "did real
+    # work happen recently?" The decisions log carries one entry per IV
+    # decision; we filter to those tied to a tool (related_tool != None)
+    # and surface the tool names + IV's reasoning at the time.
+    if recent_decisions:
+        tool_decisions = [
+            d for d in recent_decisions
+            if (d.get("related_tool") or "").strip()
+        ]
+        if tool_decisions:
+            lines.append("")
+            lines.append("Recent tool activity this turn (most recent last):")
+            for d in tool_decisions[-6:]:
+                tool = d.get("related_tool", "?")
+                trig = d.get("trigger", "?")
+                rsn = (d.get("reason") or "")[:80]
+                lines.append(f"  - [{trig}] {tool} — {rsn}")
+    lines.extend([
+        "",
+        "Walk each completed todo against the recent tool activity. For each:",
+        "",
+        "  - The tool calls plausibly accomplished the todo → noop "
+        "(advancement is real, primary's bookkeeping is honest).",
+        "  - No plausible work behind the flip → inject naming the specific "
+        "todo and what's missing (e.g. \"You marked X completed but no "
+        "tool call shows that work happening — what evidence do you have?\").",
+        "",
+        "Be specific about the tool-call evidence you saw. A vague \"primary "
+        "did some work\" reasoning is the failure mode this check exists to "
+        "prevent. If the evidence is genuinely thin (fewer than 1-2 tool "
+        "calls on the relevant subject since the last flip), that's the "
+        "signal to inject. If the tool calls are unrelated to the todo "
+        "content, that's also the signal to inject.",
+        "",
+        "TodoWrite itself does not count as evidence of the todo's work — "
+        "it's just bookkeeping. Look for Read/Write/Bash/Edit/skill calls "
+        "or the equivalent that actually performed the action.",
+    ])
+    return "\n".join(lines)
+
+
+def _format_stalled_progress_block(
+    threshold: int,
+    active_todos: list[dict[str, Any]] | None,
+    recent_decisions: list[dict[str, Any]] | None,
+) -> str:
+    """Plan A.6 — primary has made tool calls but no todo has advanced.
+
+    Fires after `threshold` non-TodoWrite tool results since the last
+    status change. The block lists the active (pending/in_progress)
+    todos and the recent tool activity, then asks the IV to judge
+    whether the primary is doing legitimate exploration or has lost
+    track of its committed plan.
+    """
+    if threshold <= 0 or not active_todos:
+        return ""
+    lines = ["", "STALLED-PROGRESS CHECK (REQUIRED — do not skip):"]
+    lines.append(
+        f"Primary has made {threshold}+ non-TodoWrite tool calls since the "
+        "last todo status change, but at least one todo is still active."
+    )
+    lines.append("")
+    lines.append("Active todos:")
+    for t in active_todos:
+        status = (t.get("status") or "?").strip()
+        c = (t.get("content") or "").strip()
+        if not c:
+            continue
+        if status not in ("pending", "in_progress"):
+            continue
+        lines.append(f"  - [{status}] {c}")
+    if recent_decisions:
+        tool_decisions = [
+            d for d in recent_decisions
+            if (d.get("related_tool") or "").strip()
+        ]
+        if tool_decisions:
+            lines.append("")
+            lines.append("Recent tool activity (most recent last):")
+            for d in tool_decisions[-6:]:
+                tool = d.get("related_tool", "?")
+                trig = d.get("trigger", "?")
+                rsn = (d.get("reason") or "")[:80]
+                lines.append(f"  - [{trig}] {tool} — {rsn}")
+    lines.extend([
+        "",
+        "Decide:",
+        "  - Tool calls are plausibly serving an active todo (research, "
+        "loading context, executing the in-progress step) → noop.",
+        "  - Tool calls are unrelated to any active todo (drifted onto a "
+        "side quest, gone exploring beyond the plan) → inject naming the "
+        "in_progress todo and asking the primary to either advance it or "
+        "explain what's blocking.",
+        "  - Tool calls are progress on the in_progress step but the "
+        "primary is taking too long without bookkeeping → inject a "
+        "lighter nudge: \"You've been working on X for a while — update "
+        "the todo list when you make progress.\"",
+        "",
+        "A long Read/Grep/Glob sequence on files relevant to the "
+        "in_progress todo is legitimate research, not a stall. Only "
+        "inject when the tool calls clearly aren't advancing any active "
+        "todo OR when the primary has done the work but forgot to update "
+        "TodoWrite.",
+    ])
+    return "\n".join(lines)
+
+
 def build_tool_result_summary(
     tool_name: str,
     result_preview: str,
     is_error: bool,
+    todo_flips: list[dict[str, str]] | None = None,
+    recent_decisions: list[dict[str, Any]] | None = None,
+    stalled_progress: bool = False,
+    tool_calls_since_flip_threshold: int = 0,
+    active_todos: list[dict[str, Any]] | None = None,
 ) -> str:
-    """One-line summary of a tool_result event for review."""
+    """One-line summary of a tool_result event for review.
+
+    `todo_flips` (Plan A.5) — when TodoWrite caused an in_progress→completed
+    flip, the summary appends a mark-without-evidence check.
+    `stalled_progress` (Plan A.6) — when the observer's stall counter
+    crossed the threshold, append a stalled-progress block asking the
+    LLM to judge whether tool activity is on-plan or drifted.
+    """
+    extra = _format_mark_without_evidence_block(todo_flips, recent_decisions)
+    if stalled_progress:
+        extra += _format_stalled_progress_block(
+            tool_calls_since_flip_threshold, active_todos, recent_decisions,
+        )
     if not is_error:
         spilled = _format_spilled_summary(tool_name, result_preview)
         if spilled is not None:
-            return spilled
+            return spilled + extra
     label = "ERROR" if is_error else "result"
     preview = result_preview[:300] + ("..." if len(result_preview) > 300 else "")
     return (
         f"Tool {tool_name} returned {label}: {preview!r}. "
         f"Primary will see this and decide its next move."
+        f"{extra}"
     )
 
 
@@ -488,6 +775,7 @@ def build_result_summary(
     stop_reason: str,
     response_text: str,
     goal_card: dict[str, Any] | None = None,
+    todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """Summary of the terminal `result` event with goal-completion check.
 
@@ -499,13 +787,14 @@ def build_result_summary(
     """
     txt = windowed_text(response_text, 1200)
     eval_block = _format_goal_eval_block(goal_card, on_unmet="ambient")
-    if eval_block:
+    pending_block = _format_pending_todos_block(todos, on_unmet="ambient")
+    if eval_block or pending_block:
         return (
             f"Turn ENDED (stop_reason={stop_reason}). The harness has already "
             f"terminated. There will be no more text or tool calls. "
-            f"Final visible response: {txt!r}.{eval_block}"
+            f"Final visible response: {txt!r}.{eval_block}{pending_block}"
         )
-    # No goal card — fall back to lighter-touch judgment.
+    # No goal card or todos — fall back to lighter-touch judgment.
     return (
         f"Turn ENDED (stop_reason={stop_reason}). The harness has already "
         f"terminated. Final visible response: {txt!r}. "

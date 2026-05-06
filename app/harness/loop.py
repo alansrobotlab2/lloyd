@@ -134,6 +134,25 @@ async def run_query(
                         "loop: drained %d background-task notification(s)", len(drained),
                     )
 
+            # Plan B — per-iteration disallowed-tools refresh. When the
+            # caller wired a refresher (typically a closure over session
+            # state), the harness re-evaluates the disallowed list on
+            # every iteration. This is what lets ExitPlanMode flipping
+            # plan_mode=false take effect mid-turn instead of waiting
+            # for a fresh user turn to rebuild options.
+            if options.disallowed_tools_refresh is not None:
+                try:
+                    current_disallowed: set[str] = set(
+                        options.disallowed_tools_refresh() or []
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "loop: disallowed_tools_refresh raised: %s", exc,
+                    )
+                    current_disallowed = set(options.disallowed_tools or [])
+            else:
+                current_disallowed = set(options.disallowed_tools or [])
+
             iteration_started_at = time.perf_counter()
             iteration_usage: dict[str, int] = {}
             assistant_text = ""
@@ -146,7 +165,7 @@ async def run_query(
                     base_url=options.base_url,
                     model=options.model,
                     messages=chat_messages,
-                    tools=loaded_set.visible_tools(),
+                    tools=loaded_set.visible_tools(extra_disallowed=current_disallowed),
                     extra_body=options.extra_body,
                     cancel_event=options.cancel_event,
                     timeout_s=options.request_timeout_s,
@@ -295,6 +314,7 @@ async def run_query(
                     options=options,
                     session_id=session_id,
                     loaded_set=loaded_set,
+                    runtime_disallowed=current_disallowed,
                 )
                 yield result_evt
                 if options.hooks is not None:
@@ -561,11 +581,17 @@ async def _dispatch_one_tool_call(
     options: RunOptions,
     session_id: str,
     loaded_set: LoadedToolSet,
+    runtime_disallowed: set[str] | None = None,
 ) -> NormalizedEvent:
     """Run hooks → MCP dispatch → hooks for a single tool call.
 
     Returns a `tool_result` event ready to yield. Encapsulates the
     deny / dispatch-error / success paths so the loop body stays flat.
+
+    `runtime_disallowed` (Plan B) — the loop's per-iteration disallowed
+    set, computed via `options.disallowed_tools_refresh` if set. When
+    None, falls back to `options.disallowed_tools` (the static turn-start
+    list). Either way, this is the gate that blocks dispatch.
     """
     name = tc["function"]["name"]
     args_dict = tc["_args_dict"]
@@ -575,7 +601,12 @@ async def _dispatch_one_tool_call(
         msg = f"Tool call arguments could not be parsed as JSON: {args_dict.get('error', 'unknown')}"
         return events.tool_result(call_id=call_id, name=name, content=msg, is_error=True)
 
-    if options.disallowed_tools and name in options.disallowed_tools:
+    effective_disallowed = (
+        runtime_disallowed
+        if runtime_disallowed is not None
+        else set(options.disallowed_tools or [])
+    )
+    if name in effective_disallowed:
         return events.tool_result(
             call_id=call_id, name=name,
             content=f"Tool {name!r} is disabled by configuration.",

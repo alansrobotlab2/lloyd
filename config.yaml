@@ -16,6 +16,14 @@ inner_voice:
     # Window of accumulated primary text the observer sees in its prompt.
     primary_text_window_chars: 4000
     rotation_days: 30
+  # Plan A — TodoWrite stewardship. IV uses session.todos as a reference
+  # artifact to monitor, steer, and gate primary's execution across turns.
+  todo_stewardship:
+    enabled: true
+    completion_gate: true       # A.4 — inject when primary stops with pending todos
+    mark_without_evidence: true # A.5 — challenge in_progress→completed without plausible work
+    stalled_progress: false        # A.6 — opt-in until tuned (false-positive risk)
+    stalled_after_tool_calls: 5    # A.6 — fires after this many non-TodoWrite tool results since the last status flip
 autonomy:
   enabled: true
   task_dir: ~/obsidian/autonomy
@@ -103,8 +111,11 @@ harness:
     # app/harness/tool_search.py.
     enabled: true
     threshold_tools: 30
-    # Empty → BUILTIN_BARE_NAMES (Bash, Read, Edit, Write, Grep, Glob, Task)
-    baseline_tools: []
+    # Empty → BUILTIN_BARE_NAMES (Bash, Read, Edit, Write, Grep, Glob, Task).
+    # skills_search / skills_read are baseline because SOUL.md's operating
+    # loop mandates skills_search as the first action of every turn — gating
+    # it behind ToolSearch causes the model to emit text-form calls.
+    baseline_tools: [Bash, Read, Edit, Write, Grep, Glob, Task, skills_search, skills_read]
     max_results_default: 5
     max_results_cap: 20
 subagents:

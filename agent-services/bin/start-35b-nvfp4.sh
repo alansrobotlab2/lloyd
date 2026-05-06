@@ -235,6 +235,10 @@ export VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=1073741824
 export VLLM_ENABLE_CUDAGRAPH_GC=1
 export VLLM_USE_FLASHINFER_SAMPLER=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# nvcc 13.2 can't build flashinfer kernels against system gcc-16 libstdc++
+# (__builtin_is_virtual_base_of unknown). Pin to gcc-15. Drop when CUDA
+# bumps past 13.2 with gcc 16 support.
+export NVCC_CCBIN=/usr/bin/g++-15
 
 exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --model "$MODEL_DIR" \
