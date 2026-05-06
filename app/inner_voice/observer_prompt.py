@@ -242,6 +242,55 @@ def _format_subliminal_context(subliminal: str | None) -> str:
     )
 
 
+def _format_plan_artifact(plan: dict[str, Any] | None) -> str:
+    """Plan B — render the committed plan or plan_mode state for IV.
+
+    When `plan_mode=True`, emit a PLANNING-MODE banner so the IV knows
+    to evaluate plan quality (Phase B2 will pair this with the
+    iv-plan-review skill). When a committed plan exists, render a
+    compact reference block with stages so IV can judge whether the
+    primary's actions advance the plan or drift from it. Empty when
+    no plan and not in planning mode — caller falls back to the
+    todos-only flow.
+    """
+    if not plan:
+        return ""
+    if plan.get("plan_mode"):
+        return (
+            "PLANNING MODE ACTIVE — primary is in research-only mode "
+            "drafting a plan. Evaluate plan quality, not execution: is "
+            "primary asking clarifying questions, exploring relevant "
+            "context, defining stages with verifiable deliverables, "
+            "decomposing into actionable todos? An off-plan tool call "
+            "here is research, not drift — only inject if the plan "
+            "draft is shaping up vague, missing acceptance criteria, "
+            "or the primary is about to commit ExitPlanMode with "
+            "obvious gaps."
+        )
+    stages = plan.get("stages") or []
+    if not stages:
+        return ""
+    lines = ["PLAN ARTIFACT (committed plan — primary's stable cross-turn anchor):"]
+    for s in stages:
+        if not isinstance(s, dict):
+            continue
+        n = s.get("n", "?")
+        title = (s.get("title") or "").strip()
+        if not title:
+            continue
+        lines.append(f"  Stage {n}: {title}")
+    if len(lines) == 1:
+        return ""
+    lines.append(
+        "Use the plan as an additional progress reference. The TODOS "
+        "block (when present) is the live state; the plan is the "
+        "frame. Off-plan tool calls aren't automatic drift, but if "
+        "primary is clearly working outside the plan's scope, that's "
+        "the signal to inject."
+    )
+    return "\n".join(lines)
+
+
 def _format_todos_block(todos: list[dict[str, Any]] | None) -> str:
     """Plan A — render `session.todos` as a compact reference block.
 
@@ -340,6 +389,7 @@ def build_user_prompt_for_event(
     prior_decisions: list[dict[str, Any]] | None = None,
     subliminal_context: str | None = None,
     todos: list[dict[str, Any]] | None = None,
+    plan_artifact: dict[str, Any] | None = None,
 ) -> str:
     """Assemble the per-event user prompt the observer evaluates."""
     budget_line = (
@@ -355,11 +405,14 @@ def build_user_prompt_for_event(
     prior_section = f"\n{prior_block}" if prior_block else ""
     subliminal_block = _format_subliminal_context(subliminal_context)
     subliminal_section = f"\n{subliminal_block}" if subliminal_block else ""
+    plan_block = _format_plan_artifact(plan_artifact)
+    plan_section = f"\n{plan_block}\n" if plan_block else ""
     todos_block = _format_todos_block(todos)
     todos_section = f"\n{todos_block}\n" if todos_block else ""
     return (
         f"USER REQUEST:\n{user_request}\n\n"
         f"{_format_goal_card(goal_card)}\n"
+        f"{plan_section}"
         f"{todos_section}"
         f"{subliminal_section}\n"
         f"PRIMARY'S RESPONSE SO FAR (visible text):\n"

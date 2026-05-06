@@ -563,6 +563,15 @@ class ObserverState:
     prior_todo_status: dict[str, str] = field(default_factory=dict)
     todo_stewardship_cfg: dict[str, Any] = field(default_factory=dict)
     tool_calls_since_last_flip: int = 0
+    # Plan B — committed plan artifact (or None when no plan exists or
+    # the session is currently in plan_mode without a prior commit).
+    # Shape mirrors `session.plan`: {plan_mode, plan_md_path, stages,
+    # committed_at}. Threaded through to the IV per-event prompt so
+    # the observer evaluates progress against the committed plan, not
+    # just the current todos. When `plan_mode=True`, the IV prompt
+    # branch swaps from "watch for execution drift" to "evaluate plan
+    # quality".
+    plan_artifact: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -810,6 +819,7 @@ def _build_event_user_prompt(
         prior_decisions=state.decisions_this_turn,
         subliminal_context=state.subliminal_context,
         todos=todos_for_prompt,
+        plan_artifact=state.plan_artifact,
     )
 
 
@@ -833,6 +843,7 @@ def install_observer(
     goal_card: dict[str, Any] | None = None,
     subliminal_context: str = "",
     todos: list[dict[str, Any]] | None = None,
+    plan_artifact: dict[str, Any] | None = None,
 ) -> ObserverState:
     """Install observer hooks onto a HookRegistry for one primary turn.
 
@@ -844,6 +855,11 @@ def install_observer(
     non-empty, the observer's per-event prompt includes a TODOS block and,
     at the terminal `assistant_message` event, a PENDING TODOS gate that
     asks IV to inject if primary is about to stop with work undone.
+
+    `plan_artifact` (Plan B) — snapshot of `session.plan` at turn start.
+    When the session is in `plan_mode`, the IV's per-event prompt swaps
+    framing to evaluate plan quality. When a committed plan exists, the
+    plan body anchors IV's progress evaluation across turns.
     """
     cfg = _observer_cfg()
     ts_cfg = _todo_stewardship_cfg()
@@ -870,6 +886,7 @@ def install_observer(
         todos=todos_snapshot,
         prior_todo_status=prior_status,
         todo_stewardship_cfg=ts_cfg,
+        plan_artifact=plan_artifact,
     )
     fast_path_enabled = bool(cfg.get("fast_path_enabled", True))
 

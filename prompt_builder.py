@@ -60,10 +60,89 @@ def _format_active_todos(todos: list[dict] | None) -> str | None:
     return "\n".join(lines)
 
 
+def _format_plan_block(plan: dict | None) -> str | None:
+    """Render the session's plan state (Plan B).
+
+    Two render modes:
+      * `plan_mode=True`: emit a `<plan_mode_active>` banner reminding
+        primary that write tools are blocked and pointing at the
+        plan-mode-authoring skill (Phase B2 will inject that as
+        `<context>` automatically; for B1 we just point at it by name).
+      * Committed plan exists (`plan_md_path` set, `plan_mode=false`):
+        load the markdown body and emit a `<plan>` block. Plan body
+        changes only when the plan is re-committed, so cache stays
+        warm across turns.
+      * Otherwise: no block.
+    """
+    if not plan:
+        return None
+    if plan.get("plan_mode"):
+        stage_summary = ""
+        stages = plan.get("stages") or []
+        if stages:
+            lines = [f"  Stage {s.get('n','?')}: {s.get('title','')}" for s in stages if isinstance(s, dict)]
+            stage_summary = "\nStages drafted so far:\n" + "\n".join(lines)
+        return (
+            "<plan_mode_active>\n"
+            "You are in research-only PLAN MODE. Write, Edit, and Bash are "
+            "blocked until you commit. Do not try to call them — they will "
+            "return errors. You retain Read, Grep, Glob, skills_search, "
+            "skills_read, and ToolSearch for research.\n\n"
+            "DO NOT call TodoWrite directly while in plan mode. The proper "
+            "commit path is `ExitPlanMode`, which atomically writes the "
+            "plan markdown to the vault AND replaces session.todos with "
+            "your decomposed list. Calling TodoWrite alone leaves the "
+            "session stuck in plan_mode with no committed plan.\n\n"
+            "Your workflow this turn:\n"
+            "  1. Research the request — read relevant files, skills, prior context.\n"
+            "  2. If the goal is ambiguous, ask the user clarifying questions "
+            "(they answer in their next turn).\n"
+            "  3. Draft a structured plan as markdown (goal, approach, stages, acceptance criteria).\n"
+            "  4. Decompose into todos: one or more per stage, in execution order, "
+            "with the first todo as `in_progress`.\n"
+            "  5. Call `ExitPlanMode` with `plan_md`, `stages`, and `todos` to commit. "
+            "If research shows the request was simpler than it looked, call "
+            "`ExitPlanMode(cancel=true)` instead.\n"
+            "  6. After ExitPlanMode succeeds, STOP this turn with a brief "
+            "summary. Write/Edit/Bash stay blocked for the rest of this "
+            "turn (harness pins disallowed_tools at turn start). The user's "
+            "next turn rebuilds options, unblocks actuator tools, and "
+            "surfaces the committed plan via your system prompt. Execution "
+            "begins on that next turn, not this one."
+            f"{stage_summary}\n"
+            "</plan_mode_active>"
+        )
+    plan_path = plan.get("plan_md_path")
+    if not plan_path:
+        return None
+    try:
+        body = Path(plan_path).read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    if not body:
+        return None
+    stages = plan.get("stages") or []
+    stage_lines = ""
+    if stages:
+        items = [f"  {s.get('n','?')}. {s.get('title','')}" for s in stages if isinstance(s, dict)]
+        stage_lines = "\n\nSTAGES:\n" + "\n".join(items)
+    return (
+        "<plan>\n"
+        f"PLAN COMMITTED at {plan.get('committed_at', '?')}.\n\n"
+        f"{body}"
+        f"{stage_lines}\n\n"
+        "Stay focused on this plan. Use TodoWrite to track progress. Do "
+        "not silently abandon stages — if you need to revise the plan, "
+        "ask the user (only a fresh /plan can rewrite it)."
+        "\n</plan>"
+    )
+
+
 def build_system_prompt(
     include_skills_index: bool = True,
     overlay_dir: str | Path | None = None,
     todos: list[dict] | None = None,
+    plan: dict | None = None,
 ) -> str:
     """Build the full system prompt for a Lloyd session.
 
@@ -75,6 +154,11 @@ def build_system_prompt(
     `todos` (Plan A) — when non-empty, an `<active_todos>` block is appended
     so primary stays anchored to its committed plan even after compaction.
     Pass the list straight from `session.todos`.
+
+    `plan` (Plan B) — when `plan_mode=True`, render a `<plan_mode_active>`
+    banner; when a committed plan exists (`plan_md_path` set), render a
+    `<plan>` block with the markdown body. Pass `session.plan` straight
+    from disk.
     """
     overlay = _resolve_overlay(overlay_dir)
     parts = []
@@ -91,6 +175,10 @@ def build_system_prompt(
         skills = _load_skills_index(overlay)
         if skills:
             parts.append(f"<available_skills>\n{skills}\n</available_skills>\nNote: relevant skill content is automatically injected into each user message as <context> when matched.")
+
+    plan_block = _format_plan_block(plan)
+    if plan_block:
+        parts.append(plan_block)
 
     todos_block = _format_active_todos(todos)
     if todos_block:
