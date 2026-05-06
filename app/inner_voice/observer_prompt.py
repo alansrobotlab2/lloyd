@@ -606,32 +606,105 @@ def _format_mark_without_evidence_block(
     return "\n".join(lines)
 
 
+def _format_stalled_progress_block(
+    threshold: int,
+    active_todos: list[dict[str, Any]] | None,
+    recent_decisions: list[dict[str, Any]] | None,
+) -> str:
+    """Plan A.6 — primary has made tool calls but no todo has advanced.
+
+    Fires after `threshold` non-TodoWrite tool results since the last
+    status change. The block lists the active (pending/in_progress)
+    todos and the recent tool activity, then asks the IV to judge
+    whether the primary is doing legitimate exploration or has lost
+    track of its committed plan.
+    """
+    if threshold <= 0 or not active_todos:
+        return ""
+    lines = ["", "STALLED-PROGRESS CHECK (REQUIRED — do not skip):"]
+    lines.append(
+        f"Primary has made {threshold}+ non-TodoWrite tool calls since the "
+        "last todo status change, but at least one todo is still active."
+    )
+    lines.append("")
+    lines.append("Active todos:")
+    for t in active_todos:
+        status = (t.get("status") or "?").strip()
+        c = (t.get("content") or "").strip()
+        if not c:
+            continue
+        if status not in ("pending", "in_progress"):
+            continue
+        lines.append(f"  - [{status}] {c}")
+    if recent_decisions:
+        tool_decisions = [
+            d for d in recent_decisions
+            if (d.get("related_tool") or "").strip()
+        ]
+        if tool_decisions:
+            lines.append("")
+            lines.append("Recent tool activity (most recent last):")
+            for d in tool_decisions[-6:]:
+                tool = d.get("related_tool", "?")
+                trig = d.get("trigger", "?")
+                rsn = (d.get("reason") or "")[:80]
+                lines.append(f"  - [{trig}] {tool} — {rsn}")
+    lines.extend([
+        "",
+        "Decide:",
+        "  - Tool calls are plausibly serving an active todo (research, "
+        "loading context, executing the in-progress step) → noop.",
+        "  - Tool calls are unrelated to any active todo (drifted onto a "
+        "side quest, gone exploring beyond the plan) → inject naming the "
+        "in_progress todo and asking the primary to either advance it or "
+        "explain what's blocking.",
+        "  - Tool calls are progress on the in_progress step but the "
+        "primary is taking too long without bookkeeping → inject a "
+        "lighter nudge: \"You've been working on X for a while — update "
+        "the todo list when you make progress.\"",
+        "",
+        "A long Read/Grep/Glob sequence on files relevant to the "
+        "in_progress todo is legitimate research, not a stall. Only "
+        "inject when the tool calls clearly aren't advancing any active "
+        "todo OR when the primary has done the work but forgot to update "
+        "TodoWrite.",
+    ])
+    return "\n".join(lines)
+
+
 def build_tool_result_summary(
     tool_name: str,
     result_preview: str,
     is_error: bool,
     todo_flips: list[dict[str, str]] | None = None,
     recent_decisions: list[dict[str, Any]] | None = None,
+    stalled_progress: bool = False,
+    tool_calls_since_flip_threshold: int = 0,
+    active_todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """One-line summary of a tool_result event for review.
 
     `todo_flips` (Plan A.5) — when TodoWrite caused an in_progress→completed
-    flip, the summary appends a mark-without-evidence check. Empty list /
-    None disables the check (fast-path noop fallback in observer.py covers
-    the common case). `recent_decisions` is `state.decisions_this_turn`
-    so the eval block can list recent tool activity.
+    flip, the summary appends a mark-without-evidence check.
+    `stalled_progress` (Plan A.6) — when the observer's stall counter
+    crossed the threshold, append a stalled-progress block asking the
+    LLM to judge whether tool activity is on-plan or drifted.
     """
+    extra = _format_mark_without_evidence_block(todo_flips, recent_decisions)
+    if stalled_progress:
+        extra += _format_stalled_progress_block(
+            tool_calls_since_flip_threshold, active_todos, recent_decisions,
+        )
     if not is_error:
         spilled = _format_spilled_summary(tool_name, result_preview)
         if spilled is not None:
-            return spilled + _format_mark_without_evidence_block(todo_flips, recent_decisions)
+            return spilled + extra
     label = "ERROR" if is_error else "result"
     preview = result_preview[:300] + ("..." if len(result_preview) > 300 else "")
-    eval_block = _format_mark_without_evidence_block(todo_flips, recent_decisions)
     return (
         f"Tool {tool_name} returned {label}: {preview!r}. "
         f"Primary will see this and decide its next move."
-        f"{eval_block}"
+        f"{extra}"
     )
 
 

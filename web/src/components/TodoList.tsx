@@ -30,6 +30,8 @@ export default function TodoList({ sessionId, refreshKey }: TodoListProps) {
     pending: todos.filter(t => t.status === 'pending').length,
   }
 
+  const completionPct = todos.length > 0 ? (counts.completed / todos.length) * 100 : 0
+
   return (
     <details
       open
@@ -46,6 +48,15 @@ export default function TodoList({ sessionId, refreshKey }: TodoListProps) {
             · {counts.in_progress} in progress
           </span>
         )}
+        <div
+          className="ml-auto w-20 h-1 bg-surface-3/60 rounded-full overflow-hidden"
+          aria-label={`${counts.completed} of ${todos.length} completed`}
+        >
+          <div
+            className="h-full bg-emerald-500/70 transition-all"
+            style={{ width: `${completionPct}%` }}
+          />
+        </div>
       </summary>
       <ul className="px-4 pb-2.5 space-y-1 max-h-48 overflow-y-auto">
         {todos.map((t, i) => (

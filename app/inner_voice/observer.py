@@ -91,7 +91,7 @@ def _todo_stewardship_cfg() -> dict[str, Any]:
     ts.setdefault("completion_gate", True)
     ts.setdefault("mark_without_evidence", True)
     ts.setdefault("stalled_progress", False)
-    ts.setdefault("stalled_after_turns", 5)
+    ts.setdefault("stalled_after_tool_calls", 5)
     return ts
 
 
@@ -555,9 +555,14 @@ class ObserverState:
     # in_progress→completed flips for the mark-without-evidence behavior
     # (A.5, Phase A2). `todo_stewardship_cfg` is a snapshot of the
     # config block so per-turn behavior toggles are deterministic.
+    # `tool_calls_since_last_flip` (A.6) counts non-TodoWrite tool_result
+    # events since the last TodoWrite that altered any status; it resets
+    # on every flip and triggers the stalled-progress nudge when it
+    # reaches `todo_stewardship.stalled_after_tool_calls`.
     todos: list[dict[str, Any]] = field(default_factory=list)
     prior_todo_status: dict[str, str] = field(default_factory=dict)
     todo_stewardship_cfg: dict[str, Any] = field(default_factory=dict)
+    tool_calls_since_last_flip: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1073,6 +1078,7 @@ def install_observer(
             # Also detect in_progress→completed flips here so the LLM
             # judgment below can challenge marks-without-evidence.
             todo_flips: list[dict[str, str]] = []
+            any_status_change = False
             ts_cfg = state.todo_stewardship_cfg
             if (
                 tool_name == "TodoWrite"
@@ -1080,17 +1086,21 @@ def install_observer(
                 and ts_cfg.get("enabled", True)
             ):
                 fresh = _load_todos_from_session(state.session_id)
-                # Diff fresh vs prior; surface only in_progress→completed
-                # flips. pending→in_progress is normal advancement and
-                # never needs a challenge. completed→completed is a
-                # no-op resubmission. Anything else (newly added, removed)
-                # we ignore for the mark-without-evidence detector.
+                fresh_status = {
+                    (t.get("content") or ""): (t.get("status") or "")
+                    for t in fresh
+                    if t.get("content")
+                }
+                # Detect any status change (used by A.6 to reset the
+                # stalled-progress counter — pending→in_progress also
+                # counts as forward motion, not just completion flips).
+                if fresh_status != state.prior_todo_status:
+                    any_status_change = True
+                # Surface in_progress→completed flips for A.5's
+                # mark-without-evidence challenge. Other transitions
+                # (pending→in_progress, completed→completed, list shape
+                # changes) are not flagged here.
                 if ts_cfg.get("mark_without_evidence", True):
-                    fresh_status = {
-                        (t.get("content") or ""): (t.get("status") or "")
-                        for t in fresh
-                        if t.get("content")
-                    }
                     for content_key, new_status in fresh_status.items():
                         old_status = state.prior_todo_status.get(content_key)
                         if old_status == "in_progress" and new_status == "completed":
@@ -1103,16 +1113,39 @@ def install_observer(
                 # successful TodoWrite so even pending→in_progress flips
                 # propagate to the next IV prompt's reference block.
                 state.todos = fresh
-                state.prior_todo_status = {
-                    (t.get("content") or ""): (t.get("status") or "")
-                    for t in fresh
-                    if t.get("content")
-                }
+                state.prior_todo_status = fresh_status
+
+            # Plan A.6 — stalled-progress counter. Counts non-TodoWrite
+            # tool results since the last TodoWrite that altered any
+            # status. Reset on a status change; increment on any other
+            # tool result. Errors don't increment (a tool error is the
+            # primary's problem to handle, not a stall signal).
+            stalled_fired = False
+            if ts_cfg.get("enabled", True) and ts_cfg.get("stalled_progress", False):
+                if any_status_change:
+                    state.tool_calls_since_last_flip = 0
+                elif tool_name != "TodoWrite" and not is_error:
+                    state.tool_calls_since_last_flip += 1
+                threshold = int(ts_cfg.get("stalled_after_tool_calls", 5))
+                has_active = any(
+                    (t.get("status") or "") in ("pending", "in_progress")
+                    for t in state.todos
+                )
+                if (
+                    state.tool_calls_since_last_flip >= threshold
+                    and has_active
+                ):
+                    stalled_fired = True
+                    # Reset immediately so the gate doesn't re-fire on the
+                    # next tool_result. The IV's decision (inject or noop)
+                    # ends this stall window; if primary keeps stalling,
+                    # the counter rebuilds and re-fires after another N.
+                    state.tool_calls_since_last_flip = 0
 
             # Tier 1: cheap check for benign small results / parse-retry errors.
-            # When TodoWrite produced an in_progress→completed flip we want
-            # IV to evaluate evidence, so skip the fast-path noop in that case.
-            if fast_path_enabled and not todo_flips:
+            # When TodoWrite produced an in_progress→completed flip OR the
+            # stalled-progress gate fired, skip fast-path so the LLM judges.
+            if fast_path_enabled and not todo_flips and not stalled_fired:
                 fp = _fast_path_tool_result(tool_name, content, is_error)
                 if fp is not None:
                     _persist(state, fp, trigger="tool_result", related_tool=tool_name)
@@ -1122,11 +1155,19 @@ def install_observer(
             # summary builder appends a mark-without-evidence eval block
             # so the LLM is forced to walk each completed-todo against
             # the recent tool calls and inject a challenge if there's no
-            # plausible work behind the flip.
+            # plausible work behind the flip. When `stalled_fired` is
+            # true, a stalled-progress block is appended asking the LLM
+            # to inject if the primary is busy but not advancing the
+            # committed plan.
             summary = _prompt.build_tool_result_summary(
                 tool_name, content, is_error,
                 todo_flips=todo_flips,
                 recent_decisions=state.decisions_this_turn,
+                stalled_progress=stalled_fired,
+                tool_calls_since_flip_threshold=int(
+                    ts_cfg.get("stalled_after_tool_calls", 5)
+                ) if stalled_fired else 0,
+                active_todos=state.todos if stalled_fired else None,
             )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
