@@ -79,6 +79,9 @@ async def get_state(
 
     counts: dict[str, int] = {}
     last_at: str | None = None
+    latest_goal_card: dict[str, Any] | None = None
+    latest_user_request: str | None = None
+    latest_turn_id: str | None = None
     if session_id and inner_voice_enabled:
         try:
             counts = usage_store.count_inner_voice_observations_by_action(
@@ -91,6 +94,33 @@ async def get_state(
                 last_at = recent[0].get("created_at")
         except Exception as e:
             logger.warning(f"get_state aggregate failed: {e}")
+        # Pull the most recent goal_card extraction from the event log so the
+        # UI can render the user's current ask + IV's captured intent. Read in
+        # bounded chunks from the tail; goal_card_extracted is rare (1-3 per
+        # turn) so the most recent one is usually within the last 200 events.
+        try:
+            total = event_log.count_events(session_id)
+            chunk = 200
+            offset = max(0, total - chunk)
+            scanned = 0
+            while offset >= 0 and scanned < 2000:
+                events = event_log.read_events(
+                    session_id, offset=offset, limit=chunk,
+                )
+                # Walk backwards through the chunk so we find the latest first.
+                for ev in reversed(events):
+                    if ev.get("event") == "inner_voice.goal_card_extracted":
+                        d = ev.get("data") or {}
+                        latest_goal_card = d.get("goal_card") or {}
+                        latest_user_request = d.get("user_request") or None
+                        latest_turn_id = ev.get("turn_id")
+                        break
+                if latest_goal_card is not None or offset == 0:
+                    break
+                scanned += chunk
+                offset = max(0, offset - chunk)
+        except Exception as e:
+            logger.warning(f"get_state goal_card lookup failed: {e}")
 
     return {
         "session_id": session_id,
@@ -98,6 +128,9 @@ async def get_state(
         "evaluate_user_turns": evaluate_user_turns,
         "observations_count_by_action": counts,
         "last_observation_at": last_at,
+        "latest_goal_card": latest_goal_card,
+        "latest_user_request": latest_user_request,
+        "latest_turn_id": latest_turn_id,
     }
 
 

@@ -20,6 +20,7 @@ import json
 import logging
 from typing import Any, Awaitable, Callable
 
+from app import event_log as _event_log
 from app.harness import HookRegistry
 from app.paths import SESSIONS_DIR
 from app.inner_voice.observer import (
@@ -82,16 +83,18 @@ def _iv_should_fire_on_turn(
     True iff the session opted into Inner Voice AND either the turn is
     ambient OR the session opted into user-turn evaluation.
 
-    Ambient turns whose producer is `inner_voice` are skipped: those are
-    nudges IV itself enqueued (via the result-trigger inject→ambient
-    downgrade), and attaching a fresh observer to them lets IV re-judge
-    its own follow-up and inject a duplicate of the same nudge.
+    IV-produced ambient turns ARE observed. Earlier we skipped them to
+    avoid IV re-judging its own nudge in a loop, but that left a deaf
+    spot exactly where stalls cluster: a primary that already stalled
+    once on a request is the most likely candidate to stall again on
+    the IV-produced retry. Loop-prevention now relies on the per-turn
+    intervention budget (DEFAULT_INTERVENTION_BUDGET) — IV can observe
+    its own follow-up but can only escalate a bounded number of times
+    before the budget exhausts.
     """
     if not _session_inner_voice_enabled(session_id):
         return False
     if turn_source == "ambient":
-        if producer_source == "inner_voice":
-            return False
         return True
     return _session_iv_evaluate_user_turns_enabled(session_id)
 
@@ -218,6 +221,23 @@ async def attach_observer_for_turn(
         session_id, current_user_text=user_request,
     )
     goal_card = await extract_goal_card(user_request, recent_exchanges=recent)
+
+    # Surface the goal card to the UI: log a structured event so the
+    # /api/inner_voice/state endpoint can read back the most recent extraction
+    # for the session (latest_goal_card + latest_user_request).
+    try:
+        _event_log.log_event(
+            session_id,
+            "inner_voice.goal_card_extracted",
+            {
+                "user_request": user_request,
+                "goal_card": goal_card or {},
+                "turn_source": turn_source,
+            },
+            turn_id=turn_id,
+        )
+    except Exception as e:  # noqa: BLE001 — non-fatal
+        logger.warning("[iv.observer] goal_card event log failed: %s", e)
 
     state = install_observer(
         hooks=options.hooks,

@@ -521,8 +521,11 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
     if session_results:
         session_lines = []
         for sr in session_results:
-            created = sr.get("created_at", "")[:16]
-            preview = sr.get("preview", "")[:SESSION_PREFETCH_SNIPPET_MAX]
+            # `created_at` is usually an ISO string; some session-recall sources
+            # return it as a unix-timestamp float, which crashes the slice
+            # below and aborts the whole turn. Coerce defensively.
+            created = str(sr.get("created_at", "") or "")[:16]
+            preview = str(sr.get("preview", "") or "")[:SESSION_PREFETCH_SNIPPET_MAX]
             msg_count = sr.get("message_count", 0)
             model = sr.get("model", "")
             snippets = sr.get("user_snippets", [])[:2]
