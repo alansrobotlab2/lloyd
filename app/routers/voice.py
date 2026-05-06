@@ -290,7 +290,11 @@ async def voice_inject(request: Request):
     model = _resolve_model_name(model)
     model_env = _get_model_env(model)
 
-    system_prompt = build_system_prompt(todos=existing.get("todos") or [])
+    voice_plan = existing.get("plan") or {}
+    voice_plan_mode = bool(voice_plan.get("plan_mode"))
+    system_prompt = build_system_prompt(
+        todos=existing.get("todos") or [], plan=voice_plan,
+    )
     prefetched_text = prefetch_context(prompt_text, session_id=session_id)
 
     options = RunOptions(
@@ -302,7 +306,7 @@ async def voice_inject(request: Request):
             "permission_mode", "bypassPermissions"
         ),
         mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(),
+        disallowed_tools=_get_disallowed_tools(plan_mode=voice_plan_mode),
         env=model_env,
         session_id=session_id,
         priority=0,

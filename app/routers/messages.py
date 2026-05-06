@@ -116,6 +116,24 @@ def _load_session_todos(session_id: str) -> list[dict]:
         return []
 
 
+def _load_session_plan(session_id: str) -> dict:
+    """Read `session.plan` from disk for system-prompt + IV plumbing (Plan B).
+
+    Shape mirrors what `agent_mcp/builtin_plan.py` writes:
+    `{plan_mode: bool, plan_md_path: str, stages: list, created_at, ...}`.
+    Returns `{}` when the session doesn't exist or has no plan field.
+    """
+    if not session_id:
+        return {}
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text()).get("plan") or {}
+    except Exception:
+        return {}
+
+
 def _build_notification_drain(session_id: str, turn_id: str):
     """Build the closure handed to ``RunOptions.notification_drain``.
 
@@ -402,6 +420,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         subliminal_context=subl_prefix or "",
         producer_source=(turn.payload or {}).get("producer_source", "") or "",
         todos=_load_session_todos(session_id),
+        plan_artifact=_load_session_plan(session_id),
     )
 
     # Background-task completion drain. Calls the internal MCP tool
@@ -1139,7 +1158,14 @@ async def post_message_stream(request: Request):
 
     t0 = time.perf_counter()
 
-    system_prompt = build_system_prompt(todos=_load_session_todos(session_id))
+    # Plan A + B — load todo + plan state once and reuse for both system
+    # prompt and disallowed_tools. plan_mode gates the actuator-tool
+    # block (see app/mcp_discovery.py::PLAN_MODE_BLOCKED_TOOLS).
+    session_todos = _load_session_todos(session_id)
+    session_plan = _load_session_plan(session_id)
+    plan_mode_active = bool(session_plan.get("plan_mode"))
+
+    system_prompt = build_system_prompt(todos=session_todos, plan=session_plan)
     t_prompt = time.perf_counter()
 
     prefetched_text = prefetch_context(text, session_id=session_id)
@@ -1182,7 +1208,7 @@ async def post_message_stream(request: Request):
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
         permission_mode=permission_mode,
         mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools() + extra_disallowed,
+        disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active) + extra_disallowed,
         env=model_env,
         hooks=iv_hooks,
         priority=0,
@@ -1259,7 +1285,11 @@ async def build_ambient_turn(
     model = _resolve_model_name(existing.get("model", "") or CONFIG.get("model", {}).get("default", ""))
     model_env = _get_model_env(model)
 
-    system_prompt = build_system_prompt(todos=existing.get("todos") or [])
+    plan = existing.get("plan") or {}
+    plan_mode_active = bool(plan.get("plan_mode"))
+    system_prompt = build_system_prompt(
+        todos=existing.get("todos") or [], plan=plan,
+    )
 
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
@@ -1272,7 +1302,7 @@ async def build_ambient_turn(
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
         permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
         mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(),
+        disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active),
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
@@ -1361,7 +1391,11 @@ async def post_message(request: Request):
     if not session_id:
         session_id = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
 
-    system_prompt = build_system_prompt(todos=_load_session_todos(session_id))
+    sync_session_plan = _load_session_plan(session_id)
+    sync_plan_mode_active = bool(sync_session_plan.get("plan_mode"))
+    system_prompt = build_system_prompt(
+        todos=_load_session_todos(session_id), plan=sync_session_plan,
+    )
     prefetched_text = prefetch_context(text, session_id=session_id)
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"
@@ -1383,7 +1417,7 @@ async def post_message(request: Request):
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
         permission_mode=sync_permission_mode,
         mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools() + sync_extra_disallowed,
+        disallowed_tools=_get_disallowed_tools(plan_mode=sync_plan_mode_active) + sync_extra_disallowed,
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
