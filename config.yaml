@@ -22,8 +22,8 @@ inner_voice:
     enabled: true
     completion_gate: true       # A.4 — inject when primary stops with pending todos
     mark_without_evidence: true # A.5 — challenge in_progress→completed without plausible work
-    stalled_progress: false     # A.6 — opt-in until tuned
-    stalled_after_turns: 5
+    stalled_progress: false        # A.6 — opt-in until tuned (false-positive risk)
+    stalled_after_tool_calls: 5    # A.6 — fires after this many non-TodoWrite tool results since the last status flip
 autonomy:
   enabled: true
   task_dir: ~/obsidian/autonomy
