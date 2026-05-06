@@ -277,6 +277,7 @@ async def voice_inject(request: Request):
 
     model = ""
     meta_path = SESSIONS_DIR / f"{session_id}.json"
+    existing: dict = {}
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
@@ -289,7 +290,7 @@ async def voice_inject(request: Request):
     model = _resolve_model_name(model)
     model_env = _get_model_env(model)
 
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(todos=existing.get("todos") or [])
     prefetched_text = prefetch_context(prompt_text, session_id=session_id)
 
     options = RunOptions(
