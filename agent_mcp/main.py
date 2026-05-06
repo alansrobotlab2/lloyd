@@ -26,6 +26,7 @@ from agent_mcp import (
     browser,
     builtin_bash,
     builtin_fs,
+    builtin_plan,
     builtin_task,
     builtin_todo,
     discord_bot,
@@ -49,6 +50,7 @@ MODULES = [
     # Built-in tool replicas (formerly provided by claude-agent-sdk)
     builtin_bash,
     builtin_fs,
+    builtin_plan,
     builtin_task,
     builtin_todo,
     # Domain modules

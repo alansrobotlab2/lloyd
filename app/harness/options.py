@@ -31,6 +31,19 @@ class RunOptions:
     permission_mode: str = "bypassPermissions"
     disallowed_tools: list[str] = field(default_factory=list)
 
+    # Optional per-iteration refresher for the disallowed tools list.
+    # When set, the harness calls this at the top of each loop iteration
+    # to get the live disallowed list — used both to filter advertised
+    # tools (visible_tools) and to gate dispatch. The catalog itself is
+    # built once at turn start using `disallowed_tools` (the static base);
+    # the refresher only ever ADDS or REMOVES from that catalog at runtime,
+    # not changes the universe of tools the harness can see.
+    #
+    # Plan B uses this so ExitPlanMode flipping plan_mode=false within a
+    # turn unblocks Write/Edit/Bash on the next iteration of the same
+    # turn, instead of waiting for a fresh user turn to rebuild options.
+    disallowed_tools_refresh: Callable[[], list[str]] | None = None
+
     # MCP / tools
     mcp_servers: dict[str, dict] = field(default_factory=dict)
 

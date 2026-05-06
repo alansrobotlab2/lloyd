@@ -277,6 +277,7 @@ async def voice_inject(request: Request):
 
     model = ""
     meta_path = SESSIONS_DIR / f"{session_id}.json"
+    existing: dict = {}
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
@@ -289,7 +290,22 @@ async def voice_inject(request: Request):
     model = _resolve_model_name(model)
     model_env = _get_model_env(model)
 
-    system_prompt = build_system_prompt()
+    voice_plan = existing.get("plan") or {}
+    voice_plan_mode = bool(voice_plan.get("plan_mode"))
+    system_prompt = build_system_prompt(
+        todos=existing.get("todos") or [], plan=voice_plan,
+    )
+
+    _voice_session_id = session_id
+
+    def _voice_refresh_disallowed() -> list[str]:
+        from app.paths import SESSIONS_DIR as _SD
+        try:
+            d = json.loads((_SD / f"{_voice_session_id}.json").read_text())
+            live = bool((d.get("plan") or {}).get("plan_mode"))
+        except Exception:
+            live = False
+        return _get_disallowed_tools(plan_mode=live)
     prefetched_text = prefetch_context(prompt_text, session_id=session_id)
 
     options = RunOptions(
@@ -301,7 +317,8 @@ async def voice_inject(request: Request):
             "permission_mode", "bypassPermissions"
         ),
         mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(),
+        disallowed_tools=_get_disallowed_tools(plan_mode=voice_plan_mode),
+        disallowed_tools_refresh=_voice_refresh_disallowed,
         env=model_env,
         session_id=session_id,
         priority=0,

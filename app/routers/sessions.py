@@ -19,6 +19,7 @@ from app.sessions_io import (
     peek_ambient_prefetch,
     set_ambient_decision,
     get_current_turn,
+    mutate_session,
     AmbientPrefetchEntry,
 )
 
@@ -77,6 +78,102 @@ async def get_session_todos(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     data = json.loads(meta_path.read_text())
     return JSONResponse({"todos": data.get("todos", [])})
+
+
+@router.get("/api/sessions/{session_id}/plan")
+async def get_session_plan(session_id: str):
+    """Return the session's committed plan (Plan B). Empty when no plan.
+
+    The shape mirrors what `agent_mcp/builtin_plan.py::ExitPlanMode`
+    persists: `{plan_mode, plan_md_path, stages, created_at, committed_at}`.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    data = json.loads(meta_path.read_text())
+    return JSONResponse({"plan": data.get("plan") or {}})
+
+
+@router.get("/api/sessions/{session_id}/plan/document")
+async def get_session_plan_document(session_id: str):
+    """Return the markdown body of the session's plan, if committed.
+
+    The plan document lives in the vault at the path stored in
+    `session.plan.plan_md_path` (`~/obsidian/plans/<session_id>.md`).
+    Returns `{plan_md: ""}` when no plan exists or the file is missing.
+    """
+    from pathlib import Path
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    data = json.loads(meta_path.read_text())
+    plan = data.get("plan") or {}
+    md_path = plan.get("plan_md_path") or ""
+    body = ""
+    if md_path:
+        try:
+            p = Path(md_path)
+            if p.exists():
+                body = p.read_text(encoding="utf-8")
+        except Exception:
+            body = ""
+    return JSONResponse({"plan_md_path": md_path, "plan_md": body})
+
+
+@router.post("/api/sessions/{session_id}/plan_mode/enter")
+async def enter_plan_mode(session_id: str):
+    """Slash-command entry point for `/plan`.
+
+    Flips `session.plan.plan_mode = true` and prepends a system reminder
+    so the next harness turn sees the constraint. Distinct from the
+    `EnterPlanMode` MCP tool primary calls itself for auto-entry; both
+    paths converge on the same session state. Caller injects the
+    follow-up user message; this endpoint just updates session state.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    import datetime
+    now = datetime.datetime.now().isoformat()
+
+    def _apply(data: dict) -> None:
+        existing = data.get("plan") or {}
+        data["plan"] = {
+            "plan_mode": True,
+            "plan_md_path": existing.get("plan_md_path", ""),
+            "stages": existing.get("stages", []),
+            "created_at": existing.get("created_at") or now,
+            "drafted_at": now,
+        }
+
+    ok = await mutate_session(session_id, _apply)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return JSONResponse({"plan_mode": True, "session_id": session_id})
+
+
+@router.post("/api/sessions/{session_id}/plan_mode/exit")
+async def exit_plan_mode(session_id: str):
+    """Slash-command exit point for `/exit-plan`.
+
+    User-initiated abandon: flips `plan_mode=false` without committing
+    a plan. Doesn't touch todos. Mirrors `ExitPlanMode(cancel=true)`
+    but originates from the user side.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    import datetime
+    now = datetime.datetime.now().isoformat()
+
+    def _apply(data: dict) -> None:
+        existing = data.get("plan") or {}
+        data["plan"] = {**existing, "plan_mode": False, "cancelled_at": now}
+
+    ok = await mutate_session(session_id, _apply)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return JSONResponse({"plan_mode": False, "session_id": session_id})
 
 
 @router.get("/api/messages/{session_id}")

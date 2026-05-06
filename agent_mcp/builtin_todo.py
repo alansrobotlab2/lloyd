@@ -27,6 +27,7 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from agent_mcp import _task_registry
+from agent_mcp._todo_validation import VALID_STATUSES, validate_todos
 from app.sessions_io import mutate_session
 
 logger = logging.getLogger("lloyd-builtin-todo")
@@ -34,35 +35,15 @@ logger = logging.getLogger("lloyd-builtin-todo")
 app = Server("lloyd-builtin-todo")
 
 
-_VALID_STATUSES = ("pending", "in_progress", "completed")
-
-
-def _validate_todos(raw: Any) -> tuple[list[dict[str, str]] | None, str | None]:
-    """Return (validated_list, error_message). At most one is non-None."""
-    if not isinstance(raw, list):
-        return None, "todos must be an array"
-    out: list[dict[str, str]] = []
-    for i, item in enumerate(raw):
-        if not isinstance(item, dict):
-            return None, f"todos[{i}] must be an object"
-        content = item.get("content")
-        status = item.get("status")
-        active_form = item.get("activeForm")
-        if not isinstance(content, str) or not content.strip():
-            return None, f"todos[{i}].content must be a non-empty string"
-        if status not in _VALID_STATUSES:
-            return None, (
-                f"todos[{i}].status must be one of {list(_VALID_STATUSES)}, "
-                f"got {status!r}"
-            )
-        if not isinstance(active_form, str) or not active_form.strip():
-            return None, f"todos[{i}].activeForm must be a non-empty string"
-        out.append({"content": content, "status": status, "activeForm": active_form})
-    return out, None
+# Backwards-compatible aliases — code outside this module imported these
+# names before B.4 extracted them; keep both pointing at the canonical
+# implementation in `_todo_validation`.
+_VALID_STATUSES = VALID_STATUSES
+_validate_todos = validate_todos
 
 
 async def _todo_write(args: dict[str, Any]) -> str:
-    todos, err = _validate_todos(args.get("todos"))
+    todos, err = validate_todos(args.get("todos"))
     if err is not None:
         return json.dumps({"error": err})
 

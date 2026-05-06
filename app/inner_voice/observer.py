@@ -36,6 +36,7 @@ from app.inner_voice.lever_tools import (
     LEVER_NAMES,
     LEVER_TOOLS,
 )
+from app.paths import SESSIONS_DIR
 from usage_store import record_inner_voice_observation
 
 logger = logging.getLogger("lloyd-iv-observer")
@@ -80,6 +81,38 @@ def _observer_cfg() -> dict[str, Any]:
     obs.setdefault("goal_extraction_enabled", True)
     obs.setdefault("fast_path_enabled", True)
     return obs
+
+
+def _todo_stewardship_cfg() -> dict[str, Any]:
+    """Plan A — todo stewardship feature flags. Defaults match config.yaml."""
+    iv = CONFIG.get("inner_voice") or {}
+    ts = dict(iv.get("todo_stewardship") or {})
+    ts.setdefault("enabled", True)
+    ts.setdefault("completion_gate", True)
+    ts.setdefault("mark_without_evidence", True)
+    ts.setdefault("stalled_progress", False)
+    ts.setdefault("stalled_after_tool_calls", 5)
+    return ts
+
+
+def _load_todos_from_session(session_id: str) -> list[dict[str, Any]]:
+    """Read live `session.todos` from disk for mid-turn refresh (Plan A.5).
+
+    Called from on_event_cb's tool_result branch when TodoWrite lands so
+    the observer's state.todos snapshot stays current as primary advances
+    through its committed plan. Cheap on a hot path (one JSON read), and
+    lock-free is fine — the session JSON is written via mutate_session
+    which provides atomicity at the file level.
+    """
+    if not session_id:
+        return []
+    p = SESSIONS_DIR / f"{session_id}.json"
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text()).get("todos") or []
+    except Exception:
+        return []
 
 
 def _resolve_endpoint(model_alias: str | None = None) -> tuple[str, str]:
@@ -514,6 +547,31 @@ class ObserverState:
     # to the observer so it can recognize when the primary is following
     # documented procedure rather than freelancing.
     subliminal_context: str = ""
+    # Plan A — TodoWrite stewardship reference artifact.
+    # `todos` is the snapshot at turn start; the on_event_cb tool_result
+    # branch refreshes it after each TodoWrite call so the observer's
+    # mid-turn judgments see the live list. `prior_todo_status` is keyed
+    # by todo `content` and tracks the prior status so we can detect
+    # in_progress→completed flips for the mark-without-evidence behavior
+    # (A.5, Phase A2). `todo_stewardship_cfg` is a snapshot of the
+    # config block so per-turn behavior toggles are deterministic.
+    # `tool_calls_since_last_flip` (A.6) counts non-TodoWrite tool_result
+    # events since the last TodoWrite that altered any status; it resets
+    # on every flip and triggers the stalled-progress nudge when it
+    # reaches `todo_stewardship.stalled_after_tool_calls`.
+    todos: list[dict[str, Any]] = field(default_factory=list)
+    prior_todo_status: dict[str, str] = field(default_factory=dict)
+    todo_stewardship_cfg: dict[str, Any] = field(default_factory=dict)
+    tool_calls_since_last_flip: int = 0
+    # Plan B — committed plan artifact (or None when no plan exists or
+    # the session is currently in plan_mode without a prior commit).
+    # Shape mirrors `session.plan`: {plan_mode, plan_md_path, stages,
+    # committed_at}. Threaded through to the IV per-event prompt so
+    # the observer evaluates progress against the committed plan, not
+    # just the current todos. When `plan_mode=True`, the IV prompt
+    # branch swaps from "watch for execution drift" to "evaluate plan
+    # quality".
+    plan_artifact: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +808,7 @@ def _build_event_user_prompt(
     # what determines completeness; chopping it off makes every long response
     # look "cut off mid-sentence" to the IV.
     cap = state.cfg.get("primary_text_window_chars", 4000)
+    todos_for_prompt = state.todos if state.todo_stewardship_cfg.get("enabled", True) else []
     return _prompt.build_user_prompt_for_event(
         user_request=state.user_request,
         goal_card=state.goal_card,
@@ -759,6 +818,8 @@ def _build_event_user_prompt(
         interventions_budget=state.intervention_budget,
         prior_decisions=state.decisions_this_turn,
         subliminal_context=state.subliminal_context,
+        todos=todos_for_prompt,
+        plan_artifact=state.plan_artifact,
     )
 
 
@@ -781,14 +842,33 @@ def install_observer(
     persist_intervention_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
     goal_card: dict[str, Any] | None = None,
     subliminal_context: str = "",
+    todos: list[dict[str, Any]] | None = None,
+    plan_artifact: dict[str, Any] | None = None,
 ) -> ObserverState:
     """Install observer hooks onto a HookRegistry for one primary turn.
 
     Returns the ObserverState. `goal_card` may be None if extraction was
     skipped or failed; the observer will still run with lighter-touch
     judgment.
+
+    `todos` (Plan A) — snapshot of `session.todos` at turn start. When
+    non-empty, the observer's per-event prompt includes a TODOS block and,
+    at the terminal `assistant_message` event, a PENDING TODOS gate that
+    asks IV to inject if primary is about to stop with work undone.
+
+    `plan_artifact` (Plan B) — snapshot of `session.plan` at turn start.
+    When the session is in `plan_mode`, the IV's per-event prompt swaps
+    framing to evaluate plan quality. When a committed plan exists, the
+    plan body anchors IV's progress evaluation across turns.
     """
     cfg = _observer_cfg()
+    ts_cfg = _todo_stewardship_cfg()
+    todos_snapshot = list(todos or [])
+    prior_status = {
+        (t.get("content") or ""): (t.get("status") or "")
+        for t in todos_snapshot
+        if t.get("content")
+    }
     state = ObserverState(
         session_id=session_id,
         turn_id=turn_id,
@@ -803,6 +883,10 @@ def install_observer(
         cfg=cfg,
         goal_card=goal_card,
         subliminal_context=subliminal_context or "",
+        todos=todos_snapshot,
+        prior_todo_status=prior_status,
+        todo_stewardship_cfg=ts_cfg,
+        plan_artifact=plan_artifact,
     )
     fast_path_enabled = bool(cfg.get("fast_path_enabled", True))
 
@@ -872,9 +956,18 @@ def install_observer(
                     return
 
             finish_reason = str(evt.get("finish_reason") or "stop")
+            # Plan A.4 — completion gate. Pass todos so the terminal-iteration
+            # summary appends a PENDING TODOS block when stewardship is on.
+            ts = state.todo_stewardship_cfg
+            todos_for_gate = (
+                state.todos
+                if ts.get("enabled", True) and ts.get("completion_gate", True)
+                else []
+            )
             summary = _prompt.build_assistant_message_summary(
                 iteration, text, tool_calls, finish_reason,
                 goal_card=state.goal_card,
+                todos=todos_for_gate,
             )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
@@ -995,15 +1088,104 @@ def install_observer(
             content = evt.get("content", "") or ""
             is_error = bool(evt.get("is_error", False))
 
+            # Plan A.5 — mid-turn TodoWrite refresh + flip detection. The
+            # static reference TODOS block in IV's prompt is sourced from
+            # `state.todos`, which is snapshotted at install_observer.
+            # Without this refresh, multi-flip turns show IV a stale list.
+            # Also detect in_progress→completed flips here so the LLM
+            # judgment below can challenge marks-without-evidence.
+            todo_flips: list[dict[str, str]] = []
+            any_status_change = False
+            ts_cfg = state.todo_stewardship_cfg
+            if (
+                tool_name == "TodoWrite"
+                and not is_error
+                and ts_cfg.get("enabled", True)
+            ):
+                fresh = _load_todos_from_session(state.session_id)
+                fresh_status = {
+                    (t.get("content") or ""): (t.get("status") or "")
+                    for t in fresh
+                    if t.get("content")
+                }
+                # Detect any status change (used by A.6 to reset the
+                # stalled-progress counter — pending→in_progress also
+                # counts as forward motion, not just completion flips).
+                if fresh_status != state.prior_todo_status:
+                    any_status_change = True
+                # Surface in_progress→completed flips for A.5's
+                # mark-without-evidence challenge. Other transitions
+                # (pending→in_progress, completed→completed, list shape
+                # changes) are not flagged here.
+                if ts_cfg.get("mark_without_evidence", True):
+                    for content_key, new_status in fresh_status.items():
+                        old_status = state.prior_todo_status.get(content_key)
+                        if old_status == "in_progress" and new_status == "completed":
+                            todo_flips.append({
+                                "content": content_key,
+                                "from": old_status,
+                                "to": new_status,
+                            })
+                # Update snapshot + status map. Done unconditionally on
+                # successful TodoWrite so even pending→in_progress flips
+                # propagate to the next IV prompt's reference block.
+                state.todos = fresh
+                state.prior_todo_status = fresh_status
+
+            # Plan A.6 — stalled-progress counter. Counts non-TodoWrite
+            # tool results since the last TodoWrite that altered any
+            # status. Reset on a status change; increment on any other
+            # tool result. Errors don't increment (a tool error is the
+            # primary's problem to handle, not a stall signal).
+            stalled_fired = False
+            if ts_cfg.get("enabled", True) and ts_cfg.get("stalled_progress", False):
+                if any_status_change:
+                    state.tool_calls_since_last_flip = 0
+                elif tool_name != "TodoWrite" and not is_error:
+                    state.tool_calls_since_last_flip += 1
+                threshold = int(ts_cfg.get("stalled_after_tool_calls", 5))
+                has_active = any(
+                    (t.get("status") or "") in ("pending", "in_progress")
+                    for t in state.todos
+                )
+                if (
+                    state.tool_calls_since_last_flip >= threshold
+                    and has_active
+                ):
+                    stalled_fired = True
+                    # Reset immediately so the gate doesn't re-fire on the
+                    # next tool_result. The IV's decision (inject or noop)
+                    # ends this stall window; if primary keeps stalling,
+                    # the counter rebuilds and re-fires after another N.
+                    state.tool_calls_since_last_flip = 0
+
             # Tier 1: cheap check for benign small results / parse-retry errors.
-            if fast_path_enabled:
+            # When TodoWrite produced an in_progress→completed flip OR the
+            # stalled-progress gate fired, skip fast-path so the LLM judges.
+            if fast_path_enabled and not todo_flips and not stalled_fired:
                 fp = _fast_path_tool_result(tool_name, content, is_error)
                 if fp is not None:
                     _persist(state, fp, trigger="tool_result", related_tool=tool_name)
                     return
 
-            # Tier 2: LLM judgment.
-            summary = _prompt.build_tool_result_summary(tool_name, content, is_error)
+            # Tier 2: LLM judgment. When `todo_flips` is non-empty, the
+            # summary builder appends a mark-without-evidence eval block
+            # so the LLM is forced to walk each completed-todo against
+            # the recent tool calls and inject a challenge if there's no
+            # plausible work behind the flip. When `stalled_fired` is
+            # true, a stalled-progress block is appended asking the LLM
+            # to inject if the primary is busy but not advancing the
+            # committed plan.
+            summary = _prompt.build_tool_result_summary(
+                tool_name, content, is_error,
+                todo_flips=todo_flips,
+                recent_decisions=state.decisions_this_turn,
+                stalled_progress=stalled_fired,
+                tool_calls_since_flip_threshold=int(
+                    ts_cfg.get("stalled_after_tool_calls", 5)
+                ) if stalled_fired else 0,
+                active_todos=state.todos if stalled_fired else None,
+            )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
                 user_prompt=user_prompt, cfg=state.cfg,
@@ -1023,8 +1205,18 @@ def install_observer(
         if etype == "result":
             stop_reason = evt.get("stop_reason", "") or ""
             response_text = evt.get("response_text", "") or ""
+            # Plan A.4 — at the result event the harness has already exited;
+            # inject is a no-op here, so pending-todos drives an `ambient`
+            # follow-up turn instead.
+            ts = state.todo_stewardship_cfg
+            todos_for_gate = (
+                state.todos
+                if ts.get("enabled", True) and ts.get("completion_gate", True)
+                else []
+            )
             summary = _prompt.build_result_summary(
                 stop_reason, response_text, goal_card=state.goal_card,
+                todos=todos_for_gate,
             )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
