@@ -112,15 +112,32 @@ class LoadedToolSet:
     enabled: bool = False
     catalog_signature: str = ""
 
-    def visible_tools(self) -> list[dict[str, Any]]:
+    def visible_tools(
+        self, extra_disallowed: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the OpenAI-format tool list to advertise this iteration.
+
+        `extra_disallowed` (Plan B) — runtime-computed set of tool names
+        to additionally filter out for THIS iteration only. The catalog
+        stays stable across iterations; this filter lets per-session
+        state (like plan_mode) hide tools without rebuilding the catalog
+        and losing the loaded set.
+        """
+        extra = extra_disallowed or set()
         if not self.enabled:
-            return list(self.catalog)
+            return [t for t in self.catalog if t["function"]["name"] not in extra]
         names = self.baseline | self.loaded
-        out = [t for t in self.catalog if t["function"]["name"] in names]
+        out = [
+            t for t in self.catalog
+            if t["function"]["name"] in names and t["function"]["name"] not in extra
+        ]
         out.append(TOOLSEARCH_OPENAI_TOOL)
         return out
 
-    def is_visible(self, name: str) -> bool:
+    def is_visible(self, name: str, extra_disallowed: set[str] | None = None) -> bool:
+        extra = extra_disallowed or set()
+        if name in extra:
+            return False
         if not self.enabled:
             return any(t["function"]["name"] == name for t in self.catalog)
         if name == TOOLSEARCH_TOOL_NAME:

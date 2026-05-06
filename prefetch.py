@@ -13,6 +13,7 @@ about what the conversation is actually about.
 Called by server.py before every query() invocation.
 """
 
+import json
 import re
 import time
 import logging
@@ -609,6 +610,29 @@ def prefetch_context(text: str, session_id: str | None = None) -> str:
         focus.update(text)
 
     query_tokens = _query_tokens(text)
+
+    # Plan B — synthetic skill-match tokens. When the session is in
+    # plan_mode, augment the query with tokens that match plan-mode-authoring
+    # (and the related `plan` / `writing-plans` skills) so the playbook
+    # for drafting a high-quality plan auto-loads as <context> regardless
+    # of what the user actually typed. Same shape as the natural query
+    # tokens — the matcher doesn't need to know they're synthetic.
+    if session_id:
+        try:
+            from app.paths import SESSIONS_DIR as _SD
+            _meta = _SD / f"{session_id}.json"
+            if _meta.exists():
+                _data = json.loads(_meta.read_text())
+                if (_data.get("plan") or {}).get("plan_mode"):
+                    # `plan-mode-authoring` tags include `plan-mode` and
+                    # `planning`; name tokenizes to {plan, mode, authoring}.
+                    # Adding these matches it strongly (name 3.0× + tags 1.5×).
+                    query_tokens = query_tokens | {
+                        "plan", "mode", "authoring", "planning",
+                        "plan-mode", "plan-mode-authoring",
+                    }
+        except Exception:
+            pass  # non-fatal; prefetch continues with plain query_tokens
 
     # Run skill, fact, vault, session, and backlog-ref search in parallel
     skills_result: list[tuple[float, dict]] = []

@@ -1160,10 +1160,22 @@ async def post_message_stream(request: Request):
 
     # Plan A + B — load todo + plan state once and reuse for both system
     # prompt and disallowed_tools. plan_mode gates the actuator-tool
-    # block (see app/mcp_discovery.py::PLAN_MODE_BLOCKED_TOOLS).
+    # block (see app/mcp_discovery.py::PLAN_MODE_BLOCKED_TOOLS), refreshed
+    # per harness iteration via `disallowed_tools_refresh` so an
+    # ExitPlanMode commit unblocks writes within the same turn.
     session_todos = _load_session_todos(session_id)
     session_plan = _load_session_plan(session_id)
     plan_mode_active = bool(session_plan.get("plan_mode"))
+
+    def _refresh_disallowed_for_session() -> list[str]:
+        """Per-iteration refresher closure. Reads session.plan from disk
+        and returns the live disallowed list (static config + plan_mode
+        actuator block when applicable + extra_disallowed from caller).
+        """
+        live_plan_mode = bool(_load_session_plan(session_id).get("plan_mode"))
+        return _get_disallowed_tools(plan_mode=live_plan_mode) + (
+            data.get("extra_disallowed") or []
+        )
 
     system_prompt = build_system_prompt(todos=session_todos, plan=session_plan)
     t_prompt = time.perf_counter()
@@ -1209,6 +1221,7 @@ async def post_message_stream(request: Request):
         permission_mode=permission_mode,
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active) + extra_disallowed,
+        disallowed_tools_refresh=_refresh_disallowed_for_session,
         env=model_env,
         hooks=iv_hooks,
         priority=0,
@@ -1291,6 +1304,10 @@ async def build_ambient_turn(
         todos=existing.get("todos") or [], plan=plan,
     )
 
+    def _ambient_refresh_disallowed() -> list[str]:
+        live_plan_mode = bool(_load_session_plan(session_id).get("plan_mode"))
+        return _get_disallowed_tools(plan_mode=live_plan_mode)
+
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
     install_default_safety_hook(iv_hooks)
@@ -1303,6 +1320,7 @@ async def build_ambient_turn(
         permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active),
+        disallowed_tools_refresh=_ambient_refresh_disallowed,
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
@@ -1401,6 +1419,10 @@ async def post_message(request: Request):
     meta_path = SESSIONS_DIR / f"{session_id}.json"
 
     sync_extra_disallowed: list[str] = data.get("extra_disallowed", [])
+
+    def _sync_refresh_disallowed() -> list[str]:
+        live_plan_mode = bool(_load_session_plan(session_id).get("plan_mode"))
+        return _get_disallowed_tools(plan_mode=live_plan_mode) + sync_extra_disallowed
     sync_permission_mode: str = (
         data.get("permission_mode")
         or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
@@ -1418,6 +1440,7 @@ async def post_message(request: Request):
         permission_mode=sync_permission_mode,
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools(plan_mode=sync_plan_mode_active) + sync_extra_disallowed,
+        disallowed_tools_refresh=_sync_refresh_disallowed,
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
