@@ -300,6 +300,11 @@ class RoomBridge:
         self.http = http_client
         self.room = rtc.Room()
         self._tasks: list[asyncio.Task] = []
+        # Strong refs to in-flight utterance handlers. asyncio's create_task
+        # docs: "Save a reference … to avoid a task disappearing mid-execution"
+        # — without this, the task can be GC'd between the transcribe log
+        # line and the inject POST, dropping transcripts on the floor.
+        self._utterance_tasks: set[asyncio.Task] = set()
         # Derive session_id from room name: "lloyd-${session_id}" → session_id
         prefix = lk_cfg.get("room_prefix", DEFAULT_ROOM_PREFIX)
         self.session_id = room_name[len(prefix):] if room_name.startswith(prefix) else room_name
@@ -339,6 +344,18 @@ class RoomBridge:
     async def disconnect(self) -> None:
         for t in self._tasks:
             t.cancel()
+        # Let any in-flight utterance handler finish (transcribe + POST) so
+        # the last thing the user said before leaving still lands in the
+        # session. Cap the wait so we don't hang on a stuck POST.
+        if self._utterance_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._utterance_tasks, return_exceptions=True),
+                    timeout=8.0,
+                )
+            except asyncio.TimeoutError:
+                LOG.warning("[%s] utterance tasks still running at shutdown — abandoning",
+                            self.room_name)
         await self.room.disconnect()
         LOG.info("[%s] disconnected", self.room_name)
 
@@ -355,6 +372,18 @@ class RoomBridge:
     def _on_participant_disconnected(self, participant) -> None:
         LOG.info("[%s] participant left: %s", self.room_name, participant.identity)
 
+    def _handle_utterance_done(self, task: asyncio.Task) -> None:
+        self._utterance_tasks.discard(task)
+        # Surface anything the handler swallowed silently. If we don't pull
+        # the exception out, asyncio prints "Task exception was never
+        # retrieved" at GC time — which masks the actual failure mode.
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            LOG.warning("[%s] utterance handler raised: %r", self.room_name, exc)
+
     async def _consume_audio(self, track, identity: str) -> None:
         stream = rtc.AudioStream(track)
         segmenter: Optional[UtteranceSegmenter] = None
@@ -368,7 +397,11 @@ class RoomBridge:
                     segmenter = UtteranceSegmenter(self.vad_cfg, frame.sample_rate)
                 utterance = segmenter.push(samples)
                 if utterance is not None:
-                    asyncio.create_task(self._handle_utterance(utterance, frame.sample_rate, identity))
+                    task = asyncio.create_task(
+                        self._handle_utterance(utterance, frame.sample_rate, identity)
+                    )
+                    self._utterance_tasks.add(task)
+                    task.add_done_callback(self._handle_utterance_done)
         except asyncio.CancelledError:
             pass
         finally:
