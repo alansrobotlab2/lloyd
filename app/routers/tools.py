@@ -77,9 +77,16 @@ async def get_tools():
 
 @router.post("/api/tool-toggle")
 async def toggle_tool(request: Request):
-    """Toggle a server or individual tool, persisting changes to config.yaml."""
+    """Toggle a server, individual tool, or baseline membership, persisting
+    changes to config.yaml.
+
+    Payloads:
+      {type: "server",   server, enabled}
+      {type: "tool",     server, tool, enabled}
+      {type: "baseline", tool, enabled}   # progressive-discovery baseline
+    """
     data = await request.json()
-    toggle_type = data.get("type")  # "server" | "tool"
+    toggle_type = data.get("type")
     enabled = bool(data.get("enabled", True))
     config_path = LLOYD_HOME / "config.yaml"
 
@@ -103,6 +110,18 @@ async def toggle_tool(request: Request):
             disabled.remove(tool_name)
         cfg["disabled_tools"] = disabled
 
+    elif toggle_type == "baseline":
+        tool_name = (data.get("tool") or "").strip()
+        if not tool_name:
+            raise HTTPException(status_code=400, detail="tool is required for baseline toggle")
+        ts_cfg = CONFIG.setdefault("harness", {}).setdefault("tool_search", {})
+        baseline = list(ts_cfg.get("baseline_tools") or [])
+        if enabled and tool_name not in baseline:
+            baseline.append(tool_name)
+        elif not enabled and tool_name in baseline:
+            baseline.remove(tool_name)
+        ts_cfg["baseline_tools"] = baseline
+
     else:
         raise HTTPException(status_code=400, detail=f"Unknown type: {toggle_type}")
 
@@ -112,3 +131,105 @@ async def toggle_tool(request: Request):
     _tools_cache.clear()
 
     return JSONResponse({"servers_updated": True})
+
+
+# ── Tool discovery (progressive disclosure) settings ────────────────────
+
+@router.get("/api/tool-discovery")
+async def get_tool_discovery():
+    """Return current `harness.tool_search.*` config plus a few derived
+    counts so the UI can render a "9 baseline / 30 threshold" summary
+    without re-parsing the catalog.
+
+    Shape:
+      {
+        "enabled": bool,
+        "threshold_tools": int,
+        "baseline_tools": list[str],
+        "max_results_default": int,
+        "max_results_cap": int,
+        "total_tools": int,         # discovered count across all enabled servers
+        "active": bool,             # progressive disclosure currently kicking in
+      }
+    """
+    ts = (CONFIG.get("harness") or {}).get("tool_search") or {}
+    enabled = bool(ts.get("enabled", True))
+    threshold = int(ts.get("threshold_tools", 30))
+    baseline = list(ts.get("baseline_tools") or [])
+    max_default = int(ts.get("max_results_default", 5))
+    max_cap = int(ts.get("max_results_cap", 20))
+
+    # Derive total_tools from the cached discovery (no extra network round
+    # trips). Cache may be empty before the first /api/tools call; that's
+    # fine — UI just shows 0 until the user visits Tools once.
+    total = sum(
+        len(entry.get("tools") or [])
+        for entry in _tools_cache.values()
+    )
+    active = enabled and total >= threshold
+
+    return JSONResponse({
+        "enabled": enabled,
+        "threshold_tools": threshold,
+        "baseline_tools": baseline,
+        "max_results_default": max_default,
+        "max_results_cap": max_cap,
+        "total_tools": total,
+        "active": active,
+    })
+
+
+@router.post("/api/tool-discovery")
+async def set_tool_discovery(request: Request):
+    """Update the `harness.tool_search.*` block. Body keys are optional —
+    only provided keys are written; everything else stays at its current
+    value (or the dataclass default in app/harness/options.py).
+
+    Body:
+      {
+        "enabled"?: bool,
+        "threshold_tools"?: int,        # clamped to [0, 1000]
+        "max_results_default"?: int,    # clamped to [1, 50]
+        "max_results_cap"?: int,        # clamped to [1, 100]
+        "baseline_tools"?: list[str],   # full replace
+      }
+    """
+    data = await request.json() if (await request.body()) else {}
+    ts = CONFIG.setdefault("harness", {}).setdefault("tool_search", {})
+
+    if "enabled" in data:
+        ts["enabled"] = bool(data["enabled"])
+    if "threshold_tools" in data:
+        try:
+            n = int(data["threshold_tools"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="threshold_tools must be int")
+        ts["threshold_tools"] = max(0, min(1000, n))
+    if "max_results_default" in data:
+        try:
+            n = int(data["max_results_default"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="max_results_default must be int")
+        ts["max_results_default"] = max(1, min(50, n))
+    if "max_results_cap" in data:
+        try:
+            n = int(data["max_results_cap"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="max_results_cap must be int")
+        ts["max_results_cap"] = max(1, min(100, n))
+    if "baseline_tools" in data:
+        bt = data["baseline_tools"]
+        if not isinstance(bt, list) or not all(isinstance(x, str) for x in bt):
+            raise HTTPException(status_code=400, detail="baseline_tools must be list[str]")
+        # de-dup while preserving order
+        seen: set[str] = set()
+        ts["baseline_tools"] = [
+            x for x in (s.strip() for s in bt)
+            if x and not (x in seen or seen.add(x))
+        ]
+
+    config_path = LLOYD_HOME / "config.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(CONFIG, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    return JSONResponse({"updated": True, "tool_search": ts})

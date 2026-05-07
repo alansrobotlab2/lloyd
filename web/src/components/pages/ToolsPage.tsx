@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
-import { Wrench, ChevronDown, ChevronRight, AlertCircle } from "lucide-react";
-import { api, type McpTool, type McpServer, type ToolsData } from "../../api";
+import { Wrench, ChevronDown, ChevronRight, AlertCircle, Star, Sparkles } from "lucide-react";
+import { api, type McpTool, type McpServer, type ToolsData, type ToolDiscoverySettings } from "../../api";
+import { cn } from "@/lib/utils";
+import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
+import {
+  Collapsible, CollapsibleContent, CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 
 // ── Primitives ─────────────────────────────────────────────────────────────
 
@@ -42,21 +48,57 @@ function ToolRow({
   serverEnabled,
   toggling,
   onToggle,
+  isBaseline,
+  baselineToggling,
+  onBaselineToggle,
+  baselineMeaningful,
 }: {
   tool: McpTool;
   serverEnabled: boolean;
   toggling: boolean;
   onToggle: () => void;
+  isBaseline: boolean;
+  baselineToggling: boolean;
+  onBaselineToggle: () => void;
+  /** True when progressive discovery is enabled + active — the ★ only
+   *  affects routing in that case, so we soften the affordance otherwise. */
+  baselineMeaningful: boolean;
 }) {
   const inactive = !serverEnabled || toggling;
+  const baselineDisabled = !serverEnabled || !tool.enabled || baselineToggling;
   return (
     <div className="flex items-center gap-3 pl-10 pr-4 py-2 hover:bg-card rounded-lg group">
       <Toggle enabled={tool.enabled} onToggle={onToggle} disabled={inactive} />
+      <button
+        type="button"
+        onClick={onBaselineToggle}
+        disabled={baselineDisabled}
+        title={
+          isBaseline
+            ? "Baseline tool — always exposed to the model"
+            : "Lazy tool — loaded via ToolSearch on demand"
+        }
+        className={cn(
+          "flex-shrink-0 -ml-1 mr-1 p-1 rounded transition-colors",
+          baselineDisabled
+            ? "opacity-40 cursor-not-allowed"
+            : "hover:bg-accent",
+          isBaseline
+            ? baselineMeaningful
+              ? "text-amber-400"
+              : "text-amber-400/60"
+            : "text-muted-foreground/50",
+        )}
+        aria-label={isBaseline ? "Remove from baseline" : "Add to baseline"}
+      >
+        <Star className={cn("w-3.5 h-3.5", isBaseline && "fill-current")} />
+      </button>
       <div className="flex-1 min-w-0">
         <span
-          className={`text-sm font-mono ${
-            serverEnabled && tool.enabled ? "text-foreground" : "text-muted-foreground"
-          }`}
+          className={cn(
+            "text-sm font-mono",
+            serverEnabled && tool.enabled ? "text-foreground" : "text-muted-foreground",
+          )}
         >
           {tool.name}
         </span>
@@ -77,6 +119,9 @@ function ServerGroup({
   togglingKey,
   onServerToggle,
   onToolToggle,
+  baselineSet,
+  onBaselineToggle,
+  baselineMeaningful,
 }: {
   server: McpServer;
   expanded: boolean;
@@ -84,6 +129,9 @@ function ServerGroup({
   togglingKey: string | null;
   onServerToggle: () => void;
   onToolToggle: (toolName: string) => void;
+  baselineSet: Set<string>;
+  onBaselineToggle: (toolName: string) => void;
+  baselineMeaningful: boolean;
 }) {
   const enabledCount = server.tools.filter((t) => t.enabled).length;
   const toolCount = server.tools.length;
@@ -182,6 +230,10 @@ function ServerGroup({
                       serverEnabled={server.enabled}
                       toggling={togglingKey === `tool:${server.name}:${tool.name}`}
                       onToggle={() => onToolToggle(tool.name)}
+                      isBaseline={baselineSet.has(tool.name)}
+                      baselineToggling={togglingKey === `baseline:${tool.name}`}
+                      onBaselineToggle={() => onBaselineToggle(tool.name)}
+                      baselineMeaningful={baselineMeaningful}
                     />
                   ))}
                 </div>
@@ -199,6 +251,154 @@ function ServerGroup({
   );
 }
 
+// ── Tool Discovery (progressive disclosure) settings card ──────────────────
+
+function ToolDiscoveryCard({
+  settings,
+  onChange,
+}: {
+  settings: ToolDiscoverySettings;
+  onChange: (patch: Partial<ToolDiscoverySettings>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // Local draft for the number inputs so users can type freely; we only
+  // commit on blur or Enter.
+  const [thresholdDraft, setThresholdDraft] = useState(String(settings.threshold_tools));
+  const [maxDefaultDraft, setMaxDefaultDraft] = useState(String(settings.max_results_default));
+  const [maxCapDraft, setMaxCapDraft] = useState(String(settings.max_results_cap));
+
+  // Resync drafts when settings change underneath us (e.g. from another tab).
+  useEffect(() => { setThresholdDraft(String(settings.threshold_tools)) }, [settings.threshold_tools]);
+  useEffect(() => { setMaxDefaultDraft(String(settings.max_results_default)) }, [settings.max_results_default]);
+  useEffect(() => { setMaxCapDraft(String(settings.max_results_cap)) }, [settings.max_results_cap]);
+
+  const commitInt = (raw: string, key: keyof ToolDiscoverySettings, current: number) => {
+    const n = parseInt(raw, 10);
+    if (Number.isNaN(n) || n === current) return;
+    onChange({ [key]: n });
+  };
+
+  const stateChip = settings.active
+    ? <span className="text-amber-400">active</span>
+    : settings.enabled
+    ? <span className="text-emerald-400">on (idle)</span>
+    : <span className="text-muted-foreground">off</span>;
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="mb-4 rounded-xl border border-border bg-card overflow-hidden">
+      <CollapsibleTrigger
+        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-accent/40 transition-colors"
+      >
+        <Sparkles className="w-4 h-4 text-primary flex-shrink-0" />
+        <div className="flex-1 text-left min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">Tool Discovery</span>
+            <span className="text-xs">{stateChip}</span>
+          </div>
+          <div className="text-xs text-muted-foreground mt-0.5">
+            {settings.baseline_tools.length} baseline · threshold {settings.threshold_tools} ·
+            {" "}{settings.total_tools || "—"} total tools · max {settings.max_results_default}/{settings.max_results_cap}
+          </div>
+        </div>
+        {open ? <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />}
+      </CollapsibleTrigger>
+
+      <CollapsibleContent className="px-4 pb-4 pt-1 border-t border-border/50">
+        <p className="text-xs text-muted-foreground mb-4 leading-relaxed">
+          When the catalog grows past <span className="font-mono">threshold_tools</span>, the
+          harness advertises a small <span className="font-mono">baseline</span> + a
+          <span className="font-mono"> ToolSearch</span> meta-tool to the model instead of
+          every tool, and the model loads the rest on demand. Mark a tool with ★ in the
+          list below to keep it in the always-on baseline.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+          <div className="flex items-center justify-between">
+            <label htmlFor="td-enabled" className="text-foreground">Enabled</label>
+            <Switch
+              id="td-enabled"
+              checked={settings.enabled}
+              onCheckedChange={(v) => onChange({ enabled: v })}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <label htmlFor="td-threshold" className="text-foreground whitespace-nowrap">
+              Threshold tools
+            </label>
+            <Input
+              id="td-threshold"
+              type="number"
+              min={0}
+              max={1000}
+              value={thresholdDraft}
+              onChange={(e) => setThresholdDraft(e.target.value)}
+              onBlur={() => commitInt(thresholdDraft, "threshold_tools", settings.threshold_tools)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              }}
+              className="h-8 w-24 text-right"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <label htmlFor="td-max-default" className="text-foreground whitespace-nowrap">
+              Max results (default)
+            </label>
+            <Input
+              id="td-max-default"
+              type="number"
+              min={1}
+              max={50}
+              value={maxDefaultDraft}
+              onChange={(e) => setMaxDefaultDraft(e.target.value)}
+              onBlur={() => commitInt(maxDefaultDraft, "max_results_default", settings.max_results_default)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              }}
+              className="h-8 w-24 text-right"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <label htmlFor="td-max-cap" className="text-foreground whitespace-nowrap">
+              Max results (cap)
+            </label>
+            <Input
+              id="td-max-cap"
+              type="number"
+              min={1}
+              max={100}
+              value={maxCapDraft}
+              onChange={(e) => setMaxCapDraft(e.target.value)}
+              onBlur={() => commitInt(maxCapDraft, "max_results_cap", settings.max_results_cap)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              }}
+              className="h-8 w-24 text-right"
+            />
+          </div>
+        </div>
+
+        {settings.baseline_tools.length > 0 && (
+          <div className="mt-4 pt-3 border-t border-border/50">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">
+              Baseline tools ({settings.baseline_tools.length})
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {settings.baseline_tools.map((t) => (
+                <span
+                  key={t}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono bg-amber-500/10 text-amber-300 border border-amber-500/20"
+                >
+                  <Star className="w-3 h-3 fill-current" /> {t}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────
 
 export default function ToolsPage() {
@@ -207,13 +407,13 @@ export default function ToolsPage() {
   const [togglingKey, setTogglingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [discovery, setDiscovery] = useState<ToolDiscoverySettings | null>(null);
 
   useEffect(() => {
-    api
-      .tools()
-      .then((d) => {
+    Promise.all([api.tools(), api.toolDiscovery()])
+      .then(([d, td]) => {
         setData(d);
-        // Expand all servers that have tools by default
+        setDiscovery(td);
         setExpanded(new Set(d.servers.filter((s) => s.tools.length > 0).map((s) => s.name)));
       })
       .catch((e) => setError(String(e)))
@@ -309,13 +509,64 @@ export default function ToolsPage() {
     }
   };
 
-  // ── Counts ────────────────────────────────────────────────────────────
+  const handleBaselineToggle = async (toolName: string) => {
+    if (!discovery) return;
+    const isBaseline = discovery.baseline_tools.includes(toolName);
+    const newEnabled = !isBaseline;
+    const key = `baseline:${toolName}`;
+    setTogglingKey(key);
+
+    // Optimistic
+    setDiscovery((prev) => prev ? {
+      ...prev,
+      baseline_tools: newEnabled
+        ? [...prev.baseline_tools, toolName]
+        : prev.baseline_tools.filter((t) => t !== toolName),
+    } : prev);
+
+    try {
+      await api.toolToggle({ type: "baseline", tool: toolName, enabled: newEnabled });
+    } catch {
+      // Revert
+      setDiscovery((prev) => prev ? {
+        ...prev,
+        baseline_tools: isBaseline
+          ? [...prev.baseline_tools, toolName]
+          : prev.baseline_tools.filter((t) => t !== toolName),
+      } : prev);
+      setError(`Failed to ${newEnabled ? "add" : "remove"} ${toolName} ${newEnabled ? "to" : "from"} baseline`);
+    } finally {
+      setTogglingKey(null);
+    }
+  };
+
+  const handleDiscoveryChange = async (patch: Partial<ToolDiscoverySettings>) => {
+    if (!discovery) return;
+    const prev = discovery;
+    // Optimistic
+    setDiscovery({ ...prev, ...patch });
+    try {
+      await api.setToolDiscovery(patch);
+    } catch {
+      setDiscovery(prev);
+      setError("Failed to update tool discovery settings");
+    }
+  };
+
+  // ── Counts + derived state ────────────────────────────────────────────
 
   const totalTools = data.servers.reduce((n, s) => n + s.tools.length, 0);
   const totalEnabled = data.servers.reduce(
     (n, s) => n + (s.enabled ? s.tools.filter((t) => t.enabled).length : 0),
     0,
   );
+
+  const baselineSet = new Set(discovery?.baseline_tools ?? []);
+  // The ★ only changes routing when discovery is enabled AND the catalog
+  // size has crossed the threshold. Otherwise we still let the user toggle
+  // (so they can pre-load a baseline before the catalog grows) but show
+  // it dimmed.
+  const baselineMeaningful = !!discovery?.enabled && totalTools >= (discovery?.threshold_tools ?? 30);
 
   // ── Render ────────────────────────────────────────────────────────────
 
@@ -354,6 +605,10 @@ export default function ToolsPage() {
           </div>
         )}
 
+        {!loading && discovery && (
+          <ToolDiscoveryCard settings={discovery} onChange={handleDiscoveryChange} />
+        )}
+
         {!loading && (
           <>
             {/* MCP Servers section */}
@@ -389,6 +644,9 @@ export default function ToolsPage() {
                     togglingKey={togglingKey}
                     onServerToggle={() => handleServerToggle(server.name)}
                     onToolToggle={(toolName) => handleToolToggle(server.name, toolName)}
+                    baselineSet={baselineSet}
+                    onBaselineToggle={handleBaselineToggle}
+                    baselineMeaningful={baselineMeaningful}
                   />
                 ))}
               </div>
