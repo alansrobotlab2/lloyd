@@ -59,7 +59,7 @@
 }
 
 
-/* Scrollbar styling */
+/* Scrollbar styling — uses shadcn tokens so the rail tracks the theme. */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -68,11 +68,16 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: hsl(var(--border));
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+  background: hsl(var(--muted-foreground) / 0.55);
+}
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--border)) transparent;
 }
 
 body {
@@ -80,9 +85,11 @@ body {
   min-height: 100vh;
 }
 
-/* Markdown prose inside chat bubbles */
+/* Markdown prose inside chat bubbles. Uses shadcn CSS variables so it
+   inherits the active theme (violet primary on zinc) instead of hard-
+   coded slate/indigo. */
 .prose-chat {
-  color: #e2e8f0;
+  color: hsl(var(--foreground) / 0.95);
 }
 .prose-chat p {
   margin: 0.35em 0;
@@ -94,21 +101,21 @@ body {
   margin-bottom: 0;
 }
 .prose-chat strong {
-  color: #f1f5f9;
+  color: hsl(var(--foreground));
   font-weight: 600;
 }
 .prose-chat em {
   font-style: italic;
 }
 .prose-chat code {
-  background: rgba(51, 65, 85, 0.6);
+  background: hsl(var(--muted) / 0.6);
   padding: 0.15em 0.35em;
   border-radius: 4px;
   font-size: 0.85em;
 }
 .prose-chat pre {
-  background: #0f172a;
-  border: 1px solid #334155;
+  background: hsl(var(--secondary));
+  border: 1px solid hsl(var(--border));
   border-radius: 8px;
   padding: 0.75em 1em;
   overflow-x: auto;
@@ -127,7 +134,7 @@ body {
   margin: 0.15em 0;
 }
 .prose-chat h1, .prose-chat h2, .prose-chat h3 {
-  color: #f1f5f9;
+  color: hsl(var(--foreground));
   margin: 0.5em 0 0.25em;
   font-weight: 600;
 }
@@ -135,18 +142,18 @@ body {
 .prose-chat h2 { font-size: 1.05em; }
 .prose-chat h3 { font-size: 1em; }
 .prose-chat a {
-  color: #818cf8;
+  color: hsl(var(--primary));
   text-decoration: underline;
 }
 .prose-chat blockquote {
-  border-left: 3px solid #4f46e5;
+  border-left: 3px solid hsl(var(--primary));
   margin: 0.5em 0;
   padding: 0.25em 0.75em;
-  color: #94a3b8;
+  color: hsl(var(--muted-foreground));
 }
 .prose-chat hr {
   border: none;
-  border-top: 1px solid #334155;
+  border-top: 1px solid hsl(var(--border));
   margin: 0.75em 0;
 }
 .prose-chat table {
@@ -155,19 +162,20 @@ body {
   width: 100%;
 }
 .prose-chat th, .prose-chat td {
-  border: 1px solid #334155;
+  border: 1px solid hsl(var(--border));
   padding: 0.35em 0.65em;
   text-align: left;
   font-size: 0.9em;
 }
 .prose-chat th {
-  background: rgba(51, 65, 85, 0.4);
-  color: #f1f5f9;
+  background: hsl(var(--muted) / 0.4);
+  color: hsl(var(--foreground));
 }
 
-/* Markdown prose inside skill detail panel */
+/* Markdown prose inside skill / memory detail panels. Same theming
+   approach as prose-chat; just smaller text + tighter spacing. */
 .prose-doc {
-  color: #cbd5e1;
+  color: hsl(var(--foreground) / 0.9);
   font-size: 0.8rem;
   line-height: 1.6;
 }
@@ -178,22 +186,22 @@ body {
   margin-top: 0;
 }
 .prose-doc strong {
-  color: #f1f5f9;
+  color: hsl(var(--foreground));
   font-weight: 600;
 }
 .prose-doc em {
   font-style: italic;
 }
 .prose-doc code {
-  background: rgba(51, 65, 85, 0.6);
-  color: #e2e8f0;
+  background: hsl(var(--muted) / 0.6);
+  color: hsl(var(--foreground) / 0.95);
   padding: 0.15em 0.35em;
   border-radius: 4px;
   font-size: 0.85em;
 }
 .prose-doc pre {
-  background: #0f172a;
-  border: 1px solid #334155;
+  background: hsl(var(--secondary));
+  border: 1px solid hsl(var(--border));
   border-radius: 8px;
   padding: 0.75em 1em;
   overflow-x: auto;
@@ -202,18 +210,18 @@ body {
 .prose-doc pre code {
   background: none;
   padding: 0;
-  color: #e2e8f0;
+  color: hsl(var(--foreground) / 0.95);
 }
 .prose-doc ul, .prose-doc ol {
   margin: 0.35em 0;
   padding-left: 1.5em;
-  color: #cbd5e1;
+  color: hsl(var(--foreground) / 0.9);
 }
 .prose-doc li {
   margin: 0.2em 0;
 }
 .prose-doc h1, .prose-doc h2, .prose-doc h3, .prose-doc h4 {
-  color: #f1f5f9;
+  color: hsl(var(--foreground));
   font-weight: 600;
 }
 .prose-doc h1 { font-size: 1.2em; margin: 0.75em 0 0.35em; }
@@ -221,18 +229,18 @@ body {
 .prose-doc h3 { font-size: 0.95em; margin: 0.5em 0 0.25em; }
 .prose-doc h4 { font-size: 0.9em; margin: 0.4em 0 0.2em; }
 .prose-doc a {
-  color: #818cf8;
+  color: hsl(var(--primary));
   text-decoration: underline;
 }
 .prose-doc blockquote {
-  border-left: 3px solid #4f46e5;
+  border-left: 3px solid hsl(var(--primary));
   margin: 0.5em 0;
   padding: 0.25em 0.75em;
-  color: #94a3b8;
+  color: hsl(var(--muted-foreground));
 }
 .prose-doc hr {
   border: none;
-  border-top: 1px solid #334155;
+  border-top: 1px solid hsl(var(--border));
   margin: 0.75em 0;
 }
 .prose-doc table {
@@ -241,14 +249,14 @@ body {
   width: 100%;
 }
 .prose-doc th, .prose-doc td {
-  border: 1px solid #334155;
+  border: 1px solid hsl(var(--border));
   padding: 0.35em 0.65em;
   text-align: left;
   font-size: 0.85em;
 }
 .prose-doc th {
-  background: rgba(51, 65, 85, 0.4);
-  color: #f1f5f9;
+  background: hsl(var(--muted) / 0.4);
+  color: hsl(var(--foreground));
 }
 
 .typing-indicator {
