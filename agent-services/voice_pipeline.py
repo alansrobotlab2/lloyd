@@ -43,6 +43,7 @@ import importlib.util
 import io
 import json
 import queue
+import re
 import uuid
 
 import sys
@@ -70,6 +71,7 @@ VAD_FRAME_SIZE = 512       # Silero VAD frame size at 16kHz
 WW_FRAME_SIZE = 640        # openWakeWord frame size at 16kHz
 SILENCE_DURATION_MS = 1000
 MIN_UTTERANCE_SAMPLES = 4800  # minimum 0.3s of audio
+MAX_UTTERANCE_SAMPLES = 30 * PIPELINE_SAMPLE_RATE  # hard cut at 30s so a stuck Smart Turn can't trap the loop forever
 
 # --- Phase 1: Smart Turn v3 constants ---
 SMART_TURN_MAX_SAMPLES = 8 * PIPELINE_SAMPLE_RATE  # 8 seconds max input
@@ -132,24 +134,67 @@ def list_audio_devices() -> dict[str, list[dict]]:
     return {"input": inputs, "output": outputs}
 
 
-def resolve_mic_device(config: dict) -> tuple[int, int]:
-    """Resolve mic device index and native sample rate from config."""
+def resolve_mic_device(config: dict, retries: int = 5, retry_delay: float = 2.0) -> tuple[int, int]:
+    """Resolve mic device index and native sample rate from config.
+
+    Retries on failure to tolerate cold-start races where supervisord launches
+    voice-mode before the host audio devices are exposed into the container.
+    """
     name_pattern = config.get("mic_device_name")
-    if name_pattern:
+    if not name_pattern:
+        device_idx = config["mic_device"]
+        native_rate = config.get("mic_native_rate", config["sample_rate"])
+        return device_idx, native_rate
+
+    last_available: list[str] = []
+    for attempt in range(retries):
         devices = sd.query_devices()
+        last_available = [d["name"] for d in devices if d["max_input_channels"] > 0]
         for idx, dev in enumerate(devices):
             if (dev["max_input_channels"] > 0
                     and name_pattern.lower() in dev["name"].lower()):
                 native_rate = (config.get("mic_native_rate")
                                or int(dev["default_samplerate"]))
                 return idx, native_rate
-        raise RuntimeError(
-            f"No input device matching '{name_pattern}'. "
-            f"Available: {[d['name'] for d in devices if d['max_input_channels'] > 0]}"
-        )
-    device_idx = config["mic_device"]
-    native_rate = config.get("mic_native_rate", config["sample_rate"])
-    return device_idx, native_rate
+        if attempt < retries - 1:
+            time.sleep(retry_delay)
+    raise RuntimeError(
+        f"No input device matching '{name_pattern}' after {retries} attempts. "
+        f"Available: {last_available}"
+    )
+
+
+def resolve_output_device(config: dict) -> int | None:
+    """Resolve output device index from `output_device_name` (substring match).
+
+    Returns None if no name configured, no match, or the matched device does
+    not accept the TTS sample rate — caller falls back to the PortAudio
+    default device, which on this system is PipeWire and resamples internally.
+
+    Strips a trailing `(hw:N,X)` from the configured name before matching,
+    since ALSA card indices renumber across reboots.
+    """
+    name_pattern = config.get("output_device_name")
+    if not name_pattern:
+        return None
+    cleaned = re.sub(r"\s*\(hw:\d+,\d+\)\s*$", "", name_pattern).strip()
+    tts_rate = int(config.get("tts_sample_rate", 24000))
+    devices = sd.query_devices()
+    for idx, dev in enumerate(devices):
+        if dev["max_output_channels"] <= 0:
+            continue
+        if cleaned.lower() not in dev["name"].lower():
+            continue
+        try:
+            sd.check_output_settings(
+                device=idx, samplerate=tts_rate, channels=1, dtype="float32",
+            )
+        except Exception:
+            # ALSA hw devices reject non-native rates; skip so caller falls
+            # back to the resampling default sink.
+            return None
+        return idx
+    return None
 
 
 def resample_int16(audio_int16: np.ndarray, target_len: int) -> np.ndarray:
@@ -334,7 +379,12 @@ class WhisperSTT:
         if hotwords_file:
             try:
                 path = Path(hotwords_file).expanduser()
-                words = [w.strip() for w in path.read_text().splitlines() if w.strip()]
+                lines = path.read_text().splitlines()
+                if lines and lines[0].strip() == "---":
+                    end = next((i for i, l in enumerate(lines[1:], 1) if l.strip() == "---"), None)
+                    if end is not None:
+                        lines = lines[end + 1:]
+                words = [w.strip() for w in lines if w.strip()]
                 if words:
                     self.hotwords = ", ".join(words)
                     logger.info("Loaded %d ASR hotwords from %s", len(words), path)
@@ -1098,11 +1148,18 @@ def wait_for_wake_word_with_buffer(
     stop_event: threading.Event | None = None,
     voice_enabled: threading.Event | None = None,
     reader_factory: Callable[[], _WebSocketAudioReader | _AudioReader | _DiscordAudioReader] | None = None,
+    tts_playing: threading.Event | None = None,
+    drain_mic_q: Callable[[], None] | None = None,
 ) -> np.ndarray | None:
     """Listen for wake word while keeping a ring buffer of recent audio.
 
     Returns the ring buffer contents as int16 PCM at 16kHz when wake word
     is detected, or None if stopped.
+
+    If `tts_playing` is set, the loop pauses consuming so the barge-in
+    monitor in voice_mode._handle_say can own the shared mic queue during
+    TTS. After TTS ends, `drain_mic_q` (if provided) clears the bleed and
+    the wake-word detector state resets.
     """
     wake_word.reset()
     ring_buffer: deque[np.ndarray] = deque(maxlen=WAKEWORD_RING_BUFFER_FRAMES)
@@ -1114,6 +1171,20 @@ def wait_for_wake_word_with_buffer(
                 return None
             if voice_enabled and not voice_enabled.is_set():
                 return None
+
+            if tts_playing is not None and tts_playing.is_set():
+                # Stand aside; barge-in monitor owns the shared mic queue.
+                while tts_playing.is_set():
+                    if stop_event and stop_event.is_set():
+                        return None
+                    if voice_enabled and not voice_enabled.is_set():
+                        return None
+                    time.sleep(0.05)
+                if drain_mic_q is not None:
+                    drain_mic_q()
+                wake_word.reset()
+                ring_buffer.clear()
+                continue
 
             audio_chunk = reader.read(timeout=0.5)
             if audio_chunk is None:
@@ -1187,9 +1258,10 @@ def record_utterance(
                             all_pcm = np.frombuffer(b"".join(audio_buffer), dtype=np.int16)
                             all_float = all_pcm.astype(np.float32) / 32768.0
                             prob = smart_turn.predict(all_float)
-                            logger.debug("Smart Turn prob: %.2f", prob)
-                            if prob < smart_turn.threshold:
-                                # Not end of turn — keep listening
+                            buffered_samples = sum(len(b) // 2 for b in audio_buffer)
+                            print(f"  [smart_turn] prob={prob:.2f} thr={smart_turn.threshold:.2f} dur={buffered_samples/PIPELINE_SAMPLE_RATE:.1f}s", flush=True)
+                            if prob < smart_turn.threshold and buffered_samples < MAX_UTTERANCE_SAMPLES:
+                                # Not end of turn — keep listening (until hard cap)
                                 silent_frames = 0
                                 continue
                         break
@@ -1268,8 +1340,9 @@ def active_listen(
                             all_pcm = np.frombuffer(b"".join(audio_buffer), dtype=np.int16)
                             all_float = all_pcm.astype(np.float32) / 32768.0
                             prob = smart_turn.predict(all_float)
-                            logger.debug("Smart Turn prob (active_listen): %.2f", prob)
-                            if prob < smart_turn.threshold:
+                            buffered_samples = sum(len(b) // 2 for b in audio_buffer)
+                            print(f"  [smart_turn:follow] prob={prob:.2f} thr={smart_turn.threshold:.2f} dur={buffered_samples/PIPELINE_SAMPLE_RATE:.1f}s", flush=True)
+                            if prob < smart_turn.threshold and buffered_samples < MAX_UTTERANCE_SAMPLES:
                                 silent_frames = 0
                                 continue
                         break
@@ -1540,6 +1613,26 @@ class PipelineRunner:
         self._tts_playing = threading.Event()  # set while TTS is playing
         self._tts_stop = threading.Event()     # set to request TTS stop (wake word interrupt)
 
+        # Local-mode shared mic stream + queue. Opened once at init_components
+        # and kept open for the daemon's lifetime so wake-word detection,
+        # utterance recording, and barge-in monitoring all consume from one
+        # source — ALSA hw devices reject multiple concurrent readers, so we
+        # serialize access through this queue. Only one consumer should pull
+        # from it at a time (state-machine driven).
+        self._mic_q: queue.Queue[np.ndarray] = queue.Queue()
+        self._mic_stream: object | None = None  # sd.InputStream
+
+        # Conversation mode — after TTS completes, accept ASR from the same
+        # speaker for a window without requiring a new wake word.
+        self._conversation_mode_enabled: bool = config.get(
+            "conversation_mode_enabled", True)
+        self._conversation_window_s: float = float(config.get(
+            "conversation_window_s", 8.0))
+        self._conversation_tts_wait_s: float = float(config.get(
+            "conversation_tts_wait_s", 30.0))
+        self._conversation_max_turns: int = int(config.get(
+            "conversation_max_turns", 10))
+
         # Phase 2/3: AEC and barge-in state
         self._aec_enabled: bool = config.get("aec_enabled", True)
         self._barge_in_enabled: bool = config.get("barge_in_enabled", True)
@@ -1602,6 +1695,15 @@ class PipelineRunner:
         self._tts_play_start = time.monotonic()
         with self._tts_ref_lock:
             self._tts_ref_buffer.clear()
+        # Reset per-utterance state. mic_pos/consec_speech are also reset on
+        # first ref chunk arrival in append_tts_reference, but clearing here
+        # too keeps things tidy if AEC is disabled.
+        self._barge_in_mic_pos = 0
+        self._barge_in_consec_speech = 0
+        # Reset per-utterance debug flags so check_barge_in's heartbeat fires
+        # once per TTS turn instead of just once per process lifetime.
+        self._bi_no_ref_warned = False
+        self._bi_active_warned = False
         self.cb.on_state_changed(State.SPEAKING)
         if self._ws_server and self._ws_server.has_clients:
             self._ws_server.send_message({"type": "state", "state": "SPEAKING"})
@@ -1629,7 +1731,11 @@ class PipelineRunner:
     def append_tts_reference(self, audio_float32: np.ndarray, tts_sr: int) -> None:
         """Accumulate TTS reference audio for AEC (resampled to 16kHz).
 
-        Called by TTS playback code as chunks are generated.
+        Called by TTS playback code as chunks are generated. On the first
+        chunk, drain the mic queue and reset `_barge_in_mic_pos` so AEC
+        starts with mic and ref samples aligned at index 0 — without this,
+        the queue contains ~100-500 ms of pre-TTS mic data and AEC ends
+        up subtracting the wrong window of the reference signal.
         """
         if not self._aec_enabled:
             return
@@ -1641,14 +1747,20 @@ class PipelineRunner:
         else:
             ref_16k = audio_float32.astype(np.float32)
         with self._tts_ref_lock:
+            first_chunk = len(self._tts_ref_buffer) == 0
             self._tts_ref_buffer.append(ref_16k)
+        if first_chunk and self.input_mode == "local":
+            self._drain_mic_q()
+            self._barge_in_mic_pos = 0
+            self._barge_in_consec_speech = 0
 
     def check_barge_in(self, mic_queue: queue.Queue, vad: VAD,
                        aec_process=None) -> bool:
         """Check if user is speaking during TTS playback (voice barge-in).
 
         Drains mic_queue, runs AEC + VAD with elevated threshold.
-        Returns True if barge-in detected.
+        Returns True if barge-in detected. Mic chunks are expected at
+        `self.mic_native_rate` and resampled to 16 kHz before AEC/VAD.
         """
         if not self._barge_in_enabled:
             return False
@@ -1660,10 +1772,22 @@ class PipelineRunner:
         # Get TTS reference
         with self._tts_ref_lock:
             if not self._tts_ref_buffer:
+                # One-shot debug for the no-ref-yet case
+                if not getattr(self, "_bi_no_ref_warned", False):
+                    print("  [barge-in] no tts_ref yet, skipping", flush=True)
+                    self._bi_no_ref_warned = True
                 return False
             tts_concat = np.concatenate(self._tts_ref_buffer)
 
-        consec_speech = 0
+        # One-shot heartbeat: confirm we're past early-exits at least once
+        if not getattr(self, "_bi_active_warned", False):
+            print(f"  [barge-in] active: q_size={mic_queue.qsize()} ref_len={len(tts_concat)}", flush=True)
+            self._bi_active_warned = True
+
+        # consec_speech persists across polls — the monitor calls this every
+        # 20 ms but the queue typically has 0-1 chunks per call, so a local
+        # counter would never accumulate to threshold.
+        consec_speech = getattr(self, "_barge_in_consec_speech", 0)
         mic_pos = getattr(self, "_barge_in_mic_pos", 0)
 
         while not mic_queue.empty():
@@ -1672,12 +1796,24 @@ class PipelineRunner:
             except queue.Empty:
                 break
 
+            # Native-rate chunks → 16 kHz for AEC/VAD.
+            if self.needs_resample:
+                target_len = int(len(mic_chunk) * PIPELINE_SAMPLE_RATE / self.mic_native_rate)
+                if target_len < VAD_FRAME_SIZE:
+                    continue
+                mic_chunk = resample_int16(mic_chunk, target_len)
+
             if len(mic_chunk) < VAD_FRAME_SIZE:
                 continue
 
             frame_float = mic_chunk.astype(np.float32) / 32768.0
 
-            # Apply AEC if available
+            # Apply AEC if available. Speex AEC has no double-talk detection,
+            # so it can over-cancel when user speech overlaps with TTS — we
+            # therefore evaluate VAD on both raw and cleaned audio and fire on
+            # whichever crosses threshold (cleaned for clean-voice barge-in,
+            # raw with a stricter requirement for cases where AEC eats the
+            # user's voice).
             if aec_process is not None:
                 ref = _get_ref_segment(tts_concat, mic_pos, len(frame_float))
                 mic_pos += len(frame_float)
@@ -1686,18 +1822,40 @@ class PipelineRunner:
                 cleaned = frame_float
                 mic_pos += len(cleaned)
 
-            # Elevated VAD threshold for barge-in
-            prob = vad.speech_probability(cleaned[:VAD_FRAME_SIZE] if len(cleaned) >= VAD_FRAME_SIZE else
-                                          np.pad(cleaned, (0, VAD_FRAME_SIZE - len(cleaned))))
-            if prob > self._barge_in_vad_threshold:
+            cleaned_for_vad = cleaned[:VAD_FRAME_SIZE] if len(cleaned) >= VAD_FRAME_SIZE else np.pad(cleaned, (0, VAD_FRAME_SIZE - len(cleaned)))
+            raw_for_vad = frame_float[:VAD_FRAME_SIZE] if len(frame_float) >= VAD_FRAME_SIZE else np.pad(frame_float, (0, VAD_FRAME_SIZE - len(frame_float)))
+            prob_clean = vad.speech_probability(cleaned_for_vad)
+            prob_raw = vad.speech_probability(raw_for_vad)
+
+            # RMS comparison: when the user adds voice on top of Lloyd's
+            # speaker output, raw mic energy goes up. If raw RMS substantially
+            # exceeds AEC residual RMS, we have evidence of user voice that
+            # Speex couldn't subtract.
+            raw_rms = float(np.sqrt(np.mean(raw_for_vad ** 2)) + 1e-12)
+            clean_rms = float(np.sqrt(np.mean(cleaned_for_vad ** 2)) + 1e-12)
+
+            prob = max(prob_clean, prob_raw)  # use the larger; cleaned still wins when AEC is good
+
+            if prob_clean > 0.3 or prob_raw > 0.85:  # log interesting frames
+                print(f"  [barge-in] clean={prob_clean:.2f} raw={prob_raw:.2f} thr={self._barge_in_vad_threshold:.2f} consec={consec_speech}/{self._barge_in_consec_chunks} rms_raw={raw_rms:.3f} rms_clean={clean_rms:.3f}", flush=True)
+
+            # Fire if cleaned VAD crosses threshold (clean-voice barge-in) OR
+            # raw VAD is very high AND raw RMS exceeds clean RMS (= user voice
+            # adding energy on top of Lloyd's room playback).
+            cleaned_fires = prob_clean > self._barge_in_vad_threshold
+            raw_fires = (prob_raw > 0.92 and raw_rms > clean_rms * 1.3)
+
+            if cleaned_fires or raw_fires:
                 consec_speech += 1
                 if consec_speech >= self._barge_in_consec_chunks:
                     self._barge_in_mic_pos = mic_pos
+                    self._barge_in_consec_speech = 0  # reset for next time
                     return True
             else:
                 consec_speech = 0
 
         self._barge_in_mic_pos = mic_pos
+        self._barge_in_consec_speech = consec_speech
         return False
 
     # --- Phase 5: Uncertain speaker tracking ---
@@ -1750,6 +1908,18 @@ class PipelineRunner:
             else:
                 self.mic_ww_blocksize = WW_FRAME_SIZE
                 self.mic_vad_blocksize = VAD_FRAME_SIZE
+
+            # Output device (optional — falls back to system default if unset/missing)
+            out_idx = resolve_output_device(config)
+            if out_idx is not None:
+                self.output_device = out_idx
+
+            # Always-on shared mic stream. Pushes int16 chunks into _mic_q at
+            # native rate; consumers (wake-word, VAD, barge-in) read from
+            # _mic_q via reader_factory. Block size is the VAD-aligned size
+            # (smaller of the two consumer frame sizes), which gives ~32 ms
+            # callback cadence at 16 kHz native.
+            self._open_local_mic_stream()
 
         if self.input_mode == "websocket":
             self.cb.on_init_progress("WebSocket Audio Server")
@@ -1888,6 +2058,52 @@ class PipelineRunner:
         """Set the output device for TTS playback."""
         self.output_device = device_index
 
+    # --- Local-mode shared mic plumbing ---
+
+    def _open_local_mic_stream(self) -> None:
+        """Open the always-on local mic InputStream that fans out to _mic_q."""
+        if self._mic_stream is not None:
+            return
+
+        def _cb(indata, frames, time_info, status):
+            try:
+                self._mic_q.put_nowait(indata[:, 0].copy())
+            except queue.Full:
+                pass
+
+        self._mic_stream = sd.InputStream(
+            samplerate=self.mic_native_rate,
+            channels=1, dtype="int16",
+            device=self.mic_device,
+            blocksize=self.mic_vad_blocksize,
+            callback=_cb,
+        )
+        self._mic_stream.start()
+
+    def _close_local_mic_stream(self) -> None:
+        if self._mic_stream is None:
+            return
+        try:
+            self._mic_stream.stop()
+            self._mic_stream.close()
+        except Exception:
+            pass
+        self._mic_stream = None
+
+    def _drain_mic_q(self) -> None:
+        """Discard any buffered chunks. Called when handing off between
+        consumers (e.g. after TTS ends, before wake-word resumes) so we
+        don't process stale audio that may include TTS bleed-through."""
+        try:
+            while True:
+                self._mic_q.get_nowait()
+        except queue.Empty:
+            pass
+
+    def _local_reader_factory(self, frame_size: int):
+        """Return a queue-based reader pinned to the shared mic queue."""
+        return lambda: _WebSocketAudioReader(self._mic_q, frame_size=frame_size)
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -1896,6 +2112,7 @@ class PipelineRunner:
 
     def stop(self) -> None:
         self.stop_event.set()
+        self._close_local_mic_stream()
         # Join client pipeline threads
         with self._client_threads_lock:
             threads = list(self._client_threads.values())
@@ -1954,6 +2171,9 @@ class PipelineRunner:
             self.needs_resample, self.mic_ww_blocksize,
             stop_event=self.stop_event,
             voice_enabled=self.voice_enabled,
+            reader_factory=self._local_reader_factory(self.mic_ww_blocksize),
+            tts_playing=self._tts_playing,
+            drain_mic_q=self._drain_mic_q,
         )
         if ww_audio is None or self.stop_event.is_set():
             return
@@ -1986,11 +2206,14 @@ class PipelineRunner:
 
         # 3. LISTENING — record utterance (with Smart Turn)
         self.cb.on_state_changed(State.LISTENING)
+        # Drain any chunks that piled up between wake-word detection and now.
+        self._drain_mic_q()
         pcm_data = record_utterance(
             self.vad, self.mic_device, self.mic_native_rate,
             self.needs_resample, self.mic_vad_blocksize,
             self.silence_frames_threshold,
             stop_event=self.stop_event,
+            reader_factory=self._local_reader_factory(self.mic_vad_blocksize),
             smart_turn=self.smart_turn,
         )
         if pcm_data is None or len(pcm_data) < MIN_UTTERANCE_SAMPLES:
@@ -2070,12 +2293,14 @@ class PipelineRunner:
         while not self.stop_event.is_set() and self.voice_enabled.is_set():
             self.cb.on_continuity_status("Listening for follow-up...")
 
+            self._drain_mic_q()
             follow_audio = active_listen(
                 self.vad, self.mic_device, self.mic_native_rate,
                 self.needs_resample, self.mic_vad_blocksize,
                 self.listen_window_s,
                 self.silence_frames_threshold,
                 stop_event=self.stop_event,
+                reader_factory=self._local_reader_factory(self.mic_vad_blocksize),
                 smart_turn=self.smart_turn,
             )
 
@@ -2121,6 +2346,109 @@ class PipelineRunner:
 
             # Accept as continuation
             self.cb.on_transcript(follow_text, current_speaker, True)
+
+        # 7. Conversation mode — after Lloyd finishes speaking, give the
+        # same speaker a window to follow up without saying the wake word.
+        if (self._conversation_mode_enabled
+                and current_embedding is not None
+                and self.input_mode == "local"
+                and not self.stop_event.is_set()
+                and self.voice_enabled.is_set()):
+            self._conversation_loop(current_embedding, current_speaker)
+
+    def _conversation_loop(self, anchor_embedding, anchor_speaker: str) -> None:
+        """Post-TTS speaker-locked follow-up listener.
+
+        Loops:
+          1. Wait (bounded) for TTS playback to start, then for it to end.
+             If TTS never starts (e.g. backend errored, TTS disabled), times
+             out and returns to wake-word.
+          2. Drain the shared mic queue (TTS bleed).
+          3. active_listen() with `conversation_window_s` — if the same
+             speaker speaks, transcribe + inject and loop back to step 1
+             for the next response. If silent or a different voice, exit.
+        """
+        import datetime as _dt
+
+        for turn in range(self._conversation_max_turns):
+            if self.stop_event.is_set() or not self.voice_enabled.is_set():
+                return
+
+            # Wait for TTS to start (Lloyd is generating + summarizing).
+            wait_deadline = time.monotonic() + self._conversation_tts_wait_s
+            while not self._tts_playing.is_set():
+                if self.stop_event.is_set() or not self.voice_enabled.is_set():
+                    return
+                if time.monotonic() > wait_deadline:
+                    return  # no TTS this turn — fall through to wake word
+                time.sleep(0.1)
+
+            # Wait for TTS to finish.
+            while self._tts_playing.is_set():
+                if self.stop_event.is_set() or not self.voice_enabled.is_set():
+                    return
+                time.sleep(0.1)
+
+            # Discard chunks captured during TTS (bleed-through, paplay echoes).
+            self._drain_mic_q()
+
+            self.cb.on_continuity_status(
+                f"Conversation mode (window {self._conversation_window_s:.0f}s)"
+            )
+            # Show LISTENING in the navbar while the conversation window is
+            # open — IDLE here would make it look like wake-word mode and is
+            # the wrong signal for "still actively listening to you".
+            self.cb.on_state_changed(State.LISTENING)
+
+            follow_audio = active_listen(
+                self.vad, self.mic_device, self.mic_native_rate,
+                self.needs_resample, self.mic_vad_blocksize,
+                self._conversation_window_s,
+                self.silence_frames_threshold,
+                stop_event=self.stop_event,
+                reader_factory=self._local_reader_factory(self.mic_vad_blocksize),
+                smart_turn=self.smart_turn,
+            )
+
+            if follow_audio is None or len(follow_audio) < MIN_UTTERANCE_SAMPLES:
+                self.cb.on_continuity_status("Conversation window expired")
+                return
+
+            self.cb.on_state_changed(State.PROCESSING)
+            follow_text = self.stt.transcribe(follow_audio)
+            if not follow_text.strip():
+                return
+
+            # Speaker match against the anchor embedding (the speaker who
+            # triggered the wake word). Cosine similarity threshold mirrors
+            # the standard speaker_threshold from the ID layer.
+            if self.speaker_id is not None:
+                follow_embedding = self.speaker_id.extract_embedding(follow_audio)
+                sim = float(np.dot(anchor_embedding, follow_embedding))
+                print(f"  [conversation] speaker_sim={sim:.2f} thr={self.speaker_threshold:.2f}", flush=True)
+                if sim < self.speaker_threshold:
+                    self.cb.on_continuity_status(
+                        f"Different speaker (sim={sim:.2f}); exiting conversation mode"
+                    )
+                    return
+
+            # Same speaker — accept as a new turn. Persist + emit; the
+            # callback handler injects to the backend like any utterance.
+            with self._last_utterance_lock:
+                self._last_utterance = {
+                    "timestamp": time.time(),
+                    "timestamp_iso": _dt.datetime.now().isoformat(),
+                    "raw_transcript": follow_text,
+                    "speaker": anchor_speaker,
+                    "audio_int16": follow_audio,
+                    "duration_s": len(follow_audio) / PIPELINE_SAMPLE_RATE,
+                }
+            self.cb.on_transcript(follow_text, anchor_speaker, True)
+            # Loop back: wait for Lloyd's next response, then listen again.
+
+        self.cb.on_continuity_status(
+            f"Conversation max turns ({self._conversation_max_turns}) reached"
+        )
 
     # --- WebSocket pipeline: per-client thread management ---
 

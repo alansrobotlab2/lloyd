@@ -125,6 +125,52 @@ def _sync_secondary_fact_extraction(transcript: str) -> list[dict]:
         return []
 
 
+_VOICE_SUMMARY_SYSTEM = (
+    "You rewrite Lloyd's text reply for spoken delivery. Preserve Lloyd's "
+    "first-person voice. Strip markdown, code blocks, bullet lists, links, "
+    "file paths, and stage directions. Keep it conversational and brief "
+    "(1-3 sentences). If the reply is already short and conversational, "
+    "return it unchanged. Output only the spoken text — no preamble, no "
+    "labels, no quotes."
+)
+
+
+def _sync_secondary_voice_summary(primary_text: str, timeout: float = 15.0) -> Optional[str]:
+    """Call secondary to rewrite a primary response for TTS playback.
+
+    Returns the spoken-form text, or None on failure (caller should fall
+    back to the original primary text).
+    """
+    text = (primary_text or "").strip()
+    if not text:
+        return None
+
+    payload = {
+        "model": _POST_CAPTURE_MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": _VOICE_SUMMARY_SYSTEM},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 200,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    try:
+        req = urllib.request.Request(
+            _POST_CAPTURE_MODEL_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip() or None
+    except Exception as e:
+        logger.warning(f"secondary voice summary failed: {e}")
+        return None
+
+
 def _sync_secondary_focus_extraction(transcript: str) -> list[str]:
     """Call secondary model to extract 3-5 topic phrases from recent conversation."""
     payload = {

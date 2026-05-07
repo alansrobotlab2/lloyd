@@ -51,8 +51,8 @@ from app.sessions_io import (
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_tool_search_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
 from app.routers.voice import (
-    extract_first_two_sentences,
     speak_text,
+    speak_voice_summary,
     tts_is_enabled,
 )
 from prompt_builder import build_system_prompt
@@ -470,11 +470,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             "delta_chars": len(delta_text),
                         }, turn_id=turn.turn_id)
                     if tts_should_speak and not tts_spoken and tts_is_enabled():
+                        # Buffer the full primary stream — TTS now waits for
+                        # secondary to rewrite the complete response into a
+                        # spoken summary (fired at end-of-turn below).
                         tts_buffer += delta_text
-                        spoken_chunk = extract_first_two_sentences(tts_buffer)
-                        if spoken_chunk:
-                            tts_spoken = True
-                            asyncio.create_task(speak_text(spoken_chunk))
 
             elif etype == "thinking_delta":
                 thinking_text = evt.get("text", "")
@@ -777,12 +776,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     # (the harness yielded `result` before this `result`
                     # event reached _run_turn). Nothing else to do here.
 
-                    # End-of-turn TTS fallback: response was shorter than two
-                    # sentences (e.g. "Done.") so the mid-stream trigger never
-                    # fired. Speak whatever we have.
+                    # End-of-turn TTS: hand the full primary response to the
+                    # secondary model for a spoken rewrite, then TTS the
+                    # rewrite. speak_voice_summary falls back to the raw
+                    # primary text if secondary fails or returns empty.
                     if tts_should_speak and not tts_spoken and tts_is_enabled() and tts_buffer.strip():
                         tts_spoken = True
-                        asyncio.create_task(speak_text(tts_buffer))
+                        asyncio.create_task(speak_voice_summary(tts_buffer))
 
                     done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
                     if accumulated_thinking:

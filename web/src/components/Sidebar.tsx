@@ -31,10 +31,10 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'chat', label: 'Chat', icon: MessageCircle },
   // Inner Voice — sibling to Chat. The critic ensemble runs only on
   // sessions opened in this tab; existing Chat tab behavior is unchanged.
   { id: 'inner_voice', label: 'Inner Voice', icon: BrainCircuit },
+  { id: 'chat', label: 'Chat', icon: MessageCircle },
   { id: 'backlog', label: 'Backlog', icon: LayoutGrid },
   { id: 'autonomy', label: 'Autonomy', icon: Lightbulb },
   { id: 'workers', label: 'Workers', icon: Workflow },
@@ -93,7 +93,10 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
 
   useEffect(() => {
     pollVoiceStatus()
-    const interval = setInterval(pollVoiceStatus, 5000)
+    // 500ms cadence so the navbar mic icon reflects IDLE→LISTENING→PROCESSING
+    // →SPEAKING transitions snappily. The endpoint is an in-memory read on
+    // a threaded HTTP server, so this is cheap.
+    const interval = setInterval(pollVoiceStatus, 500)
     return () => clearInterval(interval)
   }, [pollVoiceStatus])
 
