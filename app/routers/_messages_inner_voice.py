@@ -83,18 +83,19 @@ def _iv_should_fire_on_turn(
     True iff the session opted into Inner Voice AND either the turn is
     ambient OR the session opted into user-turn evaluation.
 
-    IV-produced ambient turns ARE observed. Earlier we skipped them to
-    avoid IV re-judging its own nudge in a loop, but that left a deaf
-    spot exactly where stalls cluster: a primary that already stalled
-    once on a request is the most likely candidate to stall again on
-    the IV-produced retry. Loop-prevention now relies on the per-turn
-    intervention budget (DEFAULT_INTERVENTION_BUDGET) — IV can observe
-    its own follow-up but can only escalate a bounded number of times
-    before the budget exhausts.
+    IV-produced ambient turns are NOT observed. Earlier code allowed
+    self-observation, relying on the per-turn intervention budget for
+    loop-prevention — but the budget resets every turn, so IV could
+    keep spawning ambient turns and rejudging itself indefinitely.
+    The deaf-spot tradeoff (a stall on the IV-produced retry won't be
+    caught) is acceptable: the user has UI controls to drive
+    follow-up, and the next user turn re-opens IV observation.
     """
     if not _session_inner_voice_enabled(session_id):
         return False
     if turn_source == "ambient":
+        if producer_source == "inner_voice":
+            return False
         return True
     return _session_iv_evaluate_user_turns_enabled(session_id)
 
