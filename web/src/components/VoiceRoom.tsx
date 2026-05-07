@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Room,
   RoomEvent,
@@ -37,6 +37,18 @@ export interface VoiceRoomState {
   agentAudioTrack: RemoteAudioTrack | undefined
   /** Best-effort agent state from connection lifecycle + agent track presence. */
   agentState: AgentState
+  /** Wake-word gate state — pushed from the worker over the data channel.
+   *  'idle' = waiting for wake-word. 'listening' = inside the continuation
+   *  window, follow-up utterances pass through without re-saying it. */
+  wakeState: 'idle' | 'listening'
+  /** Seconds remaining in the continuation window when wakeState='listening'.
+   *  Browser-side ticker decrements this every 100ms; flips to 'idle' at 0. */
+  wakeRemainingS: number
+  /** Configured continuation window in seconds (used to render progress bars). */
+  wakeContinuationS: number
+  /** Enrolled speaker name when the wake-word utterance matched a profile;
+   *  null otherwise. Helps the UI show "Listening (alan)…". */
+  wakeSpeaker: string | null
   error: string | null
   /** Manually reconnect / retry. */
   reconnect: () => void
@@ -85,6 +97,32 @@ export default function VoiceRoom({
   const [agentAudioTrack, setAgentAudioTrack] = useState<RemoteAudioTrack | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
   const [reconnectKey, setReconnectKey] = useState(0)
+
+  // Wake-word state, pushed from the worker over the data channel. `expiresAt`
+  // is the absolute monotonic time (Date.now() + remaining_s*1000) so the
+  // local 100ms ticker can compute remaining_s without drift from set-time.
+  const [wakeState, setWakeState] = useState<'idle' | 'listening'>('idle')
+  const [wakeExpiresAt, setWakeExpiresAt] = useState(0)
+  const [wakeContinuationS, setWakeContinuationS] = useState(12)
+  const [wakeSpeaker, setWakeSpeaker] = useState<string | null>(null)
+  const [wakeRemainingS, setWakeRemainingS] = useState(0)
+
+  // Local 100ms ticker — updates `wakeRemainingS` and flips to 'idle' on
+  // expiry. Stops itself when state is 'idle' (no work to do).
+  useEffect(() => {
+    if (wakeState !== 'listening') return
+    const tick = () => {
+      const remain = Math.max(0, (wakeExpiresAt - Date.now()) / 1000)
+      setWakeRemainingS(remain)
+      if (remain <= 0) {
+        setWakeState('idle')
+        setWakeSpeaker(null)
+      }
+    }
+    tick()
+    const id = setInterval(tick, 100)
+    return () => clearInterval(id)
+  }, [wakeState, wakeExpiresAt])
 
   // Watch agent track volume — drives the "speaking" detection that
   // toggles half-duplex mute and the visualizer state.
@@ -149,11 +187,38 @@ export default function VoiceRoom({
       setAgentAudioTrack(prev => (prev && prev.sid === track.sid ? undefined : prev))
     }
 
+    // JSON control messages from the worker. Currently understands
+    // {type:"wake_state", state, remaining_s, continuation_s, speaker}.
+    const onDataReceived = (payload: Uint8Array) => {
+      if (cancelled) return
+      try {
+        const text = new TextDecoder().decode(payload)
+        const msg = JSON.parse(text) as Record<string, unknown>
+        if (msg.type !== 'wake_state') return
+        const state = msg.state === 'listening' ? 'listening' : 'idle'
+        const remain = typeof msg.remaining_s === 'number' ? msg.remaining_s : 0
+        const cont = typeof msg.continuation_s === 'number' ? msg.continuation_s : 12
+        const spk = typeof msg.speaker === 'string' ? msg.speaker : null
+        setWakeState(state)
+        setWakeContinuationS(cont)
+        setWakeSpeaker(spk)
+        if (state === 'listening') {
+          setWakeExpiresAt(Date.now() + remain * 1000)
+          setWakeRemainingS(remain)
+        } else {
+          setWakeRemainingS(0)
+        }
+      } catch (e) {
+        console.warn('VoiceRoom: bad data packet', e)
+      }
+    }
+
     room.on(RoomEvent.Disconnected, onDisconnected)
     room.on(RoomEvent.Reconnecting, onReconnecting)
     room.on(RoomEvent.Reconnected, onReconnected)
     room.on(RoomEvent.TrackSubscribed, onTrackSubscribed)
     room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed)
+    room.on(RoomEvent.DataReceived, onDataReceived)
 
     const connect = async () => {
       try {
@@ -217,6 +282,7 @@ export default function VoiceRoom({
       room.off(RoomEvent.Reconnected, onReconnected)
       room.off(RoomEvent.TrackSubscribed, onTrackSubscribed)
       room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed)
+      room.off(RoomEvent.DataReceived, onDataReceived)
       // Disconnect, but keep the Room instance for re-use on reconnectKey bump.
       room.disconnect().catch(() => {})
     }
@@ -237,7 +303,7 @@ export default function VoiceRoom({
       ? 'listening'
       : 'idle'
 
-  const interrupt = async () => {
+  const interrupt = useCallback(async () => {
     // 1. Tell the worker to stop TTS immediately, via LiveKit data channel.
     try {
       const data = new TextEncoder().encode(JSON.stringify({ type: 'interrupt' }))
@@ -254,23 +320,40 @@ export default function VoiceRoom({
     } catch (e) {
       console.warn('interrupt: cancel POST failed', e)
     }
-  }
+  }, [room, sessionId])
+
+  const reconnect = useCallback(() => setReconnectKey(k => k + 1), [])
+
+  // Memoize the state object so its reference is stable when underlying
+  // state hasn't changed. Critical for VoiceModeContext's bridge: that
+  // bridge has a useEffect with `[room]` as a dep and would loop forever
+  // if the reference changed every render.
+  const state = useMemo(() => ({
+    room,
+    status,
+    micPublished,
+    micMuted,
+    agentSpeaking,
+    localAudioTrack,
+    agentAudioTrack,
+    agentState,
+    wakeState,
+    wakeRemainingS,
+    wakeContinuationS,
+    wakeSpeaker,
+    error,
+    reconnect,
+    interrupt,
+  }), [
+    room, status, micPublished, micMuted, agentSpeaking,
+    localAudioTrack, agentAudioTrack, agentState,
+    wakeState, wakeRemainingS, wakeContinuationS, wakeSpeaker,
+    error, reconnect, interrupt,
+  ])
 
   return (
     <RoomContext.Provider value={room}>
-      {children({
-        room,
-        status,
-        micPublished,
-        micMuted,
-        agentSpeaking,
-        localAudioTrack,
-        agentAudioTrack,
-        agentState,
-        error,
-        reconnect: () => setReconnectKey(k => k + 1),
-        interrupt,
-      })}
+      {children(state)}
       {/* Plays all remote audio tracks (Lloyd's TTS) through the speakers.
           Hidden — it just needs to be mounted somewhere inside RoomContext. */}
       <RoomAudioRenderer />
