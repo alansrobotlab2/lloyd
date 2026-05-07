@@ -132,7 +132,7 @@ function ModelMenu({
 export default function Layout() {
   const isMobile = useIsMobile()
   const [page, setPage] = useState<Page>('chat')
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(true)
   const [slots, setSlots] = useState<Slot[]>([])
   const [visibleSlotId, setVisibleSlotId] = useState<string | null>(null)
   const [activeSessions, setActiveSessions] = useState<Set<string>>(new Set())
