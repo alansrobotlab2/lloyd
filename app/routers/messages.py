@@ -50,11 +50,6 @@ from app.sessions_io import (
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_tool_search_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
-from app.routers.voice import (
-    speak_text,
-    speak_voice_summary,
-    tts_is_enabled,
-)
 from prompt_builder import build_system_prompt
 from prefetch import prefetch_context
 from app.compaction import load_and_compact_session
@@ -266,15 +261,6 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # tokens-in/out/cached for every LLM-output row, not just the final one.
     current_iteration_stats: dict[str, Any] = {}
 
-    # TTS-on-response: cumulative buffer across all text segments in this turn
-    # (full_response resets on tool-use; this doesn't). When voice mode's TTS
-    # toggle is on AND the source is "user", we fire one /v1/say as soon as
-    # two sentence-terminators land. Ambient/autonomy turns are intentionally
-    # silent — voice is a user-facing feature.
-    tts_buffer = ""
-    tts_spoken = False
-    tts_should_speak = tts_is_enabled() and turn.source == "user"
-
     # Persist the user message up-front so transcripts stay coherent even
     # if the SDK crashes before emitting anything. Tag ambient-sourced
     # turns so the UI can render them differently from real user input.
@@ -469,11 +455,6 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             "position_chars": len(full_response),
                             "delta_chars": len(delta_text),
                         }, turn_id=turn.turn_id)
-                    if tts_should_speak and not tts_spoken and tts_is_enabled():
-                        # Buffer the full primary stream — TTS now waits for
-                        # secondary to rewrite the complete response into a
-                        # spoken summary (fired at end-of-turn below).
-                        tts_buffer += delta_text
 
             elif etype == "thinking_delta":
                 thinking_text = evt.get("text", "")
@@ -775,14 +756,9 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     # has already fired by the time we reach this branch
                     # (the harness yielded `result` before this `result`
                     # event reached _run_turn). Nothing else to do here.
-
-                    # End-of-turn TTS: hand the full primary response to the
-                    # secondary model for a spoken rewrite, then TTS the
-                    # rewrite. speak_voice_summary falls back to the raw
-                    # primary text if secondary fails or returns empty.
-                    if tts_should_speak and not tts_spoken and tts_is_enabled() and tts_buffer.strip():
-                        tts_spoken = True
-                        asyncio.create_task(speak_voice_summary(tts_buffer))
+                    # TTS is handled out-of-band by the LiveKit agent
+                    # worker (it polls the session and publishes audio
+                    # frames as a track).
 
                     done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
                     if accumulated_thinking:
@@ -822,11 +798,6 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     if accumulated_thinking:
                         err_msg_entry["reasoning"] = accumulated_thinking
                     tail.append(err_msg_entry)
-                # Same TTS fallback as the success path: SDK died mid-stream
-                # with content but our two-sentence trigger never fired.
-                if tts_should_speak and not tts_spoken and tts_is_enabled() and tts_buffer.strip():
-                    tts_spoken = True
-                    asyncio.create_task(speak_text(tts_buffer))
                 if tail:
                     await _append_messages(session_id, tail)
                 try:
