@@ -14,7 +14,7 @@ import time as _time
 import threading
 from collections import deque
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 import requests as http_requests
@@ -338,6 +338,29 @@ class _VoiceHTTPHandler(BaseHTTPRequestHandler):
 
         sample_rate = tts.sample_rate
         output_dev = getattr(app._pipeline, "output_device", None)
+        if output_dev is None:
+            # PortAudio's `sd.default.device` is a (in, out) tuple that on this
+            # daemon often resolves to a hw:N,X HDMI sink with a fixed native
+            # rate, which makes `device=None` either raise "Input and output
+            # device are different" or "Invalid sample rate" for the 24 kHz
+            # TTS stream. Pick a PipeWire/PulseAudio virtual sink that
+            # resamples internally; fall through to None if nothing accepts
+            # the rate (paplay fallback below will handle it).
+            for _i, _d in enumerate(sd.query_devices()):
+                if _d["max_output_channels"] <= 0:
+                    continue
+                _lname = _d["name"].lower()
+                if not any(tag in _lname for tag in ("pipewire", "pulse", "default")):
+                    continue
+                try:
+                    sd.check_output_settings(
+                        device=_i, samplerate=sample_rate,
+                        channels=1, dtype="float32",
+                    )
+                    output_dev = _i
+                    break
+                except Exception:
+                    continue
 
         def _play():
             ws = getattr(app._pipeline, 'ws_server', None)
@@ -351,32 +374,28 @@ class _VoiceHTTPHandler(BaseHTTPRequestHandler):
             if ws_active:
                 ws.send_message({"type": "tts_start", "sample_rate": sample_rate})
 
-            # Phase 2/3: Set up AEC + barge-in monitoring
+            # Phase 2/3: Set up AEC + barge-in monitoring.
+            # No separate InputStream — we read from the pipeline's always-on
+            # shared mic queue. The wake-word loop has paused itself for the
+            # duration of TTS (gates on _tts_playing), so barge-in is the
+            # only consumer of _mic_q while Lloyd is talking.
             aec_process = None
             barge_in_vad = None
             barge_in_mic_q = None
-            barge_in_mic_stream = None
             if pipeline and pipeline._barge_in_enabled and pipeline.input_mode == "local":
                 try:
                     aec_process = make_aec_processor(PIPELINE_SAMPLE_RATE)
                     barge_in_vad = VAD()
-                    barge_in_mic_q = queue.Queue()
+                    barge_in_mic_q = pipeline._mic_q
                     pipeline._barge_in_mic_pos = 0
-
-                    # Open a separate mic stream for barge-in monitoring during TTS
-                    def _barge_in_mic_cb(indata, frames, time_info, status):
-                        barge_in_mic_q.put(indata[:, 0].copy())
-
-                    barge_in_mic_stream = sd.InputStream(
-                        samplerate=pipeline.mic_native_rate,
-                        channels=1, dtype="int16",
-                        device=pipeline.mic_device,
-                        blocksize=VAD_FRAME_SIZE,
-                        callback=_barge_in_mic_cb,
-                    )
-                    barge_in_mic_stream.start()
+                    # Drop any chunks captured before TTS started so AEC's
+                    # mic_pos starts aligned with the first TTS reference frame.
+                    pipeline._drain_mic_q()
+                    print(f"  [barge-in] monitor armed (aec={aec_process is not None}, thr={pipeline._barge_in_vad_threshold}, consec={pipeline._barge_in_consec_chunks})", flush=True)
                 except Exception as e:
-                    print(f"  Barge-in mic setup failed: {e}", flush=True)
+                    if not getattr(_VoiceHTTPHandler, "_barge_in_warned", False):
+                        print(f"  Barge-in setup failed (will retry on next utterance): {e}", flush=True)
+                        _VoiceHTTPHandler._barge_in_warned = True
                     aec_process = None
                     barge_in_mic_q = None
 
@@ -437,7 +456,13 @@ class _VoiceHTTPHandler(BaseHTTPRequestHandler):
                 )
                 local_stream.start()
             except Exception as e:
-                print(f"  Local audio output unavailable: {e}", flush=True)
+                # PortAudio under supervisord loses the PulseAudio host API
+                # (no `pipewire`/`default` virtual sinks visible — only ALSA
+                # hw:N,X devices that reject the 24 kHz TTS rate). Log once,
+                # then fall through silently to the paplay fallback below.
+                if not getattr(_VoiceHTTPHandler, "_local_stream_warned", False):
+                    print(f"  Local audio output unavailable (using paplay fallback): {e}", flush=True)
+                    _VoiceHTTPHandler._local_stream_warned = True
                 local_stream = None
                 # Fall back to PulseAudio via paplay (handles resampling automatically)
                 try:
@@ -460,6 +485,12 @@ class _VoiceHTTPHandler(BaseHTTPRequestHandler):
                     paplay_proc = None
 
             interrupted = False
+            # Track audio duration written so we can hold _tts_playing set
+            # until the audio actually finishes — paplay accepts pipe writes
+            # faster than it plays, so without this, notify_tts_end fires
+            # while the user can still hear Lloyd talking.
+            total_samples_written = 0
+            t_first_write: float | None = None
             try:
                 while True:
                     # Check if pipeline requested TTS stop (wake word interrupt)
@@ -474,6 +505,9 @@ class _VoiceHTTPHandler(BaseHTTPRequestHandler):
                         break
 
                     chunk_arr = np.asarray(chunk, dtype=np.float32)
+                    if t_first_write is None:
+                        t_first_write = _time.monotonic()
+                    total_samples_written += len(chunk_arr)
 
                     # Phase 2: Track TTS reference for AEC
                     if pipeline:
@@ -526,13 +560,10 @@ class _VoiceHTTPHandler(BaseHTTPRequestHandler):
                         barge_in_monitor_thread.join(timeout=1.0)
                     except Exception:
                         pass
-                # Clean up barge-in mic stream
-                if barge_in_mic_stream is not None:
-                    try:
-                        barge_in_mic_stream.stop()
-                        barge_in_mic_stream.close()
-                    except Exception:
-                        pass
+                # Drain any audio captured during TTS so the wake-word loop
+                # doesn't process TTS bleed-through when it resumes.
+                if pipeline and pipeline.input_mode == "local":
+                    pipeline._drain_mic_q()
                 if local_stream is not None:
                     try:
                         local_stream.stop()
@@ -551,6 +582,20 @@ class _VoiceHTTPHandler(BaseHTTPRequestHandler):
                             pass
                 if ws_active:
                     ws.send_message({"type": "tts_end"})
+                # Hold _tts_playing set until the audio is actually expected
+                # to finish. paplay (and to a lesser extent sounddevice) buffer
+                # writes ahead of playback, so if we clear immediately the
+                # navbar flips out of SPEAKING while the user can still hear
+                # Lloyd talking. Skip on barge-in — playback was cut short.
+                if (not interrupted
+                        and t_first_write is not None
+                        and total_samples_written > 0
+                        and sample_rate > 0):
+                    expected_end = t_first_write + (total_samples_written / sample_rate)
+                    # Small fudge for paplay's hardware-buffer flush.
+                    residual = expected_end - _time.monotonic() + 0.15
+                    if residual > 0:
+                        _time.sleep(min(residual, 30.0))
                 # Notify pipeline that TTS is done
                 if pipeline:
                     pipeline.notify_tts_end()
@@ -845,7 +890,7 @@ class VoiceTUI(App):
         # Start HTTP API server for TTS / status / toggle
         api_port = config.get("mcp_api_port", 8092)
         _VoiceHTTPHandler.tui = self
-        self._http_server = HTTPServer(("127.0.0.1", api_port), _VoiceHTTPHandler)
+        self._http_server = ThreadingHTTPServer(("127.0.0.1", api_port), _VoiceHTTPHandler)
         threading.Thread(
             target=self._http_server.serve_forever, daemon=True
         ).start()
@@ -1137,7 +1182,7 @@ class HeadlessVoiceMode:
         # Start HTTP API
         api_port = config.get("mcp_api_port", 8092)
         _VoiceHTTPHandler.tui = self
-        self._http_server = HTTPServer(("127.0.0.1", api_port), _VoiceHTTPHandler)
+        self._http_server = ThreadingHTTPServer(("127.0.0.1", api_port), _VoiceHTTPHandler)
 
         print(
             f"Voice Mode (headless) — HTTP API on 127.0.0.1:{api_port}",

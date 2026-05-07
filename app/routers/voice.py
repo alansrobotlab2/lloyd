@@ -158,6 +158,26 @@ async def speak_text(text: str) -> None:
         logger.warning(f"TTS speak failed: {e}")
 
 
+async def speak_voice_summary(primary_text: str) -> None:
+    """Hand the primary response to secondary for a spoken rewrite, then TTS.
+
+    Falls back to speaking the primary text directly if the secondary call
+    fails or returns empty. Both paths short-circuit when TTS is disabled.
+    """
+    if not _TTS_ENABLED:
+        return
+    text = (primary_text or "").strip()
+    if not text:
+        return
+    import asyncio
+    from app.secondary_models import _sync_secondary_voice_summary
+
+    loop = asyncio.get_running_loop()
+    summary = await loop.run_in_executor(None, _sync_secondary_voice_summary, text)
+    spoken = summary if summary else text
+    await speak_text(spoken)
+
+
 @router.post("/api/voice/active-session")
 async def voice_set_active_session(request: Request):
     """Set the session that voice transcripts should route to.
