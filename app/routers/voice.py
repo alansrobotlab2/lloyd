@@ -169,6 +169,42 @@ async def voice_inject(request: Request):
     )
 
 
+# ── /api/voice/summarize ──────────────────────────────────────────────────
+
+@router.post("/api/voice/summarize")
+async def voice_summarize(request: Request):
+    """Rewrite a primary-model response into a short spoken summary via the
+    secondary model. The LiveKit agent worker calls this before TTS so what
+    Lloyd says aloud is a tight conversational summary, not the full primary
+    response (which is often long, contains code blocks, tool-call references,
+    etc. — text that doesn't TTS gracefully).
+
+    Body: {"text": str}
+    Response: {"summary": str | null, "used_summary": bool}
+
+    `used_summary` is false (and `summary` echoes the input) when the secondary
+    call fails or returns empty — caller should still TTS the text but knows
+    it's the raw primary, not the spoken rewrite. Caller does not need to
+    branch on this; the convenience is just for logging/telemetry.
+    """
+    data = await request.json() if (await request.body()) else {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    # _sync_secondary_voice_summary uses urllib (sync). Run in executor so we
+    # don't block the FastAPI event loop on the secondary's response time
+    # (typically 0.5–2s).
+    import asyncio as _asyncio
+    from app.secondary_models import _sync_secondary_voice_summary
+
+    loop = _asyncio.get_running_loop()
+    summary = await loop.run_in_executor(None, _sync_secondary_voice_summary, text)
+    if summary:
+        return JSONResponse({"summary": summary, "used_summary": True})
+    return JSONResponse({"summary": text, "used_summary": False})
+
+
 # ── /api/livekit/token ────────────────────────────────────────────────────
 
 @router.post("/api/livekit/token")
