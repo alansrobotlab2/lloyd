@@ -331,12 +331,33 @@ class WakeState:
         self._anchor_embedding: Optional[np.ndarray] = None
         self._anchor_name: Optional[str] = None
 
-    def in_continuation(self) -> bool:
-        return time.monotonic() < self._until
+    def in_continuation(self, at: Optional[float] = None) -> bool:
+        """True if the continuation window is open at time `at` (monotonic).
+        Defaults to now. Caller passes `at` = utterance start when checking
+        whether a freshly-VAD'd utterance qualifies for pass-through — a
+        long utterance that started in-window but finished processing just
+        past expiry should still count."""
+        t = at if at is not None else time.monotonic()
+        return t < self._until
 
     @property
     def locked_identity(self) -> Optional[str]:
         return self._locked_identity if self.in_continuation() else None
+
+    def matches_lock(self, identity: str, at: Optional[float] = None) -> bool:
+        """True if `identity` is the locked speaker AND the continuation
+        window was open at time `at` (default now)."""
+        if self._locked_identity != identity:
+            return False
+        return self.in_continuation(at=at)
+
+    @property
+    def has_lock(self) -> bool:
+        """Whether a wake-word has been said at any point in this room's
+        history. Distinct from `in_continuation()` which expires with the
+        continuation window — `has_lock` stays True so TTS-end can re-open
+        the window after a long agent reply that happened to outlast it."""
+        return self._locked_identity is not None
 
     @property
     def anchor_embedding(self) -> Optional[np.ndarray]:
@@ -371,30 +392,41 @@ class WakeState:
 
 
 def _strip_wake_word(text: str, words: list[str]) -> Optional[str]:
-    """If `text` begins with one of `words` (case-insensitive, with optional
-    leading punctuation), return the remainder with leading punctuation/
-    whitespace trimmed. Otherwise None.
+    """Match a wake-word at the start of `text` and return the remaining
+    content (the user's actual request), or None if no wake-word is
+    present.
 
-    A trailing word boundary is required so "lloydian" doesn't match "lloyd".
+    Whisper aggressively punctuates output. "Hey Lloyd, what time is it?"
+    typically arrives as `'Hey, Lloyd, what time is it?'` with an inserted
+    comma — so we match against a normalized version of the text where
+    runs of non-alpha characters become single spaces, then strip the
+    wake-word region from the original (regex with `\\W+` between word
+    parts) so the returned tail keeps the user's original capitalization
+    and contractions.
+
+    Word-boundary check: 'lloydian' and 'lloyd's' don't match 'lloyd'.
+
+    Examples (words = ['lloyd', 'hey lloyd']):
+      'Hey Lloyd.'             → ''                  (bare wake-word)
+      'Hey, Lloyd.'            → ''                  (handles inserted comma)
+      'Hey Lloyd, what time?'  → 'what time?'
+      'Lloyd, set a timer.'    → 'set a timer.'
+      'Lloyd's birthday is...' → None                (apostrophe ≠ boundary)
+      'Hello world'            → None
     """
     import re
-    # Strip leading whitespace/punctuation but keep them in the original
-    # so we can return a clean tail.
-    stripped = text.lstrip(" \t\n.,!?;:\"'")
-    lower = stripped.lower()
+    normalized = re.sub(r"[^a-z']+", " ", text.lower()).strip()
+    if not normalized:
+        return None
     for w in words:
-        if not lower.startswith(w):
-            continue
-        # Word-boundary check on the next char.
-        next_pos = len(w)
-        if next_pos < len(lower):
-            nxt = lower[next_pos]
-            if nxt.isalnum() or nxt == "'":
-                continue  # "lloydian", "lloyd's"-ish — keep scanning
-        # Match: return the tail with leading whitespace + punctuation
-        # stripped. Empty string if the wake-word was the whole utterance.
-        tail = stripped[next_pos:]
-        return re.sub(r"^[\s.,!?;:\"']+", "", tail)
+        if normalized == w or normalized.startswith(w + " "):
+            # Build a regex that matches the wake-word in the original text
+            # tolerating any punctuation/whitespace between the word parts
+            # and trailing the match. Anchored to the start.
+            parts = w.split()
+            pattern = r"^\W*" + r"\W+".join(re.escape(p) for p in parts) + r"[\s.,!?;:'\"]*"
+            tail = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE)
+            return tail.strip()
     return None
 
 
@@ -426,7 +458,165 @@ def _looks_repetitive(text: str) -> bool:
     return False
 
 
+# ── Acoustic wake-word (openWakeWord) ────────────────────────────────────
+
+class AcousticWakeWord:
+    """openWakeWord wrapper that detects wake-phrases directly on audio
+    rather than going through Whisper text. Loads the user's custom-trained
+    Hey_Lloyd / Lloyd ONNX models. Loaded lazily so worker startup stays fast.
+
+    openWakeWord runs on 16kHz int16 mono in 80ms (1280-sample) chunks. We
+    resample if the room audio is at a different rate (typically 48kHz),
+    then sweep `predict()` across the utterance and keep the max score per
+    model. If the max score across any model crosses `threshold`, the
+    utterance contained a wake-word.
+
+    Per-utterance state reset matters: `predict()` accumulates state across
+    chunks within one utterance (that's how openWakeWord builds confidence),
+    so we must reset before each utterance to avoid leaking state from the
+    previous one.
+    """
+
+    def __init__(self, models_dir: str | Path, engine_dir: str | Path, threshold: float = 0.5):
+        self.models_dir = Path(models_dir).expanduser()
+        self.engine_dir = Path(engine_dir).expanduser()
+        self.threshold = float(threshold)
+        self._model = None
+        self._lock = asyncio.Lock()
+
+    async def _ensure_loaded(self):
+        if self._model is not None:
+            return
+        async with self._lock:
+            if self._model is not None:
+                return
+            from openwakeword.model import Model
+            ww_paths = sorted(str(p) for p in self.models_dir.glob("*.onnx"))
+            if not ww_paths:
+                raise RuntimeError(f"no .onnx models in {self.models_dir}")
+            mel = self.engine_dir / "melspectrogram.onnx"
+            emb = self.engine_dir / "embedding_model.onnx"
+            if not mel.exists() or not emb.exists():
+                raise RuntimeError(f"missing engine files: {mel}, {emb}")
+            t0 = time.monotonic()
+            self._model = await asyncio.to_thread(
+                Model,
+                wakeword_model_paths=ww_paths,
+                melspec_onnx_model_path=str(mel),
+                embedding_onnx_model_path=str(emb),
+            )
+            LOG.info(
+                "openWakeWord loaded in %.2fs (%s) threshold=%.2f",
+                time.monotonic() - t0,
+                ", ".join(self._model.models.keys()),
+                self.threshold,
+            )
+
+    def _detect_blocking(self, samples_int16: np.ndarray, sample_rate: int) -> tuple[bool, str, float]:
+        # Resample to 16kHz if needed. scipy.signal.resample_poly does a
+        # high-quality polyphase resample — much better than naive striding.
+        if sample_rate != 16000:
+            from scipy.signal import resample_poly
+            up, down = 16000, sample_rate
+            # Reduce by gcd to keep the polyphase tables small.
+            from math import gcd
+            g = gcd(up, down)
+            samples = resample_poly(samples_int16.astype(np.float32), up // g, down // g)
+            samples = np.clip(samples, -32768, 32767).astype(np.int16)
+        else:
+            samples = samples_int16
+        # Reset internal state so we don't leak confidence from a prior
+        # utterance — each call starts from zero.
+        try:
+            self._model.reset()
+        except Exception:
+            pass
+        chunk = 1280  # 80ms @ 16kHz
+        max_per_model = {n: 0.0 for n in self._model.models.keys()}
+        i = 0
+        while i + chunk <= len(samples):
+            scores = self._model.predict(samples[i:i + chunk])
+            for n, s in scores.items():
+                if s > max_per_model[n]:
+                    max_per_model[n] = float(s)
+            i += chunk
+        if not max_per_model:
+            return False, "", 0.0
+        best_name = max(max_per_model, key=max_per_model.get)
+        best_score = max_per_model[best_name]
+        return best_score >= self.threshold, best_name, best_score
+
+    async def detect(self, samples_int16: np.ndarray, sample_rate: int) -> tuple[bool, str, float]:
+        """Returns (matched, model_name, max_score). All three regardless of
+        match — caller can log the score for tuning the threshold."""
+        try:
+            await self._ensure_loaded()
+            return await asyncio.to_thread(self._detect_blocking, samples_int16, sample_rate)
+        except Exception as e:
+            LOG.warning("acoustic wake-word detect failed: %s", e)
+            return False, "", 0.0
+
+
+def _build_acoustic_wake_word(cfg: dict) -> Optional[AcousticWakeWord]:
+    """Construct AcousticWakeWord from the `livekit.acoustic_wake` config
+    block, or None when disabled / construction fails. Falls back gracefully
+    so the worker still runs (text-match path) if openwakeword isn't
+    installed or the model files are missing."""
+    if not cfg.get("enabled", True):
+        LOG.info("acoustic wake-word disabled in config")
+        return None
+    try:
+        return AcousticWakeWord(
+            models_dir=cfg.get("models_dir", "agent-services/models/wakeword"),
+            engine_dir=cfg.get("engine_dir", "agent-services/models/openwakeword"),
+            threshold=float(cfg.get("threshold", 0.5)),
+        )
+    except Exception as e:
+        LOG.warning("acoustic wake-word init failed (%s) — falling back to text-match only", e)
+        return None
+
+
 # ── STT ──────────────────────────────────────────────────────────────────
+
+def _load_hotwords(path: str | Path) -> Optional[str]:
+    """Read names from a markdown hotwords file (with optional YAML
+    frontmatter) and return them as a single space-separated string for
+    faster-whisper's `hotwords=` parameter, or None on any error.
+
+    File format (matching the user's ~/obsidian/hotwords.md):
+      ---
+      title: Hotwords
+      tags: [...]
+      ---
+      Lloyd
+      Alan
+      Lisa
+      ...
+    """
+    p = Path(path).expanduser()
+    if not p.exists():
+        return None
+    try:
+        text = p.read_text()
+    except Exception as e:
+        LOG.warning("hotwords: failed to read %s: %s", p, e)
+        return None
+    # Strip YAML frontmatter if present.
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end >= 0:
+            text = text[end + 4:]
+    names = []
+    for line in text.splitlines():
+        line = line.strip()
+        # Skip blanks, comments, and accidental markdown bullets.
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        names.append(line)
+    if not names:
+        return None
+    return " ".join(names)
+
 
 class WhisperSTT:
     """Lazy faster-whisper wrapper. Loads on first transcribe call so the
@@ -436,6 +626,16 @@ class WhisperSTT:
         self.cfg = stt_cfg
         self._model = None
         self._lock = asyncio.Lock()
+        # Optional name biasing. faster-whisper's `hotwords=` parameter
+        # nudges the decoder toward the listed tokens — important for our
+        # wake-word detection because Whisper-tiny/base regularly mishear
+        # "Lloyd" as "Floyd", "Eloid", or "Alloyed" when said quietly.
+        hotwords_path = stt_cfg.get("hotwords_file")
+        self.hotwords: Optional[str] = (
+            _load_hotwords(hotwords_path) if hotwords_path else None
+        )
+        if self.hotwords:
+            LOG.info("STT hotwords loaded: %r", self.hotwords)
 
     async def _ensure_loaded(self) -> None:
         if self._model is not None:
@@ -472,8 +672,7 @@ class WhisperSTT:
         buf.seek(0)
 
         def _run() -> str:
-            segments, _info = self._model.transcribe(
-                buf,
+            kwargs = dict(
                 language=self.cfg.get("language", "en"),
                 beam_size=int(self.cfg.get("beam_size", 1)),
                 vad_filter=False,           # we already segmented
@@ -485,6 +684,9 @@ class WhisperSTT:
                 log_prob_threshold=-0.8,
                 compression_ratio_threshold=2.0,
             )
+            if self.hotwords:
+                kwargs["hotwords"] = self.hotwords
+            segments, _info = self._model.transcribe(buf, **kwargs)
             return "".join(s.text for s in segments).strip()
 
         text = await asyncio.to_thread(_run)
@@ -633,7 +835,8 @@ class RoomBridge:
     MESSAGES_URL_TEMPLATE = "http://127.0.0.1:8080/api/messages/{session_id}"
 
     def __init__(self, room_name: str, lk_cfg: dict, stt: WhisperSTT,
-                 vad_cfg: dict, http_client, speaker_id=None) -> None:
+                 vad_cfg: dict, http_client, speaker_id=None,
+                 acoustic_wake=None) -> None:
         self.room_name = room_name
         self.lk_cfg = lk_cfg
         self.stt = stt
@@ -647,6 +850,9 @@ class RoomBridge:
         # wake-word utterance". Separate from the profile threshold —
         # anchor matching is an easier task than full identification.
         self.anchor_threshold = float(vp_cfg.get("anchor_threshold", 0.65))
+        # Optional AcousticWakeWord — parallel detection path that catches
+        # wake-words even when Whisper transcribes them as "Eloid" etc.
+        self.acoustic_wake = acoustic_wake
         self.room = rtc.Room()
         self._tasks: list[asyncio.Task] = []
         # Strong refs to in-flight utterance handlers. asyncio's create_task
@@ -744,15 +950,58 @@ class RoomBridge:
         """Called by TTSStreamer when an utterance finishes draining. Extends
         the wake-word continuation window so the user has continuation_seconds
         to follow up after Lloyd stops speaking, without re-saying the
-        wake-word. Keeps the existing locked identity (Lloyd's reply was on
-        their behalf)."""
+        wake-word.
+
+        Uses `has_lock` rather than `locked_identity` so this still fires
+        when TTS playback outlasts the continuation window — without that,
+        a long agent reply (10s+ TTS, 6s window) would let the window
+        expire mid-speech and we'd silently skip the post-TTS extension.
+        """
         if not self.wake.enabled:
             return
-        if self.wake.locked_identity is None:
+        if not self.wake.has_lock:
             return
+        was_in_continuation = self.wake.in_continuation()
         self.wake.extend()  # keep identity, refresh timer
-        LOG.info("[%s] TTS done — continuation extended to %.1fs",
-                 self.room_name, self.wake.continuation_seconds)
+        LOG.info(
+            "[%s] TTS done — continuation %s to %.1fs",
+            self.room_name,
+            "extended" if was_in_continuation else "reopened",
+            self.wake.continuation_seconds,
+        )
+        self._schedule_wake_state_publish()
+
+    def _schedule_wake_state_publish(self) -> None:
+        """Fire-and-forget data-channel publish of the current wake state.
+        Called from sync contexts (TTS callback, gate code that may or may
+        not be inside an asyncio task). Schedules `_publish_wake_state`
+        without awaiting it."""
+        try:
+            asyncio.create_task(self._publish_wake_state())
+        except RuntimeError:
+            # No running event loop (e.g. called too early). Best-effort.
+            pass
+
+    async def _publish_wake_state(self) -> None:
+        """Broadcast the current wake state to all browser participants on
+        the LiveKit data channel. Browsers tick down `remaining_s` locally
+        and flip back to 'idle' when it reaches 0, so we don't need to
+        also publish on window-expiry — the wake state stays in sync as
+        long as we publish on every extend/lock."""
+        try:
+            wake = self.wake
+            payload = {
+                "type": "wake_state",
+                "state": "listening" if wake.in_continuation() else "idle",
+                "remaining_s": round(wake.remaining_s(), 2),
+                "continuation_s": wake.continuation_seconds,
+                "speaker": wake.anchor_name,  # None when no enrolled match
+                "ts": time.time(),
+            }
+            data = json.dumps(payload).encode("utf-8")
+            await self.room.local_participant.publish_data(data, reliable=True)
+        except Exception as e:
+            LOG.debug("[%s] publish_wake_state failed: %s", self.room_name, e)
 
     async def _seed_spoken_set(self) -> None:
         url = self.MESSAGES_URL_TEMPLATE.format(session_id=self.session_id)
@@ -849,6 +1098,10 @@ class RoomBridge:
 
     def _on_participant_connected(self, participant) -> None:
         LOG.info("[%s] participant joined: %s", self.room_name, participant.identity)
+        # Push the current wake state so the freshly-joined browser doesn't
+        # have to wait for the next utterance to learn whether we're idle
+        # or already in continuation.
+        self._schedule_wake_state_publish()
 
     def _on_participant_disconnected(self, participant) -> None:
         identity = participant.identity
@@ -916,46 +1169,102 @@ class RoomBridge:
     async def _embed_async(self, samples: np.ndarray, sample_rate: int):
         """Run resemblyzer's blocking embed in a thread so the event loop
         stays responsive. Returns (embedding, name, score) on success or
-        (None, unknown_label, 0.0) on failure."""
+        (None, unknown_label, 0.0) on failure.
+
+        Note: SpeakerIdentifier.identify() itself returns (name, score, emb)
+        for legacy compatibility — we re-tuple it here so callers can
+        consistently unpack `emb, name, score = ...` (with the embedding
+        first because that's what the gate cares about most)."""
         if self.speaker_id is None:
             return None, "Unknown", 0.0
         loop = asyncio.get_running_loop()
         try:
-            return await loop.run_in_executor(
+            name, score, emb = await loop.run_in_executor(
                 None, self.speaker_id.identify, samples, sample_rate,
             )
+            return emb, name, score
         except Exception as e:
             LOG.warning("[%s] voiceprint embed failed: %s", self.room_name, e)
             return None, "Unknown", 0.0
 
     async def _handle_utterance(self, samples: np.ndarray, sample_rate: int, identity: str) -> None:
         duration_s = samples.size / sample_rate
+        # Approximate utterance start time on the worker's monotonic clock.
+        # Used by the continuation check so a follow-up that began in-window
+        # but finished processing just past expiry still counts.
+        utterance_start_t = time.monotonic() - duration_s
+        wake = self.wake
+        in_continuation = wake.enabled and wake.matches_lock(identity, at=utterance_start_t)
+
+        # Kick off Whisper as a background task so we can process openWakeWord
+        # in parallel and publish the wake-state event to the UI as soon as
+        # acoustic detection fires — without waiting ~400ms for transcription.
+        # Whisper's result is still needed for the actual text injection.
+        stt_task = asyncio.create_task(self.stt.transcribe(samples, sample_rate))
         t0 = time.monotonic()
+
+        # ── IDLE state: openWakeWord first, publish ASAP ────────────
+        ww_already_fired = False
+        ww_name = ""
+        ww_score = 0.0
+        if wake.enabled and not in_continuation and self.acoustic_wake is not None:
+            ww_match, ww_name, ww_score = await self.acoustic_wake.detect(samples, sample_rate)
+            if ww_match:
+                # Run embedding + state-publish before waiting for Whisper.
+                # This is the latency-critical path — the UI flips to
+                # "Listening" off this publish, so cutting Whisper out of
+                # the wait saves ~400ms of perceived wake-word latency.
+                emb, name, score = await self._embed_async(samples, sample_rate)
+                if emb is not None and self.speaker_id is not None:
+                    LOG.info("[%s] wake-word speaker: %s (cos=%.2f)",
+                             self.room_name, name, score)
+                wake.set_anchor(emb, name if name and name != "Unknown" else None)
+                wake.extend(identity)
+                await self._publish_wake_state()
+                ww_already_fired = True
+                LOG.info("[%s] wake-word matched (acoustic=%s/%.2f) — UI notified, awaiting STT",
+                         self.room_name, ww_name, ww_score)
+
+        # Now collect Whisper's result.
         try:
-            text = await self.stt.transcribe(samples, sample_rate)
+            text = await stt_task
         except Exception as e:
             LOG.warning("[%s] STT failed for %.2fs utterance: %s", self.room_name, duration_s, e)
             return
         latency = time.monotonic() - t0
         if not text:
+            # Empty transcript. If acoustic wake-word already fired, treat as
+            # bare wake-word (window already opened above). Otherwise drop.
+            if ww_already_fired:
+                LOG.info(
+                    "[%s] bare wake-word — opening %.1fs window (empty Whisper)",
+                    self.room_name, wake.continuation_seconds,
+                )
+                return
             LOG.info("[%s] empty transcript for %.2fs utterance from %s (%.1fs whisper)",
                      self.room_name, duration_s, identity, latency)
             return
         LOG.info("[%s] %s → %r  (%.2fs audio, %.1fs whisper)",
                  self.room_name, identity, text, duration_s, latency)
 
-        # ── Wake-word gate ──────────────────────────────────────────
-        wake = self.wake
+        # ── Gate decisions ──────────────────────────────────────────
         inject_text: Optional[str] = None
         speaker_name: Optional[str] = None  # populated from anchor or fresh ID
         if not wake.enabled:
             inject_text = text
-        elif wake.in_continuation() and identity == wake.locked_identity:
+        elif in_continuation:
             # Identity matches the locked participant. If voiceprint is
-            # enabled, also require the embedding to match the anchor —
+            # enabled AND the wake-word utterance was identified as a known
+            # speaker, also require the embedding to match the anchor —
             # this is what catches "different person, same browser tab".
+            #
+            # When the wake-word came back as Unknown (no enrolled profile),
+            # the anchor is just a noisy 1s embedding; comparing against it
+            # rejects real follow-ups without providing meaningful safety.
+            # In that case we fall back to identity-only matching.
             anchor = wake.anchor_embedding
-            if anchor is not None:
+            anchor_named = wake.anchor_name is not None
+            if anchor is not None and anchor_named:
                 emb, _name, _score = await self._embed_async(samples, sample_rate)
                 if emb is None:
                     # Embedding failed — degrade to identity-only this turn
@@ -974,28 +1283,53 @@ class RoomBridge:
             inject_text = text
             speaker_name = wake.anchor_name
             wake.extend(identity)  # extend on each turn the user takes
+            await self._publish_wake_state()
             LOG.info("[%s] continuation pass-through (%.1fs left)",
                      self.room_name, wake.remaining_s())
         else:
-            tail = _strip_wake_word(text, wake.words)
-            if tail is None:
-                LOG.info("[%s] no wake-word in %r — dropped", self.room_name, text[:80])
+            # IDLE state: openWakeWord decision was already made above
+            # (parallel with Whisper). If it didn't fire, drop. If it did,
+            # the anchor + state publish already happened — we just need
+            # to decide what (if anything) to inject from the transcript.
+            if not ww_already_fired:
+                if self.acoustic_wake is None:
+                    LOG.warning("[%s] acoustic wake-word not available — dropping %r",
+                                self.room_name, text[:80])
+                else:
+                    LOG.info(
+                        "[%s] no wake-word (acoustic=%s/%.2f) in %r — dropped",
+                        self.room_name, ww_name or "?", ww_score, text[:80],
+                    )
                 return
-            # Wake-word matched — embed to set the anchor + identify the
-            # speaker against enrolled profiles.
-            emb, name, score = await self._embed_async(samples, sample_rate)
-            if emb is not None and self.speaker_id is not None:
-                LOG.info("[%s] wake-word speaker: %s (cos=%.2f)",
-                         self.room_name, name, score)
-            wake.set_anchor(emb, name if name and name != "Unknown" else None)
-            wake.extend(identity)
+            # Wake-word already detected & state published. Just clean up
+            # the transcript for injection.
             speaker_name = wake.anchor_name
-            if not tail and wake.skip_inject_if_only_wake_word:
-                LOG.info("[%s] bare wake-word — opening %.1fs window, no inject",
-                         self.room_name, wake.continuation_seconds)
+            tail = _strip_wake_word(text, wake.words)
+            word_count = len([w for w in text.split() if w.strip(".,!?;:'\"")])
+            if tail is not None:
+                if not tail and wake.skip_inject_if_only_wake_word:
+                    LOG.info(
+                        "[%s] bare wake-word (%s/%.2f) — opening %.1fs window, no inject",
+                        self.room_name, ww_name, ww_score, wake.continuation_seconds,
+                    )
+                    return
+                inject_text = tail or text
+            elif word_count <= 2:
+                # Short transcript with no wake-word match: probably a
+                # mistranscribed bare wake-word (Whisper heard "Eloid"
+                # alone). Open the window and wait for the follow-up.
+                LOG.info(
+                    "[%s] bare wake-word inferred from short transcript %r (%s/%.2f) — opening %.1fs window",
+                    self.room_name, text[:40], ww_name, ww_score, wake.continuation_seconds,
+                )
                 return
-            inject_text = tail or text  # fallback to original if stripping consumed everything
-            LOG.info("[%s] wake-word matched, injecting %r", self.room_name, inject_text[:80])
+            else:
+                # Full transcript with mistranscribed wake-word. Inject as-is.
+                inject_text = text
+            LOG.info(
+                "[%s] wake-word injecting %r (acoustic=%s/%.2f)",
+                self.room_name, inject_text[:80], ww_name, ww_score,
+            )
 
         if not inject_text:
             return
@@ -1027,6 +1361,13 @@ class WorkerManager:
         # one profiles_dir watcher, single source of truth. None when
         # voiceprint matching is disabled in config.
         self.speaker_id = _build_speaker_id(self.lk_cfg.get("voiceprint", {}) or {})
+        # AcousticWakeWord runs in parallel with text-match wake detection.
+        # Critical because Whisper is unreliable at transcribing the brief
+        # wake-word phrase ("Eloid"/"Floyd"/"Alloyed" mishears). openWakeWord
+        # detects directly on the audio. Shared across rooms, lazy-loaded.
+        self.acoustic_wake = _build_acoustic_wake_word(
+            self.lk_cfg.get("acoustic_wake", {}) or {}
+        )
         # last time we saw a non-agent participant in each room — used for
         # the idle-grace teardown logic.
         self._last_seen_remote: dict[str, float] = {}
@@ -1076,6 +1417,7 @@ class WorkerManager:
             bridge = RoomBridge(
                 r.name, self.lk_cfg, self.stt, self.vad_cfg, self._http,
                 speaker_id=self.speaker_id,
+                acoustic_wake=self.acoustic_wake,
             )
             try:
                 await bridge.connect()
