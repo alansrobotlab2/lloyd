@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { X, ChevronDown, ChevronRight, MessageSquare } from 'lucide-react'
 import { api, type ActiveProc } from '../api'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 
 function useElapsed(createdAt: string): string {
   const [elapsed, setElapsed] = useState('')
@@ -38,33 +41,37 @@ function ActiveSessionCard({ proc, onKill }: { proc: ActiveProc; onKill: (sessio
   const modelShort = proc.model?.split('-')[0] ?? 'unknown'
 
   return (
-    <div className="bg-surface-2 border border-surface-3/40 rounded-lg p-2.5 space-y-1.5">
+    <div className="bg-secondary/40 border border-border rounded-md p-2.5 space-y-1.5">
       <div className="flex items-start justify-between gap-1">
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className="w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse flex-shrink-0 mt-0.5" />
-          <span className="text-[10px] text-slate-300 truncate leading-tight">
+          <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse flex-shrink-0 mt-0.5" />
+          <span className="text-[10px] text-foreground truncate leading-tight">
             {proc.preview || proc.session_id || `pid ${proc.pid}`}
           </span>
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="icon"
           onClick={handleKill}
           disabled={killing || !proc.session_id}
-          className="flex-shrink-0 p-0.5 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
           title="Kill subprocess"
+          className="h-5 w-5 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
         >
           <X className="w-3 h-3" />
-        </button>
+        </Button>
       </div>
       <div className="flex items-center justify-between text-[10px]">
         <div className="flex items-center gap-2">
-          <span className="font-medium text-brand-400">running</span>
+          <span className="font-medium text-primary">running</span>
           {!proc.streaming && (
-            <span className="text-amber-400/80" title="SSE disconnected — orphaned subprocess">orphaned</span>
+            <span className="text-amber-400/80" title="SSE disconnected — orphaned subprocess">
+              orphaned
+            </span>
           )}
-          <span className="text-slate-600 truncate max-w-[60px]">{modelShort}</span>
-          <span className="text-slate-600 font-mono text-[9px]">pid {proc.pid}</span>
+          <span className="text-muted-foreground/70 truncate max-w-[60px]">{modelShort}</span>
+          <span className="text-muted-foreground/70 font-mono text-[9px]">pid {proc.pid}</span>
         </div>
-        <span className="text-slate-500 font-mono flex-shrink-0">{elapsed}</span>
+        <span className="text-muted-foreground font-mono flex-shrink-0">{elapsed}</span>
       </div>
     </div>
   )
@@ -94,20 +101,30 @@ export default function RunningAgentsPanel() {
 
   if (procs.length === 0) return null
 
+  const orphanedCount = procs.filter(p => !p.streaming).length
+
   return (
-    <div className="border-t border-surface-3/30 flex-shrink-0">
+    <div className="border-t border-border flex-shrink-0">
       <button
         onClick={() => setSessionsExpanded(e => !e)}
-        className="w-full flex items-center justify-between px-3 py-2 text-[11px] font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+        className={cn(
+          'w-full flex items-center justify-between px-3 py-2 text-[11px] font-semibold transition-colors',
+          'text-muted-foreground hover:text-foreground',
+        )}
       >
         <div className="flex items-center gap-1.5">
           <MessageSquare className="w-3 h-3" />
           <span>Sessions</span>
-          <span className="bg-brand-500/20 text-brand-400 rounded px-1 py-0.5 text-[9px] font-mono">
+          <Badge variant="secondary" className="px-1 py-0 text-[9px] font-mono bg-primary/15 text-primary">
             {procs.length}
-          </span>
-          {procs.some(p => !p.streaming) && (
-            <span className="bg-amber-500/20 text-amber-400 rounded px-1 py-0.5 text-[9px]">orphaned</span>
+          </Badge>
+          {orphanedCount > 0 && (
+            <Badge
+              variant="secondary"
+              className="px-1 py-0 text-[9px] bg-amber-500/15 text-amber-400 border-transparent"
+            >
+              orphaned
+            </Badge>
           )}
         </div>
         {sessionsExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}

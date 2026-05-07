@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Circle, CheckCircle2, Loader2, ListChecks } from 'lucide-react'
 import { api, type TodoItem } from '../api'
+import { cn } from '@/lib/utils'
+import { Badge } from '@/components/ui/badge'
+import { Progress } from '@/components/ui/progress'
+import {
+  Collapsible, CollapsibleContent, CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 
 interface TodoListProps {
   sessionId: string | null
@@ -33,54 +39,53 @@ export default function TodoList({ sessionId, refreshKey }: TodoListProps) {
   const completionPct = todos.length > 0 ? (counts.completed / todos.length) * 100 : 0
 
   return (
-    <details
-      open
-      className="border-t border-surface-3/50 bg-surface-2/40"
-    >
-      <summary className="cursor-pointer list-none flex items-center gap-2 px-4 py-2 text-xs text-slate-400 hover:text-slate-300 transition-colors">
-        <ListChecks className="w-3.5 h-3.5 shrink-0 text-brand-400" />
+    <Collapsible defaultOpen className="border-t border-border bg-secondary/30">
+      <CollapsibleTrigger className={cn(
+        'w-full flex items-center gap-2 px-4 py-2 text-xs',
+        'text-muted-foreground hover:text-foreground transition-colors',
+      )}>
+        <ListChecks className="w-3.5 h-3.5 shrink-0 text-primary" />
         <span className="font-semibold uppercase tracking-wide">Tasks</span>
-        <span className="text-slate-500 font-mono">
+        <Badge variant="secondary" className="font-mono text-[10px] px-1.5 py-0">
           {counts.completed}/{todos.length}
-        </span>
+        </Badge>
         {counts.in_progress > 0 && (
           <span className="text-amber-400/80 font-mono">
             · {counts.in_progress} in progress
           </span>
         )}
-        <div
-          className="ml-auto w-20 h-1 bg-surface-3/60 rounded-full overflow-hidden"
+        <Progress
+          value={completionPct}
+          className="ml-auto w-20 h-1 bg-muted"
           aria-label={`${counts.completed} of ${todos.length} completed`}
-        >
-          <div
-            className="h-full bg-emerald-500/70 transition-all"
-            style={{ width: `${completionPct}%` }}
-          />
-        </div>
-      </summary>
-      <ul className="px-4 pb-2.5 space-y-1 max-h-48 overflow-y-auto">
-        {todos.map((t, i) => (
-          <li
-            key={i}
-            className={`flex items-start gap-2 text-xs leading-snug ${
-              t.status === 'completed' ? 'text-slate-500' : 'text-slate-300'
-            }`}
-          >
-            <span className="mt-0.5 shrink-0">
-              {t.status === 'completed' ? (
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500/80" />
-              ) : t.status === 'in_progress' ? (
-                <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
-              ) : (
-                <Circle className="w-3.5 h-3.5 text-slate-600" />
+        />
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ul className="px-4 pb-2.5 space-y-1 max-h-48 overflow-y-auto">
+          {todos.map((t, i) => (
+            <li
+              key={i}
+              className={cn(
+                'flex items-start gap-2 text-xs leading-snug',
+                t.status === 'completed' ? 'text-muted-foreground' : 'text-foreground',
               )}
-            </span>
-            <span className={t.status === 'completed' ? 'line-through' : ''}>
-              {t.status === 'in_progress' ? t.activeForm : t.content}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </details>
+            >
+              <span className="mt-0.5 shrink-0">
+                {t.status === 'completed' ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500/80" />
+                ) : t.status === 'in_progress' ? (
+                  <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                ) : (
+                  <Circle className="w-3.5 h-3.5 text-muted-foreground/70" />
+                )}
+              </span>
+              <span className={t.status === 'completed' ? 'line-through' : ''}>
+                {t.status === 'in_progress' ? t.activeForm : t.content}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
