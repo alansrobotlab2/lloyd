@@ -1,26 +1,34 @@
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
-import { Send, User, Loader2, Brain, MessageCircle, ChevronRight, Wrench, Square, Sparkles } from 'lucide-react'
-import { marked } from 'marked'
+import {
+  Send, User, Loader2, Brain, MessageCircle, ChevronRight,
+  Wrench, Square, Sparkles,
+} from 'lucide-react'
+import { Streamdown } from 'streamdown'
 import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState, type InnerVoiceObservation } from '../api'
 import TodoList from './TodoList'
 import PlanHeader from './PlanHeader'
 import ObservationBubble from './ObservationBubble'
 import { actionStyle, parseObservationTime } from './innerVoiceStyles'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Badge } from '@/components/ui/badge'
+import {
+  Collapsible, CollapsibleContent, CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import {
+  Command, CommandEmpty, CommandGroup, CommandItem, CommandList,
+} from '@/components/ui/command'
 
-// Configure marked
-marked.setOptions({ breaks: true, gfm: true })
+// ── helpers ────────────────────────────────────────────────────────────
 
-// ------------ perf helpers ------------
-
-const timeStr = (iso: string) => {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
+const timeStr = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
 type ToolCallRef = { name: string; args: string }
 
-// Preserve per-message object identity across polling refreshes so memoized rows
-// don't re-render when nothing actually changed. Compares by id + joined-text
-// length + stats/reasoning shallow-ish equality.
+// Preserve per-message object identity across polling refreshes so memoized
+// rows don't re-render when nothing actually changed.
 const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => {
   const prevById = new Map(prev.map(m => [m.id, m]))
   let different = prev.length !== next.length
@@ -32,7 +40,7 @@ const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => 
       const sameStats = (p.stats == null && n.stats == null) ||
         (p.stats && n.stats && JSON.stringify(p.stats) === JSON.stringify(n.stats))
       if (pt === nt && sameStats && p.reasoning === n.reasoning) {
-        return p // preserve identity → row memo hit
+        return p
       }
     }
     different = true
@@ -41,7 +49,7 @@ const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => 
   return different ? merged : prev
 }
 
-// ------------ memoized message row ------------
+// ── memoized message row ───────────────────────────────────────────────
 
 interface MessageRowProps {
   msg: ApiMessage
@@ -60,11 +68,9 @@ const MessageRow = memo(function MessageRow({
   toolCallIndex,
   forceLeftAlign = false,
 }: MessageRowProps) {
-  // Skip messages with empty content
   const hasContent = msg.content?.some(c => c.text?.trim())
   if (!hasContent) return null
 
-  // Hide tool/subliminal messages when details hidden, but always show error messages
   const isError = msg.role === 'tool' && msg.content?.some(c => c.text?.startsWith('Error:'))
   const hideToolMessage = !showAgentDetails && msg.role === 'tool' && !isError
   const hideSubliminal = !showAgentDetails && msg.role === 'subliminal'
@@ -75,166 +81,156 @@ const MessageRow = memo(function MessageRow({
     [msg.content]
   )
 
-  // Parse markdown once per text change, not every render
-  const parsedHtml = useMemo(() => {
-    if (msg.role === 'tool' || msg.role === 'subliminal') return '' // render as pre, no markdown
-    return marked.parse(textJoined) as string
-  }, [textJoined, msg.role])
+  const isUser = msg.role === 'user'
+  const isAssistant = msg.role === 'assistant'
+  const isTool = msg.role === 'tool'
+  const isSubliminal = msg.role === 'subliminal'
 
   return (
-    <div className={`flex gap-3 ${!forceLeftAlign && msg.role === 'user' ? 'justify-end' : ''}`}>
-      {!forceLeftAlign && msg.role !== 'user' && !isMobile && (
+    <div className={cn('flex gap-3', !forceLeftAlign && isUser && 'justify-end')}>
+      {!forceLeftAlign && !isUser && !isMobile && (
         <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
-          {msg.role === 'tool'
-            ? <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Wrench className="w-3.5 h-3.5 text-slate-400" /></div>
-            : msg.role === 'subliminal'
-            ? <div className="w-full h-full bg-purple-900/40 flex items-center justify-center"><Sparkles className="w-3.5 h-3.5 text-purple-300" /></div>
-            : <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
-          }
+          {isTool ? (
+            <div className="w-full h-full bg-secondary flex items-center justify-center">
+              <Wrench className="w-3.5 h-3.5 text-muted-foreground" />
+            </div>
+          ) : isSubliminal ? (
+            <div className="w-full h-full bg-purple-900/40 flex items-center justify-center">
+              <Sparkles className="w-3.5 h-3.5 text-purple-300" />
+            </div>
+          ) : (
+            <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
+          )}
         </div>
       )}
-      <div className={`${forceLeftAlign ? 'flex-1 min-w-0' : `max-w-[80%] ${msg.role === 'user' ? 'min-w-0' : 'flex-1 min-w-0'}`}`}>
-        <div
-          className={`rounded-xl ${
-            msg.role === 'tool' || msg.role === 'subliminal' ? 'px-2.5 py-1.5' : 'px-3.5 py-2.5'
-          } ${
-            msg.role === 'user'
-              ? 'bg-brand-600/30 border border-brand-500/40 text-white'
-              : msg.role === 'tool'
-              ? 'bg-slate-800/40 border border-slate-600/30 text-slate-200'
-              : msg.role === 'subliminal'
-              ? 'bg-purple-950/30 border border-purple-500/20 text-slate-200'
-              : 'bg-surface-2 border border-surface-3/50 text-slate-200'
-          }`}
-        >
+      <div className={cn(
+        forceLeftAlign ? 'flex-1 min-w-0' : `max-w-[80%] ${isUser ? 'min-w-0' : 'flex-1 min-w-0'}`,
+      )}>
+        <div className={cn(
+          'rounded-xl border',
+          isTool || isSubliminal ? 'px-2.5 py-1.5' : 'px-3.5 py-2.5',
+          isUser
+            ? 'bg-primary/15 border-primary/30 text-foreground'
+            : isTool
+            ? 'bg-secondary/40 border-border text-foreground'
+            : isSubliminal
+            ? 'bg-purple-950/30 border-purple-500/20 text-foreground'
+            : 'bg-card border-border text-foreground',
+        )}>
           <div className="prose-chat text-sm leading-relaxed">
-            {msg.role === 'assistant' ? (
+            {isAssistant ? (
               <>
                 {msg.reasoning && (showAgentDetails || thinkLevel !== 'off') && (
-                  <details className="group mb-3">
-                    <summary className="cursor-pointer list-none flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition-colors">
+                  <Collapsible className="mb-3">
+                    <CollapsibleTrigger className="group cursor-pointer flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition-colors">
                       <Brain className="w-3 h-3" />
-                      <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
+                      <ChevronRight className="w-3 h-3 transition-transform group-data-[state=open]:rotate-90" />
                       <span className="font-semibold">Thinking</span>
-                      <span className="text-slate-500 font-normal ml-1">({msg.reasoning.length.toLocaleString()} chars)</span>
-                    </summary>
-                    <div className="mt-2 p-3 bg-purple-900/10 border border-purple-500/10 rounded text-xs text-slate-300 whitespace-pre-wrap max-h-96 overflow-y-auto">
+                      <span className="text-muted-foreground/80 font-normal ml-1">
+                        ({msg.reasoning.length.toLocaleString()} chars)
+                      </span>
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="mt-2 p-3 bg-purple-900/10 border border-purple-500/10 rounded text-xs text-foreground/90 whitespace-pre-wrap max-h-96 overflow-y-auto">
                       {msg.reasoning}
-                    </div>
-                  </details>
+                    </CollapsibleContent>
+                  </Collapsible>
                 )}
-                <div dangerouslySetInnerHTML={{ __html: parsedHtml }} />
+                <Streamdown parseIncompleteMarkdown>{textJoined}</Streamdown>
               </>
-            ) : msg.role === 'tool' ? (() => {
-              // Tool call rendering — single-line summary, click to expand args+response
+            ) : isTool ? (() => {
               const tc = msg.tool_call_id ? toolCallIndex.get(msg.tool_call_id) : undefined
               const toolName = tc?.name || ''
               const toolArgs = tc?.args || '{}'
-
               let argsDisplay = toolArgs
               try {
                 argsDisplay = JSON.stringify(JSON.parse(toolArgs), null, 2)
-              } catch {
-                // Keep raw string if not valid JSON
-              }
-
+              } catch { /* keep raw */ }
               const responseText = textJoined
               return (
-                <details className="group">
-                  <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-300 transition-colors">
-                    <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform shrink-0" />
+                <Collapsible>
+                  <CollapsibleTrigger className="group cursor-pointer flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+                    <ChevronRight className="w-3 h-3 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
                     <Wrench className="w-3 h-3 shrink-0" />
                     <span className="font-semibold uppercase tracking-wide">Tool</span>
                     {toolName && (
-                      <span className="font-mono font-normal text-slate-500 truncate">{toolName}</span>
+                      <span className="font-mono font-normal text-muted-foreground/80 truncate">{toolName}</span>
                     )}
-                  </summary>
-                  <div className="mt-2 space-y-2">
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="mt-2 space-y-2">
                     {argsDisplay !== '{}' && (
                       <div>
-                        <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Arguments</div>
-                        <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono">
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">Arguments</div>
+                        <pre className="p-2 bg-muted/40 rounded text-xs text-foreground/90 overflow-x-auto whitespace-pre-wrap font-mono">
                           {argsDisplay}
                         </pre>
                       </div>
                     )}
                     <div>
-                      <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Response</div>
-                      <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">Response</div>
+                      <pre className="p-2 bg-muted/40 rounded text-xs text-foreground/90 overflow-x-auto whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">
                         {responseText || '⏳ Running...'}
                       </pre>
                     </div>
-                  </div>
-                </details>
+                  </CollapsibleContent>
+                </Collapsible>
               )
-            })() : msg.role === 'subliminal' ? (() => {
-              // Subliminal rendering — ephemeral context injected into the
-              // SDK prompt but not part of the conversation. Mirrors the
-              // tool renderer shape; metadata comes from msg.subliminal.
+            })() : isSubliminal ? (() => {
               const subl = msg.subliminal
               const kind = subl?.kind || 'other'
               const sources = subl?.sources || []
               const chars = subl?.chars ?? textJoined.length
               return (
-                <details className="group">
-                  <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs text-purple-400/80 hover:text-purple-300 transition-colors">
-                    <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform shrink-0" />
+                <Collapsible>
+                  <CollapsibleTrigger className="group cursor-pointer flex items-center gap-1.5 text-xs text-purple-400/80 hover:text-purple-300 transition-colors w-full">
+                    <ChevronRight className="w-3 h-3 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
                     <Sparkles className="w-3 h-3 shrink-0" />
                     <span className="font-semibold uppercase tracking-wide">Subliminal</span>
                     <span className="font-mono font-normal text-purple-500/80">{kind}</span>
                     {sources.length > 0 && (
-                      <span className="font-mono font-normal text-slate-500 truncate">
+                      <span className="font-mono font-normal text-muted-foreground truncate">
                         {sources.join(', ')}
                       </span>
                     )}
-                    <span className="font-mono font-normal text-slate-600 ml-auto">
+                    <span className="font-mono font-normal text-muted-foreground/70 ml-auto">
                       {chars.toLocaleString()} chars
                     </span>
-                  </summary>
-                  <div className="mt-2">
-                    <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Injected context</div>
-                    <pre className="p-2 bg-surface-3/30 rounded text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="mt-2">
+                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">Injected context</div>
+                    <pre className="p-2 bg-muted/40 rounded text-xs text-foreground/90 overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">
                       {textJoined}
                     </pre>
-                  </div>
-                </details>
+                  </CollapsibleContent>
+                </Collapsible>
               )
             })() : (
-              <div dangerouslySetInnerHTML={{ __html: parsedHtml }} />
+              <Streamdown parseIncompleteMarkdown>{textJoined}</Streamdown>
             )}
           </div>
         </div>
-        <div className="mt-1.5 text-[10px] text-slate-600 font-mono flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+        <div className="mt-1.5 text-[10px] text-muted-foreground/70 font-mono flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
           <span>{timeStr(msg.timestamp)}</span>
-          {msg.stats && msg.role === 'assistant' && (() => {
+          {msg.stats && isAssistant && (() => {
             const s = msg.stats as TurnStats
             const peak = s.peak_input_tokens ?? s.input_tokens
             const pct = (peak / 262144 * 100).toFixed(1)
             return (<>
-              <span className="text-slate-600">ctx: {peak.toLocaleString()} ({pct}%)</span>
-              {s.cache_read > 0 && (
-                <span className="text-emerald-700">cache↑: {s.cache_read.toLocaleString()}</span>
-              )}
-              {s.cache_create > 0 && (
-                <span className="text-amber-700">cache✎: {s.cache_create.toLocaleString()}</span>
-              )}
-              {s.duration_ms != null && (
-                <span className="text-slate-600">time: {(s.duration_ms / 1000).toFixed(1)}s</span>
-              )}
-              {s.num_turns != null && s.num_turns > 1 && (
-                <span className="text-slate-600">turns: {s.num_turns}</span>
-              )}
+              <span>ctx: {peak.toLocaleString()} ({pct}%)</span>
+              {s.cache_read > 0 && <span className="text-emerald-700">cache↑: {s.cache_read.toLocaleString()}</span>}
+              {s.cache_create > 0 && <span className="text-amber-700">cache✎: {s.cache_create.toLocaleString()}</span>}
+              {s.duration_ms != null && <span>time: {(s.duration_ms / 1000).toFixed(1)}s</span>}
+              {s.num_turns != null && s.num_turns > 1 && <span>turns: {s.num_turns}</span>}
             </>)
           })()}
-          {msg.context_tokens != null && msg.context_tokens > 0 && msg.role === 'tool' && (() => {
+          {msg.context_tokens != null && msg.context_tokens > 0 && isTool && (() => {
             const pct = (msg.context_tokens / 262144 * 100).toFixed(1)
-            return <span className="text-slate-600">ctx: {msg.context_tokens.toLocaleString()} ({pct}%)</span>
+            return <span>ctx: {msg.context_tokens.toLocaleString()} ({pct}%)</span>
           })()}
         </div>
       </div>
-      {!forceLeftAlign && msg.role === 'user' && !isMobile && (
-        <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5 hidden sm:flex">
-          <User className="w-3.5 h-3.5 text-slate-300" />
+      {!forceLeftAlign && isUser && !isMobile && (
+        <div className="w-7 h-7 rounded-full bg-secondary flex items-center justify-center flex-shrink-0 mt-0.5 hidden sm:flex">
+          <User className="w-3.5 h-3.5 text-muted-foreground" />
         </div>
       )}
     </div>
@@ -252,14 +248,12 @@ interface ChatPanelProps {
   visible?: boolean
   onThinkingChange?: (thinking: boolean, toolName: string | null) => void
   isMobile?: boolean
-  // When provided, switch to centerline-timeline mode: primary actions on
-  // the left of a vertical line, IV observations on the right, ordered
-  // chronologically. Used by the Inner Voice page.
+  // Inner Voice timeline mode: primary actions on the left of a vertical line,
+  // IV observations on the right, ordered chronologically.
   timelineRight?: InnerVoiceObservation[]
 }
 
-// Mock slash commands (will be replaced with actual backend fetch)
-const SLASH_COMMANDS = [
+const SLASH_COMMANDS: Array<{ name: string; desc: string; alias?: string }> = [
   { name: 'new', desc: 'Start a new session' },
   { name: 'clear', desc: 'Clear screen and start new session' },
   { name: 'history', desc: 'Show conversation history' },
@@ -301,6 +295,9 @@ const SLASH_COMMANDS = [
   { name: 'model', desc: 'Switch or list models', alias: 'switch' },
 ]
 
+const THINK_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+type ThinkLevel = typeof THINK_LEVELS[number]
+
 export default function ChatPanel({
   requestedSessionKey,
   onSessionLoaded,
@@ -320,15 +317,14 @@ export default function ChatPanel({
   const [thinking, setThinking] = useState(false)
   const [sending, setSending] = useState(false)
   const [showCommands, setShowCommands] = useState(false)
-  const [commandFilter, setCommandFilter] = useState('')
-  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [activeToolName, setActiveToolName] = useState<string | null>(null)
-  const [thinkLevel, setThinkLevel] = useState<string>(() => localStorage.getItem('mc_think_level') || 'off')
+  const [thinkLevel, setThinkLevel] = useState<ThinkLevel>(() => {
+    const stored = localStorage.getItem('mc_think_level')
+    return (THINK_LEVELS as readonly string[]).includes(stored ?? '') ? (stored as ThinkLevel) : 'off'
+  })
   const [queueState, setQueueState] = useState<QueueState | null>(null)
-  // Bumped to force <TodoList> to re-fetch from /api/sessions/<id>/todos.
-  // Bumped on session change (initial load) and on every TodoWrite tool
-  // result so the panel reflects the model's latest checklist.
+  // Bumped on session change + every TodoWrite/EnterPlanMode/ExitPlanMode tool result.
   const [todoRefreshKey, setTodoRefreshKey] = useState(0)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -342,27 +338,23 @@ export default function ChatPanel({
     localStorage.setItem('mc_client_id', clientId.current)
   }, [])
 
-  // Load models
   useEffect(() => {
     api.getModels().then(result => {
-      if (result.models) {
-        setModels(result.models)
-      }
+      if (result.models) setModels(result.models)
     }).catch(err => {
       console.warn('Failed to load models:', err)
     })
   }, [])
 
-  // Load messages when currentSessionKey changes (from parent)
   useEffect(() => {
     const activeKey = currentSessionKey || requestedSessionKey
     if (activeKey) {
       loadMessages(activeKey, onSessionLoaded)
     } else if (!activeKey && messages.length > 0) {
-      // Clear messages if no session is active
       setMessages([])
       setSessionKey(null)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionKey, requestedSessionKey])
 
   const handleScroll = useCallback(() => {
@@ -379,12 +371,12 @@ export default function ChatPanel({
     }
   }, [handleScroll])
 
-  // Notify parent of thinking/tool state changes
   useEffect(() => {
     onThinkingChange?.(thinking, thinking ? activeToolName : null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [thinking, activeToolName])
 
-  // Poll messages for current session (skip while streaming or sending, or hidden idle)
+  // Idle polling — refresh messages while not actively streaming.
   useEffect(() => {
     if (!sessionKey || sending || thinking) return
     if (visible === false) return
@@ -399,14 +391,13 @@ export default function ChatPanel({
         console.error('Failed to load messages:', err)
       }
     }
-
     load()
     const interval = setInterval(load, 5000)
     return () => clearInterval(interval)
   }, [sessionKey, thinking, sending, visible])
 
-  // Poll status + messages for restored streaming sessions (no local AbortController).
-  // Detects when the backend finishes so the cancel button goes away and messages refresh.
+  // Restored-stream polling — when we attached to an in-flight backend turn
+  // without a local AbortController, watch /status until it settles.
   useEffect(() => {
     if (!sessionKey || !thinking || abortControllerRef.current) return
     const poll = async () => {
@@ -415,14 +406,12 @@ export default function ChatPanel({
         if (!status.streaming) {
           setThinking(false)
           setSending(false)
-          // Refresh messages to pick up final response
           const result = await api.loadMessages(sessionKey)
           if (result.messages) {
             const next = result.messages as ApiMessage[]
             setMessages(prev => mergeMessages(prev, next))
           }
         } else {
-          // Still streaming — refresh messages so new tool calls / text appear
           const result = await api.loadMessages(sessionKey)
           if (result.messages) {
             const next = result.messages as ApiMessage[]
@@ -436,8 +425,8 @@ export default function ChatPanel({
     return () => clearInterval(interval)
   }, [sessionKey, thinking])
 
-  // Scroll to bottom when messages change. Use 'auto' (instant) during streaming
-  // so smooth-scroll animations don't pile up and jank the main thread.
+  // Auto-scroll on new messages. 'auto' during streaming so smooth-scroll
+  // animations don't pile up and jank the main thread.
   useEffect(() => {
     if (messages.length === 0) return
     const el = messagesContainerRef.current
@@ -459,11 +448,10 @@ export default function ChatPanel({
       if (result.messages) {
         const next = result.messages as ApiMessage[]
         setMessages(prev => mergeMessages(prev, next))
-        setSessionKey(key) // Update local state so polling works
-        onActiveSessionChange?.(key) // Notify parent of active session
-        if (result.model) onModelSwitch?.(result.model) // Sync model dropdown to session's model
-        onLoaded?.() // Clear requestedSessionKey only after activeSessionKey is set
-        // Check if this session is still actively streaming on the backend
+        setSessionKey(key)
+        onActiveSessionChange?.(key)
+        if (result.model) onModelSwitch?.(result.model)
+        onLoaded?.()
         try {
           const status = await api.getSessionStatus(key)
           if (status.streaming) {
@@ -474,11 +462,9 @@ export default function ChatPanel({
             setSending(false)
           }
         } catch {
-          // Status endpoint unavailable — assume idle
           setThinking(false)
           setSending(false)
         }
-        // Scroll to bottom after loading
         isNearBottom.current = true
         setTimeout(() => {
           messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -492,15 +478,12 @@ export default function ChatPanel({
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value
     setInput(value)
-    
-    // Check if we have a complete model switch command like "/model primary"
+
+    // Auto-execute "/model <alias>" once it's a complete word.
     const match = value.match(/^\/(model|switch)\s+(\w+)$/)
     if (match) {
-      // Auto-execute the model switch
       const modelAlias = match[2]
-      const targetModel = models.find(m => 
-        m.alias === modelAlias || m.name === modelAlias
-      )
+      const targetModel = models.find(m => m.alias === modelAlias || m.name === modelAlias)
       if (targetModel) {
         handleModelSwitch(targetModel.name)
         setInput('')
@@ -508,11 +491,8 @@ export default function ChatPanel({
         return
       }
     }
-    
-    // Show command dropdown when input starts with /
+
     if (value.startsWith('/')) {
-      const filter = value.slice(1).toLowerCase()
-      setCommandFilter(filter)
       setShowCommands(true)
     } else {
       setShowCommands(false)
@@ -520,10 +500,8 @@ export default function ChatPanel({
   }
 
   const handleModelSwitch = async (modelName: string) => {
-    // Use the session key from props (always up-to-date from parent)
     const activeSession = currentSessionKey
     if (!activeSession) {
-      // No active session, just update global config
       try {
         const result = await api.switchModel(modelName)
         if (result.success) {
@@ -546,9 +524,7 @@ export default function ChatPanel({
       }
       return
     }
-    
     try {
-      // Switch model for current session
       const result = await api.switchModel(modelName, activeSession)
       if (result.success) {
         onModelSwitch?.(modelName)
@@ -571,17 +547,14 @@ export default function ChatPanel({
   }
 
   const handleCommandSelect = async (cmd: string) => {
-    // Special handling for /model command
     if (cmd === 'model') {
-      // Show models in chat
       try {
         const result = await api.getModels()
-        const modelText = result.models?.length 
-          ? result.models.map(m => 
+        const modelText = result.models?.length
+          ? result.models.map(m =>
               `**/${m.alias}** - ${m.name}\n   ${m.provider} (context: ${m.context_length})`
             ).join('\n\n')
           : 'No models available'
-        
         setMessages(prev => [...prev, {
           id: `msg_${Date.now()}_model`,
           role: 'assistant',
@@ -596,15 +569,12 @@ export default function ChatPanel({
         console.error('Failed to get models:', err)
       }
     }
-    
     setInput('/' + cmd + ' ')
     setShowCommands(false)
     inputRef.current?.focus()
   }
 
-  // Build tool_call_id → { name, args } index once per messages change so
-  // memoized tool rows can look up their call info in O(1) instead of scanning
-  // the whole message array per render.
+  // tool_call_id → { name, args } index for O(1) tool-row lookup.
   const toolCallIndex = useMemo(() => {
     const map = new Map<string, ToolCallRef>()
     for (const m of messages) {
@@ -627,9 +597,6 @@ export default function ChatPanel({
     | { kind: 'msg'; ts: number; key: string; msg: ApiMessage }
     | { kind: 'obs'; ts: number; key: string; obs: InnerVoiceObservation }
 
-  // Chronological merge of primary messages and IV observations. Returns
-  // null when the panel is not in timeline mode (preserving the default
-  // right-aligned chat rendering for the regular Chat page).
   const timeline = useMemo<TimelineItem[] | null>(() => {
     if (!timelineRight) return null
     const items: TimelineItem[] = [
@@ -640,58 +607,45 @@ export default function ChatPanel({
     return items
   }, [messages, timelineRight])
 
+  // Build the visible command list.
   const filteredCommands = useMemo(() => {
-    if (!showCommands || !commandFilter) {
-      setSelectedCommandIndex(0)
-      return SLASH_COMMANDS.slice(0, 8)
+    const filter = input.startsWith('/') ? input.slice(1).toLowerCase() : ''
+    if (filter.startsWith('model ') || filter.startsWith('switch ')) {
+      const modelArg = filter.split(' ')[1] || ''
+      return models
+        .filter(m => m.alias.includes(modelArg) || m.name.includes(modelArg))
+        .map(m => ({ name: `model ${m.alias}`, desc: m.name, alias: m.alias }))
+        .slice(0, 8)
     }
-    // Check if we're typing a model switch command like "/model primary"
-    if (commandFilter.startsWith('model ') || commandFilter.startsWith('switch ')) {
-      // Show model names as completions
-      const modelArg = commandFilter.split(' ')[1] || ''
-      return models.filter(m => 
-        m.alias.includes(modelArg) || m.name.includes(modelArg)
-      ).map(m => ({
-        name: `model ${m.alias}`,
-        desc: m.name,
-        alias: m.alias
-      })).slice(0, 8)
-    }
-    const filtered = SLASH_COMMANDS.filter(cmd => 
-      cmd.name.includes(commandFilter) || 
-      (cmd.alias && cmd.alias.includes(commandFilter))
-    ).slice(0, 8)
-    setSelectedCommandIndex(0)
-    return filtered
-  }, [showCommands, commandFilter, models])
+    if (!filter) return SLASH_COMMANDS.slice(0, 8)
+    return SLASH_COMMANDS
+      .filter(cmd => cmd.name.includes(filter) || (cmd.alias && cmd.alias.includes(filter)))
+      .slice(0, 8)
+  }, [input, models])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     const text = input.trim()
     if (!text || sending || thinking) return
 
-    // Handle /new command locally
     if (text === '/new' || text === '/reset') {
       setMessages([])
       setInput('')
       setSending(false)
       setThinking(false)
-      // Also clear session key to force new session on next message
       setSessionKey(null)
       onActiveSessionChange?.(null)
       localStorage.removeItem('mc_session_id')
       return
     }
 
-    // Handle /think command locally
     if (text.startsWith('/think')) {
       const arg = text.split(/\s+/)[1]?.toLowerCase() || ''
-      const validLevels = ['off', 'low', 'medium', 'high', 'xhigh', 'max']
-      let newLevel: string
+      const validLevels = THINK_LEVELS as readonly string[]
+      let newLevel: ThinkLevel
       if (arg && validLevels.includes(arg)) {
-        newLevel = arg
+        newLevel = arg as ThinkLevel
       } else if (!arg) {
-        // Toggle: off → high, anything else → off
         newLevel = thinkLevel === 'off' ? 'high' : 'off'
       } else {
         setMessages(prev => [...prev, {
@@ -718,7 +672,6 @@ export default function ChatPanel({
     setInput('')
     setSending(true)
 
-    // Add user message
     setMessages(prev => [...prev, {
       id: `msg_${Date.now()}`,
       role: 'user',
@@ -728,17 +681,14 @@ export default function ChatPanel({
 
     setThinking(true)
 
-    // Current streaming assistant bubble — reset on each tool_start so text
-    // emitted between tool calls lands in its own bubble.
     let assistantMsgId: string | null = null
     let segmentCounter = 0
     let streamingStarted = false
     let settled = false
     let accumulatedThinking = ''
 
-    // Coalesce text deltas — per-token setState was O(n) per message array and
-    // killed the main thread on long sessions. Buffer deltas and flush once per
-    // animation frame instead.
+    // RAF-batched delta flush — per-token setState on long sessions kills the
+    // main thread; coalesce into a single update per animation frame instead.
     let pendingDelta = ''
     let rafId: number | null = null
     const flushDelta = () => {
@@ -770,15 +720,11 @@ export default function ChatPanel({
           onActiveSessionChange?.(sid)
         }
       },
-      onQueueState: (state) => {
-        setQueueState(state)
-      },
+      onQueueState: (state) => setQueueState(state),
       onToolStart: (callId, name, args, contextTokens) => {
         setActiveToolName(name)
-        // Close the current text segment so the next text_delta starts a new bubble.
         assistantMsgId = null
         accumulatedThinking = ''
-        // Add an assistant message with the tool_call, then a pending tool result message
         setMessages(prev => [
           ...prev,
           {
@@ -809,20 +755,12 @@ export default function ChatPanel({
           if (!stillPending) setActiveToolName(null)
           return updated
         })
-        // TodoWrite mutates session.todos; ExitPlanMode/EnterPlanMode mutate
-        // session.plan AND (on commit) session.todos. Bump the refresh key
-        // for any of them so TodoList + PlanHeader re-fetch.
         if (
-          _name === 'TodoWrite'
-          || _name === 'EnterPlanMode'
-          || _name === 'ExitPlanMode'
+          _name === 'TodoWrite' || _name === 'EnterPlanMode' || _name === 'ExitPlanMode'
         ) setTodoRefreshKey(k => k + 1)
       },
-      onThinkingDelta: (delta) => {
-        accumulatedThinking += delta
-      },
+      onThinkingDelta: (delta) => { accumulatedThinking += delta },
       onThinkingDone: (fullText) => {
-        // Finalize thinking — use full text from server (more reliable than accumulated deltas)
         accumulatedThinking = fullText || accumulatedThinking
       },
       onTextDelta: (delta) => {
@@ -846,7 +784,6 @@ export default function ChatPanel({
       onDone: (response, _sid, stats, reasoning) => {
         if (settled) return
         settled = true
-        // Cancel any queued delta frame and merge its payload into the final update
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
         const pendingFinal = pendingDelta
         pendingDelta = ''
@@ -921,20 +858,50 @@ export default function ChatPanel({
     abortControllerRef.current = controller
   }
 
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      if (sessionKey) {
+        api.cancelSession(sessionKey, { drainPending: true }).catch(() => {})
+      }
+    } else if (sessionKey) {
+      api.cancelSession(sessionKey, { drainPending: true }).then(() => {
+        setThinking(false)
+        setSending(false)
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_interrupted`,
+          role: 'assistant' as const,
+          content: [{ type: 'text' as const, text: '*[Cancelled]*' }],
+          timestamp: new Date().toISOString(),
+        }])
+      }).catch(() => {
+        setThinking(false)
+        setSending(false)
+      })
+    }
+  }
+
+  const cycleThinkLevel = () => {
+    const idx = THINK_LEVELS.indexOf(thinkLevel)
+    const next = THINK_LEVELS[(idx + 1) % THINK_LEVELS.length]
+    setThinkLevel(next)
+    localStorage.setItem('mc_think_level', next)
+  }
+
   const thinkingIndicatorBody = (
-    <div className="bg-surface-2 border border-surface-3/50 px-3.5 py-2.5 rounded-xl">
-      <div className="flex items-center gap-2 text-sm text-slate-400">
-        <Loader2 className="w-4 h-4 animate-spin text-brand-400" />
+    <div className="bg-card border border-border px-3.5 py-2.5 rounded-xl">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Loader2 className="w-4 h-4 animate-spin text-primary" />
         {queueState?.current?.source === 'ambient'
           ? <span><span className="text-amber-400">Ambient context</span> — Lloyd is processing background input...</span>
           : activeToolName
-            ? <span>Working: <span className="font-mono text-brand-300">{activeToolName}</span>...</span>
+            ? <span>Working: <span className="font-mono text-primary">{activeToolName}</span>...</span>
             : <span>Thinking...</span>
         }
         {queueState && queueState.depth > 0 && (
-          <span className="ml-2 text-xs text-slate-500 font-mono">
-            (queue: {queueState.pending_user}u + {queueState.pending_ambient}a)
-          </span>
+          <Badge variant="secondary" className="ml-2 font-mono">
+            queue: {queueState.pending_user}u + {queueState.pending_ambient}a
+          </Badge>
         )}
       </div>
     </div>
@@ -943,13 +910,16 @@ export default function ChatPanel({
   return (
     <div className="flex flex-col h-full">
       {/* Messages */}
-      <main ref={messagesContainerRef} className={`flex-1 overflow-y-auto p-4 ${timeline === null ? 'space-y-4' : ''}`}>
+      <main
+        ref={messagesContainerRef}
+        className={cn('flex-1 overflow-y-auto p-4', timeline === null && 'space-y-4')}
+      >
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full">
-            <div className="text-center text-slate-500">
+            <div className="text-center text-muted-foreground">
               <MessageCircle className="w-10 h-10 mx-auto mb-3 opacity-30" />
               <p className="text-sm">Welcome to Lloyd Mission Control</p>
-              <p className="text-xs mt-1 text-slate-600">Send a message to get started</p>
+              <p className="text-xs mt-1 text-muted-foreground/80">Send a message to get started</p>
             </div>
           </div>
         )}
@@ -977,10 +947,6 @@ export default function ChatPanel({
         {timeline !== null && (
           <div className="flex flex-col">
             {timeline.map(item => {
-              // Mirror MessageRow's visibility rules — drop items that would
-              // render nothing so the centerline doesn't sprout orphan dots.
-              // The most common case: assistant rows that carry tool_calls
-              // but no text (the tool result row alongside renders the bubble).
               if (item.kind === 'msg') {
                 const m = item.msg
                 const hasContent = m.content?.some(c => c.text?.trim())
@@ -990,42 +956,40 @@ export default function ChatPanel({
                 if (!showAgentDetails && m.role === 'subliminal') return null
               }
               return (
-              <div key={item.key} className="grid grid-cols-[1fr_28px_1fr] gap-x-3 py-1.5">
-                {/* Left half — primary actions */}
-                <div className="flex justify-end min-w-0">
-                  {item.kind === 'msg' && (
-                    <div className="w-full max-w-[94%] min-w-0">
-                      <MessageRow
-                        msg={item.msg}
-                        showAgentDetails={showAgentDetails}
-                        thinkLevel={thinkLevel}
-                        isMobile={isMobile}
-                        toolCallIndex={toolCallIndex}
-                        forceLeftAlign
-                      />
-                    </div>
-                  )}
+                <div key={item.key} className="grid grid-cols-[1fr_28px_1fr] gap-x-3 py-1.5">
+                  <div className="flex justify-end min-w-0">
+                    {item.kind === 'msg' && (
+                      <div className="w-full max-w-[94%] min-w-0">
+                        <MessageRow
+                          msg={item.msg}
+                          showAgentDetails={showAgentDetails}
+                          thinkLevel={thinkLevel}
+                          isMobile={isMobile}
+                          toolCallIndex={toolCallIndex}
+                          forceLeftAlign
+                        />
+                      </div>
+                    )}
+                  </div>
+                  <div className="relative flex justify-center">
+                    <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 border-l border-border/60" />
+                    <div className={cn(
+                      'relative mt-3 w-2 h-2 rounded-full ring-2 ring-card',
+                      item.kind === 'obs'
+                        ? (item.obs.trigger === 'result' && item.obs.action === 'noop'
+                            ? 'bg-emerald-400'
+                            : actionStyle(item.obs.action).dot)
+                        : 'bg-primary',
+                    )} />
+                  </div>
+                  <div className="flex justify-start min-w-0">
+                    {item.kind === 'obs' && (
+                      <div className="w-full max-w-[94%] min-w-0">
+                        <ObservationBubble obs={item.obs} />
+                      </div>
+                    )}
+                  </div>
                 </div>
-                {/* Centerline column with dot */}
-                <div className="relative flex justify-center">
-                  <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 border-l border-surface-3/40" />
-                  <div className={`relative mt-3 w-2 h-2 rounded-full ring-2 ring-surface-1 ${
-                    item.kind === 'obs'
-                      ? (item.obs.trigger === 'result' && item.obs.action === 'noop'
-                          ? 'bg-emerald-400'
-                          : actionStyle(item.obs.action).dot)
-                      : 'bg-brand-400'
-                  }`} />
-                </div>
-                {/* Right half — IV observations */}
-                <div className="flex justify-start min-w-0">
-                  {item.kind === 'obs' && (
-                    <div className="w-full max-w-[94%] min-w-0">
-                      <ObservationBubble obs={item.obs} />
-                    </div>
-                  )}
-                </div>
-              </div>
               )
             })}
             {thinking && (
@@ -1036,15 +1000,15 @@ export default function ChatPanel({
                   </div>
                 </div>
                 <div className="relative flex justify-center">
-                  <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 border-l border-surface-3/40" />
-                  <div className="relative mt-3 w-2 h-2 rounded-full ring-2 ring-surface-1 bg-brand-400 animate-pulse" />
+                  <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 border-l border-border/60" />
+                  <div className="relative mt-3 w-2 h-2 rounded-full ring-2 ring-card bg-primary animate-pulse" />
                 </div>
                 <div />
               </div>
             )}
           </div>
         )}
-        
+
         <div ref={messagesEndRef} />
       </main>
 
@@ -1056,133 +1020,107 @@ export default function ChatPanel({
       <TodoList sessionId={sessionKey} refreshKey={todoRefreshKey} />
 
       {/* Input */}
-      <footer className="p-3 border-t border-surface-3/50 relative">
+      <footer className="p-3 border-t border-border relative">
         <form onSubmit={handleSubmit} className="flex gap-2 items-center">
-          <input
+          <Input
             ref={inputRef}
             type="text"
             value={input}
             onChange={handleInputChange}
             onKeyDown={(e) => {
-              if (!showCommands) return
-
-              if (e.key === 'ArrowDown') {
+              // Let cmdk handle navigation keys when the palette is open by
+              // forwarding them to the hidden Command instance.
+              if (showCommands && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                // Command palette handles its own focus via data-attrs; we
+                // only need to prevent the input cursor moving.
+                return
+              }
+              if (showCommands && e.key === 'Escape') {
                 e.preventDefault()
-                setSelectedCommandIndex((prev) =>
-                  prev < filteredCommands.length - 1 ? prev + 1 : prev
-                )
-              } else if (e.key === 'ArrowUp') {
-                e.preventDefault()
-                setSelectedCommandIndex((prev) => prev > 0 ? prev - 1 : 0)
-              } else if (e.key === 'Enter') {
-                e.preventDefault()
-                if (filteredCommands.length > 0) {
-                  handleCommandSelect(filteredCommands[selectedCommandIndex].name)
-                }
-              } else if (e.key === 'Escape') {
                 setShowCommands(false)
               }
             }}
             placeholder={thinkLevel !== 'off' ? `Talk to Lloyd... (thinking: ${thinkLevel})` : 'Talk to Lloyd... (use / for commands)'}
-            className="flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3.5 py-2.5 border border-surface-3/50 outline-none focus:border-brand-500/50 placeholder:text-slate-500 transition-colors disabled:opacity-50"
+            className="flex-1 h-[38px] bg-card text-foreground"
             disabled={sending || thinking}
           />
-          {/* Think level toggle — always visible, cycles off→low→medium→high→xhigh→max→off */}
+          {/* Think level toggle */}
           {(() => {
-            const levels = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const
-            const idx = levels.indexOf(thinkLevel as typeof levels[number])
-            const nextLevel = levels[(idx + 1) % levels.length]
+            const idx = THINK_LEVELS.indexOf(thinkLevel)
+            const nextLevel = THINK_LEVELS[(idx + 1) % THINK_LEVELS.length]
             const isActive = thinkLevel !== 'off'
             return (
-              <button
+              <Button
                 type="button"
-                onClick={() => {
-                  setThinkLevel(nextLevel)
-                  localStorage.setItem('mc_think_level', nextLevel)
-                }}
-                className={`w-[38px] h-[38px] flex items-center justify-center rounded-lg shrink-0 transition-colors ${
-                  isActive
-                    ? 'bg-purple-600/20 border border-purple-500/30 text-purple-400 hover:bg-purple-600/30'
-                    : 'bg-surface-2 border border-surface-3/50 text-slate-500 hover:text-slate-400 hover:bg-surface-3/30'
-                }`}
+                variant="ghost"
+                size="icon"
+                onClick={cycleThinkLevel}
                 title={`Extended thinking: ${thinkLevel} (click → ${nextLevel})`}
+                className={cn(
+                  'h-[38px] w-[38px] shrink-0 border',
+                  isActive
+                    ? 'bg-purple-600/20 border-purple-500/30 text-purple-400 hover:bg-purple-600/30 hover:text-purple-300'
+                    : 'bg-card border-border text-muted-foreground hover:bg-accent',
+                )}
               >
                 <Brain className="w-4 h-4" />
-              </button>
+              </Button>
             )
           })()}
-          {/* Submit / Cancel */}
+          {/* Submit / Stop */}
           {(sending || thinking) ? (
-            <button
+            <Button
               type="button"
-              onClick={() => {
-                if (abortControllerRef.current) {
-                  // Local stream — abort the fetch directly. Also call the
-                  // backend cancel API so the harness sees cancel_event and
-                  // Inner Voice stops observing/injecting; drain any queued
-                  // ambient turns IV may have enqueued for the cancelled work.
-                  abortControllerRef.current.abort()
-                  if (sessionKey) {
-                    api.cancelSession(sessionKey, { drainPending: true }).catch(() => {})
-                  }
-                } else if (sessionKey) {
-                  // Restored session with no local stream — cancel via API
-                  api.cancelSession(sessionKey, { drainPending: true }).then(() => {
-                    setThinking(false)
-                    setSending(false)
-                    setMessages(prev => [...prev, {
-                      id: `msg_${Date.now()}_interrupted`,
-                      role: 'assistant' as const,
-                      content: [{ type: 'text' as const, text: '*[Cancelled]*' }],
-                      timestamp: new Date().toISOString(),
-                    }])
-                  }).catch(() => {
-                    // Cancel failed — force reset UI state anyway
-                    setThinking(false)
-                    setSending(false)
-                  })
-                }
-              }}
-              className="w-[38px] h-[38px] flex items-center justify-center bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 text-red-400 rounded-lg shrink-0 transition-colors"
+              variant="destructive"
+              size="icon"
+              onClick={handleStop}
               title="Stop"
+              className="h-[38px] w-[38px] shrink-0"
             >
               <Square className="w-4 h-4" />
-            </button>
+            </Button>
           ) : (
-            <button
+            <Button
               type="submit"
+              size="icon"
               disabled={!input.trim()}
-              className="w-[38px] h-[38px] flex items-center justify-center bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg shrink-0 transition-colors"
+              title="Send"
+              className="h-[38px] w-[38px] shrink-0"
             >
               <Send className="w-4 h-4" />
-            </button>
+            </Button>
           )}
         </form>
-        
-        {/* Command dropdown */}
+
+        {/* Slash command palette — cmdk handles keyboard nav (↑↓/Enter)
+            internally; we listen for Escape on the Input and close. */}
         {showCommands && filteredCommands.length > 0 && (
-          <div className="absolute bottom-full left-0 right-0 mb-1 bg-surface-1 border border-surface-3/50 rounded-lg shadow-lg max-h-60 overflow-y-auto z-50">
-            {filteredCommands.map((cmd, idx) => (
-              <button
-                key={cmd.name}
-                onClick={() => handleCommandSelect(cmd.name)}
-                className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center justify-between ${
-                  idx === selectedCommandIndex 
-                    ? 'bg-brand-500/20 text-brand-400' 
-                    : 'hover:bg-surface-2 text-slate-200'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-brand-400">/{cmd.name}</span>
-                  {cmd.alias && <span className="text-xs text-slate-500">({cmd.alias.split(' ')[0]})</span>}
-                </div>
-                <span className="text-xs text-slate-400 truncate max-w-[200px]">{cmd.desc}</span>
-              </button>
-            ))}
+          <div className="absolute bottom-full left-0 right-0 mb-1 mx-3 border border-border rounded-lg shadow-lg max-h-60 overflow-hidden z-50 bg-popover">
+            <Command shouldFilter={false} loop>
+              <CommandList>
+                <CommandEmpty>No matches.</CommandEmpty>
+                <CommandGroup>
+                  {filteredCommands.map(cmd => (
+                    <CommandItem
+                      key={cmd.name}
+                      value={cmd.name}
+                      onSelect={() => handleCommandSelect(cmd.name.split(' ')[0] === 'model' ? cmd.name : cmd.name)}
+                    >
+                      <span className="font-mono text-primary">/{cmd.name}</span>
+                      {cmd.alias && (
+                        <span className="text-xs text-muted-foreground">({cmd.alias.split(' ')[0]})</span>
+                      )}
+                      <span className="ml-auto text-xs text-muted-foreground truncate max-w-[200px]">
+                        {cmd.desc}
+                      </span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              </CommandList>
+            </Command>
           </div>
         )}
       </footer>
-      {/* Session list moved to sidebar SessionsPanel */}
     </div>
   )
 }

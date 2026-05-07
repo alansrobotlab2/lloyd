@@ -1,5 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* Streamdown's default prose / code-block styles for rendered markdown. */
+@import "streamdown/styles.css";
 
 /* ──────────────────────────────────────────────────────────────────────
    LiveKit cyan-on-zinc palette (shadcn token system).
