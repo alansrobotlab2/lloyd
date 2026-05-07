@@ -156,11 +156,16 @@ livekit:
   room_prefix: lloyd-
   agent_identity: lloyd-agent
   stt:
-    model: tiny.en
+    model: base.en
     device: cpu
     compute_type: int8
     language: en
     beam_size: 1
+    # Bias the Whisper decoder toward the names in this file (Lloyd, Alan,
+    # Lisa, etc). Critical for the wake-word path — without it, Whisper-base
+    # regularly mishears "Lloyd" as "Floyd", "Eloid", or "Alloyed" when said
+    # quietly, and the wake-word gate drops those utterances.
+    hotwords_file: ~/obsidian/hotwords.md
   tts:
     api_url: http://127.0.0.1:8090
     model: qwen3-tts
@@ -184,12 +189,36 @@ livekit:
     # (see `voiceprint:` below) when enabled, otherwise via the LiveKit
     # participant identity as a proxy.
     enabled: true
-    words: [lloyd, "hey lloyd", "hi lloyd", "okay lloyd"]
-    continuation_seconds: 12.0
+    # NB: wake-word DETECTION is now done by openWakeWord (livekit.acoustic_wake)
+    # — that's the only thing that decides whether an utterance contains the
+    # wake-phrase. This `words` list is used purely for *cleanup*: when the
+    # acoustic gate fires and Whisper happened to transcribe the wake-word
+    # correctly, we strip it from the message before injecting. If Whisper
+    # mistranscribed it ("Eloid", "Alloyed"), the full text is injected as-is.
+    words:
+      - lloyd
+      - "hey lloyd"
+      - "hi lloyd"
+      - "okay lloyd"
+      - "hello lloyd"
+    continuation_seconds: 6.0
     # If true and the wake-word is the entire utterance ("Lloyd!"), open
     # the continuation window but skip the inject. False would inject the
     # bare wake-word and Lloyd would respond conversationally.
     skip_inject_if_only_wake_word: true
+  acoustic_wake:
+    # openWakeWord — acoustic wake-word detection that runs in parallel
+    # with the text-match path. Catches wake-words even when Whisper
+    # transcribes them as "Eloid", "Floyd", etc. — pattern matches the
+    # audio shape directly.
+    enabled: true
+    # Custom-trained models (Hey_Lloyd.onnx, Lloyd.onnx) plus the shared
+    # melspectrogram + embedding ONNX engines. All under agent-services/models/.
+    models_dir: agent-services/models/wakeword
+    engine_dir: agent-services/models/openwakeword
+    # Score threshold (0..1). 0.5 is the canonical default; tune up if it
+    # fires on background noise, down if your wake-word is being missed.
+    threshold: 0.4
   voiceprint:
     # Resemblyzer-based speaker matching for the wake-word continuation
     # window. When enabled, the wake-word utterance's embedding becomes
@@ -208,12 +237,17 @@ livekit:
     # the speaker is reported as "Unknown". Resemblyzer embeddings are
     # unit-norm so this is effectively the dot product.
     profile_threshold: 0.75
-    # Cosine threshold against the wake-word anchor. Lower than the profile
-    # threshold because anchor matching is "is this still the same person
-    # who just said the wake word", which is an easier task than full
-    # speaker recognition. Tune up if continuation lets the wrong speaker
-    # through; tune down if it's too strict on your own voice.
-    anchor_threshold: 0.65
+    # Cosine threshold against the wake-word anchor. Resemblyzer cosines
+    # for short (~1s) same-speaker utterance pairs land in the 0.4-0.6
+    # range — much lower than the canonical 0.65-0.75 for ~5s utterances.
+    # Since the wake-word is often a 1-2s anchor we set this conservatively
+    # low. Tune up if continuation lets the wrong speaker through; tune
+    # down if it's still too strict on your own voice.
+    #
+    # NB: anchor matching is only enforced when the wake-word utterance
+    # itself matched an enrolled profile. For unknown speakers the gate
+    # falls back to LiveKit-identity-only matching.
+    anchor_threshold: 0.40
     # cpu | cuda. CPU is ~20ms per utterance on warm cache and avoids
     # contention with vLLM on the GPU. Set to "cuda" only if you want it.
     device: cpu

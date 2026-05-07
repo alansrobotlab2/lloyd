@@ -14,13 +14,13 @@ _SUPERVISOR_SOCK = "/tmp/agent-supervisor.sock"
 
 # service_id → (display_name, port_or_None)
 _INFRA_SERVICES = {
-    "agent-llm-primary":   ("LLM Primary",  8096),
-    "agent-llm-secondary": ("LLM Secondary", 8091),
-    "agent-qmd-daemon": ("QMD Daemon",     8181),
-    "agent-qmd-watcher":("QMD Watcher",    None),
-    "agent-tts":        ("TTS",            None),
-    "agent-voice-mcp":  ("Voice MCP",      8094),
-    "agent-voice-mode": ("Voice Mode",     None),
+    "agent-llm-primary":    ("LLM Primary",     8096),
+    "agent-llm-secondary":  ("LLM Secondary",   8091),
+    "agent-qmd-daemon":     ("QMD Daemon",      8181),
+    "agent-qmd-watcher":    ("QMD Watcher",     None),
+    "agent-tts":            ("TTS",             None),
+    "agent-livekit-server": ("LiveKit Server",  7880),
+    "lloyd-agent-worker":   ("Voice Worker",    None),
 }
 
 _LLOYD_SERVICES = {
