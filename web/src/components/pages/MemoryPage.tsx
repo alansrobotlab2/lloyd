@@ -23,7 +23,7 @@ import {
   type EntityFact,
   type EntityGraphNode,
 } from "../../api";
-import { sanitizeHtml } from "../../utils/sanitize";
+import { Streamdown } from "streamdown";
 import EntityGraph, { type EntityGraphProps } from "../EntityGraph";
 import { categoryOf, CATEGORY_CHIP_CLASS } from "../../lib/edgeCategories";
 
@@ -40,7 +40,7 @@ interface GNode extends EntityGraphNode {
 
 const TYPE_COLORS: Record<string, string> = {
   hub: "bg-amber-400/10 text-amber-400",
-  notes: "bg-slate-400/10 text-slate-400",
+  notes: "bg-slate-400/10 text-muted-foreground",
   "project-notes": "bg-sky-400/10 text-sky-400",
   "work-notes": "bg-indigo-400/10 text-indigo-400",
   talk: "bg-emerald-400/10 text-emerald-400",
@@ -49,7 +49,7 @@ const TYPE_COLORS: Record<string, string> = {
 
 const CATEGORY_COLORS: Record<string, string> = {
   profile: "text-sky-400",
-  preference: "text-brand-400",
+  preference: "text-primary",
   event: "text-emerald-400",
   state: "text-amber-400",
   relationship: "text-purple-400",
@@ -98,22 +98,22 @@ function NodeQuickInfo({
   if (node.type === "entity") {
     return (
       <div className="space-y-2">
-        <div className="flex items-center gap-2 border-b border-surface-3/30 pb-2">
+        <div className="flex items-center gap-2 border-b border-border/30 pb-2">
           <span className="inline-block w-2 h-2 rotate-45 flex-shrink-0" style={{background: "#F59E0B"}} />
           <span className="text-xs font-semibold text-amber-400">{node.label}</span>
-          <span className="ml-auto text-[10px] text-slate-500">entity</span>
+          <span className="ml-auto text-[10px] text-muted-foreground">entity</span>
         </div>
-        <div className="text-[10px] text-slate-500">
-          <span className="text-slate-400">{node.factCount || 0}</span> facts
+        <div className="text-[10px] text-muted-foreground">
+          <span className="text-muted-foreground">{node.factCount || 0}</span> facts
           {" · "}
-          <span className="text-slate-400">{connectionCount}</span> connections
+          <span className="text-muted-foreground">{connectionCount}</span> connections
         </div>
         {connectedNodes.length > 0 && (
           <div>
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Connected docs</div>
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">Connected docs</div>
             <div className="space-y-0.5">
               {connectedNodes.map((n, i) => (
-                <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+                <div key={i} className="text-[10px] text-muted-foreground truncate flex items-center gap-1">
                   <FileText className="w-2.5 h-2.5 flex-shrink-0 opacity-40" />
                   <span className="truncate">{n.label}</span>
                 </div>
@@ -127,24 +127,24 @@ function NodeQuickInfo({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2 border-b border-surface-3/30 pb-2">
-        <FileText className="w-3 h-3 text-slate-400 flex-shrink-0" />
-        <span className="text-xs font-semibold text-slate-200 truncate">{node.label}</span>
+      <div className="flex items-center gap-2 border-b border-border/30 pb-2">
+        <FileText className="w-3 h-3 text-muted-foreground flex-shrink-0" />
+        <span className="text-xs font-semibold text-foreground truncate">{node.label}</span>
       </div>
-      <div className="font-mono text-[9px] text-slate-500 break-all leading-relaxed">{node.id}</div>
+      <div className="font-mono text-[9px] text-muted-foreground break-all leading-relaxed">{node.id}</div>
       <div className="flex flex-wrap gap-1.5 text-[10px]">
-        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{vaultSection}</span>
-        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{connectionCount} links</span>
+        <span className="bg-secondary px-1.5 py-0.5 rounded text-muted-foreground">{vaultSection}</span>
+        <span className="bg-secondary px-1.5 py-0.5 rounded text-muted-foreground">{connectionCount} links</span>
         {node.degree !== undefined && (
-          <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">deg {node.degree}</span>
+          <span className="bg-secondary px-1.5 py-0.5 rounded text-muted-foreground">deg {node.degree}</span>
         )}
       </div>
       {connectedNodes.length > 0 && (
         <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Connected</div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">Connected</div>
           <div className="space-y-0.5">
             {connectedNodes.map((n, i) => (
-              <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+              <div key={i} className="text-[10px] text-muted-foreground truncate flex items-center gap-1">
                 <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${CATEGORY_CHIP_CLASS[categoryOf(n.type)]}`}>{n.type}</span>
                 <span className="truncate">{n.label}</span>
               </div>
@@ -203,36 +203,36 @@ function DocNodeDetail({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2 border-b border-surface-3/30 pb-2">
-        <FileText className="w-3.5 h-3.5 text-brand-400 flex-shrink-0" />
-        <span className="text-xs font-semibold text-slate-200 truncate">{fm.title || doc.path}</span>
+      <div className="flex items-center gap-2 border-b border-border/30 pb-2">
+        <FileText className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+        <span className="text-xs font-semibold text-foreground truncate">{fm.title || doc.path}</span>
       </div>
-      <div className="font-mono text-[9px] text-slate-500 break-all leading-relaxed">{doc.path}</div>
+      <div className="font-mono text-[9px] text-muted-foreground break-all leading-relaxed">{doc.path}</div>
       <div className="flex flex-wrap gap-1.5 text-[10px]">
         {fm.type && <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${typeClass}`}>{fm.type}</span>}
-        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{vaultSection}</span>
-        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{sizeKb}</span>
-        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{doc.lineCount} lines</span>
-        <span className="bg-surface-2 px-1.5 py-0.5 rounded text-slate-400">{connectionCount} links</span>
+        <span className="bg-secondary px-1.5 py-0.5 rounded text-muted-foreground">{vaultSection}</span>
+        <span className="bg-secondary px-1.5 py-0.5 rounded text-muted-foreground">{sizeKb}</span>
+        <span className="bg-secondary px-1.5 py-0.5 rounded text-muted-foreground">{doc.lineCount} lines</span>
+        <span className="bg-secondary px-1.5 py-0.5 rounded text-muted-foreground">{connectionCount} links</span>
       </div>
       {fm.summary && (
-        <div className="text-[11px] text-slate-400 italic leading-relaxed bg-surface-2/40 rounded px-2 py-1">
+        <div className="text-[11px] text-muted-foreground italic leading-relaxed bg-secondary/40 rounded px-2 py-1">
           {fm.summary}
         </div>
       )}
       {Array.isArray(fm.tags) && fm.tags.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {fm.tags.map((tag: string) => (
-            <span key={tag} className="text-[10px] text-slate-400 bg-surface-2 px-1.5 py-0.5 rounded">#{tag}</span>
+            <span key={tag} className="text-[10px] text-muted-foreground bg-secondary px-1.5 py-0.5 rounded">#{tag}</span>
           ))}
         </div>
       )}
       {connectedDocs.length > 0 && (
         <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Connected docs</div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">Connected docs</div>
           <div className="space-y-0.5">
             {connectedDocs.map((n, i) => (
-              <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+              <div key={i} className="text-[10px] text-muted-foreground truncate flex items-center gap-1">
                 <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${CATEGORY_CHIP_CLASS[categoryOf(n.type)]}`}>{n.type}</span>
                 <span className="truncate">{n.label}</span>
               </div>
@@ -269,7 +269,7 @@ function EntitySidebar({
         <div className="flex items-center px-1 mb-1">
           <button
             onClick={() => onSelectEntity(null)}
-            className="ml-auto text-[10px] text-brand-400 hover:text-brand-300"
+            className="ml-auto text-[10px] text-primary hover:text-primary"
           >
             clear
           </button>
@@ -282,13 +282,13 @@ function EntitySidebar({
           onClick={() => onSelectEntity(activeEntity === name ? null : name)}
           className={`w-full flex items-center gap-2 px-2 py-1 rounded text-[11px] transition-colors ${
             activeEntity === name
-              ? "bg-brand-600/15 text-brand-400"
-              : "text-slate-400 hover:text-slate-200 hover:bg-surface-2"
+              ? "bg-primary/15 text-primary"
+              : "text-muted-foreground hover:text-foreground hover:bg-secondary"
           }`}
         >
           <User className="w-2.5 h-2.5 flex-shrink-0 opacity-50" />
           <span className="flex-1 text-left truncate">{name}</span>
-          <span className="text-[10px] text-slate-500 flex-shrink-0">{factCount}</span>
+          <span className="text-[10px] text-muted-foreground flex-shrink-0">{factCount}</span>
         </button>
       ))}
     </div>
@@ -313,27 +313,27 @@ function EntityDetailPanel({ detail }: { detail: EntityDetailData }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2 border-b border-surface-3/30 pb-2">
-        <User className="w-3.5 h-3.5 text-brand-400 flex-shrink-0" />
-        <span className="text-xs font-semibold text-slate-200">{detail.name}</span>
-        <span className="ml-auto text-[10px] text-slate-500">{detail.facts.length} facts</span>
+      <div className="flex items-center gap-2 border-b border-border/30 pb-2">
+        <User className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+        <span className="text-xs font-semibold text-foreground">{detail.name}</span>
+        <span className="ml-auto text-[10px] text-muted-foreground">{detail.facts.length} facts</span>
       </div>
 
       {detail.definition && (
-        <div className="text-[11px] text-slate-400 italic leading-snug">
+        <div className="text-[11px] text-muted-foreground italic leading-snug">
           {detail.definition}
         </div>
       )}
 
       {detail.summary && (
-        <div className="text-[11px] text-slate-300 leading-relaxed whitespace-pre-wrap bg-surface-2/30 rounded px-2 py-1.5">
+        <div className="text-[11px] text-foreground/90 leading-relaxed whitespace-pre-wrap bg-secondary/30 rounded px-2 py-1.5">
           {detail.summary}
         </div>
       )}
 
       {categories.map((cat) => {
         const facts = byCategory.get(cat)!;
-        const colorClass = CATEGORY_COLORS[cat] || "text-slate-400";
+        const colorClass = CATEGORY_COLORS[cat] || "text-muted-foreground";
         return (
           <div key={cat}>
             <div className={`text-[10px] font-semibold uppercase tracking-wider mb-1 ${colorClass}`}>
@@ -343,11 +343,11 @@ function EntityDetailPanel({ detail }: { detail: EntityDetailData }) {
               {facts.map((f, i) => (
                 <div
                   key={f.id || i}
-                  className="text-[11px] text-slate-300 leading-relaxed bg-surface-2/40 rounded px-2 py-1"
+                  className="text-[11px] text-foreground/90 leading-relaxed bg-secondary/40 rounded px-2 py-1"
                 >
                   {f.fact}
                   {f.confidence < 0.8 && (
-                    <span className="ml-1 text-[9px] text-slate-500 opacity-70">
+                    <span className="ml-1 text-[9px] text-muted-foreground opacity-70">
                       ({Math.round(f.confidence * 100)}%)
                     </span>
                   )}
@@ -360,12 +360,12 @@ function EntityDetailPanel({ detail }: { detail: EntityDetailData }) {
 
       {detail.relationships.length > 0 && (
         <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider mb-1 text-slate-500">
+          <div className="text-[10px] font-semibold uppercase tracking-wider mb-1 text-muted-foreground">
             Related docs
           </div>
           <div className="space-y-0.5">
             {detail.relationships.slice(0, 10).map((r, i) => (
-              <div key={i} className="text-[10px] text-slate-400 truncate flex items-center gap-1">
+              <div key={i} className="text-[10px] text-muted-foreground truncate flex items-center gap-1">
                 <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${CATEGORY_CHIP_CLASS[categoryOf(r.type)]}`}>
                   {r.type}
                 </span>
@@ -456,13 +456,13 @@ function VaultExplorer({ onOpenFile }: { onOpenFile: (path: string) => void }) {
         <div key={node.path}>
           <button
             onClick={() => toggleDir(node.path)}
-            className="w-full flex items-center gap-1.5 py-0.5 text-[11px] text-slate-300 hover:bg-surface-2 rounded transition-colors"
+            className="w-full flex items-center gap-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-secondary rounded transition-colors"
             style={{ paddingLeft: `${indent + 4}px` }}
           >
             {node.expanded ? (
-              <ChevronDown className="w-3 h-3 text-slate-500 flex-shrink-0" />
+              <ChevronDown className="w-3 h-3 text-muted-foreground flex-shrink-0" />
             ) : (
-              <ChevronRight className="w-3 h-3 text-slate-500 flex-shrink-0" />
+              <ChevronRight className="w-3 h-3 text-muted-foreground flex-shrink-0" />
             )}
             {node.expanded ? (
               <FolderOpen className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
@@ -471,7 +471,7 @@ function VaultExplorer({ onOpenFile }: { onOpenFile: (path: string) => void }) {
             )}
             <span className="truncate">{node.name}</span>
             {node.children != null && (
-              <span className="text-[10px] text-slate-600 ml-auto pr-1">{node.children}</span>
+              <span className="text-[10px] text-muted-foreground/70 ml-auto pr-1">{node.children}</span>
             )}
           </button>
           {node.expanded && node.entries?.map((child) => renderNode(child, depth + 1))}
@@ -483,13 +483,13 @@ function VaultExplorer({ onOpenFile }: { onOpenFile: (path: string) => void }) {
       <button
         key={node.path}
         onClick={() => onOpenFile(node.path)}
-        className="w-full flex items-center gap-1.5 py-0.5 text-[11px] text-slate-400 hover:text-slate-200 hover:bg-surface-2 rounded transition-colors"
+        className="w-full flex items-center gap-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary rounded transition-colors"
         style={{ paddingLeft: `${indent + 4 + 15}px` }}
       >
-        <FileText className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+        <FileText className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
         <span className="truncate">{node.title || node.name}</span>
         {node.size != null && (
-          <span className="text-[10px] text-slate-600 ml-auto pr-1">
+          <span className="text-[10px] text-muted-foreground/70 ml-auto pr-1">
             {node.size < 1024 ? `${node.size}B` : `${(node.size / 1024).toFixed(1)}K`}
           </span>
         )}
@@ -498,7 +498,7 @@ function VaultExplorer({ onOpenFile }: { onOpenFile: (path: string) => void }) {
   };
 
   if (tree.length === 0) {
-    return <div className="text-[11px] text-slate-500 px-2 py-4">Loading...</div>;
+    return <div className="text-[11px] text-muted-foreground px-2 py-4">Loading...</div>;
   }
 
   return <div className="space-y-0">{tree.map((node) => renderNode(node, 0))}</div>;
@@ -517,7 +517,7 @@ function SearchResults({
 }) {
   if (results.results.length === 0) {
     return (
-      <div className="text-center py-12 text-slate-500">
+      <div className="text-center py-12 text-muted-foreground">
         <Search className="w-6 h-6 mx-auto mb-2 opacity-30" />
         <p className="text-sm">No results for "{query}"</p>
       </div>
@@ -526,23 +526,23 @@ function SearchResults({
 
   return (
     <div className="space-y-2">
-      <div className="text-[10px] text-slate-500 px-1">
+      <div className="text-[10px] text-muted-foreground px-1">
         {results.results.length} results for "{query}"
       </div>
       {results.results.map((r) => (
         <button
           key={r.path}
           onClick={() => onOpenFile(r.path)}
-          className="w-full text-left bg-surface-1 rounded-lg p-2.5 border border-surface-3/50 hover:border-brand-500/30 transition-colors"
+          className="w-full text-left bg-card rounded-lg p-2.5 border border-border/50 hover:border-primary/30 transition-colors"
         >
           <div className="flex items-center gap-2">
-            <FileText className="w-3.5 h-3.5 text-brand-400 flex-shrink-0" />
-            <span className="text-xs font-medium text-slate-200 truncate">
+            <FileText className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+            <span className="text-xs font-medium text-foreground truncate">
               {r.title || r.path}
             </span>
           </div>
           {(r.summary || r.snippet) && (
-            <p className="text-[11px] text-slate-400 mt-1 line-clamp-2 leading-relaxed">
+            <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2 leading-relaxed">
               {r.summary || r.snippet}
             </p>
           )}
@@ -571,14 +571,6 @@ function DocumentModal({
   const [editTags, setEditTags] = useState((fm.tags || []).join(", "));
   const [editSummary, setEditSummary] = useState(fm.summary || "");
   const [saving, setSaving] = useState(false);
-
-  const renderedContent = useMemo(() => {
-    try {
-      return sanitizeHtml(doc.content);
-    } catch {
-      return doc.content;
-    }
-  }, [doc.content]);
 
   const handleEdit = () => {
     setEditContent(doc.content);
@@ -611,14 +603,14 @@ function DocumentModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget && !editing) onClose(); }}
     >
-      <div className="bg-surface-1 border border-surface-3/50 rounded-xl shadow-2xl w-[80%] h-[80%] flex flex-col overflow-hidden">
+      <div className="bg-card border border-border/50 rounded-xl shadow-2xl w-[80%] h-[80%] flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex items-center gap-3 px-5 py-3 border-b border-surface-3/30 flex-shrink-0">
+        <div className="flex items-center gap-3 px-5 py-3 border-b border-border/30 flex-shrink-0">
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-medium text-slate-200 truncate">
+            <div className="text-sm font-medium text-foreground truncate">
               {fm.title || doc.path}
             </div>
-            <div className="text-[10px] text-slate-500 font-mono">{doc.path}</div>
+            <div className="text-[10px] text-muted-foreground font-mono">{doc.path}</div>
           </div>
           <div className="flex items-center gap-1.5">
             {editing ? (
@@ -626,7 +618,7 @@ function DocumentModal({
                 <button
                   onClick={handleSave}
                   disabled={saving}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-md bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-50 transition-colors"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-md bg-primary text-white hover:bg-primary disabled:opacity-50 transition-colors"
                 >
                   <Check className="w-3.5 h-3.5" />
                   {saving ? "Saving..." : "Save"}
@@ -634,7 +626,7 @@ function DocumentModal({
                 <button
                   onClick={handleCancel}
                   disabled={saving}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-md text-slate-400 hover:text-slate-200 hover:bg-surface-2 disabled:opacity-50 transition-colors"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-50 transition-colors"
                 >
                   <X className="w-3.5 h-3.5" />
                   Cancel
@@ -644,14 +636,14 @@ function DocumentModal({
               <>
                 <button
                   onClick={handleEdit}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-md text-slate-400 hover:text-slate-200 hover:bg-surface-2 transition-colors"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
                 >
                   <Pencil className="w-3.5 h-3.5" />
                   Edit
                 </button>
                 <button
                   onClick={onClose}
-                  className="text-slate-400 hover:text-slate-200 transition-colors p-1"
+                  className="text-muted-foreground hover:text-foreground transition-colors p-1"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -661,25 +653,25 @@ function DocumentModal({
         </div>
 
         {/* Frontmatter badges / editable tags */}
-        <div className="flex items-center gap-2 px-5 py-2 flex-wrap flex-shrink-0 border-b border-surface-3/20">
+        <div className="flex items-center gap-2 px-5 py-2 flex-wrap flex-shrink-0 border-b border-border/20">
           {fm.type && (
             <span className={`text-[10px] font-medium px-2 py-0.5 rounded ${typeClass}`}>
               {fm.type}
             </span>
           )}
           {fm.status && (
-            <span className="text-[10px] text-slate-400 bg-surface-2 px-2 py-0.5 rounded">
+            <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded">
               {fm.status}
             </span>
           )}
           {editing ? (
             <div className="flex items-center gap-1.5 flex-1 min-w-0">
-              <span className="text-[10px] text-slate-500 flex-shrink-0">tags:</span>
+              <span className="text-[10px] text-muted-foreground flex-shrink-0">tags:</span>
               <input
                 value={editTags}
                 onChange={(e) => setEditTags(e.target.value)}
                 placeholder="tag1, tag2, tag3"
-                className="flex-1 bg-surface-0 text-[11px] text-slate-200 rounded px-2 py-0.5 border border-surface-3/50 outline-none focus:border-brand-500/50 font-mono"
+                className="flex-1 bg-background text-[11px] text-foreground rounded px-2 py-0.5 border border-border/50 outline-none focus:border-primary/50 font-mono"
               />
             </div>
           ) : (
@@ -687,29 +679,29 @@ function DocumentModal({
               fm.tags.map((tag: string) => (
                 <span
                   key={tag}
-                  className="text-[10px] text-slate-400 bg-surface-2 px-1.5 py-0.5 rounded"
+                  className="text-[10px] text-muted-foreground bg-secondary px-1.5 py-0.5 rounded"
                 >
                   #{tag}
                 </span>
               ))
           )}
-          {!editing && <span className="text-[10px] text-slate-500 ml-auto">{doc.lineCount} lines</span>}
+          {!editing && <span className="text-[10px] text-muted-foreground ml-auto">{doc.lineCount} lines</span>}
         </div>
 
         {/* Summary */}
         {editing ? (
-          <div className="flex items-center gap-1.5 px-5 py-2 flex-shrink-0 border-b border-surface-3/20">
-            <span className="text-[10px] text-slate-500 flex-shrink-0">summary:</span>
+          <div className="flex items-center gap-1.5 px-5 py-2 flex-shrink-0 border-b border-border/20">
+            <span className="text-[10px] text-muted-foreground flex-shrink-0">summary:</span>
             <input
               value={editSummary}
               onChange={(e) => setEditSummary(e.target.value)}
               placeholder="Brief summary of this document..."
-              className="flex-1 bg-surface-0 text-[11px] text-slate-300 rounded px-2 py-0.5 border border-surface-3/50 outline-none focus:border-brand-500/50 italic"
+              className="flex-1 bg-background text-[11px] text-foreground/90 rounded px-2 py-0.5 border border-border/50 outline-none focus:border-primary/50 italic"
             />
           </div>
         ) : (
           fm.summary && (
-            <div className="text-[11px] text-slate-400 bg-surface-2/50 px-5 py-2 flex-shrink-0 italic border-b border-surface-3/20">
+            <div className="text-[11px] text-muted-foreground bg-secondary/50 px-5 py-2 flex-shrink-0 italic border-b border-border/20">
               {fm.summary}
             </div>
           )
@@ -721,15 +713,14 @@ function DocumentModal({
             <textarea
               value={editContent}
               onChange={(e) => setEditContent(e.target.value)}
-              className="w-full h-full resize-none bg-surface-0 text-slate-200 text-xs font-mono leading-relaxed p-5 outline-none"
+              className="w-full h-full resize-none bg-background text-foreground text-xs font-mono leading-relaxed p-5 outline-none"
               spellCheck={false}
             />
           ) : (
             <div className="px-5 py-4">
-              <div
-                className="prose-doc"
-                dangerouslySetInnerHTML={{ __html: renderedContent }}
-              />
+              <div className="prose-doc">
+                <Streamdown>{doc.content}</Streamdown>
+              </div>
             </div>
           )}
         </div>
@@ -919,13 +910,13 @@ export default function MemoryPage() {
       case "entity-detail":
         return <EntityDetailPanel detail={rightPanel.detail} />;
       case "loading-entity":
-        return <div className="text-[11px] text-slate-500 py-4">Loading facts...</div>;
+        return <div className="text-[11px] text-muted-foreground py-4">Loading facts...</div>;
       case "doc-detail":
         return <DocNodeDetail doc={rightPanel.doc} graphData={graphEdges} />;
       case "hover-node":
         return (
           <div>
-            <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-2">Hover preview</div>
+            <div className="text-[9px] uppercase tracking-wider text-muted-foreground mb-2">Hover preview</div>
             <NodeQuickInfo node={rightPanel.node} graphData={graphEdges} />
           </div>
         );
@@ -940,13 +931,13 @@ export default function MemoryPage() {
       {/* Header: search bar + stats */}
       <div className="flex items-center gap-4 flex-shrink-0">
         <div className="relative flex-1">
-          <Search className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+          <Search className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             value={searchQuery}
             onChange={handleSearchChange}
             placeholder="Search vault (BM25 full-text)..."
-            className="w-full bg-surface-2 text-sm text-slate-200 rounded-lg pl-10 pr-10 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50 placeholder:text-slate-500"
+            className="w-full bg-secondary text-sm text-foreground rounded-lg pl-10 pr-10 py-2 border border-border/50 outline-none focus:border-primary/50 placeholder:text-muted-foreground"
           />
           {searchQuery && (
             <button
@@ -955,36 +946,36 @@ export default function MemoryPage() {
                 setRightPanel({ kind: "empty" });
                 setActiveEntity(null);
               }}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground/90"
             >
               <X className="w-4 h-4" />
             </button>
           )}
           {searching && (
-            <div className="absolute right-10 top-1/2 -translate-y-1/2 text-[10px] text-slate-500">
+            <div className="absolute right-10 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">
               searching...
             </div>
           )}
         </div>
-        <div className="flex items-center gap-4 text-[11px] text-slate-400 flex-shrink-0">
+        <div className="flex items-center gap-4 text-[11px] text-muted-foreground flex-shrink-0">
           {stats && (
             <span className="flex items-center gap-1.5">
-              <FileText className="w-3.5 h-3.5 text-brand-400" />
-              <span className="text-slate-200 font-medium">{stats.docCount}</span> documents
+              <FileText className="w-3.5 h-3.5 text-primary" />
+              <span className="text-foreground font-medium">{stats.docCount}</span> documents
             </span>
           )}
           <span className="flex items-center gap-1.5">
             <User className="w-3.5 h-3.5 text-sky-400" />
-            <span className="text-slate-200 font-medium">{entityTotal}</span> entities
+            <span className="text-foreground font-medium">{entityTotal}</span> entities
           </span>
           <span className="flex items-center gap-1.5">
             <Network className="w-3.5 h-3.5 text-purple-400" />
-            <span className="text-slate-200 font-medium">{entityConnectionCount}</span> connections
+            <span className="text-foreground font-medium">{entityConnectionCount}</span> connections
           </span>
           {stats && (
             <span className="flex items-center gap-1.5">
               <Tag className="w-3.5 h-3.5 text-amber-400" />
-              <span className="text-slate-200 font-medium">{stats.tagCount}</span> tags
+              <span className="text-foreground font-medium">{stats.tagCount}</span> tags
             </span>
           )}
         </div>
@@ -994,13 +985,13 @@ export default function MemoryPage() {
       <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
         {/* Left: Entities + Explorer */}
         <div className="w-44 flex-shrink-0 flex flex-col min-h-0">
-          <div className="flex border-b border-surface-3/50 mb-2 flex-shrink-0">
+          <div className="flex border-b border-border/50 mb-2 flex-shrink-0">
             <button
               onClick={() => setSidebarTab("entities")}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider border-b-2 transition-colors ${
                 sidebarTab === "entities"
-                  ? "border-brand-400 text-brand-400"
-                  : "border-transparent text-slate-500 hover:text-slate-300"
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground/90"
               }`}
             >
               <User className="w-3 h-3" />
@@ -1010,8 +1001,8 @@ export default function MemoryPage() {
               onClick={() => setSidebarTab("explorer")}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider border-b-2 transition-colors ${
                 sidebarTab === "explorer"
-                  ? "border-brand-400 text-brand-400"
-                  : "border-transparent text-slate-500 hover:text-slate-300"
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground/90"
               }`}
             >
               <Folder className="w-3 h-3" />
@@ -1028,7 +1019,7 @@ export default function MemoryPage() {
               />
             )}
             {sidebarTab === "entities" && entities.length === 0 && (
-              <div className="text-[11px] text-slate-500 px-2 py-4">Loading entities...</div>
+              <div className="text-[11px] text-muted-foreground px-2 py-4">Loading entities...</div>
             )}
             {sidebarTab === "explorer" && (
               <VaultExplorer onOpenFile={handleOpenFile} />
@@ -1047,7 +1038,7 @@ export default function MemoryPage() {
         </div>
 
         {/* Right: dynamic panel */}
-        <div className="w-72 flex-shrink-0 overflow-y-auto min-h-0 border-l border-surface-3/30 pl-4">
+        <div className="w-72 flex-shrink-0 overflow-y-auto min-h-0 border-l border-border/30 pl-4">
           {renderRightPanel()}
         </div>
       </div>

@@ -540,7 +540,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
   // -- Render --
 
   return (
-    <div ref={containerRef} className="w-full h-full relative overflow-hidden bg-surface-0 rounded-lg border border-surface-3/30">
+    <div ref={containerRef} className="w-full h-full relative overflow-hidden bg-background rounded-lg border border-border/30">
       {!loading && !error && (
         <div className="absolute inset-0">
           <ForceGraph3D
@@ -577,9 +577,9 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
 
       {/* Legend — top-left, merged section colors + edge types */}
       {!loading && !error && (
-        <div className="absolute top-2 left-2 z-10 bg-surface-1/80 backdrop-blur-sm px-2 py-1.5 rounded text-[10px] text-slate-400 space-y-1">
+        <div className="absolute top-2 left-2 z-10 bg-card/80 backdrop-blur-sm px-2 py-1.5 rounded text-[10px] text-muted-foreground space-y-1">
           {/* Vault section node colors */}
-          <div className="font-semibold text-[9px] uppercase tracking-wider text-slate-500 mb-0.5">Nodes</div>
+          <div className="font-semibold text-[9px] uppercase tracking-wider text-muted-foreground mb-0.5">Nodes</div>
           <div className="flex flex-col gap-0.5">
             <span className="flex items-center gap-1.5">
               <span className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0" style={{background: "hsl(160,35%,50%)"}} />
@@ -603,7 +603,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
             </span>
           </div>
           {/* Edge category colors */}
-          <div className="font-semibold text-[9px] uppercase tracking-wider text-slate-500 mt-1 mb-0.5">Edges</div>
+          <div className="font-semibold text-[9px] uppercase tracking-wider text-muted-foreground mt-1 mb-0.5">Edges</div>
           <div className="flex flex-col gap-0.5">
             <span className="flex items-center gap-1.5">
               <span className="inline-block w-5 h-px flex-shrink-0" style={{background: `rgba(${CATEGORY_COLOR.structural},0.8)`}} />
@@ -626,14 +626,14 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       )}
 
       {loading && (
-        <div className="absolute inset-0 flex items-center justify-center text-slate-500 text-xs">
+        <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-xs">
           Loading knowledge graph...
         </div>
       )}
       {error && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-red-400 text-xs">
           <p>{error}</p>
-          <button onClick={loadGraph} className="underline text-slate-400 hover:text-slate-200">Retry</button>
+          <button onClick={loadGraph} className="underline text-muted-foreground hover:text-foreground">Retry</button>
         </div>
       )}
 
@@ -641,14 +641,14 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       {!loading && !error && (
         <div className="absolute bottom-2 right-2 z-10 flex items-center gap-1">
           {/* Edge type filter toggles */}
-          <div className="flex items-center gap-2 mr-2 bg-surface-1/80 backdrop-blur-sm px-2 py-1 rounded text-[10px]">
+          <div className="flex items-center gap-2 mr-2 bg-card/80 backdrop-blur-sm px-2 py-1 rounded text-[10px]">
             {(["structural", "lineage", "comparison", "reference"] as const).map((cat) => (
-              <label key={cat} className="flex items-center gap-1 cursor-pointer select-none text-slate-400 hover:text-slate-200">
+              <label key={cat} className="flex items-center gap-1 cursor-pointer select-none text-muted-foreground hover:text-foreground">
                 <input
                   type="checkbox"
                   checked={edgeFilters[cat]}
                   onChange={() => toggleFilter(cat)}
-                  className="w-2.5 h-2.5 accent-brand-500 cursor-pointer"
+                  className="w-2.5 h-2.5 accent-primary cursor-pointer"
                 />
                 <span>{cat}</span>
               </label>
@@ -660,14 +660,14 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
               if (onNodeClick) onNodeClick(null);
             }}
             title="Reset selection"
-            className="p-1 rounded text-slate-500 hover:text-slate-300 hover:bg-surface-2/80 transition-colors"
+            className="p-1 rounded text-muted-foreground hover:text-foreground/90 hover:bg-secondary/80 transition-colors"
           >
             <RotateCcw className="w-3 h-3" />
           </button>
           <button
             onClick={() => { if (fgRef.current) fgRef.current.zoomToFit(1200, 50); }}
             title="Fit all"
-            className="p-1 rounded text-slate-500 hover:text-slate-300 hover:bg-surface-2/80 transition-colors"
+            className="p-1 rounded text-muted-foreground hover:text-foreground/90 hover:bg-secondary/80 transition-colors"
           >
             <Maximize className="w-3 h-3" />
           </button>

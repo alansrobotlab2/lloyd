@@ -58,17 +58,6 @@
   --radius-sm: calc(var(--radius) - 4px);
 }
 
-/* Legacy palette — every page that hasn't been restyled yet still references
-   it. Retire in Phase 2B alongside the shell restyle. */
-@theme {
-  --color-brand-400: #818cf8;
-  --color-brand-500: #6366f1;
-  --color-brand-600: #4f46e5;
-  --color-surface-0: #020617;
-  --color-surface-1: #0f172a;
-  --color-surface-2: #1e293b;
-  --color-surface-3: #334155;
-}
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {
