@@ -184,6 +184,19 @@ livekit:
   # Utterance segmentation — energy-based VAD. Cheap and good enough for
   # push-to-talk-ish speech. Replace with silero-vad in a later pass if
   # noisier environments need it.
+  # TTS — runs in the worker. Streams PCM from the local Qwen3-TTS server
+  # at :8090 and republishes as a LiveKit audio track so the browser can
+  # play it via WebRTC. Aura visualizer modulates off this track.
+  tts:
+    api_url: http://127.0.0.1:8090
+    model: qwen3-tts
+    voice: "clone:cullen"      # Qwen3-TTS expects "clone:<profile>" with the Base model
+    speed: 1.0
+    sample_rate: 24000          # Qwen3-TTS native rate; matches the WAV header
+    # If true, only TTS the user-visible portions of the harness reply
+    # (drops empty / tool-call assistant rows). Phase 5B may swap to
+    # streaming text deltas with sentence segmentation for lower latency.
+    skip_empty: true
   vad:
     # RMS above this (0..1 over int16 normalized) counts as a voiced frame.
     # Quiet desk mic noise floor is ~0.003-0.005; raise to suppress

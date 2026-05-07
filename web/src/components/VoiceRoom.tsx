@@ -1,8 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
-import { Room, RoomEvent, Track, type LocalAudioTrack } from 'livekit-client'
-import { RoomContext } from '@livekit/components-react'
+import {
+  Room,
+  RoomEvent,
+  Track,
+  type LocalAudioTrack,
+  type RemoteAudioTrack,
+  type RemoteTrack,
+  type RemoteTrackPublication,
+  type RemoteParticipant,
+} from 'livekit-client'
+import { RoomContext, RoomAudioRenderer } from '@livekit/components-react'
 import type { AgentState } from '@livekit/components-react'
 import { api } from '../api'
+
+const AGENT_IDENTITY_PREFIX = 'lloyd-agent'
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'failed'
 
@@ -11,9 +22,12 @@ export interface VoiceRoomState {
   status: ConnectionStatus
   /** True once the local mic track is published. */
   micPublished: boolean
-  /** Local mic audio track once published — feeds the aura visualizer. */
+  /** Local mic audio track once published — useful for input-side meters. */
   localAudioTrack: LocalAudioTrack | undefined
-  /** Best-effort agent state mapped from connection lifecycle. */
+  /** Agent-published audio track (Lloyd's voice). Drives the aura visualizer
+   *  in Phase 5A onward. Undefined until the worker publishes its TTS track. */
+  agentAudioTrack: RemoteAudioTrack | undefined
+  /** Best-effort agent state from connection lifecycle + agent track presence. */
   agentState: AgentState
   error: string | null
   /** Manually reconnect / retry. */
@@ -52,6 +66,7 @@ export default function VoiceRoom({
   const [status, setStatus] = useState<ConnectionStatus>('idle')
   const [micPublished, setMicPublished] = useState(false)
   const [localAudioTrack, setLocalAudioTrack] = useState<LocalAudioTrack | undefined>(undefined)
+  const [agentAudioTrack, setAgentAudioTrack] = useState<RemoteAudioTrack | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
   const [reconnectKey, setReconnectKey] = useState(0)
 
@@ -63,6 +78,7 @@ export default function VoiceRoom({
       setStatus('idle')
       setMicPublished(false)
       setLocalAudioTrack(undefined)
+      setAgentAudioTrack(undefined)
     }
     const onReconnecting = () => {
       if (cancelled) return
@@ -73,9 +89,28 @@ export default function VoiceRoom({
       setStatus('connected')
     }
 
+    // Surface the agent's published audio track once it appears in the room.
+    const onTrackSubscribed = (
+      track: RemoteTrack,
+      _publication: RemoteTrackPublication,
+      participant: RemoteParticipant,
+    ) => {
+      if (cancelled) return
+      if (track.kind !== Track.Kind.Audio) return
+      if (!participant.identity.startsWith(AGENT_IDENTITY_PREFIX)) return
+      setAgentAudioTrack(track as RemoteAudioTrack)
+    }
+    const onTrackUnsubscribed = (track: RemoteTrack) => {
+      if (cancelled) return
+      if (track.kind !== Track.Kind.Audio) return
+      setAgentAudioTrack(prev => (prev && prev.sid === track.sid ? undefined : prev))
+    }
+
     room.on(RoomEvent.Disconnected, onDisconnected)
     room.on(RoomEvent.Reconnecting, onReconnecting)
     room.on(RoomEvent.Reconnected, onReconnected)
+    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed)
+    room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed)
 
     const connect = async () => {
       try {
@@ -130,17 +165,24 @@ export default function VoiceRoom({
       room.off(RoomEvent.Disconnected, onDisconnected)
       room.off(RoomEvent.Reconnecting, onReconnecting)
       room.off(RoomEvent.Reconnected, onReconnected)
+      room.off(RoomEvent.TrackSubscribed, onTrackSubscribed)
+      room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed)
       // Disconnect, but keep the Room instance for re-use on reconnectKey bump.
       room.disconnect().catch(() => {})
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, publishMic, reconnectKey])
 
+  // Coarse agent-state model. Phase 5A swap: presence of the agent track
+  // (i.e. Lloyd actively producing audio) flips us into 'speaking'. When
+  // the user is mic-on but no agent audio yet, we're 'listening'.
   const agentState: AgentState =
     status === 'connecting'
       ? 'connecting'
       : status === 'failed'
       ? 'disconnected'
+      : agentAudioTrack
+      ? 'speaking'
       : status === 'connected' && micPublished
       ? 'listening'
       : 'idle'
@@ -152,10 +194,14 @@ export default function VoiceRoom({
         status,
         micPublished,
         localAudioTrack,
+        agentAudioTrack,
         agentState,
         error,
         reconnect: () => setReconnectKey(k => k + 1),
       })}
+      {/* Plays all remote audio tracks (Lloyd's TTS) through the speakers.
+          Hidden — it just needs to be mounted somewhere inside RoomContext. */}
+      <RoomAudioRenderer />
     </RoomContext.Provider>
   )
 }

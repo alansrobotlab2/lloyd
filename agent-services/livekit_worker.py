@@ -63,6 +63,150 @@ def _http_url(ws_url: str) -> str:
     return ws_url
 
 
+# ── TTS ─────────────────────────────────────────────────────────────────
+
+class TTSStreamer:
+    """Streams PCM from the Qwen3-TTS HTTP server into a LiveKit AudioSource.
+
+    One instance per RoomBridge. Holds the published track; queues
+    utterances; runs them serially so the agent's voice doesn't overlap
+    itself when the harness produces multiple replies in quick succession.
+    """
+
+    # LiveKit AudioFrame chunks must be a multiple of 10 ms for the SDK
+    # to accept them. 100 ms gives a comfortable buffer with ~1 frame of
+    # latency added.
+    FRAME_MS = 100
+
+    def __init__(self, tts_cfg: dict, room: "rtc.Room") -> None:
+        self.cfg = tts_cfg
+        self.api_url = (tts_cfg.get("api_url") or "http://127.0.0.1:8090").rstrip("/")
+        self.model = tts_cfg.get("model", "qwen3-tts")
+        self.voice = tts_cfg.get("voice", "clone:cullen")
+        self.speed = float(tts_cfg.get("speed", 1.0))
+        self.sample_rate = int(tts_cfg.get("sample_rate", 24000))
+        self.room = room
+        self.source: Optional["rtc.AudioSource"] = None
+        self.track: Optional["rtc.LocalAudioTrack"] = None
+        self._publish_lock = asyncio.Lock()
+        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._worker_task: Optional[asyncio.Task] = None
+        self._speaking = asyncio.Event()
+        # Lazy import — keeps top-of-file clean.
+        import httpx
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=120.0))
+
+    async def ensure_published(self) -> None:
+        async with self._publish_lock:
+            if self.track is not None:
+                return
+            self.source = rtc.AudioSource(self.sample_rate, 1)
+            self.track = rtc.LocalAudioTrack.create_audio_track("lloyd-tts", self.source)
+            options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
+            await self.room.local_participant.publish_track(self.track, options)
+            self._worker_task = asyncio.create_task(self._drain())
+            LOG.info("TTSStreamer published track 'lloyd-tts' @ %d Hz", self.sample_rate)
+
+    async def speak(self, text: str) -> None:
+        """Queue an utterance for synthesis + playback."""
+        text = (text or "").strip()
+        if not text:
+            return
+        await self.ensure_published()
+        await self._queue.put(text)
+
+    @property
+    def is_speaking(self) -> bool:
+        return self._speaking.is_set()
+
+    async def close(self) -> None:
+        if self._worker_task is not None:
+            self._worker_task.cancel()
+            try:
+                await self._worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        try:
+            await self._http.aclose()
+        except Exception:
+            pass
+
+    async def _drain(self) -> None:
+        while True:
+            text = await self._queue.get()
+            self._speaking.set()
+            try:
+                await self._stream_utterance(text)
+            except Exception as e:
+                LOG.warning("TTS error for %r: %s", text[:60], e)
+            finally:
+                self._speaking.clear()
+
+    async def _stream_utterance(self, text: str) -> None:
+        """POST to /v1/audio/speech with stream:true,response_format:pcm and
+        push every PCM chunk into the LiveKit AudioSource."""
+        if self.source is None:
+            return
+        # 100ms LiveKit frame size, in samples + bytes.
+        samples_per_frame = self.sample_rate * self.FRAME_MS // 1000
+        bytes_per_frame = samples_per_frame * 2
+        leftover = bytearray()
+
+        t0 = time.monotonic()
+        n_pushed = 0
+        async with self._http.stream(
+            "POST",
+            f"{self.api_url}/v1/audio/speech",
+            json={
+                "model": self.model,
+                "input": text,
+                "voice": self.voice,
+                "response_format": "pcm",
+                "stream": True,
+                "speed": self.speed,
+            },
+        ) as resp:
+            if resp.status_code >= 300:
+                err = await resp.aread()
+                LOG.warning("TTS HTTP %d: %s", resp.status_code, err[:200])
+                return
+            async for chunk in resp.aiter_bytes():
+                if not chunk:
+                    continue
+                leftover.extend(chunk)
+                # Push complete 100ms frames; keep any tail for the next loop.
+                while len(leftover) >= bytes_per_frame:
+                    frame_bytes = bytes(leftover[:bytes_per_frame])
+                    del leftover[:bytes_per_frame]
+                    await self._push_frame(frame_bytes, samples_per_frame)
+                    n_pushed += 1
+        # Tail: any final partial frame (zero-padded to a 10ms boundary).
+        if leftover:
+            ten_ms = self.sample_rate // 100
+            ten_ms_bytes = ten_ms * 2
+            tail = bytes(leftover)
+            pad = (-len(tail)) % ten_ms_bytes
+            if pad:
+                tail = tail + b"\x00" * pad
+            samples = len(tail) // 2
+            if samples:
+                await self._push_frame(tail, samples)
+                n_pushed += 1
+        elapsed = time.monotonic() - t0
+        LOG.info("TTS spoke %r in %.2fs (%d frames)", text[:60], elapsed, n_pushed)
+
+    async def _push_frame(self, pcm_bytes: bytes, samples_per_channel: int) -> None:
+        if self.source is None:
+            return
+        frame = rtc.AudioFrame(
+            data=pcm_bytes,
+            sample_rate=self.sample_rate,
+            num_channels=1,
+            samples_per_channel=samples_per_channel,
+        )
+        await self.source.capture_frame(frame)
+
+
 def _looks_repetitive(text: str) -> bool:
     """Heuristic for Whisper hallucinations on near-silence: any 1- or
     2-word phrase repeated 4+ times consecutively. Catches both "Bye.
@@ -291,6 +435,12 @@ class RoomBridge:
     """One-room connection: subscribes to remote audio, segments utterances,
     transcribes them, and POSTs each transcript to /api/voice/inject."""
 
+    # How often the room polls /api/messages/<session> for new assistant
+    # turns to TTS. 500ms matches the page poll cadence; tightening to
+    # 250ms gives marginally lower mouth-latency at minor server load.
+    SESSION_POLL_INTERVAL = 0.5
+    MESSAGES_URL_TEMPLATE = "http://127.0.0.1:8080/api/messages/{session_id}"
+
     def __init__(self, room_name: str, lk_cfg: dict, stt: WhisperSTT,
                  vad_cfg: dict, http_client) -> None:
         self.room_name = room_name
@@ -309,6 +459,14 @@ class RoomBridge:
         # one when its participant leaves (otherwise stale streams keep
         # producing duplicate transcripts).
         self._audio_tasks: dict[str, asyncio.Task] = {}
+        # TTS pipeline (lazy-initialized on connect).
+        self._tts_cfg = lk_cfg.get("tts", {}) or {}
+        self.tts: Optional[TTSStreamer] = None
+        # Track which assistant message ids have already been TTS'd so the
+        # session poller doesn't speak the same reply twice. Seeded at
+        # connect time with the entire existing history so we only speak
+        # newly-arrived turns.
+        self._spoken_ids: set[str] = set()
         # Derive session_id from room name: "lloyd-${session_id}" → session_id
         prefix = lk_cfg.get("room_prefix", DEFAULT_ROOM_PREFIX)
         self.session_id = room_name[len(prefix):] if room_name.startswith(prefix) else room_name
@@ -335,6 +493,16 @@ class RoomBridge:
         await self.room.connect(self.lk_cfg["url"], token)
         LOG.info("[%s] connected as %s", self.room_name, self.room.local_participant.identity)
 
+        # TTS pipeline + session poller — only spin them up after the room
+        # connection is alive so the published track has a parent.
+        self.tts = TTSStreamer(self._tts_cfg, self.room)
+        await self.tts.ensure_published()
+        # Seed the spoken-set with all existing assistant ids so we don't
+        # re-speak history when the worker reconnects to an existing room.
+        await self._seed_spoken_set()
+        poll_task = asyncio.create_task(self._poll_session_messages())
+        self._tasks.append(poll_task)
+
     @property
     def has_remote_participants(self) -> bool:
         """True if any non-agent participant is currently in the room.
@@ -360,8 +528,63 @@ class RoomBridge:
             except asyncio.TimeoutError:
                 LOG.warning("[%s] utterance tasks still running at shutdown — abandoning",
                             self.room_name)
+        if self.tts is not None:
+            await self.tts.close()
+            self.tts = None
         await self.room.disconnect()
         LOG.info("[%s] disconnected", self.room_name)
+
+    async def _seed_spoken_set(self) -> None:
+        url = self.MESSAGES_URL_TEMPLATE.format(session_id=self.session_id)
+        try:
+            r = await self.http.get(url, timeout=5.0)
+            if r.status_code != 200:
+                return
+            for m in (r.json().get("messages") or []):
+                if m.get("role") == "assistant":
+                    mid = m.get("id")
+                    if mid:
+                        self._spoken_ids.add(mid)
+            LOG.info("[%s] seeded spoken set with %d existing assistant turns",
+                     self.room_name, len(self._spoken_ids))
+        except Exception as e:
+            LOG.warning("[%s] could not seed spoken set: %s", self.room_name, e)
+
+    async def _poll_session_messages(self) -> None:
+        """Watch the session JSON for new assistant turns and TTS them.
+
+        Runs while the bridge is connected. Skips:
+        - Subliminal / tool messages (not user-facing).
+        - Empty assistant rows (the harness tool-call frames).
+        - Anything we've already spoken (tracked by message id).
+        """
+        url = self.MESSAGES_URL_TEMPLATE.format(session_id=self.session_id)
+        skip_empty = bool(self._tts_cfg.get("skip_empty", True))
+        try:
+            while True:
+                try:
+                    r = await self.http.get(url, timeout=5.0)
+                    if r.status_code == 200:
+                        for m in (r.json().get("messages") or []):
+                            if m.get("role") != "assistant":
+                                continue
+                            mid = m.get("id")
+                            if not mid or mid in self._spoken_ids:
+                                continue
+                            text = "".join(
+                                c.get("text", "") for c in (m.get("content") or [])
+                                if c.get("type") == "text"
+                            ).strip()
+                            self._spoken_ids.add(mid)
+                            if skip_empty and not text:
+                                continue
+                            if self.tts is not None:
+                                await self.tts.speak(text)
+                except Exception as e:
+                    LOG.warning("[%s] session poll failed: %s", self.room_name, e)
+                await asyncio.sleep(self.SESSION_POLL_INTERVAL)
+        except asyncio.CancelledError:
+            return
 
     def _on_track_subscribed(self, track, publication, participant) -> None:  # noqa: ARG002
         if track.kind != rtc.TrackKind.KIND_AUDIO:
