@@ -156,6 +156,19 @@ models:
       ANTHROPIC_BASE_URL: http://127.0.0.1:8091
       ANTHROPIC_CUSTOM_MODEL_OPTION: secondary
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Secondary
+livekit:
+  # Self-hosted server bound to 127.0.0.1:7880 (see agent-services/conf/livekit.yaml).
+  # Browser clients connect via this URL; backend mints JWTs against the same
+  # api_key/api_secret pair.
+  url: ws://127.0.0.1:7880
+  api_key: lloyddevkey
+  api_secret: lloyd-dev-secret-do-not-ship-replace-me-32chars-min
+  # All session rooms get this prefix. The room name resolves to
+  # `${room_prefix}${session_id}` so the worker can map participant rooms back
+  # to chat sessions on join.
+  room_prefix: "lloyd-"
+  # The worker joins rooms as this identity when a participant connects.
+  agent_identity: "lloyd-agent"
 server:
   host: 0.0.0.0
   port: 8080

@@ -1054,4 +1054,21 @@ export const api = {
         if (!r.ok) throw new Error(`blob ${sha} not found (${r.status})`)
         return r.json()
       }),
+
+  // ── LiveKit (Phase 3) ──────────────────────────────────────────────
+  // Mint a room-scoped JWT for the browser client. The session_id maps
+  // 1:1 to a room (`lloyd-${session_id}`); the agent-worker watches
+  // RoomService and joins the same room once a participant connects.
+  livekitToken: (
+    sessionId: string,
+    identity?: string,
+  ): Promise<{ url: string; token: string; room: string; identity: string }> =>
+    fetch(`${API_BASE}/livekit/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, identity }),
+    }).then(r => {
+      if (!r.ok) throw new Error(`livekit/token failed: ${r.status}`)
+      return r.json()
+    }),
 }
