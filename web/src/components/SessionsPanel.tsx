@@ -3,6 +3,9 @@ import { MessageCircle, Clock, Loader2 } from 'lucide-react'
 import { api } from '../api'
 import { useSessionActivity } from '../hooks/useSessionActivity'
 import RunningAgentsPanel from './RunningAgentsPanel'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { Separator } from '@/components/ui/separator'
 
 interface Session {
   id: string
@@ -31,7 +34,6 @@ export default function SessionsPanel({ onSwitchSession, currentSessionKey, refr
   )
   const { hasActivity, markSeen } = useSessionActivity(activitySessions, true, currentSessionKey)
 
-  // Mark current session as seen and scroll to it when it changes
   useEffect(() => {
     if (currentSessionKey) {
       markSeen(currentSessionKey)
@@ -63,72 +65,79 @@ export default function SessionsPanel({ onSwitchSession, currentSessionKey, refr
     return () => clearInterval(interval)
   }, [loadSessions])
 
-  // Refresh when trigger changes (new session created, message sent)
   useEffect(() => {
-    if (refreshTrigger) {
-      loadSessions()
-    }
+    if (refreshTrigger) loadSessions()
   }, [refreshTrigger, loadSessions])
 
   return (
-    <div className="flex flex-col h-full bg-surface-1 border-r border-surface-3/30 w-64">
+    <div className="flex flex-col h-full bg-card text-card-foreground w-64">
       {/* Header */}
-      <div className="p-3 border-b border-surface-3/30">
+      <div className="p-3 border-b border-border">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <MessageCircle className="w-4 h-4 text-brand-400" />
-            <span className="text-sm font-semibold text-slate-200">Sessions</span>
+            <MessageCircle className="w-4 h-4 text-primary" />
+            <span className="text-sm font-semibold text-foreground">Sessions</span>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={loadSessions}
-            className="p-1 text-slate-400 hover:text-slate-200 rounded transition-colors"
             title="Refresh"
+            className="h-6 w-6 text-muted-foreground hover:text-foreground"
           >
-            <Loader2 className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
-          </button>
+            <Loader2 className={cn('w-3 h-3', loading && 'animate-spin')} />
+          </Button>
         </div>
       </div>
 
-      {/* Session List */}
-      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+      {/* Session list */}
+      <div className="flex-1 overflow-y-auto p-2">
         {loading ? (
           <div className="flex items-center justify-center h-full">
-            <Loader2 className="w-5 h-5 animate-spin text-slate-500" />
+            <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
           </div>
         ) : sessions.length === 0 ? (
-          <div className="text-center text-slate-500 p-4">
+          <div className="text-center text-muted-foreground p-4">
             <p className="text-sm">No sessions found</p>
           </div>
         ) : (
-          <div className="divide-y divide-surface-3/30" ref={sessionListRef}>
+          <div className="divide-y divide-border" ref={sessionListRef}>
             {sessions.map((session) => {
               const key = session.session_key || session.id
+              const isCurrent = currentSessionKey === key
               const isActive = activeSessions?.has(key) ?? false
               const hasNewActivity = hasActivity(key)
               return (
                 <button
                   key={key}
-                  data-selected={currentSessionKey === key ? "true" : undefined}
+                  data-selected={isCurrent ? 'true' : undefined}
                   onClick={() => { markSeen(key); onSwitchSession(key) }}
-                  className={`w-full text-left p-2 rounded-lg transition-colors ${
-                    currentSessionKey === key
-                      ? 'bg-brand-600/20'
-                      : 'hover:bg-surface-2'
-                  }`}
+                  className={cn(
+                    'w-full text-left p-2 rounded-md transition-colors',
+                    isCurrent
+                      ? 'bg-primary/15 hover:bg-primary/20'
+                      : 'hover:bg-accent',
+                  )}
                 >
-                  <div className="text-[10px] text-slate-400 truncate mb-1">
+                  <div className="text-[10px] text-muted-foreground truncate mb-1">
                     {session.preview || 'No preview'}
                   </div>
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1 text-[10px] text-slate-500">
+                    <div className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
                       <Clock className="w-2.5 h-2.5" />
                       <span>{session.last_active}</span>
                     </div>
                     {isActive && (
-                      <span className="w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse flex-shrink-0" />
+                      <span
+                        className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse flex-shrink-0"
+                        aria-label="streaming"
+                      />
                     )}
                     {hasNewActivity && !isActive && (
-                      <span className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" />
+                      <span
+                        className="w-2 h-2 rounded-full bg-emerald-400 flex-shrink-0"
+                        aria-label="unread activity"
+                      />
                     )}
                   </div>
                 </button>
@@ -139,8 +148,9 @@ export default function SessionsPanel({ onSwitchSession, currentSessionKey, refr
       </div>
 
       {/* Footer */}
-      <div className="p-2 border-t border-surface-3/30">
-        <div className="text-[10px] text-slate-500 text-center">
+      <Separator />
+      <div className="p-2">
+        <div className="text-[10px] text-muted-foreground/70 text-center">
           {sessions.length} session{sessions.length !== 1 ? 's' : ''}
         </div>
       </div>
