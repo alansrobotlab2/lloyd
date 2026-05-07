@@ -11,7 +11,6 @@ import ArchitecturePageFull from './pages/ArchitecturePage'
 import AutonomyPage from './pages/AutonomyPage'
 import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
-import VoicePreviewPage from './pages/VoicePreviewPage'
 import SettingsPage from './pages/SettingsPage'
 import RightChatSidebar from './RightChatSidebar'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
@@ -61,7 +60,6 @@ const PAGES: Record<string, React.FC> = {
   autonomy: AutonomyPage,
   workers: WorkersPage,
   inner_voice: InnerVoicePage,  // Inner Voice (#345)
-  voice_preview: VoicePreviewPage,  // Phase 2A — aura visualizer with mock state
 }
 
 interface ModelMenuProps {
@@ -126,11 +124,11 @@ function ModelMenu({
 
 export default function Layout() {
   const isMobile = useIsMobile()
-  const [page, setPage] = useState<Page>('chat')
+  const [page, setPage] = useState<Page>('inner_voice')
   const [collapsed, setCollapsed] = useState(true)
-  // Right chat sidebar — voice-driven dual-brain chat. Currently always
-  // visible on desktop; voice auto-engages on its session as soon as the
-  // sidebar mounts. (User asked to drop collapse for now — revisit later.)
+  // Right chat sidebar — voice-driven dual-brain chat. Mounted on desktop;
+  // owns its own collapse state + voice engagement (collapsing disengages
+  // voice, expanding re-engages). Persisted via localStorage internally.
   const [slots, setSlots] = useState<Slot[]>([])
   const [visibleSlotId, setVisibleSlotId] = useState<string | null>(null)
   const [activeSessions, setActiveSessions] = useState<Set<string>>(new Set())
@@ -260,7 +258,6 @@ export default function Layout() {
             onNavigate={setPage}
             collapsed={collapsed}
             onToggleCollapse={() => setCollapsed(c => !c)}
-            sessionKey={visibleSlot?.sessionKey}
           />
         )}
 
@@ -339,7 +336,6 @@ export default function Layout() {
                 onNavigate={handleMobileNavigate}
                 collapsed={false}
                 onToggleCollapse={() => {}}
-                sessionKey={visibleSlot?.sessionKey}
                 isMobile
               />
             </SheetContent>

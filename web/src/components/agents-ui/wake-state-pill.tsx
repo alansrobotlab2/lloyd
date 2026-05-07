@@ -44,8 +44,8 @@ export function WakeStatePill({
         'flex items-center gap-2 rounded-full border border-border bg-card text-muted-foreground',
         padding,
       )}>
-        <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground" />
-        Not connected
+        <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground shrink-0" />
+        <span className="truncate">Not connected</span>
       </div>
     )
   }
@@ -55,8 +55,8 @@ export function WakeStatePill({
         'flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-300',
         padding,
       )}>
-        <span className="inline-block h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-        Lloyd is thinking…
+        <span className="inline-block h-2 w-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
+        <span className="truncate">{compact ? 'Thinking…' : 'Lloyd is thinking…'}</span>
       </div>
     )
   }
@@ -66,8 +66,8 @@ export function WakeStatePill({
         'flex items-center gap-2 rounded-full border border-primary/40 bg-primary/10 text-primary',
         padding,
       )}>
-        <span className="inline-block h-2 w-2 rounded-full bg-primary animate-pulse" />
-        Lloyd is speaking
+        <span className="inline-block h-2 w-2 rounded-full bg-primary animate-pulse shrink-0" />
+        <span className="truncate">{compact ? 'Speaking' : 'Lloyd is speaking'}</span>
       </div>
     )
   }
@@ -101,8 +101,10 @@ export function WakeStatePill({
       'flex items-center gap-2 rounded-full border border-border bg-card text-muted-foreground',
       padding,
     )}>
-      <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground/60" />
-      Say <span className="font-mono text-foreground">'Lloyd'</span> to start
+      <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground/60 shrink-0" />
+      <span className="truncate">
+        Say <span className="font-mono text-foreground">'Lloyd'</span>{compact ? '' : ' to start'}
+      </span>
     </div>
   )
 }

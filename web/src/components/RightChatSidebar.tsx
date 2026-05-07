@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Plus, Info, Loader2, Square, Brain } from 'lucide-react'
+import { Plus, Info, Loader2, Square, Brain, ChevronsLeft, ChevronsRight } from 'lucide-react'
 import { type AgentState, useTrackVolume } from '@livekit/components-react'
+import { type LocalAudioTrack, type RemoteAudioTrack } from 'livekit-client'
 import ChatPanel from './ChatPanel'
 import { AgentAudioVisualizerAura } from './agents-ui/agent-audio-visualizer-aura'
 import { WakeStatePill } from './agents-ui/wake-state-pill'
 import { Button } from '@/components/ui/button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { api } from '../api'
 import { useVoiceMode } from '../contexts/VoiceModeContext'
@@ -22,9 +29,94 @@ const AURA_COLORSHIFT_MAX = 1.25
 const AGENT_SPEAKING_THRESHOLD = 0.02
 
 const STORAGE_KEY = 'mc.rightChatSidebar.width'
+const COLLAPSED_KEY = 'mc.rightChatSidebar.collapsed'
 const MIN_WIDTH = 320
 const MAX_WIDTH = 720
 const DEFAULT_WIDTH = 448  // 28rem
+const COLLAPSED_WIDTH = 56 // matches the left nav's collapsed width (w-14)
+
+/** Compact dBFS meter for the local mic — mirrors the readout on the
+ *  Voice tab so the sidebar shows mic activity at a glance. Reads off the
+ *  local track only; agent TTS doesn't drive this bar. */
+function MicDbMeter({
+  audioTrack,
+}: {
+  audioTrack: LocalAudioTrack | RemoteAudioTrack | undefined
+}) {
+  const volume = useTrackVolume(audioTrack as LocalAudioTrack | undefined, {
+    fftSize: 512,
+    smoothingTimeConstant: 0.55,
+  })
+  const dbfs = volume > 0.0001 ? 20 * Math.log10(volume) : -120
+  const dbDisplay = volume > 0 ? `${dbfs.toFixed(1)} dB` : '—'
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+        <span>mic</span>
+        <span className="tabular-nums text-foreground">{dbDisplay}</span>
+      </div>
+      <div className="h-1.5 w-full rounded-full bg-secondary overflow-hidden">
+        <div
+          className="h-full bg-primary transition-[width] duration-100"
+          style={{ width: `${Math.min(100, volume * 200)}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
+/** Tiny mic dBFS bar for collapsed mode — same data as MicDbMeter, but
+ *  rendered as a thin horizontal bar that fits inside the slender sidebar
+ *  with no numeric readout. */
+function MicDbMini({
+  audioTrack,
+}: {
+  audioTrack: LocalAudioTrack | RemoteAudioTrack | undefined
+}) {
+  const volume = useTrackVolume(audioTrack as LocalAudioTrack | undefined, {
+    fftSize: 512,
+    smoothingTimeConstant: 0.55,
+  })
+  return (
+    <div
+      className="h-1 w-8 rounded-full bg-secondary overflow-hidden"
+      title={volume > 0.0001 ? `${(20 * Math.log10(volume)).toFixed(1)} dB` : 'mic silent'}
+    >
+      <div
+        className="h-full bg-primary transition-[width] duration-100"
+        style={{ width: `${Math.min(100, volume * 200)}%` }}
+      />
+    </div>
+  )
+}
+
+/** Single colored dot mirroring the wake-state pill's status colors —
+ *  used in collapsed mode where the full pill won't fit. */
+function StatusDot({
+  status,
+  agentSpeaking,
+  agentThinking,
+  wakeState,
+}: {
+  status: 'idle' | 'connecting' | 'connected' | 'failed'
+  agentSpeaking: boolean
+  agentThinking: boolean
+  wakeState: 'idle' | 'listening'
+}) {
+  const cls =
+    status !== 'connected' ? 'bg-muted-foreground' :
+    agentThinking ? 'bg-amber-400 animate-pulse' :
+    agentSpeaking ? 'bg-primary animate-pulse' :
+    wakeState === 'listening' ? 'bg-emerald-400 animate-pulse' :
+    'bg-muted-foreground/60'
+  const label =
+    status !== 'connected' ? 'Not connected' :
+    agentThinking ? 'Thinking…' :
+    agentSpeaking ? 'Speaking' :
+    wakeState === 'listening' ? 'Listening' :
+    "Say 'Lloyd'"
+  return <span className={cn('inline-block h-2 w-2 rounded-full', cls)} title={label} />
+}
 
 function loadStoredWidth(): number {
   try {
@@ -35,6 +127,14 @@ function loadStoredWidth(): number {
     return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, n))
   } catch {
     return DEFAULT_WIDTH
+  }
+}
+
+function loadCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSED_KEY) === '1'
+  } catch {
+    return false
   }
 }
 
@@ -59,6 +159,7 @@ export default function RightChatSidebar() {
   const [agentDetails, setAgentDetails] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [width, setWidth] = useState<number>(loadStoredWidth)
+  const [collapsed, setCollapsed] = useState<boolean>(loadCollapsed)
   const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null)
   // ChatPanel publishes its "harness is thinking / streaming" state via
   // onThinkingChange. We mirror it here so the aura can flip to 'thinking'
@@ -115,15 +216,24 @@ export default function RightChatSidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Engage voice once we have a session. Stays engaged for the lifetime of
-  // the sidebar. Disengages on unmount (only happens on Layout teardown).
+  // Engage voice once we have a session AND the sidebar is expanded.
+  // Collapsing the sidebar disengages voice (mic stops publishing, agent
+  // track tears down) — re-expanding re-engages cleanly. Disengages on
+  // unmount as well (Layout teardown).
   useEffect(() => {
-    if (sessionKey) {
-      voice.engage(sessionKey)
-      return () => voice.disengage()
-    }
+    if (!sessionKey || collapsed) return
+    voice.engage(sessionKey)
+    return () => voice.disengage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey])
+  }, [sessionKey, collapsed])
+
+  const toggleCollapsed = useCallback(() => {
+    setCollapsed(c => {
+      const next = !c
+      try { localStorage.setItem(COLLAPSED_KEY, next ? '1' : '0') } catch { /* ignore */ }
+      return next
+    })
+  }, [])
 
   const handleNewSession = async () => {
     setSessionKey(null)
@@ -244,6 +354,120 @@ export default function RightChatSidebar() {
     AURA_COLORSHIFT_MIN +
     Math.min(1, agentVolume * 1.4) * (AURA_COLORSHIFT_MAX - AURA_COLORSHIFT_MIN)
 
+  // ── Collapsed layout ──────────────────────────────────────────────
+  // Slender bar matching the left nav's collapsed width. Mini aura on
+  // top, status dot, vertical icon buttons mirroring the right column,
+  // dB indicator, and an expand button at the bottom. While collapsed
+  // voice is fully disengaged (see useEffect above), so the aura's
+  // visualizerTrack is undefined and it just shows the idle animation —
+  // that's the desired "voice is off" cue.
+  if (collapsed) {
+    return (
+      <TooltipProvider delayDuration={150}>
+        <aside
+          style={{ width: `${COLLAPSED_WIDTH}px` }}
+          className="shrink-0 h-full flex flex-col items-center gap-1.5 py-2 bg-card border-l border-border"
+        >
+          <AgentAudioVisualizerAura
+            size="icon"
+            state={auraState}
+            audioTrack={visualizerTrack}
+            color="#A78BFA"
+            colorShift={dynamicColorShift}
+            themeMode="dark"
+            className="!h-10 !w-10"
+          />
+          <StatusDot
+            status={status}
+            agentSpeaking={isSpeaking}
+            agentThinking={chatThinking}
+            wakeState={room?.wakeState ?? 'idle'}
+          />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={handleNewSession}
+                disabled={resolving}
+                className="h-8 w-8 shrink-0"
+              >
+                {resolving
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <Plus className="w-4 h-4" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">New chat session</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={chatThinking ? 'destructive' : 'outline'}
+                size="icon"
+                onClick={handleStop}
+                disabled={!sessionKey}
+                className="h-8 w-8 shrink-0"
+              >
+                <Square className="w-4 h-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">Stop turn</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={ivEnabled ? 'secondary' : 'outline'}
+                size="icon"
+                onClick={handleToggleIv}
+                disabled={!sessionKey || ivBusy}
+                className={cn(
+                  'h-8 w-8 shrink-0',
+                  ivEnabled
+                    ? 'bg-purple-600/20 border-purple-500/30 text-purple-400 hover:bg-purple-600/30 hover:text-purple-300'
+                    : '',
+                )}
+              >
+                {ivBusy
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <Brain className="w-4 h-4" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">{ivEnabled ? 'Inner Voice on' : 'Inner Voice off'}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={agentDetails ? 'secondary' : 'outline'}
+                size="icon"
+                onClick={() => setAgentDetails(d => !d)}
+                className="h-8 w-8 shrink-0"
+              >
+                <Info className="w-4 h-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">Toggle agent details</TooltipContent>
+          </Tooltip>
+          <MicDbMini audioTrack={localTrack} />
+          <div className="flex-1" />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={toggleCollapsed}
+                className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+              >
+                <ChevronsLeft className="w-4 h-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">Expand chat — re-engages voice</TooltipContent>
+          </Tooltip>
+        </aside>
+      </TooltipProvider>
+    )
+  }
+
+  // ── Expanded layout ───────────────────────────────────────────────
   return (
     <aside
       style={{ width: `${width}px` }}
@@ -262,90 +486,98 @@ export default function RightChatSidebar() {
         <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border group-hover:bg-primary/60 transition-colors" />
       </div>
 
-      {/* Header: pill on top, aura below for breathing room, actions at the
-          bottom. Aura is centered + sized to fill comfortably without
-          dominating the sidebar's vertical real estate. */}
-      <div className="flex flex-col gap-3 p-3 border-b border-border">
-        <WakeStatePill
-          compact
-          status={status}
-          wakeState={room?.wakeState ?? 'idle'}
-          wakeRemainingS={room?.wakeRemainingS ?? 0}
-          wakeContinuationS={room?.wakeContinuationS ?? 6}
-          wakeSpeaker={room?.wakeSpeaker ?? null}
-          agentSpeaking={isSpeaking}
-          agentThinking={chatThinking}
-        />
-        <div className="flex items-center justify-center py-2">
-          <AgentAudioVisualizerAura
-            size="lg"
-            state={auraState}
-            audioTrack={visualizerTrack}
-            color="#A78BFA"
-            colorShift={dynamicColorShift}
-            themeMode="dark"
-            // 25% smaller than the size="lg" default (224 → 168px). The
-            // size variants don't have an in-between, so we override
-            // height + width directly with !important utility classes.
-            className="!h-[168px] !w-[168px]"
-          />
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleNewSession}
-            disabled={resolving}
-            className="h-7 text-xs"
-            title="Start a new dual-brain session"
-          >
-            {resolving
-              ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-              : <Plus className="w-3.5 h-3.5 mr-1.5" />}
-            New
-          </Button>
-          <Button
-            variant={chatThinking ? 'destructive' : 'outline'}
-            size="sm"
-            onClick={handleStop}
-            disabled={!sessionKey}
-            className="h-7 text-xs"
-            title="Stop the current turn and drain queued ambient turns"
-          >
-            <Square className="w-3.5 h-3.5 mr-1.5" />
-            Stop
-          </Button>
-          <Button
-            variant={ivEnabled ? 'secondary' : 'outline'}
-            size="sm"
-            onClick={handleToggleIv}
-            disabled={!sessionKey || ivBusy}
-            className={cn(
-              'h-7 text-xs',
-              ivEnabled
-                ? 'bg-purple-600/20 border-purple-500/30 text-purple-400 hover:bg-purple-600/30 hover:text-purple-300'
-                : '',
-            )}
-            title={ivEnabled ? 'Pause Inner Voice for this session' : 'Resume Inner Voice for this session'}
-          >
-            {ivBusy
-              ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-              : <Brain className="w-3.5 h-3.5 mr-1.5" />}
-            {ivEnabled ? 'IV on' : 'IV off'}
-          </Button>
-          <Button
-            variant={agentDetails ? 'secondary' : 'outline'}
-            size="sm"
-            onClick={() => setAgentDetails(d => !d)}
-            className="h-7 text-xs"
-            title="Show / hide agent details (tool calls, thinking)"
-          >
-            <Info className="w-3.5 h-3.5 mr-1.5" />
-            Details
-          </Button>
-          <span className="ml-auto text-[10px] text-muted-foreground font-mono truncate max-w-[10rem]" title={sessionKey ?? ''}>
-            {sessionKey ?? (resolving ? 'creating…' : '—')}
-          </span>
+      {/* Collapse chevron — anchored to the upper-left corner of the sidebar.
+          z-20 keeps it clickable above the resize handle's hot zone. */}
+      <button
+        onClick={toggleCollapsed}
+        title="Collapse chat — disengages voice"
+        className="absolute top-1.5 left-1.5 z-20 h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        aria-label="Collapse chat sidebar"
+      >
+        <ChevronsRight className="w-4 h-4" />
+      </button>
+
+      {/* Header: aura centered (not stretched) on the left, stacked
+          controls on the right. Right column owns its own height; aura
+          is a fixed square that centers within whatever space is left. */}
+      <div className="flex flex-col gap-2 p-3 border-b border-border">
+        <div className="flex items-start gap-3">
+          <div className="flex-1 min-w-0 flex items-center justify-center overflow-hidden">
+            <AgentAudioVisualizerAura
+              size="lg"
+              state={auraState}
+              audioTrack={visualizerTrack}
+              color="#A78BFA"
+              colorShift={dynamicColorShift}
+              themeMode="dark"
+              className="!h-[180px] !w-[180px] shrink-0"
+            />
+          </div>
+          <div className="w-28 shrink-0 flex flex-col gap-1.5">
+            <WakeStatePill
+              compact
+              status={status}
+              wakeState={room?.wakeState ?? 'idle'}
+              wakeRemainingS={room?.wakeRemainingS ?? 0}
+              wakeContinuationS={room?.wakeContinuationS ?? 6}
+              wakeSpeaker={room?.wakeSpeaker ?? null}
+              agentSpeaking={isSpeaking}
+              agentThinking={chatThinking}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleNewSession}
+              disabled={resolving}
+              className="h-7 text-xs w-full justify-start"
+              title="Start a new dual-brain session"
+            >
+              {resolving
+                ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                : <Plus className="w-3.5 h-3.5 mr-1.5" />}
+              New
+            </Button>
+            <Button
+              variant={chatThinking ? 'destructive' : 'outline'}
+              size="sm"
+              onClick={handleStop}
+              disabled={!sessionKey}
+              className="h-7 text-xs w-full justify-start"
+              title="Stop the current turn and drain queued ambient turns"
+            >
+              <Square className="w-3.5 h-3.5 mr-1.5" />
+              Stop
+            </Button>
+            <Button
+              variant={ivEnabled ? 'secondary' : 'outline'}
+              size="sm"
+              onClick={handleToggleIv}
+              disabled={!sessionKey || ivBusy}
+              className={cn(
+                'h-7 text-xs w-full justify-start',
+                ivEnabled
+                  ? 'bg-purple-600/20 border-purple-500/30 text-purple-400 hover:bg-purple-600/30 hover:text-purple-300'
+                  : '',
+              )}
+              title={ivEnabled ? 'Pause Inner Voice for this session' : 'Resume Inner Voice for this session'}
+            >
+              {ivBusy
+                ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                : <Brain className="w-3.5 h-3.5 mr-1.5" />}
+              {ivEnabled ? 'IV on' : 'IV off'}
+            </Button>
+            <Button
+              variant={agentDetails ? 'secondary' : 'outline'}
+              size="sm"
+              onClick={() => setAgentDetails(d => !d)}
+              className="h-7 text-xs w-full justify-start"
+              title="Show / hide agent details (tool calls, thinking)"
+            >
+              <Info className="w-3.5 h-3.5 mr-1.5" />
+              Details
+            </Button>
+            <MicDbMeter audioTrack={localTrack} />
+          </div>
         </div>
         {error && (
           <div className="text-xs text-destructive break-words">{error}</div>

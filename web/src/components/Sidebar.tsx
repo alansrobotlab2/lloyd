@@ -11,14 +11,8 @@ import {
   PinOff,
   Code2,
   Lightbulb,
-  Mic,
-  MicOff,
-  Volume2,
   Workflow,
   BrainCircuit,
-  Waves,
-  Power,
-  Square,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -29,10 +23,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { useVoiceMode } from '../contexts/VoiceModeContext'
-import { AgentAudioVisualizerAura } from './agents-ui/agent-audio-visualizer-aura'
 
-export type Page = 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'voice_preview'
+export type Page = 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice'
 
 interface NavItem {
   id: Page
@@ -51,7 +43,6 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'skills', label: 'Skills', icon: Sparkles },
   { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'services', label: 'Services', icon: LayoutList },
-  { id: 'voice_preview', label: 'Voice (preview)', icon: Waves },
 ]
 
 const BOTTOM_ITEMS: NavItem[] = [
@@ -63,7 +54,6 @@ interface SidebarProps {
   onNavigate: (page: Page) => void
   collapsed: boolean
   onToggleCollapse: () => void
-  sessionKey?: string | null
   isMobile?: boolean
 }
 
@@ -109,171 +99,7 @@ function NavRow({
   return button
 }
 
-// Voice block driven by VoiceModeContext (Phase 6). Replaces the legacy
-// pollVoiceStatus loop that polled /api/voice/status every 500ms.
-function VoiceModeBlock({ collapsed, sessionKey }: { collapsed: boolean; sessionKey?: string | null }) {
-  const voice = useVoiceMode()
-  const room = voice.room
-  const status = room?.status ?? 'idle'
-  const agentState = room?.agentState ?? 'idle'
-
-  // Friendly state label for the pill.
-  const stateLabel =
-    status === 'connecting' ? 'connecting' :
-    status === 'failed' ? 'offline' :
-    !voice.enabled ? 'off' :
-    agentState
-
-  const stateClass = cn(
-    'truncate text-[11px] font-mono',
-    voice.enabled
-      ? agentState === 'speaking'
-        ? 'text-primary'
-        : agentState === 'listening'
-        ? 'text-emerald-400'
-        : agentState === 'thinking' || agentState === 'connecting'
-        ? 'text-amber-400'
-        : 'text-muted-foreground'
-      : 'text-muted-foreground',
-  )
-
-  const handleToggleVoice = () => {
-    if (voice.enabled) {
-      voice.disengage()
-    } else if (sessionKey) {
-      voice.engage(sessionKey)
-    }
-  }
-
-  const handleToggleMic = () => {
-    if (!room) return
-    // The room manages publish state via setMicrophoneEnabled. Manual mute
-    // here flips the publication; half-duplex auto-mute may immediately
-    // reassert during agent speech.
-    const r = room.room
-    const enabled = !room.micMuted && room.micPublished
-    r.localParticipant.setMicrophoneEnabled(!enabled).catch(() => {})
-  }
-
-  // ── Disabled / no session yet ─────────────────────────────────────
-  if (!voice.enabled) {
-    return (
-      <div className="space-y-0.5 mb-1">
-        {!collapsed && (
-          <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Voice Mode
-          </div>
-        )}
-        <NavRow
-          collapsed={collapsed}
-          label={sessionKey ? 'Enable voice for this chat' : 'Open a chat session first'}
-          onClick={handleToggleVoice}
-          disabled={!sessionKey}
-          className={cn(
-            sessionKey
-              ? 'text-muted-foreground hover:text-foreground hover:bg-accent'
-              : 'text-muted-foreground/50 cursor-not-allowed opacity-50',
-          )}
-        >
-          <Power className="w-4 h-4 flex-shrink-0" />
-          {!collapsed && <span className="truncate">Enable voice</span>}
-        </NavRow>
-      </div>
-    )
-  }
-
-  // ── Enabled — render aura thumbnail + status + mic toggle ────────
-  return (
-    <div className="space-y-1 mb-1">
-      {!collapsed && (
-        <div className="flex items-center justify-between px-3 pt-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Voice Mode
-          </span>
-          <button
-            onClick={handleToggleVoice}
-            title="Disengage voice"
-            className="text-[10px] text-muted-foreground hover:text-destructive underline-offset-2 hover:underline"
-          >
-            disengage
-          </button>
-        </div>
-      )}
-
-      {!collapsed && (
-        <div className="flex items-center justify-center px-3 py-1">
-          <AgentAudioVisualizerAura
-            size="icon"
-            state={agentState}
-            audioTrack={room?.agentAudioTrack ?? room?.localAudioTrack}
-            color="#A78BFA"
-            themeMode="dark"
-            className="!h-12"
-          />
-        </div>
-      )}
-
-      {/* State pill */}
-      <NavRow
-        collapsed={collapsed}
-        label={`Voice: ${stateLabel}`}
-        className="pointer-events-none"
-        showTooltip={false}
-      >
-        <Volume2 className={cn('w-4 h-4 flex-shrink-0',
-          agentState === 'speaking' && 'text-primary animate-pulse',
-        )} />
-        {!collapsed && <span className={stateClass}>{stateLabel}</span>}
-      </NavRow>
-
-      {/* Mic mute toggle */}
-      <NavRow
-        collapsed={collapsed}
-        label={room?.micMuted ? 'Mic muted (auto: half-duplex)' : 'Click to mute mic'}
-        onClick={handleToggleMic}
-        disabled={!room?.micPublished}
-        className={cn(
-          !room?.micPublished
-            ? 'text-muted-foreground/50 cursor-not-allowed opacity-50'
-            : room.micMuted
-            ? 'text-amber-400 bg-amber-500/10 hover:bg-amber-500/20'
-            : 'text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10',
-        )}
-      >
-        {room?.micMuted
-          ? <MicOff className="w-4 h-4 flex-shrink-0" />
-          : <Mic className="w-4 h-4 flex-shrink-0" />}
-        {!collapsed && (
-          <span className="truncate">
-            {!room?.micPublished ? 'Mic offline' : room.micMuted ? 'Mic muted' : 'Mic on'}
-          </span>
-        )}
-      </NavRow>
-
-      {/* Interrupt — only visible while agent is actively speaking */}
-      {room?.agentSpeaking && (
-        <NavRow
-          collapsed={collapsed}
-          label="Interrupt — stop Lloyd's reply"
-          onClick={() => { room.interrupt().catch(() => {}) }}
-          className="text-destructive bg-destructive/10 hover:bg-destructive/20"
-        >
-          <Square className="w-4 h-4 flex-shrink-0" />
-          {!collapsed && <span className="truncate">Interrupt</span>}
-        </NavRow>
-      )}
-
-      {/* Error surface (mic permission denied, secure-context, etc.) */}
-      {!collapsed && room?.error && (
-        <div className="px-3 py-1 text-[10px] text-destructive break-words">
-          {room.error}
-        </div>
-      )}
-    </div>
-  )
-}
-
-export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, sessionKey, isMobile }: SidebarProps) {
+export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, isMobile }: SidebarProps) {
   // Hover-expand: when `collapsed` (the pinned state) is true, the sidebar
   // sits at 56px in-flow but pops out to 192px as an overlay on hover. When
   // `collapsed` is false, it's pinned-expanded and pushes content. The
@@ -337,14 +163,6 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
 
       {/* Bottom nav */}
       <div className="px-2 pt-2 space-y-0.5 border-t border-border">
-        {/* Voice block — driven by VoiceModeContext (LiveKit room state) */}
-        <VoiceModeBlock collapsed={!expanded} sessionKey={sessionKey} />
-
-        {/* Work Mode toggle hidden — keep state + handler around so we can
-            flip it back on with one line if/when the feature ships. */}
-
-        <Separator className="my-1" />
-
         {BOTTOM_ITEMS.map(renderItem)}
 
         {!isMobile && (
