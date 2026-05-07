@@ -262,13 +262,13 @@ function FileTree({
         <div key={node.path}>
           <button
             onClick={() => toggleDir(node.path)}
-            className="w-full flex items-center gap-1.5 py-0.5 text-[11px] text-slate-300 hover:bg-surface-2 rounded transition-colors"
+            className="w-full flex items-center gap-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-secondary rounded transition-colors"
             style={{ paddingLeft: `${indent + 4}px` }}
           >
             {node.expanded ? (
-              <ChevronDown className="w-3 h-3 text-slate-500 flex-shrink-0" />
+              <ChevronDown className="w-3 h-3 text-muted-foreground flex-shrink-0" />
             ) : (
-              <ChevronRight className="w-3 h-3 text-slate-500 flex-shrink-0" />
+              <ChevronRight className="w-3 h-3 text-muted-foreground flex-shrink-0" />
             )}
             {node.expanded ? (
               <FolderOpen className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
@@ -277,7 +277,7 @@ function FileTree({
             )}
             <span className="truncate">{node.name}</span>
             {node.children != null && (
-              <span className="text-[10px] text-slate-600 ml-auto pr-1">{node.children}</span>
+              <span className="text-[10px] text-muted-foreground/70 ml-auto pr-1">{node.children}</span>
             )}
           </button>
           {node.expanded && node.entries?.map((child) => renderNode(child, depth + 1))}
@@ -289,13 +289,13 @@ function FileTree({
       <button
         key={node.path}
         onClick={() => onOpenFile(node.path)}
-        className="w-full flex items-center gap-1.5 py-0.5 text-[11px] text-slate-400 hover:text-slate-200 hover:bg-surface-2 rounded transition-colors"
+        className="w-full flex items-center gap-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary rounded transition-colors"
         style={{ paddingLeft: `${indent + 4 + 15}px` }}
       >
-        <FileText className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+        <FileText className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
         <span className="truncate">{node.name}</span>
         {node.size != null && (
-          <span className="text-[10px] text-slate-600 ml-auto pr-1">
+          <span className="text-[10px] text-muted-foreground/70 ml-auto pr-1">
             {node.size < 1024 ? `${node.size}B` : `${(node.size / 1024).toFixed(1)}K`}
           </span>
         )}
@@ -304,7 +304,7 @@ function FileTree({
   };
 
   if (loading) {
-    return <div className="text-[11px] text-slate-500 px-2 py-4">Loading...</div>;
+    return <div className="text-[11px] text-muted-foreground px-2 py-4">Loading...</div>;
   }
 
   return <div className="space-y-0">{tree.map((node) => renderNode(node, 0))}</div>;
@@ -323,18 +323,18 @@ function FileViewerModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-8">
-      <div className="bg-surface-1 rounded-lg border border-surface-3/50 overflow-hidden flex flex-col max-w-5xl w-full max-h-[90vh]">
-        <div className="flex items-center justify-between px-4 py-2 border-b border-surface-3/30 bg-surface-2 flex-shrink-0">
+      <div className="bg-card rounded-lg border border-border/50 overflow-hidden flex flex-col max-w-5xl w-full max-h-[90vh]">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-border/30 bg-secondary flex-shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <Code2 className="w-4 h-4 text-brand-400 flex-shrink-0" />
-            <span className="text-sm font-medium text-slate-200 truncate">{file.path}</span>
+            <Code2 className="w-4 h-4 text-primary flex-shrink-0" />
+            <span className="text-sm font-medium text-foreground truncate">{file.path}</span>
           </div>
-          <div className="flex items-center gap-3 text-[11px] text-slate-500 flex-shrink-0">
+          <div className="flex items-center gap-3 text-[11px] text-muted-foreground flex-shrink-0">
             <span>{file.language}</span>
             <span>{file.lineCount} lines</span>
             <button
               onClick={onClose}
-              className="text-slate-400 hover:text-slate-200 transition-colors p-1"
+              className="text-muted-foreground hover:text-foreground transition-colors p-1"
             >
               <X className="w-4 h-4" />
             </button>
@@ -343,13 +343,13 @@ function FileViewerModal({
 
         <div className="flex-1 overflow-auto font-mono text-xs">
           <div className="flex">
-            <div className="w-12 flex-shrink-0 bg-surface-2/50 text-slate-600 text-right pr-3 py-2 select-none border-r border-surface-3/20">
+            <div className="w-12 flex-shrink-0 bg-secondary/50 text-muted-foreground/70 text-right pr-3 py-2 select-none border-r border-border/20">
               {lines.map((_, i) => (
                 <div key={i} className="leading-5">{i + 1}</div>
               ))}
             </div>
             <div className="flex-1 p-2 overflow-x-auto">
-              <pre className="leading-5 whitespace-pre-wrap break-words text-slate-300">
+              <pre className="leading-5 whitespace-pre-wrap break-words text-foreground/90">
                 <code dangerouslySetInnerHTML={{ __html: highlightCode(file.content, file.language) }} />
               </pre>
             </div>
@@ -440,15 +440,15 @@ function FileDetailsPanel({
   };
 
   return (
-    <div className="flex flex-col h-full bg-surface-1 rounded-lg border border-surface-3/50 overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-surface-3/30 bg-surface-2 flex-shrink-0">
+    <div className="flex flex-col h-full bg-card rounded-lg border border-border/50 overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border/30 bg-secondary flex-shrink-0">
         <div className="min-w-0">
-          <div className="text-sm font-semibold text-slate-200 truncate">{getFileName(node.path)}</div>
-          <div className="text-[10px] text-slate-500 truncate">{node.path}</div>
+          <div className="text-sm font-semibold text-foreground truncate">{getFileName(node.path)}</div>
+          <div className="text-[10px] text-muted-foreground truncate">{node.path}</div>
         </div>
         <button
           onClick={onClose}
-          className="text-slate-400 hover:text-slate-200 transition-colors p-1 flex-shrink-0"
+          className="text-muted-foreground hover:text-foreground transition-colors p-1 flex-shrink-0"
         >
           <X className="w-4 h-4" />
         </button>
@@ -456,45 +456,45 @@ function FileDetailsPanel({
 
       <div className="flex-1 overflow-auto p-4 space-y-4">
         {loading ? (
-          <div className="text-center text-slate-500 py-8">Loading file details...</div>
+          <div className="text-center text-muted-foreground py-8">Loading file details...</div>
         ) : (
           <>
             <div>
-              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Statistics</div>
+              <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Statistics</div>
               <div className="grid grid-cols-2 gap-2">
-                <div className="bg-surface-2 rounded p-2">
-                  <div className="text-[10px] text-slate-500">Lines of Code</div>
-                  <div className="text-sm font-medium text-slate-200">{stats.linesOfCode}</div>
+                <div className="bg-secondary rounded p-2">
+                  <div className="text-[10px] text-muted-foreground">Lines of Code</div>
+                  <div className="text-sm font-medium text-foreground">{stats.linesOfCode}</div>
                 </div>
-                <div className="bg-surface-2 rounded p-2">
-                  <div className="text-[10px] text-slate-500">Language</div>
-                  <div className="text-sm font-medium text-slate-200 capitalize">{stats.language}</div>
+                <div className="bg-secondary rounded p-2">
+                  <div className="text-[10px] text-muted-foreground">Language</div>
+                  <div className="text-sm font-medium text-foreground capitalize">{stats.language}</div>
                 </div>
-                <div className="bg-surface-2 rounded p-2">
-                  <div className="text-[10px] text-slate-500">File Size</div>
-                  <div className="text-sm font-medium text-slate-200">{formatFileSize(stats.fileSize)}</div>
+                <div className="bg-secondary rounded p-2">
+                  <div className="text-[10px] text-muted-foreground">File Size</div>
+                  <div className="text-sm font-medium text-foreground">{formatFileSize(stats.fileSize)}</div>
                 </div>
-                <div className="bg-surface-2 rounded p-2">
-                  <div className="text-[10px] text-slate-500">Imports</div>
-                  <div className="text-sm font-medium text-slate-200">{stats.importCount}</div>
+                <div className="bg-secondary rounded p-2">
+                  <div className="text-[10px] text-muted-foreground">Imports</div>
+                  <div className="text-sm font-medium text-foreground">{stats.importCount}</div>
                 </div>
-                <div className="bg-surface-2 rounded p-2">
-                  <div className="text-[10px] text-slate-500">Functions</div>
-                  <div className="text-sm font-medium text-slate-200">{stats.functionCount}</div>
+                <div className="bg-secondary rounded p-2">
+                  <div className="text-[10px] text-muted-foreground">Functions</div>
+                  <div className="text-sm font-medium text-foreground">{stats.functionCount}</div>
                 </div>
-                <div className="bg-surface-2 rounded p-2">
-                  <div className="text-[10px] text-slate-500">Exports/Classes</div>
-                  <div className="text-sm font-medium text-slate-200">{stats.exportCount}</div>
+                <div className="bg-secondary rounded p-2">
+                  <div className="text-[10px] text-muted-foreground">Exports/Classes</div>
+                  <div className="text-sm font-medium text-foreground">{stats.exportCount}</div>
                 </div>
               </div>
             </div>
 
             {node.exports && node.exports.length > 0 && (
               <div>
-                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Exports</div>
+                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Exports</div>
                 <div className="flex flex-wrap gap-1">
                   {node.exports.map(e => (
-                    <span key={e} className="text-[10px] font-mono bg-surface-2 text-brand-400 px-1.5 py-0.5 rounded">{e}</span>
+                    <span key={e} className="text-[10px] font-mono bg-secondary text-primary px-1.5 py-0.5 rounded">{e}</span>
                   ))}
                 </div>
               </div>
@@ -502,7 +502,7 @@ function FileDetailsPanel({
 
             {dependsOn.length > 0 && (
               <div>
-                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
+                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 flex items-center gap-1">
                   <ArrowRightLeft className="w-3 h-3" />
                   Imports
                 </div>
@@ -511,11 +511,11 @@ function FileDetailsPanel({
                     <button
                       key={dep.id}
                       onClick={() => onSelectNode(dep.id)}
-                      className="w-full text-left rounded px-2 py-1.5 hover:bg-surface-2 transition-colors"
+                      className="w-full text-left rounded px-2 py-1.5 hover:bg-secondary transition-colors"
                     >
-                      <div className="text-xs text-slate-300 font-medium">{getFileName(dep.path)}</div>
+                      <div className="text-xs text-foreground/90 font-medium">{getFileName(dep.path)}</div>
                       {symbols.length > 0 && (
-                        <div className="text-[10px] text-slate-500 mt-0.5 font-mono">{symbols.join(", ")}</div>
+                        <div className="text-[10px] text-muted-foreground mt-0.5 font-mono">{symbols.join(", ")}</div>
                       )}
                     </button>
                   ))}
@@ -525,7 +525,7 @@ function FileDetailsPanel({
 
             {dependedOnBy.length > 0 && (
               <div>
-                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
+                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 flex items-center gap-1">
                   <Layers className="w-3 h-3" />
                   Imported By
                 </div>
@@ -534,11 +534,11 @@ function FileDetailsPanel({
                     <button
                       key={dep.id}
                       onClick={() => onSelectNode(dep.id)}
-                      className="w-full text-left rounded px-2 py-1.5 hover:bg-surface-2 transition-colors"
+                      className="w-full text-left rounded px-2 py-1.5 hover:bg-secondary transition-colors"
                     >
-                      <div className="text-xs text-slate-300 font-medium">{getFileName(dep.path)}</div>
+                      <div className="text-xs text-foreground/90 font-medium">{getFileName(dep.path)}</div>
                       {symbols.length > 0 && (
-                        <div className="text-[10px] text-slate-500 mt-0.5 font-mono">{symbols.join(", ")}</div>
+                        <div className="text-[10px] text-muted-foreground mt-0.5 font-mono">{symbols.join(", ")}</div>
                       )}
                     </button>
                   ))}
@@ -864,7 +864,7 @@ function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphVi
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-surface-1 rounded-lg border border-surface-3/50 text-slate-500 text-sm">
+      <div className="flex-1 flex items-center justify-center bg-card rounded-lg border border-border/50 text-muted-foreground text-sm">
         Loading graph...
       </div>
     );
@@ -872,14 +872,14 @@ function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphVi
 
   if (!graphData) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-surface-1 rounded-lg border border-surface-3/50 text-red-400 text-sm">
+      <div className="flex-1 flex items-center justify-center bg-card rounded-lg border border-border/50 text-red-400 text-sm">
         Failed to load graph
       </div>
     );
   }
 
   return (
-    <div ref={containerRef} className="flex-1 relative bg-surface-1 rounded-lg border border-surface-3/50 overflow-hidden">
+    <div ref={containerRef} className="flex-1 relative bg-card rounded-lg border border-border/50 overflow-hidden">
       <div className="absolute inset-0">
         <ForceGraph3D
           ref={fgRef}
@@ -913,8 +913,8 @@ function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphVi
       </div>
 
       {/* Legend */}
-      <div className="absolute top-2 left-2 z-10 bg-surface-1/80 backdrop-blur-sm px-2 py-1.5 rounded text-[10px] text-slate-400 space-y-1">
-        <div className="font-semibold text-[9px] uppercase tracking-wider text-slate-500 mb-0.5">Files</div>
+      <div className="absolute top-2 left-2 z-10 bg-card/80 backdrop-blur-sm px-2 py-1.5 rounded text-[10px] text-muted-foreground space-y-1">
+        <div className="font-semibold text-[9px] uppercase tracking-wider text-muted-foreground mb-0.5">Files</div>
         <div className="flex flex-col gap-0.5">
           <span className="flex items-center gap-1.5">
             <span className="inline-block w-2 h-2 flex-shrink-0 rotate-45" style={{ background: "hsl(142,45%,50%)" }} />
@@ -929,24 +929,24 @@ function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphVi
             javascript
           </span>
         </div>
-        <div className="text-[9px] text-slate-600 mt-1">size = import count</div>
+        <div className="text-[9px] text-muted-foreground/70 mt-1">size = import count</div>
       </div>
 
       {/* Stats */}
-      <div className="absolute top-2 right-2 bg-surface-2/90 px-3 py-2 rounded text-[11px] text-slate-500">
+      <div className="absolute top-2 right-2 bg-secondary/90 px-3 py-2 rounded text-[11px] text-muted-foreground">
         {filteredData.nodes.length} nodes · {filteredData.links.length} links
       </div>
 
       {/* Controls: language filters + reset/fit */}
       <div className="absolute bottom-2 right-2 z-10 flex items-center gap-1">
-        <div className="flex items-center gap-2 mr-2 bg-surface-1/80 backdrop-blur-sm px-2 py-1 rounded text-[10px]">
+        <div className="flex items-center gap-2 mr-2 bg-card/80 backdrop-blur-sm px-2 py-1 rounded text-[10px]">
           {(["python", "typescript", "javascript"] as const).map((lang) => (
-            <label key={lang} className="flex items-center gap-1 cursor-pointer select-none text-slate-400 hover:text-slate-200">
+            <label key={lang} className="flex items-center gap-1 cursor-pointer select-none text-muted-foreground hover:text-foreground">
               <input
                 type="checkbox"
                 checked={langFilters[lang]}
                 onChange={() => setLangFilters(prev => ({ ...prev, [lang]: !prev[lang] }))}
-                className="w-2.5 h-2.5 accent-brand-500 cursor-pointer"
+                className="w-2.5 h-2.5 accent-primary cursor-pointer"
               />
               <span>{lang}</span>
             </label>
@@ -955,14 +955,14 @@ function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphVi
         <button
           onClick={() => { setActiveNode(null); onSelectNode(null); }}
           title="Reset selection"
-          className="p-1 rounded text-slate-500 hover:text-slate-300 hover:bg-surface-2/80 transition-colors"
+          className="p-1 rounded text-muted-foreground hover:text-foreground/90 hover:bg-secondary/80 transition-colors"
         >
           <RotateCcw className="w-3 h-3" />
         </button>
         <button
           onClick={() => { if (fgRef.current) fgRef.current.zoomToFit(1200, 50); }}
           title="Fit all"
-          className="p-1 rounded text-slate-500 hover:text-slate-300 hover:bg-surface-2/80 transition-colors"
+          className="p-1 rounded text-muted-foreground hover:text-foreground/90 hover:bg-secondary/80 transition-colors"
         >
           <Maximize className="w-3 h-3" />
         </button>
@@ -1030,26 +1030,26 @@ export default function ArchitecturePage() {
     <div className="flex flex-col h-full min-h-0 gap-3 p-6">
       <div className="flex items-center gap-4 flex-shrink-0">
         <div className="flex items-center gap-2">
-          <Code2 className="w-5 h-5 text-brand-400" />
-          <h1 className="text-lg font-bold text-slate-200">Architecture</h1>
+          <Code2 className="w-5 h-5 text-primary" />
+          <h1 className="text-lg font-bold text-foreground">Architecture</h1>
         </div>
-        <div className="text-[11px] text-slate-500">
-          Browse source: <code className="bg-surface-2 px-1 rounded">~/lloyd/</code> and <code className="bg-surface-2 px-1 rounded">~/lloyd/web/src/</code>
+        <div className="text-[11px] text-muted-foreground">
+          Browse source: <code className="bg-secondary px-1 rounded">~/lloyd/</code> and <code className="bg-secondary px-1 rounded">~/lloyd/web/src/</code>
         </div>
       </div>
 
       <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
         {/* Left panel: File tree */}
-        <div className="w-64 flex-shrink-0 flex flex-col min-h-0 bg-surface-1 rounded-lg border border-surface-3/50 overflow-hidden">
-          <div className="flex border-b border-surface-3/30 bg-surface-2 flex-shrink-0">
+        <div className="w-64 flex-shrink-0 flex flex-col min-h-0 bg-card rounded-lg border border-border/50 overflow-hidden">
+          <div className="flex border-b border-border/30 bg-secondary flex-shrink-0">
             {BROWSER_TABS.map(tab => (
               <button
                 key={tab.id}
                 onClick={() => setBrowserTab(tab.id)}
                 className={`flex-1 px-2 py-2 text-[11px] font-medium transition-colors ${
                   browserTab === tab.id
-                    ? "text-brand-400 border-b-2 border-brand-400 bg-surface-1/50"
-                    : "text-slate-500 hover:text-slate-300"
+                    ? "text-primary border-b-2 border-primary bg-card/50"
+                    : "text-muted-foreground hover:text-foreground/90"
                 }`}
               >
                 {tab.label}
@@ -1058,7 +1058,7 @@ export default function ArchitecturePage() {
           </div>
           <div className="flex-1 overflow-y-auto py-2">
             {loadingFile ? (
-              <div className="text-[11px] text-slate-500 px-2 py-4">Loading file...</div>
+              <div className="text-[11px] text-muted-foreground px-2 py-4">Loading file...</div>
             ) : (
               <FileTree path={currentPath} onOpenFile={handleOpenFile} />
             )}
