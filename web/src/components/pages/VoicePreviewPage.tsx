@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { type AgentState, useTrackVolume } from '@livekit/components-react'
-import type { LocalAudioTrack } from 'livekit-client'
+import type { LocalAudioTrack, RemoteAudioTrack } from 'livekit-client'
 import { AgentAudioVisualizerAura } from '../agents-ui/agent-audio-visualizer-aura'
 import VoiceRoom from '../VoiceRoom'
 import { Button } from '@/components/ui/button'
@@ -148,7 +148,7 @@ function LiveStats({
   audioTrack,
   agentState,
 }: {
-  audioTrack: LocalAudioTrack | undefined
+  audioTrack: LocalAudioTrack | RemoteAudioTrack | undefined
   agentState: AgentState
 }) {
   // useTrackVolume returns 0..1 (analyser-derived); convert to dBFS for the
@@ -251,13 +251,18 @@ export default function VoicePreviewPage() {
 
   return (
     <VoiceRoom sessionId={VOICE_PREVIEW_SESSION}>
-      {({ status, agentState, localAudioTrack, error, reconnect }) => {
-        // Until Phase 5A wires an actual agent audio track, repurpose
-        // 'speaking' as "your voice is the source" so the aura's volume
-        // modulation kicks in. Strict 'listening' would only run the
-        // brightness pulse, with no reaction to mic level.
+      {({ status, agentState, localAudioTrack, agentAudioTrack, error, reconnect }) => {
+        // Phase 5A: prefer the agent's track (Lloyd's voice) when it's
+        // present — that's the canonical "speaking" state. Fall back to
+        // the local mic so the aura still reacts to the user during the
+        // brief listening window before the agent reply audio arrives.
+        const visualizerTrack = agentAudioTrack ?? localAudioTrack
         const visualizerState: AgentState =
-          status === 'connected' && localAudioTrack ? 'speaking' : agentState
+          agentAudioTrack
+            ? 'speaking'
+            : status === 'connected' && localAudioTrack
+            ? 'speaking' // user is the audio source while we wait for the agent
+            : agentState
         return (
           <div className="flex flex-col items-center justify-center w-full min-h-full p-6 gap-6 bg-background text-foreground">
             <div className="text-sm text-muted-foreground text-center max-w-xl">
@@ -270,7 +275,7 @@ export default function VoicePreviewPage() {
             <AgentAudioVisualizerAura
               size="xl"
               state={visualizerState}
-              audioTrack={localAudioTrack}
+              audioTrack={visualizerTrack}
               color={color}
               themeMode="dark"
             />
@@ -285,6 +290,10 @@ export default function VoicePreviewPage() {
                 )}
               />
               <span className="tabular-nums text-foreground">{status}</span>
+              <span className="text-muted-foreground">·</span>
+              <span className="text-muted-foreground">
+                source: <span className="text-foreground">{agentAudioTrack ? 'agent' : localAudioTrack ? 'mic' : '—'}</span>
+              </span>
               {status === 'failed' && (
                 <Button size="sm" variant="outline" onClick={reconnect} className="ml-2">
                   Retry
@@ -292,7 +301,7 @@ export default function VoicePreviewPage() {
               )}
             </div>
             {status === 'connected' && (
-              <LiveStats audioTrack={localAudioTrack} agentState={visualizerState} />
+              <LiveStats audioTrack={visualizerTrack} agentState={visualizerState} />
             )}
             {error && (
               <div className="text-xs text-destructive max-w-md text-center break-words">
