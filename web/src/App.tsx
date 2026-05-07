@@ -1,5 +1,6 @@
 import { Component, ErrorInfo, ReactNode } from 'react'
 import Layout from './components/Layout'
+import { VoiceModeProvider } from './contexts/VoiceModeContext'
 
 interface ErrorBoundaryProps {
   children: ReactNode
@@ -49,7 +50,9 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 function App() {
   return (
     <ErrorBoundary>
-      <Layout />
+      <VoiceModeProvider>
+        <Layout />
+      </VoiceModeProvider>
     </ErrorBoundary>
   )
 }
