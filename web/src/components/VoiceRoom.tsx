@@ -88,18 +88,31 @@ export default function VoiceRoom({
         setStatus('connected')
 
         if (publishMic) {
-          try {
-            await room.localParticipant.setMicrophoneEnabled(true)
-            if (cancelled) return
-            const pub = room.localParticipant.getTrackPublication(Track.Source.Microphone)
-            const track = pub?.audioTrack as LocalAudioTrack | undefined
-            setLocalAudioTrack(track)
-            setMicPublished(!!track)
-          } catch (e) {
-            // Mic permission denied or no device — keep the room alive but
-            // surface the error so the UI can prompt the user.
-            console.warn('mic publish failed:', e)
-            setError(e instanceof Error ? e.message : String(e))
+          // Secure-context check: browsers only expose getUserMedia on
+          // localhost or HTTPS. Detect it explicitly so the user sees a
+          // useful message instead of "Cannot read properties of undefined".
+          if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+            const host = typeof window !== 'undefined' ? window.location.host : '?'
+            const isSecure = typeof window !== 'undefined' && window.isSecureContext
+            const hint = isSecure
+              ? 'Browser does not expose mediaDevices on this origin.'
+              : `Browser blocks getUserMedia on http://${host}. Load mc via http://localhost:5173/ or set up HTTPS.`
+            console.warn('[VoiceRoom]', hint)
+            setError(hint)
+          } else {
+            try {
+              await room.localParticipant.setMicrophoneEnabled(true)
+              if (cancelled) return
+              const pub = room.localParticipant.getTrackPublication(Track.Source.Microphone)
+              const track = pub?.audioTrack as LocalAudioTrack | undefined
+              setLocalAudioTrack(track)
+              setMicPublished(!!track)
+            } catch (e) {
+              // Permission denied, no device, or revoked — keep the room
+              // alive but surface the error to the UI.
+              console.warn('mic publish failed:', e)
+              setError(e instanceof Error ? e.message : String(e))
+            }
           }
         }
       } catch (e) {

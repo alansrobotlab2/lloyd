@@ -169,6 +169,30 @@ livekit:
   room_prefix: "lloyd-"
   # The worker joins rooms as this identity when a participant connects.
   agent_identity: "lloyd-agent"
+  # STT — runs in the worker, on each segmented utterance from a participant.
+  stt:
+    # faster-whisper model name. CPU-only "base.en" runs ~real-time on a
+    # modern CPU; "small.en" is more accurate, ~2x slower. GPU is auto-used
+    # if compute_type permits — currently CPU int8 to avoid contention with
+    # the LLM on GPU0.
+    model: base.en
+    device: cpu                # cpu | cuda
+    compute_type: int8         # int8 | float16 (cuda) | float32
+    language: en
+    # Beam search width. 1 = greedy (fastest), 5 = default whisper.
+    beam_size: 1
+  # Utterance segmentation — energy-based VAD. Cheap and good enough for
+  # push-to-talk-ish speech. Replace with silero-vad in Phase 4.5 if needed.
+  vad:
+    # Audio above this RMS amplitude (0..1 over int16 normalized) is treated
+    # as voiced. ~0.005 is the typical noise floor on a quiet desk mic.
+    speech_rms: 0.012
+    # End an utterance after this many ms of trailing silence.
+    silence_ms: 700
+    # Discard utterances shorter than this — usually breath / clicks.
+    min_utterance_ms: 300
+    # Hard cap so a stuck stream can't grow without bound.
+    max_utterance_ms: 30000
 server:
   host: 0.0.0.0
   port: 8080
