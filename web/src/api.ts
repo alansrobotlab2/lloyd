@@ -928,25 +928,6 @@ export const api = {
   killSessionProc: (sessionId: string): Promise<{ killed: boolean; session_id: string }> =>
     fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/kill-proc`, { method: 'POST' }).then(r => r.json()),
 
-  // Voice Mode
-  voiceStatus: (): Promise<{ state: string; voice_enabled: boolean; last_transcript: string }> =>
-    fetch(`${API_BASE}/voice/status`).then(r => r.json()),
-  voiceToggle: (): Promise<{ voice_enabled: boolean }> =>
-    fetch(`${API_BASE}/voice/toggle`, { method: 'POST' }).then(r => r.json()),
-  voiceSay: (text: string): Promise<{ text: string; duration_s: number; elapsed_s: number }> =>
-    fetch(`${API_BASE}/voice/say`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }).then(r => r.json()),
-  voiceSetActiveSession: (sessionId: string | null): Promise<{ active_session: string | null }> =>
-    fetch(`${API_BASE}/voice/active-session`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId }),
-    }).then(r => r.json()),
-  // TTS-on-response (speaker toggle in MC sidebar). Independent of wake-word state.
-  voiceTtsStatus: (): Promise<{ tts_enabled: boolean }> =>
-    fetch(`${API_BASE}/voice/tts-status`).then(r => r.json()),
-  voiceTtsToggle: (): Promise<{ tts_enabled: boolean }> =>
-    fetch(`${API_BASE}/voice/tts-toggle`, { method: 'POST' }).then(r => r.json()),
-
   // ── Inner Voice ──
   // Patch session metadata: experiment tag + critic opt-in flag +
   // user-turn evaluation flag. All optional — caller sends only what changed.
