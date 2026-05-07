@@ -1080,4 +1080,39 @@ export const api = {
       if (!r.ok) throw new Error(`livekit/token failed: ${r.status}`)
       return r.json()
     }),
+
+  // ── Voiceprint enrollment ──────────────────────────────────────────
+  voiceSpeakersList: (): Promise<{
+    profiles: Array<{ name: string; embedding_dim: number; path: string }>
+  }> =>
+    fetch(`${API_BASE}/voice/speakers`).then(r => {
+      if (!r.ok) throw new Error(`voice/speakers failed: ${r.status}`)
+      return r.json()
+    }),
+
+  voiceSpeakersEnroll: async (
+    name: string,
+    audio: Blob,
+  ): Promise<{ name: string; path: string; duration_s: number; sample_rate: number }> => {
+    const fd = new FormData()
+    fd.append('name', name)
+    fd.append('audio', audio, `${name}.wav`)
+    const r = await fetch(`${API_BASE}/voice/speakers/enroll`, { method: 'POST', body: fd })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `enroll failed: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  voiceSpeakersDelete: async (name: string): Promise<{ deleted: string }> => {
+    const r = await fetch(`${API_BASE}/voice/speakers/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `delete failed: ${r.status}`)
+    }
+    return r.json()
+  },
 }
