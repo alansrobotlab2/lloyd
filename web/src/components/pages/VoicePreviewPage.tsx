@@ -9,6 +9,7 @@ import { api, type MessageEntry } from '../../api'
 
 const STATES: AgentState[] = ['idle', 'listening', 'thinking', 'speaking']
 const COLORS: Array<{ name: string; hex: `#${string}` }> = [
+  { name: 'Violet',       hex: '#A78BFA' },
   { name: 'LiveKit cyan', hex: '#1FD5F9' },
   { name: 'Lloyd indigo', hex: '#818CF8' },
   { name: 'Mint',         hex: '#34D399' },
@@ -175,7 +176,7 @@ function LiveStats({
 }
 
 export default function VoicePreviewPage() {
-  const [color, setColor] = useState<`#${string}`>('#1FD5F9')
+  const [color, setColor] = useState<`#${string}`>('#A78BFA')
   const [mode, setMode] = useState<'live' | 'mock'>('live')
   const [mockState, setMockState] = useState<AgentState>('listening')
   const [autoCycle, setAutoCycle] = useState(true)

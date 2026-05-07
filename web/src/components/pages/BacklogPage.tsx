@@ -11,6 +11,12 @@ import {
   Search,
 } from "lucide-react";
 import { api, type BacklogBoard, type BacklogTask } from "../../api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 
 const STATUSES = ["draft", "up_next", "in_progress", "done"] as const;
 
@@ -22,7 +28,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  draft: "bg-slate-500/20 text-slate-400 border-slate-500/30",
+  draft: "bg-slate-500/20 text-muted-foreground border-slate-500/30",
   up_next: "bg-sky-500/20 text-sky-400 border-sky-500/30",
   in_progress: "bg-amber-500/20 text-amber-400 border-amber-500/30",
   done: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
@@ -32,7 +38,7 @@ const PRIORITY_COLORS: Record<string, string> = {
   high: "text-red-400",
   medium: "text-amber-400",
   low: "text-sky-400",
-  none: "text-slate-500",
+  none: "text-muted-foreground",
 };
 
 const PRIORITIES = ["none", "low", "medium", "high"];
@@ -109,14 +115,14 @@ function TaskModal({
       onClick={handleBackdropClick}
       className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
     >
-      <div className="bg-surface-1 rounded-xl border border-surface-3/50 w-[90vw] h-[90vh] flex flex-col shadow-2xl">
+      <div className="bg-card rounded-xl border border-border/50 w-[90vw] h-[90vh] flex flex-col shadow-2xl">
         {/* Header */}
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-surface-3/50">
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-border/50">
           {isCreate ? (
-            <span className="text-xs font-semibold text-brand-400">New Task</span>
+            <span className="text-xs font-semibold text-primary">New Task</span>
           ) : (
             <>
-              <span className="text-[10px] text-slate-500 font-mono">#{task.id}</span>
+              <span className="text-[10px] text-muted-foreground font-mono">#{task.id}</span>
               <span
                 className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded ${STATUS_COLORS[task.status]}`}
               >
@@ -124,79 +130,77 @@ function TaskModal({
               </span>
             </>
           )}
-          <button
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={onClose}
-            className="ml-auto text-slate-400 hover:text-slate-200 transition-colors"
+            className="ml-auto h-7 w-7 text-muted-foreground hover:text-foreground"
           >
             <X className="w-4 h-4" />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
         <div className="flex-1 flex flex-col overflow-y-auto px-5 py-4">
           {/* Name */}
           <div className="mb-4">
-            <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+            <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
               Title
             </label>
-            <input
+            <Input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={isCreate ? "What needs to be done?" : undefined}
               autoFocus={isCreate}
-              className="w-full bg-surface-2 text-sm text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+              className="w-full"
             />
           </div>
 
           {/* Description */}
           <div className="flex-1 min-h-0 flex flex-col">
-            <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+            <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
               Description
             </label>
-            <textarea
+            <Textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="w-full flex-1 bg-surface-2 text-sm text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50 resize-none"
+              className="w-full flex-1 resize-none"
             />
           </div>
         </div>
 
         {/* Additional fields section */}
-        <div className="px-5 py-3 border-t border-surface-3/50 space-y-3">
+        <div className="px-5 py-3 border-t border-border/50 space-y-3">
           {/* Status + Priority row */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Status
               </label>
-              <select
-                value={status}
-                onChange={(e) => setStatus(e.target.value)}
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
-              >
-                {STATUSES.map((s) => (
-                  <option key={s} value={s} className="bg-surface-2">
-                    {STATUS_LABELS[s]}
-                  </option>
-                ))}
-              </select>
+              <Select value={status} onValueChange={setStatus}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {STATUSES.map((s) => (
+                    <SelectItem key={s} value={s}>{STATUS_LABELS[s]}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Priority
               </label>
-              <select
-                value={priority}
-                onChange={(e) => setPriority(e.target.value)}
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
-              >
-                {PRIORITIES.map((p) => (
-                  <option key={p} value={p} className="bg-surface-2">
-                    {p.charAt(0).toUpperCase() + p.slice(1)}
-                  </option>
-                ))}
-              </select>
+              <Select value={priority} onValueChange={setPriority}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {PRIORITIES.map((p) => (
+                    <SelectItem key={p} value={p}>
+                      {p.charAt(0).toUpperCase() + p.slice(1)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
@@ -207,15 +211,15 @@ function TaskModal({
                 type="checkbox"
                 checked={blocked}
                 onChange={(e) => setBlocked(e.target.checked)}
-                className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+                className="rounded border-border bg-secondary text-primary focus:ring-primary/30"
               />
-              <span className="text-xs text-slate-300">Blocked</span>
+              <span className="text-xs text-foreground/90">Blocked</span>
             </label>
           )}
 
           {/* Metadata */}
           {!isCreate && (
-            <div className="grid grid-cols-2 gap-3 text-[10px] text-slate-500">
+            <div className="grid grid-cols-2 gap-3 text-[10px] text-muted-foreground">
               <div>
                 Created: {new Date(task.created_at).toLocaleDateString()}
               </div>
@@ -223,7 +227,7 @@ function TaskModal({
                 Updated: {new Date(task.updated_at).toLocaleDateString()}
               </div>
               {task.assigned_to_agent && (
-                <div className="col-span-2 flex items-center gap-1 text-brand-400">
+                <div className="col-span-2 flex items-center gap-1 text-primary">
                   <Bot className="w-3 h-3" />
                   Assigned to agent
                 </div>
@@ -233,36 +237,25 @@ function TaskModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-2 px-5 py-3 border-t border-surface-3/50">
+        <div className="flex items-center gap-2 px-5 py-3 border-t border-border/50">
           {!isCreate && (
-            <button
+            <Button
+              variant={confirmDelete ? "destructive" : "ghost"}
+              size="sm"
               onClick={handleDelete}
               disabled={saving}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg transition-colors ${
-                confirmDelete
-                  ? "bg-red-600 text-white hover:bg-red-500"
-                  : "text-red-400 hover:bg-red-400/10"
-              }`}
+              className={confirmDelete ? "" : "text-destructive hover:bg-destructive/10 hover:text-destructive"}
             >
               <Trash2 className="w-3.5 h-3.5" />
               {confirmDelete ? "Confirm Delete" : "Delete"}
-            </button>
+            </Button>
           )}
           <div className="flex-1" />
-          <button
-            onClick={onClose}
-            className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 rounded-lg transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || !name.trim()}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs bg-brand-600 hover:bg-brand-500 disabled:opacity-40 text-white rounded-lg transition-colors"
-          >
+          <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+          <Button size="sm" onClick={handleSave} disabled={saving || !name.trim()}>
             {isCreate ? <Plus className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
             {saving ? (isCreate ? "Creating..." : "Saving...") : (isCreate ? "Create" : "Save")}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -299,27 +292,27 @@ function TaskCard({
   return (
     <div className="relative">
       {insertIndicator === "above" && (
-        <div className="absolute -top-1.5 left-0 right-0 h-0.5 bg-brand-400 rounded-full z-10" />
+        <div className="absolute -top-1.5 left-0 right-0 h-0.5 bg-primary rounded-full z-10" />
       )}
       <div
         draggable
         onDragStart={handleDragStart}
         onDragOver={handleDragOver}
         onClick={() => onClick(task)}
-        className="bg-surface-2 rounded-lg p-3 border border-surface-3/50 hover:border-brand-500/30 transition-colors cursor-pointer active:opacity-70"
+        className="bg-secondary rounded-lg p-3 border border-border/50 hover:border-primary/30 transition-colors cursor-pointer active:opacity-70"
       >
         <div className="flex items-start gap-2">
           <div className="flex-1 min-w-0">
-            <div className="text-xs font-medium text-slate-200 leading-snug">
+            <div className="text-xs font-medium text-foreground leading-snug">
               {task.name}
             </div>
             {task.description && (
-              <p className="text-[10px] text-slate-500 mt-1 line-clamp-2">
+              <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2">
                 {task.description}
               </p>
             )}
           </div>
-          <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">
+          <span className="text-[10px] text-muted-foreground/70 font-mono flex-shrink-0">
             #{task.id}
           </span>
         </div>
@@ -340,7 +333,7 @@ function TaskCard({
             </span>
           )}
           {task.assigned_to_agent && (
-            <span className="inline-flex items-center gap-0.5 text-[10px] text-brand-400 bg-brand-400/10 px-1.5 py-0.5 rounded">
+            <span className="inline-flex items-center gap-0.5 text-[10px] text-primary bg-primary/10 px-1.5 py-0.5 rounded">
               <Bot className="w-2.5 h-2.5" />
               assigned
             </span>
@@ -348,7 +341,7 @@ function TaskCard({
           {task.tags.map((tag) => (
             <span
               key={tag}
-              className="text-[10px] text-slate-500 bg-surface-1 px-1.5 py-0.5 rounded"
+              className="text-[10px] text-muted-foreground bg-card px-1.5 py-0.5 rounded"
             >
               {tag}
             </span>
@@ -356,7 +349,7 @@ function TaskCard({
         </div>
       </div>
       {insertIndicator === "below" && (
-        <div className="absolute -bottom-1.5 left-0 right-0 h-0.5 bg-brand-400 rounded-full z-10" />
+        <div className="absolute -bottom-1.5 left-0 right-0 h-0.5 bg-primary rounded-full z-10" />
       )}
     </div>
   );
@@ -427,7 +420,7 @@ function KanbanColumn({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       className={`flex flex-col min-w-[220px] flex-1 rounded-lg transition-colors ${
-        dragOver ? "bg-brand-600/5 ring-1 ring-brand-500/30" : ""
+        dragOver ? "bg-primary/5 ring-1 ring-primary/30" : ""
       }`}
     >
       <div className="flex items-center gap-2 mb-2 px-1">
@@ -436,7 +429,7 @@ function KanbanColumn({
         >
           {STATUS_LABELS[status]}
         </span>
-        <span className="text-[10px] text-slate-500">{tasks.length}</span>
+        <span className="text-[10px] text-muted-foreground">{tasks.length}</span>
       </div>
 
       <div className="space-y-2 overflow-y-auto flex-1 min-h-0 pr-1">
@@ -451,8 +444,8 @@ function KanbanColumn({
         ))}
         {tasks.length === 0 && (
           <div
-            className={`text-[10px] text-slate-600 text-center py-8 border border-dashed rounded-lg transition-colors ${
-              dragOver ? "border-brand-500/40 text-brand-400" : "border-surface-3/30"
+            className={`text-[10px] text-muted-foreground/70 text-center py-8 border border-dashed rounded-lg transition-colors ${
+              dragOver ? "border-primary/40 text-primary" : "border-border/30"
             }`}
           >
             {dragOver ? "Drop here" : "No tasks"}
@@ -592,8 +585,8 @@ export default function BacklogPage() {
     <div className="p-6 flex flex-col h-full min-h-0">
       {/* Header */}
       <div className="flex items-center gap-3 mb-4 flex-shrink-0">
-        <LayoutGrid className="w-5 h-5 text-brand-400" />
-        <h2 className="text-lg font-semibold text-slate-200">Backlog</h2>
+        <LayoutGrid className="w-5 h-5 text-primary" />
+        <h2 className="text-lg font-semibold text-foreground">Backlog</h2>
 
         {/* Board tabs */}
         <div className="flex gap-1 ml-4">
@@ -603,52 +596,49 @@ export default function BacklogPage() {
               onClick={() => setActiveBoard(board.id)}
               className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
                 activeBoard === board.id
-                  ? "bg-brand-600/15 text-brand-400 font-medium"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-surface-2"
+                  ? "bg-primary/15 text-primary font-medium"
+                  : "text-muted-foreground hover:text-foreground hover:bg-secondary"
               }`}
             >
               {board.icon} {board.name}
-              <span className="ml-1.5 text-slate-500">{board.tasks_count}</span>
+              <span className="ml-1.5 text-muted-foreground">{board.tasks_count}</span>
             </button>
           ))}
         </div>
 
         {/* Search input */}
-        <div className="ml-auto flex items-center gap-1.5 bg-surface-2 rounded-lg px-2.5 py-1.5 border border-surface-3/50 focus-within:border-brand-500/50 transition-colors">
-          <Search className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
-          <input
+        <div className="ml-auto relative">
+          <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <Input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Filter tasks..."
-            className="bg-transparent text-xs text-slate-200 outline-none w-36 placeholder:text-slate-500"
+            className="h-8 w-56 pl-7 pr-7 text-xs"
           />
           {searchQuery && (
             <button
               onClick={() => setSearchQuery("")}
-              className="text-slate-500 hover:text-slate-300 transition-colors flex-shrink-0"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
             >
               <X className="w-3 h-3" />
             </button>
           )}
         </div>
 
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-brand-600 hover:bg-brand-500 text-white rounded-lg transition-colors"
-        >
+        <Button size="sm" onClick={() => setShowCreateModal(true)}>
           <Plus className="w-3.5 h-3.5" />
           New Task
-        </button>
+        </Button>
 
-        <span className="text-xs text-slate-500">
+        <span className="text-xs text-muted-foreground">
           {filteredTasks.length} tasks — drag to move
         </span>
       </div>
 
       {/* Kanban board */}
       {loading ? (
-        <div className="flex-1 flex items-center justify-center text-slate-500 text-sm">
+        <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
           Loading...
         </div>
       ) : (

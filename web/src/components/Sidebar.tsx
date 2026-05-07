@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import {
   LayoutList,
   Brain,
@@ -9,7 +8,6 @@ import {
   MessageCircle,
   ChevronsLeft,
   ChevronsRight,
-  Briefcase,
   Code2,
   Lightbulb,
   Mic,
@@ -207,7 +205,7 @@ function VoiceModeBlock({ collapsed, sessionKey }: { collapsed: boolean; session
             size="icon"
             state={agentState}
             audioTrack={room?.agentAudioTrack ?? room?.localAudioTrack}
-            color="#1FD5F9"
+            color="#A78BFA"
             themeMode="dark"
             className="!h-12"
           />
@@ -276,7 +274,8 @@ function VoiceModeBlock({ collapsed, sessionKey }: { collapsed: boolean; session
 
 export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, sessionKey, isMobile }: SidebarProps) {
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft
-  const [workMode, setWorkMode] = useState(false)
+  // Work Mode toggle removed from the sidebar for now; the feature isn't
+  // wired up server-side yet. Restore the state hook + NavRow when ready.
 
   const renderItem = (item: NavItem) => {
     const Icon = item.icon
@@ -331,32 +330,8 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
           {/* Voice block — driven by VoiceModeContext (LiveKit room state) */}
           <VoiceModeBlock collapsed={collapsed} sessionKey={sessionKey} />
 
-          <Separator className="my-1" />
-
-          {/* Work Mode toggle */}
-          <NavRow
-            collapsed={collapsed}
-            label="Work Mode"
-            onClick={() => setWorkMode(!workMode)}
-            className={cn(
-              workMode
-                ? 'bg-purple-600 text-white hover:bg-purple-500'
-                : 'text-muted-foreground hover:text-foreground hover:bg-accent',
-            )}
-          >
-            <Briefcase className="w-4 h-4 flex-shrink-0" />
-            {!collapsed && <span className="truncate flex-1 text-left">Work Mode</span>}
-            {!collapsed && (
-              <span
-                className={cn(
-                  'w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center transition-colors',
-                  workMode ? 'bg-white border-white' : 'border-muted-foreground',
-                )}
-              >
-                {workMode && <span className="text-[10px] text-purple-600 font-bold leading-none">&#10003;</span>}
-              </span>
-            )}
-          </NavRow>
+          {/* Work Mode toggle hidden — keep state + handler around so we can
+              flip it back on with one line if/when the feature ships. */}
 
           <Separator className="my-1" />
 
