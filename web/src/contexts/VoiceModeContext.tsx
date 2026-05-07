@@ -1,16 +1,20 @@
-import { createContext, useCallback, useContext, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import VoiceRoom, { type VoiceRoomState } from '../components/VoiceRoom'
 
 /**
  * Global voice mode context. One VoiceRoom is mounted at the app level when
- * `enabled` is true and `sessionId` is set; its render-prop state is pushed
- * into the context so Sidebar / ChatPanel / VoicePreview can all read the
- * same RTC connection.
+ * `enabled` is true and `sessionId` is set; its state is pushed into the
+ * context so Sidebar / ChatPanel / VoicePreview can read the same RTC
+ * connection.
  *
- * Layout owns the `sessionId` decision — when the user toggles voice on
- * while on the chat page, Layout points the context at the visible chat
- * slot's session_key. Switching chat tabs while voice is enabled
- * reconnects to the new session.
+ * IMPORTANT — the outer JSX tree must stay stable across enabled/disabled.
+ * Earlier versions wrapped `children` in `<VoiceRoom>` when enabled and
+ * left it bare when disabled; toggling voice changed the tree's root and
+ * caused React to remount every descendant (Layout, page state, in-flight
+ * chat, the chat sidebar's open/closed flag — all reset). The current
+ * structure keeps `<Provider>` as the only outer wrapper and renders the
+ * VoiceRoom as a sibling to `children`, so toggling voice no longer
+ * disturbs the tree.
  */
 
 export interface VoiceModeContextValue {
@@ -33,9 +37,27 @@ export function useVoiceMode(): VoiceModeContextValue {
   return ctx
 }
 
+/** Tiny consumer that syncs the VoiceRoom's render-prop state up to the
+ *  provider via a setter. Renders nothing — it's just a state pump so the
+ *  provider can hold the room reference and surface it through context. */
+function VoiceRoomStateBridge({
+  room,
+  setRoom,
+}: {
+  room: VoiceRoomState
+  setRoom: (s: VoiceRoomState | null) => void
+}) {
+  useEffect(() => {
+    setRoom(room)
+    return () => setRoom(null)
+  }, [room, setRoom])
+  return null
+}
+
 export function VoiceModeProvider({ children }: { children: ReactNode }) {
   const [enabled, setEnabled] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [room, setRoom] = useState<VoiceRoomState | null>(null)
 
   const engage = useCallback((id: string) => {
     setSessionId(id)
@@ -46,27 +68,17 @@ export function VoiceModeProvider({ children }: { children: ReactNode }) {
     setEnabled(false)
   }, [])
 
-  // Render the VoiceRoom only when both enabled and sessionId are set.
-  // The render-prop pattern lets us forward its full state into the
-  // context without VoiceRoom needing to know about the context.
-  if (enabled && sessionId) {
-    return (
-      <VoiceRoom sessionId={sessionId} key={sessionId}>
-        {(room) => (
-          <VoiceModeContext.Provider
-            value={{ enabled, sessionId, room, setEnabled, setSessionId, engage, disengage }}
-          >
-            {children}
-          </VoiceModeContext.Provider>
-        )}
-      </VoiceRoom>
-    )
-  }
-
   return (
     <VoiceModeContext.Provider
-      value={{ enabled, sessionId, room: null, setEnabled, setSessionId, engage, disengage }}
+      value={{ enabled, sessionId, room, setEnabled, setSessionId, engage, disengage }}
     >
+      {/* Sibling, not ancestor: keeps the outer tree stable across
+          engaged/disengaged so children don't remount. */}
+      {enabled && sessionId && (
+        <VoiceRoom sessionId={sessionId} key={sessionId}>
+          {(roomState) => <VoiceRoomStateBridge room={roomState} setRoom={setRoom} />}
+        </VoiceRoom>
+      )}
       {children}
     </VoiceModeContext.Provider>
   )

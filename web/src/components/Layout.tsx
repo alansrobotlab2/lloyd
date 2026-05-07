@@ -13,6 +13,7 @@ import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
 import VoicePreviewPage from './pages/VoicePreviewPage'
 import SettingsPage from './pages/SettingsPage'
+import RightChatSidebar from './RightChatSidebar'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
 import { useVoiceMode } from '../contexts/VoiceModeContext'
@@ -127,6 +128,9 @@ export default function Layout() {
   const isMobile = useIsMobile()
   const [page, setPage] = useState<Page>('chat')
   const [collapsed, setCollapsed] = useState(true)
+  // Right chat sidebar — voice-driven dual-brain chat. Currently always
+  // visible on desktop; voice auto-engages on its session as soon as the
+  // sidebar mounts. (User asked to drop collapse for now — revisit later.)
   const [slots, setSlots] = useState<Slot[]>([])
   const [visibleSlotId, setVisibleSlotId] = useState<string | null>(null)
   const [activeSessions, setActiveSessions] = useState<Set<string>>(new Set())
@@ -143,15 +147,19 @@ export default function Layout() {
   // Voice mode context — when enabled, point it at the visible chat slot's
   // session_id so the LiveKit room follows the foreground tab. Switching
   // tabs while voice is enabled reconnects to the new session.
+  // Suppressed when the right chat sidebar is mounted (desktop): that
+  // sidebar owns voice routing for its dual-brain session, and we don't
+  // want this effect to clobber its engagement when the user switches tabs.
   const voiceMode = useVoiceMode()
   useEffect(() => {
+    if (!isMobile) return  // sidebar (desktop only) owns voice routing
     if (!voiceMode.enabled) return
     if (page !== 'chat') return
     const sid = visibleSlot?.sessionKey ?? null
     if (sid && sid !== voiceMode.sessionId) {
       voiceMode.setSessionId(sid)
     }
-  }, [voiceMode.enabled, voiceMode.sessionId, page, visibleSlot?.sessionKey, voiceMode])
+  }, [voiceMode.enabled, voiceMode.sessionId, page, visibleSlot?.sessionKey, voiceMode, isMobile])
 
   const handleNewSession = () => {
     const existingBlank = slots.find(s => s.sessionKey === null)
@@ -471,6 +479,11 @@ export default function Layout() {
           {/* Other pages */}
           {PageComponent && <PageComponent />}
         </main>
+
+        {/* Right chat sidebar — voice-driven dual-brain conversation. Always
+            mounted on desktop (per "not collapsible" decision); owns the
+            LiveKit room for its session. */}
+        {!isMobile && <RightChatSidebar />}
       </div>
     </MessageProvider>
   )

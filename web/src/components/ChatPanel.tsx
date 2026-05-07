@@ -58,6 +58,9 @@ interface MessageRowProps {
   isMobile: boolean
   toolCallIndex: Map<string, ToolCallRef>
   forceLeftAlign?: boolean
+  /** Compact mode: drop avatars, full-width bubbles. Used by the right
+   *  chat sidebar to reclaim horizontal space in narrow layouts. */
+  compact?: boolean
 }
 
 const MessageRow = memo(function MessageRow({
@@ -67,6 +70,7 @@ const MessageRow = memo(function MessageRow({
   isMobile,
   toolCallIndex,
   forceLeftAlign = false,
+  compact = false,
 }: MessageRowProps) {
   const hasContent = msg.content?.some(c => c.text?.trim())
   if (!hasContent) return null
@@ -87,8 +91,8 @@ const MessageRow = memo(function MessageRow({
   const isSubliminal = msg.role === 'subliminal'
 
   return (
-    <div className={cn('flex gap-3', !forceLeftAlign && isUser && 'justify-end')}>
-      {!forceLeftAlign && !isUser && !isMobile && (
+    <div className={cn('flex gap-3', !compact && !forceLeftAlign && isUser && 'justify-end')}>
+      {!compact && !forceLeftAlign && !isUser && !isMobile && (
         <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
           {isTool ? (
             <div className="w-full h-full bg-secondary flex items-center justify-center">
@@ -104,7 +108,9 @@ const MessageRow = memo(function MessageRow({
         </div>
       )}
       <div className={cn(
-        forceLeftAlign ? 'flex-1 min-w-0' : `max-w-[80%] ${isUser ? 'min-w-0' : 'flex-1 min-w-0'}`,
+        compact || forceLeftAlign
+          ? 'flex-1 min-w-0'
+          : `max-w-[80%] ${isUser ? 'min-w-0' : 'flex-1 min-w-0'}`,
       )}>
         <div className={cn(
           'rounded-xl border',
@@ -251,6 +257,9 @@ interface ChatPanelProps {
   // Inner Voice timeline mode: primary actions on the left of a vertical line,
   // IV observations on the right, ordered chronologically.
   timelineRight?: InnerVoiceObservation[]
+  /** Compact rendering: drop avatars, full-width bubbles. Used by the
+   *  right chat sidebar to reclaim horizontal space. */
+  compact?: boolean
 }
 
 const SLASH_COMMANDS: Array<{ name: string; desc: string; alias?: string }> = [
@@ -310,6 +319,7 @@ export default function ChatPanel({
   onThinkingChange,
   isMobile = false,
   timelineRight,
+  compact = false,
 }: ChatPanelProps = {}) {
   const [sessionKey, setSessionKey] = useState<string | null>(null)
   const [messages, setMessages] = useState<ApiMessage[]>([])
@@ -932,14 +942,17 @@ export default function ChatPanel({
             thinkLevel={thinkLevel}
             isMobile={isMobile}
             toolCallIndex={toolCallIndex}
+            compact={compact}
           />
         ))}
 
         {timeline === null && thinking && (
           <div className="flex gap-3">
-            <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
-              <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
-            </div>
+            {!compact && (
+              <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
+                <img src="/lloyd.jpg" alt="Lloyd" className="w-full h-full object-cover" />
+              </div>
+            )}
             {thinkingIndicatorBody}
           </div>
         )}

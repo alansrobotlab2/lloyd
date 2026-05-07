@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { type AgentState, useTrackVolume } from '@livekit/components-react'
 import type { LocalAudioTrack, RemoteAudioTrack } from 'livekit-client'
 import { AgentAudioVisualizerAura } from '../agents-ui/agent-audio-visualizer-aura'
+import { WakeStatePill } from '../agents-ui/wake-state-pill'
 import VoiceRoom from '../VoiceRoom'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -252,7 +253,7 @@ export default function VoicePreviewPage() {
 
   return (
     <VoiceRoom sessionId={VOICE_PREVIEW_SESSION}>
-      {({ status, agentState, localAudioTrack, agentAudioTrack, agentSpeaking, micMuted, error, reconnect, interrupt }) => {
+      {({ status, agentState, localAudioTrack, agentAudioTrack, agentSpeaking, micMuted, wakeState, wakeRemainingS, wakeContinuationS, wakeSpeaker, error, reconnect, interrupt }) => {
         // Phase 5A: prefer the agent's track (Lloyd's voice) when it's
         // present — that's the canonical "speaking" state. Fall back to
         // the local mic so the aura still reacts to the user during the
@@ -279,6 +280,19 @@ export default function VoicePreviewPage() {
               audioTrack={visualizerTrack}
               color={color}
               themeMode="dark"
+            />
+            {/* Wake-word gate state — distinct from agentState. Idle = waiting
+                for "Lloyd" / "hey Lloyd". Listening = inside the post-wake-word
+                or post-TTS continuation window; follow-ups don't need the
+                wake-word until the timer hits zero. */}
+            <WakeStatePill
+              status={status}
+              wakeState={wakeState}
+              wakeRemainingS={wakeRemainingS}
+              wakeContinuationS={wakeContinuationS}
+              wakeSpeaker={wakeSpeaker}
+              agentSpeaking={agentSpeaking}
+              agentThinking={agentState === 'thinking'}
             />
             <div className="flex items-center gap-3 text-sm">
               <span
@@ -314,7 +328,11 @@ export default function VoicePreviewPage() {
               )}
             </div>
             {status === 'connected' && (
-              <LiveStats audioTrack={visualizerTrack} agentState={visualizerState} />
+              // Always read the dBFS meter off the local mic, even after the
+              // agent track is published. visualizerTrack would switch to
+              // the agent track at that point and show 0 dB whenever Lloyd
+              // isn't actively speaking, making it look like the mic died.
+              <LiveStats audioTrack={localAudioTrack} agentState={visualizerState} />
             )}
             {error && (
               <div className="text-xs text-destructive max-w-md text-center break-words">
