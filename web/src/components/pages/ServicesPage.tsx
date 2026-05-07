@@ -408,7 +408,7 @@ export default function ServicesPage() {
   );
 }
 
-function ServiceDetailView({ detail, logEndRef }: { detail: ServiceDetail; logEndRef: React.RefObject<HTMLDivElement> }) {
+function ServiceDetailView({ detail, logEndRef }: { detail: ServiceDetail; logEndRef: React.RefObject<HTMLDivElement | null> }) {
   return (
     <>
       <div className="flex flex-wrap gap-4">
@@ -442,7 +442,7 @@ function LloydDetailView({ detail }: { detail: LloydServiceDetail }) {
   );
 }
 
-function LogView({ lines, logEndRef }: { lines: string[]; logEndRef?: React.RefObject<HTMLDivElement> }) {
+function LogView({ lines, logEndRef }: { lines: string[]; logEndRef?: React.RefObject<HTMLDivElement | null> }) {
   return (
     <div>
       <div className="flex items-center gap-2 mb-2">
