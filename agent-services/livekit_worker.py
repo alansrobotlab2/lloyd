@@ -42,6 +42,7 @@ LOG = logging.getLogger("lloyd-agent-worker")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config.yaml"
 INJECT_URL = "http://127.0.0.1:8080/api/voice/inject"
+SUMMARIZE_URL = "http://127.0.0.1:8080/api/voice/summarize"
 
 POLL_INTERVAL = 2.0           # seconds between RoomService polls
 DEFAULT_ROOM_PREFIX = "lloyd-"
@@ -589,10 +590,14 @@ class RoomBridge:
     async def _poll_session_messages(self) -> None:
         """Watch the session JSON for new assistant turns and TTS them.
 
-        Runs while the bridge is connected. Skips:
-        - Subliminal / tool messages (not user-facing).
-        - Empty assistant rows (the harness tool-call frames).
-        - Anything we've already spoken (tracked by message id).
+        Each candidate assistant message goes through the secondary model
+        first (POST /api/voice/summarize) so what we speak is a tight
+        spoken-form summary, not the raw primary response (which is often
+        long and contains code/markdown that doesn't TTS gracefully).
+        Falls back to the raw text if the summary call fails.
+
+        Skips: subliminal / tool messages, empty assistant rows (harness
+        tool-call frames), anything already spoken (tracked by id).
         """
         url = self.MESSAGES_URL_TEMPLATE.format(session_id=self.session_id)
         skip_empty = bool(self._tts_cfg.get("skip_empty", True))
@@ -615,12 +620,35 @@ class RoomBridge:
                             if skip_empty and not text:
                                 continue
                             if self.tts is not None:
-                                await self.tts.speak(text)
+                                spoken = await self._summarize_for_tts(text)
+                                await self.tts.speak(spoken)
                 except Exception as e:
                     LOG.warning("[%s] session poll failed: %s", self.room_name, e)
                 await asyncio.sleep(self.SESSION_POLL_INTERVAL)
         except asyncio.CancelledError:
             return
+
+    async def _summarize_for_tts(self, text: str) -> str:
+        """POST text to /api/voice/summarize, return the spoken-form rewrite.
+        Falls back to the raw text if the summary call fails or returns
+        used_summary=false. Logs which path was taken so the worker output
+        makes the routing clear."""
+        try:
+            r = await self.http.post(SUMMARIZE_URL, json={"text": text}, timeout=20.0)
+            if r.status_code != 200:
+                LOG.warning("[%s] summarize HTTP %d: %s", self.room_name, r.status_code, r.text[:200])
+                return text
+            payload = r.json()
+            summary = (payload.get("summary") or "").strip()
+            used = bool(payload.get("used_summary"))
+            if used and summary:
+                LOG.info("[%s] summary %d→%d chars", self.room_name, len(text), len(summary))
+                return summary
+            LOG.info("[%s] summary fell back to raw (%d chars)", self.room_name, len(text))
+            return summary or text
+        except Exception as e:
+            LOG.warning("[%s] summarize failed, speaking raw: %s", self.room_name, e)
+            return text
 
     def _on_track_subscribed(self, track, publication, participant) -> None:  # noqa: ARG002
         if track.kind != rtc.TrackKind.KIND_AUDIO:
