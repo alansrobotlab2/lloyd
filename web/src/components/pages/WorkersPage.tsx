@@ -4,6 +4,16 @@ import {
   ArrowUpCircle, Trash2, FileText, FolderOpen,
 } from "lucide-react";
 import { api } from "../../api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from "@/components/ui/table";
 
 interface Status {
   initialized: boolean;
@@ -111,21 +121,18 @@ export default function WorkersPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => api.workersPause(!status?.pool?.paused).then(refresh)}
-            className="px-3 py-1.5 text-sm rounded border border-border hover:border-primary hover:text-primary flex items-center gap-1.5"
           >
             {status?.pool?.paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
             {status?.pool?.paused ? "Resume" : "Pause"}
-          </button>
-          <button
-            onClick={refresh}
-            disabled={loading}
-            className="px-3 py-1.5 text-sm rounded border border-border hover:border-primary hover:text-primary flex items-center gap-1.5"
-          >
+          </Button>
+          <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
             Refresh
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -145,41 +152,41 @@ export default function WorkersPage() {
         </div>
       )}
 
-      {/* Tab strip */}
-      <div className="flex items-center gap-1 mb-3 border-b border-border">
-        {(["queue", "runs", "sources", "review"] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm border-b-2 ${tab === t ? "border-sky-400 text-sky-300" : "border-transparent text-muted-foreground hover:text-foreground"}`}
-          >
-            {t === "queue" ? "Queue" : t === "runs" ? "Recent Runs" : t === "sources" ? "Sources" : "Review"}
-          </button>
-        ))}
-      </div>
+      <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)} className="space-y-3">
+        <TabsList>
+          <TabsTrigger value="queue">Queue</TabsTrigger>
+          <TabsTrigger value="runs">Recent Runs</TabsTrigger>
+          <TabsTrigger value="sources">Sources</TabsTrigger>
+          <TabsTrigger value="review">Review</TabsTrigger>
+        </TabsList>
 
-      {/* Filters — not on Sources or Review tabs */}
-      {(tab === "queue" || tab === "runs") && (
-        <div className="flex flex-wrap gap-3 mb-3 items-center text-sm">
-          {tab === "queue" && (
-            <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}
-                    className="bg-secondary border border-border rounded px-2 py-1">
-              <option value="">all states</option>
-              {Object.keys(STATE_COLORS).map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          )}
-          <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}
-                  className="bg-secondary border border-border rounded px-2 py-1">
-            <option value="">all sources</option>
-            {status?.sources?.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}
-          </select>
-        </div>
-      )}
+        {/* Filters — only meaningful on Queue / Runs tabs */}
+        {(tab === "queue" || tab === "runs") && (
+          <div className="flex flex-wrap gap-2 items-center text-sm">
+            {tab === "queue" && (
+              <Select value={stateFilter || "__all__"} onValueChange={(v) => setStateFilter(v === "__all__" ? "" : v)}>
+                <SelectTrigger className="h-8 w-40"><SelectValue placeholder="all states" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">all states</SelectItem>
+                  {Object.keys(STATE_COLORS).map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            )}
+            <Select value={sourceFilter || "__all__"} onValueChange={(v) => setSourceFilter(v === "__all__" ? "" : v)}>
+              <SelectTrigger className="h-8 w-48"><SelectValue placeholder="all sources" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">all sources</SelectItem>
+                {status?.sources?.map((s) => <SelectItem key={s.name} value={s.name}>{s.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
 
-      {tab === "queue" && <QueueTable items={items} />}
-      {tab === "runs" && <RunsTable runs={runs} />}
-      {tab === "sources" && <SourcesTable sources={status?.sources || []} />}
-      {tab === "review" && <ReviewPanel />}
+        <TabsContent value="queue"><QueueTable items={items} /></TabsContent>
+        <TabsContent value="runs"><RunsTable runs={runs} /></TabsContent>
+        <TabsContent value="sources"><SourcesTable sources={status?.sources || []} /></TabsContent>
+        <TabsContent value="review"><ReviewPanel /></TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -187,36 +194,36 @@ export default function WorkersPage() {
 function QueueTable({ items }: { items: QueueItem[] }) {
   if (!items.length) return <div className="text-muted-foreground italic p-4">no items</div>;
   return (
-    <div className="overflow-x-auto rounded border border-border">
-      <table className="min-w-full text-sm">
-        <thead className="bg-secondary/80 text-muted-foreground text-xs uppercase">
-          <tr>
-            <th className="px-3 py-2 text-left">id</th>
-            <th className="px-3 py-2 text-left">source / kind</th>
-            <th className="px-3 py-2 text-left">prio</th>
-            <th className="px-3 py-2 text-left">state</th>
-            <th className="px-3 py-2 text-left">attempts</th>
-            <th className="px-3 py-2 text-left">enqueued</th>
-            <th className="px-3 py-2 text-left">error</th>
-          </tr>
-        </thead>
-        <tbody>
+    <div className="rounded-md border border-border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>id</TableHead>
+            <TableHead>source / kind</TableHead>
+            <TableHead>prio</TableHead>
+            <TableHead>state</TableHead>
+            <TableHead>attempts</TableHead>
+            <TableHead>enqueued</TableHead>
+            <TableHead>error</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {items.map((it) => (
-            <tr key={it.id} className="border-t border-border hover:bg-accent">
-              <td className="px-3 py-2 font-mono text-muted-foreground">#{it.id}</td>
-              <td className="px-3 py-2">
+            <TableRow key={it.id}>
+              <TableCell className="font-mono text-muted-foreground">#{it.id}</TableCell>
+              <TableCell>
                 <span className="font-medium">{it.source}</span>
                 <span className="text-muted-foreground"> / {it.kind}</span>
-              </td>
-              <td className="px-3 py-2">{it.priority}</td>
-              <td className="px-3 py-2">
-                <span className={`text-xs px-2 py-0.5 rounded border ${STATE_COLORS[it.state] || "border-border"}`}>
+              </TableCell>
+              <TableCell>{it.priority}</TableCell>
+              <TableCell>
+                <Badge variant="outline" className={`${STATE_COLORS[it.state] || ""}`}>
                   {it.state}
-                </span>
-              </td>
-              <td className="px-3 py-2">{it.attempts}</td>
-              <td className="px-3 py-2 text-muted-foreground">{formatAgo(it.enqueued_at)}</td>
-              <td className="px-3 py-2 text-xs max-w-[260px] truncate">
+                </Badge>
+              </TableCell>
+              <TableCell>{it.attempts}</TableCell>
+              <TableCell className="text-muted-foreground">{formatAgo(it.enqueued_at)}</TableCell>
+              <TableCell className="max-w-[260px] truncate text-xs">
                 {it.error && it.state !== "completed" && (
                   <span className="text-rose-400" title={it.error}>{it.error}</span>
                 )}
@@ -228,11 +235,11 @@ function QueueTable({ items }: { items: QueueItem[] }) {
                     (recovered after {it.attempts} attempts)
                   </span>
                 )}
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -240,42 +247,40 @@ function QueueTable({ items }: { items: QueueItem[] }) {
 function RunsTable({ runs }: { runs: RunRow[] }) {
   if (!runs.length) return <div className="text-muted-foreground italic p-4">no runs yet</div>;
   return (
-    <div className="overflow-x-auto rounded border border-border">
-      <table className="min-w-full text-sm">
-        <thead className="bg-secondary/80 text-muted-foreground text-xs uppercase">
-          <tr>
-            <th className="px-3 py-2 text-left">status</th>
-            <th className="px-3 py-2 text-left">source</th>
-            <th className="px-3 py-2 text-left">task</th>
-            <th className="px-3 py-2 text-left">completed</th>
-            <th className="px-3 py-2 text-left">duration</th>
-            <th className="px-3 py-2 text-left">summary</th>
-          </tr>
-        </thead>
-        <tbody>
+    <div className="rounded-md border border-border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>status</TableHead>
+            <TableHead>source</TableHead>
+            <TableHead>task</TableHead>
+            <TableHead>completed</TableHead>
+            <TableHead>duration</TableHead>
+            <TableHead>summary</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {runs.map((r) => (
-            <tr key={r.run_id} className="border-t border-border hover:bg-accent">
-              <td className="px-3 py-2">
-                {r.status === "success" ? (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                ) : (
-                  <XCircle className="w-4 h-4 text-rose-400" />
-                )}
-              </td>
-              <td className="px-3 py-2">{r.source}</td>
-              <td className="px-3 py-2 font-mono text-muted-foreground">{r.task_id || "—"}</td>
-              <td className="px-3 py-2 text-muted-foreground">{formatAgo(r.completed_at)}</td>
-              <td className="px-3 py-2 tabular-nums">
+            <TableRow key={r.run_id}>
+              <TableCell>
+                {r.status === "success"
+                  ? <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  : <XCircle className="w-4 h-4 text-rose-400" />}
+              </TableCell>
+              <TableCell>{r.source}</TableCell>
+              <TableCell className="font-mono text-muted-foreground">{r.task_id || "—"}</TableCell>
+              <TableCell className="text-muted-foreground">{formatAgo(r.completed_at)}</TableCell>
+              <TableCell className="tabular-nums">
                 <Clock className="w-3 h-3 inline mr-1 text-muted-foreground" />
                 {r.duration_seconds?.toFixed(1) ?? "—"}s
-              </td>
-              <td className="px-3 py-2 text-foreground/90 max-w-[480px] truncate" title={r.summary}>
+              </TableCell>
+              <TableCell className="text-foreground/90 max-w-[480px] truncate" title={r.summary}>
                 {r.summary}
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -283,37 +288,40 @@ function RunsTable({ runs }: { runs: RunRow[] }) {
 function SourcesTable({ sources }: { sources: Array<{ name: string; enabled: boolean; interval_seconds?: number; max_inflight?: number; depth?: Record<string, number> }> }) {
   if (!sources.length) return <div className="text-muted-foreground italic p-4">no sources configured</div>;
   return (
-    <div className="overflow-x-auto rounded border border-border">
-      <table className="min-w-full text-sm">
-        <thead className="bg-secondary/80 text-muted-foreground text-xs uppercase">
-          <tr>
-            <th className="px-3 py-2 text-left">source</th>
-            <th className="px-3 py-2 text-left">enabled</th>
-            <th className="px-3 py-2 text-left">interval</th>
-            <th className="px-3 py-2 text-left">max inflight</th>
-            <th className="px-3 py-2 text-left">queued</th>
-            <th className="px-3 py-2 text-left">running</th>
-            <th className="px-3 py-2 text-left">completed</th>
-          </tr>
-        </thead>
-        <tbody>
+    <div className="rounded-md border border-border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>source</TableHead>
+            <TableHead>enabled</TableHead>
+            <TableHead>interval</TableHead>
+            <TableHead>max inflight</TableHead>
+            <TableHead>queued</TableHead>
+            <TableHead>running</TableHead>
+            <TableHead>completed</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {sources.map((s) => (
-            <tr key={s.name} className="border-t border-border hover:bg-accent">
-              <td className="px-3 py-2 font-medium">{s.name}</td>
-              <td className="px-3 py-2">
-                <span className={`text-xs px-2 py-0.5 rounded border ${s.enabled ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10" : "border-border text-muted-foreground"}`}>
+            <TableRow key={s.name}>
+              <TableCell className="font-medium">{s.name}</TableCell>
+              <TableCell>
+                <Badge
+                  variant="outline"
+                  className={s.enabled ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10" : "text-muted-foreground"}
+                >
                   {s.enabled ? "on" : "off"}
-                </span>
-              </td>
-              <td className="px-3 py-2 text-muted-foreground">{s.interval_seconds}s</td>
-              <td className="px-3 py-2 text-muted-foreground">{s.max_inflight ?? "—"}</td>
-              <td className="px-3 py-2">{s.depth?.queued ?? 0}</td>
-              <td className="px-3 py-2">{(s.depth?.claimed ?? 0) + (s.depth?.running ?? 0)}</td>
-              <td className="px-3 py-2 text-muted-foreground">{s.depth?.completed ?? 0}</td>
-            </tr>
+                </Badge>
+              </TableCell>
+              <TableCell className="text-muted-foreground">{s.interval_seconds}s</TableCell>
+              <TableCell className="text-muted-foreground">{s.max_inflight ?? "—"}</TableCell>
+              <TableCell>{s.depth?.queued ?? 0}</TableCell>
+              <TableCell>{(s.depth?.claimed ?? 0) + (s.depth?.running ?? 0)}</TableCell>
+              <TableCell className="text-muted-foreground">{s.depth?.completed ?? 0}</TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -421,24 +429,21 @@ function ReviewPanel() {
   return (
     <div className="flex gap-3" style={{ minHeight: "65vh" }}>
       {/* Left — item list */}
-      <div className="w-96 flex-shrink-0 border border-border rounded bg-secondary/40 flex flex-col">
+      <div className="w-96 flex-shrink-0 border border-border rounded-md bg-secondary/40 flex flex-col">
         <div className="p-2 border-b border-border flex gap-2 items-center">
-          <select
-            value={sourceFilter}
-            onChange={(e) => { setSourceFilter(e.target.value); setSelected(null); }}
-            className="bg-secondary border border-border rounded px-2 py-1 text-sm flex-1"
+          <Select
+            value={sourceFilter || "__all__"}
+            onValueChange={(v) => { setSourceFilter(v === "__all__" ? "" : v); setSelected(null); }}
           >
-            <option value="">all sources ({items.length})</option>
-            {sources.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-          <button
-            onClick={refresh}
-            disabled={loading}
-            className="p-1.5 rounded border border-border hover:border-primary"
-            title="Refresh"
-          >
+            <SelectTrigger className="h-8 flex-1"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">all sources ({items.length})</SelectItem>
+              {sources.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Button variant="outline" size="icon" onClick={refresh} disabled={loading} title="Refresh" className="h-8 w-8">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          </button>
+          </Button>
         </div>
         <div className="overflow-y-auto flex-1">
           {items.length === 0 && (
@@ -499,34 +504,38 @@ function ReviewPanel() {
                   {selected.path.replace("/home/alansrobotlab/obsidian/", "~/obsidian/")}
                 </span>
               </div>
-              <div className="flex items-center justify-between">
-                <h3 className="font-medium">{selected.filename}</h3>
-                <div className="flex gap-2">
-                  <input
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="font-medium truncate">{selected.filename}</h3>
+                <div className="flex gap-2 items-center flex-shrink-0">
+                  <Input
                     type="text"
                     placeholder={canPromoteWithoutDest ? `dest: ${DEFAULT_DEST[selected.source]}` : "destination required"}
                     value={destination}
                     onChange={(e) => setDestination(e.target.value)}
-                    className="bg-secondary border border-border rounded px-2 py-1 text-xs w-56"
+                    className="h-8 w-56 text-xs"
                   />
-                  <button
+                  <Button
+                    variant="outline"
+                    size="sm"
                     onClick={promote}
                     disabled={busy || (!canPromoteWithoutDest && !destination)}
-                    className="px-3 py-1 text-sm rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
                     title="Promote to canonical vault location"
+                    className="border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200"
                   >
                     <ArrowUpCircle className="w-3.5 h-3.5" />
                     Promote
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
                     onClick={reject}
                     disabled={busy}
-                    className="px-3 py-1 text-sm rounded border border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 disabled:opacity-40 flex items-center gap-1.5"
                     title="Move to _rejected/"
+                    className="border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     Reject
-                  </button>
+                  </Button>
                 </div>
               </div>
               {error && <div className="mt-2 text-xs text-rose-400">{error}</div>}

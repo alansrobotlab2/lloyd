@@ -32,6 +32,9 @@ import {
 } from '../../api'
 import ChatPanel from '../ChatPanel'
 import { actionStyle } from '../innerVoiceStyles'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
 
 const DEFAULT_STATE: InnerVoiceState = {
   session_id: null,
@@ -241,21 +244,23 @@ function SessionPicker({
   return (
     <div className="flex items-center gap-2 ml-2">
       <span className="text-xs text-muted-foreground">session:</span>
-      <select
-        value={selectedSession ?? ''}
-        onChange={e => onSelect(e.target.value || null)}
-        className="bg-secondary border border-border/40 rounded-md px-2 py-1 text-xs font-mono text-foreground max-w-[280px] focus:outline-none focus:border-primary/50"
+      <Select
+        value={selectedSession ?? '__none__'}
+        onValueChange={(v) => onSelect(v === '__none__' ? null : v)}
       >
-        {sessions.length === 0 && <option value="">— none —</option>}
-        {sessions.map(s => (
-          <option key={s.session_id} value={s.session_id}>
-            {s.session_id}
-            {s.evaluate_user_turns ? ' [chat]' : ''}
-            {s.experiment_id ? ` · ${s.experiment_id}` : ''}
-            {s.message_count ? ` · ${s.message_count}msg` : ''}
-          </option>
-        ))}
-      </select>
+        <SelectTrigger className="h-8 w-72 text-xs font-mono"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {sessions.length === 0 && <SelectItem value="__none__">— none —</SelectItem>}
+          {sessions.map(s => (
+            <SelectItem key={s.session_id} value={s.session_id} className="font-mono text-xs">
+              {s.session_id}
+              {s.evaluate_user_turns ? ' [chat]' : ''}
+              {s.experiment_id ? ` · ${s.experiment_id}` : ''}
+              {s.message_count ? ` · ${s.message_count}msg` : ''}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   )
 }
