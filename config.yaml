@@ -2,7 +2,12 @@ agent:
   max_turns: 60
   permission_mode: bypassPermissions
 inner_voice:
-  model: primary
+  # Observer / goal-card extraction model. Routed to secondary so it
+  # doesn't contend with the primary on user-visible TTFT — goal-card
+  # extraction is a blocking pre-turn step (~1-2s on primary), and
+  # running it on a separate endpoint cuts that latency in half AND
+  # removes prompt-cache pollution between the two flows.
+  model: secondary
   observer:
     max_tokens: 400
     timeout_seconds: 5
