@@ -258,3 +258,113 @@ async def livekit_mint_token(request: Request):
         "room": room_name,
         "identity": identity,
     })
+
+
+# ── /api/voice/speakers ───────────────────────────────────────────────────
+
+def _get_speaker_identifier():
+    """Lazily build a SpeakerIdentifier sharing config + profiles_dir with
+    the LiveKit worker. The class lives in agent-services/ so we add that
+    to sys.path on first call."""
+    import os
+    import sys
+    agent_services = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "agent-services",
+    )
+    if agent_services not in sys.path:
+        sys.path.insert(0, agent_services)
+
+    from speaker_id import SpeakerIdentifier  # noqa: E402
+
+    vp_cfg = ((CONFIG.get("livekit") or {}).get("voiceprint") or {})
+    if not vp_cfg.get("enabled", True):
+        raise HTTPException(
+            status_code=503,
+            detail="voiceprint matching is disabled in config (livekit.voiceprint.enabled)",
+        )
+    return SpeakerIdentifier(
+        profiles_dir=vp_cfg.get("profiles_dir", "~/lloyd/voice_profiles"),
+        threshold=float(vp_cfg.get("profile_threshold", 0.75)),
+        unknown_label=str(vp_cfg.get("unknown_label", "Unknown")),
+        device=str(vp_cfg.get("device", "cpu")),
+    )
+
+
+@router.get("/api/voice/speakers")
+async def voice_speakers_list():
+    """List enrolled voice profiles."""
+    try:
+        sid = _get_speaker_identifier()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"speaker module unavailable: {e}")
+    return JSONResponse({"profiles": sid.list_profiles()})
+
+
+@router.post("/api/voice/speakers/enroll")
+async def voice_speakers_enroll(request: Request):
+    """Enroll a voice profile from a wav blob.
+
+    Multipart form fields:
+      name: str    — profile name (alphanumeric/-/_)
+      audio: file  — wav file (any sample rate; resemblyzer resamples)
+
+    Embeds the audio with resemblyzer and saves <profiles_dir>/<name>.npy.
+    """
+    form = await request.form()
+    name = (form.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    audio_file = form.get("audio")
+    if audio_file is None:
+        raise HTTPException(status_code=400, detail="audio file is required")
+    audio_bytes = await audio_file.read()
+
+    import io
+    import wave
+    import numpy as np
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as w:
+            sample_rate = w.getframerate()
+            num_channels = w.getnchannels()
+            sampwidth = w.getsampwidth()
+            n_frames = w.getnframes()
+            raw = w.readframes(n_frames)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"could not parse wav: {e}")
+    if sampwidth != 2:
+        raise HTTPException(status_code=400, detail=f"need 16-bit PCM, got {sampwidth*8}-bit")
+    samples = np.frombuffer(raw, dtype=np.int16)
+    if num_channels > 1:
+        samples = samples.reshape(-1, num_channels).mean(axis=1).astype(np.int16)
+    duration_s = len(samples) / max(1, sample_rate)
+    if duration_s < 1.0:
+        raise HTTPException(status_code=400, detail=f"audio too short ({duration_s:.1f}s); need >= 1s")
+
+    sid = _get_speaker_identifier()
+    import asyncio as _asyncio
+    loop = _asyncio.get_running_loop()
+    try:
+        path = await loop.run_in_executor(None, sid.enroll, name, samples, sample_rate)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"enroll failed: {e}")
+    return JSONResponse({
+        "name": name,
+        "path": path,
+        "duration_s": round(duration_s, 2),
+        "sample_rate": sample_rate,
+    })
+
+
+@router.delete("/api/voice/speakers/{name}")
+async def voice_speakers_delete(name: str):
+    """Delete a voice profile by name."""
+    sid = _get_speaker_identifier()
+    if not sid.delete_profile(name):
+        raise HTTPException(status_code=404, detail=f"profile not found: {name}")
+    return JSONResponse({"deleted": name})

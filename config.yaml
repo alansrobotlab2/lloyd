@@ -179,9 +179,10 @@ livekit:
     # When enabled, the worker drops any utterance that doesn't begin with
     # one of `words`. After a successful wake-word match (or after Lloyd
     # finishes speaking), opens a `continuation_seconds` window during
-    # which utterances from the same LiveKit participant pass through
-    # without requiring the wake-word again. Voiceprint matching is a
-    # follow-up; identity acts as proxy in single-user rooms.
+    # which utterances from the same speaker pass through without requiring
+    # the wake-word again. Speaker identity is enforced via voiceprint
+    # (see `voiceprint:` below) when enabled, otherwise via the LiveKit
+    # participant identity as a proxy.
     enabled: true
     words: [lloyd, "hey lloyd", "hi lloyd", "okay lloyd"]
     continuation_seconds: 12.0
@@ -189,6 +190,36 @@ livekit:
     # the continuation window but skip the inject. False would inject the
     # bare wake-word and Lloyd would respond conversationally.
     skip_inject_if_only_wake_word: true
+  voiceprint:
+    # Resemblyzer-based speaker matching for the wake-word continuation
+    # window. When enabled, the wake-word utterance's embedding becomes
+    # the "anchor"; each follow-up utterance is embedded and compared
+    # (cosine similarity) against the anchor. Anchor mismatch → utterance
+    # is dropped even within the continuation window.
+    #
+    # Independently, every wake-word utterance is also matched against
+    # enrolled `profiles_dir` profiles, so the chat sees [Alan]: rather
+    # than [Unknown]: when your voice is enrolled.
+    enabled: true
+    # ~/lloyd/voice_profiles/<name>.npy — managed via the
+    # /api/voice/speakers endpoints.
+    profiles_dir: ~/lloyd/voice_profiles
+    # Cosine threshold for assigning an enrolled profile name. Below this,
+    # the speaker is reported as "Unknown". Resemblyzer embeddings are
+    # unit-norm so this is effectively the dot product.
+    profile_threshold: 0.75
+    # Cosine threshold against the wake-word anchor. Lower than the profile
+    # threshold because anchor matching is "is this still the same person
+    # who just said the wake word", which is an easier task than full
+    # speaker recognition. Tune up if continuation lets the wrong speaker
+    # through; tune down if it's too strict on your own voice.
+    anchor_threshold: 0.65
+    # cpu | cuda. CPU is ~20ms per utterance on warm cache and avoids
+    # contention with vLLM on the GPU. Set to "cuda" only if you want it.
+    device: cpu
+    # Anchor reference label when no enrolled profile matches the wake-word
+    # utterance. Used as the [Speaker] tag prepended to the injected text.
+    unknown_label: Unknown
 server:
   host: 0.0.0.0
   port: 8080

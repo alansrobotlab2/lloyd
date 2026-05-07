@@ -48,6 +48,28 @@ POLL_INTERVAL = 2.0           # seconds between RoomService polls
 DEFAULT_ROOM_PREFIX = "lloyd-"
 
 
+def _build_speaker_id(vp_cfg: dict):
+    """Construct a SpeakerIdentifier from `livekit.voiceprint` config, or
+    return None when disabled / construction fails. We swallow construction
+    failures (resemblyzer missing, profiles_dir unwritable) because voice
+    works fine without it — degrading to identity-only matching is the
+    sensible fallback."""
+    if not vp_cfg.get("enabled", True):
+        LOG.info("voiceprint matching disabled in config")
+        return None
+    try:
+        from speaker_id import SpeakerIdentifier
+        return SpeakerIdentifier(
+            profiles_dir=vp_cfg.get("profiles_dir", "~/lloyd/voice_profiles"),
+            threshold=float(vp_cfg.get("profile_threshold", 0.75)),
+            unknown_label=str(vp_cfg.get("unknown_label", "Unknown")),
+            device=str(vp_cfg.get("device", "cpu")),
+        )
+    except Exception as e:
+        LOG.warning("voiceprint init failed (%s) — falling back to identity matching", e)
+        return None
+
+
 def _load_cfg() -> dict:
     with CONFIG_PATH.open() as f:
         cfg = yaml.safe_load(f) or {}
@@ -276,10 +298,14 @@ class WakeState:
     Lloyd finishes a TTS utterance. Transition back to IDLE when the
     continuation window expires.
 
-    Voiceprint matching is queued as a follow-up; the LiveKit participant
-    `identity` field acts as a proxy in single-user rooms (one connected
-    browser tab → one identity → one speaker). In a multi-tab / multi-user
-    room you'd need a real speaker embedding to disambiguate.
+    Speaker identity is enforced two ways during continuation:
+      - LiveKit participant identity (always, cheap: one browser tab → one
+        identity)
+      - voiceprint anchor cosine (when a SpeakerIdentifier is attached;
+        embeds the wake-word utterance and rejects follow-ups whose cosine
+        falls below `anchor_threshold`)
+    The identity check is necessary-but-not-sufficient when voiceprint is
+    on; without voiceprint it's the only check.
     """
 
     def __init__(self, cfg: dict) -> None:
@@ -299,6 +325,11 @@ class WakeState:
         # Set by extend(); compared in in_continuation().
         self._until: float = 0.0
         self._locked_identity: Optional[str] = None
+        # Voiceprint anchor — the embedding extracted from the wake-word
+        # utterance. Stored alongside the speaker name (from the enrolled
+        # profile match, if any) so injects can carry [Alan]: prefixes.
+        self._anchor_embedding: Optional[np.ndarray] = None
+        self._anchor_name: Optional[str] = None
 
     def in_continuation(self) -> bool:
         return time.monotonic() < self._until
@@ -306,6 +337,20 @@ class WakeState:
     @property
     def locked_identity(self) -> Optional[str]:
         return self._locked_identity if self.in_continuation() else None
+
+    @property
+    def anchor_embedding(self) -> Optional[np.ndarray]:
+        return self._anchor_embedding if self.in_continuation() else None
+
+    @property
+    def anchor_name(self) -> Optional[str]:
+        return self._anchor_name if self.in_continuation() else None
+
+    def set_anchor(self, embedding: Optional[np.ndarray], name: Optional[str]) -> None:
+        """Lock the voiceprint anchor for the new continuation window.
+        Pass None to clear (e.g. when voiceprint matching is disabled)."""
+        self._anchor_embedding = embedding
+        self._anchor_name = name
 
     def extend(self, identity: Optional[str] = None) -> None:
         """Reset the continuation window. If `identity` is given, lock to
@@ -318,6 +363,8 @@ class WakeState:
     def reset(self) -> None:
         self._until = 0.0
         self._locked_identity = None
+        self._anchor_embedding = None
+        self._anchor_name = None
 
     def remaining_s(self) -> float:
         return max(0.0, self._until - time.monotonic())
@@ -586,12 +633,20 @@ class RoomBridge:
     MESSAGES_URL_TEMPLATE = "http://127.0.0.1:8080/api/messages/{session_id}"
 
     def __init__(self, room_name: str, lk_cfg: dict, stt: WhisperSTT,
-                 vad_cfg: dict, http_client) -> None:
+                 vad_cfg: dict, http_client, speaker_id=None) -> None:
         self.room_name = room_name
         self.lk_cfg = lk_cfg
         self.stt = stt
         self.vad_cfg = vad_cfg
         self.http = http_client
+        # Optional SpeakerIdentifier (resemblyzer). When None, the wake-word
+        # gate falls back to LiveKit-identity-only matching for continuation.
+        self.speaker_id = speaker_id
+        vp_cfg = lk_cfg.get("voiceprint", {}) or {}
+        # Cosine threshold for "is this still the same speaker as the
+        # wake-word utterance". Separate from the profile threshold —
+        # anchor matching is an easier task than full identification.
+        self.anchor_threshold = float(vp_cfg.get("anchor_threshold", 0.65))
         self.room = rtc.Room()
         self._tasks: list[asyncio.Task] = []
         # Strong refs to in-flight utterance handlers. asyncio's create_task
@@ -858,6 +913,21 @@ class RoomBridge:
         finally:
             await stream.aclose()
 
+    async def _embed_async(self, samples: np.ndarray, sample_rate: int):
+        """Run resemblyzer's blocking embed in a thread so the event loop
+        stays responsive. Returns (embedding, name, score) on success or
+        (None, unknown_label, 0.0) on failure."""
+        if self.speaker_id is None:
+            return None, "Unknown", 0.0
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                None, self.speaker_id.identify, samples, sample_rate,
+            )
+        except Exception as e:
+            LOG.warning("[%s] voiceprint embed failed: %s", self.room_name, e)
+            return None, "Unknown", 0.0
+
     async def _handle_utterance(self, samples: np.ndarray, sample_rate: int, identity: str) -> None:
         duration_s = samples.size / sample_rate
         t0 = time.monotonic()
@@ -877,10 +947,32 @@ class RoomBridge:
         # ── Wake-word gate ──────────────────────────────────────────
         wake = self.wake
         inject_text: Optional[str] = None
+        speaker_name: Optional[str] = None  # populated from anchor or fresh ID
         if not wake.enabled:
             inject_text = text
         elif wake.in_continuation() and identity == wake.locked_identity:
+            # Identity matches the locked participant. If voiceprint is
+            # enabled, also require the embedding to match the anchor —
+            # this is what catches "different person, same browser tab".
+            anchor = wake.anchor_embedding
+            if anchor is not None:
+                emb, _name, _score = await self._embed_async(samples, sample_rate)
+                if emb is None:
+                    # Embedding failed — degrade to identity-only this turn
+                    # rather than dropping a real utterance.
+                    LOG.info("[%s] continuation: voiceprint check skipped (embed failed)",
+                             self.room_name)
+                else:
+                    sim = float(np.dot(emb, anchor))
+                    if sim < self.anchor_threshold:
+                        LOG.info(
+                            "[%s] voiceprint anchor mismatch (cos=%.2f < %.2f) — dropped %r",
+                            self.room_name, sim, self.anchor_threshold, text[:80],
+                        )
+                        return
+                    LOG.info("[%s] voiceprint anchor match (cos=%.2f)", self.room_name, sim)
             inject_text = text
+            speaker_name = wake.anchor_name
             wake.extend(identity)  # extend on each turn the user takes
             LOG.info("[%s] continuation pass-through (%.1fs left)",
                      self.room_name, wake.remaining_s())
@@ -889,7 +981,15 @@ class RoomBridge:
             if tail is None:
                 LOG.info("[%s] no wake-word in %r — dropped", self.room_name, text[:80])
                 return
+            # Wake-word matched — embed to set the anchor + identify the
+            # speaker against enrolled profiles.
+            emb, name, score = await self._embed_async(samples, sample_rate)
+            if emb is not None and self.speaker_id is not None:
+                LOG.info("[%s] wake-word speaker: %s (cos=%.2f)",
+                         self.room_name, name, score)
+            wake.set_anchor(emb, name if name and name != "Unknown" else None)
             wake.extend(identity)
+            speaker_name = wake.anchor_name
             if not tail and wake.skip_inject_if_only_wake_word:
                 LOG.info("[%s] bare wake-word — opening %.1fs window, no inject",
                          self.room_name, wake.continuation_seconds)
@@ -899,15 +999,11 @@ class RoomBridge:
 
         if not inject_text:
             return
+        payload = {"text": inject_text, "session_key": self.session_id}
+        if speaker_name:
+            payload["speaker"] = speaker_name
         try:
-            r = await self.http.post(
-                INJECT_URL,
-                json={
-                    "text": inject_text,
-                    "session_key": self.session_id,
-                },
-                timeout=10.0,
-            )
+            r = await self.http.post(INJECT_URL, json=payload, timeout=10.0)
             if r.status_code >= 300:
                 LOG.warning("[%s] inject failed %d: %s",
                             self.room_name, r.status_code, r.text[:200])
@@ -927,6 +1023,10 @@ class WorkerManager:
         self._http_url = _http_url(self.lk_cfg["url"])
         self.stt = WhisperSTT(self.lk_cfg.get("stt", {}))
         self.vad_cfg = self.lk_cfg.get("vad", {})
+        # SpeakerIdentifier is shared across rooms — one VoiceEncoder load,
+        # one profiles_dir watcher, single source of truth. None when
+        # voiceprint matching is disabled in config.
+        self.speaker_id = _build_speaker_id(self.lk_cfg.get("voiceprint", {}) or {})
         # last time we saw a non-agent participant in each room — used for
         # the idle-grace teardown logic.
         self._last_seen_remote: dict[str, float] = {}
@@ -973,7 +1073,10 @@ class WorkerManager:
             non_agent = max(0, r.num_participants - (1 if already_in else 0))
             if already_in or non_agent <= 0:
                 continue
-            bridge = RoomBridge(r.name, self.lk_cfg, self.stt, self.vad_cfg, self._http)
+            bridge = RoomBridge(
+                r.name, self.lk_cfg, self.stt, self.vad_cfg, self._http,
+                speaker_id=self.speaker_id,
+            )
             try:
                 await bridge.connect()
                 self.bridges[r.name] = bridge
