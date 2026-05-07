@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import {
   LayoutList,
   Brain,
@@ -6,8 +7,8 @@ import {
   LayoutGrid,
   Settings,
   MessageCircle,
-  ChevronsLeft,
-  ChevronsRight,
+  Pin,
+  PinOff,
   Code2,
   Lightbulb,
   Mic,
@@ -273,9 +274,14 @@ function VoiceModeBlock({ collapsed, sessionKey }: { collapsed: boolean; session
 }
 
 export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, sessionKey, isMobile }: SidebarProps) {
-  const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft
-  // Work Mode toggle removed from the sidebar for now; the feature isn't
-  // wired up server-side yet. Restore the state hook + NavRow when ready.
+  // Hover-expand: when `collapsed` (the pinned state) is true, the sidebar
+  // sits at 56px in-flow but pops out to 192px as an overlay on hover. When
+  // `collapsed` is false, it's pinned-expanded and pushes content. The
+  // collapse button toggles between those two modes.
+  const [hovered, setHovered] = useState(false)
+  const expanded = !collapsed || hovered
+  const overlayMode = !isMobile && collapsed && hovered
+  const PinIcon = collapsed ? PinOff : Pin
 
   const renderItem = (item: NavItem) => {
     const Icon = item.icon
@@ -283,7 +289,7 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
     return (
       <NavRow
         key={item.id}
-        collapsed={collapsed}
+        collapsed={!expanded}
         label={item.label}
         onClick={() => onNavigate(item.id)}
         className={
@@ -293,70 +299,91 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
         }
       >
         <Icon className="w-4 h-4 flex-shrink-0" />
-        {!collapsed && <span className="truncate">{item.label}</span>}
+        {expanded && <span className="truncate">{item.label}</span>}
       </NavRow>
     )
   }
 
-  return (
-    <TooltipProvider delayDuration={150}>
-      <aside
-        className={cn(
-          'flex flex-col transition-all duration-200',
-          isMobile ? 'w-full flex-1 py-2' : 'py-4 bg-card border-r border-border',
-          isMobile ? '' : collapsed ? 'w-14' : 'w-48',
-        )}
-      >
-        {/* Brand */}
-        {!isMobile && (
-          <div className={cn('mb-6 flex items-center gap-2', collapsed ? 'px-2 justify-center' : 'px-4')}>
-            <img src="/lloyd.jpg" alt="Lloyd" className="w-7 h-7 rounded-lg object-cover flex-shrink-0" />
-            {!collapsed && (
-              <div>
-                <div className="text-sm font-bold tracking-wide text-foreground">LLOYD</div>
-                <div className="text-[10px] text-muted-foreground -mt-0.5">Mission Control</div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Main nav */}
-        <nav className="flex-1 px-2 space-y-0.5">
-          {NAV_ITEMS.map(renderItem)}
-        </nav>
-
-        {/* Bottom nav */}
-        <div className="px-2 pt-2 space-y-0.5 border-t border-border">
-          {/* Voice block — driven by VoiceModeContext (LiveKit room state) */}
-          <VoiceModeBlock collapsed={collapsed} sessionKey={sessionKey} />
-
-          {/* Work Mode toggle hidden — keep state + handler around so we can
-              flip it back on with one line if/when the feature ships. */}
-
-          <Separator className="my-1" />
-
-          {BOTTOM_ITEMS.map(renderItem)}
-
-          {!isMobile && (
-            <>
-              <Separator className="my-1" />
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={onToggleCollapse}
-                    className="w-full justify-center text-muted-foreground hover:text-foreground"
-                  >
-                    <CollapseIcon className="w-4 h-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="right">{collapsed ? 'Expand sidebar' : 'Collapse sidebar'}</TooltipContent>
-              </Tooltip>
-            </>
+  const aside = (
+    <aside
+      onMouseEnter={isMobile ? undefined : () => setHovered(true)}
+      onMouseLeave={isMobile ? undefined : () => setHovered(false)}
+      className={cn(
+        'flex flex-col transition-all duration-200',
+        isMobile ? 'w-full flex-1 py-2' : 'py-4 bg-card border-r border-border h-full',
+        isMobile ? '' : expanded ? 'w-48' : 'w-14',
+        // When hover-expanded over collapsed, lift out of the flow so we
+        // overlay page content instead of shoving it.
+        overlayMode && 'absolute inset-y-0 left-0 z-30 shadow-2xl shadow-black/40',
+      )}
+    >
+      {/* Brand */}
+      {!isMobile && (
+        <div className={cn('mb-6 flex items-center gap-2', expanded ? 'px-4' : 'px-2 justify-center')}>
+          <img src="/lloyd.jpg" alt="Lloyd" className="w-7 h-7 rounded-lg object-cover flex-shrink-0" />
+          {expanded && (
+            <div>
+              <div className="text-sm font-bold tracking-wide text-foreground">LLOYD</div>
+              <div className="text-[10px] text-muted-foreground -mt-0.5">Mission Control</div>
+            </div>
           )}
         </div>
-      </aside>
+      )}
+
+      {/* Main nav */}
+      <nav className="flex-1 px-2 space-y-0.5">
+        {NAV_ITEMS.map(renderItem)}
+      </nav>
+
+      {/* Bottom nav */}
+      <div className="px-2 pt-2 space-y-0.5 border-t border-border">
+        {/* Voice block — driven by VoiceModeContext (LiveKit room state) */}
+        <VoiceModeBlock collapsed={!expanded} sessionKey={sessionKey} />
+
+        {/* Work Mode toggle hidden — keep state + handler around so we can
+            flip it back on with one line if/when the feature ships. */}
+
+        <Separator className="my-1" />
+
+        {BOTTOM_ITEMS.map(renderItem)}
+
+        {!isMobile && (
+          <>
+            <Separator className="my-1" />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onToggleCollapse}
+                  className="w-full justify-center text-muted-foreground hover:text-foreground"
+                >
+                  <PinIcon className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                {collapsed ? 'Pin sidebar open' : 'Unpin (auto-collapse)'}
+              </TooltipContent>
+            </Tooltip>
+          </>
+        )}
+      </div>
+    </aside>
+  )
+
+  // Mobile: rendered inside a Sheet, no positioning wrapper needed.
+  if (isMobile) {
+    return <TooltipProvider delayDuration={150}>{aside}</TooltipProvider>
+  }
+
+  // Desktop: outer div reserves the collapsed-width slot in the layout flow,
+  // so when we promote the inner aside to `absolute` for the hover overlay,
+  // page content doesn't reflow.
+  return (
+    <TooltipProvider delayDuration={150}>
+      <div className={cn('relative shrink-0 transition-[width] duration-200', collapsed ? 'w-14' : 'w-48')}>
+        {aside}
+      </div>
     </TooltipProvider>
   )
 }
