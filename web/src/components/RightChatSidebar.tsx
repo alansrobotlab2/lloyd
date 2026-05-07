@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Plus, Info, Loader2 } from 'lucide-react'
+import { Plus, Info, Loader2, Square, Brain } from 'lucide-react'
 import { type AgentState, useTrackVolume } from '@livekit/components-react'
 import ChatPanel from './ChatPanel'
 import { AgentAudioVisualizerAura } from './agents-ui/agent-audio-visualizer-aura'
@@ -65,6 +65,11 @@ export default function RightChatSidebar() {
   // mode (different animation than listening) while Lloyd is processing
   // a turn — i.e. before TTS starts but after the user finished speaking.
   const [chatThinking, setChatThinking] = useState(false)
+  // IV is on when both flags are true. Tracked here so the toolbar
+  // toggle reflects current state across reloads. We refresh it on
+  // session change and after our own patches.
+  const [ivEnabled, setIvEnabled] = useState<boolean>(true)
+  const [ivBusy, setIvBusy] = useState<boolean>(false)
 
   // Resolve a session on mount: most-recent inner-voice mc session if one
   // exists, otherwise create a fresh one. New session button below sets
@@ -124,6 +129,45 @@ export default function RightChatSidebar() {
     setSessionKey(null)
     await resolveSession(true)
   }
+
+  // Read IV state for the resolved session so the toggle reflects what's
+  // actually enabled (across reloads, after patches from elsewhere).
+  useEffect(() => {
+    if (!sessionKey) return
+    let cancelled = false
+    api.innerVoiceState(sessionKey)
+      .then(s => { if (!cancelled) setIvEnabled(!!s.inner_voice_enabled) })
+      .catch(() => { /* leave default */ })
+    return () => { cancelled = true }
+  }, [sessionKey])
+
+  // Stop: cancel the running turn AND drain queued ambient turns. Works
+  // even when ChatPanel doesn't think it's busy — between IV-driven
+  // iterations the harness may briefly settle to streaming=false, and
+  // the inline Stop in ChatPanel disappears with it.
+  const handleStop = useCallback(() => {
+    if (!sessionKey) return
+    api.cancelSession(sessionKey, { drainPending: true }).catch(() => { /* swallow */ })
+  }, [sessionKey])
+
+  // Pause / resume IV for this session. Toggling both flags off prevents
+  // observation entirely; toggling on restores the dual-brain default.
+  const handleToggleIv = useCallback(async () => {
+    if (!sessionKey || ivBusy) return
+    const next = !ivEnabled
+    setIvBusy(true)
+    try {
+      const r = await api.patchSession(sessionKey, {
+        inner_voice: next,
+        inner_voice_evaluate_user_turns: next,
+      })
+      setIvEnabled(!!r.inner_voice)
+    } catch {
+      /* leave state */
+    } finally {
+      setIvBusy(false)
+    }
+  }, [sessionKey, ivBusy, ivEnabled])
 
   // Resize: drag the left edge of the sidebar. mousemove + mouseup are
   // bound to window so the drag continues even if the cursor leaves the
@@ -259,6 +303,35 @@ export default function RightChatSidebar() {
               ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
               : <Plus className="w-3.5 h-3.5 mr-1.5" />}
             New
+          </Button>
+          <Button
+            variant={chatThinking ? 'destructive' : 'outline'}
+            size="sm"
+            onClick={handleStop}
+            disabled={!sessionKey}
+            className="h-7 text-xs"
+            title="Stop the current turn and drain queued ambient turns"
+          >
+            <Square className="w-3.5 h-3.5 mr-1.5" />
+            Stop
+          </Button>
+          <Button
+            variant={ivEnabled ? 'secondary' : 'outline'}
+            size="sm"
+            onClick={handleToggleIv}
+            disabled={!sessionKey || ivBusy}
+            className={cn(
+              'h-7 text-xs',
+              ivEnabled
+                ? 'bg-purple-600/20 border-purple-500/30 text-purple-400 hover:bg-purple-600/30 hover:text-purple-300'
+                : '',
+            )}
+            title={ivEnabled ? 'Pause Inner Voice for this session' : 'Resume Inner Voice for this session'}
+          >
+            {ivBusy
+              ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+              : <Brain className="w-3.5 h-3.5 mr-1.5" />}
+            {ivEnabled ? 'IV on' : 'IV off'}
           </Button>
           <Button
             variant={agentDetails ? 'secondary' : 'outline'}

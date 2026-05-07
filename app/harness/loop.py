@@ -675,7 +675,44 @@ async def _dispatch_one_tool_call(
     if session_id:
         dispatch_args["_session_id"] = session_id
     try:
-        result = await pool.call_tool(name, dispatch_args)
+        # Race the MCP call against options.cancel_event so an in-flight
+        # tool (long-running Bash, slow MCP server) doesn't block the
+        # loop's reaction to a Stop click. On cancel we cancel the
+        # call_tool task — the SSE client closes the request, the MCP
+        # server-side coroutine receives CancelledError, and individual
+        # tools (e.g. Bash) are responsible for tearing down child
+        # processes in their own finally clauses.
+        cancel_event = getattr(options, "cancel_event", None)
+        if cancel_event is None:
+            result = await pool.call_tool(name, dispatch_args)
+        else:
+            tool_task = asyncio.create_task(pool.call_tool(name, dispatch_args))
+            cancel_task = asyncio.create_task(cancel_event.wait())
+            try:
+                done, _pending = await asyncio.wait(
+                    {tool_task, cancel_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                if not cancel_task.done():
+                    cancel_task.cancel()
+            if tool_task in done:
+                result = tool_task.result()
+            else:
+                tool_task.cancel()
+                try:
+                    await tool_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                logger.info(
+                    "loop: tool %s cancelled mid-dispatch (cancel_event set)",
+                    name,
+                )
+                return events.tool_result(
+                    call_id=call_id, name=name,
+                    content=f"Tool {name!r} cancelled by user.",
+                    is_error=True,
+                )
     except ToolDispatchError as exc:
         if options.hooks is not None:
             await options.hooks.fire_post_tool_use_failure(

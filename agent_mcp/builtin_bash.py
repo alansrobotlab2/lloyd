@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 from typing import Any
 
 from mcp.server import Server
@@ -42,6 +43,42 @@ app = Server("lloyd-builtin-bash")
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
 OUTPUT_TRUNCATE_CHARS = 30_000
+
+
+def _kill_proc_tree(proc: asyncio.subprocess.Process) -> None:
+    """Send SIGTERM (then SIGKILL after a short grace period) to the
+    process group of `proc`. Requires the proc to have been spawned with
+    start_new_session=True so it's the leader of its own pgid.
+    """
+    if proc.returncode is not None:
+        return
+    pid = proc.pid
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
+
+    async def _coup_de_grace() -> None:
+        await asyncio.sleep(2.0)
+        if proc.returncode is None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    try:
+        asyncio.get_running_loop().create_task(_coup_de_grace())
+    except RuntimeError:
+        pass
 
 
 async def _bash(args: dict[str, Any]) -> str:
@@ -59,11 +96,17 @@ async def _bash(args: dict[str, Any]) -> str:
         return await _spawn_background(command, args.get("description", ""))
 
     try:
+        # start_new_session=True puts the shell (and everything it
+        # spawns — pipes, valgrind, child binaries) into its own process
+        # group. That lets us SIGTERM/SIGKILL the whole tree on cancel
+        # or timeout via os.killpg. Without this, killing only the shell
+        # leaves grandchildren (e.g. valgrind under `timeout`) running.
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=os.getcwd(),
+            start_new_session=True,
         )
     except Exception as exc:
         return json.dumps({"error": f"failed to spawn shell: {exc}"})
@@ -71,10 +114,7 @@ async def _bash(args: dict[str, Any]) -> str:
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        _kill_proc_tree(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=2.0)
         except asyncio.TimeoutError:
@@ -83,6 +123,16 @@ async def _bash(args: dict[str, Any]) -> str:
             "error": f"command timed out after {timeout_ms}ms",
             "command": command,
         })
+    except asyncio.CancelledError:
+        # Harness cancelled this dispatch (Stop button → cancel_event →
+        # call_tool task cancelled). Kill the whole process group so
+        # long-running children (valgrind, etc.) don't outlive the turn.
+        _kill_proc_tree(proc)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass
+        raise
 
     output = stdout.decode("utf-8", errors="replace") if stdout else ""
     truncated = False
