@@ -98,13 +98,13 @@ export default function WorkersPage() {
   const pausedLabel = status?.pool?.paused ? "Paused" : status?.pool?.running ? "Running" : "Stopped";
 
   return (
-    <div className="p-6 text-slate-200">
+    <div className="p-6 text-foreground">
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <Workflow className="w-6 h-6 text-sky-400" />
           <div>
             <h1 className="text-xl font-bold">Workers</h1>
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-muted-foreground">
               Unified work queue — {pausedLabel} · {status?.pool?.slots ?? 0} slots ·
               {" "}{status?.pool?.in_flight_count ?? 0} in flight · {totalDepth} total in queue
             </p>
@@ -113,7 +113,7 @@ export default function WorkersPage() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => api.workersPause(!status?.pool?.paused).then(refresh)}
-            className="px-3 py-1.5 text-sm rounded border border-slate-600 hover:border-sky-500 hover:text-sky-300 flex items-center gap-1.5"
+            className="px-3 py-1.5 text-sm rounded border border-border hover:border-primary hover:text-primary flex items-center gap-1.5"
           >
             {status?.pool?.paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
             {status?.pool?.paused ? "Resume" : "Pause"}
@@ -121,7 +121,7 @@ export default function WorkersPage() {
           <button
             onClick={refresh}
             disabled={loading}
-            className="px-3 py-1.5 text-sm rounded border border-slate-600 hover:border-sky-500 hover:text-sky-300 flex items-center gap-1.5"
+            className="px-3 py-1.5 text-sm rounded border border-border hover:border-primary hover:text-primary flex items-center gap-1.5"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
             Refresh
@@ -131,8 +131,8 @@ export default function WorkersPage() {
 
       {/* In-flight strip */}
       {status?.pool?.in_flight && Object.keys(status.pool.in_flight).length > 0 && (
-        <div className="mb-4 p-3 rounded bg-slate-900/60 border border-slate-700">
-          <div className="text-xs uppercase text-slate-400 mb-2">In flight ({status.pool.in_flight_count})</div>
+        <div className="mb-4 p-3 rounded bg-secondary/60 border border-border">
+          <div className="text-xs uppercase text-muted-foreground mb-2">In flight ({status.pool.in_flight_count})</div>
           <div className="flex flex-wrap gap-2">
             {Object.entries(status.pool.in_flight).map(([id, info]) => (
               <span key={id}
@@ -146,12 +146,12 @@ export default function WorkersPage() {
       )}
 
       {/* Tab strip */}
-      <div className="flex items-center gap-1 mb-3 border-b border-slate-700">
+      <div className="flex items-center gap-1 mb-3 border-b border-border">
         {(["queue", "runs", "sources", "review"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm border-b-2 ${tab === t ? "border-sky-400 text-sky-300" : "border-transparent text-slate-400 hover:text-slate-200"}`}
+            className={`px-4 py-2 text-sm border-b-2 ${tab === t ? "border-sky-400 text-sky-300" : "border-transparent text-muted-foreground hover:text-foreground"}`}
           >
             {t === "queue" ? "Queue" : t === "runs" ? "Recent Runs" : t === "sources" ? "Sources" : "Review"}
           </button>
@@ -163,13 +163,13 @@ export default function WorkersPage() {
         <div className="flex flex-wrap gap-3 mb-3 items-center text-sm">
           {tab === "queue" && (
             <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 rounded px-2 py-1">
+                    className="bg-secondary border border-border rounded px-2 py-1">
               <option value="">all states</option>
               {Object.keys(STATE_COLORS).map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           )}
           <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}
-                  className="bg-slate-900 border border-slate-700 rounded px-2 py-1">
+                  className="bg-secondary border border-border rounded px-2 py-1">
             <option value="">all sources</option>
             {status?.sources?.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}
           </select>
@@ -185,11 +185,11 @@ export default function WorkersPage() {
 }
 
 function QueueTable({ items }: { items: QueueItem[] }) {
-  if (!items.length) return <div className="text-slate-500 italic p-4">no items</div>;
+  if (!items.length) return <div className="text-muted-foreground italic p-4">no items</div>;
   return (
-    <div className="overflow-x-auto rounded border border-slate-700">
+    <div className="overflow-x-auto rounded border border-border">
       <table className="min-w-full text-sm">
-        <thead className="bg-slate-900/80 text-slate-400 text-xs uppercase">
+        <thead className="bg-secondary/80 text-muted-foreground text-xs uppercase">
           <tr>
             <th className="px-3 py-2 text-left">id</th>
             <th className="px-3 py-2 text-left">source / kind</th>
@@ -202,27 +202,27 @@ function QueueTable({ items }: { items: QueueItem[] }) {
         </thead>
         <tbody>
           {items.map((it) => (
-            <tr key={it.id} className="border-t border-slate-800 hover:bg-slate-800/40">
-              <td className="px-3 py-2 font-mono text-slate-400">#{it.id}</td>
+            <tr key={it.id} className="border-t border-border hover:bg-accent">
+              <td className="px-3 py-2 font-mono text-muted-foreground">#{it.id}</td>
               <td className="px-3 py-2">
                 <span className="font-medium">{it.source}</span>
-                <span className="text-slate-500"> / {it.kind}</span>
+                <span className="text-muted-foreground"> / {it.kind}</span>
               </td>
               <td className="px-3 py-2">{it.priority}</td>
               <td className="px-3 py-2">
-                <span className={`text-xs px-2 py-0.5 rounded border ${STATE_COLORS[it.state] || "border-slate-600"}`}>
+                <span className={`text-xs px-2 py-0.5 rounded border ${STATE_COLORS[it.state] || "border-border"}`}>
                   {it.state}
                 </span>
               </td>
               <td className="px-3 py-2">{it.attempts}</td>
-              <td className="px-3 py-2 text-slate-400">{formatAgo(it.enqueued_at)}</td>
+              <td className="px-3 py-2 text-muted-foreground">{formatAgo(it.enqueued_at)}</td>
               <td className="px-3 py-2 text-xs max-w-[260px] truncate">
                 {it.error && it.state !== "completed" && (
                   <span className="text-rose-400" title={it.error}>{it.error}</span>
                 )}
                 {it.error && it.state === "completed" && it.attempts > 1 && (
                   <span
-                    className="text-slate-500 italic"
+                    className="text-muted-foreground italic"
                     title={`Succeeded on retry. Prior error: ${it.error}`}
                   >
                     (recovered after {it.attempts} attempts)
@@ -238,11 +238,11 @@ function QueueTable({ items }: { items: QueueItem[] }) {
 }
 
 function RunsTable({ runs }: { runs: RunRow[] }) {
-  if (!runs.length) return <div className="text-slate-500 italic p-4">no runs yet</div>;
+  if (!runs.length) return <div className="text-muted-foreground italic p-4">no runs yet</div>;
   return (
-    <div className="overflow-x-auto rounded border border-slate-700">
+    <div className="overflow-x-auto rounded border border-border">
       <table className="min-w-full text-sm">
-        <thead className="bg-slate-900/80 text-slate-400 text-xs uppercase">
+        <thead className="bg-secondary/80 text-muted-foreground text-xs uppercase">
           <tr>
             <th className="px-3 py-2 text-left">status</th>
             <th className="px-3 py-2 text-left">source</th>
@@ -254,7 +254,7 @@ function RunsTable({ runs }: { runs: RunRow[] }) {
         </thead>
         <tbody>
           {runs.map((r) => (
-            <tr key={r.run_id} className="border-t border-slate-800 hover:bg-slate-800/40">
+            <tr key={r.run_id} className="border-t border-border hover:bg-accent">
               <td className="px-3 py-2">
                 {r.status === "success" ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-400" />
@@ -263,13 +263,13 @@ function RunsTable({ runs }: { runs: RunRow[] }) {
                 )}
               </td>
               <td className="px-3 py-2">{r.source}</td>
-              <td className="px-3 py-2 font-mono text-slate-400">{r.task_id || "—"}</td>
-              <td className="px-3 py-2 text-slate-400">{formatAgo(r.completed_at)}</td>
+              <td className="px-3 py-2 font-mono text-muted-foreground">{r.task_id || "—"}</td>
+              <td className="px-3 py-2 text-muted-foreground">{formatAgo(r.completed_at)}</td>
               <td className="px-3 py-2 tabular-nums">
-                <Clock className="w-3 h-3 inline mr-1 text-slate-500" />
+                <Clock className="w-3 h-3 inline mr-1 text-muted-foreground" />
                 {r.duration_seconds?.toFixed(1) ?? "—"}s
               </td>
-              <td className="px-3 py-2 text-slate-300 max-w-[480px] truncate" title={r.summary}>
+              <td className="px-3 py-2 text-foreground/90 max-w-[480px] truncate" title={r.summary}>
                 {r.summary}
               </td>
             </tr>
@@ -281,11 +281,11 @@ function RunsTable({ runs }: { runs: RunRow[] }) {
 }
 
 function SourcesTable({ sources }: { sources: Array<{ name: string; enabled: boolean; interval_seconds?: number; max_inflight?: number; depth?: Record<string, number> }> }) {
-  if (!sources.length) return <div className="text-slate-500 italic p-4">no sources configured</div>;
+  if (!sources.length) return <div className="text-muted-foreground italic p-4">no sources configured</div>;
   return (
-    <div className="overflow-x-auto rounded border border-slate-700">
+    <div className="overflow-x-auto rounded border border-border">
       <table className="min-w-full text-sm">
-        <thead className="bg-slate-900/80 text-slate-400 text-xs uppercase">
+        <thead className="bg-secondary/80 text-muted-foreground text-xs uppercase">
           <tr>
             <th className="px-3 py-2 text-left">source</th>
             <th className="px-3 py-2 text-left">enabled</th>
@@ -298,18 +298,18 @@ function SourcesTable({ sources }: { sources: Array<{ name: string; enabled: boo
         </thead>
         <tbody>
           {sources.map((s) => (
-            <tr key={s.name} className="border-t border-slate-800 hover:bg-slate-800/40">
+            <tr key={s.name} className="border-t border-border hover:bg-accent">
               <td className="px-3 py-2 font-medium">{s.name}</td>
               <td className="px-3 py-2">
-                <span className={`text-xs px-2 py-0.5 rounded border ${s.enabled ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10" : "border-slate-600 text-slate-500"}`}>
+                <span className={`text-xs px-2 py-0.5 rounded border ${s.enabled ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10" : "border-border text-muted-foreground"}`}>
                   {s.enabled ? "on" : "off"}
                 </span>
               </td>
-              <td className="px-3 py-2 text-slate-400">{s.interval_seconds}s</td>
-              <td className="px-3 py-2 text-slate-400">{s.max_inflight ?? "—"}</td>
+              <td className="px-3 py-2 text-muted-foreground">{s.interval_seconds}s</td>
+              <td className="px-3 py-2 text-muted-foreground">{s.max_inflight ?? "—"}</td>
               <td className="px-3 py-2">{s.depth?.queued ?? 0}</td>
               <td className="px-3 py-2">{(s.depth?.claimed ?? 0) + (s.depth?.running ?? 0)}</td>
-              <td className="px-3 py-2 text-slate-400">{s.depth?.completed ?? 0}</td>
+              <td className="px-3 py-2 text-muted-foreground">{s.depth?.completed ?? 0}</td>
             </tr>
           ))}
         </tbody>
@@ -421,12 +421,12 @@ function ReviewPanel() {
   return (
     <div className="flex gap-3" style={{ minHeight: "65vh" }}>
       {/* Left — item list */}
-      <div className="w-96 flex-shrink-0 border border-slate-700 rounded bg-slate-900/40 flex flex-col">
-        <div className="p-2 border-b border-slate-700 flex gap-2 items-center">
+      <div className="w-96 flex-shrink-0 border border-border rounded bg-secondary/40 flex flex-col">
+        <div className="p-2 border-b border-border flex gap-2 items-center">
           <select
             value={sourceFilter}
             onChange={(e) => { setSourceFilter(e.target.value); setSelected(null); }}
-            className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm flex-1"
+            className="bg-secondary border border-border rounded px-2 py-1 text-sm flex-1"
           >
             <option value="">all sources ({items.length})</option>
             {sources.map(s => <option key={s} value={s}>{s}</option>)}
@@ -434,7 +434,7 @@ function ReviewPanel() {
           <button
             onClick={refresh}
             disabled={loading}
-            className="p-1.5 rounded border border-slate-600 hover:border-sky-500"
+            className="p-1.5 rounded border border-border hover:border-primary"
             title="Refresh"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -442,7 +442,7 @@ function ReviewPanel() {
         </div>
         <div className="overflow-y-auto flex-1">
           {items.length === 0 && (
-            <div className="p-6 text-center text-slate-500 italic text-sm">
+            <div className="p-6 text-center text-muted-foreground italic text-sm">
               no pending artifacts
             </div>
           )}
@@ -453,16 +453,16 @@ function ReviewPanel() {
               <button
                 key={it.path}
                 onClick={() => setSelected(it)}
-                className={`w-full text-left px-3 py-2 border-b border-slate-800 hover:bg-slate-800/60 ${active ? "bg-slate-800/80" : ""}`}
+                className={`w-full text-left px-3 py-2 border-b border-border hover:bg-secondary/60 ${active ? "bg-secondary/80" : ""}`}
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs text-sky-400 font-medium">{it.source}</span>
-                  <span className="text-xs text-slate-500">{formatAgo(it.mtime)}</span>
+                  <span className="text-xs text-muted-foreground">{formatAgo(it.mtime)}</span>
                 </div>
                 <div className="text-sm truncate mt-0.5" title={it.filename}>
                   {it.filename.replace(/\.md$/, "")}
                 </div>
-                <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
+                <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
                   {typeof conf === "number" && (
                     <span className={`px-1.5 py-0.5 rounded border ${
                       conf >= 0.7 ? "border-emerald-500/40 text-emerald-300" :
@@ -481,21 +481,21 @@ function ReviewPanel() {
       </div>
 
       {/* Right — detail pane */}
-      <div className="flex-1 border border-slate-700 rounded bg-slate-900/40 flex flex-col min-w-0">
+      <div className="flex-1 border border-border rounded bg-secondary/40 flex flex-col min-w-0">
         {!selected && (
-          <div className="flex-1 flex items-center justify-center text-slate-500 italic">
+          <div className="flex-1 flex items-center justify-center text-muted-foreground italic">
             <div className="text-center">
-              <FileText className="w-8 h-8 mx-auto mb-2 text-slate-600" />
+              <FileText className="w-8 h-8 mx-auto mb-2 text-muted-foreground/70" />
               select an artifact to review
             </div>
           </div>
         )}
         {selected && (
           <>
-            <div className="p-3 border-b border-slate-700 flex-shrink-0">
+            <div className="p-3 border-b border-border flex-shrink-0">
               <div className="flex items-center gap-2 mb-1">
-                <FolderOpen className="w-4 h-4 text-slate-500" />
-                <span className="text-xs text-slate-500 truncate" title={selected.path}>
+                <FolderOpen className="w-4 h-4 text-muted-foreground" />
+                <span className="text-xs text-muted-foreground truncate" title={selected.path}>
                   {selected.path.replace("/home/alansrobotlab/obsidian/", "~/obsidian/")}
                 </span>
               </div>
@@ -507,7 +507,7 @@ function ReviewPanel() {
                     placeholder={canPromoteWithoutDest ? `dest: ${DEFAULT_DEST[selected.source]}` : "destination required"}
                     value={destination}
                     onChange={(e) => setDestination(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs w-56"
+                    className="bg-secondary border border-border rounded px-2 py-1 text-xs w-56"
                   />
                   <button
                     onClick={promote}
@@ -533,19 +533,19 @@ function ReviewPanel() {
             </div>
             <div className="overflow-y-auto flex-1 p-4 font-mono text-sm">
               {detail?.frontmatter && Object.keys(detail.frontmatter).length > 0 && (
-                <div className="mb-4 p-3 rounded bg-slate-950/80 border border-slate-800">
-                  <div className="text-xs text-slate-500 uppercase mb-2">frontmatter</div>
+                <div className="mb-4 p-3 rounded bg-secondary/80 border border-border">
+                  <div className="text-xs text-muted-foreground uppercase mb-2">frontmatter</div>
                   {Object.entries(detail.frontmatter).map(([k, v]) => (
                     <div key={k} className="flex gap-2 text-xs">
-                      <span className="text-slate-400 w-28">{k}</span>
-                      <span className="text-slate-200 break-all">{
+                      <span className="text-muted-foreground w-28">{k}</span>
+                      <span className="text-foreground break-all">{
                         typeof v === "object" ? JSON.stringify(v) : String(v)
                       }</span>
                     </div>
                   ))}
                 </div>
               )}
-              <pre className="whitespace-pre-wrap text-slate-200">{detail?.body ?? "loading…"}</pre>
+              <pre className="whitespace-pre-wrap text-foreground">{detail?.body ?? "loading…"}</pre>
             </div>
           </>
         )}

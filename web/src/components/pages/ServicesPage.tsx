@@ -236,8 +236,8 @@ export default function ServicesPage() {
     switch (state) {
       case "active":   return "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
       case "failed":   return "bg-red-500/20 text-red-400 border-red-500/30";
-      case "inactive": return "bg-slate-500/20 text-slate-400 border-slate-500/30";
-      default:         return "bg-slate-500/20 text-slate-400 border-slate-500/30";
+      case "inactive": return "bg-secondary text-muted-foreground border-border";
+      default:         return "bg-secondary text-muted-foreground border-border";
     }
   };
 
@@ -251,15 +251,15 @@ export default function ServicesPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Activity className="w-5 h-5 text-brand-400" />
-          <h2 className="text-lg font-semibold text-slate-200">Services</h2>
+          <Activity className="w-5 h-5 text-primary" />
+          <h2 className="text-lg font-semibold text-foreground">Services</h2>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-slate-500">
+          <span className="text-xs text-muted-foreground">
             {totalHealthy}/{totalServices} healthy
           </span>
           {(timestamp || lloydTimestamp) && (
-            <span className="text-[10px] text-slate-600 font-mono">
+            <span className="text-[10px] text-muted-foreground/70 font-mono">
               {new Date(lloydTimestamp || timestamp).toLocaleTimeString()}
             </span>
           )}
@@ -269,14 +269,14 @@ export default function ServicesPage() {
       {/* Gateway restart overlay */}
       {gatewayRestarting && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-surface-1 border border-surface-3/50 rounded-2xl px-10 py-8 text-center space-y-4 max-w-sm">
-            <RefreshCw className="w-8 h-8 text-brand-400 animate-spin mx-auto" />
-            <div className="text-base font-medium text-slate-200">Gateway Restarting</div>
-            <div className="text-sm text-slate-400">
-              Reconnecting... <span className="font-mono text-brand-400">{countdown}s</span>
+          <div className="bg-card border border-border/50 rounded-2xl px-10 py-8 text-center space-y-4 max-w-sm">
+            <RefreshCw className="w-8 h-8 text-primary animate-spin mx-auto" />
+            <div className="text-base font-medium text-foreground">Gateway Restarting</div>
+            <div className="text-sm text-muted-foreground">
+              Reconnecting... <span className="font-mono text-primary">{countdown}s</span>
             </div>
-            <div className="w-full bg-surface-3/30 rounded-full h-1.5 overflow-hidden">
-              <div className="bg-brand-400 h-full rounded-full animate-pulse" />
+            <div className="w-full bg-muted/30 rounded-full h-1.5 overflow-hidden">
+              <div className="bg-primary h-full rounded-full animate-pulse" />
             </div>
           </div>
         </div>
@@ -284,7 +284,7 @@ export default function ServicesPage() {
 
       {/* Loading state */}
       {loading && lloydLoading && (
-        <div className="text-sm text-slate-500 text-center py-8">
+        <div className="text-sm text-muted-foreground text-center py-8">
           Loading services...
         </div>
       )}
@@ -299,37 +299,37 @@ export default function ServicesPage() {
         }).map((svc) => {
           const isExpanded = lloydExpandedUnit === svc.unit;
           return (
-            <div key={svc.unit} className="rounded-xl border border-surface-3/50 overflow-hidden">
+            <div key={svc.unit} className="rounded-xl border border-border/50 overflow-hidden">
               <div
                 onClick={() => toggleLloydExpand(svc.unit)}
-                className={`bg-surface-1 px-5 py-4 flex items-center gap-4 cursor-pointer transition-colors ${
-                  isExpanded ? "border-b border-surface-3/50" : "hover:border-surface-3/80"
+                className={`bg-card px-5 py-4 flex items-center gap-4 cursor-pointer transition-colors ${
+                  isExpanded ? "border-b border-border/50" : "hover:border-border/80"
                 }`}
               >
                 <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${healthDot(svc.health)}`} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-slate-200">{svc.name}</div>
-                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                  <div className="text-sm font-medium text-foreground">{svc.name}</div>
+                  <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
                     {svc.unit}{svc.port ? ` · :${svc.port}` : ""}
                   </div>
                 </div>
                 <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono border ${stateBadge(svc.activeState)}`}>
                   {svc.activeState}
                 </span>
-                <span className={`text-[10px] w-14 text-right px-1.5 py-0.5 rounded font-mono tabular-nums ${svc.port && svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}>
+                <span className={`text-[10px] w-14 text-right px-1.5 py-0.5 rounded font-mono tabular-nums ${svc.port && svc.portHealthy ? "text-emerald-400" : "text-muted-foreground/70"}`}>
                   :{svc.port ? String(svc.port).padStart(4, "0") : "0000"}
                 </span>
                 <div className="flex gap-1">
-                  <button onClick={(e) => handleLloydAction(e, svc.id, "start")} disabled={lloydActionLoading !== null} title="Start" className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50"><Play className="w-3.5 h-3.5" /></button>
-                  <button onClick={(e) => handleLloydAction(e, svc.id, "stop")} disabled={lloydActionLoading !== null} title="Stop" className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"><Square className="w-3.5 h-3.5" /></button>
-                  <button onClick={(e) => handleLloydAction(e, svc.id, "restart")} disabled={lloydActionLoading !== null} title="Restart" className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50 ${lloydActionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}><RotateCcw className="w-3.5 h-3.5" /></button>
+                  <button onClick={(e) => handleLloydAction(e, svc.id, "start")} disabled={lloydActionLoading !== null} title="Start" className="p-1.5 rounded-lg text-muted-foreground hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50"><Play className="w-3.5 h-3.5" /></button>
+                  <button onClick={(e) => handleLloydAction(e, svc.id, "stop")} disabled={lloydActionLoading !== null} title="Stop" className="p-1.5 rounded-lg text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"><Square className="w-3.5 h-3.5" /></button>
+                  <button onClick={(e) => handleLloydAction(e, svc.id, "restart")} disabled={lloydActionLoading !== null} title="Restart" className={`p-1.5 rounded-lg text-muted-foreground hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50 ${lloydActionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}><RotateCcw className="w-3.5 h-3.5" /></button>
                 </div>
-                <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${isExpanded ? "rotate-180" : ""}`} />
               </div>
               {isExpanded && (
-                <div className="bg-surface-0 px-5 py-4 space-y-4">
+                <div className="bg-background px-5 py-4 space-y-4">
                   {lloydDetailLoading && !lloydDetail ? (
-                    <div className="text-xs text-slate-500 text-center py-4">Loading service details...</div>
+                    <div className="text-xs text-muted-foreground text-center py-4">Loading service details...</div>
                   ) : lloydDetail ? (
                     <LloydDetailView detail={lloydDetail} />
                   ) : (
@@ -345,17 +345,17 @@ export default function ServicesPage() {
         {services.map((svc) => {
           const isExpanded = expandedId === svc.id;
           return (
-            <div key={svc.id} className="rounded-xl border border-surface-3/50 overflow-hidden">
+            <div key={svc.id} className="rounded-xl border border-border/50 overflow-hidden">
               <div
                 onClick={() => toggleExpand(svc.id)}
-                className={`bg-surface-1 px-5 py-4 flex items-center gap-4 cursor-pointer transition-colors ${
-                  isExpanded ? "border-b border-surface-3/50" : "hover:border-surface-3/80"
+                className={`bg-card px-5 py-4 flex items-center gap-4 cursor-pointer transition-colors ${
+                  isExpanded ? "border-b border-border/50" : "hover:border-border/80"
                 }`}
               >
                 <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${healthDot(svc.health)}`} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-slate-200">{svc.name}</div>
-                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                  <div className="text-sm font-medium text-foreground">{svc.name}</div>
+                  <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
                     {svc.unit} &middot; :{svc.port}
                   </div>
                 </div>
@@ -363,29 +363,29 @@ export default function ServicesPage() {
                   {svc.systemdState}
                 </span>
                 <span
-                  className={`text-[10px] w-14 text-right px-1.5 py-0.5 rounded font-mono tabular-nums ${svc.portHealthy ? "text-emerald-400" : "text-slate-600"}`}
+                  className={`text-[10px] w-14 text-right px-1.5 py-0.5 rounded font-mono tabular-nums ${svc.portHealthy ? "text-emerald-400" : "text-muted-foreground/70"}`}
                   title={svc.portHealthy ? "Port responding" : svc.port ? "Port not responding" : "No port"}
                 >
                   :{svc.port ? String(svc.port).padStart(4, "0") : "0000"}
                 </span>
                 <div className="flex gap-1">
-                  <button onClick={(e) => handleAction(e, svc.id, "start")} disabled={actionLoading !== null} title="Start" className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50">
+                  <button onClick={(e) => handleAction(e, svc.id, "start")} disabled={actionLoading !== null} title="Start" className="p-1.5 rounded-lg text-muted-foreground hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50">
                     <Play className="w-3.5 h-3.5" />
                   </button>
-                  <button onClick={(e) => handleAction(e, svc.id, "stop")} disabled={actionLoading !== null} title="Stop" className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50">
+                  <button onClick={(e) => handleAction(e, svc.id, "stop")} disabled={actionLoading !== null} title="Stop" className="p-1.5 rounded-lg text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50">
                     <Square className="w-3.5 h-3.5" />
                   </button>
-                  <button onClick={(e) => handleAction(e, svc.id, "restart")} disabled={actionLoading !== null} title="Restart" className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50 ${actionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}>
+                  <button onClick={(e) => handleAction(e, svc.id, "restart")} disabled={actionLoading !== null} title="Restart" className={`p-1.5 rounded-lg text-muted-foreground hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50 ${actionLoading === `${svc.id}-restart` ? "animate-spin" : ""}`}>
                     <RotateCcw className="w-3.5 h-3.5" />
                   </button>
                 </div>
-                <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${isExpanded ? "rotate-180" : ""}`} />
               </div>
 
               {isExpanded && (
-                <div className="bg-surface-0 px-5 py-4 space-y-4">
+                <div className="bg-background px-5 py-4 space-y-4">
                   {detailLoading && !detail ? (
-                    <div className="text-xs text-slate-500 text-center py-4">Loading service details...</div>
+                    <div className="text-xs text-muted-foreground text-center py-4">Loading service details...</div>
                   ) : detail ? (
                     <ServiceDetailView detail={detail} logEndRef={logEndRef} />
                   ) : (
@@ -399,7 +399,7 @@ export default function ServicesPage() {
 
 
         {!loading && !lloydLoading && services.length === 0 && lloydServices.length === 0 && (
-          <div className="text-sm text-slate-600 text-center py-4 italic">
+          <div className="text-sm text-muted-foreground/70 text-center py-4 italic">
             No services found
           </div>
         )}
@@ -418,7 +418,7 @@ function ServiceDetailView({ detail, logEndRef }: { detail: ServiceDetail; logEn
         {detail.tasks && <StatChip icon={<Activity className="w-3.5 h-3.5" />} label="Tasks" value={detail.tasks} />}
       </div>
       {detail.activeSince && (
-        <div className="text-[11px] text-slate-400 font-mono">Active: {detail.activeSince}</div>
+        <div className="text-[11px] text-muted-foreground font-mono">Active: {detail.activeSince}</div>
       )}
       <LogView lines={detail.logLines} logEndRef={logEndRef} />
     </>
@@ -435,7 +435,7 @@ function LloydDetailView({ detail }: { detail: LloydServiceDetail }) {
         {detail.tasks && <StatChip icon={<Activity className="w-3.5 h-3.5" />} label="Tasks" value={detail.tasks} />}
       </div>
       {detail.activeSince && (
-        <div className="text-[11px] text-slate-400 font-mono">Active: {detail.activeSince}</div>
+        <div className="text-[11px] text-muted-foreground font-mono">Active: {detail.activeSince}</div>
       )}
       <LogView lines={detail.logLines} />
     </>
@@ -446,18 +446,18 @@ function LogView({ lines, logEndRef }: { lines: string[]; logEndRef?: React.RefO
   return (
     <div>
       <div className="flex items-center gap-2 mb-2">
-        <Terminal className="w-3.5 h-3.5 text-slate-500" />
-        <span className="text-xs text-slate-400 font-medium">Recent Logs</span>
+        <Terminal className="w-3.5 h-3.5 text-muted-foreground" />
+        <span className="text-xs text-muted-foreground font-medium">Recent Logs</span>
       </div>
-      <div className="bg-black/40 rounded-lg p-3 max-h-72 overflow-y-auto font-mono text-[11px] leading-relaxed border border-surface-3/30">
+      <div className="bg-black/40 rounded-lg p-3 max-h-72 overflow-y-auto font-mono text-[11px] leading-relaxed border border-border/30">
         {lines.length > 0 ? (
           lines.map((line, i) => (
-            <div key={i} className={`whitespace-pre-wrap break-all ${line.match(/error|fail|panic|critical/i) ? "text-red-400" : line.match(/warn/i) ? "text-amber-400" : "text-slate-400"}`}>
+            <div key={i} className={`whitespace-pre-wrap break-all ${line.match(/error|fail|panic|critical/i) ? "text-red-400" : line.match(/warn/i) ? "text-amber-400" : "text-muted-foreground"}`}>
               {line}
             </div>
           ))
         ) : (
-          <div className="text-slate-600 italic">No log lines available</div>
+          <div className="text-muted-foreground/70 italic">No log lines available</div>
         )}
         {logEndRef && <div ref={logEndRef} />}
       </div>
@@ -467,11 +467,11 @@ function LogView({ lines, logEndRef }: { lines: string[]; logEndRef?: React.RefO
 
 function StatChip({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
-    <div className="flex items-center gap-2 bg-surface-1 rounded-lg px-3 py-2 border border-surface-3/30">
-      <span className="text-brand-400">{icon}</span>
+    <div className="flex items-center gap-2 bg-card rounded-lg px-3 py-2 border border-border/30">
+      <span className="text-primary">{icon}</span>
       <div>
-        <div className="text-[10px] text-slate-500 uppercase tracking-wider">{label}</div>
-        <div className="text-xs text-slate-200 font-mono">{value}</div>
+        <div className="text-[10px] text-muted-foreground uppercase tracking-wider">{label}</div>
+        <div className="text-xs text-foreground font-mono">{value}</div>
       </div>
     </div>
   );

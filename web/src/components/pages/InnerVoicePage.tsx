@@ -141,9 +141,9 @@ export default function InnerVoicePage() {
   return (
     <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
       {/* Header bar */}
-      <div className="flex items-center gap-3 px-6 py-3 border-b border-surface-3/30 flex-shrink-0">
-        <BrainCircuit className="w-5 h-5 text-brand-400" />
-        <h2 className="text-lg font-semibold text-slate-200">Inner Voice</h2>
+      <div className="flex items-center gap-3 px-6 py-3 border-b border-border/30 flex-shrink-0">
+        <BrainCircuit className="w-5 h-5 text-primary" />
+        <h2 className="text-lg font-semibold text-foreground">Inner Voice</h2>
 
         <SessionPicker
           sessions={sessions}
@@ -162,8 +162,8 @@ export default function InnerVoicePage() {
             title={showAgentDetails ? 'Hide agent details' : 'Show agent details'}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
               showAgentDetails
-                ? 'text-brand-400 bg-brand-500/15'
-                : 'text-slate-400 hover:text-brand-400 hover:bg-brand-500/10'
+                ? 'text-primary bg-primary/15'
+                : 'text-muted-foreground hover:text-primary hover:bg-primary/10'
             }`}
           >
             <Bot className="w-3.5 h-3.5" />
@@ -172,7 +172,7 @@ export default function InnerVoicePage() {
           <button
             onClick={handleCreateSession}
             disabled={creating}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-brand-600 border border-brand-500 text-white text-xs font-medium hover:bg-brand-500 transition disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary border border-primary text-white text-xs font-medium hover:bg-primary transition disabled:opacity-50"
             title="Create a new Inner Voice chat session (observer fires on user turns)"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -180,7 +180,7 @@ export default function InnerVoicePage() {
           </button>
           <button
             onClick={() => setRefreshKey(k => k + 1)}
-            className="p-1.5 rounded-md hover:bg-surface-2 text-slate-400 hover:text-slate-200 transition"
+            className="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition"
             title="Refresh"
           >
             <RefreshCw className="w-4 h-4" />
@@ -195,7 +195,7 @@ export default function InnerVoicePage() {
       <ContextRow obsState={obsState} />
 
       {/* Single-column timeline (centerline rendered inside ChatPanel) */}
-      <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-surface-0/50">
+      <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-background/50">
         {selectedSession ? (
           <ChatPanel
             key={selectedSession}
@@ -210,10 +210,10 @@ export default function InnerVoicePage() {
         ) : (
           <div className="flex-1 flex items-center justify-center p-8">
             <div className="text-center max-w-md">
-              <MessageSquare className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-              <div className="text-sm text-slate-400 mb-2">No Inner Voice session selected</div>
-              <div className="text-xs text-slate-500 mb-4">
-                Click <span className="font-mono text-brand-400">+ new chat</span> above
+              <MessageSquare className="w-12 h-12 text-muted-foreground/70 mx-auto mb-3" />
+              <div className="text-sm text-muted-foreground mb-2">No Inner Voice session selected</div>
+              <div className="text-xs text-muted-foreground mb-4">
+                Click <span className="font-mono text-primary">+ new chat</span> above
                 to start a session where the observer watches every chat turn,
                 or pick an existing session from the dropdown.
               </div>
@@ -240,11 +240,11 @@ function SessionPicker({
 }) {
   return (
     <div className="flex items-center gap-2 ml-2">
-      <span className="text-xs text-slate-500">session:</span>
+      <span className="text-xs text-muted-foreground">session:</span>
       <select
         value={selectedSession ?? ''}
         onChange={e => onSelect(e.target.value || null)}
-        className="bg-surface-2 border border-surface-3/40 rounded-md px-2 py-1 text-xs font-mono text-slate-200 max-w-[280px] focus:outline-none focus:border-brand-500/50"
+        className="bg-secondary border border-border/40 rounded-md px-2 py-1 text-xs font-mono text-foreground max-w-[280px] focus:outline-none focus:border-primary/50"
       >
         {sessions.length === 0 && <option value="">— none —</option>}
         {sessions.map(s => (
@@ -281,15 +281,15 @@ function CountsStrip({ obsState }: { obsState: InnerVoiceState }) {
   }, [counts])
 
   return (
-    <div className="flex items-center flex-wrap gap-x-3 gap-y-1 px-6 py-2 border-b border-surface-3/30 flex-shrink-0 text-[11px]">
+    <div className="flex items-center flex-wrap gap-x-3 gap-y-1 px-6 py-2 border-b border-border/30 flex-shrink-0 text-[11px]">
       <div className="flex items-center gap-1.5">
-        <Activity className="w-3.5 h-3.5 text-slate-400" />
-        <span className="text-slate-300">observer</span>
-        <span className={`font-mono ${obsState.inner_voice_enabled ? 'text-brand-400' : 'text-slate-500'}`}>
+        <Activity className="w-3.5 h-3.5 text-muted-foreground" />
+        <span className="text-foreground/90">observer</span>
+        <span className={`font-mono ${obsState.inner_voice_enabled ? 'text-primary' : 'text-muted-foreground'}`}>
           {obsState.inner_voice_enabled ? 'enabled' : 'disabled'}
         </span>
         {obsState.evaluate_user_turns && (
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-brand-500/10 text-brand-400 border border-brand-500/20">
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-primary/10 text-primary border border-primary/20">
             chat
           </span>
         )}
@@ -316,7 +316,7 @@ function CountsStrip({ obsState }: { obsState: InnerVoiceState }) {
         </div>
       )}
       {obsState.last_observation_at && (
-        <span className="ml-auto text-[10px] text-slate-500 font-mono">
+        <span className="ml-auto text-[10px] text-muted-foreground font-mono">
           last: {obsState.last_observation_at}
         </span>
       )}
@@ -326,9 +326,9 @@ function CountsStrip({ obsState }: { obsState: InnerVoiceState }) {
 
 function InlineStat({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
   return (
-    <div className={`flex items-baseline gap-1 px-2 py-0.5 rounded bg-surface-2/60 border border-surface-3/30 ${warn ? 'border-amber-500/30' : ''}`}>
-      <span className="text-[9px] uppercase tracking-wider text-slate-500">{label}</span>
-      <span className={`font-mono text-[11px] ${warn ? 'text-amber-400' : 'text-slate-300'}`}>{value}</span>
+    <div className={`flex items-baseline gap-1 px-2 py-0.5 rounded bg-secondary/60 border border-border/30 ${warn ? 'border-amber-500/30' : ''}`}>
+      <span className="text-[9px] uppercase tracking-wider text-muted-foreground">{label}</span>
+      <span className={`font-mono text-[11px] ${warn ? 'text-amber-400' : 'text-foreground/90'}`}>{value}</span>
     </div>
   )
 }
@@ -348,26 +348,26 @@ function ContextRow({ obsState }: { obsState: InnerVoiceState }) {
   if (!userText && !hasGoal) return null
 
   return (
-    <div className="grid grid-cols-2 gap-3 px-6 py-2 border-b border-surface-3/30 flex-shrink-0 text-[11px]">
+    <div className="grid grid-cols-2 gap-3 px-6 py-2 border-b border-border/30 flex-shrink-0 text-[11px]">
       {/* Left — user input */}
       <div className="min-w-0">
-        <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">user input</div>
-        <div className="text-slate-200 leading-relaxed whitespace-pre-wrap break-words">
-          {userText || <span className="text-slate-500 italic">(no user request yet)</span>}
+        <div className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">user input</div>
+        <div className="text-foreground leading-relaxed whitespace-pre-wrap break-words">
+          {userText || <span className="text-muted-foreground italic">(no user request yet)</span>}
         </div>
       </div>
       {/* Right — IV-captured intent */}
       <div className="min-w-0">
-        <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">iv intent</div>
+        <div className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">iv intent</div>
         {!hasGoal ? (
-          <div className="text-slate-500 italic">(no actionable goal extracted)</div>
+          <div className="text-muted-foreground italic">(no actionable goal extracted)</div>
         ) : (
           <div className="space-y-1">
             {successCriteria.length > 0 && (
               <GoalList label="success" items={successCriteria} color="text-emerald-400" />
             )}
             {completionSignals.length > 0 && (
-              <GoalList label="signals" items={completionSignals} color="text-brand-400" />
+              <GoalList label="signals" items={completionSignals} color="text-primary" />
             )}
             {outOfScope.length > 0 && (
               <GoalList label="out of scope" items={outOfScope} color="text-amber-400" />
@@ -382,10 +382,10 @@ function ContextRow({ obsState }: { obsState: InnerVoiceState }) {
 function GoalList({ label, items, color }: { label: string; items: string[]; color: string }) {
   return (
     <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-      <span className="text-[9px] uppercase tracking-wider text-slate-500 flex-shrink-0">{label}:</span>
+      <span className="text-[9px] uppercase tracking-wider text-muted-foreground flex-shrink-0">{label}:</span>
       {items.map((item, i) => (
         <span key={i} className={`${color} text-[11px]`}>
-          {item}{i < items.length - 1 && <span className="text-slate-600"> ·</span>}
+          {item}{i < items.length - 1 && <span className="text-muted-foreground/70"> ·</span>}
         </span>
       ))}
     </div>
