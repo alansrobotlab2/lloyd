@@ -1,5 +1,61 @@
 @import "tailwindcss";
 
+/* ──────────────────────────────────────────────────────────────────────
+   LiveKit cyan-on-zinc palette (shadcn token system).
+   The legacy `brand-*` / `surface-*` palette below stays for now so
+   existing pages keep working; it gets removed in Phase 2B once the
+   shell is restyled.
+   ────────────────────────────────────────────────────────────────────── */
+:root {
+  --background: 240 6% 7%;
+  --foreground: 0 0% 98%;
+  --card: 240 5% 10%;
+  --card-foreground: 0 0% 98%;
+  --popover: 240 5% 12%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 192 95% 55%;
+  --primary-foreground: 240 6% 7%;
+  --secondary: 240 4% 16%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 240 4% 14%;
+  --muted-foreground: 240 5% 65%;
+  --accent: 240 4% 16%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 62% 50%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 4% 18%;
+  --input: 240 4% 16%;
+  --ring: 192 95% 55%;
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+/* Legacy palette — every page that hasn't been restyled yet still references
+   it. Retire in Phase 2B alongside the shell restyle. */
 @theme {
   --color-brand-400: #818cf8;
   --color-brand-500: #6366f1;
