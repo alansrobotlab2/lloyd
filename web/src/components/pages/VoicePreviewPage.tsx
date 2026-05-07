@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
-import type { AgentState } from '@livekit/components-react'
+import { useEffect, useRef, useState } from 'react'
+import { type AgentState, useTrackVolume } from '@livekit/components-react'
+import type { LocalAudioTrack } from 'livekit-client'
 import { AgentAudioVisualizerAura } from '../agents-ui/agent-audio-visualizer-aura'
 import VoiceRoom from '../VoiceRoom'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { api, type MessageEntry } from '../../api'
 
 const STATES: AgentState[] = ['idle', 'listening', 'thinking', 'speaking']
 const COLORS: Array<{ name: string; hex: `#${string}` }> = [
@@ -14,9 +16,113 @@ const COLORS: Array<{ name: string; hex: `#${string}` }> = [
   { name: 'Magenta',      hex: '#E879F9' },
 ]
 
-// Stable session id so reloads land in the same room and the agent worker
-// can recognise the connection.
 const VOICE_PREVIEW_SESSION = 'voice_preview'
+
+/** Polling transcript log for the voice preview. Reads /api/messages/<id>
+ *  every 1.5s and renders the most recent user + assistant turns. Lets you
+ *  verify Phase 4 end-to-end without leaving the preview page. */
+function TranscriptLog({ sessionId }: { sessionId: string }) {
+  const [messages, setMessages] = useState<MessageEntry[]>([])
+  const [polledOnce, setPolledOnce] = useState(false)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const r = await api.loadMessages(sessionId, 50)
+        if (!cancelled && r.success && Array.isArray(r.messages)) {
+          setMessages(r.messages)
+        }
+      } catch {
+        // session may not exist yet — that's fine, the worker creates it
+        // on the first inject.
+      } finally {
+        if (!cancelled) setPolledOnce(true)
+      }
+    }
+    poll()
+    const id = setInterval(poll, 1500)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [sessionId])
+
+  // Auto-scroll to bottom on new messages.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages.length])
+
+  // Filter to user/assistant turns only — tool/subliminal noise hidden.
+  const visible = messages.filter(m => m.role === 'user' || m.role === 'assistant')
+  const text = (m: MessageEntry) =>
+    m.content?.map(c => (c.type === 'text' ? c.text : '')).join('') ?? ''
+
+  return (
+    <div className="w-full max-w-2xl flex flex-col gap-1">
+      <div className="text-xs text-muted-foreground flex items-center justify-between px-1">
+        <span>Transcript — session <span className="font-mono text-foreground">{sessionId}</span></span>
+        <span>{polledOnce ? `${visible.length} message${visible.length === 1 ? '' : 's'}` : 'loading…'}</span>
+      </div>
+      <div
+        ref={scrollRef}
+        className="h-64 overflow-y-auto rounded-md border border-border bg-card p-3 space-y-2"
+      >
+        {visible.length === 0 && polledOnce && (
+          <div className="text-xs text-muted-foreground text-center py-8">
+            No messages yet. Speak to drop your first transcript here.
+          </div>
+        )}
+        {visible.map(m => (
+          <div key={m.id} className="text-sm">
+            <span
+              className={cn(
+                'inline-block w-20 mr-2 text-xs uppercase tracking-wider tabular-nums',
+                m.role === 'user' ? 'text-primary' : 'text-emerald-400',
+              )}
+            >
+              {m.role}
+            </span>
+            <span className="text-foreground whitespace-pre-wrap">{text(m)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** VU meter + state pill for the live preview. Reads volume off the local
+ *  mic track and renders it as both a numeric dBFS readout and a horizontal
+ *  bar — gives unambiguous feedback that audio is flowing even before the
+ *  aura's modulation kicks in. */
+function LiveStats({
+  audioTrack,
+  agentState,
+}: {
+  audioTrack: LocalAudioTrack | undefined
+  agentState: AgentState
+}) {
+  // useTrackVolume returns 0..1 (analyser-derived); convert to dBFS for the
+  // readout. Smoothing constant matches the visualizer hook so the bar and
+  // the aura modulate in sync.
+  const volume = useTrackVolume(audioTrack, { fftSize: 512, smoothingTimeConstant: 0.55 })
+  const dbfs = volume > 0.0001 ? 20 * Math.log10(volume) : -120
+  const dbDisplay = volume > 0 ? `${dbfs.toFixed(1)} dBFS` : '—'
+  return (
+    <div className="flex flex-col items-center gap-2 w-72">
+      <div className="flex items-center justify-between w-full text-sm">
+        <span className="text-muted-foreground">mic</span>
+        <span className="tabular-nums text-foreground">{dbDisplay}</span>
+        <span className="text-muted-foreground">{agentState}</span>
+      </div>
+      <div className="h-2 w-full rounded-full bg-secondary overflow-hidden">
+        <div
+          className="h-full bg-primary transition-[width] duration-100"
+          style={{ width: `${Math.min(100, volume * 200)}%` }}
+        />
+      </div>
+    </div>
+  )
+}
 
 export default function VoicePreviewPage() {
   const [color, setColor] = useState<`#${string}`>('#1FD5F9')
@@ -54,18 +160,10 @@ export default function VoicePreviewPage() {
 
   const modeToggle = (
     <div className="flex items-center gap-2">
-      <Button
-        size="sm"
-        variant={mode === 'live' ? 'default' : 'outline'}
-        onClick={() => setMode('live')}
-      >
+      <Button size="sm" variant={mode === 'live' ? 'default' : 'outline'} onClick={() => setMode('live')}>
         Live mic
       </Button>
-      <Button
-        size="sm"
-        variant={mode === 'mock' ? 'default' : 'outline'}
-        onClick={() => setMode('mock')}
-      >
+      <Button size="sm" variant={mode === 'mock' ? 'default' : 'outline'} onClick={() => setMode('mock')}>
         Mock state
       </Button>
     </div>
@@ -92,11 +190,7 @@ export default function VoicePreviewPage() {
             </Button>
           ))}
           <span className="mx-2 h-5 w-px bg-border" />
-          <Button
-            size="sm"
-            variant={autoCycle ? 'secondary' : 'outline'}
-            onClick={() => setAutoCycle(c => !c)}
-          >
+          <Button size="sm" variant={autoCycle ? 'secondary' : 'outline'} onClick={() => setAutoCycle(c => !c)}>
             {autoCycle ? 'auto-cycling' : 'paused'}
           </Button>
         </div>
@@ -107,48 +201,59 @@ export default function VoicePreviewPage() {
 
   return (
     <VoiceRoom sessionId={VOICE_PREVIEW_SESSION}>
-      {({ status, agentState, localAudioTrack, error, reconnect }) => (
-        <div className="flex flex-col items-center justify-center w-full min-h-full p-6 gap-6 bg-background text-foreground">
-          <div className="text-sm text-muted-foreground text-center max-w-xl">
-            Live mic — your microphone publishes into a LiveKit room (
-            <span className="font-mono text-foreground">lloyd-{VOICE_PREVIEW_SESSION}</span>
-            ); the aura modulates from the actual audio levels.
-          </div>
-          {modeToggle}
-          <AgentAudioVisualizerAura
-            size="xl"
-            state={agentState}
-            audioTrack={localAudioTrack}
-            color={color}
-            themeMode="dark"
-          />
-          <div className="flex items-center gap-3 text-sm">
-            <span
-              className={cn(
-                'inline-block h-2 w-2 rounded-full',
-                status === 'connected' && 'bg-emerald-400',
-                status === 'connecting' && 'bg-amber-400 animate-pulse',
-                status === 'idle' && 'bg-muted-foreground',
-                status === 'failed' && 'bg-destructive',
-              )}
-            />
-            <span className="tabular-nums text-foreground">{status}</span>
-            <span className="text-muted-foreground">·</span>
-            <span className="text-muted-foreground">agent: <span className="text-foreground tabular-nums">{agentState}</span></span>
-            {status === 'failed' && (
-              <Button size="sm" variant="outline" onClick={reconnect} className="ml-2">
-                Retry
-              </Button>
-            )}
-          </div>
-          {error && (
-            <div className="text-xs text-destructive max-w-md text-center break-words">
-              {error}
+      {({ status, agentState, localAudioTrack, error, reconnect }) => {
+        // Until Phase 5A wires an actual agent audio track, repurpose
+        // 'speaking' as "your voice is the source" so the aura's volume
+        // modulation kicks in. Strict 'listening' would only run the
+        // brightness pulse, with no reaction to mic level.
+        const visualizerState: AgentState =
+          status === 'connected' && localAudioTrack ? 'speaking' : agentState
+        return (
+          <div className="flex flex-col items-center justify-center w-full min-h-full p-6 gap-6 bg-background text-foreground">
+            <div className="text-sm text-muted-foreground text-center max-w-xl">
+              Live mic — your microphone publishes into a LiveKit room
+              (<span className="font-mono text-foreground">lloyd-{VOICE_PREVIEW_SESSION}</span>).
+              The aura modulates from your voice (preview repurposes the agent-speaking
+              animation; Phase 5A swaps in the real agent audio track).
             </div>
-          )}
-          {colorPicker}
-        </div>
-      )}
+            {modeToggle}
+            <AgentAudioVisualizerAura
+              size="xl"
+              state={visualizerState}
+              audioTrack={localAudioTrack}
+              color={color}
+              themeMode="dark"
+            />
+            <div className="flex items-center gap-3 text-sm">
+              <span
+                className={cn(
+                  'inline-block h-2 w-2 rounded-full',
+                  status === 'connected' && 'bg-emerald-400',
+                  status === 'connecting' && 'bg-amber-400 animate-pulse',
+                  status === 'idle' && 'bg-muted-foreground',
+                  status === 'failed' && 'bg-destructive',
+                )}
+              />
+              <span className="tabular-nums text-foreground">{status}</span>
+              {status === 'failed' && (
+                <Button size="sm" variant="outline" onClick={reconnect} className="ml-2">
+                  Retry
+                </Button>
+              )}
+            </div>
+            {status === 'connected' && (
+              <LiveStats audioTrack={localAudioTrack} agentState={visualizerState} />
+            )}
+            {error && (
+              <div className="text-xs text-destructive max-w-md text-center break-words">
+                {error}
+              </div>
+            )}
+            <TranscriptLog sessionId={VOICE_PREVIEW_SESSION} />
+            {colorPicker}
+          </div>
+        )
+      }}
     </VoiceRoom>
   )
 }
