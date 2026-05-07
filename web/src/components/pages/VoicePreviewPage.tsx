@@ -251,7 +251,7 @@ export default function VoicePreviewPage() {
 
   return (
     <VoiceRoom sessionId={VOICE_PREVIEW_SESSION}>
-      {({ status, agentState, localAudioTrack, agentAudioTrack, error, reconnect }) => {
+      {({ status, agentState, localAudioTrack, agentAudioTrack, agentSpeaking, micMuted, error, reconnect, interrupt }) => {
         // Phase 5A: prefer the agent's track (Lloyd's voice) when it's
         // present — that's the canonical "speaking" state. Fall back to
         // the local mic so the aura still reacts to the user during the
@@ -292,11 +292,23 @@ export default function VoicePreviewPage() {
               <span className="tabular-nums text-foreground">{status}</span>
               <span className="text-muted-foreground">·</span>
               <span className="text-muted-foreground">
-                source: <span className="text-foreground">{agentAudioTrack ? 'agent' : localAudioTrack ? 'mic' : '—'}</span>
+                source: <span className="text-foreground">
+                  {agentSpeaking ? 'agent' : localAudioTrack && !micMuted ? 'mic' : micMuted ? 'mic (muted)' : '—'}
+                </span>
               </span>
               {status === 'failed' && (
                 <Button size="sm" variant="outline" onClick={reconnect} className="ml-2">
                   Retry
+                </Button>
+              )}
+              {agentSpeaking && (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={() => { interrupt() }}
+                  className="ml-2"
+                >
+                  Interrupt
                 </Button>
               )}
             </div>

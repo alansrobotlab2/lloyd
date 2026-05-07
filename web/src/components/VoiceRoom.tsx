@@ -3,17 +3,22 @@ import {
   Room,
   RoomEvent,
   Track,
+  DataPacket_Kind,
   type LocalAudioTrack,
   type RemoteAudioTrack,
   type RemoteTrack,
   type RemoteTrackPublication,
   type RemoteParticipant,
 } from 'livekit-client'
-import { RoomContext, RoomAudioRenderer } from '@livekit/components-react'
+import { RoomContext, RoomAudioRenderer, useTrackVolume } from '@livekit/components-react'
 import type { AgentState } from '@livekit/components-react'
 import { api } from '../api'
 
 const AGENT_IDENTITY_PREFIX = 'lloyd-agent'
+// Volume threshold (0..1 from useTrackVolume) above which we treat the agent
+// track as "actively speaking". 0.01 is below noise floor; 0.04 catches even
+// quiet TTS passages.
+const AGENT_SPEAKING_THRESHOLD = 0.02
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'failed'
 
@@ -22,6 +27,10 @@ export interface VoiceRoomState {
   status: ConnectionStatus
   /** True once the local mic track is published. */
   micPublished: boolean
+  /** True if the local mic is muted (e.g. half-duplex during agent TTS). */
+  micMuted: boolean
+  /** True while the agent track is producing audio above threshold. */
+  agentSpeaking: boolean
   /** Local mic audio track once published — useful for input-side meters. */
   localAudioTrack: LocalAudioTrack | undefined
   /** Agent-published audio track (Lloyd's voice). Drives the aura visualizer
@@ -32,12 +41,18 @@ export interface VoiceRoomState {
   error: string | null
   /** Manually reconnect / retry. */
   reconnect: () => void
+  /** Cancel the current agent turn + clear the worker's TTS queue. */
+  interrupt: () => Promise<void>
 }
 
 interface VoiceRoomProps {
   sessionId: string
   /** Auto-publish the user's microphone after connecting. Default true. */
   publishMic?: boolean
+  /** Mute the local mic publication while Lloyd is speaking, to kill the
+   *  speakers→mic echo loop that otherwise produces fake transcripts.
+   *  Default true. Disable if you have a clean headset and want full-duplex. */
+  halfDuplex?: boolean
   /** Render-prop receiving the room state. */
   children: (state: VoiceRoomState) => React.ReactNode
 }
@@ -57,6 +72,7 @@ interface VoiceRoomProps {
 export default function VoiceRoom({
   sessionId,
   publishMic = true,
+  halfDuplex = true,
   children,
 }: VoiceRoomProps) {
   const roomRef = useRef<Room | null>(null)
@@ -65,10 +81,38 @@ export default function VoiceRoom({
 
   const [status, setStatus] = useState<ConnectionStatus>('idle')
   const [micPublished, setMicPublished] = useState(false)
+  const [micMuted, setMicMuted] = useState(false)
   const [localAudioTrack, setLocalAudioTrack] = useState<LocalAudioTrack | undefined>(undefined)
   const [agentAudioTrack, setAgentAudioTrack] = useState<RemoteAudioTrack | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
   const [reconnectKey, setReconnectKey] = useState(0)
+
+  // Watch agent track volume — drives the "speaking" detection that
+  // toggles half-duplex mute and the visualizer state.
+  const agentVolume = useTrackVolume(agentAudioTrack, {
+    fftSize: 256,
+    smoothingTimeConstant: 0.4,
+  })
+  const agentSpeaking = agentVolume > AGENT_SPEAKING_THRESHOLD
+
+  // Half-duplex: while the agent's track has audio above threshold, mute
+  // the local mic so the speakers don't feed back into the ASR pipeline.
+  // Restored automatically once the agent stops.
+  useEffect(() => {
+    if (!halfDuplex || !micPublished) return
+    const targetMuted = agentSpeaking
+    if (targetMuted === micMuted) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        await room.localParticipant.setMicrophoneEnabled(!targetMuted)
+        if (!cancelled) setMicMuted(targetMuted)
+      } catch (e) {
+        console.warn('half-duplex mic toggle failed:', e)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [halfDuplex, micPublished, agentSpeaking, micMuted, room])
 
   useEffect(() => {
     let cancelled = false
@@ -136,7 +180,14 @@ export default function VoiceRoom({
             setError(hint)
           } else {
             try {
-              await room.localParticipant.setMicrophoneEnabled(true)
+              // Explicit AEC + noise suppression + AGC. Defaults are
+              // usually true but spelling them out keeps half-duplex
+              // mute and echo cancellation cooperating predictably.
+              await room.localParticipant.setMicrophoneEnabled(true, {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              })
               if (cancelled) return
               const pub = room.localParticipant.getTrackPublication(Track.Source.Microphone)
               const track = pub?.audioTrack as LocalAudioTrack | undefined
@@ -173,19 +224,38 @@ export default function VoiceRoom({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, publishMic, reconnectKey])
 
-  // Coarse agent-state model. Phase 5A swap: presence of the agent track
-  // (i.e. Lloyd actively producing audio) flips us into 'speaking'. When
-  // the user is mic-on but no agent audio yet, we're 'listening'.
+  // 'speaking' only when the agent track is actually producing audio
+  // (volume above threshold). Otherwise 'listening' if user mic is on,
+  // matching the LiveKit AgentState convention.
   const agentState: AgentState =
     status === 'connecting'
       ? 'connecting'
       : status === 'failed'
       ? 'disconnected'
-      : agentAudioTrack
+      : agentSpeaking
       ? 'speaking'
-      : status === 'connected' && micPublished
+      : status === 'connected' && (micPublished || agentAudioTrack)
       ? 'listening'
       : 'idle'
+
+  const interrupt = async () => {
+    // 1. Tell the worker to stop TTS immediately, via LiveKit data channel.
+    try {
+      const data = new TextEncoder().encode(JSON.stringify({ type: 'interrupt' }))
+      await room.localParticipant.publishData(data, { reliable: true, kind: DataPacket_Kind.RELIABLE })
+    } catch (e) {
+      console.warn('interrupt: data send failed', e)
+    }
+    // 2. Cancel the in-flight harness turn (drains any queued ambient too).
+    try {
+      await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/cancel?drain_pending=true`,
+        { method: 'POST' },
+      )
+    } catch (e) {
+      console.warn('interrupt: cancel POST failed', e)
+    }
+  }
 
   return (
     <RoomContext.Provider value={room}>
@@ -193,11 +263,14 @@ export default function VoiceRoom({
         room,
         status,
         micPublished,
+        micMuted,
+        agentSpeaking,
         localAudioTrack,
         agentAudioTrack,
         agentState,
         error,
         reconnect: () => setReconnectKey(k => k + 1),
+        interrupt,
       })}
       {/* Plays all remote audio tracks (Lloyd's TTS) through the speakers.
           Hidden — it just needs to be mounted somewhere inside RoomContext. */}

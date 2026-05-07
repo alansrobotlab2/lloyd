@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import os
 import signal
@@ -91,6 +92,9 @@ class TTSStreamer:
         self._publish_lock = asyncio.Lock()
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
+        # Currently-streaming utterance task (set by _drain). interrupt()
+        # cancels it; _drain catches the CancelledError and moves on.
+        self._current_task: Optional[asyncio.Task] = None
         self._speaking = asyncio.Event()
         # Lazy import — keeps top-of-file clean.
         import httpx
@@ -131,15 +135,46 @@ class TTSStreamer:
         except Exception:
             pass
 
+    def interrupt(self) -> int:
+        """Cancel the in-flight utterance and drop everything queued.
+
+        Returns the number of queued utterances that were dropped (the
+        in-flight one isn't counted). Safe to call when nothing is
+        playing — both operations are no-ops in that case.
+        """
+        dropped = 0
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+        if self._current_task is not None and not self._current_task.done():
+            self._current_task.cancel()
+        # Best-effort: ask the AudioSource to drop any buffered frames.
+        # The Python SDK exposes `clear_queue()` in recent versions; older
+        # ones don't, in which case ~100ms of trailing audio may still
+        # reach the browser before silence resumes.
+        if self.source is not None:
+            try:
+                self.source.clear_queue()
+            except Exception:
+                pass
+        return dropped
+
     async def _drain(self) -> None:
         while True:
             text = await self._queue.get()
             self._speaking.set()
+            self._current_task = asyncio.create_task(self._stream_utterance(text))
             try:
-                await self._stream_utterance(text)
+                await self._current_task
+            except asyncio.CancelledError:
+                LOG.info("TTS interrupted mid-utterance")
             except Exception as e:
                 LOG.warning("TTS error for %r: %s", text[:60], e)
             finally:
+                self._current_task = None
                 self._speaking.clear()
 
     async def _stream_utterance(self, text: str) -> None:
@@ -488,6 +523,7 @@ class RoomBridge:
         self.room.on("track_subscribed", self._on_track_subscribed)
         self.room.on("participant_connected", self._on_participant_connected)
         self.room.on("participant_disconnected", self._on_participant_disconnected)
+        self.room.on("data_received", self._on_data_received)
 
         LOG.info("[%s] connecting (session_id=%s)", self.room_name, self.session_id)
         await self.room.connect(self.lk_cfg["url"], token)
@@ -611,6 +647,25 @@ class RoomBridge:
         task = self._audio_tasks.pop(identity, None)
         if task is not None and not task.done():
             task.cancel()
+
+    def _on_data_received(self, packet) -> None:
+        """Handle JSON control messages from a participant via the LiveKit
+        data channel. Currently understands {"type": "interrupt"}."""
+        try:
+            payload = packet.data.decode("utf-8")
+            msg = json.loads(payload) if payload else {}
+        except Exception as e:
+            LOG.warning("[%s] bad data packet: %s", self.room_name, e)
+            return
+        kind = msg.get("type")
+        if kind == "interrupt":
+            if self.tts is None:
+                return
+            dropped = self.tts.interrupt()
+            LOG.info("[%s] interrupt: dropped %d queued utterance(s)",
+                     self.room_name, dropped)
+        else:
+            LOG.info("[%s] data message ignored: %r", self.room_name, kind)
 
     def _handle_utterance_done(self, task: asyncio.Task) -> None:
         self._utterance_tasks.discard(task)
