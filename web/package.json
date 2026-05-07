@@ -1,0 +1,39 @@
+{
+  "name": "hermes-mission-control-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@livekit/components-react": "^2.9.21",
+    "@types/d3-force": "^3.0.10",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "d3-force": "^3.0.0",
+    "livekit-client": "^2.18.9",
+    "lucide-react": "^0.460.0",
+    "marked": "^15.0.0",
+    "motion": "^12.38.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-force-graph-2d": "^1.29.1",
+    "react-force-graph-3d": "^1.29.1",
+    "recharts": "^3.8.1",
+    "tailwind-merge": "^3.5.0",
+    "three-spritetext": "^1.10.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.184.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}

@@ -25,6 +25,13 @@ __pycache__/
 # All JSON: lockfiles, runtime state, logs — may contain personal data
 *.json
 
+# …but keep source-of-truth JSON for the web app
+!web/package.json
+!web/package-lock.json
+!web/tsconfig.json
+!web/tsconfig.node.json
+!web/components.json
+
 # ─── Secrets ────────────────────────────────────────
 .env
 
