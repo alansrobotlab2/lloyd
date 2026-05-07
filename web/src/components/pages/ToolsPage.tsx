@@ -90,54 +90,61 @@ function ServerGroup({
   const serverToggling = togglingKey === `server:${server.name}`;
 
   return (
-    <div className="mb-3">
-      {/* Server header row */}
+    <div className="mb-4">
+      {/* Server header row — bigger title, primary-accent left bar when
+          enabled, description on its own line for breathing room. */}
       <div
-        className={`flex items-center gap-2 px-4 py-2.5 rounded-lg cursor-pointer hover:bg-card ${
-          server.enabled ? "" : "opacity-60"
+        className={`flex items-stretch gap-3 px-4 py-3 rounded-lg cursor-pointer hover:bg-card border-l-2 ${
+          server.enabled ? "border-l-primary/70" : "border-l-transparent opacity-60"
         }`}
       >
-        <Toggle
-          enabled={server.enabled}
-          onToggle={onServerToggle}
-          disabled={serverToggling}
-        />
+        <div className="flex items-center pt-1">
+          <Toggle
+            enabled={server.enabled}
+            onToggle={onServerToggle}
+            disabled={serverToggling}
+          />
+        </div>
         <button
-          className="flex items-center gap-2 flex-1 min-w-0 text-left"
+          className="flex flex-col flex-1 min-w-0 text-left"
           onClick={onExpandToggle}
         >
-          <span
-            className={`text-sm font-semibold ${
-              server.enabled ? "text-foreground" : "text-muted-foreground"
-            }`}
-          >
-            {server.label}
-          </span>
-          {server.description && (
-            <span className="text-xs text-muted-foreground hidden sm:inline">{server.description}</span>
-          )}
-          <span className="ml-auto flex items-center gap-2 flex-shrink-0">
-            {server.error && (
-              <span title={server.error}>
-                <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
-              </span>
-            )}
-            {toolCount > 0 && (
-              <span className="text-xs text-muted-foreground">
-                {server.enabled ? `${enabledCount} / ${toolCount}` : toolCount}
-              </span>
-            )}
-            {toolCount === 0 && !server.error && (
-              <span className="text-xs text-muted-foreground/70 italic">no tools</span>
-            )}
-            <span className="text-muted-foreground/70">
-              {expanded ? (
-                <ChevronDown className="w-3.5 h-3.5" />
-              ) : (
-                <ChevronRight className="w-3.5 h-3.5" />
-              )}
+          <div className="flex items-center gap-2 w-full">
+            <span
+              className={`text-base font-semibold tracking-tight ${
+                server.enabled ? "text-foreground" : "text-muted-foreground"
+              }`}
+            >
+              {server.label}
             </span>
-          </span>
+            <span className="ml-auto flex items-center gap-2 flex-shrink-0">
+              {server.error && (
+                <span title={server.error}>
+                  <AlertCircle className="w-4 h-4 text-amber-500" />
+                </span>
+              )}
+              {toolCount > 0 && (
+                <span className="text-xs font-mono text-muted-foreground tabular-nums">
+                  {server.enabled ? `${enabledCount} / ${toolCount}` : toolCount}
+                </span>
+              )}
+              {toolCount === 0 && !server.error && (
+                <span className="text-xs text-muted-foreground/70 italic">no tools</span>
+              )}
+              <span className="text-muted-foreground/70">
+                {expanded ? (
+                  <ChevronDown className="w-4 h-4" />
+                ) : (
+                  <ChevronRight className="w-4 h-4" />
+                )}
+              </span>
+            </span>
+          </div>
+          {server.description && (
+            <span className="text-xs text-muted-foreground mt-0.5 leading-snug line-clamp-2">
+              {server.description}
+            </span>
+          )}
         </button>
       </div>
 
