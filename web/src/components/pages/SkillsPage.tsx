@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Sparkles, Pencil, X, Save, Search, RefreshCw } from "lucide-react";
 import { api, type SkillInfo } from "../../api";
 import { sanitizeHtml } from "../../utils/sanitize";
+import { Input } from "@/components/ui/input";
 
 function formatFrontmatter(content: string): string {
   if (!content.startsWith("---")) return content;
@@ -133,14 +134,14 @@ export default function SkillsPage() {
         </div>
 
         <div className="px-3 py-2 border-b border-border">
-          <div className="flex items-center gap-2 bg-card rounded-lg px-2 py-1.5">
-            <Search size={13} className="text-muted-foreground flex-shrink-0" />
-            <input
+          <div className="relative">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+            <Input
               type="text"
               placeholder="Search..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="bg-transparent text-xs text-foreground placeholder-slate-500 outline-none flex-1"
+              className="h-8 pl-7 text-xs"
             />
           </div>
         </div>
