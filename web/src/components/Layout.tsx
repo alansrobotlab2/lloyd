@@ -60,12 +60,15 @@ export default function Layout() {
   const currentModel = visibleSlot?.model ?? ''
   const sessionsPanelRefreshTrigger = useMemo(() => slots.map(s => s.sessionKey ?? 'null').join(','), [slots])
 
-  // Route voice transcripts to whichever session is focused in MC.
-  // Null (new/empty slot) clears the override so the backend falls back to "voice-main".
+  // Route voice transcripts to whichever session is focused in the foreground tab.
+  // Chat tab uses the visible slot; Inner Voice manages its own (in InnerVoicePage).
+  // Other tabs leave the override alone so the previous owner's choice persists
+  // until the user goes back to chat.
   useEffect(() => {
+    if (page !== 'chat') return
     const sid = visibleSlot?.sessionKey ?? null
     api.voiceSetActiveSession(sid).catch(() => {})
-  }, [visibleSlot?.sessionKey])
+  }, [page, visibleSlot?.sessionKey])
 
   const handleNewSession = () => {
     const existingBlank = slots.find(s => s.sessionKey === null)
