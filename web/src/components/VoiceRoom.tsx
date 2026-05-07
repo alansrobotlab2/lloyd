@@ -3,7 +3,6 @@ import {
   Room,
   RoomEvent,
   Track,
-  DataPacket_Kind,
   type LocalAudioTrack,
   type RemoteAudioTrack,
   type RemoteTrack,
@@ -242,7 +241,7 @@ export default function VoiceRoom({
     // 1. Tell the worker to stop TTS immediately, via LiveKit data channel.
     try {
       const data = new TextEncoder().encode(JSON.stringify({ type: 'interrupt' }))
-      await room.localParticipant.publishData(data, { reliable: true, kind: DataPacket_Kind.RELIABLE })
+      await room.localParticipant.publishData(data, { reliable: true })
     } catch (e) {
       console.warn('interrupt: data send failed', e)
     }
