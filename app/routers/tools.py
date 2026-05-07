@@ -44,7 +44,14 @@ async def get_tools():
             raw_tools, error = cached["tools"], cached["error"]
         elif server_enabled:
             raw_tools, error = await _discover_mcp_tools(server_name, cfg)
-            _tools_cache[server_name] = {"tools": raw_tools, "error": error, "ts": now}
+            # Only cache successful discoveries. A failed discovery (timeout,
+            # transient network blip during MCP SSE handshake) used to get
+            # cached for the full 5-minute TTL, leaving the Tools page with
+            # a "TaskGroup … sub-exception" error long after the server
+            # recovered. Skipping the cache write on failure means the next
+            # call retries immediately.
+            if error is None:
+                _tools_cache[server_name] = {"tools": raw_tools, "error": None, "ts": now}
         else:
             raw_tools, error = [], None
 
