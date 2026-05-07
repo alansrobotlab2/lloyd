@@ -11,6 +11,7 @@ import ArchitecturePageFull from './pages/ArchitecturePage'
 import AutonomyPage from './pages/AutonomyPage'
 import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
+import VoicePreviewPage from './pages/VoicePreviewPage'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu, X } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
 import { api, type ModelInfo } from '../api'
@@ -40,6 +41,7 @@ const PAGES: Record<string, React.FC> = {
   autonomy: AutonomyPage,
   workers: WorkersPage,
   inner_voice: InnerVoicePage,  // Inner Voice (#345)
+  voice_preview: VoicePreviewPage,  // Phase 2A — aura visualizer with mock state
 }
 
 export default function Layout() {

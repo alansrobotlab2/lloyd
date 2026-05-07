@@ -19,10 +19,11 @@ import {
   VolumeX,
   Workflow,
   BrainCircuit,
+  Waves,
 } from 'lucide-react'
 import { api } from '../api'
 
-export type Page = 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice'
+export type Page = 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'voice_preview'
 
 interface NavItem {
   id: Page
@@ -43,6 +44,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'skills', label: 'Skills', icon: Sparkles },
   { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'services', label: 'Services', icon: LayoutList },
+  { id: 'voice_preview', label: 'Voice (preview)', icon: Waves },
 ]
 
 const BOTTOM_ITEMS: NavItem[] = [
