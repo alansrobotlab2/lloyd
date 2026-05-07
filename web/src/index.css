@@ -4,10 +4,11 @@
 @import "streamdown/styles.css";
 
 /* ──────────────────────────────────────────────────────────────────────
-   LiveKit cyan-on-zinc palette (shadcn token system).
-   The legacy `brand-*` / `surface-*` palette below stays for now so
-   existing pages keep working; it gets removed in Phase 2B once the
-   shell is restyled.
+   Violet-on-zinc palette (shadcn token system).
+   Originally cyan #1FD5F9; flipped to a violet primary so the UI accents
+   read warmer against the dark zinc surface. Aura visualizer default
+   color is updated to match (web/src/components/agents-ui/agent-audio-
+   visualizer-aura.tsx).
    ────────────────────────────────────────────────────────────────────── */
 :root {
   --background: 240 6% 7%;
@@ -16,8 +17,8 @@
   --card-foreground: 0 0% 98%;
   --popover: 240 5% 12%;
   --popover-foreground: 0 0% 98%;
-  --primary: 192 95% 55%;
-  --primary-foreground: 240 6% 7%;
+  --primary: 262 83% 58%;            /* violet-500 #8b5cf6 */
+  --primary-foreground: 0 0% 98%;
   --secondary: 240 4% 16%;
   --secondary-foreground: 0 0% 98%;
   --muted: 240 4% 14%;
@@ -28,7 +29,7 @@
   --destructive-foreground: 0 0% 98%;
   --border: 240 4% 18%;
   --input: 240 4% 16%;
-  --ring: 192 95% 55%;
+  --ring: 262 83% 58%;
   --radius: 0.5rem;
 }
 

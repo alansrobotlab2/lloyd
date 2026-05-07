@@ -12,6 +12,10 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { api, type AutonomyTask } from "../../api";
+import { Button } from "@/components/ui/button";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 
 const STATUSES = ["draft", "up_next", "in_progress"] as const;
 
@@ -22,7 +26,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  draft: "bg-slate-500/20 text-slate-400 border-slate-500/30",
+  draft: "bg-slate-500/20 text-muted-foreground border-slate-500/30",
   up_next: "bg-sky-500/20 text-sky-400 border-sky-500/30",
   in_progress: "bg-amber-500/20 text-amber-400 border-amber-500/30",
 };
@@ -32,7 +36,7 @@ const PRIORITY_COLORS: Record<string, string> = {
   high: "text-red-400",
   medium: "text-amber-400",
   low: "text-sky-400",
-  background: "text-slate-500",
+  background: "text-muted-foreground",
 };
 
 const PRIORITIES = ["background", "low", "medium", "high", "critical"];
@@ -212,14 +216,14 @@ function TaskModal({
       onClick={handleBackdropClick}
       className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
     >
-      <div className="bg-surface-1 rounded-xl border border-surface-3/50 w-full max-w-[75vw] max-h-[85vh] flex flex-col shadow-2xl">
+      <div className="bg-card rounded-xl border border-border/50 w-full max-w-[75vw] max-h-[85vh] flex flex-col shadow-2xl">
         {/* Header */}
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-surface-3/50">
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-border/50">
           {isCreate ? (
-            <span className="text-xs font-semibold text-brand-400">New Task</span>
+            <span className="text-xs font-semibold text-primary">New Task</span>
           ) : (
             <>
-              <span className="text-[10px] text-slate-500 font-mono">#{task.id}</span>
+              <span className="text-[10px] text-muted-foreground font-mono">#{task.id}</span>
               <span
                 className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded ${STATUS_COLORS[task.status]}`}
               >
@@ -227,12 +231,14 @@ function TaskModal({
               </span>
             </>
           )}
-          <button
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={onClose}
-            className="ml-auto text-slate-400 hover:text-slate-200 transition-colors"
+            className="ml-auto h-7 w-7 text-muted-foreground hover:text-foreground"
           >
             <X className="w-4 h-4" />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -242,7 +248,7 @@ function TaskModal({
             <div className="flex-1 overflow-y-auto space-y-4" style={{ flex: '0 0 40%' }}>
           {/* Name */}
           <div>
-            <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+            <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
               Title
             </label>
             <input
@@ -251,78 +257,71 @@ function TaskModal({
               onChange={(e) => setName(e.target.value)}
               placeholder={isCreate ? "Task name" : undefined}
               autoFocus={isCreate}
-              className="w-full bg-surface-2 text-sm text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+              className="w-full bg-secondary text-sm text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
             />
           </div>
 
           {/* Description */}
           <div>
-            <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+            <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
               Description
             </label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
-              className="w-full bg-surface-2 text-sm text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50 resize-none"
+              className="w-full bg-secondary text-sm text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50 resize-none"
             />
           </div>
 
           {/* Status + Priority row */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Status
               </label>
-              <select
-                value={status}
-                onChange={(e) => setStatus(e.target.value)}
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
-              >
-                {STATUSES.map((s) => (
-                  <option key={s} value={s} className="bg-surface-2">
-                    {STATUS_LABELS[s]}
-                  </option>
-                ))}
-              </select>
+              <Select value={status} onValueChange={setStatus}>
+                <SelectTrigger className="w-full text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {STATUSES.map((s) => (
+                    <SelectItem key={s} value={s}>{STATUS_LABELS[s]}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Priority
               </label>
-              <select
-                value={priority}
-                onChange={(e) => setPriority(e.target.value)}
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
-              >
-                {PRIORITIES.map((p) => (
-                  <option key={p} value={p} className="bg-surface-2">
-                    {p}
-                  </option>
-                ))}
-              </select>
+              <Select value={priority} onValueChange={setPriority}>
+                <SelectTrigger className="w-full text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {PRIORITIES.map((p) => (
+                    <SelectItem key={p} value={p}>{p}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
           {/* Frequency + Max Retries row */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Frequency
               </label>
-              <select
-                value={frequency}
-                onChange={(e) => setFrequency(e.target.value)}
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
-              >
-                <option value="" className="bg-surface-2">— none —</option>
-                {FREQUENCIES.map((f) => (
-                  <option key={f} value={f} className="bg-surface-2">{f}</option>
-                ))}
-              </select>
+              <Select value={frequency || "__none__"} onValueChange={(v) => setFrequency(v === "__none__" ? "" : v)}>
+                <SelectTrigger className="w-full text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">— none —</SelectItem>
+                  {FREQUENCIES.map((f) => (
+                    <SelectItem key={f} value={f}>{f}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Max Retries
               </label>
               <input
@@ -331,7 +330,7 @@ function TaskModal({
                 onChange={(e) => setMaxRetries(e.target.value)}
                 placeholder="3"
                 min="0"
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+                className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
               />
             </div>
           </div>
@@ -339,7 +338,7 @@ function TaskModal({
           {/* Scheduled At row */}
           {!isCreate && (
             <div>
-              <label className={`text-[10px] uppercase tracking-wider block mb-1 ${runsPerDay ? "text-slate-600" : "text-slate-500"}`}>
+              <label className={`text-[10px] uppercase tracking-wider block mb-1 ${runsPerDay ? "text-muted-foreground/70" : "text-muted-foreground"}`}>
                 Scheduled (PST) {runsPerDay ? "(using runs/day)" : ""}
               </label>
               <input
@@ -348,7 +347,7 @@ function TaskModal({
                 onChange={(e) => setScheduledAt(e.target.value)}
                 placeholder={runsPerDay ? "—" : "02:00:00"}
                 disabled={!!runsPerDay}
-                className={`w-full bg-surface-2 text-xs rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50 ${runsPerDay ? "text-slate-600 opacity-50 cursor-not-allowed" : "text-slate-200"}`}
+                className={`w-full bg-secondary text-xs rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50 ${runsPerDay ? "text-muted-foreground/70 opacity-50 cursor-not-allowed" : "text-foreground"}`}
               />
             </div>
           )}
@@ -357,7 +356,7 @@ function TaskModal({
           {!isCreate && (
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+                <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                   Runs per day
                 </label>
                 <input
@@ -365,11 +364,11 @@ function TaskModal({
                   value={runsPerDay}
                   onChange={(e) => setRunsPerDay(e.target.value)}
                   placeholder="1.0"
-                  className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+                  className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
                 />
               </div>
               <div>
-                <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+                <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                   Timeout (sec)
                 </label>
                 <input
@@ -377,7 +376,7 @@ function TaskModal({
                   value={timeoutSeconds}
                   onChange={(e) => setTimeoutSeconds(e.target.value)}
                   placeholder="1800"
-                  className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+                  className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
                 />
               </div>
             </div>
@@ -385,7 +384,7 @@ function TaskModal({
           {/* Preferred Hours */}
           {!isCreate && (
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Preferred Hours (UTC)
               </label>
               <input
@@ -393,14 +392,14 @@ function TaskModal({
                 value={preferredHours}
                 onChange={(e) => setPreferredHours(e.target.value)}
                 placeholder="e.g. [2,3,4] (UTC hours)"
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+                className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
               />
             </div>
           )}
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Pipeline
               </label>
               <input
@@ -408,30 +407,32 @@ function TaskModal({
                 value={pipeline}
                 onChange={(e) => setPipeline(e.target.value)}
                 placeholder="nightly"
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+                className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
               />
             </div>
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Depends on
               </label>
-              <select
-                value={dependsOn}
-                onChange={(e) => setDependsOn(e.target.value)}
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+              <Select
+                value={dependsOn ? String(dependsOn) : "__none__"}
+                onValueChange={(v) => setDependsOn(v === "__none__" ? "" : v)}
               >
-                <option value="">—</option>
-                {allTasks.filter(t => t.id !== task?.id).map(t => (
-                  <option key={t.id} value={t.id} className="bg-surface-2">
-                    #{t.id} {t.name}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger className="w-full text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">—</SelectItem>
+                  {allTasks.filter(t => t.id !== task?.id).map(t => (
+                    <SelectItem key={t.id} value={String(t.id)}>
+                      #{t.id} {t.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Agent ID
               </label>
               <input
@@ -439,11 +440,11 @@ function TaskModal({
                 value={agentId}
                 onChange={(e) => setAgentId(e.target.value)}
                 placeholder="memory"
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+                className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
               />
             </div>
             <div>
-              <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Skill name
               </label>
               <input
@@ -451,12 +452,12 @@ function TaskModal({
                 value={skillName}
                 onChange={(e) => setSkillName(e.target.value)}
                 placeholder="e.g. autonomy-data-pipeline"
-                className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+                className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
               />
             </div>
           </div>
           <div>
-            <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+            <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
               Model override
             </label>
             <input
@@ -464,13 +465,13 @@ function TaskModal({
               value={model}
               onChange={(e) => setModel(e.target.value)}
               placeholder="llama3-70b"
-              className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+              className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
             />
           </div>
 
           {/* Tags */}
           <div>
-            <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+            <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
               Tags
             </label>
             <input
@@ -478,7 +479,7 @@ function TaskModal({
               value={tags}
               onChange={(e) => setTags(e.target.value)}
               placeholder="comma, separated, tags"
-              className="w-full bg-surface-2 text-xs text-slate-200 rounded-lg px-3 py-2 border border-surface-3/50 outline-none focus:border-brand-500/50"
+              className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
             />
           </div>
 
@@ -489,42 +490,42 @@ function TaskModal({
                 type="checkbox"
                 checked={autoAdvance}
                 onChange={(e) => setAutoAdvance(e.target.checked)}
-                className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+                className="rounded border-border bg-secondary text-primary focus:ring-primary/30"
               />
-              <span className="text-xs text-slate-300">Auto-advance (recycle to up_next automatically)</span>
+              <span className="text-xs text-foreground/90">Auto-advance (recycle to up_next automatically)</span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
                 checked={pipelineMode}
                 onChange={(e) => setPipelineMode(e.target.checked)}
-                className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+                className="rounded border-border bg-secondary text-primary focus:ring-primary/30"
               />
-              <span className="text-xs text-slate-300">{"Pipeline mode (plan\u2192implement\u2192review)"}</span>
+              <span className="text-xs text-foreground/90">{"Pipeline mode (plan\u2192implement\u2192review)"}</span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
                 checked={notifyOnComplete}
                 onChange={(e) => setNotifyOnComplete(e.target.checked)}
-                className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+                className="rounded border-border bg-secondary text-primary focus:ring-primary/30"
               />
-              <span className="text-xs text-slate-300">Notify on completion (toast)</span>
+              <span className="text-xs text-foreground/90">Notify on completion (toast)</span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
                 checked={preemptible}
                 onChange={(e) => setPreemptible(e.target.checked)}
-                className="rounded border-surface-3 bg-surface-2 text-brand-500 focus:ring-brand-500/30"
+                className="rounded border-border bg-secondary text-primary focus:ring-primary/30"
               />
-              <span className="text-xs text-slate-300">Preemptible by higher priority work</span>
+              <span className="text-xs text-foreground/90">Preemptible by higher priority work</span>
             </label>
           </div>
 
             {/* Metadata */}
           {!isCreate && (
-            <div className="grid grid-cols-2 gap-3 text-[10px] text-slate-500 pt-2 border-t border-surface-3/30">
+            <div className="grid grid-cols-2 gap-3 text-[10px] text-muted-foreground pt-2 border-t border-border/30">
               <div>
                 Created: {new Date(task.created || task.created_at).toLocaleDateString()}
               </div>
@@ -538,7 +539,7 @@ function TaskModal({
                 </div>
               )}
               {task.last_run && (
-                <div className="col-span-2 flex items-center gap-1 text-slate-400">
+                <div className="col-span-2 flex items-center gap-1 text-muted-foreground">
                   <Clock className="w-3 h-3" />
                   Last run: {formatLastRun(task.last_run)}
                 </div>
@@ -550,39 +551,44 @@ function TaskModal({
             {/* Right column - Logs panel */}
             {!isCreate && (
               <div className="flex-1 overflow-y-auto" style={{ flex: '0 0 60%' }}>
-                <div className="h-full flex flex-col bg-surface-0 rounded-lg border border-surface-3/50">
-                  <div className="flex items-center justify-between px-3 py-2 border-b border-surface-3/50">
-                    <span className="text-xs font-semibold text-slate-300">Logs</span>
-                    <button onClick={loadRuns} className="text-slate-400 hover:text-slate-200 transition-colors">
+                <div className="h-full flex flex-col bg-background rounded-lg border border-border/50">
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-border/50">
+                    <span className="text-xs font-semibold text-foreground/90">Logs</span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={loadRuns}
+                      className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                    >
                       <RefreshCw className="w-3.5 h-3.5" />
-                    </button>
+                    </Button>
                   </div>
                   <div className="flex-1 overflow-y-auto p-3">
                     {logsLoading ? (
-                      <div className="text-[10px] text-slate-500 text-center py-4">Loading...</div>
+                      <div className="text-[10px] text-muted-foreground text-center py-4">Loading...</div>
                     ) : runs.length === 0 ? (
-                      <div className="text-[10px] text-slate-500 text-center py-4">No runs yet.</div>
+                      <div className="text-[10px] text-muted-foreground text-center py-4">No runs yet.</div>
                     ) : (
                       <div className="space-y-2">
                         {runs.map((run) => {
                           const statusColor = run.status === 'success' ? 'text-emerald-400' :
                             run.status === 'failed' ? 'text-red-400' :
                             run.status === 'running' ? 'text-amber-400' :
-                            run.status === 'timeout' ? 'text-orange-400' : 'text-slate-400';
+                            run.status === 'timeout' ? 'text-orange-400' : 'text-muted-foreground';
                           return (
                             <div key={run.id} className="bg-black/30 rounded p-2 space-y-1">
                               <div className="flex items-center gap-2">
                                 <span className={`text-[10px] font-semibold uppercase ${statusColor}`}>{run.status}</span>
-                                <span className="text-[10px] text-slate-500">{new Date(run.started_at || run.started).toLocaleString()}</span>
+                                <span className="text-[10px] text-muted-foreground">{new Date(run.started_at || run.started).toLocaleString()}</span>
                                 {run.duration_seconds && (
-                                  <span className="text-[10px] text-slate-600">{run.duration_seconds}s</span>
+                                  <span className="text-[10px] text-muted-foreground/70">{run.duration_seconds}s</span>
                                 )}
                               </div>
                               {run.summary && (
-                                <pre className="text-[10px] text-slate-300 font-mono whitespace-pre-wrap">{run.summary}</pre>
+                                <pre className="text-[10px] text-foreground/90 font-mono whitespace-pre-wrap">{run.summary}</pre>
                               )}
                               {run.activity_log && (
-                                <pre className="text-[10px] text-slate-400 font-mono whitespace-pre-wrap mt-1 border-t border-surface-3/30 pt-1">{run.activity_log}</pre>
+                                <pre className="text-[10px] text-muted-foreground font-mono whitespace-pre-wrap mt-1 border-t border-border/30 pt-1">{run.activity_log}</pre>
                               )}
                             </div>
                           );
@@ -597,36 +603,25 @@ function TaskModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-2 px-5 py-3 border-t border-surface-3/50">
+        <div className="flex items-center gap-2 px-5 py-3 border-t border-border/50">
           {!isCreate && (
-            <button
+            <Button
+              variant={confirmDelete ? "destructive" : "ghost"}
+              size="sm"
               onClick={handleDelete}
               disabled={saving}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg transition-colors ${
-                confirmDelete
-                  ? "bg-red-600 text-white hover:bg-red-500"
-                  : "text-red-400 hover:bg-red-400/10"
-              }`}
+              className={confirmDelete ? "" : "text-destructive hover:bg-destructive/10 hover:text-destructive"}
             >
               <Trash2 className="w-3.5 h-3.5" />
               {confirmDelete ? "Confirm Delete" : "Delete"}
-            </button>
+            </Button>
           )}
           <div className="flex-1" />
-          <button
-            onClick={onClose}
-            className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 rounded-lg transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || !name.trim()}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs bg-brand-600 hover:bg-brand-500 disabled:opacity-40 text-white rounded-lg transition-colors"
-          >
+          <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+          <Button size="sm" onClick={handleSave} disabled={saving || !name.trim()}>
             {isCreate ? <Plus className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
             {saving ? (isCreate ? "Creating..." : "Saving...") : (isCreate ? "Create" : "Save")}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -663,27 +658,27 @@ function TaskCard({
   return (
     <div className="relative">
       {insertIndicator === "above" && (
-        <div className="absolute -top-1.5 left-0 right-0 h-0.5 bg-brand-400 rounded-full z-10" />
+        <div className="absolute -top-1.5 left-0 right-0 h-0.5 bg-primary rounded-full z-10" />
       )}
       <div
         draggable
         onDragStart={handleDragStart}
         onDragOver={handleDragOver}
         onClick={() => onClick(task)}
-        className="bg-surface-2 rounded-lg p-3 border border-surface-3/50 hover:border-brand-500/30 transition-colors cursor-pointer active:opacity-70"
+        className="bg-secondary rounded-lg p-3 border border-border/50 hover:border-primary/30 transition-colors cursor-pointer active:opacity-70"
       >
         <div className="flex items-start gap-2">
           <div className="flex-1 min-w-0">
-            <div className="text-xs font-medium text-slate-200 leading-snug">
+            <div className="text-xs font-medium text-foreground leading-snug">
               {task.name}
             </div>
             {task.description && (
-              <p className="text-[10px] text-slate-500 mt-1 line-clamp-2">
+              <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2">
                 {task.description}
               </p>
             )}
           </div>
-          <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">
+          <span className="text-[10px] text-muted-foreground/70 font-mono flex-shrink-0">
             #{task.id}
           </span>
         </div>
@@ -714,7 +709,7 @@ function TaskCard({
             </span>
           )}
           {task.agent_id && (
-            <span className="inline-flex items-center gap-0.5 text-[10px] text-slate-400 bg-slate-400/10 px-1.5 py-0.5 rounded">
+            <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground bg-slate-400/10 px-1.5 py-0.5 rounded">
               {task.agent_id}
             </span>
           )}
@@ -731,7 +726,7 @@ function TaskCard({
             </span>
           )}
           {task.last_run && (
-            <span className="inline-flex items-center gap-0.5 text-[10px] text-slate-500 bg-slate-500/10 px-1.5 py-0.5 rounded">
+            <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground bg-slate-500/10 px-1.5 py-0.5 rounded">
               <Clock className="w-2.5 h-2.5" />
               {formatLastRun(task.last_run)}
             </span>
@@ -754,7 +749,7 @@ function TaskCard({
         </div>
       </div>
       {insertIndicator === "below" && (
-        <div className="absolute -bottom-1.5 left-0 right-0 h-0.5 bg-brand-400 rounded-full z-10" />
+        <div className="absolute -bottom-1.5 left-0 right-0 h-0.5 bg-primary rounded-full z-10" />
       )}
     </div>
   );
@@ -825,7 +820,7 @@ function KanbanColumn({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       className={`flex flex-col min-w-[220px] flex-1 rounded-lg transition-colors ${
-        dragOver ? "bg-brand-600/5 ring-1 ring-brand-500/30" : ""
+        dragOver ? "bg-primary/5 ring-1 ring-primary/30" : ""
       }`}
     >
       <div className="flex items-center gap-2 mb-2 px-1">
@@ -834,7 +829,7 @@ function KanbanColumn({
         >
           {STATUS_LABELS[status]}
         </span>
-        <span className="text-[10px] text-slate-500">{tasks.length}</span>
+        <span className="text-[10px] text-muted-foreground">{tasks.length}</span>
       </div>
 
       <div className="space-y-2 overflow-y-auto flex-1 min-h-0 pr-1">
@@ -849,8 +844,8 @@ function KanbanColumn({
         ))}
         {tasks.length === 0 && (
           <div
-            className={`text-[10px] text-slate-600 text-center py-8 border border-dashed rounded-lg transition-colors ${
-              dragOver ? "border-brand-500/40 text-brand-400" : "border-surface-3/30"
+            className={`text-[10px] text-muted-foreground/70 text-center py-8 border border-dashed rounded-lg transition-colors ${
+              dragOver ? "border-primary/40 text-primary" : "border-border/30"
             }`}
           >
             {dragOver ? "Drop here" : "No tasks"}
@@ -950,24 +945,24 @@ export default function AutonomyPage() {
       {/* Header */}
       <div className="flex items-center gap-3 mb-4 flex-shrink-0">
         <Lightbulb className="w-5 h-5 text-amber-400" />
-        <h2 className="text-lg font-semibold text-slate-200">Autonomy</h2>
+        <h2 className="text-lg font-semibold text-foreground">Autonomy</h2>
 
         <button
           onClick={() => setShowCreateModal(true)}
-          className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-brand-600 hover:bg-brand-500 text-white rounded-lg transition-colors"
+          className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary hover:bg-primary text-white rounded-lg transition-colors"
         >
           <Plus className="w-3.5 h-3.5" />
           New Task
         </button>
 
-        <span className="text-xs text-slate-500">
+        <span className="text-xs text-muted-foreground">
           {tasks.length} tasks — drag to move
         </span>
       </div>
 
       {/* Kanban board */}
       {loading ? (
-        <div className="flex-1 flex items-center justify-center text-slate-500 text-sm">
+        <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
           Loading...
         </div>
       ) : (
