@@ -268,20 +268,21 @@ async def voice_inject(request: Request):
     text = (data.get("text") or "").strip()
     speaker = (data.get("speaker") or "").strip()
     # Priority:
-    #   1. the MC-focused session set by the frontend — if the user has MC
-    #      open, the current chat tab is always the right destination
-    #   2. explicit session_key/session_id in the payload — used when the
-    #      daemon has a WS client with its own session, or when injected
-    #      from a non-MC caller that knows which session it wants
-    #   3. the legacy "voice-main" catch-all session
-    #
-    # Note: the daemon's _lloyd_session_key config default is "voice-main",
-    # so in local/TUI mode every payload arrives with session_key="voice-main".
-    # Putting _VOICE_ACTIVE_SESSION first prevents that default from
-    # clobbering the MC user's actual focus.
+    #   1. an explicit, non-default payload session_key/session_id —
+    #      LiveKit worker derives this from the room name, so it always
+    #      knows which chat session a transcript belongs to. Wins over
+    #      the MC focus.
+    #   2. the MC-focused session set by the frontend — for the legacy
+    #      voice_mode daemon (whose config default is "voice-main"),
+    #      this redirects transcripts to whatever chat tab the user has
+    #      open instead of the catch-all session.
+    #   3. the explicit payload (even if it's the default "voice-main").
+    #   4. the legacy "voice-main" catch-all session.
     payload_session = data.get("session_key") or data.get("session_id")
+    explicit_payload = bool(payload_session) and payload_session != "voice-main"
     session_id = (
-        _VOICE_ACTIVE_SESSION
+        (payload_session if explicit_payload else None)
+        or _VOICE_ACTIVE_SESSION
         or payload_session
         or "voice-main"
     )
