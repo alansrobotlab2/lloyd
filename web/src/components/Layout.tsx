@@ -12,6 +12,7 @@ import AutonomyPage from './pages/AutonomyPage'
 import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
 import VoicePreviewPage from './pages/VoicePreviewPage'
+import SettingsPage from './pages/SettingsPage'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
 import { useVoiceMode } from '../contexts/VoiceModeContext'
@@ -47,13 +48,6 @@ const GraphPage = () => (
     <p className="text-muted-foreground mt-2">Coming soon...</p>
   </div>
 )
-const SettingsPage = () => (
-  <div className="p-6">
-    <h2 className="text-xl font-bold text-foreground">Settings</h2>
-    <p className="text-muted-foreground mt-2">Coming soon...</p>
-  </div>
-)
-
 const PAGES: Record<string, React.FC> = {
   services: ServicesPage,
   backlog: BacklogPage,
