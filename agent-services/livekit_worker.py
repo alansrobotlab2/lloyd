@@ -179,10 +179,12 @@ class UtteranceSegmenter:
 
     def __init__(self, vad_cfg: dict, sample_rate: int) -> None:
         self.sample_rate = sample_rate
-        self.speech_rms = float(vad_cfg.get("speech_rms", 0.012))
-        self.silence_ms = int(vad_cfg.get("silence_ms", 700))
-        self.min_ms = int(vad_cfg.get("min_utterance_ms", 300))
+        self.speech_rms = float(vad_cfg.get("speech_rms", 0.025))
+        self.silence_ms = int(vad_cfg.get("silence_ms", 500))
+        self.min_ms = int(vad_cfg.get("min_utterance_ms", 350))
         self.max_ms = int(vad_cfg.get("max_utterance_ms", 30000))
+        self.min_start_frames = int(vad_cfg.get("min_speech_frames_to_start", 3))
+        self.min_voiced_ratio = float(vad_cfg.get("min_voiced_ratio", 0.30))
         self._lead_in_samples = int(self.LEAD_IN_MS / 1000 * sample_rate)
         self._silence_samples = int(self.silence_ms / 1000 * sample_rate)
         self._max_samples = int(self.max_ms / 1000 * sample_rate)
@@ -191,9 +193,13 @@ class UtteranceSegmenter:
         # Rolling buffer of recent silence so we can prepend lead-in.
         self._lead_buf: list[np.ndarray] = []
         self._lead_count = 0
+        # Pending consecutive-loud-frames counter before we commit to
+        # "speaking" — debounces single noise spikes.
+        self._pending_speech_frames = 0
         # Active utterance buffer.
         self._buf: list[np.ndarray] = []
         self._buf_count = 0
+        self._voiced_samples = 0
         self._silence_run = 0
         self._speaking = False
 
@@ -218,21 +224,32 @@ class UtteranceSegmenter:
                 self._lead_count -= self._lead_buf[0].size
                 self._lead_buf.pop(0)
 
+            # Require N consecutive voiced frames to commit to "speaking".
+            # Suppresses single mic clicks / noise spikes.
             if is_speech:
-                # Flip into "speaking". Move the lead-in buffer into the
-                # utterance buffer so we keep the first phoneme.
+                self._pending_speech_frames += 1
+            else:
+                self._pending_speech_frames = 0
+
+            if self._pending_speech_frames >= self.min_start_frames:
                 self._speaking = True
                 self._buf = list(self._lead_buf)
                 self._buf_count = self._lead_count
+                # Lead-in samples don't count towards voiced_samples — they're
+                # the silence we kept around to avoid clipping the first
+                # phoneme. Voiced ratio is computed from speaking-state frames.
+                self._voiced_samples = 0
                 self._lead_buf = []
                 self._lead_count = 0
                 self._silence_run = 0
+                self._pending_speech_frames = 0
             return None
 
         # Speaking — keep accumulating.
         self._buf.append(frame)
         self._buf_count += frame.size
         if is_speech:
+            self._voiced_samples += frame.size
             self._silence_run = 0
         else:
             self._silence_run += frame.size
@@ -241,19 +258,31 @@ class UtteranceSegmenter:
         capped = self._buf_count >= self._max_samples
         if ended or capped:
             utterance = np.concatenate(self._buf) if self._buf else np.zeros(0, dtype=np.int16)
+            voiced = self._voiced_samples
+            buf_count = self._buf_count
             self._reset()
             if utterance.size < self._min_samples:
-                return None  # too short, drop
+                return None
+            # Voiced-ratio gate: real speech is mostly voiced; near-silence
+            # utterances that briefly tripped the trigger should be dropped.
+            # Compute against the speaking-state frames only (excludes
+            # lead-in and trailing silence).
+            voicing_window = max(1, buf_count - self._lead_in_samples - self._silence_samples)
+            voiced_ratio = voiced / voicing_window
+            if voiced_ratio < self.min_voiced_ratio:
+                return None
             return utterance
         return None
 
     def _reset(self) -> None:
         self._buf = []
         self._buf_count = 0
+        self._voiced_samples = 0
         self._silence_run = 0
         self._speaking = False
         self._lead_buf = []
         self._lead_count = 0
+        self._pending_speech_frames = 0
 
 
 # ── Per-room bridge ──────────────────────────────────────────────────────
@@ -361,11 +390,15 @@ class RoomBridge:
         LOG.info("[%s] %s → %r  (%.2fs audio, %.1fs whisper)",
                  self.room_name, identity, text, duration_s, latency)
         try:
+            # No speaker field: the LiveKit identity ("user-XXXXXX") isn't a
+            # real speaker name — it's a per-connection token id — and
+            # /api/voice/inject prepends "[speaker]: " when it's set. Diarization
+            # / speaker recognition arrive in a later phase and will populate
+            # this with a real name.
             r = await self.http.post(
                 INJECT_URL,
                 json={
                     "text": text,
-                    "speaker": identity,
                     "session_key": self.session_id,
                 },
                 timeout=10.0,

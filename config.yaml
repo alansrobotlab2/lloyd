@@ -171,26 +171,35 @@ livekit:
   agent_identity: "lloyd-agent"
   # STT — runs in the worker, on each segmented utterance from a participant.
   stt:
-    # faster-whisper model name. CPU-only "base.en" runs ~real-time on a
-    # modern CPU; "small.en" is more accurate, ~2x slower. GPU is auto-used
-    # if compute_type permits — currently CPU int8 to avoid contention with
-    # the LLM on GPU0.
-    model: base.en
+    # faster-whisper model name. tiny.en runs ~3x faster than base.en on CPU
+    # at int8 with a small accuracy hit — fine for short conversational
+    # utterances. Bump to base.en or small.en for harder accents / noise.
+    # GPU is auto-used if compute_type permits — keep CPU int8 by default
+    # to avoid contention with the LLM on GPU0.
+    model: tiny.en
     device: cpu                # cpu | cuda
     compute_type: int8         # int8 | float16 (cuda) | float32
     language: en
-    # Beam search width. 1 = greedy (fastest), 5 = default whisper.
-    beam_size: 1
+    beam_size: 1               # 1 = greedy (fastest), 5 = default whisper
   # Utterance segmentation — energy-based VAD. Cheap and good enough for
-  # push-to-talk-ish speech. Replace with silero-vad in Phase 4.5 if needed.
+  # push-to-talk-ish speech. Replace with silero-vad in a later pass if
+  # noisier environments need it.
   vad:
-    # Audio above this RMS amplitude (0..1 over int16 normalized) is treated
-    # as voiced. ~0.005 is the typical noise floor on a quiet desk mic.
-    speech_rms: 0.012
+    # RMS above this (0..1 over int16 normalized) counts as a voiced frame.
+    # Quiet desk mic noise floor is ~0.003-0.005; raise to suppress
+    # background noise / hum / fan.
+    speech_rms: 0.025
+    # Require this many consecutive voiced frames to flip into the
+    # speaking state — debounces single noise spikes.
+    min_speech_frames_to_start: 3
+    # An utterance must have at least this fraction of voiced frames
+    # overall to be considered real speech. Suppresses near-silence
+    # utterances even if they cross the trigger threshold briefly.
+    min_voiced_ratio: 0.30
     # End an utterance after this many ms of trailing silence.
-    silence_ms: 700
+    silence_ms: 500
     # Discard utterances shorter than this — usually breath / clicks.
-    min_utterance_ms: 300
+    min_utterance_ms: 350
     # Hard cap so a stuck stream can't grow without bound.
     max_utterance_ms: 30000
 server:
