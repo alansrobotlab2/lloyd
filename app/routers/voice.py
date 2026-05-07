@@ -401,3 +401,61 @@ async def voice_set_config(request: Request):
             return JSONResponse(r.json())
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Voice mode not available: {e}")
+
+
+# ── LiveKit ──────────────────────────────────────────────────────────────────
+# Phase 3: mint room-scoped JWTs for browser clients. Each chat session maps
+# to one LiveKit room (`${room_prefix}${session_id}`); the agent worker joins
+# the same room out-of-band when a participant arrives.
+
+@router.post("/api/livekit/token")
+async def livekit_mint_token(request: Request):
+    """Mint a LiveKit JWT scoped to a single room.
+
+    Request body:
+      {"session_id": "<id>"}     # session/room key — caller's chat session id
+      {"identity": "<id>"}       # optional; defaults to a fresh uuid
+
+    Response:
+      {"url": "ws://…", "token": "<jwt>", "room": "<room name>", "identity": "<id>"}
+    """
+    lk_cfg = (CONFIG.get("livekit") or {}) if isinstance(CONFIG, dict) else {}
+    if not lk_cfg or not lk_cfg.get("api_key") or not lk_cfg.get("api_secret"):
+        raise HTTPException(status_code=503, detail="LiveKit not configured (config.yaml: livekit.api_key/api_secret missing)")
+
+    body = await request.json() if (await request.body()) else {}
+    session_id = (body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    identity = (body.get("identity") or f"user-{uuid.uuid4().hex[:8]}").strip()
+
+    room_prefix = lk_cfg.get("room_prefix", "lloyd-")
+    room_name = f"{room_prefix}{session_id}"
+
+    # Late import — avoid pulling livekit-api into module load if the feature
+    # is unused. AccessToken's API is sync.
+    try:
+        from livekit import api as lkapi
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"livekit-api not installed: {e}")
+
+    grants = lkapi.VideoGrants(
+        room=room_name,
+        room_join=True,
+        can_publish=True,
+        can_subscribe=True,
+        can_publish_data=True,
+    )
+    token = (
+        lkapi.AccessToken(lk_cfg["api_key"], lk_cfg["api_secret"])
+        .with_identity(identity)
+        .with_name(identity)
+        .with_grants(grants)
+        .to_jwt()
+    )
+    return JSONResponse({
+        "url": lk_cfg.get("url", "ws://127.0.0.1:7880"),
+        "token": token,
+        "room": room_name,
+        "identity": identity,
+    })
