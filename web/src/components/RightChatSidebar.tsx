@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Plus, Info, Loader2, Square, Brain, ChevronsLeft, ChevronsRight } from 'lucide-react'
+import { Plus, Info, Loader2, Square, ChevronsLeft, ChevronsRight } from 'lucide-react'
 import { type AgentState, useTrackVolume } from '@livekit/components-react'
 import { type LocalAudioTrack, type RemoteAudioTrack } from 'livekit-client'
 import ChatPanel from './ChatPanel'
@@ -166,11 +166,6 @@ export default function RightChatSidebar() {
   // mode (different animation than listening) while Lloyd is processing
   // a turn — i.e. before TTS starts but after the user finished speaking.
   const [chatThinking, setChatThinking] = useState(false)
-  // IV is on when both flags are true. Tracked here so the toolbar
-  // toggle reflects current state across reloads. We refresh it on
-  // session change and after our own patches.
-  const [ivEnabled, setIvEnabled] = useState<boolean>(true)
-  const [ivBusy, setIvBusy] = useState<boolean>(false)
 
   // Resolve a session on mount: most-recent inner-voice mc session if one
   // exists, otherwise create a fresh one. New session button below sets
@@ -240,44 +235,16 @@ export default function RightChatSidebar() {
     await resolveSession(true)
   }
 
-  // Read IV state for the resolved session so the toggle reflects what's
-  // actually enabled (across reloads, after patches from elsewhere).
-  useEffect(() => {
-    if (!sessionKey) return
-    let cancelled = false
-    api.innerVoiceState(sessionKey)
-      .then(s => { if (!cancelled) setIvEnabled(!!s.inner_voice_enabled) })
-      .catch(() => { /* leave default */ })
-    return () => { cancelled = true }
-  }, [sessionKey])
-
-  // Stop: cancel the running turn AND drain queued ambient turns. Works
-  // even when ChatPanel doesn't think it's busy — between IV-driven
-  // iterations the harness may briefly settle to streaming=false, and
-  // the inline Stop in ChatPanel disappears with it.
+  // Stop: cancel the running turn AND drain queued ambient turns. The
+  // backend cancel_event is shared with the IV observer (observer.py),
+  // so this stops both primary and IV at the same time. Works even when
+  // ChatPanel doesn't think it's busy — between IV-driven iterations the
+  // harness may briefly settle to streaming=false, and the inline Stop
+  // in ChatPanel disappears with it.
   const handleStop = useCallback(() => {
     if (!sessionKey) return
     api.cancelSession(sessionKey, { drainPending: true }).catch(() => { /* swallow */ })
   }, [sessionKey])
-
-  // Pause / resume IV for this session. Toggling both flags off prevents
-  // observation entirely; toggling on restores the dual-brain default.
-  const handleToggleIv = useCallback(async () => {
-    if (!sessionKey || ivBusy) return
-    const next = !ivEnabled
-    setIvBusy(true)
-    try {
-      const r = await api.patchSession(sessionKey, {
-        inner_voice: next,
-        inner_voice_evaluate_user_turns: next,
-      })
-      setIvEnabled(!!r.inner_voice)
-    } catch {
-      /* leave state */
-    } finally {
-      setIvBusy(false)
-    }
-  }, [sessionKey, ivBusy, ivEnabled])
 
   // Resize: drag the left edge of the sidebar. mousemove + mouseup are
   // bound to window so the drag continues even if the cursor leaves the
@@ -411,28 +378,7 @@ export default function RightChatSidebar() {
                 <Square className="w-4 h-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="left">Stop turn</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant={ivEnabled ? 'secondary' : 'outline'}
-                size="icon"
-                onClick={handleToggleIv}
-                disabled={!sessionKey || ivBusy}
-                className={cn(
-                  'h-8 w-8 shrink-0',
-                  ivEnabled
-                    ? 'bg-purple-600/20 border-purple-500/30 text-purple-400 hover:bg-purple-600/30 hover:text-purple-300'
-                    : '',
-                )}
-              >
-                {ivBusy
-                  ? <Loader2 className="w-4 h-4 animate-spin" />
-                  : <Brain className="w-4 h-4" />}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="left">{ivEnabled ? 'Inner Voice on' : 'Inner Voice off'}</TooltipContent>
+            <TooltipContent side="left">Stop turn (primary + IV)</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -543,28 +489,10 @@ export default function RightChatSidebar() {
               onClick={handleStop}
               disabled={!sessionKey}
               className="h-7 text-xs w-full justify-start"
-              title="Stop the current turn and drain queued ambient turns"
+              title="Stop the current turn (primary + Inner Voice) and drain queued ambient turns"
             >
               <Square className="w-3.5 h-3.5 mr-1.5" />
               Stop
-            </Button>
-            <Button
-              variant={ivEnabled ? 'secondary' : 'outline'}
-              size="sm"
-              onClick={handleToggleIv}
-              disabled={!sessionKey || ivBusy}
-              className={cn(
-                'h-7 text-xs w-full justify-start',
-                ivEnabled
-                  ? 'bg-purple-600/20 border-purple-500/30 text-purple-400 hover:bg-purple-600/30 hover:text-purple-300'
-                  : '',
-              )}
-              title={ivEnabled ? 'Pause Inner Voice for this session' : 'Resume Inner Voice for this session'}
-            >
-              {ivBusy
-                ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-                : <Brain className="w-3.5 h-3.5 mr-1.5" />}
-              {ivEnabled ? 'IV on' : 'IV off'}
             </Button>
             <Button
               variant={agentDetails ? 'secondary' : 'outline'}
