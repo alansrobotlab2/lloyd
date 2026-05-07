@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState } from 'react'
 import {
   LayoutList,
   Brain,
@@ -14,14 +14,13 @@ import {
   Lightbulb,
   Mic,
   MicOff,
-  Radio,
   Volume2,
-  VolumeX,
   Workflow,
   BrainCircuit,
   Waves,
+  Power,
+  Square,
 } from 'lucide-react'
-import { api } from '../api'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
@@ -31,6 +30,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { useVoiceMode } from '../contexts/VoiceModeContext'
+import { AgentAudioVisualizerAura } from './agents-ui/agent-audio-visualizer-aura'
 
 export type Page = 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'voice_preview'
 
@@ -41,8 +42,6 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  // Inner Voice — sibling to Chat. The critic ensemble runs only on
-  // sessions opened in this tab; existing Chat tab behavior is unchanged.
   { id: 'inner_voice', label: 'Inner Voice', icon: BrainCircuit },
   { id: 'chat', label: 'Chat', icon: MessageCircle },
   { id: 'backlog', label: 'Backlog', icon: LayoutGrid },
@@ -70,7 +69,6 @@ interface SidebarProps {
 }
 
 // Icon-button row with an optional tooltip that activates only when collapsed.
-// Mirrors the old `title=` UX without polluting the markup.
 function NavRow({
   collapsed,
   label,
@@ -112,56 +110,173 @@ function NavRow({
   return button
 }
 
+// Voice block driven by VoiceModeContext (Phase 6). Replaces the legacy
+// pollVoiceStatus loop that polled /api/voice/status every 500ms.
+function VoiceModeBlock({ collapsed, sessionKey }: { collapsed: boolean; sessionKey?: string | null }) {
+  const voice = useVoiceMode()
+  const room = voice.room
+  const status = room?.status ?? 'idle'
+  const agentState = room?.agentState ?? 'idle'
+
+  // Friendly state label for the pill.
+  const stateLabel =
+    status === 'connecting' ? 'connecting' :
+    status === 'failed' ? 'offline' :
+    !voice.enabled ? 'off' :
+    agentState
+
+  const stateClass = cn(
+    'truncate text-[11px] font-mono',
+    voice.enabled
+      ? agentState === 'speaking'
+        ? 'text-primary'
+        : agentState === 'listening'
+        ? 'text-emerald-400'
+        : agentState === 'thinking' || agentState === 'connecting'
+        ? 'text-amber-400'
+        : 'text-muted-foreground'
+      : 'text-muted-foreground',
+  )
+
+  const handleToggleVoice = () => {
+    if (voice.enabled) {
+      voice.disengage()
+    } else if (sessionKey) {
+      voice.engage(sessionKey)
+    }
+  }
+
+  const handleToggleMic = () => {
+    if (!room) return
+    // The room manages publish state via setMicrophoneEnabled. Manual mute
+    // here flips the publication; half-duplex auto-mute may immediately
+    // reassert during agent speech.
+    const r = room.room
+    const enabled = !room.micMuted && room.micPublished
+    r.localParticipant.setMicrophoneEnabled(!enabled).catch(() => {})
+  }
+
+  // ── Disabled / no session yet ─────────────────────────────────────
+  if (!voice.enabled) {
+    return (
+      <div className="space-y-0.5 mb-1">
+        {!collapsed && (
+          <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Voice Mode
+          </div>
+        )}
+        <NavRow
+          collapsed={collapsed}
+          label={sessionKey ? 'Enable voice for this chat' : 'Open a chat session first'}
+          onClick={handleToggleVoice}
+          disabled={!sessionKey}
+          className={cn(
+            sessionKey
+              ? 'text-muted-foreground hover:text-foreground hover:bg-accent'
+              : 'text-muted-foreground/50 cursor-not-allowed opacity-50',
+          )}
+        >
+          <Power className="w-4 h-4 flex-shrink-0" />
+          {!collapsed && <span className="truncate">Enable voice</span>}
+        </NavRow>
+      </div>
+    )
+  }
+
+  // ── Enabled — render aura thumbnail + status + mic toggle ────────
+  return (
+    <div className="space-y-1 mb-1">
+      {!collapsed && (
+        <div className="flex items-center justify-between px-3 pt-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Voice Mode
+          </span>
+          <button
+            onClick={handleToggleVoice}
+            title="Disengage voice"
+            className="text-[10px] text-muted-foreground hover:text-destructive underline-offset-2 hover:underline"
+          >
+            disengage
+          </button>
+        </div>
+      )}
+
+      {!collapsed && (
+        <div className="flex items-center justify-center px-3 py-1">
+          <AgentAudioVisualizerAura
+            size="icon"
+            state={agentState}
+            audioTrack={room?.agentAudioTrack ?? room?.localAudioTrack}
+            color="#1FD5F9"
+            themeMode="dark"
+            className="!h-12"
+          />
+        </div>
+      )}
+
+      {/* State pill */}
+      <NavRow
+        collapsed={collapsed}
+        label={`Voice: ${stateLabel}`}
+        className="pointer-events-none"
+        showTooltip={false}
+      >
+        <Volume2 className={cn('w-4 h-4 flex-shrink-0',
+          agentState === 'speaking' && 'text-primary animate-pulse',
+        )} />
+        {!collapsed && <span className={stateClass}>{stateLabel}</span>}
+      </NavRow>
+
+      {/* Mic mute toggle */}
+      <NavRow
+        collapsed={collapsed}
+        label={room?.micMuted ? 'Mic muted (auto: half-duplex)' : 'Click to mute mic'}
+        onClick={handleToggleMic}
+        disabled={!room?.micPublished}
+        className={cn(
+          !room?.micPublished
+            ? 'text-muted-foreground/50 cursor-not-allowed opacity-50'
+            : room.micMuted
+            ? 'text-amber-400 bg-amber-500/10 hover:bg-amber-500/20'
+            : 'text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10',
+        )}
+      >
+        {room?.micMuted
+          ? <MicOff className="w-4 h-4 flex-shrink-0" />
+          : <Mic className="w-4 h-4 flex-shrink-0" />}
+        {!collapsed && (
+          <span className="truncate">
+            {!room?.micPublished ? 'Mic offline' : room.micMuted ? 'Mic muted' : 'Mic on'}
+          </span>
+        )}
+      </NavRow>
+
+      {/* Interrupt — only visible while agent is actively speaking */}
+      {room?.agentSpeaking && (
+        <NavRow
+          collapsed={collapsed}
+          label="Interrupt — stop Lloyd's reply"
+          onClick={() => { room.interrupt().catch(() => {}) }}
+          className="text-destructive bg-destructive/10 hover:bg-destructive/20"
+        >
+          <Square className="w-4 h-4 flex-shrink-0" />
+          {!collapsed && <span className="truncate">Interrupt</span>}
+        </NavRow>
+      )}
+
+      {/* Error surface (mic permission denied, secure-context, etc.) */}
+      {!collapsed && room?.error && (
+        <div className="px-3 py-1 text-[10px] text-destructive break-words">
+          {room.error}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, sessionKey, isMobile }: SidebarProps) {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  void sessionKey
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft
   const [workMode, setWorkMode] = useState(false)
-  // Voice state — polls voice mode HTTP API via backend proxy.
-  // Phase 6 will replace this with LiveKit room state.
-  const [isListening, setIsListening] = useState(false)
-  const [voiceEnabled, setVoiceEnabled] = useState(false)
-  const [voiceOnline, setVoiceOnline] = useState(false)
-  const [pipelineState, setPipelineState] = useState<string>('IDLE')
-  const [ttsEnabled, setTtsEnabled] = useState(false)
-
-  const pollVoiceStatus = useCallback(() => {
-    api.voiceStatus()
-      .then(s => {
-        const online = s.state !== 'OFFLINE'
-        setVoiceOnline(online)
-        setVoiceEnabled(s.voice_enabled ?? false)
-        setPipelineState(s.state ?? 'IDLE')
-        setIsListening(s.state === 'LISTENING' || s.state === 'ACTIVE_LISTEN')
-      })
-      .catch(() => setVoiceOnline(false))
-    api.voiceTtsStatus()
-      .then(s => setTtsEnabled(s.tts_enabled ?? false))
-      .catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    pollVoiceStatus()
-    const interval = setInterval(pollVoiceStatus, 500)
-    return () => clearInterval(interval)
-  }, [pollVoiceStatus])
-
-  const handleVoiceToggle = async () => {
-    try {
-      const r = await api.voiceToggle()
-      setVoiceEnabled(r.voice_enabled ?? !voiceEnabled)
-    } catch {
-      // ignore
-    }
-  }
-  const handleTtsToggle = async () => {
-    try {
-      const r = await api.voiceTtsToggle()
-      setTtsEnabled(r.tts_enabled ?? !ttsEnabled)
-    } catch {
-      // ignore
-    }
-  }
 
   const renderItem = (item: NavItem) => {
     const Icon = item.icon
@@ -183,12 +298,6 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
       </NavRow>
     )
   }
-
-  const stateText = pipelineState === 'IDLE' ? 'Idle' : pipelineState
-  const stateClass =
-    pipelineState === 'LISTENING' || pipelineState === 'ACTIVE_LISTEN'
-      ? 'text-emerald-400 bg-emerald-500/10'
-      : 'text-muted-foreground bg-secondary'
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -219,74 +328,8 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
 
         {/* Bottom nav */}
         <div className="px-2 pt-2 space-y-0.5 border-t border-border">
-          {/* Voice status section */}
-          <div className="space-y-0.5 mb-1">
-            {!collapsed && (
-              <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Voice Mode
-              </div>
-            )}
-
-            {/* Pipeline state */}
-            {voiceOnline && (
-              <NavRow
-                collapsed={collapsed}
-                label={stateText}
-                className={cn('text-xs font-medium pointer-events-none', stateClass)}
-              >
-                <Radio className="w-4 h-4 flex-shrink-0" />
-                {!collapsed && <span className="truncate text-[11px] font-mono">{stateText}</span>}
-              </NavRow>
-            )}
-
-            {/* Mic toggle */}
-            <NavRow
-              collapsed={collapsed}
-              disabled={!voiceOnline}
-              label={
-                !voiceOnline ? 'Voice offline' :
-                isListening ? 'Listening — click to disable' :
-                voiceEnabled ? 'Mic on — click to disable' :
-                'Mic off — click to enable'
-              }
-              onClick={voiceOnline ? handleVoiceToggle : undefined}
-              className={cn(
-                !voiceOnline
-                  ? 'text-muted-foreground/50 cursor-not-allowed opacity-50'
-                  : voiceEnabled
-                    ? isListening
-                      ? 'text-emerald-400 bg-emerald-500/20 hover:bg-emerald-500/30'
-                      : 'text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-accent',
-              )}
-            >
-              {voiceEnabled ? (
-                <Mic className={cn('w-4 h-4 flex-shrink-0', isListening && 'animate-pulse')} />
-              ) : (
-                <MicOff className="w-4 h-4 flex-shrink-0" />
-              )}
-              {!collapsed && (
-                <span className="truncate">
-                  {!voiceOnline ? 'Offline' : isListening ? 'Listening' : voiceEnabled ? 'Mic On' : 'Mic Off'}
-                </span>
-              )}
-            </NavRow>
-
-            {/* TTS toggle */}
-            <NavRow
-              collapsed={collapsed}
-              label={ttsEnabled ? 'Speak responses: ON' : 'Speak responses: OFF'}
-              onClick={handleTtsToggle}
-              className={
-                ttsEnabled
-                  ? 'text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-accent'
-              }
-            >
-              {ttsEnabled ? <Volume2 className="w-4 h-4 flex-shrink-0" /> : <VolumeX className="w-4 h-4 flex-shrink-0" />}
-              {!collapsed && <span className="truncate">{ttsEnabled ? 'Speak: On' : 'Speak: Off'}</span>}
-            </NavRow>
-          </div>
+          {/* Voice block — driven by VoiceModeContext (LiveKit room state) */}
+          <VoiceModeBlock collapsed={collapsed} sessionKey={sessionKey} />
 
           <Separator className="my-1" />
 

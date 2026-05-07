@@ -14,6 +14,7 @@ import InnerVoicePage from './pages/InnerVoicePage'
 import VoicePreviewPage from './pages/VoicePreviewPage'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
+import { useVoiceMode } from '../contexts/VoiceModeContext'
 import { api, type ModelInfo } from '../api'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { cn } from '@/lib/utils'
@@ -145,11 +146,24 @@ export default function Layout() {
   const currentModel = visibleSlot?.model ?? ''
   const sessionsPanelRefreshTrigger = useMemo(() => slots.map(s => s.sessionKey ?? 'null').join(','), [slots])
 
-  // Route voice transcripts to whichever session is focused in the foreground tab.
-  // Chat tab uses the visible slot; Inner Voice manages its own (in InnerVoicePage).
-  // Other tabs leave the override alone so the previous owner's choice persists
-  // until the user goes back to chat. Goes away in Phase 6 when LiveKit room
-  // membership replaces the explicit active-session POST.
+  // Voice mode context — when enabled, point it at the visible chat slot's
+  // session_id so the LiveKit room follows the foreground tab. Switching
+  // tabs while voice is enabled reconnects to the new session.
+  const voiceMode = useVoiceMode()
+  useEffect(() => {
+    if (!voiceMode.enabled) return
+    if (page !== 'chat') return
+    const sid = visibleSlot?.sessionKey ?? null
+    if (sid && sid !== voiceMode.sessionId) {
+      voiceMode.setSessionId(sid)
+    }
+  }, [voiceMode.enabled, voiceMode.sessionId, page, visibleSlot?.sessionKey, voiceMode])
+
+  // Legacy bridge: until Phase 8 retires the daemon path, also tell the
+  // backend's _VOICE_ACTIVE_SESSION which chat session is focused, so any
+  // remaining injects from the legacy /api/voice/inject route still land
+  // somewhere reasonable. The LiveKit worker bypasses this via explicit
+  // payload session_key.
   useEffect(() => {
     if (page !== 'chat') return
     const sid = visibleSlot?.sessionKey ?? null
