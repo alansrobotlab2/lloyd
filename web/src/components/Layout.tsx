@@ -12,10 +12,24 @@ import AutonomyPage from './pages/AutonomyPage'
 import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
 import VoicePreviewPage from './pages/VoicePreviewPage'
-import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu, X } from 'lucide-react'
+import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
 import { api, type ModelInfo } from '../api'
 import { useIsMobile } from '../hooks/useIsMobile'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
 
 interface Slot {
   slotId: string
@@ -26,8 +40,18 @@ interface Slot {
 let slotCounter = 0
 const nextSlotId = () => `slot_${Date.now()}_${++slotCounter}`
 
-const GraphPage = () => <div className="p-6"><h2 className="text-xl font-bold">Graph</h2><p className="text-slate-400 mt-2">Coming soon...</p></div>
-const SettingsPage = () => <div className="p-6"><h2 className="text-xl font-bold">Settings</h2><p className="text-slate-400 mt-2">Coming soon...</p></div>
+const GraphPage = () => (
+  <div className="p-6">
+    <h2 className="text-xl font-bold text-foreground">Graph</h2>
+    <p className="text-muted-foreground mt-2">Coming soon...</p>
+  </div>
+)
+const SettingsPage = () => (
+  <div className="p-6">
+    <h2 className="text-xl font-bold text-foreground">Settings</h2>
+    <p className="text-muted-foreground mt-2">Coming soon...</p>
+  </div>
+)
 
 const PAGES: Record<string, React.FC> = {
   services: ServicesPage,
@@ -44,6 +68,66 @@ const PAGES: Record<string, React.FC> = {
   voice_preview: VoicePreviewPage,  // Phase 2A — aura visualizer with mock state
 }
 
+interface ModelMenuProps {
+  models: ModelInfo[]
+  currentModel: string
+  visibleSlot: Slot | null
+  visibleSlotId: string | null
+  onSwitchModel: (slotId: string, model: string) => void
+  triggerLabel: string
+  triggerClassName?: string
+}
+
+function ModelMenu({
+  models,
+  currentModel,
+  visibleSlot,
+  visibleSlotId,
+  onSwitchModel,
+  triggerLabel,
+  triggerClassName,
+}: ModelMenuProps) {
+  const handleSelect = async (model: string) => {
+    if (visibleSlot?.sessionKey) {
+      try {
+        const result = await api.switchModel(model, visibleSlot.sessionKey)
+        if (result.success && visibleSlotId) onSwitchModel(visibleSlotId, model)
+      } catch (err) {
+        console.error('Failed to switch model:', err)
+      }
+    } else if (visibleSlotId) {
+      onSwitchModel(visibleSlotId, model)
+    }
+  }
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" className={cn('text-xs gap-1', triggerClassName)}>
+          {triggerLabel}
+          <ChevronDown className="w-3 h-3" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56 max-h-60 overflow-y-auto">
+        {models.map(model => (
+          <DropdownMenuItem
+            key={model.name}
+            onSelect={() => handleSelect(model.name)}
+            className={cn(
+              'flex-col items-start gap-0.5',
+              model.name === currentModel && 'bg-primary/15 text-primary focus:bg-primary/20',
+            )}
+          >
+            <span className="font-medium truncate w-full">{model.name}</span>
+            <span className="text-xs text-muted-foreground truncate w-full">
+              {model.alias} · {model.provider}
+            </span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 export default function Layout() {
   const isMobile = useIsMobile()
   const [page, setPage] = useState<Page>('chat')
@@ -53,7 +137,6 @@ export default function Layout() {
   const [activeSessions, setActiveSessions] = useState<Set<string>>(new Set())
   const [showSessions, setShowSessions] = useState(true)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const [showModelDropdown, setShowModelDropdown] = useState(false)
   const [showAgentDetails, setShowAgentDetails] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false)
@@ -65,7 +148,8 @@ export default function Layout() {
   // Route voice transcripts to whichever session is focused in the foreground tab.
   // Chat tab uses the visible slot; Inner Voice manages its own (in InnerVoicePage).
   // Other tabs leave the override alone so the previous owner's choice persists
-  // until the user goes back to chat.
+  // until the user goes back to chat. Goes away in Phase 6 when LiveKit room
+  // membership replaces the explicit active-session POST.
   useEffect(() => {
     if (page !== 'chat') return
     const sid = visibleSlot?.sessionKey ?? null
@@ -152,120 +236,99 @@ export default function Layout() {
 
   const PageComponent = PAGES[page]
 
-  // Mobile navigation handler — close menu after navigating
   const handleMobileNavigate = (p: Page) => {
     setPage(p)
     setMobileMenuOpen(false)
   }
 
+  const triggerModelLabel = currentModel
+    ? (models.find(m => m.name === currentModel)?.name || currentModel)
+    : 'Model'
+
   return (
     <MessageProvider>
-      <div className={`h-screen flex ${isMobile ? 'flex-col' : ''} bg-surface-0`}>
+      <div className={cn('h-screen flex bg-background text-foreground', isMobile && 'flex-col')}>
         {/* Desktop sidebar */}
         {!isMobile && (
           <Sidebar
             active={page}
             onNavigate={setPage}
             collapsed={collapsed}
-            onToggleCollapse={() => setCollapsed((c) => !c)}
+            onToggleCollapse={() => setCollapsed(c => !c)}
             sessionKey={visibleSlot?.sessionKey}
           />
         )}
 
         {/* Mobile top bar */}
         {isMobile && (
-          <div className="flex items-center justify-between px-3 py-2 bg-surface-1 border-b border-surface-3/30 flex-shrink-0">
+          <div className="flex items-center justify-between px-3 py-2 bg-card border-b border-border flex-shrink-0">
             <div className="flex items-center gap-2">
-              <button onClick={() => setMobileMenuOpen(true)} className="text-slate-400 p-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setMobileMenuOpen(true)}
+                aria-label="Open menu"
+              >
                 <Menu className="w-5 h-5" />
-              </button>
-              <img src="/lloyd.jpg" alt="Lloyd" className="w-6 h-6 rounded-lg object-cover" />
-              <span className="text-sm font-bold text-slate-200">LLOYD</span>
+              </Button>
+              <img src="/lloyd.jpg" alt="Lloyd" className="w-6 h-6 rounded-md object-cover" />
+              <span className="text-sm font-bold text-foreground">LLOYD</span>
             </div>
             <div className="flex items-center gap-1">
               {page === 'chat' && (
                 <>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
                     onClick={() => setMobileSessionsOpen(true)}
-                    className="text-slate-400 p-1.5"
-                    title="Sessions"
+                    aria-label="Sessions"
                   >
                     <PanelLeft className="w-4 h-4" />
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
                     onClick={handleNewSession}
-                    className="text-slate-400 p-1.5"
-                    title="New Session"
+                    aria-label="New session"
                   >
                     <Plus className="w-4 h-4" />
-                  </button>
+                  </Button>
                 </>
               )}
               {models.length > 0 && page === 'chat' && (
-                <div className="relative">
-                  <button
-                    onClick={() => setShowModelDropdown((v) => !v)}
-                    className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium text-slate-400"
-                  >
-                    {currentModel ? (models.find(m => m.name === currentModel)?.alias || currentModel) : 'Model'}
-                    <ChevronDown className="w-3 h-3" />
-                  </button>
-                  {showModelDropdown && (
-                    <div className="absolute top-full right-0 mt-1 w-48 bg-surface-1 border border-surface-3/50 rounded-lg shadow-lg z-50 max-h-60 overflow-y-auto">
-                      {models.map((model) => (
-                        <button
-                          key={model.name}
-                          onClick={async () => {
-                            if (visibleSlot?.sessionKey) {
-                              try {
-                                const result = await api.switchModel(model.name, visibleSlot.sessionKey)
-                                if (result.success && visibleSlotId) {
-                                  handleSlotModelSwitch(visibleSlotId, model.name)
-                                  setShowModelDropdown(false)
-                                }
-                              } catch (err) {
-                                console.error('Failed to switch model:', err)
-                              }
-                            } else if (visibleSlotId) {
-                              handleSlotModelSwitch(visibleSlotId, model.name)
-                              setShowModelDropdown(false)
-                            }
-                          }}
-                          className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-                            model.name === currentModel
-                              ? 'bg-brand-500/20 text-brand-400'
-                              : 'hover:bg-surface-2 text-slate-200'
-                          }`}
-                        >
-                          <div className="font-medium truncate">{model.name}</div>
-                          <div className="text-xs text-slate-500 truncate">{model.alias} • {model.provider}</div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                <ModelMenu
+                  models={models}
+                  currentModel={currentModel}
+                  visibleSlot={visibleSlot}
+                  visibleSlotId={visibleSlotId}
+                  onSwitchModel={handleSlotModelSwitch}
+                  triggerLabel={
+                    currentModel
+                      ? (models.find(m => m.name === currentModel)?.alias || currentModel)
+                      : 'Model'
+                  }
+                />
               )}
             </div>
           </div>
         )}
 
-        {/* Mobile slide-out menu overlay */}
-        {isMobile && mobileMenuOpen && (
-          <div className="fixed inset-0 z-50 flex">
-            <div className="absolute inset-0 bg-black/60" onClick={() => setMobileMenuOpen(false)} />
-            <div className="relative w-64 bg-surface-1 h-full flex flex-col animate-slide-in-left">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-surface-3/30">
+        {/* Mobile menu sheet */}
+        {isMobile && (
+          <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
+            <SheetContent side="left" className="p-0 w-64 flex flex-col">
+              <SheetHeader className="px-4 py-3 border-b border-border">
                 <div className="flex items-center gap-2">
-                  <img src="/lloyd.jpg" alt="Lloyd" className="w-7 h-7 rounded-lg object-cover" />
-                  <div>
-                    <div className="text-sm font-bold text-slate-200">LLOYD</div>
-                    <div className="text-[10px] text-slate-500 -mt-0.5">Mission Control</div>
+                  <img src="/lloyd.jpg" alt="Lloyd" className="w-7 h-7 rounded-md object-cover" />
+                  <div className="text-left">
+                    <SheetTitle className="text-sm font-bold leading-tight">LLOYD</SheetTitle>
+                    <div className="text-[10px] text-muted-foreground -mt-0.5">Mission Control</div>
                   </div>
                 </div>
-                <button onClick={() => setMobileMenuOpen(false)} className="text-slate-400 p-1">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
+              </SheetHeader>
               <Sidebar
                 active={page}
                 onNavigate={handleMobileNavigate}
@@ -274,21 +337,17 @@ export default function Layout() {
                 sessionKey={visibleSlot?.sessionKey}
                 isMobile
               />
-            </div>
-          </div>
+            </SheetContent>
+          </Sheet>
         )}
 
-        {/* Mobile sessions overlay */}
-        {isMobile && mobileSessionsOpen && (
-          <div className="fixed inset-0 z-50 flex">
-            <div className="absolute inset-0 bg-black/60" onClick={() => setMobileSessionsOpen(false)} />
-            <div className="relative w-72 bg-surface-1 h-full flex flex-col animate-slide-in-left">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-surface-3/30">
-                <span className="text-sm font-semibold text-slate-200">Sessions</span>
-                <button onClick={() => setMobileSessionsOpen(false)} className="text-slate-400 p-1">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
+        {/* Mobile sessions sheet */}
+        {isMobile && (
+          <Sheet open={mobileSessionsOpen} onOpenChange={setMobileSessionsOpen}>
+            <SheetContent side="left" className="p-0 w-72 flex flex-col">
+              <SheetHeader className="px-4 py-3 border-b border-border">
+                <SheetTitle className="text-sm font-semibold">Sessions</SheetTitle>
+              </SheetHeader>
               <div className="flex-1 overflow-y-auto">
                 <SessionsPanel
                   onSwitchSession={(key) => { handleOpenSession(key); setMobileSessionsOpen(false) }}
@@ -297,100 +356,84 @@ export default function Layout() {
                   refreshTrigger={sessionsPanelRefreshTrigger}
                 />
               </div>
-            </div>
-          </div>
+            </SheetContent>
+          </Sheet>
         )}
 
         <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          {/* Desktop page header */}
+          {/* Desktop chat header */}
           {!isMobile && page === 'chat' && (
             <div className="flex items-center justify-between flex-shrink-0 px-6 pt-6 pb-2">
               <div className="flex items-center gap-3">
-                <button
-                  onClick={() => setShowSessions((s) => !s)}
-                  title={showSessions ? "Hide sessions" : "Show sessions"}
-                  className="text-slate-400 hover:text-brand-400 transition-colors"
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-muted-foreground hover:text-primary"
+                  onClick={() => setShowSessions(s => !s)}
+                  aria-label={showSessions ? 'Hide sessions' : 'Show sessions'}
                 >
                   {showSessions ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeft className="w-5 h-5" />}
-                </button>
-                <MessageCircle className="w-5 h-5 text-brand-400" />
-                <h2 className="text-lg font-semibold text-slate-200">Chat</h2>
+                </Button>
+                <MessageCircle className="w-5 h-5 text-primary" />
+                <h2 className="text-lg font-semibold text-foreground">Chat</h2>
               </div>
               <div className="flex items-center gap-1.5">
                 {models.length > 0 && (
-                  <div className="relative">
-                    <button
-                      onClick={() => setShowModelDropdown((v) => !v)}
-                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-brand-400 hover:bg-brand-500/10 transition-colors"
-                    >
-                      {currentModel ? models.find(m => m.name === currentModel)?.name || currentModel : 'Model'}
-                      <ChevronDown className="w-3 h-3" />
-                    </button>
-                    {showModelDropdown && (
-                      <div className="absolute top-full right-0 mt-1 w-48 bg-surface-1 border border-surface-3/50 rounded-lg shadow-lg z-50 max-h-60 overflow-y-auto">
-                        {models.map((model) => (
-                          <button
-                            key={model.name}
-                            onClick={async () => {
-                              if (visibleSlot?.sessionKey) {
-                                try {
-                                  const result = await api.switchModel(model.name, visibleSlot.sessionKey)
-                                  if (result.success && visibleSlotId) {
-                                    handleSlotModelSwitch(visibleSlotId, model.name)
-                                    setShowModelDropdown(false)
-                                  }
-                                } catch (err) {
-                                  console.error('Failed to switch model:', err)
-                                }
-                              } else if (visibleSlotId) {
-                                handleSlotModelSwitch(visibleSlotId, model.name)
-                                setShowModelDropdown(false)
-                              }
-                            }}
-                            className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-                              model.name === currentModel
-                                ? 'bg-brand-500/20 text-brand-400'
-                                : 'hover:bg-surface-2 text-slate-200'
-                            }`}
-                          >
-                            <div className="font-medium truncate">{model.name}</div>
-                            <div className="text-xs text-slate-500 truncate">{model.alias} • {model.provider}</div>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                  <ModelMenu
+                    models={models}
+                    currentModel={currentModel}
+                    visibleSlot={visibleSlot}
+                    visibleSlotId={visibleSlotId}
+                    onSwitchModel={handleSlotModelSwitch}
+                    triggerLabel={triggerModelLabel}
+                    triggerClassName="text-muted-foreground hover:text-primary hover:bg-primary/10"
+                  />
                 )}
-                <button
-                  onClick={() => setShowAgentDetails((v) => !v)}
-                  title={showAgentDetails ? "Hide agent details" : "Show agent details"}
-                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowAgentDetails(v => !v)}
+                  className={cn(
+                    'text-xs gap-1.5',
                     showAgentDetails
-                      ? 'text-brand-400 bg-brand-500/15'
-                      : 'text-slate-400 hover:text-brand-400 hover:bg-brand-500/10'
-                  }`}
+                      ? 'text-primary bg-primary/15 hover:bg-primary/20'
+                      : 'text-muted-foreground hover:text-primary hover:bg-primary/10',
+                  )}
                 >
                   <Bot className="w-3.5 h-3.5" />
                   Agent Details
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={handleNewSession}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-brand-400 hover:bg-brand-500/10 transition-colors"
+                  className="text-xs gap-1.5 text-muted-foreground hover:text-primary hover:bg-primary/10"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   New Session
-                </button>
+                </Button>
               </div>
             </div>
           )}
 
           {/* Chat area — always mounted so session state + messages survive tab switches.
-              Hidden via display:none when another page is active so no layout space is taken. */}
-          <div className={`flex-1 flex min-h-0 overflow-hidden flex-shrink-0 ${isMobile ? 'm-0' : 'mx-6 mb-6'} ${page === 'chat' ? '' : 'hidden'}`}>
-            <div className={`flex flex-1 flex-row h-full bg-surface-1 ${isMobile ? '' : 'border border-surface-3/50 rounded-xl'} overflow-hidden`}>
+              Hidden via display:none when another page is active. */}
+          <div
+            className={cn(
+              'flex-1 flex min-h-0 overflow-hidden flex-shrink-0',
+              isMobile ? 'm-0' : 'mx-6 mb-6',
+              page === 'chat' ? '' : 'hidden',
+            )}
+          >
+            <div
+              className={cn(
+                'flex flex-1 flex-row h-full bg-card overflow-hidden',
+                !isMobile && 'border border-border rounded-xl',
+              )}
+            >
               {/* Sessions Panel - desktop only */}
               {!isMobile && showSessions && (
-                <div className="w-64 border-r border-surface-3/30 flex-shrink-0">
+                <div className="w-64 border-r border-border flex-shrink-0">
                   <SessionsPanel
                     onSwitchSession={(key) => handleOpenSession(key)}
                     currentSessionKey={visibleSlot?.sessionKey ?? null}
@@ -405,7 +448,10 @@ export default function Layout() {
                 {slots.map(slot => (
                   <div
                     key={slot.slotId}
-                    className={`absolute inset-0 flex flex-col ${slot.slotId === visibleSlotId ? '' : 'hidden'}`}
+                    className={cn(
+                      'absolute inset-0 flex flex-col',
+                      slot.slotId === visibleSlotId ? '' : 'hidden',
+                    )}
                   >
                     <ChatPanel
                       requestedSessionKey={slot.sessionKey}
@@ -425,10 +471,10 @@ export default function Layout() {
             </div>
           </div>
 
-            {/* Other pages */}
-            {PageComponent && <PageComponent />}
-          </main>
-        </div>
-      </MessageProvider>
+          {/* Other pages */}
+          {PageComponent && <PageComponent />}
+        </main>
+      </div>
+    </MessageProvider>
   )
 }

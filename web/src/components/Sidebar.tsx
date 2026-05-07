@@ -22,6 +22,15 @@ import {
   Waves,
 } from 'lucide-react'
 import { api } from '../api'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { Separator } from '@/components/ui/separator'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 
 export type Page = 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'voice_preview'
 
@@ -60,21 +69,61 @@ interface SidebarProps {
   isMobile?: boolean
 }
 
+// Icon-button row with an optional tooltip that activates only when collapsed.
+// Mirrors the old `title=` UX without polluting the markup.
+function NavRow({
+  collapsed,
+  label,
+  showTooltip,
+  className,
+  onClick,
+  disabled,
+  children,
+}: {
+  collapsed: boolean
+  label: string
+  showTooltip?: boolean
+  className?: string
+  onClick?: () => void
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  const button = (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        'w-full flex items-center rounded-md text-xs font-medium transition-colors',
+        collapsed ? 'justify-center px-3 py-2' : 'gap-2.5 px-3 py-2',
+        className,
+      )}
+    >
+      {children}
+    </button>
+  )
+  if (collapsed && showTooltip !== false) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>{button}</TooltipTrigger>
+        <TooltipContent side="right">{label}</TooltipContent>
+      </Tooltip>
+    )
+  }
+  return button
+}
+
 export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, sessionKey, isMobile }: SidebarProps) {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   void sessionKey
   const CollapseIcon = collapsed ? ChevronsRight : ChevronsLeft
   const [workMode, setWorkMode] = useState(false)
-  // Voice state — polls voice mode HTTP API via backend proxy
+  // Voice state — polls voice mode HTTP API via backend proxy.
+  // Phase 6 will replace this with LiveKit room state.
   const [isListening, setIsListening] = useState(false)
   const [voiceEnabled, setVoiceEnabled] = useState(false)
   const [voiceOnline, setVoiceOnline] = useState(false)
-  const [_pipelineState, setPipelineState] = useState<string>('IDLE')
-  // TTS-on-response: independent of wake-word state. Speaker icon (Vol2/VolX)
-  // reflects this; mic-related rows reflect voiceEnabled.
+  const [pipelineState, setPipelineState] = useState<string>('IDLE')
   const [ttsEnabled, setTtsEnabled] = useState(false)
-  const _wsAvailable = voiceOnline
-  const _statusLoaded = voiceOnline
 
   const pollVoiceStatus = useCallback(() => {
     api.voiceStatus()
@@ -86,8 +135,6 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
         setIsListening(s.state === 'LISTENING' || s.state === 'ACTIVE_LISTEN')
       })
       .catch(() => setVoiceOnline(false))
-    // TTS flag is owned by lloyd backend, not the voice-mode daemon, so it's
-    // queryable independent of voice mode being up.
     api.voiceTtsStatus()
       .then(s => setTtsEnabled(s.tts_enabled ?? false))
       .catch(() => {})
@@ -95,9 +142,6 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
 
   useEffect(() => {
     pollVoiceStatus()
-    // 500ms cadence so the navbar mic icon reflects IDLE→LISTENING→PROCESSING
-    // →SPEAKING transitions snappily. The endpoint is an in-memory read on
-    // a threaded HTTP server, so this is cheap.
     const interval = setInterval(pollVoiceStatus, 500)
     return () => clearInterval(interval)
   }, [pollVoiceStatus])
@@ -123,165 +167,178 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
     const Icon = item.icon
     const isActive = active === item.id
     return (
-      <button
+      <NavRow
         key={item.id}
+        collapsed={collapsed}
+        label={item.label}
         onClick={() => onNavigate(item.id)}
-        title={collapsed ? item.label : undefined}
-        className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+        className={
           isActive
-            ? 'bg-brand-600/15 text-brand-400'
-            : 'text-slate-400 hover:text-slate-200 hover:bg-surface-2'
-        }`}
+            ? 'bg-primary/15 text-primary hover:bg-primary/20'
+            : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+        }
       >
         <Icon className="w-4 h-4 flex-shrink-0" />
         {!collapsed && <span className="truncate">{item.label}</span>}
-      </button>
+      </NavRow>
     )
   }
 
-  // Compute state color/text based on pipeline state
-  const stateColor = _pipelineState === 'LISTENING' || _pipelineState === 'ACTIVE_LISTEN' ? 'text-green-400 bg-green-600/10' : 'text-slate-400 bg-surface-2'
-  const stateText = _pipelineState === 'IDLE' ? 'Idle' : _pipelineState
+  const stateText = pipelineState === 'IDLE' ? 'Idle' : pipelineState
+  const stateClass =
+    pipelineState === 'LISTENING' || pipelineState === 'ACTIVE_LISTEN'
+      ? 'text-emerald-400 bg-emerald-500/10'
+      : 'text-muted-foreground bg-secondary'
 
   return (
-    <aside className={`${isMobile ? 'w-full flex-1' : collapsed ? 'w-14' : 'w-48'} ${isMobile ? '' : 'bg-surface-1 border-r border-surface-3/30'} flex flex-col ${isMobile ? 'py-2' : 'py-4'} transition-all duration-200`}>
-      {/* Brand — hidden in mobile (overlay has its own header) */}
-      {!isMobile && (
-        <div className={`${collapsed ? 'px-2 justify-center' : 'px-4'} mb-6 flex items-center gap-2`}>
-          <img src="/lloyd.jpg" alt="Lloyd" className="w-7 h-7 rounded-lg object-cover flex-shrink-0" />
-          {!collapsed && (
-            <div>
-              <div className="text-sm font-bold tracking-wide text-slate-200">LLOYD</div>
-              <div className="text-[10px] text-slate-500 -mt-0.5">Mission Control</div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Main nav */}
-      <nav className="flex-1 px-2 space-y-0.5">
-        {NAV_ITEMS.map(renderItem)}
-      </nav>
-
-      {/* Bottom nav */}
-      <div className="px-2 pt-2 border-t border-surface-3/30 space-y-0.5">
-        {/* Voice status section */}
-        <div className="space-y-0.5 mb-1">
-          {!collapsed && (
-            <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Voice Mode</div>
-          )}
-          {/* Row 1 — Last utterance (stub - disabled) */}
-          {false && (
-            <div
-              title={collapsed ? 'No transcript' : undefined}
-              className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-1.5 rounded-lg text-xs transition-opacity duration-1000 opacity-0 text-slate-400`}
-            >
-              {collapsed ? (
-                <MessageCircle className="w-4 h-4 flex-shrink-0 text-slate-500" />
-              ) : (
-                <span className="truncate text-[11px] italic">""</span>
-              )}
-            </div>
-          )}
-
-          {/* Row 2 — Pipeline state */}
-          {_wsAvailable && (
-            <div
-              title={collapsed ? stateText : undefined}
-              className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-1.5 rounded-lg text-xs font-medium ${stateColor}`}
-            >
-              <Radio className="w-4 h-4 flex-shrink-0" />
-              {!collapsed && <span className="truncate text-[11px] font-mono">{stateText}</span>}
-            </div>
-          )}
-
-          {/* Row 3 — Mic toggle (click to enable/disable ASR wake-word listener) */}
-          <button
-            onClick={_statusLoaded ? handleVoiceToggle : undefined}
-            disabled={!_statusLoaded}
-            title={collapsed ? (
-              !_statusLoaded ? 'Voice Offline' :
-              isListening ? 'Listening — click to disable' :
-              voiceEnabled ? 'Mic On — click to disable' :
-              'Mic Off — click to enable'
-            ) : undefined}
-            className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-              !_statusLoaded
-                ? 'text-slate-600 cursor-not-allowed opacity-50'
-                : voiceEnabled
-                  ? isListening
-                    ? 'text-green-400 bg-green-600/20 hover:bg-green-600/30'
-                    : 'text-green-400 bg-green-600/10 hover:bg-green-600/20'
-                  : 'text-slate-500 hover:text-slate-300 hover:bg-surface-2'
-            }`}
-          >
-            {voiceEnabled ? (
-              <Mic className={`w-4 h-4 flex-shrink-0 ${isListening ? 'animate-pulse' : ''}`} />
-            ) : (
-              <MicOff className="w-4 h-4 flex-shrink-0" />
-            )}
+    <TooltipProvider delayDuration={150}>
+      <aside
+        className={cn(
+          'flex flex-col transition-all duration-200',
+          isMobile ? 'w-full flex-1 py-2' : 'py-4 bg-card border-r border-border',
+          isMobile ? '' : collapsed ? 'w-14' : 'w-48',
+        )}
+      >
+        {/* Brand */}
+        {!isMobile && (
+          <div className={cn('mb-6 flex items-center gap-2', collapsed ? 'px-2 justify-center' : 'px-4')}>
+            <img src="/lloyd.jpg" alt="Lloyd" className="w-7 h-7 rounded-lg object-cover flex-shrink-0" />
             {!collapsed && (
-              <span className="truncate">
-                {!_statusLoaded ? 'Offline' :
-                 isListening ? 'Listening' :
-                 voiceEnabled ? 'Mic On' : 'Mic Off'}
+              <div>
+                <div className="text-sm font-bold tracking-wide text-foreground">LLOYD</div>
+                <div className="text-[10px] text-muted-foreground -mt-0.5">Mission Control</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Main nav */}
+        <nav className="flex-1 px-2 space-y-0.5">
+          {NAV_ITEMS.map(renderItem)}
+        </nav>
+
+        {/* Bottom nav */}
+        <div className="px-2 pt-2 space-y-0.5 border-t border-border">
+          {/* Voice status section */}
+          <div className="space-y-0.5 mb-1">
+            {!collapsed && (
+              <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Voice Mode
+              </div>
+            )}
+
+            {/* Pipeline state */}
+            {voiceOnline && (
+              <NavRow
+                collapsed={collapsed}
+                label={stateText}
+                className={cn('text-xs font-medium pointer-events-none', stateClass)}
+              >
+                <Radio className="w-4 h-4 flex-shrink-0" />
+                {!collapsed && <span className="truncate text-[11px] font-mono">{stateText}</span>}
+              </NavRow>
+            )}
+
+            {/* Mic toggle */}
+            <NavRow
+              collapsed={collapsed}
+              disabled={!voiceOnline}
+              label={
+                !voiceOnline ? 'Voice offline' :
+                isListening ? 'Listening — click to disable' :
+                voiceEnabled ? 'Mic on — click to disable' :
+                'Mic off — click to enable'
+              }
+              onClick={voiceOnline ? handleVoiceToggle : undefined}
+              className={cn(
+                !voiceOnline
+                  ? 'text-muted-foreground/50 cursor-not-allowed opacity-50'
+                  : voiceEnabled
+                    ? isListening
+                      ? 'text-emerald-400 bg-emerald-500/20 hover:bg-emerald-500/30'
+                      : 'text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-accent',
+              )}
+            >
+              {voiceEnabled ? (
+                <Mic className={cn('w-4 h-4 flex-shrink-0', isListening && 'animate-pulse')} />
+              ) : (
+                <MicOff className="w-4 h-4 flex-shrink-0" />
+              )}
+              {!collapsed && (
+                <span className="truncate">
+                  {!voiceOnline ? 'Offline' : isListening ? 'Listening' : voiceEnabled ? 'Mic On' : 'Mic Off'}
+                </span>
+              )}
+            </NavRow>
+
+            {/* TTS toggle */}
+            <NavRow
+              collapsed={collapsed}
+              label={ttsEnabled ? 'Speak responses: ON' : 'Speak responses: OFF'}
+              onClick={handleTtsToggle}
+              className={
+                ttsEnabled
+                  ? 'text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+              }
+            >
+              {ttsEnabled ? <Volume2 className="w-4 h-4 flex-shrink-0" /> : <VolumeX className="w-4 h-4 flex-shrink-0" />}
+              {!collapsed && <span className="truncate">{ttsEnabled ? 'Speak: On' : 'Speak: Off'}</span>}
+            </NavRow>
+          </div>
+
+          <Separator className="my-1" />
+
+          {/* Work Mode toggle */}
+          <NavRow
+            collapsed={collapsed}
+            label="Work Mode"
+            onClick={() => setWorkMode(!workMode)}
+            className={cn(
+              workMode
+                ? 'bg-purple-600 text-white hover:bg-purple-500'
+                : 'text-muted-foreground hover:text-foreground hover:bg-accent',
+            )}
+          >
+            <Briefcase className="w-4 h-4 flex-shrink-0" />
+            {!collapsed && <span className="truncate flex-1 text-left">Work Mode</span>}
+            {!collapsed && (
+              <span
+                className={cn(
+                  'w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center transition-colors',
+                  workMode ? 'bg-white border-white' : 'border-muted-foreground',
+                )}
+              >
+                {workMode && <span className="text-[10px] text-purple-600 font-bold leading-none">&#10003;</span>}
               </span>
             )}
-          </button>
+          </NavRow>
 
-          {/* Row 3.5 — Speaker toggle (TTS-on-response, independent of wake-word) */}
-          <button
-            onClick={handleTtsToggle}
-            title={collapsed ? (ttsEnabled ? 'Speak responses: ON' : 'Speak responses: OFF') : undefined}
-            className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-              ttsEnabled
-                ? 'text-green-400 bg-green-600/10 hover:bg-green-600/20'
-                : 'text-slate-500 hover:text-slate-300 hover:bg-surface-2'
-            }`}
-          >
-            {ttsEnabled ? <Volume2 className="w-4 h-4 flex-shrink-0" /> : <VolumeX className="w-4 h-4 flex-shrink-0" />}
-            {!collapsed && <span className="truncate">{ttsEnabled ? 'Speak: On' : 'Speak: Off'}</span>}
-          </button>
+          <Separator className="my-1" />
+
+          {BOTTOM_ITEMS.map(renderItem)}
+
+          {!isMobile && (
+            <>
+              <Separator className="my-1" />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={onToggleCollapse}
+                    className="w-full justify-center text-muted-foreground hover:text-foreground"
+                  >
+                    <CollapseIcon className="w-4 h-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="right">{collapsed ? 'Expand sidebar' : 'Collapse sidebar'}</TooltipContent>
+              </Tooltip>
+            </>
+          )}
         </div>
-        <div className="border-t border-surface-3/30 my-1" />
-
-        {/* Work Mode toggle */}
-        <button
-          onClick={() => setWorkMode(!workMode)}
-          title={collapsed ? 'Work Mode' : undefined}
-          className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-            workMode
-              ? 'bg-purple-600 text-white hover:bg-purple-500'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-surface-2'
-          }`}
-        >
-          <Briefcase className="w-4 h-4 flex-shrink-0" />
-          {!collapsed && (
-            <span className="truncate flex-1 text-left">Work Mode</span>
-          )}
-          {!collapsed && (
-            <span className={`w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center transition-colors ${
-              workMode ? 'bg-white border-white' : 'border-slate-500'
-            }`}>
-              {workMode && <span className="text-[10px] text-purple-600 font-bold leading-none">&#10003;</span>}
-            </span>
-          )}
-        </button>
-        <div className="border-t border-surface-3/30 my-1" />
-        {BOTTOM_ITEMS.map(renderItem)}
-        {!isMobile && (
-          <>
-            <div className="border-t border-surface-3/30 my-1" />
-            <button
-              onClick={onToggleCollapse}
-              title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              className="w-full flex items-center justify-center px-3 py-2 rounded-lg text-xs font-medium text-slate-500 hover:text-slate-300 hover:bg-surface-2 transition-colors mt-1"
-            >
-              <CollapseIcon className="w-4 h-4" />
-            </button>
-          </>
-        )}
-      </div>
-    </aside>
+      </aside>
+    </TooltipProvider>
   )
 }
