@@ -19,18 +19,20 @@ const COLORS: Array<{ name: string; hex: `#${string}` }> = [
 const VOICE_PREVIEW_SESSION = 'voice_preview'
 
 /** Polling transcript log for the voice preview. Reads /api/messages/<id>
- *  every 1.5s and renders the most recent user + assistant turns. Lets you
- *  verify Phase 4 end-to-end without leaving the preview page. */
+ *  every 500ms and renders the most recent user + assistant turns. Tool-
+ *  call rounds (assistant text="" + a tool result) are collapsed into a
+ *  single "tool calls (N)" line so they don't bury real transcripts. */
 function TranscriptLog({ sessionId }: { sessionId: string }) {
   const [messages, setMessages] = useState<MessageEntry[]>([])
   const [polledOnce, setPolledOnce] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
     const poll = async () => {
       try {
-        const r = await api.loadMessages(sessionId, 50)
+        const r = await api.loadMessages(sessionId, 200)
         if (!cancelled && r.success && Array.isArray(r.messages)) {
           setMessages(r.messages)
         }
@@ -46,45 +48,93 @@ function TranscriptLog({ sessionId }: { sessionId: string }) {
     return () => { cancelled = true; clearInterval(id) }
   }, [sessionId])
 
-  // Auto-scroll to bottom on new messages.
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages.length])
 
-  // Filter to user/assistant turns only — tool/subliminal noise hidden.
-  const visible = messages.filter(m => m.role === 'user' || m.role === 'assistant')
   const text = (m: MessageEntry) =>
     m.content?.map(c => (c.type === 'text' ? c.text : '')).join('') ?? ''
+
+  // Build a display row list:
+  // - Drop subliminal entries entirely (they're context injection).
+  // - Drop assistant rows whose text is empty (those are tool-call frames).
+  // - Collapse any consecutive run of tool messages into one summary row.
+  type Row =
+    | { kind: 'msg'; m: MessageEntry; text: string }
+    | { kind: 'tools'; n: number; firstId: string }
+  const rows: Row[] = []
+  for (const m of messages) {
+    if (m.role === 'subliminal') continue
+    if (m.role === 'tool') {
+      const last = rows[rows.length - 1]
+      if (last && last.kind === 'tools') last.n += 1
+      else rows.push({ kind: 'tools', n: 1, firstId: m.id })
+      continue
+    }
+    const t = text(m).trim()
+    if (m.role === 'assistant' && !t) continue
+    rows.push({ kind: 'msg', m, text: t })
+  }
+
+  const handleReset = async () => {
+    if (resetting) return
+    if (!window.confirm(`Reset session ${sessionId}? This deletes the conversation history so the next utterance starts fresh.`)) return
+    setResetting(true)
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
+      setMessages([])
+    } catch (e) {
+      console.warn('reset failed:', e)
+    } finally {
+      setResetting(false)
+    }
+  }
 
   return (
     <div className="w-full max-w-2xl flex flex-col gap-1">
       <div className="text-xs text-muted-foreground flex items-center justify-between px-1">
         <span>Transcript — session <span className="font-mono text-foreground">{sessionId}</span></span>
-        <span>{polledOnce ? `${visible.length} message${visible.length === 1 ? '' : 's'}` : 'loading…'}</span>
+        <div className="flex items-center gap-3">
+          <span>{polledOnce ? `${rows.length} row${rows.length === 1 ? '' : 's'}` : 'loading…'}</span>
+          <button
+            onClick={handleReset}
+            disabled={resetting}
+            className="text-[11px] text-muted-foreground hover:text-destructive disabled:opacity-50 underline-offset-2 hover:underline"
+          >
+            {resetting ? 'resetting…' : 'reset session'}
+          </button>
+        </div>
       </div>
       <div
         ref={scrollRef}
         className="h-64 overflow-y-auto rounded-md border border-border bg-card p-3 space-y-2"
       >
-        {visible.length === 0 && polledOnce && (
+        {rows.length === 0 && polledOnce && (
           <div className="text-xs text-muted-foreground text-center py-8">
             No messages yet. Speak to drop your first transcript here.
           </div>
         )}
-        {visible.map(m => (
-          <div key={m.id} className="text-sm">
-            <span
-              className={cn(
-                'inline-block w-20 mr-2 text-xs uppercase tracking-wider tabular-nums',
-                m.role === 'user' ? 'text-primary' : 'text-emerald-400',
-              )}
-            >
-              {m.role}
-            </span>
-            <span className="text-foreground whitespace-pre-wrap">{text(m)}</span>
-          </div>
-        ))}
+        {rows.map((r, i) =>
+          r.kind === 'tools' ? (
+            <div key={`tools-${r.firstId}-${i}`} className="text-xs text-muted-foreground italic pl-22">
+              <span className="inline-block w-20 mr-2 uppercase tracking-wider tabular-nums">tools</span>
+              {r.n} tool {r.n === 1 ? 'call' : 'calls'} ↺
+            </div>
+          ) : (
+            <div key={r.m.id} className="text-sm">
+              <span
+                className={cn(
+                  'inline-block w-20 mr-2 text-xs uppercase tracking-wider tabular-nums',
+                  r.m.role === 'user' ? 'text-primary' : 'text-emerald-400',
+                )}
+              >
+                {r.m.role}
+              </span>
+              <span className="text-foreground whitespace-pre-wrap">{r.text}</span>
+            </div>
+          ),
+        )}
       </div>
     </div>
   )

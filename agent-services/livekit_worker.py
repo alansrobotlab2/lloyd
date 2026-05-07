@@ -305,6 +305,10 @@ class RoomBridge:
         # — without this, the task can be GC'd between the transcribe log
         # line and the inject POST, dropping transcripts on the floor.
         self._utterance_tasks: set[asyncio.Task] = set()
+        # Per-participant audio consumer tasks, so we can cancel a specific
+        # one when its participant leaves (otherwise stale streams keep
+        # producing duplicate transcripts).
+        self._audio_tasks: dict[str, asyncio.Task] = {}
         # Derive session_id from room name: "lloyd-${session_id}" → session_id
         prefix = lk_cfg.get("room_prefix", DEFAULT_ROOM_PREFIX)
         self.session_id = room_name[len(prefix):] if room_name.startswith(prefix) else room_name
@@ -362,15 +366,28 @@ class RoomBridge:
     def _on_track_subscribed(self, track, publication, participant) -> None:  # noqa: ARG002
         if track.kind != rtc.TrackKind.KIND_AUDIO:
             return
-        LOG.info("[%s] subscribed to audio from %s", self.room_name, participant.identity)
-        task = asyncio.create_task(self._consume_audio(track, participant.identity))
+        identity = participant.identity
+        # Cancel any prior consumer for this identity (e.g. participant
+        # rejoining with the same id after a brief disconnect).
+        prior = self._audio_tasks.pop(identity, None)
+        if prior is not None and not prior.done():
+            prior.cancel()
+        LOG.info("[%s] subscribed to audio from %s", self.room_name, identity)
+        task = asyncio.create_task(self._consume_audio(track, identity))
         self._tasks.append(task)
+        self._audio_tasks[identity] = task
 
     def _on_participant_connected(self, participant) -> None:
         LOG.info("[%s] participant joined: %s", self.room_name, participant.identity)
 
     def _on_participant_disconnected(self, participant) -> None:
-        LOG.info("[%s] participant left: %s", self.room_name, participant.identity)
+        identity = participant.identity
+        LOG.info("[%s] participant left: %s", self.room_name, identity)
+        # Cancel the per-participant audio consumer so a stale stream can't
+        # keep producing duplicate transcripts after the participant is gone.
+        task = self._audio_tasks.pop(identity, None)
+        if task is not None and not task.done():
+            task.cancel()
 
     def _handle_utterance_done(self, task: asyncio.Task) -> None:
         self._utterance_tasks.discard(task)

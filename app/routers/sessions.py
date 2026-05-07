@@ -479,6 +479,28 @@ async def get_session_status(session_id: str):
     return JSONResponse({"streaming": is_session_active(session_id)})
 
 
+@router.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Wipe a session's history.
+
+    Cancels the current turn (if any), drains queued ambient turns, and
+    removes the session JSON. The next message lands in a fresh session
+    at the same id. Used by the voice preview page's reset button.
+    """
+    cancel_event = get_cancel_event(session_id)
+    if cancel_event is not None:
+        cancel_event.set()
+    await drain_pending(session_id, source=None)  # drain all queued turns
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    removed = False
+    try:
+        meta_path.unlink()
+        removed = True
+    except FileNotFoundError:
+        pass
+    return JSONResponse({"deleted": removed, "session_id": session_id})
+
+
 @router.post("/api/sessions/{session_id}/cancel")
 async def cancel_session(session_id: str, request: Request):
     """Request cancellation of the currently-running turn.
