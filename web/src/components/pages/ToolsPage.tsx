@@ -19,10 +19,10 @@ function Toggle({
       disabled={disabled}
       className={`relative flex-shrink-0 w-8 h-[18px] rounded-full transition-colors ${
         disabled
-          ? "bg-surface-2 opacity-40 cursor-not-allowed"
+          ? "bg-secondary opacity-40 cursor-not-allowed"
           : enabled
-          ? "bg-brand-600 hover:bg-brand-500"
-          : "bg-surface-3 hover:bg-surface-2"
+          ? "bg-primary hover:bg-primary"
+          : "bg-muted hover:bg-secondary"
       }`}
       aria-label={enabled ? "Disable" : "Enable"}
     >
@@ -50,18 +50,18 @@ function ToolRow({
 }) {
   const inactive = !serverEnabled || toggling;
   return (
-    <div className="flex items-center gap-3 pl-10 pr-4 py-2 hover:bg-surface-1 rounded-lg group">
+    <div className="flex items-center gap-3 pl-10 pr-4 py-2 hover:bg-card rounded-lg group">
       <Toggle enabled={tool.enabled} onToggle={onToggle} disabled={inactive} />
       <div className="flex-1 min-w-0">
         <span
           className={`text-sm font-mono ${
-            serverEnabled && tool.enabled ? "text-slate-200" : "text-slate-500"
+            serverEnabled && tool.enabled ? "text-foreground" : "text-muted-foreground"
           }`}
         >
           {tool.name}
         </span>
         {tool.description && (
-          <span className="ml-2 text-xs text-slate-500 truncate">{tool.description}</span>
+          <span className="ml-2 text-xs text-muted-foreground truncate">{tool.description}</span>
         )}
       </div>
     </div>
@@ -93,7 +93,7 @@ function ServerGroup({
     <div className="mb-3">
       {/* Server header row */}
       <div
-        className={`flex items-center gap-2 px-4 py-2.5 rounded-lg cursor-pointer hover:bg-surface-1 ${
+        className={`flex items-center gap-2 px-4 py-2.5 rounded-lg cursor-pointer hover:bg-card ${
           server.enabled ? "" : "opacity-60"
         }`}
       >
@@ -108,13 +108,13 @@ function ServerGroup({
         >
           <span
             className={`text-sm font-semibold ${
-              server.enabled ? "text-slate-200" : "text-slate-500"
+              server.enabled ? "text-foreground" : "text-muted-foreground"
             }`}
           >
             {server.label}
           </span>
           {server.description && (
-            <span className="text-xs text-slate-500 hidden sm:inline">{server.description}</span>
+            <span className="text-xs text-muted-foreground hidden sm:inline">{server.description}</span>
           )}
           <span className="ml-auto flex items-center gap-2 flex-shrink-0">
             {server.error && (
@@ -123,14 +123,14 @@ function ServerGroup({
               </span>
             )}
             {toolCount > 0 && (
-              <span className="text-xs text-slate-500">
+              <span className="text-xs text-muted-foreground">
                 {server.enabled ? `${enabledCount} / ${toolCount}` : toolCount}
               </span>
             )}
             {toolCount === 0 && !server.error && (
-              <span className="text-xs text-slate-600 italic">no tools</span>
+              <span className="text-xs text-muted-foreground/70 italic">no tools</span>
             )}
-            <span className="text-slate-600">
+            <span className="text-muted-foreground/70">
               {expanded ? (
                 <ChevronDown className="w-3.5 h-3.5" />
               ) : (
@@ -164,7 +164,7 @@ function ServerGroup({
               return (
                 <div key={cat} className="mt-1 first:mt-0">
                   {showHeaders && (
-                    <div className="pl-10 pr-4 pt-2 pb-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                    <div className="pl-10 pr-4 pt-2 pb-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
                       {cat}
                     </div>
                   )}
@@ -182,7 +182,7 @@ function ServerGroup({
             });
           })()}
           {server.tools.length === 0 && !server.error && (
-            <div className="pl-10 pr-4 py-2 text-xs text-slate-600 italic">
+            <div className="pl-10 pr-4 py-2 text-xs text-muted-foreground/70 italic">
               {server.enabled ? "No tools discovered" : "Enable server to discover tools"}
             </div>
           )}
@@ -315,19 +315,19 @@ export default function ToolsPage() {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex-shrink-0 px-6 pt-5 pb-4 border-b border-slate-700">
+      <div className="flex-shrink-0 px-6 pt-5 pb-4 border-b border-border">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Wrench className="w-5 h-5 text-brand-400" />
-            <h2 className="text-lg font-semibold text-slate-200">Tools</h2>
+            <Wrench className="w-5 h-5 text-primary" />
+            <h2 className="text-lg font-semibold text-foreground">Tools</h2>
           </div>
           {!loading && totalTools > 0 && (
-            <span className="text-sm text-slate-400">
+            <span className="text-sm text-muted-foreground">
               {totalEnabled} / {totalTools} enabled
             </span>
           )}
         </div>
-        <p className="text-xs text-slate-500 mt-1">
+        <p className="text-xs text-muted-foreground mt-1">
           Enable or disable MCP servers and individual tools. Changes take effect on the next session.
         </p>
       </div>
@@ -342,7 +342,7 @@ export default function ToolsPage() {
         )}
 
         {loading && (
-          <div className="text-sm text-slate-500 px-4 py-8 text-center">
+          <div className="text-sm text-muted-foreground px-4 py-8 text-center">
             Discovering tools...
           </div>
         )}
@@ -352,27 +352,27 @@ export default function ToolsPage() {
             {/* MCP Servers section */}
             <div className="mb-2">
               <div className="flex items-center justify-between px-4 mb-2">
-                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                   MCP Servers
                 </h3>
                 <div className="flex items-center gap-3">
                   <button
                     onClick={expandAll}
-                    className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                    className="text-xs text-muted-foreground hover:text-foreground/90 transition-colors"
                   >
                     expand all
                   </button>
-                  <span className="text-slate-700">·</span>
+                  <span className="text-muted-foreground/50">·</span>
                   <button
                     onClick={collapseAll}
-                    className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                    className="text-xs text-muted-foreground hover:text-foreground/90 transition-colors"
                   >
                     collapse all
                   </button>
                 </div>
               </div>
 
-              <div className="bg-surface-0 rounded-xl border border-slate-700 overflow-hidden px-1 py-1">
+              <div className="bg-background rounded-xl border border-border overflow-hidden px-1 py-1">
                 {data.servers.map((server) => (
                   <ServerGroup
                     key={server.name}
