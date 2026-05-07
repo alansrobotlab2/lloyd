@@ -287,6 +287,16 @@ export interface McpServer {
   error?: string
 }
 
+export interface ToolDiscoverySettings {
+  enabled: boolean
+  threshold_tools: number
+  baseline_tools: string[]
+  max_results_default: number
+  max_results_cap: number
+  total_tools: number
+  active: boolean
+}
+
 export interface ToolsData {
   servers: McpServer[]
 }
@@ -738,11 +748,29 @@ export const api = {
     payload:
       | { type: 'server'; server: string; enabled: boolean }
       | { type: 'tool'; server: string; tool: string; enabled: boolean }
+      | { type: 'baseline'; tool: string; enabled: boolean }
   ): Promise<void> {
     await fetch(`${API_BASE}/tool-toggle`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+    })
+  },
+
+  // Progressive tool discovery (config knobs under harness.tool_search).
+  toolDiscovery(): Promise<ToolDiscoverySettings> {
+    return fetch(`${API_BASE}/tool-discovery`).then(r => r.json())
+  },
+
+  async setToolDiscovery(
+    patch: Partial<Pick<ToolDiscoverySettings,
+      'enabled' | 'threshold_tools' | 'baseline_tools' |
+      'max_results_default' | 'max_results_cap'>>,
+  ): Promise<void> {
+    await fetch(`${API_BASE}/tool-discovery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
     })
   },
 
