@@ -94,14 +94,6 @@ export default function InnerVoicePage() {
     return () => { cancelled = true; clearInterval(t) }
   }, [selectedSession, refreshKey])
 
-  // Route voice transcripts to the inner-voice session this tab is showing.
-  // Layout's effect skips its routing while page === 'inner_voice', so this
-  // takes over until the user navigates away (then Layout re-asserts the chat
-  // slot's session on the next page change).
-  useEffect(() => {
-    api.voiceSetActiveSession(selectedSession ?? null).catch(() => {})
-  }, [selectedSession])
-
   // Observations poll. Sort ascending by id so chronological merge in ChatPanel
   // sees them in their natural order (the API returns newest-first).
   useEffect(() => {

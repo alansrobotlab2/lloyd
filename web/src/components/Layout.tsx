@@ -159,17 +159,6 @@ export default function Layout() {
     }
   }, [voiceMode.enabled, voiceMode.sessionId, page, visibleSlot?.sessionKey, voiceMode])
 
-  // Legacy bridge: until Phase 8 retires the daemon path, also tell the
-  // backend's _VOICE_ACTIVE_SESSION which chat session is focused, so any
-  // remaining injects from the legacy /api/voice/inject route still land
-  // somewhere reasonable. The LiveKit worker bypasses this via explicit
-  // payload session_key.
-  useEffect(() => {
-    if (page !== 'chat') return
-    const sid = visibleSlot?.sessionKey ?? null
-    api.voiceSetActiveSession(sid).catch(() => {})
-  }, [page, visibleSlot?.sessionKey])
-
   const handleNewSession = () => {
     const existingBlank = slots.find(s => s.sessionKey === null)
     if (existingBlank) {

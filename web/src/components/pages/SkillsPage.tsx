@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Sparkles, Pencil, X, Save, Search, RefreshCw } from "lucide-react";
+import { Streamdown } from "streamdown";
 import { api, type SkillInfo } from "../../api";
-import { sanitizeHtml } from "../../utils/sanitize";
 import { Input } from "@/components/ui/input";
 
 function formatFrontmatter(content: string): string {
@@ -252,10 +252,9 @@ export default function SkillsPage() {
               />
             )}
             {!loadingContent && content !== null && !isEditing && (
-              <div
-                className="prose-doc"
-                dangerouslySetInnerHTML={{ __html: sanitizeHtml(formatFrontmatter(content)) }}
-              />
+              <div className="prose-doc">
+                <Streamdown>{formatFrontmatter(content)}</Streamdown>
+              </div>
             )}
           </div>
         </div>
