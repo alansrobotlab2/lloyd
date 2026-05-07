@@ -63,6 +63,34 @@ def _http_url(ws_url: str) -> str:
     return ws_url
 
 
+def _looks_repetitive(text: str) -> bool:
+    """Heuristic for Whisper hallucinations on near-silence: any 1- or
+    2-word phrase repeated 4+ times consecutively. Catches both "Bye.
+    Bye. Bye." and "Thank you. Thank you. Thank you. Thank you." styles
+    without affecting normal speech."""
+    if not text:
+        return False
+    import re
+    words = re.findall(r"[A-Za-z']+", text.lower())
+    if len(words) < 4:
+        return False
+    for ngram in (1, 2):
+        if len(words) < ngram * 4:
+            continue
+        run = 1
+        prev = tuple(words[:ngram])
+        for i in range(ngram, len(words) - ngram + 1, ngram):
+            cur = tuple(words[i:i + ngram])
+            if cur == prev:
+                run += 1
+                if run >= 4:
+                    return True
+            else:
+                run = 1
+            prev = cur
+    return False
+
+
 # ── STT ──────────────────────────────────────────────────────────────────
 
 class WhisperSTT:
@@ -115,10 +143,23 @@ class WhisperSTT:
                 beam_size=int(self.cfg.get("beam_size", 1)),
                 vad_filter=False,           # we already segmented
                 condition_on_previous_text=False,
+                # Tighten hallucination thresholds — defaults are tuned for
+                # long-form audio; short utterances need stricter gates or
+                # whisper happily produces "Bye. Bye. Bye…" on near-silence.
+                no_speech_threshold=0.7,
+                log_prob_threshold=-0.8,
+                compression_ratio_threshold=2.0,
             )
             return "".join(s.text for s in segments).strip()
 
-        return await asyncio.to_thread(_run)
+        text = await asyncio.to_thread(_run)
+        # Catch the residual hallucinations whisper still ships through:
+        # "Thank you. Thank you. ... Bye. Bye. Bye." style output where the
+        # same short token repeats. Drop the whole transcript if any token
+        # repeats ≥ 4 times consecutively in a small window.
+        if _looks_repetitive(text):
+            return ""
+        return text
 
 
 # ── VAD / utterance segmentation ─────────────────────────────────────────
@@ -249,11 +290,22 @@ class RoomBridge:
             .to_jwt()
         )
         self.room.on("track_subscribed", self._on_track_subscribed)
+        self.room.on("participant_connected", self._on_participant_connected)
         self.room.on("participant_disconnected", self._on_participant_disconnected)
 
         LOG.info("[%s] connecting (session_id=%s)", self.room_name, self.session_id)
         await self.room.connect(self.lk_cfg["url"], token)
         LOG.info("[%s] connected as %s", self.room_name, self.room.local_participant.identity)
+
+    @property
+    def has_remote_participants(self) -> bool:
+        """True if any non-agent participant is currently in the room.
+        We trust the room's own participant set over LiveKit RoomService
+        polling — the room is the source of truth for our connection."""
+        try:
+            return len(self.room.remote_participants) > 0
+        except Exception:
+            return False
 
     async def disconnect(self) -> None:
         for t in self._tasks:
@@ -267,6 +319,9 @@ class RoomBridge:
         LOG.info("[%s] subscribed to audio from %s", self.room_name, participant.identity)
         task = asyncio.create_task(self._consume_audio(track, participant.identity))
         self._tasks.append(task)
+
+    def _on_participant_connected(self, participant) -> None:
+        LOG.info("[%s] participant joined: %s", self.room_name, participant.identity)
 
     def _on_participant_disconnected(self, participant) -> None:
         LOG.info("[%s] participant left: %s", self.room_name, participant.identity)
@@ -334,6 +389,9 @@ class WorkerManager:
         self._http_url = _http_url(self.lk_cfg["url"])
         self.stt = WhisperSTT(self.lk_cfg.get("stt", {}))
         self.vad_cfg = self.lk_cfg.get("vad", {})
+        # last time we saw a non-agent participant in each room — used for
+        # the idle-grace teardown logic.
+        self._last_seen_remote: dict[str, float] = {}
         # Lazy-imported to avoid hard dep ordering with httpx.
         import httpx
         self._http = httpx.AsyncClient()
@@ -359,31 +417,47 @@ class WorkerManager:
         finally:
             await self._teardown()
 
+    # Rooms we just disconnected from — backoff before considering rejoin
+    # to avoid the polling/event race when a participant briefly drops.
+    _IDLE_GRACE_SECONDS = 15.0
+
     async def _tick(self) -> None:
         async with lkapi.LiveKitAPI(self._http_url, self.lk_cfg["api_key"], self.lk_cfg["api_secret"]) as svc:
             rooms = (await svc.room.list_rooms(lkapi.ListRoomsRequest())).rooms
 
-        active: dict[str, int] = {}
+        # Connect to rooms that have non-agent participants and we're not
+        # currently in. RoomService participant counts include the agent
+        # only after we've joined, so subtract our presence.
         for r in rooms:
             if not r.name.startswith(self.room_prefix):
                 continue
-            non_agent = max(0, r.num_participants - (1 if r.name in self.bridges else 0))
-            if non_agent > 0:
-                active[r.name] = non_agent
-
-        for room_name in active:
-            if room_name in self.bridges:
+            already_in = r.name in self.bridges
+            non_agent = max(0, r.num_participants - (1 if already_in else 0))
+            if already_in or non_agent <= 0:
                 continue
-            bridge = RoomBridge(room_name, self.lk_cfg, self.stt, self.vad_cfg, self._http)
+            bridge = RoomBridge(r.name, self.lk_cfg, self.stt, self.vad_cfg, self._http)
             try:
                 await bridge.connect()
-                self.bridges[room_name] = bridge
+                self.bridges[r.name] = bridge
+                self._last_seen_remote[r.name] = time.monotonic()
             except Exception as e:
-                LOG.warning("[%s] connect failed: %s", room_name, e)
+                LOG.warning("[%s] connect failed: %s", r.name, e)
 
-        for room_name in list(self.bridges):
-            if room_name not in active:
-                bridge = self.bridges.pop(room_name)
+        # Trust the room's own participant set for "should I stay or go?".
+        # Only tear down a bridge after _IDLE_GRACE_SECONDS of zero remote
+        # participants — otherwise a participant momentarily flickering
+        # would force an immediate reconnect.
+        now = time.monotonic()
+        for room_name, bridge in list(self.bridges.items()):
+            if bridge.has_remote_participants:
+                self._last_seen_remote[room_name] = now
+                continue
+            idle_for = now - self._last_seen_remote.get(room_name, now)
+            if idle_for >= self._IDLE_GRACE_SECONDS:
+                LOG.info("[%s] no remote participants for %.0fs — disconnecting",
+                         room_name, idle_for)
+                self.bridges.pop(room_name, None)
+                self._last_seen_remote.pop(room_name, None)
                 try:
                     await bridge.disconnect()
                 except Exception:
