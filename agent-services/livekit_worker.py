@@ -29,7 +29,7 @@ import sys
 import time
 import wave
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import yaml
@@ -80,7 +80,12 @@ class TTSStreamer:
     # latency added.
     FRAME_MS = 100
 
-    def __init__(self, tts_cfg: dict, room: "rtc.Room") -> None:
+    def __init__(
+        self,
+        tts_cfg: dict,
+        room: "rtc.Room",
+        on_utterance_end: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.cfg = tts_cfg
         self.api_url = (tts_cfg.get("api_url") or "http://127.0.0.1:8090").rstrip("/")
         self.model = tts_cfg.get("model", "qwen3-tts")
@@ -88,6 +93,10 @@ class TTSStreamer:
         self.speed = float(tts_cfg.get("speed", 1.0))
         self.sample_rate = int(tts_cfg.get("sample_rate", 24000))
         self.room = room
+        # Optional callback fired (synchronously, no args) when an utterance
+        # finishes draining — RoomBridge wires this to extend the wake-word
+        # continuation window from end-of-speak.
+        self.on_utterance_end = on_utterance_end
         self.source: Optional["rtc.AudioSource"] = None
         self.track: Optional["rtc.LocalAudioTrack"] = None
         self._publish_lock = asyncio.Lock()
@@ -177,6 +186,15 @@ class TTSStreamer:
             finally:
                 self._current_task = None
                 self._speaking.clear()
+                # Notify the bridge that this utterance finished draining so
+                # it can extend the wake-word continuation window. Best-effort:
+                # any callback exception is swallowed, the drain loop survives.
+                cb = self.on_utterance_end
+                if cb is not None:
+                    try:
+                        cb()
+                    except Exception as e:
+                        LOG.warning("on_utterance_end callback raised: %s", e)
 
     async def _stream_utterance(self, text: str) -> None:
         """POST to /v1/audio/speech with stream:true,response_format:pcm and
@@ -241,6 +259,96 @@ class TTSStreamer:
             samples_per_channel=samples_per_channel,
         )
         await self.source.capture_frame(frame)
+
+
+# ── Wake-word gate / continuation ────────────────────────────────────────
+
+class WakeState:
+    """Per-room wake-word gate.
+
+    Two states:
+      IDLE         — drop any utterance that doesn't begin with a wake-word.
+      CONTINUATION — pass utterances through (from the locked participant)
+                     without requiring the wake-word, and extend the window
+                     on each pass-through.
+
+    Transition into CONTINUATION on a successful wake-word match or after
+    Lloyd finishes a TTS utterance. Transition back to IDLE when the
+    continuation window expires.
+
+    Voiceprint matching is queued as a follow-up; the LiveKit participant
+    `identity` field acts as a proxy in single-user rooms (one connected
+    browser tab → one identity → one speaker). In a multi-tab / multi-user
+    room you'd need a real speaker embedding to disambiguate.
+    """
+
+    def __init__(self, cfg: dict) -> None:
+        self.enabled: bool = bool(cfg.get("enabled", True))
+        # Lower-cased + sorted longest-first so "hey lloyd" wins over "lloyd"
+        # when the user said "hey lloyd what time is it".
+        words = list(cfg.get("words") or ["lloyd"])
+        self.words: list[str] = sorted(
+            (w.strip().lower() for w in words if w and w.strip()),
+            key=len,
+            reverse=True,
+        )
+        self.continuation_seconds: float = float(cfg.get("continuation_seconds", 12.0))
+        self.skip_inject_if_only_wake_word: bool = bool(
+            cfg.get("skip_inject_if_only_wake_word", True)
+        )
+        # Set by extend(); compared in in_continuation().
+        self._until: float = 0.0
+        self._locked_identity: Optional[str] = None
+
+    def in_continuation(self) -> bool:
+        return time.monotonic() < self._until
+
+    @property
+    def locked_identity(self) -> Optional[str]:
+        return self._locked_identity if self.in_continuation() else None
+
+    def extend(self, identity: Optional[str] = None) -> None:
+        """Reset the continuation window. If `identity` is given, lock to
+        that identity; otherwise keep the existing lock (used for TTS-end
+        extensions where the speaker hasn't changed)."""
+        self._until = time.monotonic() + self.continuation_seconds
+        if identity is not None:
+            self._locked_identity = identity
+
+    def reset(self) -> None:
+        self._until = 0.0
+        self._locked_identity = None
+
+    def remaining_s(self) -> float:
+        return max(0.0, self._until - time.monotonic())
+
+
+def _strip_wake_word(text: str, words: list[str]) -> Optional[str]:
+    """If `text` begins with one of `words` (case-insensitive, with optional
+    leading punctuation), return the remainder with leading punctuation/
+    whitespace trimmed. Otherwise None.
+
+    A trailing word boundary is required so "lloydian" doesn't match "lloyd".
+    """
+    import re
+    # Strip leading whitespace/punctuation but keep them in the original
+    # so we can return a clean tail.
+    stripped = text.lstrip(" \t\n.,!?;:\"'")
+    lower = stripped.lower()
+    for w in words:
+        if not lower.startswith(w):
+            continue
+        # Word-boundary check on the next char.
+        next_pos = len(w)
+        if next_pos < len(lower):
+            nxt = lower[next_pos]
+            if nxt.isalnum() or nxt == "'":
+                continue  # "lloydian", "lloyd's"-ish — keep scanning
+        # Match: return the tail with leading whitespace + punctuation
+        # stripped. Empty string if the wake-word was the whole utterance.
+        tail = stripped[next_pos:]
+        return re.sub(r"^[\s.,!?;:\"']+", "", tail)
+    return None
 
 
 def _looks_repetitive(text: str) -> bool:
@@ -498,6 +606,8 @@ class RoomBridge:
         # TTS pipeline (lazy-initialized on connect).
         self._tts_cfg = lk_cfg.get("tts", {}) or {}
         self.tts: Optional[TTSStreamer] = None
+        # Wake-word gate. Per-room so multi-room workers don't share state.
+        self.wake = WakeState(lk_cfg.get("wake", {}) or {})
         # Track which assistant message ids have already been TTS'd so the
         # session poller doesn't speak the same reply twice. Seeded at
         # connect time with the entire existing history so we only speak
@@ -532,7 +642,11 @@ class RoomBridge:
 
         # TTS pipeline + session poller — only spin them up after the room
         # connection is alive so the published track has a parent.
-        self.tts = TTSStreamer(self._tts_cfg, self.room)
+        self.tts = TTSStreamer(
+            self._tts_cfg,
+            self.room,
+            on_utterance_end=self._on_tts_utterance_end,
+        )
         await self.tts.ensure_published()
         # Seed the spoken-set with all existing assistant ids so we don't
         # re-speak history when the worker reconnects to an existing room.
@@ -570,6 +684,20 @@ class RoomBridge:
             self.tts = None
         await self.room.disconnect()
         LOG.info("[%s] disconnected", self.room_name)
+
+    def _on_tts_utterance_end(self) -> None:
+        """Called by TTSStreamer when an utterance finishes draining. Extends
+        the wake-word continuation window so the user has continuation_seconds
+        to follow up after Lloyd stops speaking, without re-saying the
+        wake-word. Keeps the existing locked identity (Lloyd's reply was on
+        their behalf)."""
+        if not self.wake.enabled:
+            return
+        if self.wake.locked_identity is None:
+            return
+        self.wake.extend()  # keep identity, refresh timer
+        LOG.info("[%s] TTS done — continuation extended to %.1fs",
+                 self.room_name, self.wake.continuation_seconds)
 
     async def _seed_spoken_set(self) -> None:
         url = self.MESSAGES_URL_TEMPLATE.format(session_id=self.session_id)
@@ -745,16 +873,37 @@ class RoomBridge:
             return
         LOG.info("[%s] %s → %r  (%.2fs audio, %.1fs whisper)",
                  self.room_name, identity, text, duration_s, latency)
+
+        # ── Wake-word gate ──────────────────────────────────────────
+        wake = self.wake
+        inject_text: Optional[str] = None
+        if not wake.enabled:
+            inject_text = text
+        elif wake.in_continuation() and identity == wake.locked_identity:
+            inject_text = text
+            wake.extend(identity)  # extend on each turn the user takes
+            LOG.info("[%s] continuation pass-through (%.1fs left)",
+                     self.room_name, wake.remaining_s())
+        else:
+            tail = _strip_wake_word(text, wake.words)
+            if tail is None:
+                LOG.info("[%s] no wake-word in %r — dropped", self.room_name, text[:80])
+                return
+            wake.extend(identity)
+            if not tail and wake.skip_inject_if_only_wake_word:
+                LOG.info("[%s] bare wake-word — opening %.1fs window, no inject",
+                         self.room_name, wake.continuation_seconds)
+                return
+            inject_text = tail or text  # fallback to original if stripping consumed everything
+            LOG.info("[%s] wake-word matched, injecting %r", self.room_name, inject_text[:80])
+
+        if not inject_text:
+            return
         try:
-            # No speaker field: the LiveKit identity ("user-XXXXXX") isn't a
-            # real speaker name — it's a per-connection token id — and
-            # /api/voice/inject prepends "[speaker]: " when it's set. Diarization
-            # / speaker recognition arrive in a later phase and will populate
-            # this with a real name.
             r = await self.http.post(
                 INJECT_URL,
                 json={
-                    "text": text,
+                    "text": inject_text,
                     "session_key": self.session_id,
                 },
                 timeout=10.0,

@@ -4,26 +4,18 @@ agent:
 inner_voice:
   model: primary
   observer:
-    # Per-call cap on observer LLM output (it answers in JSON; no need for more).
     max_tokens: 400
-    # Wall-clock cap for the observer's call on iteration / tool boundaries.
     timeout_seconds: 5
-    # Tighter cap for the synchronous PreToolUse gate (blocks tool dispatch).
     pretool_timeout_seconds: 3
-    # Per-turn intervention budget. After this many inject/cancel/ambient
-    # actions, the observer can only noop. Pretool denies don't count.
     intervention_budget: 3
-    # Window of accumulated primary text the observer sees in its prompt.
     primary_text_window_chars: 4000
     rotation_days: 30
-  # Plan A — TodoWrite stewardship. IV uses session.todos as a reference
-  # artifact to monitor, steer, and gate primary's execution across turns.
   todo_stewardship:
     enabled: true
-    completion_gate: true       # A.4 — inject when primary stops with pending todos
-    mark_without_evidence: true # A.5 — challenge in_progress→completed without plausible work
-    stalled_progress: false        # A.6 — opt-in until tuned (false-positive risk)
-    stalled_after_tool_calls: 5    # A.6 — fires after this many non-TodoWrite tool results since the last status flip
+    completion_gate: true
+    mark_without_evidence: true
+    stalled_progress: false
+    stalled_after_tool_calls: 5
 autonomy:
   enabled: true
   task_dir: ~/obsidian/autonomy
@@ -66,56 +58,57 @@ mcp_servers:
   lloyd-mcp:
     disabled_tools:
     - browser_screenshot
+    - discord_get_home_channel
+    - discord_list_channels
+    - discord_send
+    - discord_send_embed
     name: lloyd-mcp
     type: sse
     url: http://127.0.0.1:8500/sse
 model:
   default: primary
 compaction:
-  # mode: summarize | truncate
-  #   summarize → LLM-based summarization of older history when above
-  #               threshold (falls back to truncate on any failure)
-  #   truncate  → drop-oldest only (legacy behavior; no LLM call)
   mode: summarize
-  # Model alias used for summarization. Empty/null → falls back to the
-  # global default model (primary). Setting this lets you point compact
-  # at a smaller/cheaper local model if one is configured.
   summary_model: primary
-  # Number of most-recent turns kept verbatim past the summary boundary.
-  # The summary covers everything older.
   keep_recent_turns: 5
   microcompact:
     enabled: true
-    keep_recent_tools: 5     # most-recent compactable tool results kept inline
-    count_threshold: 20      # microcompact fires when count exceeds this
-    # Compactable tool list. Falls back to module default if null/empty.
-    compactable_tools: [Read, Bash, Grep, Glob, Edit, Write]
+    keep_recent_tools: 5
+    count_threshold: 20
+    compactable_tools:
+    - Read
+    - Bash
+    - Grep
+    - Glob
+    - Edit
+    - Write
   restore:
     enabled: true
-    budget_tokens: 50000     # total budget across all restored files
+    budget_tokens: 50000
     max_per_file: 5000
     max_files: 5
   manual:
-    # Manual /compact uses a tighter buffer than auto, since the user
-    # explicitly asked to compact and is willing to fill more of the
-    # context window. Currently informational; the manual handler
-    # bypasses the threshold check entirely.
     buffer_tokens: 3000
 harness:
   stream_chunk_timeout_seconds: 60
   max_tools_per_request: 128
   tool_search:
-    # When enabled and the catalog has at least `threshold_tools` entries,
-    # the harness advertises a small baseline + a ToolSearch meta-tool to
-    # vLLM instead of every tool. Model loads schemas on demand. See
-    # app/harness/tool_search.py.
     enabled: true
     threshold_tools: 30
-    # Empty → BUILTIN_BARE_NAMES (Bash, Read, Edit, Write, Grep, Glob, Task).
-    # skills_search / skills_read are baseline because SOUL.md's operating
-    # loop mandates skills_search as the first action of every turn — gating
-    # it behind ToolSearch causes the model to emit text-form calls.
-    baseline_tools: [Bash, Read, Edit, Write, Grep, Glob, Task, skills_search, skills_read]
+    baseline_tools:
+    - Read
+    - Edit
+    - Write
+    - Grep
+    - Glob
+    - skills_search
+    - skills_read
+    - Bash
+    - http_fetch
+    - http_request
+    - http_search
+    - vault_write
+    - vault_recall
     max_results_default: 5
     max_results_cap: 20
 subagents:
@@ -157,64 +150,45 @@ models:
       ANTHROPIC_CUSTOM_MODEL_OPTION: secondary
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Secondary
 livekit:
-  # Self-hosted server bound to 127.0.0.1:7880 (see agent-services/conf/livekit.yaml).
-  # Browser clients connect via this URL; backend mints JWTs against the same
-  # api_key/api_secret pair.
   url: ws://127.0.0.1:7880
   api_key: lloyddevkey
   api_secret: lloyd-dev-secret-do-not-ship-replace-me-32chars-min
-  # All session rooms get this prefix. The room name resolves to
-  # `${room_prefix}${session_id}` so the worker can map participant rooms back
-  # to chat sessions on join.
-  room_prefix: "lloyd-"
-  # The worker joins rooms as this identity when a participant connects.
-  agent_identity: "lloyd-agent"
-  # STT — runs in the worker, on each segmented utterance from a participant.
+  room_prefix: lloyd-
+  agent_identity: lloyd-agent
   stt:
-    # faster-whisper model name. tiny.en runs ~3x faster than base.en on CPU
-    # at int8 with a small accuracy hit — fine for short conversational
-    # utterances. Bump to base.en or small.en for harder accents / noise.
-    # GPU is auto-used if compute_type permits — keep CPU int8 by default
-    # to avoid contention with the LLM on GPU0.
     model: tiny.en
-    device: cpu                # cpu | cuda
-    compute_type: int8         # int8 | float16 (cuda) | float32
+    device: cpu
+    compute_type: int8
     language: en
-    beam_size: 1               # 1 = greedy (fastest), 5 = default whisper
-  # Utterance segmentation — energy-based VAD. Cheap and good enough for
-  # push-to-talk-ish speech. Replace with silero-vad in a later pass if
-  # noisier environments need it.
-  # TTS — runs in the worker. Streams PCM from the local Qwen3-TTS server
-  # at :8090 and republishes as a LiveKit audio track so the browser can
-  # play it via WebRTC. Aura visualizer modulates off this track.
+    beam_size: 1
   tts:
     api_url: http://127.0.0.1:8090
     model: qwen3-tts
-    voice: "clone:cullen"      # Qwen3-TTS expects "clone:<profile>" with the Base model
+    voice: clone:cullen
     speed: 1.0
-    sample_rate: 24000          # Qwen3-TTS native rate; matches the WAV header
-    # If true, only TTS the user-visible portions of the harness reply
-    # (drops empty / tool-call assistant rows). Phase 5B may swap to
-    # streaming text deltas with sentence segmentation for lower latency.
+    sample_rate: 24000
     skip_empty: true
   vad:
-    # RMS above this (0..1 over int16 normalized) counts as a voiced frame.
-    # Quiet desk mic noise floor is ~0.003-0.005; raise to suppress
-    # background noise / hum / fan.
     speech_rms: 0.025
-    # Require this many consecutive voiced frames to flip into the
-    # speaking state — debounces single noise spikes.
     min_speech_frames_to_start: 3
-    # An utterance must have at least this fraction of voiced frames
-    # overall to be considered real speech. Suppresses near-silence
-    # utterances even if they cross the trigger threshold briefly.
-    min_voiced_ratio: 0.30
-    # End an utterance after this many ms of trailing silence.
+    min_voiced_ratio: 0.3
     silence_ms: 500
-    # Discard utterances shorter than this — usually breath / clicks.
     min_utterance_ms: 350
-    # Hard cap so a stuck stream can't grow without bound.
     max_utterance_ms: 30000
+  wake:
+    # When enabled, the worker drops any utterance that doesn't begin with
+    # one of `words`. After a successful wake-word match (or after Lloyd
+    # finishes speaking), opens a `continuation_seconds` window during
+    # which utterances from the same LiveKit participant pass through
+    # without requiring the wake-word again. Voiceprint matching is a
+    # follow-up; identity acts as proxy in single-user rooms.
+    enabled: true
+    words: [lloyd, "hey lloyd", "hi lloyd", "okay lloyd"]
+    continuation_seconds: 12.0
+    # If true and the wake-word is the entire utterance ("Lloyd!"), open
+    # the continuation window but skip the inject. False would inject the
+    # bare wake-word and Lloyd would respond conversationally.
+    skip_inject_if_only_wake_word: true
 server:
   host: 0.0.0.0
   port: 8080
