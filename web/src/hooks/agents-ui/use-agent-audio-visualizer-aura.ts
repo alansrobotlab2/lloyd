@@ -26,6 +26,12 @@ const DEFAULT_PULSE_TRANSITION: ValueAnimationTransition = {
   repeat: Infinity,
   repeatType: 'mirror',
 };
+const THINKING_PULSE_TRANSITION: ValueAnimationTransition = {
+  duration: 0.7,
+  ease: 'easeOut',
+  repeat: Infinity,
+  repeatType: 'mirror',
+};
 
 function useAnimatedValue<T>(initialValue: T) {
   const [value, setValue] = useState(initialValue);
@@ -84,11 +90,11 @@ export function useAgentAudioVisualizerAura(
       case 'thinking':
       case 'connecting':
       case 'initializing':
-        setSpeed(15);
+        setSpeed(7.5);
         animateScale(0.3, DEFAULT_TRANSITION);
         animateAmplitude(0.5, DEFAULT_TRANSITION);
         animateFrequency(1, DEFAULT_TRANSITION);
-        animateBrightness([0.5, 2.5], DEFAULT_PULSE_TRANSITION);
+        animateBrightness([0.5, 2.5], THINKING_PULSE_TRANSITION);
         return;
       case 'speaking':
         setSpeed(35);

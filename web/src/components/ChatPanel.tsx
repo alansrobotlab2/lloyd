@@ -54,7 +54,7 @@ const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => 
 interface MessageRowProps {
   msg: ApiMessage
   showAgentDetails: boolean
-  thinkLevel: string
+  thinkEnabled: boolean
   isMobile: boolean
   toolCallIndex: Map<string, ToolCallRef>
   forceLeftAlign?: boolean
@@ -66,7 +66,7 @@ interface MessageRowProps {
 const MessageRow = memo(function MessageRow({
   msg,
   showAgentDetails,
-  thinkLevel,
+  thinkEnabled,
   isMobile,
   toolCallIndex,
   forceLeftAlign = false,
@@ -75,7 +75,7 @@ const MessageRow = memo(function MessageRow({
   const hasContent = msg.content?.some(c => c.text?.trim())
   if (!hasContent) return null
 
-  const isError = msg.role === 'tool' && msg.content?.some(c => c.text?.startsWith('Error:'))
+  const isError = msg.role === 'tool' && msg.stats?.is_error === true
   const hideToolMessage = !showAgentDetails && msg.role === 'tool' && !isError
   const hideSubliminal = !showAgentDetails && msg.role === 'subliminal'
   if (hideToolMessage || hideSubliminal) return null
@@ -117,6 +117,8 @@ const MessageRow = memo(function MessageRow({
           isTool || isSubliminal ? 'px-2.5 py-1.5' : 'px-3.5 py-2.5',
           isUser
             ? 'bg-primary/15 border-primary/30 text-foreground'
+            : isTool && isError
+            ? 'bg-destructive/10 border-destructive/40 text-foreground'
             : isTool
             ? 'bg-secondary/40 border-border text-foreground'
             : isSubliminal
@@ -126,7 +128,7 @@ const MessageRow = memo(function MessageRow({
           <div className="prose-chat text-sm leading-relaxed">
             {isAssistant ? (
               <>
-                {msg.reasoning && (showAgentDetails || thinkLevel !== 'off') && (
+                {msg.reasoning && (showAgentDetails || thinkEnabled) && (
                   <Collapsible className="mb-3">
                     <CollapsibleTrigger className="group cursor-pointer flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition-colors">
                       <Brain className="w-3 h-3" />
@@ -154,12 +156,20 @@ const MessageRow = memo(function MessageRow({
               const responseText = textJoined
               return (
                 <Collapsible>
-                  <CollapsibleTrigger className="group cursor-pointer flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+                  <CollapsibleTrigger className={cn(
+                    'group cursor-pointer flex items-center gap-1.5 text-xs transition-colors',
+                    isError
+                      ? 'text-destructive hover:text-destructive/80'
+                      : 'text-muted-foreground hover:text-foreground',
+                  )}>
                     <ChevronRight className="w-3 h-3 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
                     <Wrench className="w-3 h-3 shrink-0" />
                     <span className="font-semibold uppercase tracking-wide">Tool</span>
                     {toolName && (
-                      <span className="font-mono font-normal text-muted-foreground/80 truncate">{toolName}</span>
+                      <span className={cn(
+                        'font-mono font-normal truncate',
+                        isError ? 'text-destructive/80' : 'text-muted-foreground/80',
+                      )}>{toolName}</span>
                     )}
                   </CollapsibleTrigger>
                   <CollapsibleContent className="mt-2 space-y-2">
@@ -274,7 +284,7 @@ const SLASH_COMMANDS: Array<{ name: string; desc: string; alias?: string }> = [
   { name: 'background', desc: 'Run prompt in background', alias: 'bg' },
   { name: 'btw', desc: 'Ephemeral side question' },
   { name: 'queue', desc: 'Queue prompt for next turn', alias: 'q' },
-  { name: 'think', desc: 'Toggle extended thinking (off/low/medium/high/xhigh/max)' },
+  { name: 'think', desc: 'Toggle extended thinking (on/off)' },
   { name: 'profile', desc: 'Show active profile' },
   { name: 'config', desc: 'Show configuration' },
   { name: 'provider', desc: 'Show available providers' },
@@ -304,8 +314,6 @@ const SLASH_COMMANDS: Array<{ name: string; desc: string; alias?: string }> = [
   { name: 'model', desc: 'Switch or list models', alias: 'switch' },
 ]
 
-const THINK_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const
-type ThinkLevel = typeof THINK_LEVELS[number]
 
 export default function ChatPanel({
   requestedSessionKey,
@@ -329,9 +337,8 @@ export default function ChatPanel({
   const [showCommands, setShowCommands] = useState(false)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [activeToolName, setActiveToolName] = useState<string | null>(null)
-  const [thinkLevel, setThinkLevel] = useState<ThinkLevel>(() => {
-    const stored = localStorage.getItem('mc_think_level')
-    return (THINK_LEVELS as readonly string[]).includes(stored ?? '') ? (stored as ThinkLevel) : 'off'
+  const [thinkEnabled, setThinkEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('mc_think_enabled') === '1'
   })
   const [queueState, setQueueState] = useState<QueueState | null>(null)
   // Bumped on session change + every TodoWrite/EnterPlanMode/ExitPlanMode tool result.
@@ -651,28 +658,26 @@ export default function ChatPanel({
 
     if (text.startsWith('/think')) {
       const arg = text.split(/\s+/)[1]?.toLowerCase() || ''
-      const validLevels = THINK_LEVELS as readonly string[]
-      let newLevel: ThinkLevel
-      if (arg && validLevels.includes(arg)) {
-        newLevel = arg as ThinkLevel
-      } else if (!arg) {
-        newLevel = thinkLevel === 'off' ? 'high' : 'off'
-      } else {
+      let next: boolean
+      if (arg === 'on') next = true
+      else if (arg === 'off') next = false
+      else if (!arg) next = !thinkEnabled
+      else {
         setMessages(prev => [...prev, {
           id: `msg_${Date.now()}_think`,
           role: 'assistant',
-          content: [{ type: 'text', text: `Invalid think level **"${arg}"**. Valid: off, low, medium, high, xhigh, max` }],
+          content: [{ type: 'text', text: `Invalid argument **"${arg}"**. Use: /think, /think on, /think off` }],
           timestamp: new Date().toISOString(),
         }])
         setInput('')
         return
       }
-      setThinkLevel(newLevel)
-      localStorage.setItem('mc_think_level', newLevel)
+      setThinkEnabled(next)
+      localStorage.setItem('mc_think_enabled', next ? '1' : '0')
       setMessages(prev => [...prev, {
         id: `msg_${Date.now()}_think`,
         role: 'assistant',
-        content: [{ type: 'text', text: newLevel === 'off' ? '🧠 Extended thinking **off**' : `🧠 Extended thinking set to **${newLevel}**` }],
+        content: [{ type: 'text', text: next ? '🧠 Extended thinking **on**' : '🧠 Extended thinking **off**' }],
         timestamp: new Date().toISOString(),
       }])
       setInput('')
@@ -864,7 +869,7 @@ export default function ChatPanel({
         }])
         inputRef.current?.focus()
       },
-    }, !sessionKey ? pendingModel : undefined, thinkLevel !== 'off' ? thinkLevel : undefined)
+    }, !sessionKey ? pendingModel : undefined, thinkEnabled ? 'on' : undefined)
     abortControllerRef.current = controller
   }
 
@@ -891,11 +896,10 @@ export default function ChatPanel({
     }
   }
 
-  const cycleThinkLevel = () => {
-    const idx = THINK_LEVELS.indexOf(thinkLevel)
-    const next = THINK_LEVELS[(idx + 1) % THINK_LEVELS.length]
-    setThinkLevel(next)
-    localStorage.setItem('mc_think_level', next)
+  const toggleThink = () => {
+    const next = !thinkEnabled
+    setThinkEnabled(next)
+    localStorage.setItem('mc_think_enabled', next ? '1' : '0')
   }
 
   const thinkingIndicatorBody = (
@@ -939,7 +943,7 @@ export default function ChatPanel({
             key={msg.id}
             msg={msg}
             showAgentDetails={showAgentDetails}
-            thinkLevel={thinkLevel}
+            thinkEnabled={thinkEnabled}
             isMobile={isMobile}
             toolCallIndex={toolCallIndex}
             compact={compact}
@@ -964,7 +968,7 @@ export default function ChatPanel({
                 const m = item.msg
                 const hasContent = m.content?.some(c => c.text?.trim())
                 if (!hasContent) return null
-                const isError = m.role === 'tool' && m.content?.some(c => c.text?.startsWith('Error:'))
+                const isError = m.role === 'tool' && m.stats?.is_error === true
                 if (!showAgentDetails && m.role === 'tool' && !isError) return null
                 if (!showAgentDetails && m.role === 'subliminal') return null
               }
@@ -976,7 +980,7 @@ export default function ChatPanel({
                         <MessageRow
                           msg={item.msg}
                           showAgentDetails={showAgentDetails}
-                          thinkLevel={thinkLevel}
+                          thinkEnabled={thinkEnabled}
                           isMobile={isMobile}
                           toolCallIndex={toolCallIndex}
                           forceLeftAlign
@@ -1053,33 +1057,26 @@ export default function ChatPanel({
                 setShowCommands(false)
               }
             }}
-            placeholder={thinkLevel !== 'off' ? `Talk to Lloyd... (thinking: ${thinkLevel})` : 'Talk to Lloyd... (use / for commands)'}
+            placeholder={thinkEnabled ? 'Talk to Lloyd... (thinking on)' : 'Talk to Lloyd... (use / for commands)'}
             className="flex-1 h-[38px] bg-card text-foreground"
             disabled={sending || thinking}
           />
-          {/* Think level toggle */}
-          {(() => {
-            const idx = THINK_LEVELS.indexOf(thinkLevel)
-            const nextLevel = THINK_LEVELS[(idx + 1) % THINK_LEVELS.length]
-            const isActive = thinkLevel !== 'off'
-            return (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={cycleThinkLevel}
-                title={`Extended thinking: ${thinkLevel} (click → ${nextLevel})`}
-                className={cn(
-                  'h-[38px] w-[38px] shrink-0 border',
-                  isActive
-                    ? 'bg-purple-600/20 border-purple-500/30 text-purple-400 hover:bg-purple-600/30 hover:text-purple-300'
-                    : 'bg-card border-border text-muted-foreground hover:bg-accent',
-                )}
-              >
-                <Brain className="w-4 h-4" />
-              </Button>
-            )
-          })()}
+          {/* Think on/off toggle */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={toggleThink}
+            title={`Extended thinking: ${thinkEnabled ? 'on (click to turn off)' : 'off (click to turn on)'}`}
+            className={cn(
+              'h-[38px] w-[38px] shrink-0 border',
+              thinkEnabled
+                ? 'bg-purple-600/20 border-purple-500/30 text-purple-400 hover:bg-purple-600/30 hover:text-purple-300'
+                : 'bg-card border-border text-muted-foreground hover:bg-accent',
+            )}
+          >
+            <Brain className="w-4 h-4" />
+          </Button>
           {/* Submit / Stop */}
           {(sending || thinking) ? (
             <Button

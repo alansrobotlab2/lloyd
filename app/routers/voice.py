@@ -192,11 +192,21 @@ async def voice_summarize(request: Request):
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
 
+    from app.secondary_models import (
+        _is_trivially_speakable,
+        _sync_secondary_voice_summary,
+    )
+
+    # Fast path: short, plain-prose replies don't benefit from a rewrite —
+    # the secondary's own prompt would just echo them back. Skip the call.
+    if _is_trivially_speakable(text):
+        logger.info("voice_summarize: skipped secondary (%d chars, plain prose)", len(text))
+        return JSONResponse({"summary": text, "used_summary": False})
+
     # _sync_secondary_voice_summary uses urllib (sync). Run in executor so we
     # don't block the FastAPI event loop on the secondary's response time
     # (typically 0.5–2s).
     import asyncio as _asyncio
-    from app.secondary_models import _sync_secondary_voice_summary
 
     loop = _asyncio.get_running_loop()
     summary = await loop.run_in_executor(None, _sync_secondary_voice_summary, text)

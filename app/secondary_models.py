@@ -7,6 +7,7 @@ primary generation path stays unblocked.
 
 import json
 import logging
+import re
 import urllib.request
 from typing import Optional
 
@@ -133,6 +134,38 @@ _VOICE_SUMMARY_SYSTEM = (
     "return it unchanged. Output only the spoken text — no preamble, no "
     "labels, no quotes."
 )
+
+
+# Markers that signal structured / non-conversational content. Anything that
+# matches gets routed through the secondary so code, paths, lists, and tables
+# can be flattened into something speakable.
+_NON_TRIVIAL_PATTERN = re.compile(
+    r"```"                       # fenced code block
+    r"|`[^`]+`"                  # inline code (paths, snippets)
+    r"|^\s*[-*+]\s"              # bullet list
+    r"|^\s*\d+\.\s"              # numbered list
+    r"|^\s*#{1,6}\s"             # markdown heading
+    r"|\|.*\|"                   # table row
+    r"|\[[^\]]+\]\([^)]+\)",     # markdown link
+    re.MULTILINE,
+)
+
+_TRIVIAL_MAX_CHARS = 300
+
+
+def _is_trivially_speakable(text: str) -> bool:
+    """True when `text` is short, plain prose that can be TTS'd as-is.
+
+    The secondary's voice rewrite costs ~0.5-2s per call. For one- or two-
+    sentence replies with no markdown/code, the secondary's own prompt just
+    echoes the input back anyway, so we skip the round-trip and let the
+    LiveKit worker speak the primary text directly."""
+    if not text:
+        return False
+    s = text.strip()
+    if len(s) > _TRIVIAL_MAX_CHARS:
+        return False
+    return _NON_TRIVIAL_PATTERN.search(s) is None
 
 
 def _sync_secondary_voice_summary(primary_text: str, timeout: float = 15.0) -> Optional[str]:
