@@ -8,6 +8,10 @@ export interface TurnStats {
   num_turns: number | null
   model: string
   peak_input_tokens?: number
+  // Tool-result messages reuse this `stats` slot with a different shape:
+  // `{ result_chars, is_error }`. Keeping these optional avoids a union split.
+  is_error?: boolean
+  result_chars?: number
 }
 
 export interface QueueState {
@@ -828,8 +832,11 @@ export const api = {
     fetch(`${API_BASE}/memory/search?q=${encodeURIComponent(q)}&limit=${limit}`).then(r => r.json()),
   memoryBrowse: (path = ''): Promise<MemoryBrowseResult> =>
     fetch(`${API_BASE}/memory/browse?path=${encodeURIComponent(path)}`).then(r => r.json()),
-  memoryRead: (path: string): Promise<MemoryReadResult> =>
-    fetch(`${API_BASE}/memory/read?path=${encodeURIComponent(path)}`).then(r => r.json()),
+  memoryRead: async (path: string): Promise<MemoryReadResult> => {
+    const r = await fetch(`${API_BASE}/memory/read?path=${encodeURIComponent(path)}`)
+    if (!r.ok) throw new Error(`memory_read failed (${r.status}): ${path}`)
+    return r.json()
+  },
   async memorySave(path: string, content: string, frontmatter?: Record<string, unknown>): Promise<{ ok: boolean }> {
     const res = await fetch(`${API_BASE}/memory/save`, {
       method: 'POST',

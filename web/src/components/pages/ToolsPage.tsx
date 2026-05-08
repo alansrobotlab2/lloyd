@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
 import { Wrench, ChevronDown, ChevronRight, AlertCircle, Star, Sparkles } from "lucide-react";
 import { api, type McpTool, type McpServer, type ToolsData, type ToolDiscoverySettings } from "../../api";
 import { cn } from "@/lib/utils";
@@ -408,6 +409,27 @@ export default function ToolsPage() {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [discovery, setDiscovery] = useState<ToolDiscoverySettings | null>(null);
+
+  // Pick the alphabetically-first expanded server as the focus signal.
+  // Multiple-expanded is the common case; "focused" here just means
+  // "currently most relevant," not exclusive selection.
+  const focusedServer = expanded.size > 0
+    ? Array.from(expanded).sort()[0]
+    : null;
+  useReportMcFocus(
+    "tools",
+    focusedServer ? { kind: "server", id: focusedServer } : null,
+  );
+
+  const pendingFocus = usePendingFocusFor("tools");
+  useEffect(() => {
+    if (!pendingFocus) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.add(pendingFocus);
+      return next;
+    });
+  }, [pendingFocus]);
 
   useEffect(() => {
     Promise.all([api.tools(), api.toolDiscovery()])

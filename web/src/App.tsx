@@ -1,6 +1,7 @@
 import { Component, ErrorInfo, ReactNode } from 'react'
 import Layout from './components/Layout'
 import { VoiceModeProvider } from './contexts/VoiceModeContext'
+import { McUiProvider } from './contexts/McUiContext'
 
 interface ErrorBoundaryProps {
   children: ReactNode
@@ -51,7 +52,9 @@ function App() {
   return (
     <ErrorBoundary>
       <VoiceModeProvider>
-        <Layout />
+        <McUiProvider>
+          <Layout />
+        </McUiProvider>
       </VoiceModeProvider>
     </ErrorBoundary>
   )

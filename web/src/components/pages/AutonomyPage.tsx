@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, type DragEvent } from "react";
+import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
 import {
   Lightbulb,
   Clock,
@@ -864,6 +865,22 @@ export default function AutonomyPage() {
   const [loading, setLoading] = useState(true);
   const [editingTask, setEditingTask] = useState<AutonomyTask | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+
+  useReportMcFocus(
+    "autonomy",
+    editingTask
+      ? { kind: "task", id: String(editingTask.id), label: editingTask.name }
+      : null,
+  );
+
+  const pendingFocus = usePendingFocusFor("autonomy");
+  useEffect(() => {
+    if (!pendingFocus) return;
+    const asNum = Number(pendingFocus);
+    if (!Number.isFinite(asNum)) return;
+    const task = allTasks.find((t) => t.id === asNum);
+    if (task) setEditingTask(task);
+  }, [pendingFocus, allTasks]);
 
   const loadData = useCallback(async () => {
     try {

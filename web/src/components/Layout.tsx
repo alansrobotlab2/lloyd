@@ -16,6 +16,9 @@ import RightChatSidebar from './RightChatSidebar'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
 import { useVoiceMode } from '../contexts/VoiceModeContext'
+import { useMcUi, useReportMcFocus, usePendingFocusFor } from '../contexts/McUiContext'
+import { useMcStateSync } from '../hooks/useMcStateSync'
+import { useMcNavigationEvents } from '../hooks/useMcNavigationEvents'
 import { api, type ModelInfo } from '../api'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { cn } from '@/lib/utils'
@@ -124,7 +127,10 @@ function ModelMenu({
 
 export default function Layout() {
   const isMobile = useIsMobile()
-  const [page, setPage] = useState<Page>('inner_voice')
+  const { currentTab: page, setCurrentTab: setPage } = useMcUi()
+  // Mirror tab + focus to the backend; subscribe to navigate commands.
+  useMcStateSync()
+  useMcNavigationEvents()
   const [collapsed, setCollapsed] = useState(true)
   // Right chat sidebar — voice-driven dual-brain chat. Mounted on desktop;
   // owns its own collapse state + voice engagement (collapsing disengages
@@ -140,6 +146,18 @@ export default function Layout() {
 
   const visibleSlot = useMemo(() => slots.find(s => s.slotId === visibleSlotId) ?? null, [slots, visibleSlotId])
   const currentModel = visibleSlot?.model ?? ''
+
+  // Mirror chat focus (visible slot's session) for the agent.
+  useReportMcFocus(
+    'chat',
+    visibleSlot?.sessionKey
+      ? { kind: 'session', id: visibleSlot.sessionKey }
+      : null,
+  )
+
+  // Apply incoming chat focus from mc_navigate by opening the requested
+  // session — same path the URL ?session= and SessionsPanel use.
+  const chatPendingFocus = usePendingFocusFor('chat')
   const sessionsPanelRefreshTrigger = useMemo(() => slots.map(s => s.sessionKey ?? 'null').join(','), [slots])
 
   // Voice mode context — when enabled, point it at the visible chat slot's
@@ -191,7 +209,12 @@ export default function Layout() {
       return [...prev, { slotId: id, sessionKey, model: '' }]
     })
     setPage('chat')
-  }, [])
+  }, [setPage])
+
+  // mc_navigate tab=chat focus_id=<session-id> → open that session.
+  useEffect(() => {
+    if (chatPendingFocus) handleOpenSession(chatPendingFocus)
+  }, [chatPendingFocus, handleOpenSession])
 
   const handleActiveSessionChange = useCallback((slotId: string, key: string | null) => {
     setSlots(prev => prev.map(s => s.slotId === slotId ? { ...s, sessionKey: key } : s))
