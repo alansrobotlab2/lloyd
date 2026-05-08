@@ -49,10 +49,14 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 }
 
 function App() {
+  // On mobile the chat sidebar is the primary UI, so start on the chat tab.
+  // Desktop keeps Inner Voice as the default landing tab.
+  const initialTab =
+    typeof window !== 'undefined' && window.innerWidth < 768 ? 'chat' : 'inner_voice'
   return (
     <ErrorBoundary>
       <VoiceModeProvider>
-        <McUiProvider>
+        <McUiProvider initialTab={initialTab}>
           <Layout />
         </McUiProvider>
       </VoiceModeProvider>
