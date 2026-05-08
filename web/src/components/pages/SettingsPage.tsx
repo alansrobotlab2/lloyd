@@ -19,6 +19,13 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
+import {
+  MIC_GAIN_RANGE,
+  gainToDb,
+  getMicGain,
+  setMicGain,
+  subscribeMicGain,
+} from '@/lib/micGain'
 
 const RECORD_SECONDS = 5
 const SAMPLE_RATE_HINT = 16000  // resemblyzer resamples internally; this is just a request
@@ -127,6 +134,247 @@ async function recordWav(
   view.setUint32(40, i16.byteLength, true)
   new Int16Array(buffer, 44).set(i16)
   return new Blob([buffer], { type: 'audio/wav' })
+}
+
+function formatDb(db: number): string {
+  if (!Number.isFinite(db)) return '−∞'
+  return (db >= 0 ? '+' : '') + db.toFixed(1)
+}
+
+function MicTuningCard() {
+  const [gain, setGainState] = useState<number>(() => getMicGain())
+  const [meterPeakDb, setMeterPeakDb] = useState<number>(-Infinity)
+  const [meterRmsDb, setMeterRmsDb] = useState<number>(-Infinity)
+  const [error, setError] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+
+  const ctxRef = useRef<AudioContext | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const gainNodeRef = useRef<GainNode | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const rafRef = useRef<number | null>(null)
+
+  // Push live slider drags into the shared store so VoiceRoom's GainNode
+  // ramps in real time without republishing the track.
+  const updateGain = useCallback((g: number) => {
+    setGainState(g)
+    setMicGain(g)
+    const node = gainNodeRef.current
+    const ctx = ctxRef.current
+    if (node && ctx) {
+      try { node.gain.setTargetAtTime(g, ctx.currentTime, 0.05) }
+      catch { node.gain.value = g }
+    }
+  }, [])
+
+  // Keep slider in sync if another tab/window changes it.
+  useEffect(() => subscribeMicGain((g) => setGainState(g)), [])
+
+  const stop = useCallback(() => {
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
+    try { streamRef.current?.getTracks().forEach((t) => t.stop()) } catch { /* noop */ }
+    streamRef.current = null
+    try { gainNodeRef.current?.disconnect() } catch { /* noop */ }
+    try { analyserRef.current?.disconnect() } catch { /* noop */ }
+    gainNodeRef.current = null
+    analyserRef.current = null
+    const ctx = ctxRef.current
+    ctxRef.current = null
+    if (ctx) { void ctx.close().catch(() => {}) }
+    setRunning(false)
+    setMeterPeakDb(-Infinity)
+    setMeterRmsDb(-Infinity)
+  }, [])
+
+  const start = useCallback(async () => {
+    if (running) return
+    setError(null)
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Browser does not expose mediaDevices on this origin.')
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      })
+      streamRef.current = stream
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
+      const ctx = new AC()
+      if (ctx.state === 'suspended') {
+        try { await ctx.resume() } catch { /* noop */ }
+      }
+      const src = ctx.createMediaStreamSource(stream)
+      const node = ctx.createGain()
+      node.gain.value = getMicGain()
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 1024
+      analyser.smoothingTimeConstant = 0.0
+      // src → gain → analyser. We do NOT connect to ctx.destination;
+      // routing the mic to the speakers would feed back. The analyser
+      // observes the post-gain signal — exactly what Lloyd would see.
+      src.connect(node).connect(analyser)
+      ctxRef.current = ctx
+      gainNodeRef.current = node
+      analyserRef.current = analyser
+
+      const buf = new Float32Array(analyser.fftSize)
+      let smoothedPeak = -Infinity
+      const tick = () => {
+        if (!analyserRef.current) return
+        analyserRef.current.getFloatTimeDomainData(buf)
+        let peak = 0
+        let sumSq = 0
+        for (let i = 0; i < buf.length; i++) {
+          const v = buf[i]
+          const a = Math.abs(v)
+          if (a > peak) peak = a
+          sumSq += v * v
+        }
+        const rms = Math.sqrt(sumSq / buf.length)
+        const peakDb = peak > 0 ? 20 * Math.log10(peak) : -Infinity
+        const rmsDb = rms > 0 ? 20 * Math.log10(rms) : -Infinity
+        // Peak hold with slow decay so the eye can read it (~12 dB/sec).
+        if (peakDb > smoothedPeak) smoothedPeak = peakDb
+        else if (Number.isFinite(smoothedPeak)) smoothedPeak -= 12 / 60
+        setMeterPeakDb(smoothedPeak)
+        setMeterRmsDb(rmsDb)
+        rafRef.current = requestAnimationFrame(tick)
+      }
+      rafRef.current = requestAnimationFrame(tick)
+      setRunning(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      stop()
+    }
+  }, [running, stop])
+
+  // Auto-start meter on mount; clean up on unmount.
+  useEffect(() => {
+    void start()
+    return () => stop()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Map a dBFS value to a 0–100% bar position. Useful range -60 to 0 dB.
+  const dbToBar = (db: number) => {
+    if (!Number.isFinite(db)) return 0
+    const clamped = Math.max(-60, Math.min(0, db))
+    return ((clamped + 60) / 60) * 100
+  }
+  const peakPct = dbToBar(meterPeakDb)
+  const rmsPct = dbToBar(meterRmsDb)
+
+  // Threshold zones for color coding. Matches the VAD's 0.025 (-32 dBFS)
+  // floor and gives the user a visual sense of where speech should land.
+  const peakColor =
+    meterPeakDb >= -3 ? 'bg-red-500' :
+    meterPeakDb >= -12 ? 'bg-yellow-400' :
+    'bg-green-500'
+
+  const db = gainToDb(gain)
+  const dbLabel = !Number.isFinite(db) ? 'muted' : `${db >= 0 ? '+' : ''}${db.toFixed(1)} dB`
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Microphone tuning</CardTitle>
+        <CardDescription>
+          Per-device gain applied between your microphone and Lloyd. Speak normally and aim for the
+          green band on the meter; the yellow band is fine for emphasis. Red is clipping.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Meter */}
+        <div>
+          <div className="relative h-4 w-full rounded bg-muted overflow-hidden">
+            {/* RMS bar (steady fill) */}
+            <div
+              className="absolute inset-y-0 left-0 bg-foreground/30 transition-[width] duration-75"
+              style={{ width: `${rmsPct}%` }}
+            />
+            {/* Peak indicator (thin tick) */}
+            <div
+              className={cn('absolute inset-y-0 w-0.5', peakColor)}
+              style={{ left: `calc(${peakPct}% - 1px)` }}
+            />
+            {/* -12 dBFS reference line */}
+            <div
+              className="absolute inset-y-0 w-px bg-foreground/40"
+              style={{ left: '80%' }}
+            />
+          </div>
+          <div className="flex justify-between text-[10px] text-muted-foreground mt-1 font-mono">
+            <span>−60</span>
+            <span>−40</span>
+            <span>−20</span>
+            <span className="text-foreground/60">−12</span>
+            <span>0 dBFS</span>
+          </div>
+          <div className="flex gap-4 text-xs text-muted-foreground mt-2 font-mono">
+            <span>peak: {formatDb(meterPeakDb)} dBFS</span>
+            <span>rms: {formatDb(meterRmsDb)} dBFS</span>
+            {!running && <span className="text-amber-500">meter stopped</span>}
+          </div>
+        </div>
+
+        {/* Slider */}
+        <div className="space-y-2">
+          <div className="flex justify-between items-baseline">
+            <label htmlFor="mic-gain" className="text-sm font-medium">Gain</label>
+            <span className="text-sm font-mono text-muted-foreground">
+              {gain.toFixed(2)}× ({dbLabel})
+            </span>
+          </div>
+          <input
+            id="mic-gain"
+            type="range"
+            min={MIC_GAIN_RANGE.min}
+            max={MIC_GAIN_RANGE.max}
+            step={0.05}
+            value={gain}
+            onChange={(e) => updateGain(parseFloat(e.target.value))}
+            className="w-full accent-foreground"
+          />
+          <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
+            <span>0× (mute)</span>
+            <span>1× (0 dB)</span>
+            <span>2× (+6 dB)</span>
+            <span>4× (+12 dB)</span>
+          </div>
+        </div>
+
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => updateGain(MIC_GAIN_RANGE.default)}
+            disabled={gain === MIC_GAIN_RANGE.default}
+          >
+            Reset to 1×
+          </Button>
+          {running ? (
+            <Button variant="outline" size="sm" onClick={stop}>Stop meter</Button>
+          ) : (
+            <Button variant="outline" size="sm" onClick={() => void start()}>Start meter</Button>
+          )}
+        </div>
+
+        {error && (
+          <div className="text-sm text-red-500 flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
 }
 
 function VoiceProfilesCard() {
@@ -735,15 +983,20 @@ function DevicesCard() {
 
 export default function SettingsPage() {
   return (
-    <div className="p-6 max-w-3xl mx-auto space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-foreground">Settings</h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          Configure how Lloyd recognizes your voice and other preferences.
-        </p>
+    <div className="flex flex-col h-full min-h-0">
+      <div className="flex-1 overflow-y-auto min-h-0">
+        <div className="p-6 max-w-3xl mx-auto space-y-6">
+          <div>
+            <h2 className="text-xl font-bold text-foreground">Settings</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              Configure how Lloyd recognizes your voice and other preferences.
+            </p>
+          </div>
+          <MicTuningCard />
+          <VoiceProfilesCard />
+          <DevicesCard />
+        </div>
       </div>
-      <VoiceProfilesCard />
-      <DevicesCard />
     </div>
   )
 }
