@@ -23,6 +23,7 @@ import {
   type EntityDetailData,
   type EntityFact,
   type EntityGraphNode,
+  type EntityGraphData,
 } from "../../api";
 import { Streamdown } from "streamdown";
 import EntityGraph, { type EntityGraphProps } from "../EntityGraph";
@@ -774,17 +775,20 @@ export default function MemoryPage() {
           : null,
   );
 
-  // Load stats, entities, and graph connection count on mount
+  // Load stats and entity list on mount. The entity graph is fetched once by
+  // the EntityGraph component and surfaced here via onGraphLoaded so we don't
+  // pay for a second 1.1MB round-trip + parse.
   useEffect(() => {
     api.memoryStats().then(setStats).catch(console.error);
     api.entityList(500).then((d) => {
       setEntities(d.entities);
       setEntityTotal(d.total);
     }).catch(console.error);
-    api.entityGraph().then((g) => {
-      setEntityConnectionCount(g.edges.length);
-      setGraphEdges(g as any);
-    }).catch(console.error);
+  }, []);
+
+  const handleGraphLoaded = useCallback((g: EntityGraphData) => {
+    setEntityConnectionCount(g.edges.length);
+    setGraphEdges(g);
   }, []);
 
   // Debounced search
@@ -1063,13 +1067,18 @@ export default function MemoryPage() {
             onNodeClick={handleGraphNodeClick}
             onNodeDoubleClick={handleGraphNodeDoubleClick}
             onNodeHover={handleGraphNodeHover}
+            onGraphLoaded={handleGraphLoaded}
           />
         </div>
 
-        {/* Right: dynamic panel */}
-        <div className="w-72 flex-shrink-0 overflow-y-auto min-h-0 border-l border-border/30 pl-4">
-          {renderRightPanel()}
-        </div>
+        {/* Right: dynamic panel — only mounted when there's content, so the
+            graph reclaims the full width when nothing is selected (matches
+            the Architecture tab). */}
+        {rightPanel.kind !== "empty" && (
+          <div className="w-72 flex-shrink-0 overflow-y-auto min-h-0 border-l border-border/30 pl-4">
+            {renderRightPanel()}
+          </div>
+        )}
       </div>
 
       {/* Document modal */}

@@ -46,6 +46,11 @@ _RELATIONSHIPS_GRAPH = _FACTS_ROOT / "_relationships.json"
 # fact files costs ~500ms cold, so caching repeat UI loads is worth it.
 _GRAPH_CACHE: dict = {"sig": None, "payload": None, "built_at": 0.0}
 
+# Entity-list cache. Cold scan (~150ms) globs each entity dir twice; warm hits
+# this cache and returns immediately. Same invalidation key as the graph since
+# both depend on the facts/ tree shape.
+_ENTITIES_CACHE: dict = {"sig": None, "payload": None}
+
 
 def _facts_signature() -> tuple:
     """Cheap signature of the facts tree plus the typed-graph file. If either
@@ -136,14 +141,25 @@ def _read_definition(entity_dir: Path) -> str | None:
 async def list_entities():
     if not _FACTS_ROOT.exists():
         return JSONResponse({"entities": [], "total": 0})
+    sig = _facts_signature()
+    if _ENTITIES_CACHE["sig"] == sig and _ENTITIES_CACHE["payload"] is not None:
+        return JSONResponse(_ENTITIES_CACHE["payload"])
     entities = []
     for d in sorted(_FACTS_ROOT.iterdir()):
         if not d.is_dir():
             continue
-        fact_count = sum(1 for _ in d.glob("*.md"))
-        categories = list(set(f.stem.split("-", 1)[-1] for f in d.glob("*.md") if "-" in f.stem))
-        entities.append({"name": d.name, "factCount": fact_count, "categories": categories})
-    return JSONResponse({"entities": entities, "total": len(entities)})
+        fact_count = 0
+        cats: set[str] = set()
+        for f in d.glob("*.md"):
+            fact_count += 1
+            stem = f.stem
+            if "-" in stem:
+                cats.add(stem.split("-", 1)[-1])
+        entities.append({"name": d.name, "factCount": fact_count, "categories": list(cats)})
+    payload = {"entities": entities, "total": len(entities)}
+    _ENTITIES_CACHE["sig"] = sig
+    _ENTITIES_CACHE["payload"] = payload
+    return JSONResponse(payload)
 
 
 @router.get("/api/entity")

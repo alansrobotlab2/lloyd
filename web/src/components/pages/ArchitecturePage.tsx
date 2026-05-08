@@ -769,12 +769,12 @@ function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphVi
     const key = `${src}\x00${tgt}`;
     const highlighted = highlightLinks.has(key);
     const dimmed = hasDimming && !highlighted;
-    if (dimmed) return "rgba(71,85,105,0.05)";
+    if (dimmed) return "rgba(71,85,105,0.08)";
     if (highlighted) {
       const srcNode = filteredData.nodes.find(n => n.id === src);
       return langColorBright(srcNode?.lang);
     }
-    return "rgba(100,116,139,0.05)";
+    return "rgba(100,116,139,0.18)";
   }, [highlightLinks, hasDimming, filteredData]);
 
   // Flowing arrow particles on highlighted edges
@@ -864,7 +864,7 @@ function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphVi
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-card rounded-lg border border-border/50 text-muted-foreground text-sm">
+      <div className="w-full h-full flex items-center justify-center bg-card rounded-lg border border-border/50 text-muted-foreground text-sm">
         Loading graph...
       </div>
     );
@@ -872,14 +872,14 @@ function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphVi
 
   if (!graphData) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-card rounded-lg border border-border/50 text-red-400 text-sm">
+      <div className="w-full h-full flex items-center justify-center bg-card rounded-lg border border-border/50 text-red-400 text-sm">
         Failed to load graph
       </div>
     );
   }
 
   return (
-    <div ref={containerRef} className="flex-1 relative bg-card rounded-lg border border-border/50 overflow-hidden">
+    <div ref={containerRef} className="w-full h-full relative bg-card rounded-lg border border-border/50 overflow-hidden">
       <div className="absolute inset-0">
         <ForceGraph3D
           ref={fgRef}
@@ -974,23 +974,29 @@ function GraphView({ graphData, loading, onSelectNode, selectedNodeId }: GraphVi
 // ── Main Page ───────────────────────────────────────────────────────────
 
 const BROWSER_TABS = [
-  { id: "lloyd", label: "lloyd", path: "/home/alansrobotlab/lloyd" },
-  { id: "lloyd-web", label: "web", path: "/home/alansrobotlab/lloyd/web/src" },
+  { id: "lloyd", label: "lloyd", path: "/home/alansrobotlab/lloyd", scope: "py" },
+  { id: "lloyd-web", label: "web", path: "/home/alansrobotlab/lloyd/web/src", scope: "ts" },
 ] as const;
 type BrowserTab = typeof BROWSER_TABS[number]["id"];
 
 export default function ArchitecturePage() {
   const [browserTab, setBrowserTab] = useState<BrowserTab>("lloyd");
-  const currentPath = BROWSER_TABS.find(t => t.id === browserTab)!.path;
+  const currentTab = BROWSER_TABS.find(t => t.id === browserTab)!;
+  const currentPath = currentTab.path;
+  const currentScope = currentTab.scope;
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [graphLoading, setGraphLoading] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<FileContent | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
 
+  // Refetch when the tab (and therefore the graph scope) changes. Clear the
+  // current selection since node ids from the previous scope won't resolve.
   useEffect(() => {
     setGraphLoading(true);
-    api.fetchGraph()
+    setGraphData(null);
+    setSelectedNodeId(null);
+    api.fetchGraph(currentScope)
       .then(data => {
         setGraphData(data);
         setGraphLoading(false);
@@ -999,7 +1005,7 @@ export default function ArchitecturePage() {
         console.error("Failed to load graph:", err);
         setGraphLoading(false);
       });
-  }, []);
+  }, [currentScope]);
 
   const handleOpenFile = useCallback(async (filePath: string) => {
     setLoadingFile(true);
@@ -1066,12 +1072,14 @@ export default function ArchitecturePage() {
         </div>
 
         {/* Center panel: Dependency graph */}
-        <GraphView
-          graphData={graphData}
-          loading={graphLoading}
-          onSelectNode={handleSelectNode}
-          selectedNodeId={selectedNodeId}
-        />
+        <div className="flex-1 min-w-0 min-h-0">
+          <GraphView
+            graphData={graphData}
+            loading={graphLoading}
+            onSelectNode={handleSelectNode}
+            selectedNodeId={selectedNodeId}
+          />
+        </div>
 
         {/* Right panel: File details (conditional) */}
         {selectedNode && (
@@ -1107,8 +1115,8 @@ const api = {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     }),
-  fetchGraph: () =>
-    fetch(`/api/architecture/graph`).then((res) => {
+  fetchGraph: (scope?: string) =>
+    fetch(`/api/architecture/graph${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`).then((res) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     }),
