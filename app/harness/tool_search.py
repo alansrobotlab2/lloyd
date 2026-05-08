@@ -179,34 +179,63 @@ def catalog_signature(catalog: list[dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def format_catalog_reminder(catalog: list[dict[str, Any]]) -> str:
-    """Build the ``role: system`` content block listing all deferred tools.
+def format_catalog_reminder(
+    catalog: list[dict[str, Any]],
+    *,
+    loaded: set[str] | None = None,
+) -> str:
+    """Build the ``role: system`` content block listing deferred tools.
 
-    Mirrors the Claude Code system-reminder shape: name on its own line,
-    optional one-line description after a dash. Keeping it terse — the model
-    only needs enough to know what to ask ToolSearch for.
+    Partitioned into two sections so the model can tell at a glance which
+    tools are already callable in this session vs. which still need a
+    ToolSearch round-trip. Without this split the model defensively
+    re-searches tools it loaded several turns ago, wasting a turn.
+
+    The unloaded-section prose tells the model the harness will auto-load
+    on first direct call (matching the gate behavior in ``loop.py``) but
+    still recommends ToolSearch when planning a parallel batch — that
+    avoids the "next turn pays the schema cost" round-trip.
     """
     if not catalog:
         return ""
-    lines = [
-        "<system-reminder>",
-        "The following deferred tools are available via ToolSearch. Their "
-        "schemas are NOT loaded — calling them directly will fail. Use "
-        "ToolSearch with query \"select:<name>[,<name>...]\" to load tool "
-        "schemas before calling them, or use keyword search to discover tools "
-        "by topic:",
-        "",
-    ]
+    loaded_set = loaded or set()
+
+    loaded_lines: list[str] = []
+    unloaded_lines: list[str] = []
     for t in catalog:
         name = t["function"]["name"]
         desc = (t["function"].get("description") or "").strip()
         first_line = desc.splitlines()[0] if desc else ""
-        if first_line:
-            lines.append(f"- {name} — {first_line}")
+        line = f"- {name} — {first_line}" if first_line else f"- {name}"
+        if name in loaded_set:
+            loaded_lines.append(line)
         else:
-            lines.append(f"- {name}")
-    lines.append("</system-reminder>")
-    return "\n".join(lines)
+            unloaded_lines.append(line)
+
+    out = ["<system-reminder>"]
+    if loaded_lines:
+        out.append(
+            "The following tools are loaded and callable now. They stay "
+            "loaded for the rest of this session — do not re-call "
+            "ToolSearch for them:"
+        )
+        out.append("")
+        out.extend(loaded_lines)
+        if unloaded_lines:
+            out.append("")
+    if unloaded_lines:
+        out.append(
+            "The following deferred tools are available via ToolSearch. "
+            "Use ToolSearch with query \"select:<name>[,<name>...]\" to "
+            "load schemas in advance, or keyword search to discover tools "
+            "by topic. Direct calls also work — the harness auto-loads on "
+            "first use — but ToolSearch is more efficient when planning a "
+            "parallel batch of calls to the same tool:"
+        )
+        out.append("")
+        out.extend(unloaded_lines)
+    out.append("</system-reminder>")
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------

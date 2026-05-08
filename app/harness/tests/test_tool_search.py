@@ -182,6 +182,56 @@ def test_format_catalog_reminder_handles_missing_descriptions():
     assert "- Bash" in out
 
 
+def test_format_catalog_reminder_partitions_loaded_and_unloaded():
+    """When `loaded` is supplied, the reminder splits into a 'callable now'
+    section and a 'load via ToolSearch' section so the model can tell
+    which tools it can already use without re-searching."""
+    catalog = [
+        _tool("fact_add", "add a fact"),
+        _tool("vault_write", "write a note"),
+        _tool("http_search", "search the web"),
+    ]
+    out = format_catalog_reminder(catalog, loaded={"fact_add", "vault_write"})
+
+    # Loaded tools appear under the "callable now" header.
+    assert "loaded and callable now" in out
+    assert "do not re-call ToolSearch for them" in out
+    assert "fact_add — add a fact" in out
+    assert "vault_write — write a note" in out
+
+    # Unloaded tools appear under the deferred header with usage hints.
+    assert "available via ToolSearch" in out
+    assert "select:<name>" in out
+    assert "auto-loads on first use" in out
+    assert "http_search — search the web" in out
+
+    # Loaded section comes BEFORE unloaded section.
+    loaded_idx = out.index("fact_add — add a fact")
+    unloaded_idx = out.index("http_search — search the web")
+    assert loaded_idx < unloaded_idx
+
+
+def test_format_catalog_reminder_omits_loaded_section_when_none_loaded():
+    """No 'callable now' header when nothing has been loaded yet — keeps the
+    first-turn reminder identical to its prior look (modulo the soft-gate
+    prose update)."""
+    catalog = [_tool("fact_add", "add a fact")]
+    out = format_catalog_reminder(catalog, loaded=set())
+    assert "loaded and callable now" not in out
+    assert "available via ToolSearch" in out
+    assert "fact_add — add a fact" in out
+
+
+def test_format_catalog_reminder_omits_unloaded_section_when_all_loaded():
+    """Symmetric case: every tool already loaded → no deferred section."""
+    catalog = [_tool("fact_add", "add a fact"), _tool("vault_write", "write")]
+    out = format_catalog_reminder(
+        catalog, loaded={"fact_add", "vault_write"},
+    )
+    assert "loaded and callable now" in out
+    assert "available via ToolSearch" not in out
+
+
 # ---------------------------------------------------------------------------
 # catalog_signature
 # ---------------------------------------------------------------------------

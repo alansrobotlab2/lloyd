@@ -254,8 +254,10 @@ def test_toolsearch_call_loads_matched_tools_for_next_turn(monkeypatch):
     # Turn 1's tool_result for ToolSearch was synthesized by the harness,
     # not by the MCP pool.
     assert all(name != TOOLSEARCH_TOOL_NAME for name, _ in pool.call_log)
-    # The MCP pool DID get the second tool call.
-    assert ("domain_tool_007", {}) in pool.call_log
+    # The MCP pool DID get the second tool call. Args carry the harness's
+    # injected `_session_id` correlation key — domain handlers pop it
+    # before schema validation.
+    assert ("domain_tool_007", {"_session_id": "test-toolsearch-load"}) in pool.call_log
 
     # The synthesized ToolSearch result is a tool_result event with a
     # <functions> block in its content.
@@ -303,9 +305,15 @@ def test_catalog_reminder_injected_exactly_once(monkeypatch):
         assert sum(1 for m in turn_msgs if m.get("role") == "system") == 1
 
 
-def test_unloaded_tool_call_returns_guidance(monkeypatch):
-    """Defensive intercept: vLLM dispatches a tool not in visible_tools.
-    The harness should return a guidance tool_result without hitting MCP."""
+def test_unloaded_tool_call_auto_loads_and_dispatches(monkeypatch):
+    """Soft gate: when the model calls a catalog tool whose schema isn't
+    yet loaded, the harness auto-loads it and dispatches normally.
+
+    This replaces the older strict-gate behavior where the call would be
+    rejected with "call ToolSearch first" — that pattern made parallel
+    batches pathological because each call in the batch hit the same
+    rejection independently.
+    """
     pool = _FakePool("lloyd-mcp", _make_catalog(50))
     _patch_pool(monkeypatch, pool)
     script = _StreamScript([
@@ -323,18 +331,53 @@ def test_unloaded_tool_call_returns_guidance(monkeypatch):
         model="primary",
         tool_search_enabled=True,
         tool_search_threshold_tools=30,
-        session_id="test-unloaded-intercept",
+        session_id="test-unloaded-autoload",
     )
     events = asyncio.run(_drain([{"role": "user", "content": "hi"}], opts))
 
-    # MCP was NOT called for the unloaded tool.
-    assert pool.call_log == []
-    # A tool_result with is_error=True and ToolSearch guidance was emitted.
+    # MCP was called — auto-load lets the dispatch through.
+    assert pool.call_log == [("domain_tool_005", {"_session_id": "test-unloaded-autoload"})]
+    # A successful tool_result was emitted (no schema-loading error).
     results = [e for e in events if e["type"] == "tool_result"]
     assert results
-    assert results[0]["is_error"]
-    assert "ToolSearch" in results[0]["content"]
-    assert "select:domain_tool_005" in results[0]["content"]
+    assert results[0]["is_error"] is False
+    assert "FAKE_RESULT[domain_tool_005]" in results[0]["content"]
+    # The tool is now loaded for the rest of the session: the next turn's
+    # tools= array advertises domain_tool_005 without any ToolSearch
+    # round-trip in between.
+    turn2_names = {t["function"]["name"] for t in script.captured_tools[1]}
+    assert "domain_tool_005" in turn2_names
+
+
+def test_unknown_tool_name_still_falls_through_to_mcp(monkeypatch):
+    """Names that aren't in the catalog at all skip the auto-load branch
+    and reach MCP, which returns its own error. We don't want auto-load
+    to mask genuinely-bogus tool names."""
+    pool = _FakePool("lloyd-mcp", _make_catalog(50))
+    _patch_pool(monkeypatch, pool)
+    script = _StreamScript([
+        ("", [{
+            "id": "call_y",
+            "name": "this_tool_does_not_exist",
+            "arguments": {},
+        }]),
+        ("acknowledged", []),
+    ])
+    monkeypatch.setattr("app.harness.loop.stream_chat", script)
+
+    opts = RunOptions(
+        model="primary",
+        tool_search_enabled=True,
+        tool_search_threshold_tools=30,
+        session_id="test-unknown-tool",
+    )
+    asyncio.run(_drain([{"role": "user", "content": "hi"}], opts))
+
+    # The fake pool happily logs anything, but the real signal is that
+    # the call reached MCP (no schema-loading rejection in the harness).
+    assert pool.call_log == [
+        ("this_tool_does_not_exist", {"_session_id": "test-unknown-tool"})
+    ]
 
 
 def test_session_scoped_loaded_set_persists_across_run_query(monkeypatch):
