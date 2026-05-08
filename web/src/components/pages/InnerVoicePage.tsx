@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useReportMcFocus, usePendingFocusFor } from '../../contexts/McUiContext'
 import {
   BrainCircuit,
   Activity,
@@ -60,6 +61,18 @@ export default function InnerVoicePage() {
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [showAgentDetails, setShowAgentDetails] = useState(false)
+
+  // Mirror focused session for the agent's mc_get_state tool.
+  useReportMcFocus(
+    'inner_voice',
+    selectedSession ? { kind: 'session', id: selectedSession } : null,
+  )
+
+  // Apply incoming focus from the agent's mc_navigate tool.
+  const pendingFocus = usePendingFocusFor('inner_voice')
+  useEffect(() => {
+    if (pendingFocus) setSelectedSession(pendingFocus)
+  }, [pendingFocus])
 
   // Sessions list
   const loadSessions = useCallback(async () => {

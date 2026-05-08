@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, type DragEvent } from "react";
+import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
 import {
   LayoutGrid,
   AlertTriangle,
@@ -466,6 +467,32 @@ export default function BacklogPage() {
   const [editingTask, setEditingTask] = useState<BacklogTask | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Mirror current focus for the agent. Editing-task wins; otherwise
+  // active board.
+  useReportMcFocus(
+    "backlog",
+    editingTask
+      ? { kind: "task", id: String(editingTask.id), label: editingTask.name }
+      : activeBoard != null
+        ? { kind: "board", id: String(activeBoard) }
+        : null,
+  );
+
+  // Apply incoming focus from mc_navigate. Numeric ids that match a
+  // task open it; otherwise treat as board id.
+  const pendingFocus = usePendingFocusFor("backlog");
+  useEffect(() => {
+    if (!pendingFocus) return;
+    const asNum = Number(pendingFocus);
+    if (!Number.isFinite(asNum)) return;
+    const task = tasks.find((t) => t.id === asNum);
+    if (task) {
+      setEditingTask(task);
+      return;
+    }
+    setActiveBoard(asNum);
+  }, [pendingFocus, tasks]);
 
   const loadData = useCallback(async () => {
     try {

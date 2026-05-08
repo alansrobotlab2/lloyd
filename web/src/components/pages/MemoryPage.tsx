@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
 import {
   Search,
   FileText,
@@ -760,6 +761,19 @@ export default function MemoryPage() {
   // Store graph edges data for connection counts (fetched once)
   const [graphEdges, setGraphEdges] = useState<{ nodes: EntityGraphNode[]; edges: { source: string | EntityGraphNode; target: string | EntityGraphNode; type: string }[] } | null>(null);
 
+  // Mirror focused item for the agent. Open document wins (most specific),
+  // then graph node, then active entity.
+  useReportMcFocus(
+    "memory",
+    doc
+      ? { kind: "path", id: doc.path }
+      : selectedGraphNode
+        ? { kind: "entity", id: selectedGraphNode }
+        : activeEntity
+          ? { kind: "entity", id: activeEntity }
+          : null,
+  );
+
   // Load stats, entities, and graph connection count on mount
   useEffect(() => {
     api.memoryStats().then(setStats).catch(console.error);
@@ -829,6 +843,21 @@ export default function MemoryPage() {
       console.error("Read failed:", err);
     }
   }, []);
+
+  // Apply incoming focus from mc_navigate.
+  // Path-shaped values (contain "/" or end in .md) open the file in the
+  // explorer; bare names are treated as entities.
+  const pendingFocus = usePendingFocusFor("memory");
+  useEffect(() => {
+    if (!pendingFocus) return;
+    const looksLikePath = pendingFocus.includes("/") || pendingFocus.endsWith(".md");
+    if (looksLikePath) {
+      setSidebarTab("explorer");
+      handleOpenFile(pendingFocus);
+    } else {
+      setActiveEntity(pendingFocus);
+    }
+  }, [pendingFocus, handleOpenFile]);
 
   const handleCloseDoc = useCallback(() => {
     setDoc(null);

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Activity, Play, Square, RotateCcw, RefreshCw, ChevronDown, Terminal, Cpu, HardDrive, Clock, AlertTriangle } from "lucide-react";
 import { api, type ServiceStatus, type ServiceDetail, type LloydServiceUnit, type LloydServiceDetail } from "../../api";
+import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
 
 export default function ServicesPage() {
   // Gateway (managed) services state
@@ -23,6 +24,22 @@ export default function ServicesPage() {
   const [lloydExpandedUnit, setLloydExpandedUnit] = useState<string | null>(null);
   const [lloydDetail, setLloydDetail] = useState<LloydServiceDetail | null>(null);
   const [lloydDetailLoading, setLloydDetailLoading] = useState(false);
+
+  const focusedService = lloydExpandedUnit || expandedId;
+  useReportMcFocus(
+    "services",
+    focusedService ? { kind: "service", id: focusedService } : null,
+  );
+
+  const pendingFocus = usePendingFocusFor("services");
+  useEffect(() => {
+    if (!pendingFocus) return;
+    if (lloydServices.some((s) => s.unit === pendingFocus)) {
+      setLloydExpandedUnit(pendingFocus);
+    } else {
+      setExpandedId(pendingFocus);
+    }
+  }, [pendingFocus, lloydServices]);
 
   const refresh = useCallback(async () => {
     try {

@@ -28,6 +28,7 @@ from app.routers import voice as _voice_router
 from app.routers import messages as _messages_router
 from app.routers import workers as _workers_router
 from app.routers import inner_voice as _inner_voice_router
+from app.routers import mc_ui as _mc_ui_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -57,6 +58,7 @@ app.include_router(_tools_router.router)
 app.include_router(_voice_router.router)
 app.include_router(_workers_router.router)
 app.include_router(_inner_voice_router.router)
+app.include_router(_mc_ui_router.router)
 
 app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
 app.on_event("startup")(_workers_router.start_worker_pool)

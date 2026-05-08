@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
 import {
   Workflow, Pause, Play, RefreshCw, CheckCircle2, XCircle, Clock, Loader2,
   ArrowUpCircle, Trash2, FileText, FolderOpen,
@@ -75,6 +76,16 @@ export default function WorkersPage() {
   const [stateFilter, setStateFilter] = useState<string>("");
   const [sourceFilter, setSourceFilter] = useState<string>("");
   const [loading, setLoading] = useState(false);
+
+  useReportMcFocus(
+    "workers",
+    sourceFilter ? { kind: "source", id: sourceFilter } : null,
+  );
+
+  const pendingFocus = usePendingFocusFor("workers");
+  useEffect(() => {
+    if (pendingFocus) setSourceFilter(pendingFocus);
+  }, [pendingFocus]);
 
   const refresh = useCallback(async () => {
     setLoading(true);

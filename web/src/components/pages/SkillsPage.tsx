@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
 import { Sparkles, Pencil, X, Save, Search, RefreshCw } from "lucide-react";
 import { Streamdown } from "streamdown";
 import { api, type SkillInfo } from "../../api";
@@ -41,6 +42,18 @@ export default function SkillsPage() {
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+
+  useReportMcFocus(
+    "skills",
+    selectedSkill ? { kind: "skill", id: selectedSkill.name } : null,
+  );
+
+  const pendingFocus = usePendingFocusFor("skills");
+  useEffect(() => {
+    if (!pendingFocus) return;
+    const skill = skills.find((s) => s.name === pendingFocus);
+    if (skill) setSelectedSkill(skill);
+  }, [pendingFocus, skills]);
 
   const loadSkills = useCallback(() => {
     api.skills()
