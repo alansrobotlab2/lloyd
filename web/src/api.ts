@@ -1122,4 +1122,77 @@ export const api = {
     }
     return r.json()
   },
+
+  // ── LAN access / mTLS ────────────────────────────────────────────────
+  getLanInfo: async (): Promise<{
+    lan_ip: string | null
+    hostname: string
+    https_url: string | null
+    ca_available: boolean
+  }> => {
+    const r = await fetch(`${API_BASE}/system/lan-info`)
+    if (!r.ok) throw new Error(`lan-info failed: ${r.status}`)
+    return r.json()
+  },
+
+  getIdentity: async (): Promise<{ name: string | null; fingerprint: string | null }> => {
+    const r = await fetch(`${API_BASE}/system/identity`)
+    if (!r.ok) throw new Error(`identity failed: ${r.status}`)
+    return r.json()
+  },
+
+  getCABlob: async (): Promise<Blob> => {
+    const r = await fetch(`${API_BASE}/system/cert/ca`)
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `CA download failed: ${r.status}`)
+    }
+    return r.blob()
+  },
+
+  listClients: async (): Promise<{
+    clients: Array<{ name: string; fingerprint: string; issued_at: string }>
+  }> => {
+    const r = await fetch(`${API_BASE}/system/clients`)
+    if (!r.ok) throw new Error(`list clients failed: ${r.status}`)
+    return r.json()
+  },
+
+  mintClient: async (name: string, passphrase?: string): Promise<{
+    name: string
+    fingerprint: string
+    issued_at: string
+    passphrase: string
+    p12_url: string
+  }> => {
+    const r = await fetch(`${API_BASE}/system/clients`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, ...(passphrase ? { passphrase } : {}) }),
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `mint failed: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  downloadClientP12: async (name: string): Promise<Blob> => {
+    const r = await fetch(`${API_BASE}/system/clients/${encodeURIComponent(name)}/p12`)
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `p12 download failed: ${r.status}`)
+    }
+    return r.blob()
+  },
+
+  revokeClient: async (name: string): Promise<void> => {
+    const r = await fetch(`${API_BASE}/system/clients/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `revoke failed: ${r.status}`)
+    }
+  },
 }

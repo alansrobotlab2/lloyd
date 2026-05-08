@@ -152,9 +152,11 @@ models:
       ANTHROPIC_CUSTOM_MODEL_OPTION: secondary
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Secondary
 livekit:
-  url: ws://127.0.0.1:7880
-  api_key: lloyddevkey
-  api_secret: lloyd-dev-secret-do-not-ship-replace-me-32chars-min
+  url: ws://127.0.0.1:7880   # internal URL — used by the agent worker on this host
+  # client_url: wss://lloyd.local:5173/livekit  # optional override for the URL handed to browsers (default: derived from request via Vite proxy)
+  # Secrets live in .env (see scripts/gen-livekit-secrets.sh) and are expanded at config load.
+  api_key: ${LIVEKIT_API_KEY}
+  api_secret: ${LIVEKIT_API_SECRET}
   room_prefix: lloyd-
   agent_identity: lloyd-agent
   stt:

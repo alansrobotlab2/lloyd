@@ -1,22 +1,31 @@
-# LiveKit server config for Lloyd (local-only, dev keys).
-# Bound to 127.0.0.1 — not reachable from other hosts without an explicit reverse
-# proxy. Browser clients connect via ws://127.0.0.1:7880.
+# LiveKit server config for Lloyd. Reached from LAN browsers via Vite's
+# wss:///livekit ws-proxy (Vite terminates TLS, then forwards plain ws to
+# 127.0.0.1:7880). Bind to 0.0.0.0 because RTC media (UDP 50000-50100) and
+# the TCP fallback (7881) need to be reachable directly from LAN clients.
 #
-# Dev API key/secret. Rotate before exposing this server to anything beyond
-# localhost.
+# API key/secret are sourced from <repo>/.env (LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+# and substituted at startup by agent-services/bin/start-livekit-server.sh.
+# Rotate via: bash scripts/gen-livekit-secrets.sh
 
 port: 7880
 bind_addresses:
-  - 127.0.0.1
+  - 0.0.0.0
 
 rtc:
   tcp_port: 7881
   port_range_start: 50000
   port_range_end: 50100
+  # Pin the ICE candidate to the Tailscale IP. Every tailnet client (LAN and
+  # remote) reaches LiveKit media via this address. The host can also reach
+  # itself at this IP through the local tailscale0 interface, so browsers on
+  # the host machine still work. Trade-off: LAN-only clients (no Tailscale)
+  # can't use voice — that's intentional for now.
+  node_ip: 100.72.151.100
   use_external_ip: false
 
 keys:
-  lloyddevkey: lloyd-dev-secret-do-not-ship-replace-me-32chars-min
+  # Substituted at startup by start-livekit-server.sh from .env
+  ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}
 
 logging:
   level: info
@@ -27,5 +36,6 @@ room:
   departure_timeout: 20    # delay before considering a participant gone
 
 webhook:
-  api_key: lloyddevkey
+  # Must match a key in the `keys:` block above; signs webhook callbacks.
+  api_key: ${LIVEKIT_API_KEY}
   urls: []                 # add http://127.0.0.1:8080/api/webhooks/livekit in Phase 3

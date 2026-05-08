@@ -125,7 +125,7 @@ const MessageRow = memo(function MessageRow({
             ? 'bg-purple-950/30 border-purple-500/20 text-foreground'
             : 'bg-card border-border text-foreground',
         )}>
-          <div className="prose-chat text-sm leading-relaxed">
+          <div className="prose-chat text-[13px] leading-relaxed">
             {isAssistant ? (
               <>
                 {msg.reasoning && (showAgentDetails || thinkEnabled) && (
@@ -904,7 +904,7 @@ export default function ChatPanel({
 
   const thinkingIndicatorBody = (
     <div className="bg-card border border-border px-3.5 py-2.5 rounded-xl">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
         <Loader2 className="w-4 h-4 animate-spin text-primary" />
         {queueState?.current?.source === 'ambient'
           ? <span><span className="text-amber-400">Ambient context</span> — Lloyd is processing background input...</span>
