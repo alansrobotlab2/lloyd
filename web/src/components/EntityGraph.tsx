@@ -3,7 +3,7 @@ import ForceGraph3D from "react-force-graph-3d";
 import * as THREE from "three";
 import SpriteText from "three-spritetext";
 import { forceCollide } from "d3-force";
-import { api, type EntityGraphNode } from "../api";
+import { api, type EntityGraphNode, type EntityGraphData } from "../api";
 import { RotateCcw, Maximize } from "lucide-react";
 import { categoryOf, CATEGORY_COLOR } from "../lib/edgeCategories";
 
@@ -45,6 +45,9 @@ export interface EntityGraphProps {
   onNodeDoubleClick?: (nodeId: string) => void;
   /** Called when a node is hovered (debounced ~150ms). null = no hover */
   onNodeHover?: (node: GNode | null) => void;
+  /** Surface the loaded graph payload to the parent so it can be reused
+   *  (connection counts, side-panel rendering) without a duplicate fetch. */
+  onGraphLoaded?: (data: EntityGraphData) => void;
 }
 
 // Edge filter state — one toggle per EdgeCategory defined in lib/edgeCategories.
@@ -99,17 +102,18 @@ function splitRgba(rgba: string): { color: string; alpha: number } {
 }
 
 function edgeColor(type: string, highlighted: boolean, dimmed: boolean): string {
-  if (dimmed) return "rgba(71,85,105,0.05)";
+  if (dimmed) return "rgba(71,85,105,0.08)";
   const rgb = CATEGORY_COLOR[categoryOf(type)];
   // Highlighted: strong alpha so the selected subgraph pops.
-  // Default (no selection): very faint so highlighted edges stand out.
-  const alpha = highlighted ? 0.9 : 0.06;
+  // Default (no selection): faint enough that highlighted edges still stand
+  // out, but visible enough to read the topology.
+  const alpha = highlighted ? 0.9 : 0.18;
   return `rgba(${rgb},${alpha})`;
 }
 
 // -- Component --
 
-export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick, onNodeDoubleClick, onNodeHover }: EntityGraphProps) {
+export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick, onNodeDoubleClick, onNodeHover, onGraphLoaded }: EntityGraphProps) {
   const fgRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const initialFitDone = useRef(false);
@@ -157,12 +161,13 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
         nodes,
         links: data.edges as GLink[],
       });
+      onGraphLoaded?.(data);
     } catch (err: any) {
       setError(err.message || "Failed to load entity graph");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [onGraphLoaded]);
 
   useEffect(() => { loadGraph(); }, [loadGraph]);
 

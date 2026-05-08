@@ -1,6 +1,8 @@
 """Architecture tab endpoints: browse project, read sources, build import graph."""
 
+import os
 import re
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -16,9 +18,32 @@ _ARCH_ALLOWED_ROOTS = [LLOYD_HOME]
 _ARCH_SKIP_DIRS = {
     ".git", "node_modules", ".venvs", "__pycache__",
     "sessions", "logs", "dist", ".next", ".cache",
+    # Third-party LLM stack (vllm/llama.cpp wrappers, supervisord configs,
+    # voice-mode plumbing). Dwarfs the actual Lloyd backend in node count and
+    # isn't part of the architecture being explored.
+    "agent-services",
 }
 
 _ARCH_SOURCE_EXTENSIONS = {".py", ".ts", ".tsx", ".js", ".jsx"}
+
+# Per-scope walk config. The "scope" query param on the graph endpoint
+# maps each tab in the Architecture UI to a walk root (relative to
+# LLOYD_HOME) and an extension whitelist:
+#   py  → Lloyd backend (whole repo, .py only)
+#   ts  → Web frontend (web/src only, .ts/.tsx only). Subrooted to dodge
+#         false positives like CMake's compile_depend.ts files under
+#         agent-services/llm/ik_llama.cpp/build/.
+#   all → legacy / unscoped callers (whole repo, all source exts)
+_SCOPE_CONFIG: dict[str, dict] = {
+    "py":  {"subroot": "",        "exts": {".py"}},
+    "ts":  {"subroot": "web/src", "exts": {".ts", ".tsx"}},
+    "all": {"subroot": "",        "exts": _ARCH_SOURCE_EXTENSIONS},
+}
+
+# Graph cache, keyed by scope. Cold cost was ~9s, dominated by rglob
+# descending into .git / node_modules before filtering. With os.walk +
+# in-place pruning the cold build is ~300ms; this cache makes warm hits free.
+_GRAPH_CACHE: dict[str, dict] = {}
 
 _ARCH_LANG_MAP = {
     ".py": "python", ".ts": "typescript", ".tsx": "typescript",
@@ -88,19 +113,67 @@ async def architecture_read(path: str = ""):
     })
 
 
+def _walk_source_files(root: Path, exts: set[str]) -> list[Path]:
+    """Walk the project tree returning source files matching `exts`, pruning
+    skip dirs in place (vs rglob, which descends into .git/node_modules
+    before filtering)."""
+    out: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # In-place mutation tells os.walk not to descend into pruned dirs.
+        dirnames[:] = [d for d in dirnames if d not in _ARCH_SKIP_DIRS]
+        for fn in filenames:
+            ext = os.path.splitext(fn)[1]
+            if ext in exts:
+                out.append(Path(dirpath) / fn)
+    return out
+
+
+def _graph_signature(files: list[Path]) -> tuple:
+    """Cheap signature: (file count, max source mtime). Re-stat is fast (~30ms
+    for 4.6k files). Captures additions, deletions, and content edits."""
+    if not files:
+        return (0, 0.0)
+    max_mtime = 0.0
+    for f in files:
+        try:
+            m = f.stat().st_mtime
+        except OSError:
+            continue
+        if m > max_mtime:
+            max_mtime = m
+    return (len(files), max_mtime)
+
+
 @router.get("/api/architecture/graph")
-async def architecture_graph():
-    """Build import dependency graph for the project."""
+async def architecture_graph(scope: str = "all"):
+    """Build import dependency graph for the project.
+
+    `scope` selects which file types are included:
+      - "py": backend Python only (.py)
+      - "ts": web TypeScript only (.ts, .tsx)
+      - "all": everything (default)
+    Each scope is cached independently.
+    """
+    cfg = _SCOPE_CONFIG.get(scope)
+    if cfg is None:
+        raise HTTPException(status_code=400, detail=f"unknown scope: {scope}")
+    # Imports are still resolved relative to LLOYD_HOME so cross-package
+    # references work, but the walk is scoped to the subroot.
     root = LLOYD_HOME.resolve()
+    walk_root = (root / cfg["subroot"]).resolve() if cfg["subroot"] else root
+
+    file_paths = _walk_source_files(walk_root, cfg["exts"])
+    sig = _graph_signature(file_paths)
+    cache = _GRAPH_CACHE.get(scope)
+    if cache is not None and cache.get("sig") == sig and cache.get("payload") is not None:
+        return JSONResponse(cache["payload"])
 
     files: dict[str, Path] = {}  # relative_path -> absolute_path
-    for p in root.rglob("*"):
-        if not p.is_file() or p.suffix not in _ARCH_SOURCE_EXTENSIONS:
+    for p in file_paths:
+        try:
+            rel = str(p.relative_to(root))
+        except ValueError:
             continue
-        rel_parts = p.relative_to(root).parts
-        if any(part in _ARCH_SKIP_DIRS for part in rel_parts):
-            continue
-        rel = str(p.relative_to(root))
         files[rel] = p
 
     py_import_re = re.compile(
@@ -206,10 +279,13 @@ async def architecture_graph():
         }
 
     node_list = list(nodes.values())
-    return JSONResponse({
+    payload = {
         "nodes": node_list,
         "links": links,
         "totalImports": sum(n["count"] for n in node_list),
         "totalNodes": len(node_list),
         "totalLinks": len(links),
-    })
+        "scope": scope,
+    }
+    _GRAPH_CACHE[scope] = {"sig": sig, "payload": payload, "built_at": time.time()}
+    return JSONResponse(payload)

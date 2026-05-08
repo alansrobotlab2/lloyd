@@ -26,11 +26,42 @@ def _jsonable(obj):
 _VAULT = Path.home() / "obsidian"
 _VAULT_SEGMENTS = ["memory", "knowledge", "projects", "agents", "personal", "work", "skills"]
 
+# Cached stats payload. Keyed by a mtime signature over the segment dirs;
+# cold cost is ~600ms (reading 2KB + YAML parse from every .md), warm is <1ms.
+_STATS_CACHE: dict = {"sig": None, "payload": None}
+
+
+def _stats_signature() -> tuple:
+    """Cheap signature: per-segment (recursive max mtime, file count). Recomputed
+    each call by walking the tree and stat()ing each .md — still much cheaper
+    than re-reading 2KB + parsing YAML from each file."""
+    parts: list = []
+    for seg in _VAULT_SEGMENTS:
+        seg_dir = _VAULT / seg
+        if not seg_dir.is_dir():
+            parts.append((seg, 0, 0.0))
+            continue
+        max_mtime = 0.0
+        count = 0
+        for f in seg_dir.rglob("*.md"):
+            try:
+                m = f.stat().st_mtime
+            except OSError:
+                continue
+            count += 1
+            if m > max_mtime:
+                max_mtime = m
+        parts.append((seg, count, max_mtime))
+    return tuple(parts)
+
 
 @router.get("/api/memory/stats")
 async def memory_stats():
     if not _VAULT.exists():
         return JSONResponse({"docCount": 0, "tagCount": 0, "types": {}, "topTags": [], "lastRefresh": ""})
+    sig = _stats_signature()
+    if _STATS_CACHE["sig"] == sig and _STATS_CACHE["payload"] is not None:
+        return JSONResponse(_STATS_CACHE["payload"])
     types: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
     doc_count = 0
@@ -55,13 +86,16 @@ async def memory_stats():
         types[seg] = count
         doc_count += count
     top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:20]
-    return JSONResponse({
+    payload = {
         "docCount": doc_count,
         "tagCount": len(tag_counts),
         "types": types,
         "topTags": [{"tag": t, "count": c} for t, c in top_tags],
         "lastRefresh": datetime.now().isoformat(),
-    })
+    }
+    _STATS_CACHE["sig"] = sig
+    _STATS_CACHE["payload"] = payload
+    return JSONResponse(payload)
 
 
 @router.get("/api/memory/search")
