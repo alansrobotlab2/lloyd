@@ -125,7 +125,7 @@ const MessageRow = memo(function MessageRow({
             ? 'bg-purple-950/30 border-purple-500/20 text-foreground'
             : 'bg-card border-border text-foreground',
         )}>
-          <div className="prose-chat text-[13px] leading-relaxed">
+          <div className={cn('prose-chat leading-relaxed', isMobile ? 'text-[15px]' : 'text-[13px]')}>
             {isAssistant ? (
               <>
                 {msg.reasoning && (showAgentDetails || thinkEnabled) && (
@@ -1058,7 +1058,7 @@ export default function ChatPanel({
               }
             }}
             placeholder={thinkEnabled ? 'Talk to Lloyd... (thinking on)' : 'Talk to Lloyd... (use / for commands)'}
-            className="flex-1 h-[38px] bg-card text-foreground"
+            className={cn('flex-1 h-[38px] bg-card text-foreground', isMobile && 'text-base')}
             disabled={sending || thinking}
           />
           {/* Think on/off toggle */}

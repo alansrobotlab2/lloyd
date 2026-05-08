@@ -15,7 +15,6 @@ import SettingsPage from './pages/SettingsPage'
 import RightChatSidebar from './RightChatSidebar'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
-import { useVoiceMode } from '../contexts/VoiceModeContext'
 import { useMcUi, useReportMcFocus, usePendingFocusFor } from '../contexts/McUiContext'
 import { useMcStateSync } from '../hooks/useMcStateSync'
 import { useMcNavigationEvents } from '../hooks/useMcNavigationEvents'
@@ -142,7 +141,6 @@ export default function Layout() {
   const [models, setModels] = useState<ModelInfo[]>([])
   const [showAgentDetails, setShowAgentDetails] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-  const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false)
 
   const visibleSlot = useMemo(() => slots.find(s => s.slotId === visibleSlotId) ?? null, [slots, visibleSlotId])
   const currentModel = visibleSlot?.model ?? ''
@@ -160,22 +158,8 @@ export default function Layout() {
   const chatPendingFocus = usePendingFocusFor('chat')
   const sessionsPanelRefreshTrigger = useMemo(() => slots.map(s => s.sessionKey ?? 'null').join(','), [slots])
 
-  // Voice mode context — when enabled, point it at the visible chat slot's
-  // session_id so the LiveKit room follows the foreground tab. Switching
-  // tabs while voice is enabled reconnects to the new session.
-  // Suppressed when the right chat sidebar is mounted (desktop): that
-  // sidebar owns voice routing for its dual-brain session, and we don't
-  // want this effect to clobber its engagement when the user switches tabs.
-  const voiceMode = useVoiceMode()
-  useEffect(() => {
-    if (!isMobile) return  // sidebar (desktop only) owns voice routing
-    if (!voiceMode.enabled) return
-    if (page !== 'chat') return
-    const sid = visibleSlot?.sessionKey ?? null
-    if (sid && sid !== voiceMode.sessionId) {
-      voiceMode.setSessionId(sid)
-    }
-  }, [voiceMode.enabled, voiceMode.sessionId, page, visibleSlot?.sessionKey, voiceMode, isMobile])
+  // Voice mode is owned by RightChatSidebar — on desktop it's always
+  // mounted; on mobile it's mounted as the chat page itself.
 
   const handleNewSession = () => {
     const existingBlank = slots.find(s => s.sessionKey === null)
@@ -245,8 +229,11 @@ export default function Layout() {
     })
   }, [])
 
-  // Initialize first slot when on chat page with no slots yet
+  // Initialize first slot when on chat page with no slots yet.
+  // Skipped on mobile — the chat page is RightChatSidebar there, which
+  // owns its own session resolution and never reads the slot list.
   useEffect(() => {
+    if (isMobile) return
     if (page !== 'chat' || slots.length > 0) return
     api.listSessions().then(result => {
       const mostRecent = result.sessions?.[0]
@@ -258,7 +245,7 @@ export default function Layout() {
       setSlots([{ slotId: id, sessionKey: null, model: '' }])
       setVisibleSlotId(id)
     })
-  }, [page, slots.length])
+  }, [page, slots.length, isMobile])
 
   const PageComponent = PAGES[page]
 
@@ -301,42 +288,9 @@ export default function Layout() {
               <span className="text-sm font-bold text-foreground">LLOYD</span>
             </div>
             <div className="flex items-center gap-1">
-              {page === 'chat' && (
-                <>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => setMobileSessionsOpen(true)}
-                    aria-label="Sessions"
-                  >
-                    <PanelLeft className="w-4 h-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={handleNewSession}
-                    aria-label="New session"
-                  >
-                    <Plus className="w-4 h-4" />
-                  </Button>
-                </>
-              )}
-              {models.length > 0 && page === 'chat' && (
-                <ModelMenu
-                  models={models}
-                  currentModel={currentModel}
-                  visibleSlot={visibleSlot}
-                  visibleSlotId={visibleSlotId}
-                  onSwitchModel={handleSlotModelSwitch}
-                  triggerLabel={
-                    currentModel
-                      ? (models.find(m => m.name === currentModel)?.alias || currentModel)
-                      : 'Model'
-                  }
-                />
-              )}
+              {/* Chat-specific controls are intentionally absent on mobile —
+                  the chat page is RightChatSidebar, which owns its own
+                  new-session, stop, and details controls. */}
             </div>
           </div>
         )}
@@ -361,25 +315,6 @@ export default function Layout() {
                 onToggleCollapse={() => {}}
                 isMobile
               />
-            </SheetContent>
-          </Sheet>
-        )}
-
-        {/* Mobile sessions sheet */}
-        {isMobile && (
-          <Sheet open={mobileSessionsOpen} onOpenChange={setMobileSessionsOpen}>
-            <SheetContent side="left" className="p-0 w-72 flex flex-col">
-              <SheetHeader className="px-4 py-3 border-b border-border">
-                <SheetTitle className="text-sm font-semibold">Sessions</SheetTitle>
-              </SheetHeader>
-              <div className="flex-1 overflow-y-auto">
-                <SessionsPanel
-                  onSwitchSession={(key) => { handleOpenSession(key); setMobileSessionsOpen(false) }}
-                  currentSessionKey={visibleSlot?.sessionKey ?? null}
-                  activeSessions={activeSessions}
-                  refreshTrigger={sessionsPanelRefreshTrigger}
-                />
-              </div>
             </SheetContent>
           </Sheet>
         )}
@@ -441,59 +376,70 @@ export default function Layout() {
           )}
 
           {/* Chat area — always mounted so session state + messages survive tab switches.
-              Hidden via display:none when another page is active. */}
-          <div
-            className={cn(
-              'flex-1 flex min-h-0 overflow-hidden flex-shrink-0',
-              isMobile ? 'm-0' : 'mx-6 mb-6',
-              page === 'chat' ? '' : 'hidden',
-            )}
-          >
+              Hidden via display:none when another page is active.
+              On mobile this slot-based chat is replaced by RightChatSidebar
+              (rendered below), so it's only mounted on desktop. */}
+          {!isMobile && (
             <div
               className={cn(
-                'flex flex-1 flex-row h-full bg-card overflow-hidden',
-                !isMobile && 'border border-border rounded-xl',
+                'flex-1 flex min-h-0 overflow-hidden flex-shrink-0 mx-6 mb-6',
+                page === 'chat' ? '' : 'hidden',
               )}
             >
-              {/* Sessions Panel - desktop only */}
-              {!isMobile && showSessions && (
-                <div className="w-64 border-r border-border flex-shrink-0">
-                  <SessionsPanel
-                    onSwitchSession={(key) => handleOpenSession(key)}
-                    currentSessionKey={visibleSlot?.sessionKey ?? null}
-                    activeSessions={activeSessions}
-                    refreshTrigger={sessionsPanelRefreshTrigger}
-                  />
-                </div>
-              )}
-
-              {/* Chat panels — one per slot, only visible one shown */}
-              <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
-                {slots.map(slot => (
-                  <div
-                    key={slot.slotId}
-                    className={cn(
-                      'absolute inset-0 flex flex-col',
-                      slot.slotId === visibleSlotId ? '' : 'hidden',
-                    )}
-                  >
-                    <ChatPanel
-                      requestedSessionKey={slot.sessionKey}
-                      onSessionLoaded={() => {}}
-                      onActiveSessionChange={(key) => handleActiveSessionChange(slot.slotId, key)}
-                      onThinkingChange={(thinking, _toolName) => handleThinkingChange(slot.sessionKey, thinking)}
-                      onModelSwitch={(model) => handleSlotModelSwitch(slot.slotId, model)}
-                      currentSessionKey={slot.sessionKey}
-                      showAgentDetails={showAgentDetails}
-                      pendingModel={slot.model || models[0]?.name}
-                      visible={page === 'chat' && slot.slotId === visibleSlotId}
-                      isMobile={isMobile}
+              <div className="flex flex-1 flex-row h-full bg-card overflow-hidden border border-border rounded-xl">
+                {showSessions && (
+                  <div className="w-64 border-r border-border flex-shrink-0">
+                    <SessionsPanel
+                      onSwitchSession={(key) => handleOpenSession(key)}
+                      currentSessionKey={visibleSlot?.sessionKey ?? null}
+                      activeSessions={activeSessions}
+                      refreshTrigger={sessionsPanelRefreshTrigger}
                     />
                   </div>
-                ))}
+                )}
+
+                {/* Chat panels — one per slot, only visible one shown */}
+                <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+                  {slots.map(slot => (
+                    <div
+                      key={slot.slotId}
+                      className={cn(
+                        'absolute inset-0 flex flex-col',
+                        slot.slotId === visibleSlotId ? '' : 'hidden',
+                      )}
+                    >
+                      <ChatPanel
+                        requestedSessionKey={slot.sessionKey}
+                        onSessionLoaded={() => {}}
+                        onActiveSessionChange={(key) => handleActiveSessionChange(slot.slotId, key)}
+                        onThinkingChange={(thinking, _toolName) => handleThinkingChange(slot.sessionKey, thinking)}
+                        onModelSwitch={(model) => handleSlotModelSwitch(slot.slotId, model)}
+                        currentSessionKey={slot.sessionKey}
+                        showAgentDetails={showAgentDetails}
+                        pendingModel={slot.model || models[0]?.name}
+                        visible={page === 'chat' && slot.slotId === visibleSlotId}
+                        isMobile={isMobile}
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
+          )}
+
+          {/* Mobile chat: RightChatSidebar full-width as the primary UI.
+              Hidden via display:none when another page is active so its
+              session/voice state survives tab switches. */}
+          {isMobile && (
+            <div
+              className={cn(
+                'flex-1 flex min-h-0 overflow-hidden flex-shrink-0',
+                page === 'chat' ? '' : 'hidden',
+              )}
+            >
+              <RightChatSidebar isMobile />
+            </div>
+          )}
 
           {/* Other pages */}
           {PageComponent && <PageComponent />}

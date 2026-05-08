@@ -152,14 +152,15 @@ function loadCollapsed(): boolean {
  * of the layout. The left-sidebar voice toggle is suppressed on desktop
  * (Layout's slot-tracking effect skips when the sidebar is mounted).
  */
-export default function RightChatSidebar() {
+export default function RightChatSidebar({ isMobile = false }: { isMobile?: boolean } = {}) {
   const voice = useVoiceMode()
   const [sessionKey, setSessionKey] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
   const [agentDetails, setAgentDetails] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [width, setWidth] = useState<number>(loadStoredWidth)
-  const [collapsed, setCollapsed] = useState<boolean>(loadCollapsed)
+  // On mobile the sidebar IS the chat UI — never collapsed, full width.
+  const [collapsed, setCollapsed] = useState<boolean>(() => isMobile ? false : loadCollapsed())
   const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null)
   // ChatPanel publishes its "harness is thinking / streaming" state via
   // onThinkingChange. We mirror it here so the aura can flip to 'thinking'
@@ -328,12 +329,20 @@ export default function RightChatSidebar() {
   // voice is fully disengaged (see useEffect above), so the aura's
   // visualizerTrack is undefined and it just shows the idle animation —
   // that's the desired "voice is off" cue.
-  if (collapsed) {
+  if (collapsed && !isMobile) {
+    // Clicking anywhere on the bar expands it, except on the inner buttons —
+    // those keep their own actions (new session, stop, details, expand).
+    const handleBarClick = (e: React.MouseEvent) => {
+      if ((e.target as HTMLElement).closest('button')) return
+      toggleCollapsed()
+    }
     return (
       <TooltipProvider delayDuration={150}>
         <aside
           style={{ width: `${COLLAPSED_WIDTH}px` }}
-          className="shrink-0 h-full flex flex-col items-center gap-1.5 py-2 bg-card border-l border-border"
+          onClick={handleBarClick}
+          title="Expand chat — re-engages voice"
+          className="shrink-0 h-full flex flex-col items-center gap-1.5 py-2 bg-card border-l border-border cursor-pointer"
         >
           <AgentAudioVisualizerAura
             size="icon"
@@ -416,32 +425,34 @@ export default function RightChatSidebar() {
   // ── Expanded layout ───────────────────────────────────────────────
   return (
     <aside
-      style={{ width: `${width}px` }}
+      style={isMobile ? undefined : { width: `${width}px` }}
       className={cn(
-        'shrink-0 h-full flex flex-col bg-card border-l border-border relative',
+        'h-full flex flex-col bg-card relative',
+        isMobile ? 'w-full flex-1 min-h-0' : 'shrink-0 border-l border-border',
       )}
     >
-      {/* Resize handle on the left edge. 6px wide hot zone with a subtle
-          line that highlights on hover. */}
-      <div
-        onMouseDown={onResizeStart}
-        className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 z-10 cursor-col-resize group"
-        aria-label="Resize sidebar"
-        role="separator"
-      >
-        <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border group-hover:bg-primary/60 transition-colors" />
-      </div>
-
-      {/* Collapse chevron — anchored to the upper-left corner of the sidebar.
-          z-20 keeps it clickable above the resize handle's hot zone. */}
-      <button
-        onClick={toggleCollapsed}
-        title="Collapse chat — disengages voice"
-        className="absolute top-1.5 left-1.5 z-20 h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-        aria-label="Collapse chat sidebar"
-      >
-        <ChevronsRight className="w-4 h-4" />
-      </button>
+      {/* Resize handle + collapse chevron — desktop only. On mobile the
+          sidebar IS the chat UI, so resizing/collapsing don't apply. */}
+      {!isMobile && (
+        <>
+          <div
+            onMouseDown={onResizeStart}
+            className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 z-10 cursor-col-resize group"
+            aria-label="Resize sidebar"
+            role="separator"
+          >
+            <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border group-hover:bg-primary/60 transition-colors" />
+          </div>
+          <button
+            onClick={toggleCollapsed}
+            title="Collapse chat — disengages voice"
+            className="absolute top-1.5 left-1.5 z-20 h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+            aria-label="Collapse chat sidebar"
+          >
+            <ChevronsRight className="w-4 h-4" />
+          </button>
+        </>
+      )}
 
       {/* Header: aura centered (not stretched) on the left, stacked
           controls on the right. Right column owns its own height; aura
@@ -523,6 +534,7 @@ export default function RightChatSidebar() {
             visible={true}
             showAgentDetails={agentDetails}
             compact
+            isMobile={isMobile}
             onThinkingChange={(thinking) => setChatThinking(thinking)}
           />
         ) : (
