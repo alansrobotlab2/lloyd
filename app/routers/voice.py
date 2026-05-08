@@ -263,11 +263,32 @@ async def livekit_mint_token(request: Request):
         .to_jwt()
     )
     return JSONResponse({
-        "url": lk_cfg.get("url", "ws://127.0.0.1:7880"),
+        "url": _livekit_url_for_request(request, lk_cfg),
         "token": token,
         "room": room_name,
         "identity": identity,
     })
+
+
+def _livekit_url_for_request(request: Request, lk_cfg: dict) -> str:
+    """Build the WebSocket URL the browser should use to reach LiveKit.
+
+    Clients connect through the Vite proxy at /livekit, so the URL is derived
+    from the public host the browser used (forwarded by Vite as
+    X-Forwarded-Host / X-Forwarded-Proto). The agent worker uses the
+    ``livekit.url`` internal URL — that one is NOT exposed to browsers. An
+    explicit ``livekit.client_url`` in config still wins for advanced setups.
+    """
+    explicit = (lk_cfg.get("client_url") or "").strip()
+    if explicit:
+        return explicit
+
+    fwd_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    fwd_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    host = fwd_host or request.headers.get("host") or "localhost:5173"
+    proto = fwd_proto or request.url.scheme
+    scheme = "wss" if proto == "https" else "ws"
+    return f"{scheme}://{host}/livekit"
 
 
 # ── /api/voice/speakers ───────────────────────────────────────────────────

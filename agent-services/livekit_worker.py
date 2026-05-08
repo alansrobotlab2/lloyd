@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
+import re
 import yaml
 from livekit import api as lkapi
 from livekit import rtc
@@ -41,8 +42,45 @@ LOG = logging.getLogger("lloyd-agent-worker")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config.yaml"
+ENV_PATH = REPO_ROOT / ".env"
 INJECT_URL = "http://127.0.0.1:8080/api/voice/inject"
 SUMMARIZE_URL = "http://127.0.0.1:8080/api/voice/summarize"
+
+_ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+
+
+def _load_env_file(path: Path) -> None:
+    """Mirror of app.config._load_env_file — keeps this module standalone.
+
+    Reads simple KEY=VALUE lines from .env into os.environ (without
+    overriding values already present). Supervisord-set env still wins.
+    """
+    if not path.exists():
+        return
+    try:
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                v = v[1:-1]
+            os.environ.setdefault(k, v)
+    except OSError:
+        pass
+
+
+def _expand_env(value):
+    """Recursively expand ${VAR} in strings within a dict/list tree."""
+    if isinstance(value, str):
+        return _ENV_VAR_RE.sub(lambda m: os.environ.get(m.group(1), ""), value)
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    return value
 
 POLL_INTERVAL = 2.0           # seconds between RoomService polls
 DEFAULT_ROOM_PREFIX = "lloyd-"
@@ -71,11 +109,13 @@ def _build_speaker_id(vp_cfg: dict):
 
 
 def _load_cfg() -> dict:
+    _load_env_file(ENV_PATH)
     with CONFIG_PATH.open() as f:
         cfg = yaml.safe_load(f) or {}
+    cfg = _expand_env(cfg)
     lk = cfg.get("livekit") or {}
     if not lk.get("url") or not lk.get("api_key") or not lk.get("api_secret"):
-        raise SystemExit("config.yaml: livekit.{url,api_key,api_secret} are required")
+        raise SystemExit("config.yaml: livekit.{url,api_key,api_secret} are required (check .env for LIVEKIT_API_KEY/LIVEKIT_API_SECRET)")
     return cfg
 
 

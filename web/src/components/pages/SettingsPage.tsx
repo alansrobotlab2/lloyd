@@ -1,5 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Mic, Square, Trash2, RefreshCw, AlertCircle, CheckCircle2 } from 'lucide-react'
+import {
+  Mic,
+  Square,
+  Trash2,
+  RefreshCw,
+  AlertCircle,
+  CheckCircle2,
+  Copy,
+  Check,
+  Download,
+  Wifi,
+  ShieldCheck,
+  Plus,
+} from 'lucide-react'
 import { api } from '../../api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -345,6 +358,381 @@ function VoiceProfilesCard() {
   )
 }
 
+interface ClientCert {
+  name: string
+  fingerprint: string
+  issued_at: string
+}
+
+interface NewlyMinted {
+  name: string
+  passphrase: string
+}
+
+function shortFp(fp: string): string {
+  if (!fp) return ''
+  const u = fp.toUpperCase()
+  return `${u.slice(0, 8)}…${u.slice(-8)}`
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+function DevicesCard() {
+  const [info, setInfo] = useState<{
+    lan_ip: string | null
+    hostname: string
+    https_url: string | null
+    ca_available: boolean
+  } | null>(null)
+  const [identity, setIdentity] = useState<{ name: string | null; fingerprint: string | null } | null>(null)
+  const [clients, setClients] = useState<ClientCert[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
+  const [newName, setNewName] = useState('')
+  const [newPass, setNewPass] = useState('')
+  const [minting, setMinting] = useState(false)
+  const [justMinted, setJustMinted] = useState<NewlyMinted | null>(null)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [i, id, cs] = await Promise.all([
+        api.getLanInfo(),
+        api.getIdentity(),
+        api.listClients(),
+      ])
+      setInfo(i)
+      setIdentity(id)
+      setClients(cs.clients)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const copy = async (label: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(label)
+      setTimeout(() => setCopied(null), 1200)
+    } catch {
+      setError('Clipboard access denied')
+    }
+  }
+
+  const downloadCa = async () => {
+    setError(null)
+    try {
+      downloadBlob(await api.getCABlob(), 'lloyd-ca.crt')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const downloadP12 = async (name: string) => {
+    setError(null)
+    try {
+      downloadBlob(await api.downloadClientP12(name), `lloyd-${name}.p12`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const validName = /^[a-zA-Z0-9_-]+$/.test(newName.trim())
+  const trimmedName = newName.trim()
+  const nameTaken = clients.some(c => c.name.toLowerCase() === trimmedName.toLowerCase())
+
+  const mint = async () => {
+    if (!trimmedName || !validName || nameTaken) return
+    setMinting(true)
+    setError(null)
+    setJustMinted(null)
+    try {
+      const r = await api.mintClient(trimmedName, newPass.trim() || undefined)
+      setJustMinted({ name: r.name, passphrase: r.passphrase })
+      setNewName('')
+      setNewPass('')
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setMinting(false)
+    }
+  }
+
+  const revoke = async (name: string) => {
+    const isYou = identity?.name === name
+    const msg = isYou
+      ? `'${name}' is the cert YOU are using. Revoking it will lock you out immediately. Continue?`
+      : `Revoke client cert '${name}'? Devices using it will lose access immediately.`
+    if (!confirm(msg)) return
+    setError(null)
+    try {
+      await api.revokeClient(name)
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Wifi className="w-5 h-5" /> LAN / remote access
+        </CardTitle>
+        <CardDescription>
+          Lloyd uses mutual TLS — every device needs a client cert (signed by the on-host CA)
+          to reach the API. Mint one cert per device and install it in that device's keystore.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {error && (
+          <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span className="break-words">{error}</span>
+          </div>
+        )}
+
+        {/* URL + identity */}
+        <div className="space-y-3">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1">
+              URL for other devices
+            </div>
+            {loading ? (
+              <div className="text-sm text-muted-foreground">Detecting…</div>
+            ) : info?.https_url ? (
+              <div className="flex items-center gap-2">
+                <code className="flex-1 rounded-md border border-border bg-card/50 px-3 py-2 text-sm font-mono break-all">
+                  {info.https_url}
+                </code>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => copy('url', info.https_url!)}
+                  aria-label="Copy URL"
+                >
+                  {copied === 'url' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                </Button>
+              </div>
+            ) : (
+              <div className="text-sm text-amber-400">Could not detect a LAN IP.</div>
+            )}
+            {info?.hostname && (
+              <div className="text-xs text-muted-foreground mt-1">
+                Host: <span className="font-mono">{info.hostname}</span>
+                {info.lan_ip && <> · IP: <span className="font-mono">{info.lan_ip}</span></>}
+              </div>
+            )}
+          </div>
+
+          {identity?.name && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              You are connected as <span className="font-mono text-foreground">{identity.name}</span>
+              {identity.fingerprint && (
+                <span className="text-muted-foreground">
+                  · fp <span className="font-mono">{shortFp(identity.fingerprint)}</span>
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* CA cert */}
+        <div className="rounded-md border border-border bg-card/50 p-4 space-y-2">
+          <div className="text-sm font-medium">Step 1 — install the CA on every device</div>
+          <div className="text-xs text-muted-foreground">
+            Each device must trust the Lloyd CA. Download once, install in the OS trust store.
+            (Firefox keeps its own store — import via Settings → Privacy &amp; Security.)
+          </div>
+          <Button onClick={downloadCa} disabled={!info?.ca_available} variant="outline">
+            <Download className="w-4 h-4 mr-2" /> Download CA cert (lloyd-ca.crt)
+          </Button>
+          {!info?.ca_available && (
+            <div className="text-xs text-amber-400">
+              CA not found. Run: <code>bash scripts/gen-cert.sh</code>
+            </div>
+          )}
+        </div>
+
+        {/* Mint device cert */}
+        <div className="rounded-md border border-border bg-card/50 p-4 space-y-3">
+          <div className="text-sm font-medium">Step 2 — mint a client cert for each device</div>
+          <div className="text-xs text-muted-foreground">
+            One cert per device. Install the .p12 in the device's OS keystore (or Firefox cert
+            manager). The browser will offer the cert when connecting.
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <Input
+              placeholder="device name (e.g. phone, laptop)"
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              disabled={minting}
+              className="sm:max-w-[220px]"
+            />
+            <Input
+              placeholder="passphrase (default: lloyd)"
+              value={newPass}
+              onChange={e => setNewPass(e.target.value)}
+              disabled={minting}
+              className="sm:max-w-[220px]"
+            />
+            <Button
+              onClick={mint}
+              disabled={minting || !trimmedName || !validName || nameTaken}
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              {minting ? 'Minting…' : 'Mint + download'}
+            </Button>
+          </div>
+          {trimmedName && !validName && (
+            <div className="text-xs text-destructive">
+              Name must be alphanumeric (with - or _ allowed)
+            </div>
+          )}
+          {trimmedName && validName && nameTaken && (
+            <div className="text-xs text-amber-400">
+              '{trimmedName}' already exists — revoke it first or pick a different name
+            </div>
+          )}
+          {justMinted && (
+            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs">
+              <div className="flex items-start gap-2 text-emerald-300">
+                <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <div className="break-words space-y-1">
+                  <div>Minted '<span className="font-mono">{justMinted.name}</span>'.
+                    Passphrase: <span className="font-mono">{justMinted.passphrase}</span></div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-1"
+                    onClick={() => downloadP12(justMinted.name)}
+                  >
+                    <Download className="w-3.5 h-3.5 mr-1.5" /> Download .p12
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer select-none hover:text-foreground">
+              How to install a client cert per OS
+            </summary>
+            <div className="mt-2 space-y-2 pl-2 border-l-2 border-border">
+              <div>
+                <span className="font-medium text-foreground">macOS:</span> double-click the .p12
+                → Keychain Access → enter passphrase → drag the imported cert to "login" or "System".
+              </div>
+              <div>
+                <span className="font-medium text-foreground">Windows:</span> double-click → Certificate
+                Import Wizard → enter passphrase → place in <em>Personal</em> store.
+              </div>
+              <div>
+                <span className="font-medium text-foreground">Linux (Chrome):</span> Settings →
+                Privacy &amp; Security → Security → Manage device certificates → "Your certificates"
+                → Import.
+              </div>
+              <div>
+                <span className="font-medium text-foreground">iOS:</span> AirDrop or email the .p12
+                → Settings → "Profile Downloaded" → Install → enter passphrase. Then Settings →
+                General → About → Certificate Trust Settings → enable for the Lloyd CA.
+              </div>
+              <div>
+                <span className="font-medium text-foreground">Android:</span> Settings → Security →
+                Encryption &amp; credentials → Install a certificate → VPN &amp; app user certificate.
+              </div>
+              <div>
+                <span className="font-medium text-foreground">Firefox (any OS):</span> Settings →
+                Privacy &amp; Security → Certificates → View Certificates → Your Certificates → Import.
+              </div>
+            </div>
+          </details>
+        </div>
+
+        {/* Devices list */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-medium">
+              Authorised devices
+              {!loading && (
+                <span className="ml-2 text-xs text-muted-foreground">({clients.length})</span>
+              )}
+            </div>
+            <Button variant="ghost" size="sm" onClick={refresh} disabled={loading}>
+              <RefreshCw className={cn("w-3.5 h-3.5 mr-1.5", loading && "animate-spin")} /> Refresh
+            </Button>
+          </div>
+          {loading ? (
+            <div className="text-xs text-muted-foreground">Loading…</div>
+          ) : clients.length === 0 ? (
+            <div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-xs text-muted-foreground">
+              No devices yet. Mint one above.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {clients.map(c => {
+                const isYou = identity?.name === c.name
+                return (
+                  <div
+                    key={c.name}
+                    className="flex items-center justify-between rounded-md border border-border bg-card/30 px-3 py-2"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ShieldCheck className={cn("w-4 h-4 flex-shrink-0", isYou ? "text-emerald-400" : "text-muted-foreground")} />
+                      <span className="font-mono text-sm truncate">{c.name}</span>
+                      {isYou && <Badge variant="outline" className="text-[10px]">you</Badge>}
+                      <span className="text-[10px] font-mono text-muted-foreground">
+                        {shortFp(c.fingerprint)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => downloadP12(c.name)}
+                        className="text-muted-foreground hover:text-foreground"
+                        aria-label={`Download .p12 for ${c.name}`}
+                      >
+                        <Download className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => revoke(c.name)}
+                        className="text-muted-foreground hover:text-destructive"
+                        aria-label={`Revoke ${c.name}`}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 export default function SettingsPage() {
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6">
@@ -355,6 +743,7 @@ export default function SettingsPage() {
         </p>
       </div>
       <VoiceProfilesCard />
+      <DevicesCard />
     </div>
   )
 }

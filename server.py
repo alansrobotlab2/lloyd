@@ -5,11 +5,14 @@ Creates the FastAPI app, mounts every router under app/routers/, wires the
 autonomy startup ticker, and starts uvicorn. All business logic lives in app/.
 """
 
+import json
 import logging
+from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import CONFIG
 from app.lifecycle import shutdown_cleanup
@@ -29,10 +32,33 @@ from app.routers import messages as _messages_router
 from app.routers import workers as _workers_router
 from app.routers import inner_voice as _inner_voice_router
 from app.routers import mc_ui as _mc_ui_router
+from app.routers import system as _system_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("lloyd-server")
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+CLIENTS_JSON = REPO_ROOT / "agent-services" / "cert" / "clients.json"
+
+
+def _load_allowlist() -> dict[str, str]:
+    """Read clients.json and return {fingerprint_uppercase: name}.
+
+    Re-read on every request so revocations take effect without a backend
+    restart. This file is small (one entry per device) and the I/O is cheap.
+    """
+    try:
+        data = json.loads(CLIENTS_JSON.read_text() or "{}")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    out: dict[str, str] = {}
+    for name, entry in data.items():
+        fp = (entry.get("fingerprint") or "").upper().replace(":", "")
+        if fp:
+            out[fp] = name
+    return out
 
 
 app = FastAPI(title="Lloyd Mission Control")
@@ -43,6 +69,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _require_client_cert(request: Request, call_next):
+    """Enforce the per-device client cert allowlist on /api/* routes.
+
+    Vite has already verified the cert was signed by the Lloyd CA at the TLS
+    layer (requestCert + rejectUnauthorized). Vite's configureServer plugin
+    forwards the SHA-256 fingerprint as X-Client-Fingerprint. Here we check
+    that the fingerprint is in clients.json — revocation = remove from json.
+    """
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+
+    fp = (request.headers.get("x-client-fingerprint") or "").upper().replace(":", "")
+    if not fp:
+        return JSONResponse(
+            {"detail": "no client cert fingerprint forwarded — Vite mTLS not configured?"},
+            status_code=401,
+        )
+    allowlist = _load_allowlist()
+    if fp not in allowlist:
+        return JSONResponse(
+            {"detail": "client cert revoked or unknown"},
+            status_code=403,
+        )
+    # Stash the cert identity for handlers that want to log/use it.
+    request.state.client_name = allowlist[fp]
+    request.state.client_fingerprint = fp
+    return await call_next(request)
 
 app.include_router(_messages_router.router)
 app.include_router(_sessions_router.router)
@@ -59,6 +118,7 @@ app.include_router(_voice_router.router)
 app.include_router(_workers_router.router)
 app.include_router(_inner_voice_router.router)
 app.include_router(_mc_ui_router.router)
+app.include_router(_system_router.router)
 
 app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
 app.on_event("startup")(_workers_router.start_worker_pool)
