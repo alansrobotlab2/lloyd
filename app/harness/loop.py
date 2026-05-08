@@ -634,21 +634,24 @@ async def _dispatch_one_tool_call(
             call_id=call_id, name=name, content=content, is_error=False,
         )
 
-    # Defensive intercept: vLLM should only dispatch tools that are in the
-    # ``tools=`` array we sent, but the qwen3_xml parser is lenient and may
-    # let an unadvertised name through. Catch it before MCP and guide the
-    # model back to ToolSearch instead of failing opaquely.
+    # Soft gate: if the model calls a deferred tool that's in the catalog
+    # but not yet loaded, treat that as an implicit ToolSearch and proceed.
+    # Rationale: a strict reject made parallel batches pathological — N
+    # parallel calls to the same unloaded tool would each independently
+    # fail with the same "call ToolSearch first" error, wasting N-1
+    # dispatches before the model could recover. ToolSearch is now a
+    # context-optimization hint (load schemas in advance to keep prompts
+    # slim), not a hard gate. Truly unknown names (not in the catalog at
+    # all) still fall through to MCP, which returns its own clean
+    # "tool not found" error.
     if loaded_set.enabled and not loaded_set.is_visible(name):
         catalog_names = {t["function"]["name"] for t in loaded_set.catalog}
         if name in catalog_names:
-            return events.tool_result(
-                call_id=call_id, name=name,
-                content=(
-                    f"Tool {name!r} requires schema loading before it can be "
-                    f"called. Call ToolSearch(query=\"select:{name}\") first, "
-                    f"then retry."
-                ),
-                is_error=True,
+            loaded_set.mark_loaded([name])
+            logger.info(
+                "loop: auto-loaded schema for %r on direct call (no prior "
+                "ToolSearch); loaded set now %d.",
+                name, len(loaded_set.loaded),
             )
 
     # PreToolUse — first deny wins.
@@ -851,7 +854,7 @@ def _inject_catalog_reminder(
     only the reminder body — same constraint, just no leading content
     to merge into.
     """
-    body = format_catalog_reminder(loaded_set.catalog)
+    body = format_catalog_reminder(loaded_set.catalog, loaded=loaded_set.loaded)
     if not body:
         return
     addendum = f"\n\n{_CATALOG_REMINDER_MARKER}\n{body}"
