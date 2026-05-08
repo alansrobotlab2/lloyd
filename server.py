@@ -86,6 +86,13 @@ async def _require_client_cert(request: Request, call_next):
     if not path.startswith("/api/"):
         return await call_next(request)
 
+    # Loopback bypass: same-host services (LiveKit worker, autonomy ticker)
+    # POST directly to 127.0.0.1:8080 without going through Vite's TLS
+    # layer. mTLS is a LAN-browser allowlist; trust same-host callers.
+    client_host = request.client.host if request.client else ""
+    if client_host in ("127.0.0.1", "::1"):
+        return await call_next(request)
+
     fp = (request.headers.get("x-client-fingerprint") or "").upper().replace(":", "")
     if not fp:
         return JSONResponse(

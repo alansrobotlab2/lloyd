@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  LocalAudioTrack,
   Room,
   RoomEvent,
   Track,
-  type LocalAudioTrack,
   type RemoteAudioTrack,
   type RemoteTrack,
   type RemoteTrackPublication,
@@ -12,6 +12,7 @@ import {
 import { RoomContext, RoomAudioRenderer, useTrackVolume } from '@livekit/components-react'
 import type { AgentState } from '@livekit/components-react'
 import { api } from '../api'
+import { getMicGain, subscribeMicGain } from '../lib/micGain'
 
 const AGENT_IDENTITY_PREFIX = 'lloyd-agent'
 // Volume threshold (0..1 from useTrackVolume) above which we treat the agent
@@ -151,6 +152,14 @@ export default function VoiceRoom({
     return () => { cancelled = true }
   }, [halfDuplex, micPublished, agentSpeaking, micMuted, room])
 
+  // Refs holding the audio-graph nodes that intercept the mic stream so
+  // we can apply a per-client gain stage. Created on publish, torn down
+  // on disconnect. The gain ref is exposed via subscribeMicGain so the
+  // settings slider can ramp it live without republishing the track.
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const gainNodeRef = useRef<GainNode | null>(null)
+  const rawStreamRef = useRef<MediaStream | null>(null)
+
   useEffect(() => {
     let cancelled = false
 
@@ -244,19 +253,47 @@ export default function VoiceRoom({
             setError(hint)
           } else {
             try {
-              // Explicit AEC + noise suppression + AGC. Defaults are
-              // usually true but spelling them out keeps half-duplex
-              // mute and echo cancellation cooperating predictably.
-              await room.localParticipant.setMicrophoneEnabled(true, {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
+              // Manual capture chain so we can sit a per-client GainNode
+              // between the mic and LiveKit. Browser AEC/NS/AGC stays on;
+              // our gain stage runs in series with them. The processed
+              // stream is wrapped in a LocalAudioTrack tagged as
+              // Track.Source.Microphone, so setMicrophoneEnabled(false)
+              // and the existing half-duplex mute logic still find it.
+              const raw = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true,
+                  channelCount: 1,
+                },
+              })
+              if (cancelled) {
+                raw.getTracks().forEach(t => t.stop())
+                return
+              }
+              rawStreamRef.current = raw
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
+              const ctx = new AC()
+              if (ctx.state === 'suspended') {
+                try { await ctx.resume() } catch { /* will fail silently if no gesture */ }
+              }
+              const src = ctx.createMediaStreamSource(raw)
+              const gain = ctx.createGain()
+              gain.gain.value = getMicGain()
+              const dest = ctx.createMediaStreamDestination()
+              src.connect(gain).connect(dest)
+              audioCtxRef.current = ctx
+              gainNodeRef.current = gain
+
+              const processedTrack = dest.stream.getAudioTracks()[0]
+              const lkTrack = new LocalAudioTrack(processedTrack, undefined, false)
+              await room.localParticipant.publishTrack(lkTrack, {
+                source: Track.Source.Microphone,
               })
               if (cancelled) return
-              const pub = room.localParticipant.getTrackPublication(Track.Source.Microphone)
-              const track = pub?.audioTrack as LocalAudioTrack | undefined
-              setLocalAudioTrack(track)
-              setMicPublished(!!track)
+              setLocalAudioTrack(lkTrack)
+              setMicPublished(true)
             } catch (e) {
               // Permission denied, no device, or revoked — keep the room
               // alive but surface the error to the UI.
@@ -285,9 +322,36 @@ export default function VoiceRoom({
       room.off(RoomEvent.DataReceived, onDataReceived)
       // Disconnect, but keep the Room instance for re-use on reconnectKey bump.
       room.disconnect().catch(() => {})
+      // Tear down our audio graph. LocalAudioTrack.stop() handles the
+      // processed track; we still own the raw getUserMedia stream and
+      // the AudioContext.
+      try { rawStreamRef.current?.getTracks().forEach(t => t.stop()) } catch { /* noop */ }
+      rawStreamRef.current = null
+      try { gainNodeRef.current?.disconnect() } catch { /* noop */ }
+      gainNodeRef.current = null
+      const ctx = audioCtxRef.current
+      audioCtxRef.current = null
+      if (ctx) { void ctx.close().catch(() => {}) }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, publishMic, reconnectKey])
+
+  // Live gain updates from the settings slider. Ramp over 50ms so a fast
+  // drag doesn't introduce zipper artifacts.
+  useEffect(() => {
+    const apply = (g: number) => {
+      const node = gainNodeRef.current
+      const ctx = audioCtxRef.current
+      if (!node || !ctx) return
+      try {
+        node.gain.setTargetAtTime(g, ctx.currentTime, 0.05)
+      } catch {
+        node.gain.value = g
+      }
+    }
+    apply(getMicGain())
+    return subscribeMicGain(apply)
+  }, [micPublished])
 
   // 'speaking' only when the agent track is actually producing audio
   // (volume above threshold). Otherwise 'listening' if user mic is on,

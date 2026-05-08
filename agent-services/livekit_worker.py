@@ -754,8 +754,9 @@ class UtteranceSegmenter:
 
     LEAD_IN_MS = 200
 
-    def __init__(self, vad_cfg: dict, sample_rate: int) -> None:
+    def __init__(self, vad_cfg: dict, sample_rate: int, room_name: str = "") -> None:
         self.sample_rate = sample_rate
+        self.room_name = room_name
         self.speech_rms = float(vad_cfg.get("speech_rms", 0.025))
         self.silence_ms = int(vad_cfg.get("silence_ms", 500))
         self.min_ms = int(vad_cfg.get("min_utterance_ms", 350))
@@ -838,15 +839,20 @@ class UtteranceSegmenter:
             voiced = self._voiced_samples
             buf_count = self._buf_count
             self._reset()
+            dur_s = utterance.size / max(1, self.sample_rate)
             if utterance.size < self._min_samples:
+                LOG.info(
+                    "[%s][diag-drop] reason=too_short dur=%.2fs min=%.2fs voiced_samples=%d",
+                    self.room_name or "?", dur_s, self._min_samples / max(1, self.sample_rate), voiced,
+                )
                 return None
-            # Voiced-ratio gate: real speech is mostly voiced; near-silence
-            # utterances that briefly tripped the trigger should be dropped.
-            # Compute against the speaking-state frames only (excludes
-            # lead-in and trailing silence).
             voicing_window = max(1, buf_count - self._lead_in_samples - self._silence_samples)
             voiced_ratio = voiced / voicing_window
             if voiced_ratio < self.min_voiced_ratio:
+                LOG.info(
+                    "[%s][diag-drop] reason=low_voiced dur=%.2fs voiced_ratio=%.2f min=%.2f",
+                    self.room_name or "?", dur_s, voiced_ratio, self.min_voiced_ratio,
+                )
                 return None
             return utterance
         return None
@@ -1193,7 +1199,7 @@ class RoomBridge:
                 if frame.num_channels > 1:
                     samples = samples.reshape(-1, frame.num_channels).mean(axis=1).astype(np.int16)
                 if segmenter is None:
-                    segmenter = UtteranceSegmenter(self.vad_cfg, frame.sample_rate)
+                    segmenter = UtteranceSegmenter(self.vad_cfg, frame.sample_rate, self.room_name)
                 utterance = segmenter.push(samples)
                 if utterance is not None:
                     task = asyncio.create_task(
@@ -1229,17 +1235,29 @@ class RoomBridge:
 
     async def _handle_utterance(self, samples: np.ndarray, sample_rate: int, identity: str) -> None:
         duration_s = samples.size / sample_rate
-        # Approximate utterance start time on the worker's monotonic clock.
-        # Used by the continuation check so a follow-up that began in-window
-        # but finished processing just past expiry still counts.
+
+        # Diagnostic stats: mean/peak RMS over the whole utterance and a
+        # voiced-ratio computed in 10ms windows (mirrors the VAD's frame
+        # view). Cheap O(n) numpy ops on a few hundred ms of audio.
+        f32 = samples.astype(np.float32) / 32768.0
+        if f32.size:
+            rms_mean = float(np.sqrt(np.mean(f32 * f32)))
+            rms_peak = float(np.max(np.abs(f32)))
+            chunk = max(1, sample_rate // 100)
+            n_chunks = f32.size // chunk
+            if n_chunks > 0:
+                trimmed = f32[: n_chunks * chunk].reshape(n_chunks, chunk)
+                chunk_rms = np.sqrt(np.mean(trimmed * trimmed, axis=1))
+                voiced_ratio = float(np.mean(chunk_rms >= float(self.vad_cfg.get("speech_rms", 0.025))))
+            else:
+                voiced_ratio = 0.0
+        else:
+            rms_mean = rms_peak = voiced_ratio = 0.0
+
         utterance_start_t = time.monotonic() - duration_s
         wake = self.wake
         in_continuation = wake.enabled and wake.matches_lock(identity, at=utterance_start_t)
 
-        # Kick off Whisper as a background task so we can process openWakeWord
-        # in parallel and publish the wake-state event to the UI as soon as
-        # acoustic detection fires — without waiting ~400ms for transcription.
-        # Whisper's result is still needed for the actual text injection.
         stt_task = asyncio.create_task(self.stt.transcribe(samples, sample_rate))
         t0 = time.monotonic()
 
@@ -1247,8 +1265,10 @@ class RoomBridge:
         ww_already_fired = False
         ww_name = ""
         ww_score = 0.0
+        ww_ran = False
         if wake.enabled and not in_continuation and self.acoustic_wake is not None:
             ww_match, ww_name, ww_score = await self.acoustic_wake.detect(samples, sample_rate)
+            ww_ran = True
             if ww_match:
                 # Run embedding + state-publish before waiting for Whisper.
                 # This is the latency-critical path — the UI flips to
@@ -1269,9 +1289,20 @@ class RoomBridge:
         try:
             text = await stt_task
         except Exception as e:
-            LOG.warning("[%s] STT failed for %.2fs utterance: %s", self.room_name, duration_s, e)
+            LOG.warning(
+                "[%s][diag] STT_FAIL dur=%.2fs rms_mean=%.3f rms_peak=%.3f voiced=%.2f ww=%s err=%s",
+                self.room_name, duration_s, rms_mean, rms_peak, voiced_ratio,
+                f"{ww_name or '-'}:{ww_score:.2f}" if ww_ran else "skipped",
+                e,
+            )
             return
         latency = time.monotonic() - t0
+        LOG.info(
+            "[%s][diag] dur=%.2fs rms_mean=%.3f rms_peak=%.3f voiced=%.2f ww=%s stt_lat=%.2fs cont=%s text=%r",
+            self.room_name, duration_s, rms_mean, rms_peak, voiced_ratio,
+            f"{ww_name or '-'}:{ww_score:.2f}" if ww_ran else "skipped",
+            latency, "Y" if in_continuation else "N", (text or "")[:80],
+        )
         if not text:
             # Empty transcript. If acoustic wake-word already fired, treat as
             # bare wake-word (window already opened above). Otherwise drop.
