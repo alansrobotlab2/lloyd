@@ -133,8 +133,10 @@ def main():
         sys.exit(0)
 
     output_blocks = []
+    print(f"DEBUG: Processing {len(recent_files)} recent files", file=sys.stderr)
     for filepath in sorted(recent_files):
-        session_id, session_ts, entries = process_fn(filepath, last_run_ts)
+        session_id, session_ts, entries = process_lloyd_session(filepath, last_run_ts)
+        print(f"DEBUG: {os.path.basename(filepath)} -> {len(entries)} entries", file=sys.stderr)
         if not entries:
             continue
 
