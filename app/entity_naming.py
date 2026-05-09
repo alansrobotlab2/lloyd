@@ -1,29 +1,28 @@
 """Shared entity-name normalization for Lloyd's memory graph.
 
 This is the single source of truth for resolving entity names before any
-read or write under ~/obsidian/facts/. Every code path that touches the
+read or write under the facts tree. Every code path that touches the
 facts tree (routers, extractors, classifiers, profile generators) must
 normalize through this module.
 
-Key facts about the data layout (as of 2026-04-21):
+Key facts about the data layout:
 
-- `~/obsidian/facts/entity-aliases.json` is a flat
-  `{surface_form: canonical_name}` map. Keys are case-sensitive surface
-  forms; multiple casings/punctuations can map to the same canonical.
-- `~/obsidian/facts/entity-registry.json` is metadata only — it does NOT
-  carry any canonical_mapping field, despite what older docs claimed.
-- One dir per canonical entity under `~/obsidian/facts/<Name>/`.
+- `entity-aliases.json` is a flat `{surface_form: canonical_name}` map.
+  Keys are case-sensitive surface forms; multiple casings/punctuations
+  can map to the same canonical.
+- `entity-registry.json` is metadata only — it does NOT carry any
+  canonical_mapping field, despite what older docs claimed.
+- One dir per canonical entity under `<facts_root>/<Name>/`.
 
-See `~/obsidian/skills/entity-name-normalization/SKILL.md`.
+The facts root lives at `app.paths.VAULT_FACTS_ROOT` (currently
+`~/lloyd/_pipeline/vault-derived/facts/`).
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-FACTS = Path.home() / "obsidian" / "facts"
-_ALIASES_PATH = FACTS / "entity-aliases.json"
+from app.paths import VAULT_FACTS_ALIASES as _ALIASES_PATH
 
 _ALIAS_CACHE: dict = {"mtime": 0.0, "map": {}}
 
@@ -66,7 +65,7 @@ def normalize(name: str) -> str:
 
     Returns the input unchanged if no alias matches. Safe to call on empty
     strings. This is the function every reader/writer should use before
-    touching ~/obsidian/facts/.
+    touching the facts tree.
     """
     if not name:
         return name

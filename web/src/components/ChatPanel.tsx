@@ -442,21 +442,20 @@ export default function ChatPanel({
     return () => clearInterval(interval)
   }, [sessionKey, thinking])
 
-  // Auto-scroll on new messages. 'auto' during streaming so smooth-scroll
-  // animations don't pile up and jank the main thread.
+  // Auto-scroll on new activity. 'auto' during streaming so smooth-scroll
+  // animations don't pile up and jank the main thread. Follows by default;
+  // pauses only when the user has explicitly scrolled away from the bottom
+  // (handleScroll keeps isNearBottom in sync). Watches timelineRight too so
+  // Inner Voice observation polls also nudge the view.
   useEffect(() => {
-    if (messages.length === 0) return
+    const hasContent = messages.length > 0 || (timelineRight && timelineRight.length > 0)
+    if (!hasContent) return
     const el = messagesContainerRef.current
     if (!el) return
-    if (thinking) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
-    } else {
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200
-      if (nearBottom) {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-      }
+    if (thinking || isNearBottom.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: thinking ? 'auto' : 'smooth' })
     }
-  }, [messages, thinking])
+  }, [messages, timelineRight, thinking])
 
   const loadMessages = async (key: string, onLoaded?: () => void) => {
     if (!key) return
