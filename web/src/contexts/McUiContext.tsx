@@ -34,6 +34,12 @@ export interface PendingFileChange {
   seq: number
 }
 
+export interface PendingCloseModal {
+  tab: Page
+  // Bumped on each new event so consumers can re-fire on duplicates.
+  seq: number
+}
+
 interface McUiContextValue {
   currentTab: Page
   setCurrentTab: (tab: Page) => void
@@ -63,6 +69,11 @@ interface McUiContextValue {
   // or conflict banner depending on tab state).
   pendingFileChange: PendingFileChange | null
   setPendingFileChange: (next: PendingFileChange | null) => void
+
+  // Set by the navigate-events hook when the agent issues a close_modal.
+  // Pages that own modals read + apply it (sequence-gated).
+  pendingCloseModal: PendingCloseModal | null
+  setPendingCloseModal: (next: PendingCloseModal | null) => void
 }
 
 const McUiContext = createContext<McUiContextValue | null>(null)
@@ -79,6 +90,7 @@ export function McUiProvider({ children, initialTab = 'inner_voice' }: ProviderP
   const [ideState, setIdeState] = useState<IdeState | null>(null)
   const [pendingIdeAction, setPendingIdeAction] = useState<PendingIdeAction | null>(null)
   const [pendingFileChange, setPendingFileChange] = useState<PendingFileChange | null>(null)
+  const [pendingCloseModal, setPendingCloseModal] = useState<PendingCloseModal | null>(null)
 
   // reportFocus is called from inside render via a useEffect in each page.
   // Skip state updates that wouldn't change anything, otherwise React loops.
@@ -130,8 +142,11 @@ export function McUiProvider({ children, initialTab = 'inner_voice' }: ProviderP
     setPendingIdeAction,
     pendingFileChange,
     setPendingFileChange,
+    pendingCloseModal,
+    setPendingCloseModal,
   }), [currentTab, focusByTab, reportFocus, pendingFocus, consumePendingFocus,
-       ideState, reportIdeState, pendingIdeAction, pendingFileChange])
+       ideState, reportIdeState, pendingIdeAction, pendingFileChange,
+       pendingCloseModal])
 
   return <McUiContext.Provider value={value}>{children}</McUiContext.Provider>
 }

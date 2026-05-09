@@ -41,11 +41,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-FACTS_ROOT = Path.home() / "obsidian" / "facts"
+from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_FACTS_ALIASES as ALIASES_PATH
+
 REL_PATH = FACTS_ROOT / "_relationships.json"
-ALIASES_PATH = FACTS_ROOT / "entity-aliases.json"  # canonical alias table consumed by MCP server + v4 classifier
 OUT_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
 
 # ── Normalization ────────────────────────────────────────────────────────────
@@ -365,6 +367,74 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
 # ── Apply ────────────────────────────────────────────────────────────────────
 
 
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+    try:
+        fm = yaml.safe_load(parts[1]) or {}
+    except Exception:
+        fm = {}
+    return fm, parts[2].lstrip("\n")
+
+
+def _dump_frontmatter(fm: dict, body: str) -> str:
+    ytxt = yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    return f"---\n{ytxt}---\n\n{body}"
+
+
+def _merge_facts_lists(a: list, b: list) -> list:
+    """Dedup by fact text. Prefer higher confidence, tiebreak by most-recent created_at."""
+    seen: dict[str, dict] = {}
+    for fact in list(a) + list(b):
+        text = (fact.get("fact") or "").strip().lower()
+        if not text:
+            continue
+        existing = seen.get(text)
+        if existing is None:
+            seen[text] = fact
+            continue
+        if float(fact.get("confidence", 0)) > float(existing.get("confidence", 0)):
+            seen[text] = fact
+        elif float(fact.get("confidence", 0)) == float(existing.get("confidence", 0)):
+            if fact.get("created_at", "") > existing.get("created_at", ""):
+                seen[text] = fact
+    return list(seen.values())
+
+
+def _merge_fact_file_into(src: Path, dst: Path) -> None:
+    """Merge src fact-file content into existing dst.
+
+    For type=overview files: keep dst (newer canonical), discard src.
+    For type=facts files: merge `facts:` arrays, dedup by text, write back.
+    Caller is responsible for unlinking src after this returns.
+    """
+    src_fm, _ = _parse_frontmatter(src.read_text(encoding="utf-8"))
+    dst_text = dst.read_text(encoding="utf-8")
+    dst_fm, dst_body = _parse_frontmatter(dst_text)
+    if dst_fm.get("type") == "overview" or src_fm.get("type") == "overview":
+        return
+    merged = _merge_facts_lists(dst_fm.get("facts") or [], src_fm.get("facts") or [])
+    if not merged:
+        return
+    dst_fm["facts"] = merged
+    dst_fm["last_updated"] = dt.datetime.now().isoformat()
+    entity = dst_fm.get("entity", "")
+    category = dst_fm.get("category", "")
+    if entity and category:
+        body = (
+            f"\n# {entity} - {category}\n\n"
+            f"**Entity:** {entity}\n"
+            f"**Category:** {category}\n"
+            f"**Fact Count:** {len(merged)}\n"
+        )
+    else:
+        body = dst_body
+    dst.write_text(_dump_frontmatter(dst_fm, body), encoding="utf-8")
+
+
 def backup_file(path: Path, timestamp: str) -> Path:
     if not path.exists():
         return path
@@ -465,14 +535,14 @@ def apply_merges(
                     new_name = new_prefix + f.name[len(old_prefix):]
                     break
             dest = cdir / new_name
-            # If dest exists, suffix _dup{n}
             if dest.exists():
-                stem, ext = dest.stem, dest.suffix
-                i = 1
-                while (cdir / f"{stem}_dup{i}{ext}").exists():
-                    i += 1
-                dest = cdir / f"{stem}_dup{i}{ext}"
-            shutil.move(str(f), str(dest))
+                # Merge YAML facts list instead of creating _dup{N} sidecar.
+                # Sidecars accumulated 499 files of cleanup debt (see
+                # _pipeline/memory-graph/reconcile_dup_files.py).
+                _merge_fact_file_into(f, dest)
+                f.unlink()
+            else:
+                shutil.move(str(f), str(dest))
             moved += 1
         # Remove variant dir if empty
         removed = False

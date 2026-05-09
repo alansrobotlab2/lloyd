@@ -90,13 +90,42 @@ async def _mc_navigate(params: dict) -> dict:
     return {
         "tab": data.get("tab", tab),
         "focus_id": data.get("focus_id", focus_id),
+        "focus_error": data.get("focus_error"),
         "detail": data.get("detail", {}),
     }
+
+
+async def _mc_close_modal(params: dict) -> dict:
+    tab = (params.get("tab") or "").strip()
+    if not tab:
+        return _err("tab is required", ErrorCode.MISSING_PARAM)
+    if tab not in _VALID_TABS:
+        return _err(
+            f"unknown tab: {tab!r}. Valid: {_VALID_TABS}",
+            ErrorCode.INVALID_PARAM,
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{LLOYD_API}/api/mc/close_modal", json={"tab": tab}
+            )
+            if r.status_code >= 400:
+                try:
+                    msg = r.json().get("detail") or r.text
+                except Exception:
+                    msg = r.text
+                return _err(str(msg), ErrorCode.INVALID_PARAM)
+    except Exception as e:
+        return _err(f"close_modal failed: {e}", ErrorCode.INTERNAL)
+
+    return {"tab": tab, "closed": True}
 
 
 _handlers = {
     "mc_get_state": _mc_get_state,
     "mc_navigate": _mc_navigate,
+    "mc_close_modal": _mc_close_modal,
 }
 
 
@@ -140,7 +169,12 @@ async def list_tools():
                 "  services           → service unit name (expands)\n"
                 "  ide                → absolute file path (opens it in a "
                 "new editor tab; prefer ide_open_file for richer feedback)\n"
-                "  architecture / settings / graph → no focus supported"
+                "  architecture / settings / graph → no focus supported\n\n"
+                "If focus_id is invalid (path doesn't exist, escapes vault), the "
+                "tab still switches and the result returns `focus_error` describing "
+                "the failure with `focus_id: null`. Inspect `focus_error` and retry "
+                "focus separately if needed (e.g. via vault_search to find the "
+                "right path)."
             ),
             inputSchema={
                 "type": "object",
@@ -158,6 +192,35 @@ async def list_tools():
                             "for backlog/autonomy, server name for tools, skill "
                             "name for skills, vault path or entity name for "
                             "memory). When omitted, just switches the tab."
+                        ),
+                    },
+                },
+                "required": ["tab"],
+            },
+        ),
+        Tool(
+            name="mc_close_modal",
+            description=(
+                "Dismiss any modal popup currently open in the given Mission "
+                "Control tab. Counterpart to mc_navigate when its focus_id "
+                "opens a modal (memory document viewer, autonomy/backlog task "
+                "editor, create-task dialog). Tabs without modals (workers, "
+                "settings, graph, etc.) silently no-op.\n\n"
+                "Use when the user says \"close that\", \"dismiss it\", "
+                "\"close the popup\", \"close the document\", or after you've "
+                "shown them an item via mc_navigate and they're done with it. "
+                "For closing IDE editor tabs use ide_close_tab instead."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tab": {
+                        "type": "string",
+                        "enum": _VALID_TABS,
+                        "description": (
+                            "Tab whose open modal should be dismissed. Use "
+                            "mc_get_state first if unsure which tab the user "
+                            "is on."
                         ),
                     },
                 },

@@ -2,7 +2,7 @@
 """
 One-time backfill: export Lloyd session JSONs to vault markdown for QMD indexing.
 
-Converts ~/lloyd/sessions/*.json → ~/obsidian/sessions/{date}/*.md
+Converts ~/lloyd/sessions/*.json → ~/lloyd/_pipeline/vault-derived/sessions/{date}/*.md
 Skips autonomy sessions and sessions that already have a markdown export.
 
 Usage:
@@ -16,7 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
-VAULT_SESSIONS_DIR = Path.home() / "obsidian" / "sessions"
+VAULT_SESSIONS_DIR = Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "sessions"
 PST = ZoneInfo("America/Los_Angeles")
 
 

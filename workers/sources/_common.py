@@ -15,11 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from app.paths import LLOYD_HOME
+from app.paths import LLOYD_HOME, VAULT_PENDING_RESEARCH_DIR as STAGING_ROOT
 
 logger = logging.getLogger("lloyd-workers.common")
-
-STAGING_ROOT = Path.home() / "obsidian" / "pending-research"
 
 
 def staging_dir(source: str) -> Path:

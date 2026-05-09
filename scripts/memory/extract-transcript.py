@@ -16,6 +16,7 @@ SESSION: <session-id> | <timestamp>
 
 import json
 import os
+import sys; print("SCRIPT START", file=sys.stderr)
 import sys
 import glob
 from datetime import datetime, timezone
@@ -110,6 +111,8 @@ def process_lloyd_session(filepath, last_run_ts):
 
 
 def main():
+    import sys
+    print("TEST: main() called", file=sys.stderr)
     dry_run = '--dry-run' in sys.argv
     sessions_dir = LLOYD_SESSIONS_DIR
     pattern = os.path.join(sessions_dir, "*.json")

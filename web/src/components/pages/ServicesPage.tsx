@@ -285,7 +285,7 @@ export default function ServicesPage() {
 
       {/* Gateway restart overlay */}
       {gatewayRestarting && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="bg-card border border-border/50 rounded-2xl px-10 py-8 text-center space-y-4 max-w-sm">
             <RefreshCw className="w-8 h-8 text-primary animate-spin mx-auto" />
             <div className="text-base font-medium text-foreground">Gateway Restarting</div>

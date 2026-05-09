@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, type DragEvent } from "react";
-import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
+import { useReportMcFocus, usePendingFocusFor, useMcUi } from "../../contexts/McUiContext";
 import {
   LayoutGrid,
   AlertTriangle,
@@ -114,7 +114,7 @@ function TaskModal({
     <div
       ref={backdropRef}
       onClick={handleBackdropClick}
-      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+      className="absolute inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
     >
       <div className="bg-card rounded-xl border border-border/50 w-[90vw] h-[90vh] flex flex-col shadow-2xl">
         {/* Header */}
@@ -493,6 +493,17 @@ export default function BacklogPage() {
     }
     setActiveBoard(asNum);
   }, [pendingFocus, tasks]);
+
+  // Apply agent-issued close_modal for the backlog tab.
+  const { pendingCloseModal } = useMcUi();
+  const lastClosedSeq = useRef(0);
+  useEffect(() => {
+    if (!pendingCloseModal || pendingCloseModal.tab !== "backlog") return;
+    if (pendingCloseModal.seq === lastClosedSeq.current) return;
+    lastClosedSeq.current = pendingCloseModal.seq;
+    setEditingTask(null);
+    setShowCreateModal(false);
+  }, [pendingCloseModal]);
 
   const loadData = useCallback(async () => {
     try {

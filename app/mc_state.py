@@ -238,6 +238,20 @@ async def publish_file_changed(path: str, *, deleted: bool = False) -> None:
     _fanout(payload)
 
 
+async def publish_close_modal(tab: str) -> None:
+    """Push a close-modal command to every subscribed client.
+
+    Counterpart to publish_navigate: where navigate(tab, focus_id) tells a
+    page to open a modal/popup, close_modal(tab) tells it to dismiss
+    whatever modal it currently has open. Pages that own no modals (e.g.
+    workers, settings) ignore the event.
+    """
+    if tab not in VALID_TABS:
+        raise ValueError(f"unknown tab: {tab!r}")
+    payload = {"type": "close_modal", "tab": tab}
+    _fanout(payload)
+
+
 async def publish_ide_action(kind: str, path: str) -> None:
     """Push an IDE action (open_folder / close_tab) to every subscribed client.
 

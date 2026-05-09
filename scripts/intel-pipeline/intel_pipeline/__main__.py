@@ -79,7 +79,8 @@ def main():
             print(f"Scored {len(scored)} items")
             
             # Save scored items
-            intel_path = Path.home() / "obsidian/memory/feeds" / f"intel-{today}.jsonl"
+            from ._paths import FEEDS_DIR
+            intel_path = FEEDS_DIR / f"intel-{today}.jsonl"
             with open(intel_path, "w") as f:
                 for item in scored:
                     f.write(item.to_json() + "\n")

@@ -15,9 +15,13 @@ const VALID_IDE_ACTIONS: ReadonlySet<string> = new Set(['open_folder', 'close_ta
 // when the EventSource closes — keeps the agent's reach alive across
 // server restarts and transient network blips.
 export function useMcNavigationEvents() {
-  const { setCurrentTab, setPendingFocus, setPendingIdeAction, setPendingFileChange } = useMcUi()
+  const {
+    setCurrentTab, setPendingFocus, setPendingIdeAction, setPendingFileChange,
+    setPendingCloseModal,
+  } = useMcUi()
   const ideSeq = useRef(0)
   const fileSeq = useRef(0)
+  const closeSeq = useRef(0)
 
   useEffect(() => {
     let es: EventSource | null = null
@@ -57,6 +61,19 @@ export function useMcNavigationEvents() {
               path,
               seq: ideSeq.current,
             })
+          }
+        } catch {
+          // Ignore malformed payloads.
+        }
+      })
+
+      es.addEventListener('close_modal', (ev: MessageEvent) => {
+        try {
+          const data = JSON.parse(ev.data)
+          const tab = data?.tab
+          if (typeof tab === 'string' && VALID_TABS.has(tab)) {
+            closeSeq.current += 1
+            setPendingCloseModal({ tab: tab as Page, seq: closeSeq.current })
           }
         } catch {
           // Ignore malformed payloads.
@@ -107,5 +124,5 @@ export function useMcNavigationEvents() {
         es = null
       }
     }
-  }, [setCurrentTab, setPendingFocus, setPendingIdeAction, setPendingFileChange])
+  }, [setCurrentTab, setPendingFocus, setPendingIdeAction, setPendingFileChange, setPendingCloseModal])
 }

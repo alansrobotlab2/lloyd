@@ -24,7 +24,7 @@ autoresearch:
   bench_dir: ~/obsidian/lloyd/bench
   default_budget_minutes: 120
   default_model: primary
-  facts_experiments_dir: ~/obsidian/facts/experiments
+  facts_experiments_dir: ~/lloyd/_pipeline/vault-derived/facts/experiments
   ledger_path: ~/lloyd/_pipeline/research/ledger.jsonl
   max_variants_per_round: 7
   promotion:
@@ -247,4 +247,4 @@ workers:
       interval_seconds: 1800
       max_inflight: 1
       max_duration_seconds: 300
-  staging_root: ~/obsidian/pending-research
+  staging_root: ~/lloyd/_pipeline/vault-derived/pending-research
