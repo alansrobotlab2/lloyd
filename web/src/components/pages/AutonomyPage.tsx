@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, type DragEvent } from "react";
-import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
+import { useReportMcFocus, usePendingFocusFor, useMcUi } from "../../contexts/McUiContext";
 import {
   Lightbulb,
   Clock,
@@ -215,7 +215,7 @@ function TaskModal({
     <div
       ref={backdropRef}
       onClick={handleBackdropClick}
-      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+      className="absolute inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
     >
       <div className="bg-card rounded-xl border border-border/50 w-full max-w-[75vw] max-h-[85vh] flex flex-col shadow-2xl">
         {/* Header */}
@@ -881,6 +881,17 @@ export default function AutonomyPage() {
     const task = allTasks.find((t) => t.id === asNum);
     if (task) setEditingTask(task);
   }, [pendingFocus, allTasks]);
+
+  // Apply agent-issued close_modal for the autonomy tab.
+  const { pendingCloseModal } = useMcUi();
+  const lastClosedSeq = useRef(0);
+  useEffect(() => {
+    if (!pendingCloseModal || pendingCloseModal.tab !== "autonomy") return;
+    if (pendingCloseModal.seq === lastClosedSeq.current) return;
+    lastClosedSeq.current = pendingCloseModal.seq;
+    setEditingTask(null);
+    setShowCreateModal(false);
+  }, [pendingCloseModal]);
 
   const loadData = useCallback(async () => {
     try {

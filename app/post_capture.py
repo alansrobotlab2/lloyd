@@ -28,7 +28,7 @@ from app.secondary_models import (
 
 logger = logging.getLogger("lloyd-server")
 
-VAULT_SESSIONS_DIR = Path.home() / "obsidian" / "sessions"
+from app.paths import VAULT_SESSIONS_DIR
 
 
 def _build_capture_transcript(messages: list, max_chars: int = 4000) -> str:

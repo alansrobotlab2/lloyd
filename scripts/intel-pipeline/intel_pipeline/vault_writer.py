@@ -9,11 +9,7 @@ from .models import ScoredItem
 from .profile import load_profile, get_all_keywords, keyword_match
 
 
-# Paths
-VAULT_ROOT = Path.home() / "obsidian"
-KNOWLEDGE_DIR = VAULT_ROOT / "knowledge"
-SCORED_FEEDS_DIR = VAULT_ROOT / "memory/feeds"
-VAULT_WRITTEN_STATE = VAULT_ROOT / "memory/feeds/vault-written.json"
+from ._paths import VAULT_ROOT, KNOWLEDGE_DIR, FEEDS_DIR as SCORED_FEEDS_DIR, VAULT_WRITTEN_STATE
 
 
 def load_scored_items(date_str: str) -> List[ScoredItem]:

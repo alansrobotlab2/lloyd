@@ -5,9 +5,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-# Default paths
-STATE_FILE = Path.home() / "obsidian/memory/feeds/scanner-state.json"
-RAW_DIR = Path.home() / "obsidian/memory/feeds/raw"
+from ._paths import STATE_FILE, RAW_DIR
 
 
 def ensure_dirs():

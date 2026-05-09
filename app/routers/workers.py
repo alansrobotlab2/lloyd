@@ -26,12 +26,10 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.config import CONFIG
-from app.paths import LLOYD_HOME
+from app.paths import LLOYD_HOME, VAULT_ROOT, VAULT_PENDING_RESEARCH_DIR as PENDING_ROOT
 from workers.queue import get_queue
 from workers.pool import get_pool
 
-PENDING_ROOT = Path.home() / "obsidian" / "pending-research"
-VAULT_ROOT = Path.home() / "obsidian"
 REJECTED_ROOT = PENDING_ROOT / "_rejected"
 
 # Default promotion destination per source (relative to vault root).

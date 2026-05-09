@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
-import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
+import { useReportMcFocus, usePendingFocusFor, useMcUi } from "../../contexts/McUiContext";
 import {
   Search,
   FileText,
@@ -866,6 +866,16 @@ export default function MemoryPage() {
   const handleCloseDoc = useCallback(() => {
     setDoc(null);
   }, []);
+
+  // Apply agent-issued close_modal for the memory tab.
+  const { pendingCloseModal } = useMcUi();
+  const lastClosedSeq = useRef(0);
+  useEffect(() => {
+    if (!pendingCloseModal || pendingCloseModal.tab !== "memory") return;
+    if (pendingCloseModal.seq === lastClosedSeq.current) return;
+    lastClosedSeq.current = pendingCloseModal.seq;
+    setDoc(null);
+  }, [pendingCloseModal]);
 
   const handleGraphNodeClick = useCallback((nodeId: string | null) => {
     setSelectedGraphNode(nodeId);

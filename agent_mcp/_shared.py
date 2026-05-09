@@ -32,9 +32,11 @@ from mcp.types import TextContent
 
 # ── Path constants ───────────────────────────────────────────────────────────
 
-VAULT = Path.home() / "obsidian"
-FACTS_ROOT = VAULT / "facts"
-ALIASES_PATH = FACTS_ROOT / "entity-aliases.json"
+from app.paths import (
+    VAULT_ROOT as VAULT,
+    VAULT_FACTS_ROOT as FACTS_ROOT,
+    VAULT_FACTS_ALIASES as ALIASES_PATH,
+)
 
 
 # ── Result types & dispatch helpers (#340 PR 4) ──────────────────────────────

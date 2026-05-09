@@ -99,22 +99,23 @@ async def post_mc_navigate(request: Request):
     if focus_id is not None and not isinstance(focus_id, str):
         raise HTTPException(status_code=400, detail="focus_id must be a string or null")
 
-    # Pre-validate path-shaped focus on tabs that load files. Surfacing the
-    # 404 here turns a silent broken navigation into a clear tool error the
-    # caller can correct (e.g. by retrying with vault_search results).
+    # Pre-validate path-shaped focus on tabs that load files. A focus failure
+    # is non-fatal: the tab still switches so the user's literal "go to X tab"
+    # request is satisfied, and the error is surfaced via `focus_error` so the
+    # caller can retry focus with vault_search results.
+    focus_error: str | None = None
     if tab == "memory" and focus_id and ("/" in focus_id or focus_id.endswith(".md")):
         vault_path = (Path.home() / "obsidian" / focus_id).resolve()
         vault_root = (Path.home() / "obsidian").resolve()
         if not str(vault_path).startswith(str(vault_root) + "/"):
-            raise HTTPException(status_code=400, detail=f"path escapes vault: {focus_id}")
-        if not vault_path.exists():
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"vault path does not exist: {focus_id}. "
-                    "Use vault_search to find the correct path."
-                ),
+            focus_error = f"path escapes vault: {focus_id}"
+        elif not vault_path.exists():
+            focus_error = (
+                f"vault path does not exist: {focus_id}. "
+                "Use vault_search to find the correct path."
             )
+    if focus_error is not None:
+        focus_id = None
 
     try:
         await mc_state.publish_navigate(tab, focus_id)
@@ -122,7 +123,43 @@ async def post_mc_navigate(request: Request):
         logger.warning("mc/navigate publish failed: %s", e)
 
     detail = await _summarize_tab(tab)
-    return JSONResponse({"tab": tab, "focus_id": focus_id, "detail": detail})
+    return JSONResponse({
+        "tab": tab,
+        "focus_id": focus_id,
+        "focus_error": focus_error,
+        "detail": detail,
+    })
+
+
+# ── Close modal (agent → frontend) ─────────────────────────────────────
+
+@router.post("/api/mc/close_modal")
+async def post_mc_close_modal(request: Request):
+    """Push a close-modal command to all subscribed frontends.
+
+    Body: {tab: string}
+    Returns: {tab, ok: true}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid json body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+
+    tab = body.get("tab")
+    if not isinstance(tab, str) or tab not in mc_state.VALID_TABS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"tab must be one of: {sorted(mc_state.VALID_TABS)}",
+        )
+
+    try:
+        await mc_state.publish_close_modal(tab)
+    except Exception as e:
+        logger.warning("mc/close_modal publish failed: %s", e)
+
+    return JSONResponse({"tab": tab, "ok": True})
 
 
 # ── IDE drive (agent → frontend) ───────────────────────────────────────
