@@ -1,6 +1,7 @@
 import { defineConfig, type PluginOption } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import importMetaUrlPlugin from "@codingame/esbuild-import-meta-url-plugin";
 import fs from "node:fs";
 import path from "node:path";
 import type { TLSSocket } from "node:tls";
@@ -70,7 +71,58 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Route every `monaco-editor` import (ours, @monaco-editor/react's,
+      // monaco-languageclient's, etc.) to the codingame VSCode-flavored
+      // build. Without a single shared Monaco runtime, language client
+      // provider registrations don't reach our editor instances.
+      "monaco-editor": "@codingame/monaco-vscode-editor-api",
     },
+  },
+  // The codingame packages use `new Worker(new URL(..., import.meta.url))`
+  // to load Monaco's editor / textmate / extension-host workers. Vite's
+  // dep pre-bundler rewrites `import.meta.url` to point at the optimized
+  // chunk, which breaks those worker URLs (browser ends up fetching
+  // index.html instead of the worker JS). The esbuild plugin below
+  // preserves the original URLs during pre-bundling so workers and
+  // bundled extension assets resolve correctly.
+  optimizeDeps: {
+    esbuildOptions: {
+      plugins: [importMetaUrlPlugin as unknown as never],
+    },
+    // The codingame packages and monaco-languageclient must NOT be
+    // pre-bundled — they use `new URL(..., import.meta.url)` for workers
+    // and rely on side-effect imports (vscode/localExtensionHost) that
+    // Vite's optimizer would break.
+    //
+    // BUT: vscode-languageclient is pure CJS that uses `__exportStar`
+    // runtime re-exports for BaseLanguageClient. It HAS to be pre-bundled
+    // by esbuild so the browser sees named ESM exports. Same for
+    // vscode-languageserver-protocol (ditto) and the cmdk transitive deps.
+    exclude: [
+      "monaco-languageclient",
+      "monaco-languageclient/vscodeApiWrapper",
+      "monaco-languageclient/workerFactory",
+      "monaco-languageclient/wrapper",
+      "monaco-languageclient/editorApp",
+      "@codingame/monaco-vscode-api",
+      "@codingame/monaco-vscode-editor-api",
+      "vscode",
+    ],
+    // Force pre-bundle for the LSP CJS deps so their __exportStar named
+    // exports get materialised into proper ESM by esbuild.
+    include: [
+      "vscode-languageclient/browser.js",
+      "vscode-languageserver-protocol",
+      "vscode-jsonrpc",
+    ],
+    needsInterop: [
+      "vscode-languageclient/browser.js",
+      "vscode-languageserver-protocol",
+      "vscode-jsonrpc",
+    ],
+  },
+  worker: {
+    format: "es",
   },
   server: {
     host: "0.0.0.0",
@@ -82,6 +134,11 @@ export default defineConfig({
         target: "http://localhost:8080",
         changeOrigin: true,
         xfwd: true,
+        // ws: true is required for WebSocket upgrades on /api/* — without
+        // this flag, the LSP WebSocket endpoints (/api/lsp/{language}) die
+        // at the Vite layer and never reach the backend, which silently
+        // breaks all language-server features (hover, go-to-def, etc).
+        ws: true,
         timeout: 300000,
       },
       "/livekit": {

@@ -1234,6 +1234,114 @@ export const api = {
     }
     return r.json()
   },
+
+  ideCreate: async (path: string, type: 'file' | 'dir'): Promise<{ path: string; type: string }> => {
+    const r = await fetch(`${API_BASE}/ide/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, type }),
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `ide create failed: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  ideRename: async (from: string, to: string): Promise<{ from: string; to: string }> => {
+    const r = await fetch(`${API_BASE}/ide/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to }),
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `ide rename failed: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  ideDelete: async (path: string): Promise<{ path: string; deleted: boolean }> => {
+    const r = await fetch(`${API_BASE}/ide/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `ide delete failed: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  ideGlob: async (root: string, limit = 4000): Promise<{ root: string; files: string[]; truncated: boolean }> => {
+    const r = await fetch(`${API_BASE}/ide/glob?root=${encodeURIComponent(root)}&limit=${limit}`)
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `ide glob failed: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  ideGitDiff: async (path: string): Promise<{ path: string; hunks: GitHunk[] }> => {
+    const r = await fetch(`${API_BASE}/ide/git/diff?path=${encodeURIComponent(path)}`)
+    if (!r.ok) return { path, hunks: [] }
+    return r.json()
+  },
+
+  ideAiHover: async (
+    args: { path: string; code: string; symbol: string; line: number; language?: string },
+  ): Promise<{ markdown: string }> => {
+    const r = await fetch(`${API_BASE}/ide/ai/hover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+    })
+    if (!r.ok) return { markdown: '' }
+    return r.json()
+  },
+
+  ideAiAction: async (
+    args: { path: string; code: string; range_code: string; action: string; language?: string },
+  ): Promise<{ result?: string; edit?: string }> => {
+    const r = await fetch(`${API_BASE}/ide/ai/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `ide ai action failed: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  ideAiComplete: async (
+    args: { prefix: string; suffix: string; language?: string },
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const r = await fetch(`${API_BASE}/ide/ai/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+      signal,
+    })
+    if (!r.ok || !r.body) return
+    const reader = r.body.getReader()
+    const decoder = new TextDecoder()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      onChunk(decoder.decode(value, { stream: true }))
+    }
+  },
+}
+
+export interface GitHunk {
+  type: 'add' | 'modify' | 'delete'
+  new_start: number
+  new_count: number
 }
 
 export interface IdeEntry {

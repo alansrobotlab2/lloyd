@@ -57,6 +57,9 @@ interface SidebarProps {
   collapsed: boolean
   onToggleCollapse: () => void
   isMobile?: boolean
+  // Optional per-tab preload hooks. Called on first hover so heavy tabs
+  // (e.g. IDE with Monaco + LSP) start fetching their chunk early.
+  onHoverPreload?: Partial<Record<Page, () => void>>
 }
 
 // Icon-button row with an optional tooltip that activates only when collapsed.
@@ -66,6 +69,7 @@ function NavRow({
   showTooltip,
   className,
   onClick,
+  onMouseEnter,
   disabled,
   children,
 }: {
@@ -74,12 +78,14 @@ function NavRow({
   showTooltip?: boolean
   className?: string
   onClick?: () => void
+  onMouseEnter?: () => void
   disabled?: boolean
   children: React.ReactNode
 }) {
   const button = (
     <button
       onClick={onClick}
+      onMouseEnter={onMouseEnter}
       disabled={disabled}
       className={cn(
         'w-full flex items-center rounded-md text-xs font-medium transition-colors',
@@ -101,7 +107,7 @@ function NavRow({
   return button
 }
 
-export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, isMobile }: SidebarProps) {
+export default function Sidebar({ active, onNavigate, collapsed, onToggleCollapse, isMobile, onHoverPreload }: SidebarProps) {
   // Hover-expand: when `collapsed` (the pinned state) is true, the sidebar
   // sits at 56px in-flow but pops out to 192px as an overlay on hover. When
   // `collapsed` is false, it's pinned-expanded and pushes content. The
@@ -114,12 +120,14 @@ export default function Sidebar({ active, onNavigate, collapsed, onToggleCollaps
   const renderItem = (item: NavItem) => {
     const Icon = item.icon
     const isActive = active === item.id
+    const preload = onHoverPreload?.[item.id]
     return (
       <NavRow
         key={item.id}
         collapsed={!expanded}
         label={item.label}
         onClick={() => onNavigate(item.id)}
+        onMouseEnter={preload}
         className={
           isActive
             ? 'bg-primary/15 text-primary hover:bg-primary/20'

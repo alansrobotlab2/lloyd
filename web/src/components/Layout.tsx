@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, lazy, Suspense } from 'react'
 import Sidebar, { type Page } from './Sidebar'
 import ChatPanel from './ChatPanel'
 import SessionsPanel from './SessionsPanel'
@@ -11,8 +11,23 @@ import ArchitecturePageFull from './pages/ArchitecturePage'
 import AutonomyPage from './pages/AutonomyPage'
 import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
-import IdePage from './pages/IdePage'
 import SettingsPage from './pages/SettingsPage'
+
+// IDE pulls in Monaco (+ language client + AI providers) — heavy. Lazy-load
+// it so the rest of MC isn't waiting on that bundle. After first visit,
+// the chunk is cached and the tab snaps in.
+//
+// Hold the loader factory separately so we can call it both for React.lazy
+// (when the IDE actually mounts) AND ahead-of-time as a preload on hover /
+// browser idle.
+const importIdePage = () => import('./pages/IdePage')
+const IdePage = lazy(importIdePage)
+let _ideChunkPreloaded = false
+function preloadIdeChunk() {
+  if (_ideChunkPreloaded) return
+  _ideChunkPreloaded = true
+  void importIdePage().catch(() => { _ideChunkPreloaded = false })
+}
 import RightChatSidebar from './RightChatSidebar'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
@@ -143,6 +158,28 @@ export default function Layout() {
   const [showAgentDetails, setShowAgentDetails] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
+  // IDE tab is heavy (Monaco + LSP + AI providers). Only mount it the
+  // first time the user activates it; from then on keep it mounted so
+  // editor state survives further tab switches.
+  const [ideEverActive, setIdeEverActive] = useState(false)
+  useEffect(() => {
+    if (page === 'ide') setIdeEverActive(true)
+  }, [page])
+
+  // Preload the IDE chunk in the background once the rest of MC has had
+  // a chance to render. requestIdleCallback gives it the lowest priority
+  // — the user's first paint isn't blocked. This way, by the time they
+  // click the IDE tab the bundle is usually already cached.
+  useEffect(() => {
+    const w = window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }
+    const ric = w.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 1500))
+    const handle = ric(() => preloadIdeChunk(), { timeout: 4000 })
+    return () => {
+      const w2 = window as unknown as { cancelIdleCallback?: (h: number) => void }
+      if (w2.cancelIdleCallback) w2.cancelIdleCallback(handle as number)
+    }
+  }, [])
+
   const visibleSlot = useMemo(() => slots.find(s => s.slotId === visibleSlotId) ?? null, [slots, visibleSlotId])
   const currentModel = visibleSlot?.model ?? ''
 
@@ -269,6 +306,7 @@ export default function Layout() {
             onNavigate={setPage}
             collapsed={collapsed}
             onToggleCollapse={() => setCollapsed(c => !c)}
+            onHoverPreload={{ ide: preloadIdeChunk }}
           />
         )}
 
@@ -315,6 +353,7 @@ export default function Layout() {
                 collapsed={false}
                 onToggleCollapse={() => {}}
                 isMobile
+                onHoverPreload={{ ide: preloadIdeChunk }}
               />
             </SheetContent>
           </Sheet>
@@ -442,17 +481,25 @@ export default function Layout() {
             </div>
           )}
 
-          {/* IDE — always mounted so open files / editor state survive tab
-              switches (Monaco re-init is expensive). Hidden via display:none
-              when another page is active. */}
-          <div
-            className={cn(
-              'flex-1 flex flex-col min-h-0 overflow-hidden',
-              page === 'ide' ? '' : 'hidden',
-            )}
-          >
-            <IdePage />
-          </div>
+          {/* IDE — lazy + sticky. The Monaco bundle only downloads on the
+              first visit; thereafter we keep IdePage mounted so editor
+              state survives tab switches (Monaco re-init is expensive). */}
+          {ideEverActive && (
+            <div
+              className={cn(
+                'flex-1 flex flex-col min-h-0 overflow-hidden',
+                page === 'ide' ? '' : 'hidden',
+              )}
+            >
+              <Suspense fallback={
+                <div className="flex items-center justify-center h-full text-sm text-muted-foreground italic">
+                  Loading IDE…
+                </div>
+              }>
+                <IdePage />
+              </Suspense>
+            </div>
+          )}
 
           {/* Other pages */}
           {PageComponent && <PageComponent />}

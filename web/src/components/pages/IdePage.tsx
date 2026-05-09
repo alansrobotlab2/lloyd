@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { FileCode2, FolderOpen, AlertCircle, Save, Loader2, RefreshCw, X } from 'lucide-react'
+import { FileCode2, FolderOpen, AlertCircle, Save, Loader2, RefreshCw, X, Search, Command as CommandIcon } from 'lucide-react'
 import FileTree from '../ide/FileTree'
 import EditorTabs from '../ide/EditorTabs'
 import MonacoHost from '../ide/MonacoHost'
+import QuickOpen from '../ide/QuickOpen'
+import CommandPalette, { type PaletteCommand } from '../ide/CommandPalette'
 import { IdeProvider, useIde } from '../../contexts/IdeContext'
 import { useMcUi, type IdeState } from '../../contexts/McUiContext'
 import { Button } from '@/components/ui/button'
@@ -34,8 +36,11 @@ function IdePageInner() {
     skipAnimation,
   } = useIde()
 
-  const { reportIdeState, pendingIdeAction, pendingFileChange } = useMcUi()
+  const { reportIdeState, pendingIdeAction, pendingFileChange, currentTab } = useMcUi()
   const [folderInput, setFolderInput] = useState(openFolder ?? '')
+  const [quickOpen, setQuickOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [treeRefreshKey, setTreeRefreshKey] = useState(0)
 
   // Keep the input synced if the folder changes from outside (e.g. agent).
   useEffect(() => {
@@ -84,13 +89,53 @@ function IdePageInner() {
   }, [pendingFocus, consumePendingFocus, openFile])
 
   // file_changed events from inotify → IdeContext decides what to do.
+  // Tree refresh is debounced (~600ms) so a burst of writes (save, git
+  // pull, Lloyd's Edit-then-Edit-then-Edit) collapses into one fetch.
+  // The fetch is silent in FileTree so it never flashes the user.
   const lastAppliedFileSeq = useRef<number>(0)
+  const treeRefreshTimer = useRef<number | null>(null)
   useEffect(() => {
     if (!pendingFileChange) return
     if (pendingFileChange.seq === lastAppliedFileSeq.current) return
     lastAppliedFileSeq.current = pendingFileChange.seq
     void handleFileChanged(pendingFileChange.path, pendingFileChange.deleted)
+    if (treeRefreshTimer.current !== null) {
+      window.clearTimeout(treeRefreshTimer.current)
+    }
+    treeRefreshTimer.current = window.setTimeout(() => {
+      setTreeRefreshKey(x => x + 1)
+      treeRefreshTimer.current = null
+    }, 600)
   }, [pendingFileChange, handleFileChanged])
+  useEffect(() => {
+    return () => {
+      if (treeRefreshTimer.current !== null) {
+        window.clearTimeout(treeRefreshTimer.current)
+      }
+    }
+  }, [])
+
+  // Cmd/Ctrl+P → Quick Open. Cmd/Ctrl+Shift+P → Command Palette.
+  // Only active when the IDE tab is the visible one.
+  useEffect(() => {
+    if (currentTab !== 'ide') return
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey
+      if (!mod) return
+      if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault()
+        if (e.shiftKey) {
+          setPaletteOpen(true)
+          setQuickOpen(false)
+        } else {
+          setQuickOpen(true)
+          setPaletteOpen(false)
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [currentTab])
 
   const handleOpenFolder = () => {
     const trimmed = folderInput.trim()
@@ -106,6 +151,38 @@ function IdePageInner() {
   const handleEditorChange = useCallback((value: string) => {
     if (activeFile) setContent(activeFile, value)
   }, [activeFile, setContent])
+
+  // Command palette command list — derived from current state.
+  const paletteCommands: PaletteCommand[] = useMemo(() => {
+    const cmds: PaletteCommand[] = [
+      {
+        id: 'ide.quickOpen',
+        label: 'Quick Open File…',
+        description: 'Find a file by fuzzy name',
+        keybinding: 'Ctrl/Cmd+P',
+        run: () => setQuickOpen(true),
+      },
+      {
+        id: 'ide.save',
+        label: 'Save',
+        description: 'Save the active file',
+        keybinding: 'Ctrl/Cmd+S',
+        run: () => { void saveActive() },
+      },
+      {
+        id: 'ide.closeTab',
+        label: 'Close Tab',
+        description: 'Close the active editor tab',
+        run: () => { if (activeFile) closeTab(activeFile) },
+      },
+      {
+        id: 'ide.refreshTree',
+        label: 'Refresh File Tree',
+        run: () => setTreeRefreshKey(x => x + 1),
+      },
+    ]
+    return cmds
+  }, [activeFile, closeTab, saveActive])
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
@@ -128,6 +205,27 @@ function IdePageInner() {
         </div>
         <div className="flex items-center gap-2">
           {saving && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setQuickOpen(true)}
+            disabled={!openFolder}
+            className="text-xs gap-1.5"
+            title="Quick open file (Ctrl/Cmd+P)"
+          >
+            <Search className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline">Open File</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setPaletteOpen(true)}
+            className="text-xs gap-1.5"
+            title="Command palette (Ctrl/Cmd+Shift+P)"
+          >
+            <CommandIcon className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline">Commands</span>
+          </Button>
           <Button
             variant="ghost"
             size="sm"
@@ -197,6 +295,18 @@ function IdePageInner() {
         </div>
       )}
 
+      <QuickOpen
+        open={quickOpen}
+        onClose={() => setQuickOpen(false)}
+        rootPath={openFolder}
+        onPick={openFile}
+      />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={paletteCommands}
+      />
+
       {/* Body */}
       <div className="flex-1 flex min-h-0 overflow-hidden mx-6 mb-6 border border-border rounded-xl bg-card">
         {/* Tree */}
@@ -205,6 +315,7 @@ function IdePageInner() {
             rootPath={openFolder}
             selectedPath={activeFile}
             onFileClick={openFile}
+            refreshKey={treeRefreshKey}
           />
         </div>
 
@@ -242,6 +353,7 @@ function IdePageInner() {
                   content={activeOpenFile.content}
                   onChange={handleEditorChange}
                   onSaveShortcut={() => { void saveActive() }}
+                  openFolder={openFolder}
                   onEditorReady={registerEditor}
                 />
               )
