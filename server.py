@@ -33,6 +33,7 @@ from app.routers import workers as _workers_router
 from app.routers import inner_voice as _inner_voice_router
 from app.routers import mc_ui as _mc_ui_router
 from app.routers import system as _system_router
+from app.routers import ide as _ide_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -126,10 +127,30 @@ app.include_router(_workers_router.router)
 app.include_router(_inner_voice_router.router)
 app.include_router(_mc_ui_router.router)
 app.include_router(_system_router.router)
+app.include_router(_ide_router.router)
 
 app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
 app.on_event("startup")(_workers_router.start_worker_pool)
 app.on_event("shutdown")(shutdown_cleanup)
+
+
+@app.on_event("startup")
+async def _start_file_watcher() -> None:
+    """Attach the running event loop to the IDE file watcher and rebind
+    to whatever folder was open before the restart."""
+    import asyncio
+    from app import file_watcher, mc_state
+    file_watcher.attach_loop(asyncio.get_running_loop())
+    snap = mc_state.get_ide_snapshot() or {}
+    folder = snap.get("open_folder")
+    if folder:
+        file_watcher.bind(folder)
+
+
+@app.on_event("shutdown")
+async def _stop_file_watcher() -> None:
+    from app import file_watcher
+    file_watcher.shutdown()
 
 
 if __name__ == "__main__":

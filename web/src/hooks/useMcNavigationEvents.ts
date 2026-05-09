@@ -1,19 +1,23 @@
-import { useEffect } from 'react'
-import { useMcUi } from '../contexts/McUiContext'
+import { useEffect, useRef } from 'react'
+import { useMcUi, type IdeActionKind } from '../contexts/McUiContext'
 import type { Page } from '../components/Sidebar'
 
 const VALID_TABS: ReadonlySet<string> = new Set([
   'inner_voice', 'chat', 'backlog', 'autonomy', 'workers',
   'memory', 'architecture', 'skills', 'tools', 'services',
-  'settings', 'graph',
+  'settings', 'graph', 'ide',
 ])
 
-// Subscribes to /api/mc/events and applies navigate commands to the
-// MC UI context. Single mount expected (Layout). Auto-reconnects when
-// the EventSource closes — keeps the agent's reach alive across server
-// restarts and transient network blips.
+const VALID_IDE_ACTIONS: ReadonlySet<string> = new Set(['open_folder', 'close_tab'])
+
+// Subscribes to /api/mc/events and applies navigate + ide_action commands
+// to the MC UI context. Single mount expected (Layout). Auto-reconnects
+// when the EventSource closes — keeps the agent's reach alive across
+// server restarts and transient network blips.
 export function useMcNavigationEvents() {
-  const { setCurrentTab, setPendingFocus } = useMcUi()
+  const { setCurrentTab, setPendingFocus, setPendingIdeAction, setPendingFileChange } = useMcUi()
+  const ideSeq = useRef(0)
+  const fileSeq = useRef(0)
 
   useEffect(() => {
     let es: EventSource | null = null
@@ -34,6 +38,43 @@ export function useMcNavigationEvents() {
             if (focusId) {
               setPendingFocus({ tab: tab as Page, focusId })
             }
+          }
+        } catch {
+          // Ignore malformed payloads.
+        }
+      })
+
+      es.addEventListener('ide_action', (ev: MessageEvent) => {
+        try {
+          const data = JSON.parse(ev.data)
+          const kind = data?.kind
+          const path = data?.path
+          if (typeof kind === 'string' && VALID_IDE_ACTIONS.has(kind)
+              && typeof path === 'string' && path) {
+            ideSeq.current += 1
+            setPendingIdeAction({
+              kind: kind as IdeActionKind,
+              path,
+              seq: ideSeq.current,
+            })
+          }
+        } catch {
+          // Ignore malformed payloads.
+        }
+      })
+
+      es.addEventListener('file_changed', (ev: MessageEvent) => {
+        try {
+          const data = JSON.parse(ev.data)
+          const path = data?.path
+          const deleted = !!data?.deleted
+          if (typeof path === 'string' && path) {
+            fileSeq.current += 1
+            setPendingFileChange({
+              path,
+              deleted,
+              seq: fileSeq.current,
+            })
           }
         } catch {
           // Ignore malformed payloads.
@@ -66,5 +107,5 @@ export function useMcNavigationEvents() {
         es = null
       }
     }
-  }, [setCurrentTab, setPendingFocus])
+  }, [setCurrentTab, setPendingFocus, setPendingIdeAction, setPendingFileChange])
 }

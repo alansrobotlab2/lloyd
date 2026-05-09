@@ -40,10 +40,16 @@ async def get_mc_state():
 
 @router.post("/api/mc/state")
 async def post_mc_state(request: Request):
-    """Frontend reports its current tab + focus.
+    """Frontend reports its current tab + focus + (optional) IDE state.
 
-    Body: {tab?: string, focus?: {kind, id, label?} | null}
-    A null/missing focus clears the active tab's focus entry.
+    Body: {
+      tab?: string,
+      focus?: {kind, id, label?} | null,
+      ide?: {open_folder?, visible_file?, open_tabs?: [...]} | null,
+    }
+    A null/missing focus clears the active tab's focus entry. The `ide`
+    field is sentinel-handled: omitting it leaves IDE state unchanged;
+    explicit null clears it; a dict updates it.
     """
     try:
         body = await request.json()
@@ -54,8 +60,13 @@ async def post_mc_state(request: Request):
 
     tab = body.get("tab")
     focus = body.get("focus")
+    # Use a sentinel-y signal: pass through only if "ide" was a key in body.
+    has_ide = "ide" in body
+    ide = body.get("ide") if has_ide else mc_state._SENTINEL
     try:
-        snap = await mc_state.set_state(tab if isinstance(tab, str) else None, focus)
+        snap = await mc_state.set_state(
+            tab if isinstance(tab, str) else None, focus, ide,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return JSONResponse(snap)
@@ -114,10 +125,51 @@ async def post_mc_navigate(request: Request):
     return JSONResponse({"tab": tab, "focus_id": focus_id, "detail": detail})
 
 
+# ── IDE drive (agent → frontend) ───────────────────────────────────────
+
+@router.post("/api/mc/ide_action")
+async def post_mc_ide_action(request: Request):
+    """Push an IDE action (open_folder / close_tab) to all subscribed frontends.
+
+    `ide_open_file` is intentionally NOT routed here — it reuses
+    /api/mc/navigate with tab=ide, focus_id=<path>.
+
+    Body: {kind: "open_folder" | "close_tab", path: string}
+    Returns: {kind, path, ok: true}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid json body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+
+    kind = body.get("kind")
+    path = body.get("path")
+    if not isinstance(kind, str) or kind not in mc_state.VALID_IDE_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of: {sorted(mc_state.VALID_IDE_ACTIONS)}",
+        )
+    if not isinstance(path, str) or not path.strip():
+        raise HTTPException(status_code=400, detail="path must be a non-empty string")
+
+    try:
+        await mc_state.publish_ide_action(kind, path)
+    except Exception as e:
+        logger.warning("mc/ide_action publish failed: %s", e)
+
+    return JSONResponse({"kind": kind, "path": path, "ok": True})
+
+
 # ── SSE event bus (backend → frontend) ─────────────────────────────────
 
 async def _navigate_sse(request: Request):
-    """Yield SSE events from the navigate fan-out queue."""
+    """Yield SSE events from the fan-out queue.
+
+    Carries two event types: `navigate` (tab + focus_id) and `ide_action`
+    (kind + path). Both share the same queue per subscriber.
+    """
     q = mc_state.subscribe()
     try:
         # Initial hello so the client knows the channel is live.
@@ -132,7 +184,8 @@ async def _navigate_sse(request: Request):
                 # intermediaries that close idle SSE sockets.
                 yield ": ping\n\n"
                 continue
-            yield f"event: navigate\ndata: {json.dumps(evt)}\n\n"
+            event_name = evt.get("type", "navigate")
+            yield f"event: {event_name}\ndata: {json.dumps(evt)}\n\n"
     except asyncio.CancelledError:
         raise
     finally:
@@ -354,6 +407,16 @@ def _summarize_services() -> dict:
     return {"counts": counts}
 
 
+def _summarize_ide() -> dict:
+    """Surface the current IDE state in the navigate detail."""
+    snap = mc_state.get_ide_snapshot() or {}
+    return {
+        "open_folder": snap.get("open_folder"),
+        "visible_file": snap.get("visible_file"),
+        "open_tab_count": len(snap.get("open_tabs") or []),
+    }
+
+
 _SUMMARIZERS = {
     "inner_voice": _summarize_inner_voice,
     "chat": _summarize_chat,
@@ -367,6 +430,7 @@ _SUMMARIZERS = {
     "architecture": lambda: {},
     "settings": lambda: {},
     "graph": lambda: {},
+    "ide": _summarize_ide,
 }
 
 

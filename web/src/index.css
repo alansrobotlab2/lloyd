@@ -288,3 +288,36 @@ body {
     -webkit-overflow-scrolling: touch;
   }
 }
+
+/* IDE animated-diff decorations.
+   Targets Monaco-specific selectors via .monaco-editor to override the
+   editor's default line backgrounds. */
+.monaco-editor .view-overlays .ide-diff-add,
+.monaco-editor .ide-diff-add {
+  background-color: rgba(34, 197, 94, 0.18) !important;
+  animation: ide-diff-flash-add 1.5s ease-out;
+}
+.monaco-editor .ide-diff-add-inline {
+  font-weight: 700;
+  color: rgb(187, 247, 208);
+}
+.monaco-editor .view-overlays .ide-diff-remove,
+.monaco-editor .ide-diff-remove {
+  background-color: rgba(239, 68, 68, 0.18) !important;
+  animation: ide-diff-flash-remove 1.5s ease-out;
+}
+.monaco-editor .ide-diff-remove-inline {
+  font-weight: 700;
+  text-decoration: line-through;
+  color: rgb(252, 165, 165);
+}
+@keyframes ide-diff-flash-add {
+  0%   { background-color: rgba(34, 197, 94, 0.55); }
+  35%  { background-color: rgba(34, 197, 94, 0.30); }
+  100% { background-color: rgba(34, 197, 94, 0.18); }
+}
+@keyframes ide-diff-flash-remove {
+  0%   { background-color: rgba(239, 68, 68, 0.55); }
+  35%  { background-color: rgba(239, 68, 68, 0.30); }
+  100% { background-color: rgba(239, 68, 68, 0.18); }
+}

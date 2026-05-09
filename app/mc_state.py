@@ -24,7 +24,7 @@ logger = logging.getLogger("lloyd-server")
 VALID_TABS = {
     "inner_voice", "chat", "backlog", "autonomy", "workers",
     "memory", "architecture", "skills", "tools", "services",
-    "settings", "graph",
+    "settings", "graph", "ide",
 }
 
 _STATE_PATH = LLOYD_HOME / "mc-state.json"
@@ -33,6 +33,9 @@ _state_lock = asyncio.Lock()
 _state: dict[str, Any] = {
     "tab": "inner_voice",
     "focus_by_tab": {},
+    # IDE tab mirror — frontend reports {open_folder, visible_file, open_tabs}.
+    # None until the user has opened the IDE tab at least once.
+    "ide": None,
     "last_updated": None,
 }
 
@@ -59,6 +62,9 @@ def _load_from_disk() -> None:
                     k: v for k, v in focus.items()
                     if k in VALID_TABS and isinstance(v, dict)
                 }
+            ide = data.get("ide")
+            if isinstance(ide, dict):
+                _state["ide"] = _normalize_ide(ide)
             _state["last_updated"] = data.get("last_updated")
     except Exception as e:
         logger.warning("mc_state: failed to load %s: %s", _STATE_PATH, e)
@@ -75,6 +81,30 @@ def _persist() -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_ide(ide: Any) -> Optional[dict]:
+    """Coerce client-supplied IDE state into the canonical shape.
+
+    Returns None on garbage. Drops unknown keys; coerces tab list entries
+    to strings; caps the tab list at 32 entries to keep the state compact.
+    """
+    if not isinstance(ide, dict):
+        return None
+    open_folder = ide.get("open_folder")
+    visible_file = ide.get("visible_file")
+    open_tabs = ide.get("open_tabs")
+    out: dict[str, Any] = {}
+    if isinstance(open_folder, str) and open_folder.strip():
+        out["open_folder"] = open_folder
+    if isinstance(visible_file, str) and visible_file.strip():
+        out["visible_file"] = visible_file
+    if isinstance(open_tabs, list):
+        clean = [str(t) for t in open_tabs if isinstance(t, str) and t.strip()]
+        out["open_tabs"] = clean[:32]
+    if not out:
+        return None
+    return out
 
 
 def _normalize_focus(focus: Any) -> Optional[dict]:
@@ -102,15 +132,32 @@ async def get_state() -> dict:
             "tab": _state["tab"],
             "focus": focus_for_tab,
             "focus_by_tab": dict(_state["focus_by_tab"]),
+            "ide": dict(_state["ide"]) if _state.get("ide") else None,
             "last_updated": _state["last_updated"],
         }
 
 
-async def set_state(tab: Optional[str], focus: Any) -> dict:
+def get_ide_snapshot() -> Optional[dict]:
+    """Synchronous snapshot of just the IDE block.
+
+    Used by prefetch context injection where the call site is sync and
+    can't await get_state(). Reads without the lock — small TOCTOU window
+    but the worst case is a one-turn-stale read, harmless.
+    """
+    ide = _state.get("ide")
+    return dict(ide) if isinstance(ide, dict) else None
+
+
+_SENTINEL = object()
+
+
+async def set_state(tab: Optional[str], focus: Any, ide: Any = _SENTINEL) -> dict:
     """Update the mirror from a frontend report.
 
     `tab` may be None (only updating focus); `focus` may be None (clearing
-    the active tab's focus). Validates tab against VALID_TABS.
+    the active tab's focus). `ide` is sentinel-defaulted: omitted means
+    "leave IDE state unchanged"; an explicit None clears it; a dict updates
+    it. Validates tab against VALID_TABS.
     """
     async with _state_lock:
         if tab is not None:
@@ -125,12 +172,31 @@ async def set_state(tab: Optional[str], focus: Any) -> dict:
         else:
             _state["focus_by_tab"][active] = normalized
 
+        prev_folder = (_state.get("ide") or {}).get("open_folder") if _state.get("ide") else None
+        if ide is not _SENTINEL:
+            if ide is None:
+                _state["ide"] = None
+            else:
+                _state["ide"] = _normalize_ide(ide)
+
+        new_folder = (_state.get("ide") or {}).get("open_folder") if _state.get("ide") else None
+        # Rebind the inotify watcher whenever the open folder changes.
+        # Lazy-imported to avoid bringing watchdog into modules that don't
+        # need it during startup.
+        if new_folder != prev_folder:
+            try:
+                from app import file_watcher
+                file_watcher.bind(new_folder)
+            except Exception as e:
+                logger.warning("mc_state: file_watcher.bind failed: %s", e)
+
         _state["last_updated"] = _now()
         _persist()
 
         return {
             "tab": _state["tab"],
             "focus": _state["focus_by_tab"].get(_state["tab"]),
+            "ide": dict(_state["ide"]) if _state.get("ide") else None,
             "last_updated": _state["last_updated"],
         }
 
@@ -154,6 +220,39 @@ async def publish_navigate(tab: str, focus_id: Optional[str]) -> None:
     if tab not in VALID_TABS:
         raise ValueError(f"unknown tab: {tab!r}")
     payload = {"type": "navigate", "tab": tab, "focus_id": focus_id}
+    _fanout(payload)
+
+
+VALID_IDE_ACTIONS = {"open_folder", "close_tab"}
+
+
+async def publish_file_changed(path: str, *, deleted: bool = False) -> None:
+    """Push a file-changed signal to every subscribed client.
+
+    Fired by the inotify watcher when a file inside the IDE's open
+    folder is modified, created, deleted, or renamed. The frontend
+    decides what to do (silent reload, animate, conflict banner)
+    based on whether it has the path open and whether the tab is dirty.
+    """
+    payload = {"type": "file_changed", "path": path, "deleted": bool(deleted)}
+    _fanout(payload)
+
+
+async def publish_ide_action(kind: str, path: str) -> None:
+    """Push an IDE action (open_folder / close_tab) to every subscribed client.
+
+    `ide_open_file` is intentionally NOT here — it reuses publish_navigate
+    with tab="ide", focus_id=<path>, which the existing pendingFocus channel
+    already handles. This bus is for richer IDE drives that don't fit a
+    single focus_id.
+    """
+    if kind not in VALID_IDE_ACTIONS:
+        raise ValueError(f"unknown ide action kind: {kind!r}")
+    payload = {"type": "ide_action", "kind": kind, "path": path}
+    _fanout(payload)
+
+
+def _fanout(payload: dict) -> None:
     dead: list[asyncio.Queue] = []
     for q in list(_subscribers):
         try:
