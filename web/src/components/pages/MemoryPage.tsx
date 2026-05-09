@@ -602,7 +602,7 @@ function DocumentModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget && !editing) onClose(); }}
     >
       <div className="bg-card border border-border/50 rounded-xl shadow-2xl w-[80%] h-[80%] flex flex-col overflow-hidden">
@@ -1060,8 +1060,8 @@ export default function MemoryPage() {
           </div>
         </div>
 
-        {/* Center: Entity/Knowledge graph */}
-        <div className="flex-1 min-w-0 min-h-0">
+        {/* Center: Entity/Knowledge graph (right panel floats over it) */}
+        <div className="flex-1 min-w-0 min-h-0 relative">
           <EntityGraph
             selectedNode={selectedGraphNode}
             onNodeClick={handleGraphNodeClick}
@@ -1069,16 +1069,15 @@ export default function MemoryPage() {
             onNodeHover={handleGraphNodeHover}
             onGraphLoaded={handleGraphLoaded}
           />
-        </div>
 
-        {/* Right: dynamic panel — only mounted when there's content, so the
-            graph reclaims the full width when nothing is selected (matches
-            the Architecture tab). */}
-        {rightPanel.kind !== "empty" && (
-          <div className="w-72 flex-shrink-0 overflow-y-auto min-h-0 border-l border-border/30 pl-4">
-            {renderRightPanel()}
-          </div>
-        )}
+          {/* Right: dynamic panel — overlays the top-right of the graph so
+              the graph keeps its full width when something is selected. */}
+          {rightPanel.kind !== "empty" && (
+            <div className="absolute top-0 right-0 bottom-0 w-72 overflow-y-auto bg-card/85 backdrop-blur-sm border-l border-border/40 rounded-l-md shadow-lg p-3 pointer-events-auto">
+              {renderRightPanel()}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Document modal */}

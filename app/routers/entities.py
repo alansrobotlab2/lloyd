@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from app.entity_naming import normalize as _normalize_entity
+from app.paths import VAULT_FACTS_ROOT
 
 # Prefer the C-based YAML loader when available (~10x faster than safe_load).
 # All frontmatter we parse here is trusted vault content, so SafeLoader-level
@@ -34,8 +35,7 @@ def _jsonable(v):
 
 router = APIRouter()
 
-_FACTS_ROOT = Path.home() / "obsidian" / "facts"
-_RELATIONS_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
+_FACTS_ROOT = VAULT_FACTS_ROOT
 # Authoritative typed knowledge graph maintained by the nightly v4 classifier.
 # Contains semantic edge types (uses, part_of, implements, depends_on, etc.)
 # with confidence, provenance, and temporal bookkeeping (expired_at).
