@@ -29,7 +29,7 @@ LLOYD_API = os.environ.get("LLOYD_API_URL", "http://127.0.0.1:8080")
 _VALID_TABS = [
     "inner_voice", "chat", "backlog", "autonomy", "workers",
     "memory", "architecture", "skills", "tools", "services",
-    "settings", "graph",
+    "settings", "graph", "ide",
 ]
 
 app = Server("lloyd-mission-control-ui")
@@ -138,6 +138,8 @@ async def list_tools():
                 "  tools              → MCP server id (expands server)\n"
                 "  skills             → skill name (selects + opens viewer)\n"
                 "  services           → service unit name (expands)\n"
+                "  ide                → absolute file path (opens it in a "
+                "new editor tab; prefer ide_open_file for richer feedback)\n"
                 "  architecture / settings / graph → no focus supported"
             ),
             inputSchema={

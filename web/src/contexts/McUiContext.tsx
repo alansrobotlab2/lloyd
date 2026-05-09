@@ -12,6 +12,28 @@ interface PendingFocus {
   focusId: string
 }
 
+export interface IdeState {
+  open_folder?: string
+  visible_file?: string
+  open_tabs?: string[]
+}
+
+export type IdeActionKind = 'open_folder' | 'close_tab'
+
+export interface PendingIdeAction {
+  kind: IdeActionKind
+  path: string
+  // Bumped on each new action so consumers can re-fire on duplicates.
+  seq: number
+}
+
+export interface PendingFileChange {
+  path: string
+  deleted: boolean
+  // Bumped on each new event so consumers can re-fire on duplicates.
+  seq: number
+}
+
 interface McUiContextValue {
   currentTab: Page
   setCurrentTab: (tab: Page) => void
@@ -25,6 +47,22 @@ interface McUiContextValue {
   pendingFocus: PendingFocus | null
   setPendingFocus: (next: PendingFocus | null) => void
   consumePendingFocus: (tab: Page) => string | null
+
+  // IDE tab state mirror — IdePage reports its open folder / visible file /
+  // open tabs here, useMcStateSync sends them to the backend.
+  ideState: IdeState | null
+  reportIdeState: (next: IdeState | null) => void
+
+  // Set by the navigate-events hook when the agent issues an ide_action.
+  // IdePage reads + applies it, no explicit consume needed (sequence-gated).
+  pendingIdeAction: PendingIdeAction | null
+  setPendingIdeAction: (next: PendingIdeAction | null) => void
+
+  // Set by the navigate-events hook when inotify fires for a file inside
+  // the IDE's open folder. IdePage applies it (silent reload, animate,
+  // or conflict banner depending on tab state).
+  pendingFileChange: PendingFileChange | null
+  setPendingFileChange: (next: PendingFileChange | null) => void
 }
 
 const McUiContext = createContext<McUiContextValue | null>(null)
@@ -38,6 +76,9 @@ export function McUiProvider({ children, initialTab = 'inner_voice' }: ProviderP
   const [currentTab, setCurrentTab] = useState<Page>(initialTab)
   const [focusByTab, setFocusByTab] = useState<Partial<Record<Page, McFocus | null>>>({})
   const [pendingFocus, setPendingFocus] = useState<PendingFocus | null>(null)
+  const [ideState, setIdeState] = useState<IdeState | null>(null)
+  const [pendingIdeAction, setPendingIdeAction] = useState<PendingIdeAction | null>(null)
+  const [pendingFileChange, setPendingFileChange] = useState<PendingFileChange | null>(null)
 
   // reportFocus is called from inside render via a useEffect in each page.
   // Skip state updates that wouldn't change anything, otherwise React loops.
@@ -51,6 +92,20 @@ export function McUiProvider({ children, initialTab = 'inner_voice' }: ProviderP
       ) || (!existing && !focus)
       if (same) return prev
       return { ...prev, [tab]: focus }
+    })
+  }, [])
+
+  const reportIdeState = useCallback((next: IdeState | null) => {
+    setIdeState(prev => {
+      const a = prev ?? {}
+      const b = next ?? {}
+      const sameTabs = (a.open_tabs ?? []).length === (b.open_tabs ?? []).length
+        && (a.open_tabs ?? []).every((t, i) => t === (b.open_tabs ?? [])[i])
+      const same = a.open_folder === b.open_folder
+        && a.visible_file === b.visible_file
+        && sameTabs
+      if (same) return prev
+      return next
     })
   }, [])
 
@@ -69,7 +124,14 @@ export function McUiProvider({ children, initialTab = 'inner_voice' }: ProviderP
     pendingFocus,
     setPendingFocus,
     consumePendingFocus,
-  }), [currentTab, focusByTab, reportFocus, pendingFocus, consumePendingFocus])
+    ideState,
+    reportIdeState,
+    pendingIdeAction,
+    setPendingIdeAction,
+    pendingFileChange,
+    setPendingFileChange,
+  }), [currentTab, focusByTab, reportFocus, pendingFocus, consumePendingFocus,
+       ideState, reportIdeState, pendingIdeAction, pendingFileChange])
 
   return <McUiContext.Provider value={value}>{children}</McUiContext.Provider>
 }

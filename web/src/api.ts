@@ -1195,4 +1195,71 @@ export const api = {
       throw new Error(err?.detail || `revoke failed: ${r.status}`)
     }
   },
+
+  // ── IDE tab ─────────────────────────────────────────────────────────
+
+  ideList: async (path: string): Promise<IdeListResponse> => {
+    const r = await fetch(`${API_BASE}/ide/list?path=${encodeURIComponent(path)}`)
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `ide list failed: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  ideRead: async (path: string): Promise<IdeFileResponse> => {
+    const r = await fetch(`${API_BASE}/ide/file?path=${encodeURIComponent(path)}`)
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `ide read failed: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  ideWrite: async (
+    path: string,
+    content: string,
+    expected_mtime?: number,
+  ): Promise<IdeWriteResponse> => {
+    const r = await fetch(`${API_BASE}/ide/file`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, content, expected_mtime }),
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      const e = new Error(err?.detail || `ide write failed: ${r.status}`)
+      ;(e as Error & { status?: number }).status = r.status
+      throw e
+    }
+    return r.json()
+  },
+}
+
+export interface IdeEntry {
+  name: string
+  isDir: boolean
+  size: number
+  mtime: number
+}
+
+export interface IdeListResponse {
+  path: string
+  entries: IdeEntry[]
+  truncated: boolean
+}
+
+export interface IdeFileResponse {
+  path: string
+  size: number
+  mtime: number
+  binary: boolean
+  too_large: boolean
+  content: string | null
+}
+
+export interface IdeWriteResponse {
+  path: string
+  size: number
+  mtime: number
 }

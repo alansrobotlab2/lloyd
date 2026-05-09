@@ -718,7 +718,52 @@ def prefetch_context(text: str, session_id: str | None = None) -> str:
                               backlog_refs=backlog_result,
                               had_query=True,
                               show_skill_hint=not is_continuation)
+
+    # IDE state — what folder/file the user has open in the IDE tab. Tiny,
+    # always-fresh, helps the agent answer "what file am I looking at?"
+    # without needing a tool call. Folded into the existing <context>
+    # envelope when present so it sits next to skills/facts/vault.
+    ide_block = _format_ide_state()
+    if ide_block:
+        if context:
+            # Splice <ide_state>...</ide_state> just before the closing
+            # </context> tag so the agent sees it as part of the same
+            # injection block.
+            context = context.rsplit("</context>", 1)
+            context = context[0] + ide_block + "\n</context>"
+        else:
+            context = "<context>\n" + ide_block + "\n</context>"
+
     if not context:
         return text
 
     return context + "\n\n" + text
+
+
+def _format_ide_state() -> str:
+    """Render the current IDE block as a compact tag, or "" if none.
+
+    Reads the in-memory MC state mirror — same process as the FastAPI
+    backend, no HTTP round-trip.
+    """
+    try:
+        from app.mc_state import get_ide_snapshot
+        snap = get_ide_snapshot()
+    except Exception:
+        return ""
+    if not snap:
+        return ""
+    open_folder = snap.get("open_folder")
+    visible_file = snap.get("visible_file")
+    open_tabs = snap.get("open_tabs") or []
+    lines = ["<ide_state>"]
+    if open_folder:
+        lines.append(f"  open_folder: {open_folder}")
+    if visible_file:
+        lines.append(f"  visible_file: {visible_file}")
+    if open_tabs:
+        lines.append(f"  open_tabs: [{', '.join(open_tabs)}]")
+    if len(lines) == 1:
+        return ""
+    lines.append("</ide_state>")
+    return "\n".join(lines)

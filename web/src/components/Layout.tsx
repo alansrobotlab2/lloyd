@@ -11,6 +11,7 @@ import ArchitecturePageFull from './pages/ArchitecturePage'
 import AutonomyPage from './pages/AutonomyPage'
 import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
+import IdePage from './pages/IdePage'
 import SettingsPage from './pages/SettingsPage'
 import RightChatSidebar from './RightChatSidebar'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
@@ -440,6 +441,18 @@ export default function Layout() {
               <RightChatSidebar isMobile />
             </div>
           )}
+
+          {/* IDE — always mounted so open files / editor state survive tab
+              switches (Monaco re-init is expensive). Hidden via display:none
+              when another page is active. */}
+          <div
+            className={cn(
+              'flex-1 flex flex-col min-h-0 overflow-hidden',
+              page === 'ide' ? '' : 'hidden',
+            )}
+          >
+            <IdePage />
+          </div>
 
           {/* Other pages */}
           {PageComponent && <PageComponent />}

@@ -111,6 +111,9 @@ harness:
     - vault_recall
     - mc_get_state
     - mc_navigate
+    - ide_open_folder
+    - ide_open_file
+    - ide_close_tab
     max_results_default: 5
     max_results_cap: 20
 subagents:
