@@ -11,12 +11,39 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import re
 import subprocess
 import logging
 import os
 import traceback
 from pathlib import Path
 from typing import Optional
+
+
+# High-precision phrases that suggest a tool/subprocess failed even though the
+# agent's turn completed successfully. Used by _detect_silent_failures() to flag
+# runs whose summary should not be trusted as a clean success.
+_SILENT_FAILURE_PATTERNS = [
+    re.compile(r"\bfailed because\b", re.IGNORECASE),
+    re.compile(r"\bTraceback \(most recent call last\)"),
+    re.compile(r"\bexit code\s+[1-9]\d*\b"),
+    re.compile(r"\b(?:FileNotFoundError|PermissionError|ModuleNotFoundError|"
+               r"ImportError|KeyError|AttributeError|TypeError|ValueError)\b\s*:"),
+]
+
+
+def _detect_silent_failures(text: str) -> list[str]:
+    """Return the failure-indicator snippets found in text, or []."""
+    if not text:
+        return []
+    hits = []
+    for pat in _SILENT_FAILURE_PATTERNS:
+        m = pat.search(text)
+        if m:
+            start = max(0, m.start() - 30)
+            end = min(len(text), m.end() + 80)
+            hits.append(text[start:end].strip().replace("\n", " "))
+    return hits
 
 import yaml
 
@@ -341,7 +368,11 @@ async def run_task(task_id) -> dict:
     else:
         return {"success": False, "error": f"Task #{task_id} has no skill_name or skill_path"}
 
-    _update_task_field(task_id, status="in_progress")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    now_iso = now.isoformat()
+    run_id = f"run_{task_id}_{now.strftime('%Y%m%d_%H%M%S')}"
+
+    _update_task_field(task_id, status="in_progress", updated=now_iso)
     prompt = _build_task_prompt(task, skill_content)
 
     # Resolve model
@@ -357,10 +388,6 @@ async def run_task(task_id) -> dict:
 
     model_env = _get_model_env(task_model)
     timeout = int(task.get("timeout_seconds") or 1800)
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    now_iso = now.isoformat()
-    run_id = f"run_{task_id}_{now.strftime('%Y%m%d_%H%M%S')}"
 
     logger.info("Running task #%s: %s (model=%s)", task_id, task.get("name"), task_model)
     started_at = now_iso
@@ -410,11 +437,21 @@ async def run_task(task_id) -> dict:
         completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         duration = (datetime.datetime.now(datetime.timezone.utc) - now).total_seconds()
 
+        silent_failures = _detect_silent_failures(final_response)
+        body_parts = [f"## Prompt\n\n{prompt[:500]}...", f"## Response\n\n{final_response}"]
+        if silent_failures:
+            indicators_md = "\n".join(f"- `{s}`" for s in silent_failures[:5])
+            body_parts.insert(1, f"## ⚠ Silent failure indicators detected\n\n{indicators_md}")
+            logger.warning(
+                "Task #%s ran to completion but final response contains failure indicators: %s",
+                task_id, silent_failures[:3],
+            )
+
         _write_run_record(
             task_id=task_id, run_id=run_id, status="success",
             started_at=started_at, completed_at=completed_at,
             duration_seconds=duration, summary=final_response[:200],
-            body=f"## Prompt\n\n{prompt[:500]}...\n\n## Response\n\n{final_response}",
+            body="\n\n".join(body_parts),
         )
 
         interval = _frequency_interval_seconds(task)
@@ -423,7 +460,14 @@ async def run_task(task_id) -> dict:
         _update_task_field(task_id, status="up_next", last_run=completed_at,
                            updated=completed_at, failure_count=0,
                            **({"next_run": next_run_iso} if next_run_iso else {}))
-        _append_activity_log(task_id, f"Run {run_id} — success ({duration:.0f}s)")
+        if silent_failures:
+            _append_activity_log(
+                task_id,
+                f"Run {run_id} — success ({duration:.0f}s) ⚠ silent-failure indicators: "
+                f"{silent_failures[0][:120]}",
+            )
+        else:
+            _append_activity_log(task_id, f"Run {run_id} — success ({duration:.0f}s)")
 
         logger.info("Task #%s completed in %.1fs", task_id, duration)
         return {

@@ -2,8 +2,8 @@
 """Promote classifier output into `_relationships.json`.
 
 Reads `_pipeline/memory-graph/classified.jsonl` (produced by
-classify-relationships.py) and updates `~/obsidian/facts/_relationships.json`
-in place:
+classify-relationships.py) and updates the live relationships index
+(resolved via app.paths.VAULT_FACTS_ROOT) in place:
 
 - For each classified edge, if new_type != original_type and confidence ≥ min:
   - Mark the old edge as expired (expired_at = now) — preserves history
@@ -33,9 +33,11 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-FACTS_DIR = Path.home() / "obsidian" / "facts"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
+
 RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
-DEFAULT_CLASSIFIED = Path.home() / "lloyd" / "_pipeline" / "memory-graph" / "classified.jsonl"
+DEFAULT_CLASSIFIED = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "memory-graph" / "classified.jsonl"
 DEFAULT_MIN_CONF = 0.6
 
 

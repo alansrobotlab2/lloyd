@@ -23,9 +23,10 @@ from pathlib import Path
 
 import yaml
 
-FACTS_DIR = Path.home() / "obsidian" / "facts"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
-RELATIONS_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
+RELATIONS_INDEX = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "relations-index.json"
 
 # Confidence levels per extraction method
 CONFIDENCE = {

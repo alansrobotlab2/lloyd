@@ -259,13 +259,39 @@ export default function VoiceRoom({
               // stream is wrapped in a LocalAudioTrack tagged as
               // Track.Source.Microphone, so setMicrophoneEnabled(false)
               // and the existing half-duplex mute logic still find it.
+              //
+              // Phase 1d diagnostic: `?raw_audio=1` disables the browser's
+              // WebRTC APM (EC/NS/AGC) so we can A/B whether browser-side
+              // processing is responsible for the phone wake-word failure
+              // (oWW scores of 0.001 on phone audio with APM on). Sticky
+              // in localStorage so reload preserves the choice while
+              // diagnosing.
+              const rawAudio = (() => {
+                if (typeof window === 'undefined') return false
+                try {
+                  const url = new URL(window.location.href)
+                  const q = url.searchParams.get('raw_audio')
+                  if (q === '1') { localStorage.setItem('lloyd:raw_audio', '1'); return true }
+                  if (q === '0') { localStorage.removeItem('lloyd:raw_audio'); return false }
+                  return localStorage.getItem('lloyd:raw_audio') === '1'
+                } catch { return false }
+              })()
+              const audioConstraints: MediaTrackConstraints = rawAudio
+                ? {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                    channelCount: 1,
+                  }
+                : {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    channelCount: 1,
+                  }
+              if (rawAudio) console.info('[VoiceRoom] raw_audio mode: WebRTC APM disabled (NS/AEC/AGC off)')
               const raw = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                  echoCancellation: true,
-                  noiseSuppression: true,
-                  autoGainControl: true,
-                  channelCount: 1,
-                },
+                audio: audioConstraints,
               })
               if (cancelled) {
                 raw.getTracks().forEach(t => t.stop())
@@ -294,6 +320,34 @@ export default function VoiceRoom({
               if (cancelled) return
               setLocalAudioTrack(lkTrack)
               setMicPublished(true)
+              // Diagnostic: tell the worker what audio path this client
+              // is using. The worker stores this per-identity and includes
+              // it in every per-utterance ww-diag record so we can A/B
+              // browser-DSP-on vs browser-DSP-off across devices.
+              try {
+                const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
+                const isMobile = /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(ua)
+                const settings = processedTrack.getSettings?.() ?? {}
+                const payload = {
+                  type: 'client_info',
+                  userAgent: ua,
+                  isMobile,
+                  rawAudio,
+                  audioConstraints,
+                  trackSettings: {
+                    sampleRate: (settings as MediaTrackSettings).sampleRate,
+                    channelCount: (settings as MediaTrackSettings).channelCount,
+                    echoCancellation: (settings as MediaTrackSettings).echoCancellation,
+                    noiseSuppression: (settings as MediaTrackSettings).noiseSuppression,
+                    autoGainControl: (settings as MediaTrackSettings).autoGainControl,
+                  },
+                  micGain: getMicGain(),
+                }
+                const data = new TextEncoder().encode(JSON.stringify(payload))
+                await room.localParticipant.publishData(data, { reliable: true })
+              } catch (e) {
+                console.warn('client_info publish failed:', e)
+              }
             } catch (e) {
               // Permission denied, no device, or revoked — keep the room
               // alive but surface the error to the UI.

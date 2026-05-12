@@ -1,4 +1,9 @@
-2026-04-20 18:00 PDT - Memory capture task #25 skipped: No new sessions detected since last run (watermark-gated: 766 == 766)
-2026-04-20 17:55 PDT - Memory capture task #25 skipped: No new sessions detected since last run (watermark-gated, count 767)
-2026-04-20 18:00 PDT - Memory capture task #25 skipped: No new sessions detected since last run (watermark-gated)
 - **Entity Resolution Sweep #48 (2026-04-23)**: 681 entities, 2396 active edges, 5 AMBIGUOUS clusters, 0 SAFE merges. Graph stable. **Path bug found & fixed**: 5 scripts (entity-resolution-sweep, classify-relationships-v4, semantic-entity-resolution, normalize-task-entities, fact_extractor) were reading from `_aliases.json` (48 entries) instead of `entity-aliases.json` (91 entries). The memory MCP server and entity_naming.py were already correct. Fixed all paths; `_aliases.json` removed as dead code.
+§
+- Entity resolution sweep completed on 2026-05-07: 160 SAFE clusters merged, 6 AMBIGUOUS clusters manually resolved, reducing entities from 2,496 to 2,289 and edges from 14,422 to 13,355 before final merge to 17,132 edges
+- Knowledge graph v4 classifier audit (2026-05-04): Ran on 4,001 edges — 29.6% type changed, 81.5% of model-reasoning quotes were fabricated (hallucination), 58.5% of asymmetric verbs were reversed, mean confidence 0.393
+- Disk space cleanup (2026-05-06): Deleted 17G orphan GGUF and 86G Minimax model workspace, freeing space from 84% to 59% utilization (656G free)
+- Chrome extension for web capture architecture built (2026-05-06): Three-component system (extension, backend server on port 8087, vault output) successfully tested for YouTube and article capture
+- Tool failure pattern (2026-05-05): Model forgetting to call ToolSearch before deferred tools (chat_list_sessions, chat_get_session) — inconsistent protocol adherence requiring system prompt reinforcement
+- vLLM connectivity issues (2026-05-04): Multiple poisoned worker clears due to vLLM 500 errors and connection failures; port discrepancy documented (8096 vs 8091 in skill docs)
+- Knowledge graph edge audit (2026-05-04): 19,829 total edges, 74 distinct types (60 active); 47 out of 60 active types have 2 or fewer edges; root cause: fact_relate MCP tool allows free-text types with no validation

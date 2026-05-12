@@ -50,7 +50,9 @@ from agent_mcp.facts import (
     _fact_matches_tokens,
     _fact_score,
     _get_facts_sync,
+    _get_entity_edge_counts,
 )
+import math
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -110,8 +112,14 @@ def _qmd_strip_stopwords(query: str) -> str:
 
     Uses the wider _QUERY_STOPWORDS (see #327) rather than _ENTITY_STOPWORDS
     so natural-language question framing gets fully removed from BM25 signal.
+
+    Short tokens (len<2) are kept when purely digits so version numbers like
+    "Qwen3.5" → tokens [qwen3, 5] don't lose the fractional part.
     """
-    words = [w for w in re.findall(r"\b\w+\b", query.lower()) if w not in _QUERY_STOPWORDS and len(w) >= 2]
+    words = [
+        w for w in re.findall(r"\b\w+\b", query.lower())
+        if w not in _QUERY_STOPWORDS and (len(w) >= 2 or w.isdigit())
+    ]
     return " ".join(words) if words else query
 
 
@@ -246,6 +254,78 @@ def _rrf_fuse(ranked_lists: list, k: int = 60) -> list:
         result["rrf_score"] = round(rrf_score, 6)
         fused.append(result)
     return fused
+
+
+def _graph_rerank(
+    documents: list[dict],
+    seed_entities: list[str],
+    weighted_neighbors: list,
+    alpha: float = 0.5,
+) -> list[dict]:
+    """Re-rank documents using fact-graph topological voting (TGS-RAG Phase 3).
+
+    For each doc, extract entities mentioned in its title+snippet. Each
+    seed/neighbor entity contributes a vote weighted by its graph weight
+    (seeds=1.0, neighbors=their _graph_weighted_neighbors weight) and
+    divided by log(1+degree) so god-nodes (e.g. "lloyd" with ~991 edges)
+    don't dominate. Final score = alpha * QMD_score + (1-alpha) * normalized_topo.
+
+    Returns a new list of dicts sorted by combined score, with `_qmd_score`
+    and `_topo_score` annotations preserved for inspection/eval.
+    """
+    if not documents or (not seed_entities and not weighted_neighbors):
+        return documents
+
+    voters: dict[str, float] = {}
+    for s in seed_entities or []:
+        if s:
+            voters[s.lower()] = 1.0
+    for ent, w in (weighted_neighbors or []):
+        key = (ent or "").lower()
+        if key and key not in voters:
+            voters[key] = float(w)
+
+    if not voters:
+        return documents
+
+    edge_counts = _get_entity_edge_counts()
+
+    def _topo(text: str) -> float:
+        if not text:
+            return 0.0
+        chunk_entities = [e for e, _ in (_extract_entities_from_query(text) or [])]
+        score = 0.0
+        for e in chunk_entities:
+            v = voters.get(e.lower())
+            if v is None:
+                continue
+            degree = max(edge_counts.get(e, 1), 1)
+            score += v / math.log(1 + degree + math.e)  # +e so degree=0 → ~1.0
+        return score
+
+    raw = []
+    for d in documents:
+        text = " ".join([
+            str(d.get("path") or ""),
+            str(d.get("title") or ""),
+            str(d.get("snippet") or ""),
+        ])
+        raw.append(_topo(text))
+
+    max_topo = max(raw) if raw else 0.0
+    rescored = []
+    for d, t in zip(documents, raw):
+        norm = (t / max_topo) if max_topo > 0 else 0.0
+        qmd = float(d.get("score", 0) or 0)
+        combined = alpha * qmd + (1 - alpha) * norm
+        rescored.append({
+            **d,
+            "score": round(combined, 6),
+            "_qmd_score": round(qmd, 6),
+            "_topo_score": round(norm, 6),
+        })
+    rescored.sort(key=lambda x: x["score"], reverse=True)
+    return rescored
 
 
 def _run_vault_search(query: str, max_results: int, min_score: float, scope: str, consolidate: bool) -> dict:
@@ -419,11 +499,20 @@ def _vault_recall(params: dict) -> dict:
     limit = int(params.get("limit", 20))
     include_facts = params.get("include_facts", True)
     expand_graph = params.get("expand_graph", False)
+    graph_rerank = bool(params.get("graph_rerank", False))
+    rerank_alpha = float(params.get("rerank_alpha", 0.5))
 
-    seed_entities = [e for e, _ in _extract_entities_from_query(query)[:5]]
+    # Take top-10 seeds (was 5). Ties at low scores can knock out the
+    # canonical entity; e.g. "Knowledge Graph Consistency" and "Knowledge
+    # Graph System" both score 0.27 for the same query, and with k=5 the
+    # canonical one can be cut off.
+    seed_entities = [e for e, _ in _extract_entities_from_query(query)[:10]]
 
+    # If graph_rerank is requested, we need neighbors regardless of expand_graph,
+    # because rerank uses them as voters. Force graph expansion in that case.
+    need_neighbors = expand_graph or graph_rerank
     weighted_neighbors: list[tuple[str, float]] = []
-    if expand_graph and seed_entities:
+    if need_neighbors and seed_entities:
         weighted_neighbors = _graph_weighted_neighbors(seed_entities, top_k=5, hops=1)
 
     def _do_search():
@@ -440,7 +529,10 @@ def _vault_recall(params: dict) -> dict:
         qtoks = _fact_query_tokens(query)
 
         def _collect(entity_names: list[str], godnode_threshold: int) -> list[dict]:
-            """Pull facts from entities, applying god-node guardrail (Fix C)."""
+            """Pull facts from entities, applying god-node guardrail (Fix C).
+            Tags each fact with its source `entity` so downstream consumers
+            (re-ranking, eval, UI) can attribute facts back to a node.
+            """
             out: list[dict] = []
             for ent in entity_names:
                 try:
@@ -455,7 +547,8 @@ def _vault_recall(params: dict) -> dict:
                     if not kept:
                         continue
                     ef = kept
-                out.extend(ef)
+                resolved_entity = entity_data.get("entity") or ent
+                out.extend({**f, "entity": resolved_entity} for f in ef)
             return out
 
         def _rank(candidates: list[dict], cap: int) -> list[dict]:
@@ -486,7 +579,10 @@ def _vault_recall(params: dict) -> dict:
             raw_results = search_fut.result()
             facts, graph_facts = facts_fut.result()
         documents = []
-        for r in raw_results[:limit]:
+        # When graph_rerank is on, we over-fetch from QMD then re-rank.
+        # Otherwise honor the requested limit as before.
+        prerank_pool = raw_results[: max(limit * 3, limit)] if graph_rerank else raw_results[:limit]
+        for r in prerank_pool:
             path = r.get("file", "").removeprefix("qmd://")
             if path.startswith("obsidian/"):
                 path = path.removeprefix("obsidian/")
@@ -496,6 +592,8 @@ def _vault_recall(params: dict) -> dict:
                 "snippet": r.get("snippet", ""),
                 "score": r.get("score", 0),
             })
+        if graph_rerank:
+            documents = _graph_rerank(documents, seed_entities, weighted_neighbors, alpha=rerank_alpha)[:limit]
         result = {"documents": documents, "facts": facts, "query": query}
         if graph_facts:
             result["graph_expanded_facts"] = graph_facts
@@ -505,7 +603,7 @@ def _vault_recall(params: dict) -> dict:
             ]
         # NOTE: datetime event_date values from YAML-parsed fact frontmatter
         # are non-JSON-native. _wrap() in the dispatcher uses default=str to
-        # serialize them. (Pre-existing data issue in ~/obsidian/facts/,
+        # serialize them. (Pre-existing data issue in the facts tree,
         # surfaced by #322 returning more facts.)
         return result
     except Exception as exc:

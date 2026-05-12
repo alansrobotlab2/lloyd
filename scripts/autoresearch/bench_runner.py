@@ -113,10 +113,18 @@ async def run_bench(
     variants: list[tuple[str, Path]],  # (variant_id, overlay_dir)
     tasks: list[dict[str, Any]],
     model: str,
-    max_parallel: int = 8,
+    max_parallel: int = 3,
     per_task_timeout: int = 180,
 ) -> list[dict[str, Any]]:
-    """Fan out (variant × task) HTTP calls through a semaphore-gated thread pool."""
+    """Fan out (variant × task) HTTP calls through a semaphore-gated thread pool.
+
+    Default cap of 3 leaves one engine slot free for interactive chat
+    (primary vLLM has --max-num-seqs=4). Overflowing it queues calls past
+    their read timeout and pins slots, since vLLM doesn't honor client
+    disconnects — see hypothesis_generator.propose_variants for the full
+    picture. Callers (workers/sources/autoresearch.py) should not raise
+    this above 3 without also raising the engine cap.
+    """
     traces: list[dict[str, Any]] = []
     sem = asyncio.Semaphore(max_parallel)
     loop = asyncio.get_running_loop()

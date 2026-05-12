@@ -4,8 +4,9 @@ A promotion executes when a variant beats baseline on >= N% of bench tasks
 and passes all safety probes. Before swapping, we snapshot the current state
 (SOUL.md, MEMORY.md, USER.md) into `_pipeline/research/snapshots/<ts>/`.
 After swap, we write the winning experiment as a fact under
-`~/obsidian/facts/experiments/<variant_id>/` so it's queryable via the
-normal memory pipeline.
+`cfg.paths.facts_experiments_dir/<variant_id>/` (configured in config.yaml,
+currently `~/lloyd/_pipeline/vault-derived/facts/experiments/`) so it's
+queryable via the normal memory pipeline.
 
 `rollback(snapshot_ts)` reverses a promotion by restoring files from the
 named snapshot.
@@ -107,7 +108,7 @@ def write_experiment_fact(
     baseline_summary: dict[str, Any],
     snapshot_dir: Path,
 ) -> Path | None:
-    """Write the promoted experiment as a fact file under ~/obsidian/facts/experiments/<id>/."""
+    """Write the promoted experiment as a fact file under cfg.paths.facts_experiments_dir/<id>/."""
     ex_dir = cfg.paths.facts_experiments_dir / variant["variant_id"]
     ex_dir.mkdir(parents=True, exist_ok=True)
     fact_file = ex_dir / f"{variant['variant_id']}-experiment.md"

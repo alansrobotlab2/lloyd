@@ -62,10 +62,11 @@ except ImportError:
                         current_list = False
             return result
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 VAULT = Path.home() / "obsidian"
 MEMORY_DIR = VAULT / "memory"
-FACTS_DIR = Path.home() / "obsidian" / "facts"
-INDEX_FILE = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
+INDEX_FILE = Path(__file__).resolve().parent.parent.parent.parent / "_pipeline" / "relations-index.json"
 
 # Import local modules
 sys.path.insert(0, str(VAULT / "agents" / "memory" / "scripts" / "next-gen-memory"))
@@ -107,7 +108,7 @@ class NightlyExtraction:
         Returns:
             Canonical entity name or original if not in registry
         """
-        registry_path = Path("/home/alansrobotlab/obsidian/facts/entity-registry.json")
+        registry_path = FACTS_DIR / "entity-registry.json"
         
         if not registry_path.exists():
             # Fallback to no normalization if registry missing
@@ -148,7 +149,7 @@ class NightlyExtraction:
         from collections import defaultdict
         
         # Load entity registry
-        registry_path = Path("/home/alansrobotlab/obsidian/facts/entity-registry.json")
+        registry_path = FACTS_DIR / "entity-registry.json"
         canonical_mapping = {}
         
         if registry_path.exists():

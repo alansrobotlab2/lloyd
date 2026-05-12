@@ -227,11 +227,11 @@ async def entity_detail(name: str = ""):
 async def entity_graph():
     """Build entity graph from the typed-relationship classifier output.
 
-    Nodes: one per entity dir under ~/obsidian/facts/, plus any endpoint that
-    appears in the active relationship graph without a local fact dir (these
-    are rendered with factCount=0).
+    Nodes: one per entity dir under app.paths.VAULT_FACTS_ROOT, plus any
+    endpoint that appears in the active relationship graph without a local
+    fact dir (these are rendered with factCount=0).
 
-    Edges: active (non-expired) edges from ~/obsidian/facts/_relationships.json
+    Edges: active (non-expired) edges from <FACTS_ROOT>/_relationships.json
     with their real semantic type (uses, part_of, implements, etc.). No
     substring co-occurrence, no fabricated "has-facts" edges.
     """

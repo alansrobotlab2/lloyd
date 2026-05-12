@@ -7,11 +7,12 @@ Tools:
     fact_invalidate, fact_relate, fact_relationships, fact_path,
     fact_neighbors  (10 tools)
 
-Data root: ~/obsidian/facts/
-Relationships index: ~/obsidian/facts/_relationships.json
+Data root: app.paths.VAULT_FACTS_ROOT
+    (currently ~/lloyd/_pipeline/vault-derived/facts/)
+Relationships index: <FACTS_ROOT>/_relationships.json
 
 Split out of agent_mcp/memory.py as part of Task #340 PR 5. Owns:
-    - Entity-keyed fact files (~/obsidian/facts/<Entity>/<Entity>-<category>.md)
+    - Entity-keyed fact files (<FACTS_ROOT>/<Entity>/<Entity>-<category>.md)
     - The relationships index (with mtime-based caching from PR 2)
     - Entity-to-entity graph traversal + weighted expansion
     - Query-aware fact ranking (FACT_GODNODE_THRESHOLD etc.)
@@ -19,6 +20,7 @@ Split out of agent_mcp/memory.py as part of Task #340 PR 5. Owns:
 
 import datetime
 import json
+import math
 import re
 import time
 import uuid
@@ -781,11 +783,22 @@ def _graph_weighted_neighbors(
                 if neighbor in seed_set:
                     continue
                 w = EDGE_TYPE_WEIGHTS.get(etype, _DEFAULT_EDGE_WEIGHT) * conf * hop_decay
-                scores[neighbor] = min(1.0, scores.get(neighbor, 0.0) + w)
+                # No cap here — accumulate raw evidence weight first so multiple
+                # typed edges to the same neighbor compound. God-node penalty
+                # applied below.
+                scores[neighbor] = scores.get(neighbor, 0.0) + w
                 if neighbor not in visited:
                     next_layer.add(neighbor)
         visited.update(next_layer)
         current = next_layer
+
+    # God-node penalty: divide by log(degree+e) so high-degree entities
+    # (e.g. "lloyd" with ~991 edges, log≈7) don't dominate over specific
+    # entities (degree<10, log≈2.5). Without this, broad nodes saturated at 1.0.
+    edge_counts = _get_entity_edge_counts()
+    for entity in list(scores.keys()):
+        degree = max(edge_counts.get(entity, 1), 1)
+        scores[entity] = scores[entity] / math.log(degree + math.e)
 
     ranked = sorted(scores.items(), key=lambda kv: -kv[1])
     return ranked[:top_k]

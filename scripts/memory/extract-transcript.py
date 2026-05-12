@@ -22,7 +22,7 @@ import glob
 from datetime import datetime, timezone
 
 LLOYD_SESSIONS_DIR = os.path.expanduser("~/lloyd/sessions")
-STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "state.json")
+STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 
 
 def load_state():

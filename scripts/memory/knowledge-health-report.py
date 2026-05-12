@@ -6,8 +6,8 @@ Analyzes the fact store and relationship graph to produce a markdown
 health report. Designed to be run by the nightly cron system.
 
 Inputs:
-  - Facts: ~/obsidian/facts/ (YAML frontmatter markdown files, one per entity/category)
-  - Relationships: ~/obsidian/facts/_relationships.json (optional)
+  - Facts dir + relationships index resolved via app.paths.VAULT_FACTS_ROOT
+    (currently ~/lloyd/_pipeline/vault-derived/facts/)
 
 Output:
   - ~/lloyd/_pipeline/reflection/knowledge-health-YYYY-MM-DD.md
@@ -22,10 +22,11 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 
-FACTS_DIR = Path.home() / "obsidian" / "facts"
 RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
-DEFAULT_OUTPUT_DIR = Path.home() / "lloyd" / "_pipeline" / "reflection"
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "reflection"
 
 GOD_ENTITY_THRESHOLD = 20
 THIN_ENTITY_MAX_FACTS = 2

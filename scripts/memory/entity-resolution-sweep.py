@@ -284,7 +284,10 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
         degrees[e["source"]] += 1
         degrees[e["target"]] += 1
 
-    entities = list(degrees.keys())
+    # Include existing directory names so entities with zero active-edge degree
+    # (e.g. "OpenClaw SDK", "Voice Mode System") are still discovered and can be
+    # merged into their canonical partners.
+    entities = list(set(degrees.keys()) | existing_dirs)
 
     # Two-stage clustering:
     #   Stage A: cluster by normalize_full to surface candidates.

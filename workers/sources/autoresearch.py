@@ -42,7 +42,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     budget = int(payload.get("budget_minutes", 60))
     max_variants = payload.get("max_variants")
     bench_limit = payload.get("bench_limit")
-    max_parallel = int(payload.get("max_parallel", 4))
+    max_parallel = int(payload.get("max_parallel", 3))
     dry_run = bool(payload.get("dry_run", False))
     model = payload.get("model")
 

@@ -8,10 +8,14 @@ set -euo pipefail
 # Sibling of start-27b-nvfp4.sh (mmangkad re-quant). Same architecture
 # (Qwen3_5ForConditionalGeneration, model_type=qwen3_5): dense 27B, hybrid
 # DeltaNet + full-attention (64 layers, full_attention_interval=4 → 16 full /
-# 48 linear), MTP head present, NVFP4 (ModelOpt) on linear ops, vision tower
-# left in BF16 (per quant_config ignore list). Unsloth's variant ships the
-# same single-shard model.safetensors (~25.5 GiB) plus their nvfp4_recipe.json
-# / recipe.yaml.
+# 48 linear), NVFP4 (ModelOpt) on linear ops, vision tower left in BF16 (per
+# quant_config ignore list). Unsloth's variant ships a single-shard
+# model.safetensors (~26 GiB) plus their nvfp4_recipe.json / recipe.yaml.
+#
+# MTP head STRIPPED in this re-quant: config.json reports
+# text_config.mtp_num_hidden_layers=1 but the safetensors contains zero MTP
+# tensors (only main layers 0–63, lm_head, model.visual). Do NOT pass
+# --speculative-config — vLLM will fail to find the MTP weights and wedge.
 #
 # Multimodal: vision+video stack (image_token_id=248056, video_token_id=248057)
 # with MRoPE. Served here as text-only via --limit-mm-per-prompt. Drop those
@@ -22,10 +26,8 @@ set -euo pipefail
 #
 # Tuning inherited from start-27b-nvfp4.sh / start-35b-nvfp4.sh:
 #   - --max-num-batched-tokens 8192: DeltaNet block-size constraint requires >4288.
-#   - --speculative-config MTP num_speculative_tokens=4: 35B sweep winner; re-sweep
-#     here once the unsloth re-quant is stable, dense 27B may prefer a different depth.
-#   - --tool-call-parser qwen3_xml: empirical last-known-good under MTP. qwen3_coder
-#     wedges the engine on the stop-token path with MTP enabled.
+#   - --tool-call-parser qwen3_xml: empirical last-known-good for the Qwen3.5/3.6
+#     family. qwen3_coder wedges the engine on the stop-token path.
 #   - --override-generation-config presence_penalty=1.5: Unsloth anti-repetition
 #     default for the Qwen3.5 thinking family.
 #   - --performance-mode interactivity: +10-15% single-user decode, sub-second TTFT.
@@ -86,6 +88,5 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --tool-call-parser qwen3_xml \
   --reasoning-parser qwen3 \
   --performance-mode interactivity \
-  --speculative-config '{"method": "mtp", "num_speculative_tokens": 4}' \
   --override-generation-config '{"presence_penalty": 1.5}' \
   --limit-mm-per-prompt '{"image": 0, "video": 0, "audio": 0}'

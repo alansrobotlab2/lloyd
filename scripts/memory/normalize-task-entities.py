@@ -27,7 +27,9 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-FACTS = Path("/home/alansrobotlab/obsidian/facts")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS
+
 RELATIONSHIPS = FACTS / "_relationships.json"
 ALIASES = FACTS / "entity-aliases.json"
 

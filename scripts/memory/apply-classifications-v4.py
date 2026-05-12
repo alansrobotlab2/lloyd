@@ -3,8 +3,8 @@
 
 Reads every `classified-v4*.jsonl` under `_pipeline/memory-graph/`,
 deduplicates by (source, target) keeping the most recent `classified_at`,
-and lands upgrades onto active `mentions` edges in
-`~/obsidian/facts/_relationships.json`.
+and lands upgrades onto active `mentions` edges in the live relationships
+index (resolved via `app.paths.VAULT_FACTS_ROOT`).
 
 For each record where `new_type != "mentions"` and `confidence ≥ --min-confidence`:
 - Mark the matching active `(source, target, mentions)` edge expired
@@ -29,9 +29,11 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-FACTS_DIR = Path.home() / "obsidian" / "facts"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
+
 RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
-CLASSIFIED_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
+CLASSIFIED_DIR = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "memory-graph"
 DEFAULT_GLOB = "classified-v4*.jsonl"
 DEFAULT_MIN_CONF = 0.6
 

@@ -6,6 +6,7 @@ Uses three-tier resolution: exact, fuzzy (Levenshtein + Jaccard), and substring 
 
 import os
 import re
+import sys
 import json
 from pathlib import Path
 from typing import List, Tuple, Dict
@@ -18,7 +19,8 @@ except ImportError:
     fuzz = None
     distance = None
 
-FACTS_DIR = Path("/home/alansrobotlab/obsidian/facts")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 EXCLUDE_DIRS = {"_pipeline", "_relationships.json"}
 
 def normalize_name(name: str) -> str:

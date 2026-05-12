@@ -1,0 +1,150 @@
+# TGS-RAG Research Summary
+
+## Source
+- **Paper**: Text-Graph Synergy: A Bidirectional Verification and Completion Framework for RAG
+- **Authors**: Jiarui Zhong, Hong Cai Chen (Southeast University, Nanjing)
+- **Date**: May 7, 2026
+- **arXiv**: https://arxiv.org/abs/2605.05643
+- **GitHub**: https://github.com/EvannZhongg/TGS-RAG.git (claimed in paper, but 404 on access)
+
+## Core Problem
+**Information Island Gap**: Text-based RAG and Graph-based RAG operate in isolation:
+- **Text-based RAG**: Prone to semantic drift (retrieves semantically similar but logically irrelevant pseudo-evidence)
+- **Graph-based RAG**: Suffers from broken reasoning paths due to search-time beam pruning (discards potentially valid paths early)
+
+## TGS-RAG Solution: Bidirectional Synergy
+
+### Architecture
+Three-phase framework:
+1. **Knowledge Base Construction** (offline):
+   - Extract entities and relations from text using LLM
+   - Build knowledge graph G = (E, R)
+   - Create bidirectional mapping M between text chunks C and graph G
+
+2. **Bidirectional Synergistic Retrieval** (online):
+   - Dual-channel initial retrieval (text + graph in parallel)
+   - Graph-to-Text channel: Global Voting re-ranks text chunks
+   - Text-to-Graph channel: Memory-based Orphan Entity Bridging resurrects pruned paths
+
+3. **Generation**:
+   - Consolidate refined evidence
+   - Generate answer with LLM
+
+### Key Innovations
+
+#### 1. Graph-to-Text Channel (Global Voting)
+- Visited graph nodes "vote" for their source text chunks
+- Final text score = α * vector_similarity + (1-α) * topological_relevance
+- α = 0.5 (optimal symmetry)
+- Filters semantic noise using structural logic
+
+#### 2. Text-to-Graph Channel (Memory-based Orphan Entity Bridging)
+- **Core idea**: Treat pruning as postponement, not elimination
+- During beam search, maintain **Visited Memory** of ALL explored nodes and paths (both selected AND pruned)
+- When text retrieval finds entities missing from active graph paths:
+  - Check if they exist in Visited Memory
+  - If yes, "resurrect" the path from memory (zero-overhead bridging)
+- No additional database queries needed
+
+### Algorithms
+
+**Algorithm 1: Semantic Beam Search with Visited Memory**
+- Tracks all explored nodes in memory during search
+- Stores {path, score} for each visited entity
+- Prunes to top-K paths but keeps full history
+
+**Algorithm 2: Memory-based Orphan Entity Bridging**
+- Extract entities from retrieved text chunks
+- Identify orphan entities (in text but not in active graph paths)
+- For each orphan in Visited Memory: resurrect path
+- Merge resurrected paths with initial paths
+
+## Performance Results
+
+### Benchmarks
+- **Datasets**: MuSiQue (multi-hop, low lexical overlap), HotpotQA (distractor documents)
+- **Baselines**: Naive RAG, Hybrid RAG, GraphRAG, LightRAG, KG2RAG
+- **LLM Judge**: DeepSeek-V3.2
+
+### Key Metrics (HotpotQA)
+| Method | Strict Hit Rate | Judge Accuracy | Token Usage |
+|--------|----------------|----------------|-------------|
+| Naive RAG | ~14% | ~22% | 62M |
+| Hybrid RAG | ~14% | ~22% | ~65M |
+| GraphRAG | ~58% | ~65% | 757M |
+| LightRAG | ~60% | ~68% | 757M |
+| **TGS-RAG** | **~62%** | **~80%** | **217M** |
+
+### Key Findings
+1. **Shallow hybridization fails**: Hybrid RAG ≈ Naive RAG (no improvement)
+2. **TGS-RAG achieves SOTA**: 79.99% Judge Accuracy on HotpotQA
+3. **Cost-effective**: 71% fewer tokens than GraphRAG/LightRAG
+4. **Precision**: 27.41% retrieval precision (vs. ~10% for GraphRAG/LightRAG)
+
+## Implementation Details
+
+### Stack
+- **LLM**: GPT-4o-mini (KG construction, entity extraction, generation)
+- **Embeddings**: Qwen3-Embedding-0.6B (1024 dim)
+- **Vector DB**: PostgreSQL with pgvector
+- **Hardware**: Linux server, 32GB RAM
+
+### Hyperparameters
+- Chunk Synergy Weight α: 0.5
+- Text Confirmation Bonus ε: 0.4
+- Beam Search Width K: 20
+- Search Depth d: 3
+- Max Neighbors per Node: 30
+- Top Orphan Entities Bridged k_o: 3
+
+## Why This Matters for Lloyd
+
+### Direct Applicability
+1. **Memory Architecture**: The "Visited Memory" concept maps directly to Lloyd's long-term memory system
+   - Current: Memory is queried via semantic search
+   - Opportunity: Maintain a "pruned but visited" memory buffer for path resurrection
+
+2. **Bidirectional Verification**: Lloyd could implement:
+   - Graph-to-Text: Use entity relationships to re-rank retrieved notes
+   - Text-to-Graph: Use note content to resurrect forgotten memory paths
+
+3. **Cost Reduction**: 71% token savings vs. global graph methods
+   - Lloyd's current RAG could be significantly cheaper
+
+### Specific Improvements for Lloyd
+1. **Memory Path Resurrection**:
+   - When searching memory, keep track of "near misses" (entities that almost matched)
+   - If a retrieved note mentions an entity that was a "near miss," resurrect that path
+   - Zero-overhead: just query the search history cache
+
+2. **Global Voting for Note Ranking**:
+   - When retrieving notes, let related entities "vote" for relevance
+   - Combine semantic similarity with topological relevance
+   - Reduces semantic drift (false positives from similar-sounding but unrelated concepts)
+
+3. **Orphan Entity Bridging**:
+   - If a retrieved note mentions an entity not in current reasoning path:
+     - Check if it was explored earlier in the conversation
+     - If yes, resurrect that reasoning branch
+   - Prevents "broken reasoning paths" in multi-hop queries
+
+### Implementation Considerations
+- **Not a full rewrite**: Can be added incrementally to existing memory system
+- **Database**: Already have PostgreSQL with pgvector (per paper)
+- **Graph layer**: Would need to add entity relationship tracking (Lloyd already has fact_graph)
+- **Memory buffer**: Need to maintain "visited memory" during search (simple cache)
+
+## Open Questions
+1. **GitHub repo missing**: Paper claims https://github.com/EvannZhongg/TGS-RAG but 404
+   - Need to verify if code is public
+2. **Real-world deployment**: Paper only shows benchmarks, no production deployment
+3. **Dynamic updates**: How does TGS-RAG handle frequent knowledge base updates?
+   - Paper claims "on-demand" retrieval avoids expensive re-indexing
+
+## Next Steps
+1. **Deep dive into paper**: Read full PDF (have 12 pages extracted, need more)
+2. **Check for code**: Search for TGS-RAG implementation elsewhere
+3. **Prototype for Lloyd**:
+   - Start with "Visited Memory" concept
+   - Add orphan entity bridging to existing memory search
+   - Measure impact on multi-hop reasoning tasks
