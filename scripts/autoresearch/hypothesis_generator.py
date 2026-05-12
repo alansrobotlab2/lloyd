@@ -401,10 +401,14 @@ def propose_variants(
 ) -> list[dict[str, Any]]:
     """Ask the local model for up to N variant overlays, one per parallel call.
 
-    Each variant is one LLM call targeting one file. Calls run concurrently —
-    vLLM on localhost has 8 decode slots, so 7 concurrent variant calls fit
-    with 1 slot left for preemption. Returns the list of variants that parsed
-    cleanly (may be shorter than max_variants if some calls failed).
+    Each variant is one LLM call targeting one file. Calls run concurrently
+    but bounded by the engine's `--max-num-seqs` (currently 4 for primary).
+    Overflowing it queues requests past their 300s read timeout — and vLLM
+    doesn't honor client disconnects, so timed-out calls keep running and
+    pin engine slots until natural completion. We cap parallelism strictly
+    below the engine cap so one slot stays free for interactive chat.
+    Returns the list of variants that parsed cleanly (may be shorter than
+    max_variants if some calls failed).
     """
     targets = targets or ["prompts"]
     max_variants = max_variants or cfg.max_variants_per_round
@@ -414,8 +418,7 @@ def propose_variants(
         "requesting %d variants (1-per-call, parallel) from model=%s targets=%s",
         max_variants, model, targets,
     )
-    # Cap parallelism to 7 so one vLLM slot stays free for interactive traffic.
-    max_workers = min(max_variants, 7)
+    max_workers = min(max_variants, 3)
     variants: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [

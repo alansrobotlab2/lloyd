@@ -241,10 +241,11 @@ workers:
     scheduled-task:
       enabled: true
       interval_seconds: 60
+      max_inflight: 2
       max_duration_seconds: 1200
     session-distill:
       enabled: true
       interval_seconds: 1800
       max_inflight: 1
-      max_duration_seconds: 300
+      max_duration_seconds: 600
   staging_root: ~/lloyd/_pipeline/vault-derived/pending-research

@@ -53,7 +53,9 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-FACTS_ROOT = Path.home() / "obsidian" / "facts"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT
+
 REL_PATH = FACTS_ROOT / "_relationships.json"
 ALIASES_PATH = FACTS_ROOT / "entity-aliases.json"
 

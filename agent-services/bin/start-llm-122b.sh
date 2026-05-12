@@ -198,7 +198,7 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --trust-remote-code \
   --tensor-parallel-size 1 \
   --max-model-len 262144 \
-  --max-num-seqs 4 \
+  --max-num-seqs 8 \
   --enable-chunked-prefill \
   --max-num-batched-tokens 8192 \
   --gpu-memory-utilization 0.92 \

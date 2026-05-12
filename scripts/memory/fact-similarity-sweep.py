@@ -4,13 +4,15 @@ Fact-content similarity sweep: Find entities with highly similar fact corpora.
 """
 import json
 import re
+import sys
 from pathlib import Path
 from collections import defaultdict
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
-FACTS_DIR = Path.home() / "obsidian" / "facts"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 
 def normalize_fact(fact: str) -> str:
     """Normalize fact text for comparison."""

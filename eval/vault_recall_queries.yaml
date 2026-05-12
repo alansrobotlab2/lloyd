@@ -1,0 +1,152 @@
+# Evaluation set for vault_recall / vault_search.
+#
+# Purpose: baseline current retrieval, then re-run after any Phase 3
+# (graph-vote re-ranking) change to measure impact.
+#
+# Schema:
+#   id: short slug
+#   query: the user-facing query string (verbatim, as if typed/spoken)
+#   category: query class (single, multi-hop, recent, technical, fuzzy, hard)
+#   expect_entities: entities that SHOULD appear in returned facts/graph_neighbors
+#     (case-insensitive substring match against entity dir names)
+#   expect_docs: substrings any of which should appear in returned document paths
+#     (relative to ~/obsidian/) — at least one match counts as a hit
+#   notes: why this query is in the set, especially for hard/known-fail cases
+#
+# Scoring (simple, per-query):
+#   entity_hit:   any expected entity appears in result.facts entities or graph_neighbors
+#   doc_hit:      any expected doc substring appears in result.documents paths
+#   topk_overlap: fraction of expect_entities that appear in top-K facts/neighbors
+
+queries:
+  # --- Single-entity lookups (basic retrieval) ---
+  - id: backlog-363
+    query: "tell me about backlog item 363"
+    category: single
+    expect_entities: ["Backlog Item 363", "Task #363"]
+    expect_docs: ["backlog/363-implement-tgs-rag", "Backlog Item 363"]
+
+  - id: entity-resolution-sweep
+    query: "what does the entity resolution sweep skill do?"
+    category: single
+    expect_entities: ["Entity Resolution Sweep"]
+    expect_docs: ["skills/entity-resolution-sweep", "autonomy/48-entity-resolution"]
+
+  - id: inner-voice
+    query: "explain the inner voice architecture"
+    category: single
+    expect_entities: ["Inner Voice", "Inner Voice (Task #345)"]
+    expect_docs: ["lloyd/inner_voice", "inner_voice"]
+
+  - id: vault-recall
+    query: "what is vault_recall and how does it work?"
+    category: single
+    expect_entities: ["vault_recall"]
+    expect_docs: ["agent_mcp/vault.py", "vault_recall"]
+
+  - id: qmd
+    query: "what is QMD?"
+    category: single
+    expect_entities: ["qmd", "QMD"]
+    expect_docs: ["qmd"]
+
+  # --- Multi-hop / cross-entity (where graph-vote should help most) ---
+  - id: kg-maintenance-tasks
+    query: "which autonomy tasks maintain the knowledge graph?"
+    category: multi-hop
+    expect_entities: ["Entity Resolution Sweep", "Conversation Relation Linking", "KG Mention Classifier", "Semantic Entity Resolution", "Data Pipeline"]
+    expect_docs: ["autonomy/48-", "autonomy/51-", "autonomy/67-", "autonomy/74-", "autonomy/24-"]
+    notes: "Should surface ≥3 of the 5 KG-chain tasks. Pure semantic search may miss some."
+
+  - id: lloyd-vllm-rel
+    query: "how does Lloyd use vLLM?"
+    category: multi-hop
+    expect_entities: ["lloyd", "vLLM"]
+    expect_docs: ["vllm", "harness", "config.yaml"]
+
+  - id: harness-tools
+    query: "how does the agent harness dispatch tool calls?"
+    category: multi-hop
+    expect_entities: ["app/harness", "lloyd"]
+    expect_docs: ["app/harness/loop.py", "app/harness/tool_schema.py", "harness"]
+
+  - id: nightly-reflection
+    query: "what skills are involved in nightly reflection?"
+    category: multi-hop
+    expect_entities: ["Nightly Reflection — Knowledge Analysis", "Nightly Reflection — Knowledge Write"]
+    expect_docs: ["autonomy/39-", "autonomy/42-", "nightly-reflection"]
+
+  - id: qwen35-users
+    query: "what runs on Qwen3.5?"
+    category: multi-hop
+    expect_entities: ["Qwen3.5", "Qwen3.5-122B", "primary"]
+    expect_docs: ["start-llm-122b", "Qwen3.5", "config.yaml"]
+
+  # --- Recent / project-status (recency-biased — historically hard for semantic search) ---
+  - id: tgs-rag-state
+    query: "what's the current state of TGS-RAG research?"
+    category: recent
+    expect_entities: ["Backlog Item 363", "Implement TGS-RAG"]
+    expect_docs: ["tgs-rag", "neuro-symbolic-rag", "363-implement-tgs-rag"]
+
+  - id: graph-quality
+    query: "what's the noise floor in our relationship graph?"
+    category: recent
+    expect_entities: ["KG Mention Classifier", "Knowledge Graph"]
+    expect_docs: ["kg-mention-classifier", "knowledge-health"]
+    notes: "Touches the mention-noise problem we discussed today."
+
+  # --- Specific technical detail ---
+  - id: classifier-v4
+    query: "how does the v4 mention classifier decide what to upgrade?"
+    category: technical
+    expect_entities: ["KG Mention Classifier", "Knowledge Graph v4 Classifier"]
+    expect_docs: ["classify-relationships-v4", "kg-mention-classifier"]
+
+  - id: godnode-threshold
+    query: "what's the FACT_GODNODE_THRESHOLD and why does it exist?"
+    category: technical
+    expect_entities: ["facts.py", "Knowledge Graph"]
+    expect_docs: ["agent_mcp/facts.py", "fact_graph"]
+    notes: "Niche technical detail — tests whether retrieval finds source code references."
+
+  - id: relationships-location
+    query: "where is the relationships index stored?"
+    category: technical
+    expect_entities: ["Knowledge Graph"]
+    expect_docs: ["facts.py", "vault-derived/facts", "_relationships"]
+
+  # --- Conceptual / fuzzy ---
+  - id: memory-persistence
+    query: "how does Lloyd remember things across sessions?"
+    category: fuzzy
+    expect_entities: ["Memory Capture", "MEMORY.md", "Knowledge Graph"]
+    expect_docs: ["memory", "MEMORY.md", "autonomy/25-"]
+
+  - id: autonomy-pipeline
+    query: "describe the autonomy pipeline end to end"
+    category: fuzzy
+    expect_entities: ["Autonomy Data Pipeline", "Data Pipeline", "Conversation Relation Linking"]
+    expect_docs: ["autonomy/24-", "autonomy-data-pipeline", "autonomy.py"]
+
+  # --- Known-difficult / cross-domain ---
+  - id: robotics-projects
+    query: "what robotics projects have I worked on?"
+    category: hard
+    expect_entities: ["GR00T", "Isaac GR00T N1.7", "1X Neo", "Six-Servo Robot Dog", "3D-Printing-Robotics Project"]
+    expect_docs: ["GR00T", "robot", "robotics"]
+    notes: "Cross-domain. Many candidates, semantic search may favor only the most-mentioned."
+
+  - id: this-week-autonomy
+    query: "what changed in the autonomy system this week?"
+    category: hard
+    expect_entities: ["Autonomy Data Pipeline", "KG Mention Classifier", "Entity Resolution Sweep"]
+    expect_docs: ["autonomy/", "kg-pipeline"]
+    notes: "Recency-biased; semantic similarity alone tends to miss 'this week' framing."
+
+  - id: backlog-overview
+    query: "anything interesting in the backlog we should tackle?"
+    category: hard
+    expect_entities: ["Backlog System"]
+    expect_docs: ["backlog/"]
+    notes: "Open-ended; current vault_recall probably returns weak results. Useful baseline."

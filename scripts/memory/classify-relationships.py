@@ -45,7 +45,8 @@ from typing import Any
 
 import yaml
 
-FACTS_DIR = Path.home() / "obsidian" / "facts"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
 DEFAULT_OUTPUT = Path.home() / "lloyd" / "_pipeline" / "memory-graph" / "classified.jsonl"
 DEFAULT_ENDPOINT = "http://127.0.0.1:8096/v1/chat/completions"

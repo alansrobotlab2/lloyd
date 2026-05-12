@@ -27,7 +27,9 @@ import os
 import signal
 import sys
 import time
+import uuid
 import wave
+from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -616,6 +618,324 @@ def _build_acoustic_wake_word(cfg: dict) -> Optional[AcousticWakeWord]:
         return None
 
 
+# ── Wake-word miss capture (diagnostic rig) ──────────────────────────────
+
+class WakeMissCapture:
+    """Diagnostic capture rig for tuning the wake-word detector.
+
+    Maintains three things, all under ~/.lloyd/ww_diag/:
+      - scores.jsonl: one structured record per utterance handled — includes
+        ww score, threshold, fired flag, transcript prefix, audio path. The
+        ground-truth log for replay analysis.
+      - utterances/<id>.wav: a copy of every utterance the segmenter
+        emitted, so we can replay misses through alternative thresholds /
+        models. Bounded at MAX_UTTERANCE_FILES; oldest pruned.
+      - misses/<ts>_<label>.{wav,json}: explicit miss reports from the
+        /ww_miss endpoint. The wav is the per-room rolling raw-audio ring
+        (RING_SECONDS of pre-VAD audio at the room's native rate) — this
+        is the only way to recover the speech when VAD never even
+        segmented it (the silent failure mode).
+
+    Single-threaded by virtue of running entirely inside the asyncio
+    event loop: no locks needed.
+    """
+
+    DIAG_DIR = Path("~/.lloyd/ww_diag").expanduser()
+    UTTERANCES_DIR = DIAG_DIR / "utterances"
+    MISSES_DIR = DIAG_DIR / "misses"
+    SCORES_PATH = DIAG_DIR / "scores.jsonl"
+    LABELS_PATH = DIAG_DIR / "labels.jsonl"
+
+    MAX_UTTERANCE_FILES = 500
+    RING_SECONDS = 5.0
+    MISS_RECENT_WINDOW_S = 30.0
+
+    def __init__(self) -> None:
+        self.UTTERANCES_DIR.mkdir(parents=True, exist_ok=True)
+        self.MISSES_DIR.mkdir(parents=True, exist_ok=True)
+        # room_name -> {sr: int, buf: deque[np.ndarray int16], total: int}
+        self._rings: dict[str, dict] = {}
+
+    # -- raw audio ring (pre-VAD) --
+
+    def push_raw_frame(self, room: str, samples: np.ndarray, sr: int) -> None:
+        """Append an int16 mono frame to the per-room rolling buffer.
+        Cheap inline numpy work; safe to call from the audio consumer hot
+        loop on every frame."""
+        ring = self._rings.get(room)
+        if ring is None or ring["sr"] != sr:
+            ring = {"sr": int(sr), "buf": deque(), "total": 0}
+            self._rings[room] = ring
+        ring["buf"].append(samples.astype(np.int16, copy=False))
+        ring["total"] += len(samples)
+        cap = int(self.RING_SECONDS * sr)
+        while ring["total"] > cap and len(ring["buf"]) > 1:
+            dropped = ring["buf"].popleft()
+            ring["total"] -= len(dropped)
+
+    def drop_room(self, room: str) -> None:
+        self._rings.pop(room, None)
+
+    # -- per-utterance record + wav --
+
+    def record_utterance(self, *, utterance_id: str, room: str, identity: str,
+                         duration_s: float, rms_mean: float, rms_peak: float,
+                         voiced_ratio: float, ww_ran: bool, ww_name: str,
+                         ww_score: float, ww_threshold: float, ww_fired: bool,
+                         in_continuation: bool, stt_text: str,
+                         stt_latency_s: float, samples: np.ndarray,
+                         sample_rate: int,
+                         client_info: Optional[dict] = None) -> None:
+        """Save the utterance audio + append a structured record to
+        scores.jsonl. Errors are swallowed and logged — diagnostic code
+        must never crash the audio pipeline."""
+        audio_path: Optional[Path] = None
+        try:
+            audio_path = self._save_utterance_wav(utterance_id, samples, sample_rate)
+        except Exception as e:
+            LOG.warning("ww-diag: utterance wav save failed: %s", e)
+        rec = {
+            "ts": time.time(),
+            "utterance_id": utterance_id,
+            "room": room,
+            "identity": identity,
+            "sample_rate": int(sample_rate),
+            "duration_s": round(float(duration_s), 3),
+            "rms_mean": round(float(rms_mean), 4),
+            "rms_peak": round(float(rms_peak), 4),
+            "voiced_ratio": round(float(voiced_ratio), 3),
+            "ww_ran": bool(ww_ran),
+            "ww_name": ww_name or None,
+            "ww_score": round(float(ww_score), 4),
+            "ww_threshold": round(float(ww_threshold), 4),
+            "ww_fired": bool(ww_fired),
+            "in_continuation": bool(in_continuation),
+            "stt_text": (stt_text or "")[:200],
+            "stt_latency_s": round(float(stt_latency_s), 3),
+            "audio_path": str(audio_path) if audio_path else None,
+            "client_info": client_info,
+        }
+        try:
+            with self.SCORES_PATH.open("a") as f:
+                f.write(json.dumps(rec) + "\n")
+        except OSError as e:
+            LOG.warning("ww-diag: scores.jsonl write failed: %s", e)
+
+    def _save_utterance_wav(self, utterance_id: str, samples: np.ndarray,
+                             sample_rate: int) -> Path:
+        path = self.UTTERANCES_DIR / f"{utterance_id}.wav"
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(int(sample_rate))
+            wf.writeframes(samples.astype(np.int16, copy=False).tobytes())
+        files = sorted(self.UTTERANCES_DIR.glob("*.wav"),
+                       key=lambda p: p.stat().st_mtime)
+        excess = len(files) - self.MAX_UTTERANCE_FILES
+        for old in files[:max(0, excess)]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        return path
+
+    # -- miss reports --
+
+    def dump_miss(self, label: str, room: Optional[str],
+                  identity: Optional[str]) -> dict:
+        """Snapshot the rolling ring buffer + recent JSONL records to disk.
+        If `room` is None or unknown, falls back to the most-active ring."""
+        ts = time.time()
+        chosen_room, ring = self._pick_ring(room)
+        if ring is None:
+            raise RuntimeError("no audio captured yet — start a LiveKit room first")
+        sr = ring["sr"]
+        audio = (
+            np.concatenate(list(ring["buf"]))
+            if ring["buf"] else np.zeros(0, dtype=np.int16)
+        )
+        safe_label = re.sub(r"[^A-Za-z0-9._-]+", "_", label or "miss")[:40] or "miss"
+        stem = f"{int(ts)}_{safe_label}"
+        wav_path = self.MISSES_DIR / f"{stem}.wav"
+        json_path = self.MISSES_DIR / f"{stem}.json"
+        with wave.open(str(wav_path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(int(sr))
+            wf.writeframes(audio.tobytes())
+        recent = self._tail_recent(self.MISS_RECENT_WINDOW_S)
+        meta = {
+            "ts": ts,
+            "label": safe_label,
+            "room": chosen_room,
+            "identity": identity,
+            "ring_sample_rate": int(sr),
+            "ring_duration_s": round(len(audio) / max(1, sr), 3),
+            "ring_samples": int(len(audio)),
+            "wav_path": str(wav_path),
+            "recent_utterances": recent,
+        }
+        json_path.write_text(json.dumps(meta, indent=2))
+        return {
+            "wav": str(wav_path),
+            "json": str(json_path),
+            "room": chosen_room,
+            "ring_duration_s": meta["ring_duration_s"],
+            "recent_count": len(recent),
+        }
+
+    def _pick_ring(self, room: Optional[str]):
+        if not self._rings:
+            return None, None
+        if room and room in self._rings:
+            return room, self._rings[room]
+        chosen = max(self._rings.items(), key=lambda kv: kv[1].get("total", 0))
+        return chosen[0], chosen[1]
+
+    def _tail_recent(self, window_s: float) -> list[dict]:
+        cutoff = time.time() - window_s
+        out: list[dict] = []
+        if not self.SCORES_PATH.exists():
+            return out
+        try:
+            with self.SCORES_PATH.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if rec.get("ts", 0) >= cutoff:
+                        out.append(rec)
+        except OSError:
+            pass
+        return out
+
+    # -- ground-truth labels --
+
+    def record_label(self, *, utterance_id: Optional[str], miss_ts: Optional[float],
+                     said_wake_word: bool, note: Optional[str]) -> dict:
+        """Append a ground-truth label for an existing utterance or miss
+        dump. Returns the resolved target (utterance_id and/or miss path)
+        so the caller can confirm it landed on the right row."""
+        if not utterance_id and miss_ts is None:
+            raise ValueError("either utterance_id or miss_ts is required")
+        resolved: dict = {"said_wake_word": bool(said_wake_word)}
+        if utterance_id:
+            wav = self.UTTERANCES_DIR / f"{utterance_id}.wav"
+            resolved["utterance_id"] = utterance_id
+            resolved["utterance_wav_exists"] = wav.exists()
+        if miss_ts is not None:
+            # Filenames are formed as `{int(ts)}_{label}.{wav,json}` — find
+            # the closest match by integer ts prefix.
+            prefix = str(int(miss_ts))
+            matches = sorted(self.MISSES_DIR.glob(f"{prefix}_*.wav"))
+            resolved["miss_ts"] = miss_ts
+            resolved["miss_matches"] = [str(p) for p in matches]
+        rec = {
+            "ts": time.time(),
+            "utterance_id": utterance_id or None,
+            "miss_ts": miss_ts,
+            "said_wake_word": bool(said_wake_word),
+            "note": (note or "")[:300] or None,
+        }
+        try:
+            with self.LABELS_PATH.open("a") as f:
+                f.write(json.dumps(rec) + "\n")
+        except OSError as e:
+            LOG.warning("ww-diag: labels.jsonl write failed: %s", e)
+            raise
+        return resolved
+
+
+async def _start_ww_diag_server(capture: WakeMissCapture,
+                                 host: str = "127.0.0.1", port: int = 8501):
+    """Start a tiny aiohttp server exposing /ww_miss and /healthz on
+    localhost. The lloyd backend proxies /api/voice/ww_miss here. Returns
+    the AppRunner so callers can clean up on shutdown."""
+    from aiohttp import web
+
+    async def healthz(_req):
+        return web.json_response({
+            "ok": True,
+            "rings": {r: {"sr": v["sr"], "samples": v["total"]}
+                      for r, v in capture._rings.items()},
+        })
+
+    async def ww_miss(req):
+        try:
+            body = await req.json() if req.body_exists else {}
+        except Exception:
+            body = {}
+        label = (body.get("label") or "miss").strip() or "miss"
+        room = (body.get("room") or "").strip() or None
+        identity = (body.get("identity") or "").strip() or None
+        try:
+            result = capture.dump_miss(label, room, identity)
+        except Exception as e:
+            LOG.warning("ww_miss: dump failed: %s", e)
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+        LOG.info(
+            "ww_miss captured: label=%r room=%s ring=%.2fs recent=%d wav=%s",
+            label, result["room"], result["ring_duration_s"],
+            result["recent_count"], result["wav"],
+        )
+        return web.json_response({"ok": True, **result})
+
+    async def ww_label(req):
+        try:
+            body = await req.json() if req.body_exists else {}
+        except Exception:
+            body = {}
+        utterance_id = (body.get("utterance_id") or "").strip() or None
+        miss_ts_raw = body.get("miss_ts")
+        miss_ts: Optional[float]
+        try:
+            miss_ts = float(miss_ts_raw) if miss_ts_raw is not None else None
+        except (TypeError, ValueError):
+            return web.json_response(
+                {"ok": False, "error": "miss_ts must be a number"}, status=400,
+            )
+        if "said_wake_word" not in body:
+            return web.json_response(
+                {"ok": False, "error": "said_wake_word (bool) is required"}, status=400,
+            )
+        said = bool(body.get("said_wake_word"))
+        note = (body.get("note") or "").strip() or None
+        try:
+            resolved = capture.record_label(
+                utterance_id=utterance_id, miss_ts=miss_ts,
+                said_wake_word=said, note=note,
+            )
+        except ValueError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+        except Exception as e:
+            LOG.warning("ww_label: record failed: %s", e)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        LOG.info("ww_label: utt=%s miss_ts=%s said=%s note=%r",
+                 utterance_id, miss_ts, said, note)
+        return web.json_response({"ok": True, "resolved": resolved})
+
+    app = web.Application()
+    app.router.add_get("/healthz", healthz)
+    app.router.add_post("/ww_miss", ww_miss)
+    app.router.add_post("/ww_label", ww_label)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host, port)
+    try:
+        await site.start()
+    except OSError as e:
+        await runner.cleanup()
+        LOG.warning("ww-diag HTTP could not bind %s:%d (%s) — capture rig disabled",
+                    host, port, e)
+        return None
+    LOG.info("ww-diag HTTP listening on http://%s:%d", host, port)
+    return runner
+
+
 # ── STT ──────────────────────────────────────────────────────────────────
 
 def _load_hotwords(path: str | Path) -> Optional[str]:
@@ -882,12 +1202,18 @@ class RoomBridge:
 
     def __init__(self, room_name: str, lk_cfg: dict, stt: WhisperSTT,
                  vad_cfg: dict, http_client, speaker_id=None,
-                 acoustic_wake=None) -> None:
+                 acoustic_wake=None, wake_capture: Optional[WakeMissCapture] = None) -> None:
         self.room_name = room_name
         self.lk_cfg = lk_cfg
         self.stt = stt
         self.vad_cfg = vad_cfg
         self.http = http_client
+        self.wake_capture = wake_capture
+        # identity -> client_info dict (browser UA, mobile flag, audio
+        # constraints). Populated by `client_info` data-channel messages
+        # from VoiceRoom on connect. Used by ww-diag to A/B browser DSP
+        # configurations.
+        self._client_meta: dict[str, dict] = {}
         # Optional SpeakerIdentifier (resemblyzer). When None, the wake-word
         # gate falls back to LiveKit-identity-only matching for continuation.
         self.speaker_id = speaker_id
@@ -990,6 +1316,8 @@ class RoomBridge:
             await self.tts.close()
             self.tts = None
         await self.room.disconnect()
+        if self.wake_capture is not None:
+            self.wake_capture.drop_room(self.room_name)
         LOG.info("[%s] disconnected", self.room_name)
 
     def _on_tts_utterance_end(self) -> None:
@@ -1160,7 +1488,8 @@ class RoomBridge:
 
     def _on_data_received(self, packet) -> None:
         """Handle JSON control messages from a participant via the LiveKit
-        data channel. Currently understands {"type": "interrupt"}."""
+        data channel. Understands {"type": "interrupt"} and
+        {"type": "client_info", ...}."""
         try:
             payload = packet.data.decode("utf-8")
             msg = json.loads(payload) if payload else {}
@@ -1174,6 +1503,29 @@ class RoomBridge:
             dropped = self.tts.interrupt()
             LOG.info("[%s] interrupt: dropped %d queued utterance(s)",
                      self.room_name, dropped)
+        elif kind == "client_info":
+            # Sender identity comes from the LiveKit packet's participant
+            # field; fall back to None if the SDK version doesn't expose it.
+            sender = getattr(packet, "participant", None)
+            identity = getattr(sender, "identity", None) if sender else None
+            if not identity:
+                # Some SDK versions put it on packet directly.
+                identity = getattr(packet, "participant_identity", None)
+            if identity:
+                info = {k: v for k, v in msg.items() if k != "type"}
+                self._client_meta[identity] = info
+                LOG.info(
+                    "[%s] client_info from %s: mobile=%s raw_audio=%s ns=%s aec=%s agc=%s sr=%s",
+                    self.room_name, identity, info.get("isMobile"),
+                    info.get("rawAudio"),
+                    (info.get("trackSettings") or {}).get("noiseSuppression"),
+                    (info.get("trackSettings") or {}).get("echoCancellation"),
+                    (info.get("trackSettings") or {}).get("autoGainControl"),
+                    (info.get("trackSettings") or {}).get("sampleRate"),
+                )
+            else:
+                LOG.warning("[%s] client_info dropped (no identity on packet)",
+                            self.room_name)
         else:
             LOG.info("[%s] data message ignored: %r", self.room_name, kind)
 
@@ -1198,6 +1550,14 @@ class RoomBridge:
                 samples = np.frombuffer(frame.data, dtype=np.int16)
                 if frame.num_channels > 1:
                     samples = samples.reshape(-1, frame.num_channels).mean(axis=1).astype(np.int16)
+                # Diagnostic: feed raw mono frames into the rolling ring
+                # buffer so /ww_miss can recover audio even when VAD never
+                # segmented it (the silent failure mode).
+                if self.wake_capture is not None:
+                    try:
+                        self.wake_capture.push_raw_frame(self.room_name, samples, frame.sample_rate)
+                    except Exception as e:
+                        LOG.debug("[%s] ww-diag ring push failed: %s", self.room_name, e)
                 if segmenter is None:
                     segmenter = UtteranceSegmenter(self.vad_cfg, frame.sample_rate, self.room_name)
                 utterance = segmenter.push(samples)
@@ -1235,6 +1595,7 @@ class RoomBridge:
 
     async def _handle_utterance(self, samples: np.ndarray, sample_rate: int, identity: str) -> None:
         duration_s = samples.size / sample_rate
+        utterance_id = uuid.uuid4().hex[:12]
 
         # Diagnostic stats: mean/peak RMS over the whole utterance and a
         # voiced-ratio computed in 10ms windows (mirrors the VAD's frame
@@ -1260,6 +1621,35 @@ class RoomBridge:
 
         stt_task = asyncio.create_task(self.stt.transcribe(samples, sample_rate))
         t0 = time.monotonic()
+
+        def _record_diag(text: str, latency: float) -> None:
+            cap = self.wake_capture
+            if cap is None:
+                return
+            try:
+                cap.record_utterance(
+                    utterance_id=utterance_id,
+                    room=self.room_name,
+                    identity=identity,
+                    duration_s=duration_s,
+                    rms_mean=rms_mean,
+                    rms_peak=rms_peak,
+                    voiced_ratio=voiced_ratio,
+                    ww_ran=ww_ran,
+                    ww_name=ww_name,
+                    ww_score=ww_score,
+                    ww_threshold=(self.acoustic_wake.threshold
+                                  if self.acoustic_wake is not None else 0.0),
+                    ww_fired=ww_already_fired,
+                    in_continuation=in_continuation,
+                    stt_text=text,
+                    stt_latency_s=latency,
+                    samples=samples,
+                    sample_rate=sample_rate,
+                    client_info=self._client_meta.get(identity),
+                )
+            except Exception as e:
+                LOG.debug("[%s] ww-diag record failed: %s", self.room_name, e)
 
         # ── IDLE state: openWakeWord first, publish ASAP ────────────
         ww_already_fired = False
@@ -1289,12 +1679,14 @@ class RoomBridge:
         try:
             text = await stt_task
         except Exception as e:
+            latency = time.monotonic() - t0
             LOG.warning(
                 "[%s][diag] STT_FAIL dur=%.2fs rms_mean=%.3f rms_peak=%.3f voiced=%.2f ww=%s err=%s",
                 self.room_name, duration_s, rms_mean, rms_peak, voiced_ratio,
                 f"{ww_name or '-'}:{ww_score:.2f}" if ww_ran else "skipped",
                 e,
             )
+            _record_diag("", latency)
             return
         latency = time.monotonic() - t0
         LOG.info(
@@ -1303,6 +1695,7 @@ class RoomBridge:
             f"{ww_name or '-'}:{ww_score:.2f}" if ww_ran else "skipped",
             latency, "Y" if in_continuation else "N", (text or "")[:80],
         )
+        _record_diag(text or "", latency)
         if not text:
             # Empty transcript. If acoustic wake-word already fired, treat as
             # bare wake-word (window already opened above). Otherwise drop.
@@ -1439,6 +1832,17 @@ class WorkerManager:
         self.acoustic_wake = _build_acoustic_wake_word(
             self.lk_cfg.get("acoustic_wake", {}) or {}
         )
+        # Wake-word miss capture rig (Phase A). Always-on by default; gate
+        # via livekit.acoustic_wake.diag.{enabled,host,port}. The aiohttp
+        # listener is started in run() so the cleanup hook has a runner.
+        diag_cfg = (self.lk_cfg.get("acoustic_wake", {}) or {}).get("diag", {}) or {}
+        self._diag_enabled = bool(diag_cfg.get("enabled", True))
+        self._diag_host = str(diag_cfg.get("host", "127.0.0.1"))
+        self._diag_port = int(diag_cfg.get("port", 8501))
+        self.wake_capture: Optional[WakeMissCapture] = (
+            WakeMissCapture() if self._diag_enabled else None
+        )
+        self._diag_runner = None
         # last time we saw a non-agent participant in each room — used for
         # the idle-grace teardown logic.
         self._last_seen_remote: dict[str, float] = {}
@@ -1454,6 +1858,10 @@ class WorkerManager:
             await self.stt._ensure_loaded()
         except Exception as e:
             LOG.warning("STT eager-load failed (will retry on first utterance): %s", e)
+        if self.wake_capture is not None:
+            self._diag_runner = await _start_ww_diag_server(
+                self.wake_capture, host=self._diag_host, port=self._diag_port,
+            )
         try:
             while not self._stopping.is_set():
                 try:
@@ -1489,6 +1897,7 @@ class WorkerManager:
                 r.name, self.lk_cfg, self.stt, self.vad_cfg, self._http,
                 speaker_id=self.speaker_id,
                 acoustic_wake=self.acoustic_wake,
+                wake_capture=self.wake_capture,
             )
             try:
                 await bridge.connect()
@@ -1524,6 +1933,12 @@ class WorkerManager:
             except Exception:
                 pass
         self.bridges.clear()
+        if self._diag_runner is not None:
+            try:
+                await self._diag_runner.cleanup()
+            except Exception:
+                pass
+            self._diag_runner = None
         try:
             await self._http.aclose()
         except Exception:

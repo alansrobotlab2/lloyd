@@ -2,8 +2,9 @@
 """
 Entity Overview Generator — Next-Gen Memory System
 
-Generates a `{entity}-overview.md` file for each entity in ~/obsidian/facts/,
-containing a one-line definition (frontmatter) and a synthesized summary
+Generates a `{entity}-overview.md` file for each entity in the live facts
+tree (resolved via `app.paths.VAULT_FACTS_ROOT`), containing a one-line
+definition (frontmatter) and a synthesized summary
 (markdown body). Uses the local primary model and, for non-personal entities,
 augments the prompt with DuckDuckGo search snippets.
 
@@ -25,8 +26,9 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 HOME = Path.home()
-FACTS_DIR = HOME / "obsidian" / "facts"
 
 # Entities whose facts fall into these categories are treated as personal
 # and NOT sent to DuckDuckGo. `preference` is the narrow "this is a sentient

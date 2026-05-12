@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 # Shared entity normalization (case-insensitive alias resolution + self-register).
-# The facts tree uses ~/obsidian/facts/entity-aliases.json as the source of truth;
+# The facts tree uses <VAULT_FACTS_ROOT>/entity-aliases.json as the source of truth;
 # without normalization, writers accumulate duplicate dirs (gr00t/ + GR00T/).
 _LLOYD_ROOT = Path(__file__).resolve().parents[3]
 if str(_LLOYD_ROOT) not in sys.path:
@@ -92,7 +92,8 @@ except ImportError:
 # Constants
 HOME = Path.home()
 VAULT = HOME / "obsidian"
-FACTS_DIR = Path.home() / "obsidian" / "facts"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 EXTRACTION_PROMPT = """You are a fact extraction engine. Analyze the following content and extract
 atomic facts about entities mentioned.
 

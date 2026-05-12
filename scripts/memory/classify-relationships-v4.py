@@ -60,7 +60,9 @@ ROLE_BLOCKED_VERBS = {"created_by", "implements", "supersedes", "part_of", "depe
 # Entity alias table (loaded once at module import)
 # ---------------------------------------------------------------------------
 
-ALIASES_PATH = Path.home() / "obsidian" / "facts" / "entity-aliases.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as _FACTS_ROOT
+ALIASES_PATH = _FACTS_ROOT / "entity-aliases.json"
 
 
 def _load_aliases() -> dict[str, str]:

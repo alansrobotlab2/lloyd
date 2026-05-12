@@ -19,14 +19,19 @@ Scan categories:
 
 import os
 import re
+import sys
 import json
 import glob
 from datetime import datetime, timedelta
 from collections import defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT
 
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
 QUEUE_OUTPUT = os.path.expanduser("~/lloyd/_pipeline/groundskeeper-queue.json")
-FACTS_DIR = os.path.expanduser("~/obsidian/facts")
+FACTS_DIR = str(VAULT_FACTS_ROOT)
 MEMORY_MD = os.path.join(VAULT_ROOT, "lloyd/MEMORY.md")
 
 

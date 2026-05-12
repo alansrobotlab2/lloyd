@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backfill the `provenance` field onto existing facts in ~/obsidian/facts/.
+"""Backfill the `provenance` field onto existing facts (resolved via app.paths).
 
 Provenance rules (applied only to facts that lack the field):
   - EXTRACTED  if source_doc contains "http" or "arxiv"
@@ -20,7 +20,8 @@ from pathlib import Path
 import yaml
 
 
-FACTS_DIR = Path.home() / "obsidian" / "facts"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 
 # Regex to split frontmatter from body.  Matches the opening and closing "---".
 FRONTMATTER_RE = re.compile(r"^---\n(.*?\n)---\n?(.*)", re.DOTALL)

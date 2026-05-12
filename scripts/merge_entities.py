@@ -5,12 +5,14 @@ Merges high-confidence matches (score >= 0.85) and preserves fact history.
 """
 
 import os
+import sys
 import json
 import shutil
 from pathlib import Path
 from datetime import datetime
 
-FACTS_DIR = Path("/home/alansrobotlab/obsidian/facts")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 RESULTS_FILE = Path("/tmp/entity_resolution_results.json")
 
 def get_canonical_entity(info_a: dict, info_b: dict) -> tuple:

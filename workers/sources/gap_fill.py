@@ -1,10 +1,11 @@
 """gap-fill source — resolves `label: gap` facts discovered in live sessions.
 
-Scans ~/obsidian/facts/**/* for facts whose frontmatter contains
-`label: gap` or `provenance: GAP`, dedups by fact id, and enqueues one
-research item per gap. Handler asks the primary model to research the
-topic (via vault tools + web if available), writes a resolution note
-to pending-research/gaps/, and (at high confidence) updates the fact.
+Scans the live facts tree (resolved via app.paths.VAULT_FACTS_ROOT) for
+facts whose frontmatter contains `label: gap` or `provenance: GAP`, dedups
+by fact id, and enqueues one research item per gap. Handler asks the
+primary model to research the topic (via vault tools + web if available),
+writes a resolution note to pending-research/gaps/, and (at high
+confidence) updates the fact.
 """
 
 from __future__ import annotations
@@ -18,12 +19,12 @@ import yaml
 
 from workers.queue import WorkQueue, QueueItem
 from workers.sources._common import write_staging_note, run_prompt_on_primary
+from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT
 
 logger = logging.getLogger("lloyd-workers.gap_fill")
 
 NAME = "gap-fill"
 DEFAULT_PRIORITY = 50
-FACTS_ROOT = Path.home() / "obsidian" / "facts"
 
 _MAX_ENQUEUE_PER_TICK = 5  # don't flood the queue with every gap at once
 

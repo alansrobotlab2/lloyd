@@ -215,6 +215,103 @@ async def voice_summarize(request: Request):
     return JSONResponse({"summary": text, "used_summary": False})
 
 
+# ── /api/voice/ww_miss ────────────────────────────────────────────────────
+
+@router.post("/api/voice/ww_miss")
+async def voice_ww_miss(request: Request):
+    """Flag a wake-word miss for the diagnostic capture rig.
+
+    Forwards to the LiveKit worker's localhost endpoint
+    (default http://127.0.0.1:8501/ww_miss). The worker dumps its
+    per-room rolling raw-audio ring + recent score records to
+    ~/.lloyd/ww_diag/misses/<ts>_<label>.{wav,json}. Use this when you
+    just said "Hey Lloyd" and Lloyd didn't respond — capturing the audio
+    that the wake word didn't fire on is the only way to debug it.
+
+    Body (all optional): {label?, room?, identity?}
+      label   — short tag written into the filename (e.g. "laptop_kitchen")
+      room    — explicit room name; otherwise the most-active room is used
+      identity— for record-keeping only
+
+    Curl from anywhere on this host:
+      curl -X POST http://localhost:8080/api/voice/ww_miss \\
+           -H 'content-type: application/json' \\
+           -d '{"label":"laptop_kitchen"}'
+    """
+    body = await request.json() if (await request.body()) else {}
+    diag_cfg = (
+        ((CONFIG.get("livekit") or {}).get("acoustic_wake") or {}).get("diag")
+    ) or {}
+    host = str(diag_cfg.get("host", "127.0.0.1"))
+    port = int(diag_cfg.get("port", 8501))
+    target = f"http://{host}:{port}/ww_miss"
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(target, json=body)
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail=f"LiveKit worker not reachable at {target} — is lloyd-agent-worker running?",
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"worker proxy failed: {e}")
+    if r.status_code >= 400:
+        return JSONResponse(r.json() if r.content else {"ok": False}, status_code=r.status_code)
+    return JSONResponse(r.json())
+
+
+# ── /api/voice/ww_label ───────────────────────────────────────────────────
+
+@router.post("/api/voice/ww_label")
+async def voice_ww_label(request: Request):
+    """Attach a ground-truth label to an existing wake-word capture.
+
+    Use this after listening to ~/.lloyd/ww_diag/utterances/<id>.wav or
+    ~/.lloyd/ww_diag/misses/<ts>_<label>.wav to confirm whether the user
+    actually said the wake word in that recording. The replay/analysis
+    script in Phase 1c uses these labels to compute true detection rate
+    vs false-accept rate per device class.
+
+    Body: {said_wake_word: bool, utterance_id?: str, miss_ts?: number, note?: str}
+      Provide utterance_id for a VAD-segmented capture, OR miss_ts for a
+      ring-buffer-only miss dump (the integer part of the filename). At
+      least one of the two is required.
+
+    Examples:
+      curl -X POST http://localhost:8080/api/voice/ww_label \\
+           -H 'content-type: application/json' \\
+           -d '{"utterance_id":"14c9cfa902f5","said_wake_word":true,
+                "note":"hey lloyd, scored 0.25"}'
+      curl -X POST http://localhost:8080/api/voice/ww_label \\
+           -H 'content-type: application/json' \\
+           -d '{"miss_ts":1778379115,"said_wake_word":true}'
+    """
+    body = await request.json() if (await request.body()) else {}
+    diag_cfg = (
+        ((CONFIG.get("livekit") or {}).get("acoustic_wake") or {}).get("diag")
+    ) or {}
+    host = str(diag_cfg.get("host", "127.0.0.1"))
+    port = int(diag_cfg.get("port", 8501))
+    target = f"http://{host}:{port}/ww_label"
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(target, json=body)
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail=f"LiveKit worker not reachable at {target} — is lloyd-agent-worker running?",
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"worker proxy failed: {e}")
+    if r.status_code >= 400:
+        return JSONResponse(r.json() if r.content else {"ok": False}, status_code=r.status_code)
+    return JSONResponse(r.json())
+
+
 # ── /api/livekit/token ────────────────────────────────────────────────────
 
 @router.post("/api/livekit/token")
