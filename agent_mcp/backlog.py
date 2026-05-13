@@ -71,32 +71,25 @@ def save_task(task: dict) -> bool:
     if "filename" not in task:
         return False
     filepath = BACKLOG_DIR / task["filename"]
-    fm_lines = ["---"]
+    fm = {}
     for key, value in task.items():
-        if key in ("id", "filename", "body"):
+        if key in ("id", "filename", "body") or value is None:
             continue
-        if value is None:
-            continue
-        if isinstance(value, bool):
-            fm_lines.append(f"{key}: {str(value).lower()}")
-        elif isinstance(value, list):
-            fm_lines.append(f"{key}:")
-            for item in value:
-                fm_lines.append(f"  - {item}")
-        elif isinstance(value, datetime):
-            fm_lines.append(f"{key}: {value.isoformat()}")
-        else:
-            fm_lines.append(f"{key}: {value}")
-    fm_lines.append("---")
+        if isinstance(value, datetime):
+            value = value.isoformat()
+        fm[key] = value
+    fm_yaml = yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)
     body = task.get("body", "")
-    filepath.write_text("\n".join(fm_lines) + "\n\n" + body)
+    filepath.write_text(f"---\n{fm_yaml}---\n\n{body}")
     return True
 
 
 def add_activity(task: dict, message: str) -> dict:
     now = datetime.now().isoformat()
     activity = task.get("activity_log", [])
-    activity.append(f"- **{now}** — {message}")
+    if isinstance(activity, str):
+        activity = [activity]
+    activity.append(f"**{now}** — {message}")
     task["activity_log"] = activity
     task["updated"] = now
     return task

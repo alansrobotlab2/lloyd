@@ -68,6 +68,106 @@ VAULT_SEGMENTS = [
 VAULT_EXCLUDE_DIRS = {"templates", "images"}
 VAULT_EXCLUDE_FILES = {"tags.md"}
 
+# Demotion patterns for auto-generated "memory churn" files. These all
+# lexically contain whatever the user was discussing recently and crowd
+# out canonical knowledge sources. Covers:
+#  - `memory/YYYY-MM-DD.md` — daily session transcripts
+#  - `memory/pipeline/**` — auto-generated pipeline state / skill candidate files
+# Other memory/ subdirs (learnings, alan, autonomy-pipeline) NOT demoted —
+# they tested as containing genuinely-useful aggregate content.
+# Tunable via `demote_daily_logs` + `demote_factor` params on _vault_recall.
+_DAILY_LOG_RE = re.compile(
+    r"(?:^|/)memory/(\d{4}-\d{2}-\d{2}\.md|pipeline/)"
+)
+DAILY_LOG_DEMOTE_FACTOR = 0.4
+
+# Canonical-source prefixes for graph_lookup boost. When a graph-derived
+# entity name resolves to a file under one of these prefixes, treat it as
+# a strong signal — the user almost certainly wants this file, not the
+# memory log that mentions it.
+_CANONICAL_PREFIXES = (
+    "autonomy/", "skills/", "backlog/", "architecture/", "knowledge/", "facts/",
+)
+
+# Source-code grep fallback. QMD's index covers `~/obsidian/` only, so
+# questions about Lloyd internals (`vault_recall`, `FACT_GODNODE_THRESHOLD`,
+# etc.) return nothing relevant. When the query mentions identifier-like
+# tokens AND QMD's hit count is thin, fall back to ripgrep over the
+# code roots and merge results.
+LLOYD_HOME = Path(__file__).resolve().parent.parent
+LLOYD_CODE_ROOTS = [
+    LLOYD_HOME / "agent_mcp",
+    LLOYD_HOME / "app",
+    LLOYD_HOME / "scripts",
+    LLOYD_HOME / "workers",
+]
+LLOYD_CODE_PREFIX = str(LLOYD_HOME) + "/"
+# Match Python-style identifiers >=4 chars that look code-like:
+#   - have an underscore (vault_recall, _relationships)
+#   - OR have 2+ uppercase chars (FACT_GODNODE, KGMentionClassifier)
+#   - OR have a dot-extension (vault.py, relationships.json)
+_IDENT_RE = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_]{3,}\b")
+_DOTTED_FILE_RE = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_]{2,}\.(?:py|json|md|yaml|yml|toml|sh)\b")
+
+
+def _identifier_tokens(query: str) -> list[str]:
+    """Pull identifier-like tokens from a query for the grep fallback.
+    Returns dedup'd list preserving order; bounded to 4 to cap subprocess work.
+    """
+    out, seen = [], set()
+    for m in _DOTTED_FILE_RE.finditer(query):
+        t = m.group(0)
+        if t.lower() not in seen:
+            seen.add(t.lower()); out.append(t)
+    for m in _IDENT_RE.finditer(query):
+        t = m.group(0)
+        if "_" in t or sum(1 for c in t if c.isupper()) >= 2:
+            if t.lower() not in seen:
+                seen.add(t.lower()); out.append(t)
+    return out[:4]
+
+
+def _grep_lloyd_code(query: str, limit: int = 8, timeout: float = 2.0) -> list[dict]:
+    """Ripgrep the Lloyd code roots for identifier-like tokens in `query`.
+    Returns QMD-shaped result dicts so they merge cleanly. Empty if no
+    identifier tokens or rg fails."""
+    idents = _identifier_tokens(query)
+    if not idents:
+        return []
+    roots = [str(r) for r in LLOYD_CODE_ROOTS if r.exists()]
+    if not roots:
+        return []
+    found: dict[str, dict] = {}
+    for rank, ident in enumerate(idents):
+        try:
+            proc = subprocess.run(
+                ["rg", "--files-with-matches", "--type-add=src:*.{py,ts,tsx,js,sh,yaml,yml,toml,json}",
+                 "--type", "src", "-F", ident, *roots],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        for path in (proc.stdout or "").splitlines():
+            if not path:
+                continue
+            rel = path.removeprefix(LLOYD_CODE_PREFIX)
+            if rel in found:
+                continue
+            # Score: 0.5 for top match per ident, decaying; behind QMD rank-1 (1.0)
+            # but ahead of QMD rank-3 (0.33). Multiple-ident match files rise.
+            base_score = 0.5 / (1 + 0.15 * rank)
+            found[rel] = {
+                "file": rel,
+                "title": Path(path).name,
+                "snippet": f"[code match: {ident}]",
+                "score": round(base_score, 4),
+            }
+            if len(found) >= limit:
+                break
+        if len(found) >= limit:
+            break
+    return list(found.values())
+
 CONSOLIDATION_ENDPOINT = "http://localhost:8091/v1/chat/completions"
 CONSOLIDATION_MODEL = "Qwen3.5-35B-A3B"
 CONSOLIDATION_MIN_RESULTS = 4
@@ -159,10 +259,16 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     query = _qmd_sanitize(query)
     if not query:
         return []
+    # Apply the same stopword strip to BOTH legs. Conversational framing
+    # ("tell me about X", "show me Y") drifts the vec embedding away from
+    # content. Identical inputs are fine — lex (BM25) and vec (embedding)
+    # do fundamentally different matching, so they still produce
+    # complementary signal.
+    stripped = _qmd_strip_stopwords(query)
     payload = {
         "searches": [
-            {"type": "lex", "query": _qmd_strip_stopwords(query)},
-            {"type": "vec", "query": query},
+            {"type": "lex", "query": stripped},
+            {"type": "vec", "query": stripped},
         ],
         "limit": limit,
         "collections": collections,
@@ -288,19 +394,28 @@ def _graph_rerank(
     if not voters:
         return documents
 
+    # Precompute per-voter score contribution (degree penalty baked in)
+    # and a word-boundary regex. This collapses what used to be a full
+    # `_extract_entities_from_query(doc_text)` call per doc — which
+    # iterates ~2,700 entity dirs — into a tight regex scan over ~15
+    # voter terms. Drops rerank latency by ~10x.
     edge_counts = _get_entity_edge_counts()
+    voter_contribs: dict[str, float] = {}
+    voter_patterns: dict[str, re.Pattern] = {}
+    for vk, vw in voters.items():
+        if len(vk) < 2:
+            continue
+        degree = max(edge_counts.get(vk, 1), 1)
+        voter_contribs[vk] = vw / math.log(1 + degree + math.e)
+        voter_patterns[vk] = re.compile(r"(?<!\w)" + re.escape(vk) + r"(?!\w)", re.IGNORECASE)
 
     def _topo(text: str) -> float:
         if not text:
             return 0.0
-        chunk_entities = [e for e, _ in (_extract_entities_from_query(text) or [])]
         score = 0.0
-        for e in chunk_entities:
-            v = voters.get(e.lower())
-            if v is None:
-                continue
-            degree = max(edge_counts.get(e, 1), 1)
-            score += v / math.log(1 + degree + math.e)  # +e so degree=0 → ~1.0
+        for vk, pat in voter_patterns.items():
+            if pat.search(text):
+                score += voter_contribs[vk]
         return score
 
     raw = []
@@ -341,12 +456,11 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
         scope_segs = [s.strip().rstrip("/") for s in scope.split(",") if s.strip()]
         coll_list = [s for s in scope_segs if s in VAULT_SEGMENTS] or VAULT_SEGMENTS
 
-    all_raw = []
-    if len(coll_list) == 1:
-        result = _qmd_daemon_search(query, max_results, coll_list)
-        if result is not None:
-            all_raw = result
-    else:
+    # Run QMD search across the requested collections AND the source-code
+    # grep fallback in parallel (lever 3) when not scope-restricted.
+    def _do_qmd():
+        if len(coll_list) == 1:
+            return _qmd_daemon_search(query, max_results, coll_list) or []
         def _search_one(coll):
             return _qmd_daemon_search(query, max_results, [coll]) or []
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(coll_list), 4)) as pool:
@@ -357,7 +471,33 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
                 fpath = r.get("file", "")
                 if fpath not in merged or float(r.get("score", 0)) > float(merged[fpath].get("score", 0)):
                     merged[fpath] = r
-        all_raw = sorted(merged.values(), key=lambda x: float(x.get("score", 0)), reverse=True)
+        return sorted(merged.values(), key=lambda x: float(x.get("score", 0)), reverse=True)
+
+    def _do_grep():
+        # Skip grep when caller restricted scope — they want vault-only results.
+        if scope_prefixes:
+            return []
+        return _grep_lloyd_code(query, limit=max(max_results, 8))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        qmd_fut = pool.submit(_do_qmd)
+        grep_fut = pool.submit(_do_grep)
+        all_raw = qmd_fut.result()
+        grep_results = grep_fut.result()
+
+    if grep_results:
+        existing = {r.get("file", "") for r in all_raw}
+        for gr in grep_results:
+            if gr.get("file") not in existing:
+                all_raw.append(gr)
+
+    # Lever 1: demote memory daily logs so they don't dominate canonical sources.
+    for r in all_raw:
+        path_for_demote = r.get("file", "").removeprefix("qmd://").removeprefix("obsidian/")
+        if _DAILY_LOG_RE.search(path_for_demote):
+            r["_pre_demote_score"] = r.get("score", 0)
+            r["score"] = round(float(r.get("score", 0)) * DAILY_LOG_DEMOTE_FACTOR, 6)
+    all_raw.sort(key=lambda x: float(x.get("score", 0)), reverse=True)
 
     parsed = []
     for r in all_raw:
@@ -499,8 +639,14 @@ def _vault_recall(params: dict) -> dict:
     limit = int(params.get("limit", 20))
     include_facts = params.get("include_facts", True)
     expand_graph = params.get("expand_graph", False)
-    graph_rerank = bool(params.get("graph_rerank", False))
-    rerank_alpha = float(params.get("rerank_alpha", 0.5))
+    # graph_rerank default-on as of 2026-05-12 — the perf optimization
+    # (regex over voters instead of full entity scan) drops latency from
+    # ~2s extra to near-zero, while the MRR lift (+6-13%) is consistent.
+    # Alpha defaults to 0.3 (graph-heavy) per the May 11 alpha sweep.
+    graph_rerank = bool(params.get("graph_rerank", True))
+    rerank_alpha = float(params.get("rerank_alpha", 0.3))
+    demote_daily_logs = bool(params.get("demote_daily_logs", True))
+    demote_factor = float(params.get("demote_factor", DAILY_LOG_DEMOTE_FACTOR))
 
     # Take top-10 seeds (was 5). Ties at low scores can knock out the
     # canonical entity; e.g. "Knowledge Graph Consistency" and "Knowledge
@@ -521,6 +667,78 @@ def _vault_recall(params: dict) -> dict:
         # broken state, then eats 30s before returning empty.
         result = _qmd_daemon_search(query, limit, VAULT_SEGMENTS)
         return result or []
+
+    def _do_code_grep():
+        if not params.get("grep_code", True):
+            return []
+        return _grep_lloyd_code(query, limit=8)
+
+    def _do_graph_lookup():
+        """Phase 2 (reframed): for each top seed + graph neighbor, look
+        up its canonical file via a focused QMD search of the entity name.
+        Surfaces autonomy/N-*.md, skills/<slug>/SKILL.md, backlog files
+        that lexically match the entity but don't share the original
+        query's tokens.
+
+        Eval verdict (2026-05-12): on average HURTS single-entity queries
+        by injecting alternatives that displace the perfect QMD top-1
+        match. HELPS the 'hard' cross-domain category. Net regression
+        when default-on (-12% MRR overall). Default-off, opt-in via
+        `graph_lookup: True`."""
+        if not params.get("graph_lookup", False):
+            return []
+        # Use top 4 seeds + top 4 neighbors. Cap entity name length to skip
+        # noisy compound names like "autonomy tasks API" that just retrieve
+        # the original query's results again.
+        entity_pool = []
+        for e in (seed_entities or [])[:4]:
+            if e and 3 <= len(e) <= 60 and e not in entity_pool:
+                entity_pool.append(e)
+        if need_neighbors:
+            for e, _w in (weighted_neighbors or [])[:4]:
+                if e and 3 <= len(e) <= 60 and e not in entity_pool:
+                    entity_pool.append(e)
+        if not entity_pool:
+            return []
+
+        def _lookup_one(ent):
+            try:
+                hits = _qmd_daemon_search(ent, 2, VAULT_SEGMENTS) or []
+            except Exception:
+                hits = []
+            return [(ent, h) for h in hits[:2]]
+
+        # Parallel per-entity lookup. Cap workers to avoid swamping QMD.
+        canonical: dict[str, dict] = {}
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(entity_pool), 6)
+        ) as pool:
+            for pairs in pool.map(_lookup_one, entity_pool):
+                for ent, h in pairs:
+                    f = h.get("file", "")
+                    if not f or f in canonical:
+                        continue
+                    rel_path = f.removeprefix("qmd://").removeprefix("obsidian/")
+                    is_canonical = any(rel_path.startswith(p) for p in _CANONICAL_PREFIXES)
+                    qmd_score = float(h.get("score", 0) or 0)
+                    if is_canonical:
+                        # Promote canonical files into top-N but don't
+                        # overtake QMD rank-1 (1.0). Cap at 0.85 so a
+                        # legitimate query→canonical lexical match (1.0)
+                        # still wins, but graph-derived canonicals beat
+                        # demoted memory logs (0.4) and QMD rank-2 (0.5).
+                        boosted = min(0.85, qmd_score + 0.35)
+                    else:
+                        # Weak promote: don't outrank ANY strong QMD hit.
+                        boosted = min(0.5, qmd_score * 0.6)
+                    canonical[f] = {
+                        **h,
+                        "score": round(boosted, 4),
+                        "_via_graph_entity": ent,
+                        "_qmd_score_at_lookup": qmd_score,
+                        "_canonical_boost": is_canonical,
+                    }
+        return list(canonical.values())
 
     def _do_facts():
         if not include_facts:
@@ -573,15 +791,31 @@ def _vault_recall(params: dict) -> dict:
         return facts, graph_facts
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             search_fut = pool.submit(_do_search)
             facts_fut = pool.submit(_do_facts)
+            grep_fut = pool.submit(_do_code_grep)
+            graph_lookup_fut = pool.submit(_do_graph_lookup)
             raw_results = search_fut.result()
             facts, graph_facts = facts_fut.result()
+            grep_results = grep_fut.result()
+            graph_lookup_results = graph_lookup_fut.result()
+        # Merge alternate-retrieval sources: dedupe by file path; first
+        # wins (QMD primary, then grep, then graph-lookup).
+        existing_files = {r.get("file", "") for r in raw_results}
+        for gr in grep_results:
+            if gr.get("file") not in existing_files:
+                raw_results.append(gr)
+                existing_files.add(gr.get("file", ""))
+        for gl in graph_lookup_results:
+            if gl.get("file") not in existing_files:
+                raw_results.append(gl)
+                existing_files.add(gl.get("file", ""))
         documents = []
-        # When graph_rerank is on, we over-fetch from QMD then re-rank.
-        # Otherwise honor the requested limit as before.
-        prerank_pool = raw_results[: max(limit * 3, limit)] if graph_rerank else raw_results[:limit]
+        # When graph_rerank is on (or demote_daily_logs is on, since post-
+        # processing may swap docs) we over-fetch from QMD then re-sort.
+        pool_size = max(limit * 3, limit) if (graph_rerank or demote_daily_logs) else limit
+        prerank_pool = raw_results[:pool_size]
         for r in prerank_pool:
             path = r.get("file", "").removeprefix("qmd://")
             if path.startswith("obsidian/"):
@@ -592,8 +826,16 @@ def _vault_recall(params: dict) -> dict:
                 "snippet": r.get("snippet", ""),
                 "score": r.get("score", 0),
             })
+        if demote_daily_logs:
+            for d in documents:
+                if _DAILY_LOG_RE.search(d.get("path") or ""):
+                    d["_pre_demote_score"] = d.get("score", 0)
+                    d["score"] = round(float(d.get("score", 0)) * demote_factor, 6)
+            documents.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
         if graph_rerank:
             documents = _graph_rerank(documents, seed_entities, weighted_neighbors, alpha=rerank_alpha)[:limit]
+        else:
+            documents = documents[:limit]
         result = {"documents": documents, "facts": facts, "query": query}
         if graph_facts:
             result["graph_expanded_facts"] = graph_facts
