@@ -47,10 +47,10 @@ discord:
   auto_thread_archive_duration: 1440
   free_response_channels: []
   home_channel: null
-  owner_id: ${DISCORD_OWNER_ID}
+  owner_id: ''
   reactions: true
   require_mention: true
-  token: ${DISCORD_BOT_TOKEN}
+  token: ''
 display:
   personality: kawaii
   streaming: true
@@ -114,6 +114,9 @@ harness:
     - ide_open_folder
     - ide_open_file
     - ide_close_tab
+    - Task
+    - vault_search
+    - TodoWrite
     max_results_default: 5
     max_results_cap: 20
 subagents:
@@ -155,11 +158,9 @@ models:
       ANTHROPIC_CUSTOM_MODEL_OPTION: secondary
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Secondary
 livekit:
-  url: ws://127.0.0.1:7880   # internal URL — used by the agent worker on this host
-  # client_url: wss://lloyd.local:5173/livekit  # optional override for the URL handed to browsers (default: derived from request via Vite proxy)
-  # Secrets live in .env (see scripts/gen-livekit-secrets.sh) and are expanded at config load.
-  api_key: ${LIVEKIT_API_KEY}
-  api_secret: ${LIVEKIT_API_SECRET}
+  url: ws://127.0.0.1:7880
+  api_key: lloyd_1eec02918cf4
+  api_secret: JHjfOpGpwxNs6R4YIx_3dFeoL_XDuC4w7u7QZNWfxfXIs4mp
   room_prefix: lloyd-
   agent_identity: lloyd-agent
   stt:
@@ -197,7 +198,7 @@ livekit:
     enabled: true
     models_dir: agent-services/models/wakeword
     engine_dir: agent-services/models/openwakeword
-    threshold: 0.4
+    threshold: 0.55
   voiceprint:
     enabled: true
     profiles_dir: ~/lloyd/voice_profiles

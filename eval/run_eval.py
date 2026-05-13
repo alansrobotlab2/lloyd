@@ -62,6 +62,24 @@ def _norm(s: str) -> str:
     return str(s or "").lower().replace("-", "_")
 
 
+def _ndcg_at_k(got_docs: list[str], expected_docs: list[str], k: int = 10) -> float:
+    """Binary-relevance NDCG@k. Each got_docs[i] (i<k) scores 1 if it
+    matches any expected substring, else 0. IDCG is computed against the
+    actual count of relevant docs found in top-k (not len(expected_docs)),
+    because expectations are substrings and may each match multiple docs.
+    Returns 0.0 when no relevant docs in top-k or no expectations."""
+    if not expected_docs:
+        return 0.0
+    import math as _m
+    rel = [1 if any(exp in got for exp in expected_docs) else 0 for got in got_docs[:k]]
+    num_rel = sum(rel)
+    if num_rel == 0:
+        return 0.0
+    dcg = sum(r / _m.log2(i + 2) for i, r in enumerate(rel))
+    idcg = sum(1.0 / _m.log2(i + 2) for i in range(num_rel))
+    return dcg / idcg
+
+
 def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> dict:
     expected_entities = [_norm(e) for e in (query_spec.get("expect_entities") or [])]
     expected_docs = [_norm(d) for d in (query_spec.get("expect_docs") or [])]
@@ -80,6 +98,18 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
 
     # Reciprocal rank (0 if not found). Useful for MRR-style aggregates.
     rr_doc = (1.0 / first_doc_rank) if first_doc_rank else 0.0
+    ndcg10 = _ndcg_at_k(got_docs, expected_docs, k=10)
+
+    # Facts-side scoring: how many expected entities appear in returned facts
+    # (not just seeds/neighbors)? This isolates whether the entity attribution
+    # makes its way into the fact retrieval, separate from the seed extractor.
+    fact_entities = []
+    for f in (result.get("facts") or []):
+        e = _norm(f.get("entity", "") or "")
+        if e:
+            fact_entities.append(e)
+    fact_matches = [exp for exp in expected_entities if any(exp in fe for fe in fact_entities)]
+    fact_entity_recall = (len(fact_matches) / len(expected_entities)) if expected_entities else None
 
     return {
         "entity_hit": bool(entity_matches),
@@ -88,13 +118,16 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
         "doc_recall": (len(doc_matches) / len(expected_docs)) if expected_docs else None,
         "first_doc_rank": first_doc_rank,
         "rr_doc": round(rr_doc, 4),
+        "ndcg10": round(ndcg10, 4),
+        "fact_entity_recall": fact_entity_recall,
         "entities_matched": entity_matches,
         "docs_matched": doc_matches,
     }
 
 
 def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
-             graph_rerank: bool = False, rerank_alpha: float = 0.5) -> list[dict]:
+             graph_rerank: bool = False, rerank_alpha: float = 0.5,
+             demote_factor: float | None = None) -> list[dict]:
     records = []
     for spec in queries:
         qid = spec.get("id")
@@ -103,13 +136,16 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
             continue
         t0 = time.perf_counter()
         try:
-            result = _vault_recall({
+            recall_params = {
                 "query": query,
                 "limit": limit,
                 "expand_graph": expand_graph,
                 "graph_rerank": graph_rerank,
                 "rerank_alpha": rerank_alpha,
-            })
+            }
+            if demote_factor is not None:
+                recall_params["demote_factor"] = demote_factor
+            result = _vault_recall(recall_params)
             err = None
         except Exception as e:
             result = {"documents": [], "facts": []}
@@ -163,6 +199,8 @@ def summarize(records: list[dict]) -> dict:
         "entity_recall_avg": avg([r["scoring"]["entity_recall"] for r in records]),
         "doc_recall_avg": avg([r["scoring"]["doc_recall"] for r in records]),
         "mrr_doc": avg([r["scoring"]["rr_doc"] for r in records]),
+        "ndcg10": avg([r["scoring"]["ndcg10"] for r in records]),
+        "fact_entity_recall_avg": avg([r["scoring"]["fact_entity_recall"] for r in records]),
         "latency_ms_avg": avg([r["latency_ms"] for r in records]),
         "errors": sum(1 for r in records if r.get("error")),
     }
@@ -175,13 +213,15 @@ def summarize(records: list[dict]) -> dict:
             "doc_hit_rate": avg([1.0 if r["scoring"]["doc_hit"] else 0.0 for r in rs]),
             "entity_recall_avg": avg([r["scoring"]["entity_recall"] for r in rs]),
             "mrr_doc": avg([r["scoring"]["rr_doc"] for r in rs]),
+            "ndcg10": avg([r["scoring"]["ndcg10"] for r in rs]),
+            "fact_entity_recall_avg": avg([r["scoring"]["fact_entity_recall"] for r in rs]),
         }
     return {"overall": overall, "by_category": per_cat}
 
 
 def print_table(records: list[dict], summary: dict) -> None:
-    print(f"\n{'id':<26} {'cat':<10} {'ent_hit':<8} {'doc_hit':<8} {'ent_R':<6} {'doc_R':<6} {'rank':<5} {'latms':<7}")
-    print("-" * 90)
+    print(f"\n{'id':<26} {'cat':<10} {'eH':<4} {'dH':<4} {'eR':<6} {'dR':<6} {'rank':<5} {'NDCG':<6} {'fER':<6} {'latms':<7}")
+    print("-" * 100)
     for r in records:
         s = r["scoring"]
         eh = "✓" if s["entity_hit"] else "✗"
@@ -189,17 +229,20 @@ def print_table(records: list[dict], summary: dict) -> None:
         er = f"{s['entity_recall']:.2f}" if s["entity_recall"] is not None else "—"
         dr = f"{s['doc_recall']:.2f}" if s["doc_recall"] is not None else "—"
         rk = str(s["first_doc_rank"]) if s["first_doc_rank"] else "—"
-        print(f"{r['id']:<26} {(r['category'] or ''):<10} {eh:<8} {dh:<8} {er:<6} {dr:<6} {rk:<5} {r['latency_ms']:<7.0f}")
+        ndcg = f"{s['ndcg10']:.2f}"
+        fer = f"{s['fact_entity_recall']:.2f}" if s["fact_entity_recall"] is not None else "—"
+        print(f"{r['id']:<26} {(r['category'] or ''):<10} {eh:<4} {dh:<4} {er:<6} {dr:<6} {rk:<5} {ndcg:<6} {fer:<6} {r['latency_ms']:<7.0f}")
     print()
     o = summary["overall"]
     print(f"Overall: n={o['n_queries']}  entity_hit={o['entity_hit_rate']:.2f}  doc_hit={o['doc_hit_rate']:.2f}  "
           f"ent_recall={o['entity_recall_avg']:.2f}  doc_recall={o['doc_recall_avg']:.2f}  "
-          f"MRR_doc={o['mrr_doc']:.3f}  avg_lat={o['latency_ms_avg']:.0f}ms")
+          f"MRR={o['mrr_doc']:.3f}  NDCG10={o['ndcg10']:.3f}  fER={o['fact_entity_recall_avg'] or 0:.3f}  "
+          f"avg_lat={o['latency_ms_avg']:.0f}ms")
     print("\nBy category:")
     for cat, s in summary["by_category"].items():
         print(f"  {cat:<10} n={s['n']:<3} entity_hit={s['entity_hit_rate']:.2f}  "
               f"doc_hit={s['doc_hit_rate']:.2f}  ent_recall={s['entity_recall_avg']:.2f}  "
-              f"MRR_doc={s['mrr_doc']:.3f}")
+              f"MRR={s['mrr_doc']:.3f}  NDCG10={s['ndcg10']:.3f}  fER={s['fact_entity_recall_avg'] or 0:.3f}")
 
 
 def main() -> int:
@@ -211,6 +254,7 @@ def main() -> int:
     ap.add_argument("--no-graph", action="store_true", help="Disable expand_graph (default: on)")
     ap.add_argument("--graph-rerank", action="store_true", help="Enable Phase 3 graph-vote re-ranking")
     ap.add_argument("--alpha", type=float, default=0.5, help="Re-rank alpha: 1.0=pure QMD, 0.0=pure graph (default 0.5)")
+    ap.add_argument("--demote-factor", type=float, default=None, help="Daily-log demote factor (default uses module constant 0.4)")
     args = ap.parse_args()
 
     spec_file = Path(args.queries)
@@ -223,6 +267,7 @@ def main() -> int:
         expand_graph=not args.no_graph,
         graph_rerank=args.graph_rerank,
         rerank_alpha=args.alpha,
+        demote_factor=args.demote_factor,
     )
     summary = summarize(records)
 

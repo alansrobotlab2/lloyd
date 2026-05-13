@@ -73,12 +73,13 @@ def _load_jsonl(path: Path) -> list[dict]:
     return out
 
 
-def _build_models(models_dir: Path, engine_dir: Path, enable_speex_ns: bool):
-    """Build an openWakeWord Model exactly the way the worker does."""
+def _build_models(model_paths: list[Path], engine_dir: Path, enable_speex_ns: bool):
+    """Build an openWakeWord Model exactly the way the worker does, given an
+    explicit list of .onnx paths."""
     from openwakeword.model import Model
-    ww_paths = sorted(str(p) for p in models_dir.glob("*.onnx"))
+    ww_paths = [str(p) for p in model_paths]
     if not ww_paths:
-        raise SystemExit(f"no .onnx wake-word models in {models_dir}")
+        raise SystemExit("no .onnx wake-word model paths provided")
     mel = engine_dir / "melspectrogram.onnx"
     emb = engine_dir / "embedding_model.onnx"
     if not mel.exists() or not emb.exists():
@@ -183,12 +184,27 @@ def main(argv=None):
                     help="speex noise suppression inside openWakeWord "
                          "(default 'off' matches the LiveKit worker; 'on'/'both' "
                          "require the speexdsp_ns extra)")
+    ap.add_argument("--models", default=None,
+                    help="comma-separated explicit .onnx paths (overrides "
+                         "the config-derived models_dir; useful to A/B a "
+                         "candidate model before deploying)")
     args = ap.parse_args(argv)
 
     thresholds = sorted({float(t) for t in args.thresholds.split(",")}, reverse=True)
     models_dir, engine_dir, prod_threshold = _load_config_paths()
 
-    print(f"models_dir = {models_dir}")
+    if args.models:
+        model_paths = [Path(p).expanduser() for p in args.models.split(",")]
+        for p in model_paths:
+            if not p.exists():
+                raise SystemExit(f"model file not found: {p}")
+        print(f"using explicit model paths: {[str(p) for p in model_paths]}")
+    else:
+        model_paths = sorted(models_dir.glob("*.onnx"))
+        if not model_paths:
+            raise SystemExit(f"no .onnx files in {models_dir}")
+        print(f"models_dir = {models_dir}")
+
     print(f"engine_dir = {engine_dir}")
     print(f"prod threshold = {prod_threshold}  (livekit.acoustic_wake.threshold)")
     print(f"sweeping = {thresholds}")
@@ -221,7 +237,7 @@ def main(argv=None):
     variants = {}
     for name, ns in ns_variants:
         try:
-            variants[name] = _build_models(models_dir, engine_dir, ns)
+            variants[name] = _build_models(model_paths, engine_dir, ns)
         except ModuleNotFoundError as e:
             print(f"[warn] variant {name!r} unavailable: {e} "
                   f"(skipping; pip install openwakeword[full] to enable speex NS)",

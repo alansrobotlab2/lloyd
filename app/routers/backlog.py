@@ -43,6 +43,13 @@ def _backlog_board_map() -> dict:
     return {name: idx + 1 for idx, name in enumerate(sorted(names))}
 
 
+def _write_task_file(filepath: Path, fm: dict, body: str) -> None:
+    clean = {k: (v.isoformat() if isinstance(v, datetime) else v)
+             for k, v in fm.items() if v is not None}
+    fm_yaml = yaml.dump(clean, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    filepath.write_text(f"---\n{fm_yaml}---\n\n{body}")
+
+
 def _backlog_find_file(task_id: int) -> Path | None:
     """Find the markdown file for a given task ID."""
     if not _BACKLOG_DIR.exists():
@@ -187,20 +194,7 @@ async def backlog_task_update(request: Request):
     if "assigned_to_agent" in data:
         fm["assigned"] = data["assigned_to_agent"]
     fm["updated"] = datetime.now().isoformat()
-    fm_lines = ["---"]
-    for key, value in fm.items():
-        if value is None:
-            continue
-        if isinstance(value, bool):
-            fm_lines.append(f"{key}: {str(value).lower()}")
-        elif isinstance(value, list):
-            fm_lines.append(f"{key}: {value}")
-        elif isinstance(value, datetime):
-            fm_lines.append(f"{key}: {value.isoformat()}")
-        else:
-            fm_lines.append(f"{key}: {value}")
-    fm_lines.append("---")
-    filepath.write_text("\n".join(fm_lines) + "\n\n" + body)
+    _write_task_file(filepath, fm, body)
     return JSONResponse({"success": True})
 
 
@@ -236,22 +230,11 @@ async def backlog_task_create(request: Request):
     }
     if data.get("tags"):
         fm["tags"] = data["tags"]
-    fm_lines = ["---"]
-    for key, value in fm.items():
-        if value is None:
-            continue
-        if isinstance(value, bool):
-            fm_lines.append(f"{key}: {str(value).lower()}")
-        elif isinstance(value, list):
-            fm_lines.append(f"{key}: {value}")
-        else:
-            fm_lines.append(f"{key}: {value}")
-    fm_lines.append("---")
     body = f"# {name}"
     if data.get("description"):
         body += f"\n\n{data['description']}"
     _BACKLOG_DIR.mkdir(parents=True, exist_ok=True)
-    (_BACKLOG_DIR / filename).write_text("\n".join(fm_lines) + "\n\n" + body)
+    _write_task_file(_BACKLOG_DIR / filename, fm, body)
     return JSONResponse({"success": True, "id": task_id})
 
 
