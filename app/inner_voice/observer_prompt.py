@@ -34,6 +34,7 @@ _VAULT_INNER_VOICE_DIR = _LLOYD_HOME.parent / "obsidian" / "lloyd" / "inner_voic
 
 _SYSTEM_PROMPT_PATH = _VAULT_INNER_VOICE_DIR / "system_prompt.md"
 _GOAL_EXTRACTION_PATH = _VAULT_INNER_VOICE_DIR / "goal_extraction_prompt.md"
+_GOAL_COMPLETION_PATH = _VAULT_INNER_VOICE_DIR / "goal_completion_prompt.md"
 
 
 def _strip_frontmatter(content: str) -> str:
@@ -94,6 +95,13 @@ Respond by calling exactly one of the lever tools loaded into your context: noop
 _FALLBACK_GOAL_EXTRACTION_PROMPT = """Extract a goal card from the user's request and call the `record_goal_card` tool with three array fields: success_criteria, out_of_scope, completion_signals. Empty lists if the request is conversational or has no actionable goal.
 """
 
+_FALLBACK_GOAL_COMPLETION_PROMPT = """You are Lloyd's goal-completion evaluator. The user set a persistent goal via /goal. After each turn you judge — strictly — whether the goal is actually met.
+
+Call `record_goal_completion` with:
+- `achieved`: true only when the goal's verifiable end condition is plainly satisfied by what already happened in the conversation (files written, tools confirmed the action, the answer was delivered). Default to false when in doubt.
+- `reason`: when achieved=false, write the next user-visible follow-up — be specific about what is still missing and what concrete step should come next. Treat textual promises of future action ("I'll do X next") as evidence the work was NOT done.
+"""
+
 
 SYSTEM_PROMPT = _load_prompt_file(
     _SYSTEM_PROMPT_PATH,
@@ -105,6 +113,12 @@ GOAL_EXTRACTION_SYSTEM_PROMPT = _load_prompt_file(
     _GOAL_EXTRACTION_PATH,
     _FALLBACK_GOAL_EXTRACTION_PROMPT,
     label="goal_extraction_prompt",
+)
+
+GOAL_COMPLETION_SYSTEM_PROMPT = _load_prompt_file(
+    _GOAL_COMPLETION_PATH,
+    _FALLBACK_GOAL_COMPLETION_PROMPT,
+    label="goal_completion_prompt",
 )
 
 
@@ -174,6 +188,33 @@ DEFAULT_GOAL_EXTRACTION_MAX_TOKENS = 600
 # ---------------------------------------------------------------------------
 # Per-event prompt assembly
 # ---------------------------------------------------------------------------
+
+
+def _format_persistent_goal(persistent_goal: dict[str, Any] | None) -> str:
+    """Render the session's persistent goal (the /goal target) for IV.
+
+    This is the user's session-wide north star, distinct from the per-turn
+    goal_card extracted from the immediate request. The observer sees both:
+    goal_card is "what does THIS turn need to deliver?" and persistent_goal
+    is "what is the whole session trying to reach?".
+    """
+    if not persistent_goal:
+        return ""
+    text = (persistent_goal.get("text") or "").strip()
+    if not text:
+        return ""
+    if persistent_goal.get("achieved_at"):
+        return ""
+    attempts = int(persistent_goal.get("attempts") or 0)
+    attempt_line = f" (attempt {attempts + 1})" if attempts else ""
+    return (
+        f"PERSISTENT GOAL (user's /goal){attempt_line}: {text}\n"
+        "Every turn should advance this goal or surface a concrete "
+        "blocker. If the primary stops with the goal still unmet, the "
+        "post-turn evaluator will queue a follow-up; you can also "
+        "inject/ambient mid-turn if the primary is clearly drifting "
+        "from the goal."
+    )
 
 
 def _format_goal_card(goal_card: dict[str, Any] | None) -> str:
@@ -400,6 +441,7 @@ def build_user_prompt_for_event(
     subliminal_context: str | None = None,
     todos: list[dict[str, Any]] | None = None,
     plan_artifact: dict[str, Any] | None = None,
+    persistent_goal: dict[str, Any] | None = None,
 ) -> str:
     """Assemble the per-event user prompt the observer evaluates."""
     budget_line = (
@@ -419,8 +461,11 @@ def build_user_prompt_for_event(
     plan_section = f"\n{plan_block}\n" if plan_block else ""
     todos_block = _format_todos_block(todos)
     todos_section = f"\n{todos_block}\n" if todos_block else ""
+    persistent_goal_block = _format_persistent_goal(persistent_goal)
+    persistent_goal_section = f"{persistent_goal_block}\n\n" if persistent_goal_block else ""
     return (
         f"USER REQUEST:\n{user_request}\n\n"
+        f"{persistent_goal_section}"
         f"{_format_goal_card(goal_card)}\n"
         f"{plan_section}"
         f"{todos_section}"
@@ -431,6 +476,44 @@ def build_user_prompt_for_event(
         f"EVENT UNDER REVIEW:\n{event_summary}\n\n"
         f"{budget_line}\n\n"
         f"Decide: noop, inject, cancel, ambient, clarify, or (for pretool) allow / deny_tool."
+    )
+
+
+def build_goal_completion_user_prompt(
+    *,
+    goal_text: str,
+    user_request: str,
+    response_text: str,
+    attempts: int,
+    max_attempts: int,
+    recent_tool_calls: list[str] | None = None,
+) -> str:
+    """User prompt for the persistent-goal post-turn evaluator.
+
+    Called from `observer._evaluate_goal_completion` at the `result` event
+    when the session has a /goal set. The model must call
+    `record_goal_completion` with achieved=bool, reason=str. Reason on
+    `achieved=false` becomes the next ambient follow-up's body.
+    """
+    recent_block = ""
+    if recent_tool_calls:
+        names = ", ".join(recent_tool_calls[-12:])
+        recent_block = f"\nTools called this turn (most recent last): {names}\n"
+    txt = windowed_text(response_text or "", 1500)
+    attempt_line = (
+        f"\nThis is attempt {attempts + 1}/{max_attempts} since the goal "
+        "was set. If the goal is plainly impossible from the agent's side "
+        "(needs external action, missing credentials, etc.), say so in "
+        "`reason` so the user can intervene."
+    )
+    return (
+        f"PERSISTENT GOAL: {goal_text}\n\n"
+        f"This turn's user request: {user_request}\n"
+        f"{recent_block}\n"
+        f"Primary's final visible response: {txt!r}\n"
+        f"{attempt_line}\n\n"
+        "Decide strictly: has the persistent goal been achieved? Call "
+        "`record_goal_completion`."
     )
 
 

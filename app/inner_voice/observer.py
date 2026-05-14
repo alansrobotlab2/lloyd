@@ -31,12 +31,15 @@ from app import event_log as _event_log
 from app.config import CONFIG, _get_model_cfg
 from app.inner_voice import observer_prompt as _prompt
 from app.inner_voice.lever_tools import (
+    GOAL_COMPLETION_TOOL_NAME,
+    GOAL_COMPLETION_TOOLS,
     GOAL_EXTRACTION_TOOL_NAME,
     GOAL_EXTRACTION_TOOLS,
     LEVER_NAMES,
     LEVER_TOOLS,
 )
 from app.paths import SESSIONS_DIR
+from app.sessions_io import mutate_session
 from usage_store import record_inner_voice_observation
 
 logger = logging.getLogger("lloyd-iv-observer")
@@ -81,6 +84,16 @@ def _observer_cfg() -> dict[str, Any]:
     obs.setdefault("goal_extraction_enabled", True)
     obs.setdefault("fast_path_enabled", True)
     return obs
+
+
+def _goal_loop_cfg() -> dict[str, Any]:
+    """Config block for the persistent-goal completion loop (the /goal feature)."""
+    iv = CONFIG.get("inner_voice") or {}
+    g = dict(iv.get("goal") or {})
+    g.setdefault("max_attempts", 10)
+    g.setdefault("eval_timeout_seconds", 8.0)
+    g.setdefault("eval_max_tokens", 300)
+    return g
 
 
 def _todo_stewardship_cfg() -> dict[str, Any]:
@@ -276,6 +289,93 @@ async def extract_goal_card(
         len(out["completion_signals"]),
     )
     return out
+
+
+@dataclass
+class GoalCompletionVerdict:
+    """One-shot goal-completion evaluator result."""
+
+    achieved: bool = False
+    reason: str = ""
+    error: str | None = None
+    latency_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+async def evaluate_goal_completion(
+    *,
+    goal_text: str,
+    user_request: str,
+    response_text: str,
+    attempts: int,
+    max_attempts: int,
+    recent_tool_calls: list[str] | None = None,
+    cfg: dict[str, Any] | None = None,
+) -> GoalCompletionVerdict:
+    """One LLM call: did this turn achieve the persistent goal?
+
+    Forces the model to invoke `record_goal_completion(achieved, reason)`.
+    On any failure the verdict defaults to `achieved=False` with the error
+    captured — the caller decides whether to still queue an ambient. The
+    `reason` field on `achieved=False` becomes the user-visible follow-up
+    body, so the prompt is engineered to make it a concrete next step.
+    """
+    cfg = cfg or _goal_loop_cfg()
+    if not goal_text or not goal_text.strip():
+        return GoalCompletionVerdict(achieved=False, error="empty_goal")
+    base_url, model_name = _resolve_endpoint()
+    if not base_url:
+        return GoalCompletionVerdict(achieved=False, error="no_base_url")
+    timeout = float(cfg.get("eval_timeout_seconds", 8.0))
+    max_tokens = int(cfg.get("eval_max_tokens", 300))
+    user_prompt = _prompt.build_goal_completion_user_prompt(
+        goal_text=goal_text,
+        user_request=user_request,
+        response_text=response_text,
+        attempts=attempts,
+        max_attempts=max_attempts,
+        recent_tool_calls=recent_tool_calls,
+    )
+    started = time.perf_counter()
+    try:
+        body = await _post_chat_completion_with_tools(
+            base_url=base_url,
+            model_name=model_name,
+            system_prompt=_prompt.GOAL_COMPLETION_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            tools=GOAL_COMPLETION_TOOLS,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout,
+        )
+    except Exception as e:  # noqa: BLE001 — best effort
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        logger.warning("[iv.observer] goal_completion eval failed: %s", e)
+        return GoalCompletionVerdict(
+            achieved=False, error=f"exception: {e}", latency_ms=latency_ms,
+        )
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    usage = body.get("usage") or {}
+    in_tok = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    out_tok = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    extracted = _extract_tool_call(body)
+    if extracted is None:
+        return GoalCompletionVerdict(
+            achieved=False, error="no_tool_call",
+            latency_ms=latency_ms, input_tokens=in_tok, output_tokens=out_tok,
+        )
+    name, args = extracted
+    if name != GOAL_COMPLETION_TOOL_NAME:
+        return GoalCompletionVerdict(
+            achieved=False, error=f"unexpected_tool:{name}",
+            latency_ms=latency_ms, input_tokens=in_tok, output_tokens=out_tok,
+        )
+    achieved = bool(args.get("achieved"))
+    reason = str(args.get("reason") or "").strip()[:2000]
+    return GoalCompletionVerdict(
+        achieved=achieved, reason=reason,
+        latency_ms=latency_ms, input_tokens=in_tok, output_tokens=out_tok,
+    )
 
 
 def _coerce_str_list(v: Any) -> list[str]:
@@ -572,6 +672,16 @@ class ObserverState:
     # branch swaps from "watch for execution drift" to "evaluate plan
     # quality".
     plan_artifact: dict[str, Any] | None = None
+    # Persistent /goal — the session-level north star. None when no goal
+    # is set or the goal is already marked achieved. Shape:
+    # `{text, set_at, achieved_at, attempts}`. The observer threads this
+    # into per-event prompts so primary stays anchored, and runs a
+    # dedicated goal-completion evaluator at the `result` event when set.
+    persistent_goal: dict[str, Any] | None = None
+    # Tool names called this turn (latest 32), used as evidence input
+    # for the goal-completion evaluator. Captured via the on_event_cb
+    # tool_result branch.
+    tool_calls_this_turn: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -820,7 +930,240 @@ def _build_event_user_prompt(
         subliminal_context=state.subliminal_context,
         todos=todos_for_prompt,
         plan_artifact=state.plan_artifact,
+        persistent_goal=state.persistent_goal,
     )
+
+
+# ---------------------------------------------------------------------------
+# Persistent-goal completion handler (the /goal loop)
+# ---------------------------------------------------------------------------
+
+
+_GOAL_ACHIEVED_BREADCRUMB = (
+    "Goal achieved: {text} — {reason}"
+)
+
+
+async def _persist_goal_state(
+    session_id: str, *,
+    achieved_at: str | None = None,
+    bump_attempts: bool = False,
+) -> dict[str, Any] | None:
+    """Mutate `session.goal` after a completion verdict.
+
+    Returns the new goal dict on success, None if the session no longer
+    exists or has no goal. Best-effort — failures fold into None and the
+    caller logs/skips.
+    """
+    new_state: dict[str, Any] | None = None
+
+    def _apply(data: dict[str, Any]) -> None:
+        nonlocal new_state
+        g = data.get("goal") or {}
+        if not g or not (g.get("text") or "").strip():
+            return
+        if bump_attempts:
+            g["attempts"] = int(g.get("attempts") or 0) + 1
+        if achieved_at:
+            g["achieved_at"] = achieved_at
+        data["goal"] = g
+        new_state = dict(g)
+
+    try:
+        ok = await mutate_session(session_id, _apply)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[iv.observer] goal mutate failed: %s", e)
+        return None
+    if not ok:
+        return None
+    return new_state
+
+
+async def _handle_persistent_goal_at_result(
+    state: ObserverState,
+    evt: dict[str, Any],
+    *,
+    prior_decision: ObserverDecision,
+) -> None:
+    """Run the goal-completion evaluator at the turn-final `result` event.
+
+    Behavior:
+      * cancel/clarify already fired this turn → skip (user is in control).
+      * Evaluator says achieved → mutate `session.goal.achieved_at`, emit
+        a success breadcrumb via the inject-persist callback (uses the
+        ``inner_voice_inject`` channel which renders as a chat message).
+      * Evaluator says NOT achieved + we still have attempts left →
+        queue an ambient follow-up with `verdict.reason` as the body,
+        unless the prior decision already queued one.
+      * Evaluator says NOT achieved + attempts exhausted → escalate to
+        clarify so the user can intervene.
+    """
+    gp = state.persistent_goal
+    if not gp:
+        return
+    goal_text = (gp.get("text") or "").strip()
+    if not goal_text:
+        return
+
+    # If the turn was cancelled or clarify already fired, don't pile a
+    # goal-driven ambient onto it — the user is reading the screen.
+    if state.cancel_event.is_set():
+        return
+
+    attempts = int(gp.get("attempts") or 0)
+    goal_cfg = _goal_loop_cfg()
+    max_attempts = int(goal_cfg.get("max_attempts", 10))
+
+    response_text = evt.get("response_text") or state.accumulated_text or ""
+
+    verdict = await evaluate_goal_completion(
+        goal_text=goal_text,
+        user_request=state.user_request,
+        response_text=response_text,
+        attempts=attempts,
+        max_attempts=max_attempts,
+        recent_tool_calls=state.tool_calls_this_turn,
+        cfg=goal_cfg,
+    )
+
+    # Persist the evaluator call as an observation row so the UI can show it.
+    eval_decision = ObserverDecision(
+        action="noop" if verdict.achieved else "ambient",
+        reason=("goal_achieved" if verdict.achieved else "goal_unmet")
+        + (f": {verdict.reason}" if verdict.reason else ""),
+        content=verdict.reason if not verdict.achieved else "",
+        input_tokens=verdict.input_tokens,
+        output_tokens=verdict.output_tokens,
+        latency_ms=verdict.latency_ms,
+        error=verdict.error,
+    )
+
+    if verdict.achieved:
+        now_iso_str = _now_iso_for_goal()
+        updated = await _persist_goal_state(state.session_id, achieved_at=now_iso_str)
+        # User-visible breadcrumb in chat so the user sees the goal closed
+        # naturally — uses the existing inject persistence channel.
+        if state.persist_intervention_callback is not None:
+            try:
+                await state.persist_intervention_callback(
+                    "inject",
+                    _GOAL_ACHIEVED_BREADCRUMB.format(
+                        text=goal_text,
+                        reason=verdict.reason or "criteria met",
+                    ),
+                    "goal achieved",
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[iv.observer] goal achieved breadcrumb failed: %s", e)
+        _event_log.log_event(
+            state.session_id,
+            "inner_voice.goal_achieved",
+            {
+                "goal_text": goal_text,
+                "attempts": (updated or gp).get("attempts", attempts),
+                "reason": verdict.reason,
+            },
+            turn_id=state.turn_id,
+        )
+        logger.info(
+            "[iv.observer] goal achieved session=%s turn=%s text=%r reason=%r",
+            state.session_id, state.turn_id, goal_text[:120], verdict.reason[:120],
+        )
+        _persist(state, eval_decision, trigger="result", related_tool="goal_completion")
+        return
+
+    # Goal not achieved — bump attempts and either queue ambient or
+    # escalate to clarify.
+    new_attempts = attempts + 1
+    await _persist_goal_state(state.session_id, bump_attempts=True)
+
+    follow_up_body = (
+        verdict.reason
+        or f"Goal not yet met: {goal_text}. Continue working toward it."
+    )
+
+    # Don't double-queue: if the prior result-event decision already
+    # queued an ambient, append a goal-driven note instead of stacking.
+    prior_action = (prior_decision.action or "").strip()
+    already_queued_ambient = prior_action == "ambient"
+
+    if new_attempts >= max_attempts:
+        # Exhausted — escalate to clarify so the user can intervene.
+        clarify_question = (
+            f"I've made {new_attempts} attempts at the persistent goal "
+            f"and it's still not met. Should I keep trying, change "
+            f"approach, or clear the goal?\n\nGoal: {goal_text}\n"
+            f"Last evaluator note: {follow_up_body}"
+        )
+        if state.clarify_callback is not None:
+            try:
+                await state.clarify_callback(clarify_question, "goal max_attempts")
+                state.cancel_event.set()
+                eval_decision.action = "clarify"
+                eval_decision.content = clarify_question
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[iv.observer] goal clarify failed: %s", e)
+                eval_decision.action = "noop_goal_clarify_failed"
+                eval_decision.error = (eval_decision.error or "") + f"; clarify_cb: {e}"
+        else:
+            eval_decision.action = "noop_no_clarify_channel"
+        _event_log.log_event(
+            state.session_id,
+            "inner_voice.goal_clarify_exhausted",
+            {
+                "goal_text": goal_text,
+                "attempts": new_attempts,
+                "max_attempts": max_attempts,
+            },
+            turn_id=state.turn_id,
+        )
+        _persist(state, eval_decision, trigger="result", related_tool="goal_completion")
+        return
+
+    # Still under the cap — queue an ambient follow-up unless one already fired.
+    if already_queued_ambient:
+        eval_decision.action = "noop_goal_ambient_already_queued"
+        eval_decision.reason = (
+            eval_decision.reason + " [prior decision already queued ambient]"
+        )
+        _persist(state, eval_decision, trigger="result", related_tool="goal_completion")
+        return
+
+    if state.enqueue_ambient_callback is None:
+        eval_decision.action = "noop_no_ambient_channel"
+        _persist(state, eval_decision, trigger="result", related_tool="goal_completion")
+        return
+
+    try:
+        await state.enqueue_ambient_callback(follow_up_body, f"goal unmet (attempt {new_attempts})")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[iv.observer] goal ambient enqueue failed: %s", e)
+        eval_decision.action = "noop_goal_ambient_failed"
+        eval_decision.error = (eval_decision.error or "") + f"; ambient_enqueue: {e}"
+        _persist(state, eval_decision, trigger="result", related_tool="goal_completion")
+        return
+
+    _event_log.log_event(
+        state.session_id,
+        "inner_voice.goal_followup_queued",
+        {
+            "goal_text": goal_text,
+            "attempts": new_attempts,
+            "max_attempts": max_attempts,
+            "reason": follow_up_body[:400],
+        },
+        turn_id=state.turn_id,
+    )
+    logger.info(
+        "[iv.observer] goal follow-up queued session=%s turn=%s attempt=%d/%d",
+        state.session_id, state.turn_id, new_attempts, max_attempts,
+    )
+    _persist(state, eval_decision, trigger="result", related_tool="goal_completion")
+
+
+def _now_iso_for_goal() -> str:
+    import datetime
+    return datetime.datetime.now().isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +1187,7 @@ def install_observer(
     subliminal_context: str = "",
     todos: list[dict[str, Any]] | None = None,
     plan_artifact: dict[str, Any] | None = None,
+    persistent_goal: dict[str, Any] | None = None,
 ) -> ObserverState:
     """Install observer hooks onto a HookRegistry for one primary turn.
 
@@ -869,6 +1213,16 @@ def install_observer(
         for t in todos_snapshot
         if t.get("content")
     }
+    # Only thread the persistent goal forward when it's both set and not
+    # already marked achieved. An achieved goal becomes a no-op input —
+    # the next /goal call replaces it; until then it stays in the session
+    # JSON for the UI but doesn't drive observer behavior.
+    pg = persistent_goal if (
+        persistent_goal
+        and (persistent_goal.get("text") or "").strip()
+        and not persistent_goal.get("achieved_at")
+    ) else None
+
     state = ObserverState(
         session_id=session_id,
         turn_id=turn_id,
@@ -887,6 +1241,7 @@ def install_observer(
         prior_todo_status=prior_status,
         todo_stewardship_cfg=ts_cfg,
         plan_artifact=plan_artifact,
+        persistent_goal=pg,
     )
     fast_path_enabled = bool(cfg.get("fast_path_enabled", True))
 
@@ -1088,6 +1443,13 @@ def install_observer(
             content = evt.get("content", "") or ""
             is_error = bool(evt.get("is_error", False))
 
+            # Capture tool name for the goal-completion evaluator. Cap at 32
+            # most-recent so we don't unbounded-grow on long turns.
+            if tool_name:
+                state.tool_calls_this_turn.append(tool_name)
+                if len(state.tool_calls_this_turn) > 32:
+                    state.tool_calls_this_turn = state.tool_calls_this_turn[-32:]
+
             # Plan A.5 — mid-turn TodoWrite refresh + flip detection. The
             # static reference TODOS block in IV's prompt is sourced from
             # `state.todos`, which is snapshotted at install_observer.
@@ -1233,6 +1595,17 @@ def install_observer(
                 return
             await _apply_lever(state, decision, trigger="result")
             _persist(state, decision, trigger="result")
+
+            # Persistent-goal completion loop (the /goal feature). Runs
+            # AFTER the regular observer decision, so a normal ambient
+            # already fired (e.g. from todo gating) won't be overwritten;
+            # instead we only queue a goal-driven ambient when none was
+            # queued and the goal is still unmet.
+            if state.persistent_goal:
+                await _handle_persistent_goal_at_result(
+                    state, evt, prior_decision=decision,
+                )
+
             state.closed = True
             return
 

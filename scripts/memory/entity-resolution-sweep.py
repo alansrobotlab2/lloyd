@@ -28,7 +28,6 @@ Usage:
   # also rewrite entity-aliases.json from scratch (drops fuzzy-match poison):
   python entity-resolution-sweep.py --apply --rebuild-aliases
 """
-
 from __future__ import annotations
 
 import argparse
@@ -40,6 +39,9 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any
+
+# Ensure app/ is importable when running this script standalone
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import yaml
 

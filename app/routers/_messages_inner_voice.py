@@ -196,6 +196,7 @@ async def attach_observer_for_turn(
     producer_source: str = "",
     todos: list[dict[str, Any]] | None = None,
     plan_artifact: dict[str, Any] | None = None,
+    persistent_goal: dict[str, Any] | None = None,
 ) -> ObserverState | None:
     """Install the observer onto `options.hooks` for one turn.
 
@@ -257,6 +258,7 @@ async def attach_observer_for_turn(
         subliminal_context=subliminal_context,
         todos=todos,
         plan_artifact=plan_artifact,
+        persistent_goal=persistent_goal,
     )
     logger.info(
         "[iv.observer] attached session=%s turn=%s source=%s budget=%d "
