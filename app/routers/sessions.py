@@ -176,6 +176,84 @@ async def exit_plan_mode(session_id: str):
     return JSONResponse({"plan_mode": False, "session_id": session_id})
 
 
+@router.get("/api/sessions/{session_id}/goal")
+async def get_session_goal(session_id: str):
+    """Return the session's persistent goal (the /goal target).
+
+    Shape: ``{text, set_at, achieved_at, attempts}`` or ``{}`` when no
+    goal is set. Set by `SetGoal` MCP tool or the POST endpoint below;
+    cleared by `ClearGoal` or DELETE.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    data = json.loads(meta_path.read_text())
+    return JSONResponse({"goal": data.get("goal") or {}})
+
+
+@router.post("/api/sessions/{session_id}/goal")
+async def set_session_goal(session_id: str, request: Request):
+    """Slash-command entry point for `/goal <text>`.
+
+    Stores ``session.goal = {text, set_at, achieved_at: null, attempts: 0}``
+    and auto-enables inner voice so the post-turn evaluator actually runs.
+    The frontend follows this POST with a normal `/api/message/stream`
+    call carrying the goal text as the first user turn — that kicks off
+    the loop. Replaces any prior goal wholesale.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    body = await request.json()
+    text = (body or {}).get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="text (non-empty string) is required")
+    text = text.strip()
+    if len(text) > 4000:
+        raise HTTPException(status_code=400, detail="text must be <= 4000 chars")
+    import datetime
+    now = datetime.datetime.now().isoformat()
+
+    def _apply(data: dict) -> None:
+        data["goal"] = {
+            "text": text,
+            "set_at": now,
+            "achieved_at": None,
+            "attempts": 0,
+        }
+        # Mirror builtin_goal.SetGoal: auto-enable IV so the loop runs.
+        data["inner_voice"] = True
+        data["inner_voice_evaluate_user_turns"] = True
+
+    ok = await mutate_session(session_id, _apply)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return JSONResponse({
+        "session_id": session_id,
+        "goal": {"text": text, "set_at": now, "achieved_at": None, "attempts": 0},
+    })
+
+
+@router.delete("/api/sessions/{session_id}/goal")
+async def clear_session_goal(session_id: str):
+    """Slash-command exit point for `/clear-goal`.
+
+    Drops ``session.goal`` entirely. Leaves the IV opt-in flags as-is so
+    the user keeps explicit control of whether the observer runs.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    def _apply(data: dict) -> None:
+        data.pop("goal", None)
+
+    ok = await mutate_session(session_id, _apply)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return JSONResponse({"session_id": session_id, "cleared": True})
+
+
 @router.get("/api/messages/{session_id}")
 async def get_messages(session_id: str):
     """Load messages for a session from stored session metadata."""

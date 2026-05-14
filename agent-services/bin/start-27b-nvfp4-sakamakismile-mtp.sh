@@ -107,7 +107,7 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --enable-flashinfer-autotune \
   --async-scheduling \
   --enable-auto-tool-choice \
-  --tool-call-parser qwen3_coder \
+  --tool-call-parser qwen3_xml \
   --reasoning-parser qwen3 \
   --performance-mode interactivity \
   --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \

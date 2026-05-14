@@ -138,11 +138,49 @@ def _format_plan_block(plan: dict | None) -> str | None:
     )
 
 
+def _format_goal_block(goal: dict | None) -> str | None:
+    """Render the session's persistent goal (the /goal target).
+
+    Anchors primary on the user's stated end condition across turns. The
+    block is short and cache-friendly: changes only when the user
+    sets/clears/achieves the goal. Returns None when no goal is set or
+    the goal text is empty.
+    """
+    if not goal:
+        return None
+    text = (goal.get("text") or "").strip()
+    if not text:
+        return None
+    achieved = goal.get("achieved_at")
+    if achieved:
+        return (
+            "<goal achieved>\n"
+            f"GOAL ACHIEVED at {achieved}: {text}\n"
+            "The inner voice judged this goal met. Continue with whatever "
+            "the user asks next; you do not need to keep working toward it."
+            "\n</goal>"
+        )
+    attempts = int(goal.get("attempts") or 0)
+    attempt_line = f"\nAttempts so far: {attempts}." if attempts else ""
+    return (
+        "<goal>\n"
+        f"PERSISTENT GOAL (the user's /goal — keep working toward this until met):\n"
+        f"{text}{attempt_line}\n\n"
+        "After each turn the inner voice evaluates whether this goal is "
+        "met. If not, it queues a follow-up turn with a short reason. "
+        "Stay focused — every turn should advance the goal or surface a "
+        "concrete blocker. If you cannot make progress, say so plainly "
+        "and stop rather than padding."
+        "\n</goal>"
+    )
+
+
 def build_system_prompt(
     include_skills_index: bool = True,
     overlay_dir: str | Path | None = None,
     todos: list[dict] | None = None,
     plan: dict | None = None,
+    goal: dict | None = None,
 ) -> str:
     """Build the full system prompt for a Lloyd session.
 
@@ -159,6 +197,10 @@ def build_system_prompt(
     banner; when a committed plan exists (`plan_md_path` set), render a
     `<plan>` block with the markdown body. Pass `session.plan` straight
     from disk.
+
+    `goal` (the /goal target) — session-level persistent goal. When set,
+    renders a `<goal>` block above plan + todos so primary stays anchored
+    on the user's end condition. Pass `session.goal` straight from disk.
     """
     overlay = _resolve_overlay(overlay_dir)
     parts = []
@@ -175,6 +217,10 @@ def build_system_prompt(
         skills = _load_skills_index(overlay)
         if skills:
             parts.append(f"<available_skills>\n{skills}\n</available_skills>\nNote: relevant skill content is automatically injected into each user message as <context> when matched.")
+
+    goal_block = _format_goal_block(goal)
+    if goal_block:
+        parts.append(goal_block)
 
     plan_block = _format_plan_block(plan)
     if plan_block:

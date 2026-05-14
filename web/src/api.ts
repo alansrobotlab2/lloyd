@@ -467,6 +467,13 @@ export interface SessionPlan {
   cancelled_at?: string
 }
 
+export interface SessionGoal {
+  text?: string
+  set_at?: string
+  achieved_at?: string | null
+  attempts?: number
+}
+
 export interface ActiveProc {
   pid: number
   sdk_session_id: string | null
@@ -625,6 +632,41 @@ export const api = {
       `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/plan_mode/exit`,
       { method: 'POST' },
     )
+    return response.json()
+  },
+
+  async getSessionGoal(sessionId: string): Promise<SessionGoal> {
+    const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/goal`)
+    if (!response.ok) return {}
+    const data = await response.json()
+    return (data?.goal as SessionGoal) || {}
+  },
+
+  async setSessionGoal(sessionId: string, text: string): Promise<{ goal: SessionGoal; session_id: string }> {
+    const response = await fetch(
+      `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/goal`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      },
+    )
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }))
+      throw new Error(err.detail || `HTTP ${response.status}`)
+    }
+    return response.json()
+  },
+
+  async clearSessionGoal(sessionId: string): Promise<{ session_id: string; cleared: boolean }> {
+    const response = await fetch(
+      `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/goal`,
+      { method: 'DELETE' },
+    )
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }))
+      throw new Error(err.detail || `HTTP ${response.status}`)
+    }
     return response.json()
   },
 

@@ -167,13 +167,46 @@ def main() -> int:
         source = rec["source"]
         target = rec["target"]
         key = (source, target)
+
+        def _dir_check(dc):
+            """Normalize direction_check to a string verdict."""
+            if isinstance(dc, dict):
+                return dc.get("verdict", "")
+            return dc or ""
+
         if key not in active_mentions:
-            # Either no live edge at all, the live edge is no longer
-            # `mentions` (e.g., upgraded by a prior apply), or the live
-            # edge has a non-EXTRACTED provenance we deliberately leave
-            # alone.
-            stats["no_eligible_edge"] += 1
-            continue
+            # Check reversed: the classifier may have classified (A, B)
+            # but the live mentions edge is (B, A).
+            rev = (target, source)
+            if rev in active_mentions:
+                new_type = rec["new_type"]
+                dc_val = _dir_check(rec.get("direction_check"))
+                va = rec.get("verdict_adjustment")
+
+                if new_type == "related_to":
+                    # Symmetric: just flip to match live edge
+                    source, target = target, source
+                    key = rev
+                elif va == "downgraded_reversed":
+                    # Classifier caught the flip; keep as mentions
+                    stats["still_mentions"] += 1
+                    continue
+                elif dc_val == "reversed":
+                    # Classifier caught the flip; keep as mentions
+                    stats["still_mentions"] += 1
+                    continue
+                else:
+                    # Asymmetric verb with direction_check == "correct"
+                    # but live edge is reversed — the classifier's
+                    # direction_check was against (source, target) as
+                    # stored. Since live has (target, source), this means
+                    # the direction is actually wrong for the live edge.
+                    stats["still_mentions"] += 1
+                    continue
+            else:
+                # No live edge at all
+                stats["no_eligible_edge"] += 1
+                continue
 
         stats["upgrades"] += 1
         transitions[("mentions", new_type)] += 1

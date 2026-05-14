@@ -7,6 +7,7 @@ import { Streamdown } from 'streamdown'
 import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState, type InnerVoiceObservation } from '../api'
 import TodoList from './TodoList'
 import PlanHeader from './PlanHeader'
+import GoalHeader from './GoalHeader'
 import ObservationBubble from './ObservationBubble'
 import { actionStyle, parseObservationTime } from './innerVoiceStyles'
 import { cn } from '@/lib/utils'
@@ -299,6 +300,8 @@ const SLASH_COMMANDS: Array<{ name: string; desc: string; alias?: string }> = [
   { name: 'tools', desc: 'Manage tools' },
   { name: 'toolsets', desc: 'List toolsets' },
   { name: 'skills', desc: 'Search/manage skills' },
+  { name: 'goal', desc: 'Set a persistent goal (e.g. /goal write a haiku to /tmp/h.txt)' },
+  { name: 'clear-goal', desc: 'Clear the current persistent goal' },
   { name: 'cron', desc: 'Manage scheduled tasks' },
   { name: 'reload-mcp', desc: 'Reload MCP servers', alias: 'reload_mcp' },
   { name: 'browser', desc: 'Connect browser tools' },
@@ -655,6 +658,168 @@ export default function ChatPanel({
       return
     }
 
+    if (text === '/clear-goal' || text === '/cleargoal') {
+      if (!sessionKey) {
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_goal`,
+          role: 'assistant',
+          content: [{ type: 'text', text: '/clear-goal requires an active session.' }],
+          timestamp: new Date().toISOString(),
+        }])
+        setInput('')
+        return
+      }
+      try {
+        await api.clearSessionGoal(sessionKey)
+        setTodoRefreshKey(k => k + 1)
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_goal`,
+          role: 'assistant',
+          content: [{ type: 'text', text: '🎯 Goal cleared.' }],
+          timestamp: new Date().toISOString(),
+        }])
+      } catch (err) {
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_goal`,
+          role: 'assistant',
+          content: [{ type: 'text', text: `Failed to clear goal: ${err instanceof Error ? err.message : String(err)}` }],
+          timestamp: new Date().toISOString(),
+        }])
+      }
+      setInput('')
+      return
+    }
+
+    if (text.startsWith('/goal')) {
+      const goalText = text.slice('/goal'.length).trim()
+      if (!goalText) {
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_goal`,
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Usage: `/goal <verifiable end condition>` — e.g. `/goal save a haiku about supervisord to /tmp/h.txt`. The inner voice will check after each turn and loop until the goal is met.' }],
+          timestamp: new Date().toISOString(),
+        }])
+        setInput('')
+        return
+      }
+      // Need an active session to attach the goal to. If we don't have one,
+      // streamMessage will create it on the first turn; in that case post the
+      // goal after onSession fires.
+      const submitGoal = async (sid: string) => {
+        try {
+          await api.setSessionGoal(sid, goalText)
+          setTodoRefreshKey(k => k + 1)
+        } catch (err) {
+          console.warn('setSessionGoal failed:', err)
+        }
+      }
+      if (sessionKey) {
+        await submitGoal(sessionKey)
+      }
+      // Fall through: send the goal text as the first user message so the
+      // loop kicks off immediately, matching Claude Code's /goal behavior.
+      setInput('')
+      setSending(true)
+      setMessages(prev => [...prev, {
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: [{ type: 'text', text: goalText }],
+        timestamp: new Date().toISOString(),
+      }])
+      setThinking(true)
+      // Track whether the goal was already submitted (when we had a session
+      // up front) or whether we need to submit after the session is created.
+      let goalPosted = !!sessionKey
+      let assistantMsgIdG: string | null = null
+      let segmentCounterG = 0
+      let streamingStartedG = false
+      let settledG = false
+      let accumulatedThinkingG = ''
+      let pendingDeltaG = ''
+      let rafIdG: number | null = null
+      const flushDeltaG = () => {
+        rafIdG = null
+        const delta = pendingDeltaG
+        if (!delta || !assistantMsgIdG) return
+        pendingDeltaG = ''
+        const cid = assistantMsgIdG
+        const ct = accumulatedThinkingG
+        setMessages(prev => prev.map(m =>
+          m.id === cid
+            ? { ...m, content: [{ type: 'text' as const, text: m.content[0].text + delta }], ...(ct && !m.reasoning ? { reasoning: ct } : {}) }
+            : m
+        ))
+      }
+      const scheduleFlushG = () => { if (rafIdG === null) rafIdG = requestAnimationFrame(flushDeltaG) }
+      abortControllerRef.current = api.streamMessage(goalText, clientId.current, sessionKey || undefined, {
+        onSession: async (sid) => {
+          if (!sessionKey) {
+            setSessionKey(sid)
+            localStorage.setItem('mc_session_id', sid)
+            onActiveSessionChange?.(sid)
+          }
+          if (!goalPosted) {
+            await submitGoal(sid)
+            goalPosted = true
+          }
+        },
+        onQueueState: (s) => setQueueState(s),
+        onToolStart: (callId, name, args, contextTokens) => {
+          setActiveToolName(name)
+          assistantMsgIdG = null
+          accumulatedThinkingG = ''
+          setMessages(prev => [
+            ...prev,
+            { id: `msg_${callId}_tc`, role: 'assistant', content: [{ type: 'text', text: '' }], tool_calls: [{ id: callId, call_id: callId, type: 'function', function: { name, arguments: JSON.stringify(args) } }], timestamp: new Date().toISOString() },
+            { id: `msg_${callId}_result`, role: 'tool', content: [{ type: 'text', text: '⏳ Running...' }], tool_call_id: callId, context_tokens: contextTokens, timestamp: new Date().toISOString() },
+          ])
+        },
+        onToolComplete: (callId, _name, result) => {
+          setMessages(prev => {
+            const upd = prev.map(m => m.id === `msg_${callId}_result` ? { ...m, content: [{ type: 'text' as const, text: result }] } : m)
+            const stillPending = upd.find(m => m.role === 'tool' && m.content[0]?.text === '⏳ Running...')
+            if (!stillPending) setActiveToolName(null)
+            return upd
+          })
+          if (_name === 'TodoWrite' || _name === 'EnterPlanMode' || _name === 'ExitPlanMode' || _name === 'SetGoal' || _name === 'ClearGoal') {
+            setTodoRefreshKey(k => k + 1)
+          }
+        },
+        onThinkingDelta: (delta) => { accumulatedThinkingG += delta },
+        onThinkingDone: (fullText) => { accumulatedThinkingG = fullText || accumulatedThinkingG },
+        onTextDelta: (delta) => {
+          streamingStartedG = true
+          if (assistantMsgIdG === null) {
+            segmentCounterG += 1
+            const nid = `msg_${Date.now()}_resp_${segmentCounterG}`
+            assistantMsgIdG = nid
+            setMessages(prev => [...prev, { id: nid, role: 'assistant', content: [{ type: 'text', text: delta }], timestamp: new Date().toISOString(), ...(accumulatedThinkingG ? { reasoning: accumulatedThinkingG } : {}) }])
+          } else {
+            pendingDeltaG += delta
+            scheduleFlushG()
+          }
+        },
+        onDone: () => {
+          if (settledG) return
+          settledG = true
+          // Flush any final delta before clearing state.
+          if (pendingDeltaG) flushDeltaG()
+          setSending(false)
+          setThinking(false)
+          setTodoRefreshKey(k => k + 1)
+          // Suppress unused-var warnings for stream gating fields kept for parity with the main handler.
+          void streamingStartedG
+        },
+        onError: (detail) => {
+          setMessages(prev => [...prev, { id: `msg_${Date.now()}_err`, role: 'assistant', content: [{ type: 'text', text: `Error: ${detail}` }], timestamp: new Date().toISOString() }])
+          setSending(false)
+          setThinking(false)
+        },
+        onAborted: () => { setSending(false); setThinking(false) },
+      })
+      return
+    }
+
     if (text.startsWith('/think')) {
       const arg = text.split(/\s+/)[1]?.toLowerCase() || ''
       let next: boolean
@@ -771,6 +936,7 @@ export default function ChatPanel({
         })
         if (
           _name === 'TodoWrite' || _name === 'EnterPlanMode' || _name === 'ExitPlanMode'
+          || _name === 'SetGoal' || _name === 'ClearGoal'
         ) setTodoRefreshKey(k => k + 1)
       },
       onThinkingDelta: (delta) => { accumulatedThinking += delta },
@@ -1028,6 +1194,11 @@ export default function ChatPanel({
         <div ref={messagesEndRef} />
       </main>
 
+      <GoalHeader
+        sessionId={sessionKey}
+        refreshKey={todoRefreshKey}
+        onCleared={() => setTodoRefreshKey(k => k + 1)}
+      />
       <PlanHeader
         sessionId={sessionKey}
         refreshKey={todoRefreshKey}

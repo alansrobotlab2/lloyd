@@ -204,6 +204,53 @@ GOAL_EXTRACTION_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Persistent-goal completion evaluator (post-turn, when /goal is set)
+# ---------------------------------------------------------------------------
+
+GOAL_COMPLETION_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "record_goal_completion",
+            "description": (
+                "Judge whether the user's persistent goal has been met by the "
+                "conversation so far. Be strict: only `achieved=true` when the "
+                "goal's verifiable end condition is plainly satisfied by what "
+                "actually happened (files written, tests passing, answer "
+                "delivered). Promises of future work do NOT count."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "achieved": {
+                        "type": "boolean",
+                        "description": (
+                            "True iff the goal's end condition is plainly "
+                            "satisfied. False otherwise."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "minLength": 5,
+                        "description": (
+                            "One or two sentences. If achieved=false, this is "
+                            "the user-visible follow-up prompt; be specific "
+                            "about what is still missing and what the next "
+                            "concrete step should be. If achieved=true, a "
+                            "short note on what evidence confirmed it."
+                        ),
+                    },
+                },
+                "required": ["achieved", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+
 # Convenience name sets for validation in observer.py.
 LEVER_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in LEVER_TOOLS)
 GOAL_EXTRACTION_TOOL_NAME = GOAL_EXTRACTION_TOOLS[0]["function"]["name"]
+GOAL_COMPLETION_TOOL_NAME = GOAL_COMPLETION_TOOLS[0]["function"]["name"]

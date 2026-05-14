@@ -16,6 +16,14 @@ inner_voice:
     mark_without_evidence: true
     stalled_progress: false
     stalled_after_tool_calls: 5
+  goal:
+    # Cap on consecutive ambient follow-up turns triggered by an unmet
+    # persistent goal. When exceeded, the observer escalates to clarify
+    # so the user can intervene instead of looping silently.
+    max_attempts: 10
+    # Per-call timeout / token budget for the goal completion evaluator.
+    eval_timeout_seconds: 8
+    eval_max_tokens: 300
 autonomy:
   enabled: true
   task_dir: ~/obsidian/autonomy

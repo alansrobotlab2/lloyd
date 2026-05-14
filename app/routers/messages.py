@@ -129,6 +129,27 @@ def _load_session_plan(session_id: str) -> dict:
         return {}
 
 
+def _load_session_goal(session_id: str) -> dict:
+    """Read `session.goal` from disk for system-prompt + IV plumbing.
+
+    Shape mirrors what `agent_mcp/builtin_goal.py::SetGoal` writes:
+    `{text, set_at, achieved_at, attempts}`. Returns `{}` when the session
+    doesn't exist or has no goal field. The system prompt renders an
+    achieved goal as a closed banner; the observer's persistent_goal
+    plumbing filters achieved goals to None so they don't trigger the
+    completion loop again.
+    """
+    if not session_id:
+        return {}
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text()).get("goal") or {}
+    except Exception:
+        return {}
+
+
 def _build_notification_drain(session_id: str, turn_id: str):
     """Build the closure handed to ``RunOptions.notification_drain``.
 
@@ -407,6 +428,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         producer_source=(turn.payload or {}).get("producer_source", "") or "",
         todos=_load_session_todos(session_id),
         plan_artifact=_load_session_plan(session_id),
+        persistent_goal=_load_session_goal(session_id),
     )
 
     # Background-task completion drain. Calls the internal MCP tool
@@ -1136,6 +1158,7 @@ async def post_message_stream(request: Request):
     # ExitPlanMode commit unblocks writes within the same turn.
     session_todos = _load_session_todos(session_id)
     session_plan = _load_session_plan(session_id)
+    session_goal = _load_session_goal(session_id)
     plan_mode_active = bool(session_plan.get("plan_mode"))
 
     def _refresh_disallowed_for_session() -> list[str]:
@@ -1148,7 +1171,9 @@ async def post_message_stream(request: Request):
             data.get("extra_disallowed") or []
         )
 
-    system_prompt = build_system_prompt(todos=session_todos, plan=session_plan)
+    system_prompt = build_system_prompt(
+        todos=session_todos, plan=session_plan, goal=session_goal,
+    )
     t_prompt = time.perf_counter()
 
     prefetched_text = prefetch_context(text, session_id=session_id)
@@ -1270,9 +1295,10 @@ async def build_ambient_turn(
     model_env = _get_model_env(model)
 
     plan = existing.get("plan") or {}
+    goal = existing.get("goal") or {}
     plan_mode_active = bool(plan.get("plan_mode"))
     system_prompt = build_system_prompt(
-        todos=existing.get("todos") or [], plan=plan,
+        todos=existing.get("todos") or [], plan=plan, goal=goal,
     )
 
     def _ambient_refresh_disallowed() -> list[str]:
