@@ -206,7 +206,7 @@ livekit:
     enabled: true
     models_dir: agent-services/models/wakeword
     engine_dir: agent-services/models/openwakeword
-    threshold: 0.55
+    threshold: 0.40
   voiceprint:
     enabled: true
     profiles_dir: ~/lloyd/voice_profiles
