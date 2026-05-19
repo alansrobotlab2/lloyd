@@ -36,12 +36,21 @@ from .common import AUTORESEARCH_PRIORITY, AutoresearchConfig
 logger = logging.getLogger("autoresearch.bench_runner")
 
 # Hit vLLM directly; priority=2 in each body yields to user (0) and pipeline/autonomy SDK (1).
-PRIMARY_URL = "http://127.0.0.1:8096"
-SECONDARY_URL = "http://127.0.0.1:8091"
+# Resolves through app.config so the `secondary_enabled` flag routes "secondary" → primary in
+# single-LLM deployments without touching individual scripts.
 
 
 def _endpoint_for(model: str) -> str:
-    return PRIMARY_URL if model != "secondary" else SECONDARY_URL
+    from app.config import resolve_model_alias, _get_model_cfg
+    name = resolve_model_alias(model)
+    cfg = _get_model_cfg(name) or {}
+    base = cfg.get("base_url") or cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")
+    return base.rstrip("/")
+
+
+def _resolved_model_name(model: str) -> str:
+    from app.config import resolve_model_alias
+    return resolve_model_alias(model)
 
 
 def _run_one_sync(
@@ -73,7 +82,7 @@ def _run_one_sync(
         system_prompt = build_system_prompt(overlay_dir=overlay_dir)
         user_prompt = task.get("prompt") or task.get("_body") or ""
         endpoint = _endpoint_for(model)
-        model_name = model if model in ("primary", "secondary") else model
+        model_name = _resolved_model_name(model)
         resp = requests.post(
             f"{endpoint}/v1/chat/completions",
             headers={"Authorization": "Bearer no-key-required"},

@@ -102,3 +102,41 @@ def _read_log_tail(log_path: str, lines: int = 50) -> list[str]:
             return f.readlines()[-lines:]
     except Exception:
         return []
+
+
+# supervisord fault codes we want to treat as no-ops (idempotent calls).
+# 60 ALREADY_STARTED, 70 NOT_RUNNING, 80 SUCCESS
+_FAULT_ALREADY_STARTED = 60
+_FAULT_NOT_RUNNING = 70
+
+
+def start_process(name: str, wait: bool = False) -> tuple[bool, str]:
+    """Start a supervisord-managed process by name. Idempotent.
+
+    Returns (ok, message). ok=True if the process is running (or was already).
+    """
+    try:
+        _supervisor_proxy().supervisor.startProcess(name, wait)
+        return True, "started"
+    except _xmlrpc.Fault as fault:
+        if fault.faultCode == _FAULT_ALREADY_STARTED:
+            return True, "already running"
+        return False, f"fault {fault.faultCode}: {fault.faultString}"
+    except Exception as exc:
+        return False, f"error: {exc}"
+
+
+def stop_process(name: str, wait: bool = False) -> tuple[bool, str]:
+    """Stop a supervisord-managed process by name. Idempotent.
+
+    Returns (ok, message). ok=True if the process is stopped (or was already).
+    """
+    try:
+        _supervisor_proxy().supervisor.stopProcess(name, wait)
+        return True, "stopped"
+    except _xmlrpc.Fault as fault:
+        if fault.faultCode == _FAULT_NOT_RUNNING:
+            return True, "already stopped"
+        return False, f"fault {fault.faultCode}: {fault.faultString}"
+    except Exception as exc:
+        return False, f"error: {exc}"

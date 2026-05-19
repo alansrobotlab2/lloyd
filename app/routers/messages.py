@@ -658,39 +658,19 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                                      "tool_call_id": cid, "timestamp": end_ts,
                                      "stats": {"result_chars": len(result_text_str)}})
 
-                # Cancelled path: persist and emit done(cancelled=True).
-                if cancelled_mid_stream:
-                    stream_stats["peak_input_tokens"] = last_turn_input
-                    if full_response.strip():
-                        cancel_msg: dict = {
-                            "id": uuid.uuid4().hex[:8], "role": "assistant",
-                            "content": [{"type": "text", "text": full_response}],
-                            "timestamp": end_ts, "stats": stream_stats, "cancelled": True,
-                        }
-                        if accumulated_thinking:
-                            cancel_msg["reasoning"] = accumulated_thinking
-                        tail.append(cancel_msg)
-                    if tail:
-                        await _append_messages(session_id, tail)
-                    final_persisted = True
-                    await _emit(turn, "done", {
-                        "response": full_response,
-                        "session_id": session_id,
-                        "stats": stream_stats,
-                        "cancelled": True,
-                    })
-                    continue  # skip the normal completion path below
-
                 # Ambient turns only: if the agent called `ambient_decide`
-                # mid-turn to opt out of surfacing, replace the assistant
-                # text with a muted breadcrumb so the transcript shows the
-                # decision without user-visible noise. (#295 Slice 4)
+                # to opt out of surfacing, write a muted breadcrumb instead
+                # of the assistant text. Checked BEFORE the cancelled path
+                # because the server's /ambient-decide handler schedules a
+                # cancel after recording the decision — so this turn may
+                # end via either the cancelled or the normal-completion
+                # path, and we want the silent breadcrumb regardless. (#295
+                # Slice 4)
                 ambient_decision = None
                 if turn.source == "ambient":
                     ambient_decision = take_ambient_decision(session_id)
 
                 if ambient_decision and not ambient_decision.get("surface", True):
-                    # Silent path: muted system breadcrumb, no assistant message.
                     silent_entry = {
                         "id": uuid.uuid4().hex[:8],
                         "role": "system",
@@ -716,76 +696,91 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         "stats": stats_dict,
                         "ambient_silent": True,
                     })
-                else:
-                    if result_text.strip():
-                        msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
-                                     "content": [{"type": "text", "text": result_text}],
-                                     "timestamp": end_ts, "stats": stats_dict}
-                        if accumulated_thinking:
-                            msg_entry["reasoning"] = accumulated_thinking
-                        if turn.source != "user":
-                            msg_entry["source"] = turn.source
-                        tail.append(msg_entry)
-                    elif tool_calls_log and turn.source == "user" and not cancelled_mid_stream:
-                        # Empty terminal iteration after tool calls. The
-                        # model called tools, got results, and stopped
-                        # without summarizing. Surface a synthetic
-                        # placeholder so the user sees the turn ended
-                        # rather than a silent stall. The Inner Voice
-                        # observer should usually catch this first via
-                        # `inject`; this is the safety net for IV-off
-                        # sessions or cases the observer missed.
-                        placeholder_text = (
-                            "*(Lloyd completed its tool calls but did not produce a summary. "
-                            "Ask again if you'd like an answer.)*"
-                        )
-                        placeholder = {
-                            "id": uuid.uuid4().hex[:8],
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": placeholder_text}],
-                            "timestamp": end_ts,
-                            "stats": stats_dict,
-                            "synthetic_empty_terminal": True,
+                    continue
+
+                # Cancelled path: persist and emit done(cancelled=True).
+                if cancelled_mid_stream:
+                    stream_stats["peak_input_tokens"] = last_turn_input
+                    if full_response.strip():
+                        cancel_msg: dict = {
+                            "id": uuid.uuid4().hex[:8], "role": "assistant",
+                            "content": [{"type": "text", "text": full_response}],
+                            "timestamp": end_ts, "stats": stream_stats, "cancelled": True,
                         }
-                        if turn.source != "user":
-                            placeholder["source"] = turn.source
-                        tail.append(placeholder)
-                        done_text = placeholder_text
-                        logger.warning(
-                            "[empty_terminal] session=%s turn=%s — "
-                            "surfaced synthetic placeholder after %d tool calls "
-                            "with no final assistant text",
-                            session_id, turn.turn_id, len(tool_calls_log),
-                        )
-                        _event_log.log_event(
-                            session_id,
-                            "harness.empty_terminal_iteration",
-                            {
-                                "tool_call_count": len(tool_calls_log),
-                                "stop_reason": stop_reason,
-                            },
-                            turn_id=turn.turn_id,
-                        )
+                        if accumulated_thinking:
+                            cancel_msg["reasoning"] = accumulated_thinking
+                        tail.append(cancel_msg)
                     if tail:
                         await _append_messages(session_id, tail)
                     final_persisted = True
+                    await _emit(turn, "done", {
+                        "response": full_response,
+                        "session_id": session_id,
+                        "stats": stream_stats,
+                        "cancelled": True,
+                    })
+                    continue
 
-                    asyncio.ensure_future(_post_session_capture(session_id))
-                    asyncio.ensure_future(_maybe_extract_focus(session_id))
-
-                    # Inner Voice — observer ran inline as the turn streamed
-                    # via the OnEvent hook. Its `result`-trigger decision
-                    # has already fired by the time we reach this branch
-                    # (the harness yielded `result` before this `result`
-                    # event reached _run_turn). Nothing else to do here.
-                    # TTS is handled out-of-band by the LiveKit agent
-                    # worker (it polls the session and publishes audio
-                    # frames as a track).
-
-                    done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
+                if result_text.strip():
+                    msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
+                                 "content": [{"type": "text", "text": result_text}],
+                                 "timestamp": end_ts, "stats": stats_dict}
                     if accumulated_thinking:
-                        done_payload['reasoning'] = accumulated_thinking
-                    await _emit(turn, "done", done_payload)
+                        msg_entry["reasoning"] = accumulated_thinking
+                    if turn.source != "user":
+                        msg_entry["source"] = turn.source
+                    tail.append(msg_entry)
+                elif tool_calls_log and turn.source == "user" and not cancelled_mid_stream:
+                    # Empty terminal iteration after tool calls. The
+                    # model called tools, got results, and stopped
+                    # without summarizing. Surface a synthetic
+                    # placeholder so the user sees the turn ended
+                    # rather than a silent stall. The Inner Voice
+                    # observer should usually catch this first via
+                    # `inject`; this is the safety net for IV-off
+                    # sessions or cases the observer missed.
+                    placeholder_text = (
+                        "*(Lloyd completed its tool calls but did not produce a summary. "
+                        "Ask again if you'd like an answer.)*"
+                    )
+                    placeholder = {
+                        "id": uuid.uuid4().hex[:8],
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": placeholder_text}],
+                        "timestamp": end_ts,
+                        "stats": stats_dict,
+                        "synthetic_empty_terminal": True,
+                    }
+                    if turn.source != "user":
+                        placeholder["source"] = turn.source
+                    tail.append(placeholder)
+                    done_text = placeholder_text
+                    logger.warning(
+                        "[empty_terminal] session=%s turn=%s — "
+                        "surfaced synthetic placeholder after %d tool calls "
+                        "with no final assistant text",
+                        session_id, turn.turn_id, len(tool_calls_log),
+                    )
+                    _event_log.log_event(
+                        session_id,
+                        "harness.empty_terminal_iteration",
+                        {
+                            "tool_call_count": len(tool_calls_log),
+                            "stop_reason": stop_reason,
+                        },
+                        turn_id=turn.turn_id,
+                    )
+                if tail:
+                    await _append_messages(session_id, tail)
+                final_persisted = True
+
+                asyncio.ensure_future(_post_session_capture(session_id))
+                asyncio.ensure_future(_maybe_extract_focus(session_id))
+
+                done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
+                if accumulated_thinking:
+                    done_payload['reasoning'] = accumulated_thinking
+                await _emit(turn, "done", done_payload)
 
         # The harness always emits a `result` event (even on cancel), so
         # the post-loop cancel block from the old SDK path is not needed.

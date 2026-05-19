@@ -1,8 +1,9 @@
-"""Synchronous calls to the secondary LLM (port 8091) for post-session jobs.
+"""Synchronous calls to the secondary LLM for post-session jobs.
 
-The primary model talks to the user; the secondary model runs on a separate
-GPU and handles summary/fact/focus extraction in the background so the
-primary generation path stays unblocked.
+The primary model talks to the user; the secondary model handles
+summary/fact/focus extraction in the background so the primary generation
+path stays unblocked. When `secondary_enabled: false` in config.yaml, the
+alias resolver routes these calls to the primary instead.
 """
 
 import json
@@ -14,8 +15,14 @@ from typing import Optional
 
 logger = logging.getLogger("lloyd-server")
 
-_POST_CAPTURE_MODEL_URL = "http://127.0.0.1:8091/v1/chat/completions"
-_POST_CAPTURE_MODEL_NAME = "secondary"
+
+def _endpoint() -> tuple[str, str]:
+    """Resolve (chat_completions_url, model_name) for post-capture jobs."""
+    from app.config import resolve_model_alias, _get_model_cfg
+    name = resolve_model_alias("secondary")
+    cfg = _get_model_cfg(name) or {}
+    base = cfg.get("base_url") or cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")
+    return f"{base.rstrip('/')}/v1/chat/completions", name
 
 
 _FACT_EXTRACTION_PROMPT = """\
@@ -51,8 +58,9 @@ def _sync_secondary_capture_call(transcript: str) -> Optional[str]:
         f"Transcript:\n{transcript}"
     )
 
+    url, model_name = _endpoint()
     payload = {
-        "model": _POST_CAPTURE_MODEL_NAME,
+        "model": model_name,
         "messages": [
             {"role": "system", "content": "You are a concise conversation summarizer. Return only the summary text, no JSON or formatting."},
             {"role": "user", "content": prompt},
@@ -64,7 +72,7 @@ def _sync_secondary_capture_call(transcript: str) -> Optional[str]:
 
     try:
         req = urllib.request.Request(
-            _POST_CAPTURE_MODEL_URL,
+            url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -79,8 +87,9 @@ def _sync_secondary_capture_call(transcript: str) -> Optional[str]:
 
 def _sync_secondary_fact_extraction(transcript: str) -> list[dict]:
     """Call secondary model to extract durable facts from a session transcript."""
+    url, model_name = _endpoint()
     payload = {
-        "model": _POST_CAPTURE_MODEL_NAME,
+        "model": model_name,
         "messages": [
             {"role": "system", "content": "You extract durable facts from conversations. Return only fact lines, no commentary."},
             {"role": "user", "content": _FACT_EXTRACTION_PROMPT + transcript},
@@ -92,7 +101,7 @@ def _sync_secondary_fact_extraction(transcript: str) -> list[dict]:
 
     try:
         req = urllib.request.Request(
-            _POST_CAPTURE_MODEL_URL,
+            url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -178,8 +187,9 @@ def _sync_secondary_voice_summary(primary_text: str, timeout: float = 15.0) -> O
     if not text:
         return None
 
+    url, model_name = _endpoint()
     payload = {
-        "model": _POST_CAPTURE_MODEL_NAME,
+        "model": model_name,
         "messages": [
             {"role": "system", "content": _VOICE_SUMMARY_SYSTEM},
             {"role": "user", "content": text},
@@ -191,7 +201,7 @@ def _sync_secondary_voice_summary(primary_text: str, timeout: float = 15.0) -> O
 
     try:
         req = urllib.request.Request(
-            _POST_CAPTURE_MODEL_URL,
+            url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -206,8 +216,9 @@ def _sync_secondary_voice_summary(primary_text: str, timeout: float = 15.0) -> O
 
 def _sync_secondary_focus_extraction(transcript: str) -> list[str]:
     """Call secondary model to extract 3-5 topic phrases from recent conversation."""
+    url, model_name = _endpoint()
     payload = {
-        "model": _POST_CAPTURE_MODEL_NAME,
+        "model": model_name,
         "messages": [
             {"role": "system", "content": "Extract the main topics from this conversation. Return 3-5 short topic phrases (2-4 words each), one per line. No numbering, no explanation."},
             {"role": "user", "content": transcript},
@@ -219,7 +230,7 @@ def _sync_secondary_focus_extraction(transcript: str) -> list[str]:
 
     try:
         req = urllib.request.Request(
-            _POST_CAPTURE_MODEL_URL,
+            url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",

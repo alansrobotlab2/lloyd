@@ -173,8 +173,10 @@ def _call_local_llm(
     in a JSON object fits without truncation. Temperature raised to 0.8 to get
     more variant diversity across parallel calls.
     """
-    base = "http://127.0.0.1:8096" if model == "primary" else "http://127.0.0.1:8091"
-    model_name = model if model in ("primary", "secondary") else model
+    from app.config import resolve_model_alias, _get_model_cfg
+    model_name = resolve_model_alias(model)
+    _cfg = _get_model_cfg(model_name) or {}
+    base = (_cfg.get("base_url") or _cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")).rstrip("/")
     payload: dict[str, Any] = {
         "model": model_name,
         "messages": [{"role": "user", "content": prompt}],

@@ -13,8 +13,11 @@ router = APIRouter()
 @router.get("/api/models")
 async def get_models():
     _ordered = ["primary", "secondary"]  # always first in dropdown
+    secondary_enabled = bool(CONFIG.get("secondary_enabled", False))
     models = []
     for name, cfg in MODEL_CONFIGS.items():
+        if name == "secondary" and not secondary_enabled:
+            continue
         models.append({
             "name": name,
             "alias": cfg.get("alias", ""),

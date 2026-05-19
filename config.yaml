@@ -1,6 +1,10 @@
 agent:
   max_turns: 60
   permission_mode: bypassPermissions
+# When false, all "secondary" model traffic routes to primary and the
+# secondary vLLM service stays stopped. Flip to true when running a
+# dedicated secondary LLM on port 8091. See app/config.py:resolve_model_alias.
+secondary_enabled: false
 inner_voice:
   model: secondary
   observer:
@@ -17,11 +21,7 @@ inner_voice:
     stalled_progress: false
     stalled_after_tool_calls: 5
   goal:
-    # Cap on consecutive ambient follow-up turns triggered by an unmet
-    # persistent goal. When exceeded, the observer escalates to clarify
-    # so the user can intervene instead of looping silently.
     max_attempts: 10
-    # Per-call timeout / token budget for the goal completion evaluator.
     eval_timeout_seconds: 8
     eval_max_tokens: 300
 autonomy:
@@ -125,6 +125,9 @@ harness:
     - Task
     - vault_search
     - TodoWrite
+    - ambient_decide
+    - mc_close_modal
+    - SetGoal
     max_results_default: 5
     max_results_cap: 20
 subagents:
@@ -206,7 +209,7 @@ livekit:
     enabled: true
     models_dir: agent-services/models/wakeword
     engine_dir: agent-services/models/openwakeword
-    threshold: 0.40
+    threshold: 0.4
   voiceprint:
     enabled: true
     profiles_dir: ~/lloyd/voice_profiles

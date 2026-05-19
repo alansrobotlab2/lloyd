@@ -168,10 +168,26 @@ def _grep_lloyd_code(query: str, limit: int = 8, timeout: float = 2.0) -> list[d
             break
     return list(found.values())
 
-CONSOLIDATION_ENDPOINT = "http://localhost:8091/v1/chat/completions"
-CONSOLIDATION_MODEL = "Qwen3.5-35B-A3B"
 CONSOLIDATION_MIN_RESULTS = 4
 CONSOLIDATION_TIMEOUT = 10
+
+
+def _consolidation_endpoint() -> tuple[str, str]:
+    """Resolve (chat_completions_url, model_name) for vault consolidation.
+
+    Uses the alias resolver so when `secondary_enabled: false` the call
+    routes to primary instead of the dead :8091 endpoint.
+    """
+    try:
+        from app.config import resolve_model_alias, _get_model_cfg
+    except Exception:
+        return ("", "")
+    name = resolve_model_alias("secondary")
+    cfg = _get_model_cfg(name) or {}
+    base = cfg.get("base_url") or cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")
+    if not base:
+        return ("", name)
+    return (f"{base.rstrip('/')}/v1/chat/completions", name)
 
 CONSOLIDATION_SYSTEM_PROMPT = (
     "You are a memory consolidation engine. Your job is to take raw search results "
@@ -316,6 +332,9 @@ def _qmd_subprocess_search(query: str, limit: int, collections: list) -> list:
 def _consolidate_results(query: str, results: list) -> Optional[dict]:
     if len(results) < CONSOLIDATION_MIN_RESULTS:
         return None
+    url, model_name = _consolidation_endpoint()
+    if not url:
+        return None
     parts = [f"Query: {query}\n\nSearch Results:\n"]
     for i, r in enumerate(results, 1):
         parts.append(f"--- Result {i} (score: {r.get('score', 'N/A')}) ---")
@@ -323,11 +342,11 @@ def _consolidate_results(query: str, results: list) -> Optional[dict]:
         snippet = r.get("snippet", "")[:2000]
         parts.append(f"Content:\n{snippet}\n")
     payload = json.dumps({
-        "model": CONSOLIDATION_MODEL,
+        "model": model_name,
         "messages": [{"role": "system", "content": CONSOLIDATION_SYSTEM_PROMPT}, {"role": "user", "content": "\n".join(parts)}],
         "temperature": 0.0, "max_tokens": 1000,
     }).encode()
-    req = urllib.request.Request(CONSOLIDATION_ENDPOINT, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=CONSOLIDATION_TIMEOUT) as resp:
             data = json.loads(resp.read())

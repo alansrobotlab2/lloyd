@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Starts sakamakismile/Qwen3.6-27B-Text-NVFP4-MTP via vLLM on GPU 1
+# Starts sakamakismile/Qwen3.6-27B-Text-NVFP4-MTP via vLLM on GPU 0
 # (RTX PRO 6000 Blackwell, 96GB). OpenAI-compatible API on port 8096
 # (same primary slot as the other 27B/35B nvfp4 builds — only one at a time).
 #
@@ -76,10 +76,10 @@ fi
 export PATH="$VLLM_VENV/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
 export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDA_HOME="/opt/cuda"
-# PCI bus order: index 0 = RTX 5090 (secondary, port 8091),
-#                index 1 = RTX PRO 6000 Blackwell (this server, port 8096).
+# Single-GPU host: index 0 = RTX PRO 6000 Blackwell (this server, port 8096).
+# 5090 removed 2026-05-18.
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 export VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=1073741824
 export VLLM_ENABLE_CUDAGRAPH_GC=1
 export VLLM_USE_FLASHINFER_SAMPLER=1
@@ -98,7 +98,7 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --max-num-seqs 2 \
   --enable-chunked-prefill \
   --max-num-batched-tokens 8192 \
-  --gpu-memory-utilization 0.9 \
+  --gpu-memory-utilization 0.80 \
   --scheduling-policy priority \
   --kv-cache-dtype fp8_e4m3 \
   --attention-backend FLASHINFER \
