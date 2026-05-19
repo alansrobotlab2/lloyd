@@ -28,7 +28,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from app import event_log as _event_log
-from app.config import CONFIG, _get_model_cfg
+from app.config import CONFIG, _get_model_cfg, resolve_model_alias
 from app.inner_voice import observer_prompt as _prompt
 from app.inner_voice.lever_tools import (
     GOAL_COMPLETION_TOOL_NAME,
@@ -136,6 +136,7 @@ def _resolve_endpoint(model_alias: str | None = None) -> tuple[str, str]:
         or iv.get("model")
         or CONFIG.get("model", {}).get("default", "")
     )
+    name = resolve_model_alias(name)
     cfg = _get_model_cfg(name) or {}
     base = cfg.get("base_url") or cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")
     return (base.rstrip("/"), name)

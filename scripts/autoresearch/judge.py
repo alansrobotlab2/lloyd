@@ -88,8 +88,13 @@ def _score_objective(task: dict[str, Any], trace: dict[str, Any]) -> tuple[float
 
 
 def _call_rubric_llm(prompt: str, model: str = "primary", timeout: int = 180) -> str | None:
-    base = "http://127.0.0.1:8096" if model == "primary" else "http://127.0.0.1:8091"
-    name = model if model in ("primary", "secondary") else model
+    from app.config import resolve_model_alias, _get_model_cfg
+    name = resolve_model_alias(model)
+    cfg = _get_model_cfg(name) or {}
+    base = (cfg.get("base_url") or cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")).rstrip("/")
+    if not base:
+        logger.warning("rubric LLM: no base_url for model=%s", name)
+        return None
     try:
         resp = requests.post(
             f"{base}/v1/chat/completions",

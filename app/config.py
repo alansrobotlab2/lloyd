@@ -115,3 +115,15 @@ def _resolve_model_name(model_input: str) -> str:
         if cfg.get("alias") == model_input:
             return name
     return model_input
+
+
+def resolve_model_alias(name: str) -> str:
+    """Route 'secondary' → 'primary' when secondary_enabled is false.
+
+    Single switch for primary-only deployments. Callers that previously
+    hardcoded 'secondary' (or its port) should pass through this helper
+    before resolving base_url / model name.
+    """
+    if name == "secondary" and not CONFIG.get("secondary_enabled", False):
+        return "primary"
+    return name

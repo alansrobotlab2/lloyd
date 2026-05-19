@@ -149,6 +149,25 @@ async def _start_file_watcher() -> None:
         file_watcher.bind(folder)
 
 
+@app.on_event("startup")
+async def _sync_secondary_llm_state() -> None:
+    """Reconcile the secondary vLLM supervisord process with config.yaml's
+    `secondary_enabled` flag. Idempotent — safe to call on every boot."""
+    import logging
+    from app.config import CONFIG
+    from app.supervisor_client import start_process, stop_process
+
+    log = logging.getLogger("lloyd-server")
+    enabled = bool(CONFIG.get("secondary_enabled", False))
+    proc = "agent-llm-secondary"
+    if enabled:
+        ok, msg = start_process(proc)
+        log.info("secondary_enabled=true → start %s: %s (ok=%s)", proc, msg, ok)
+    else:
+        ok, msg = stop_process(proc)
+        log.info("secondary_enabled=false → stop %s: %s (ok=%s)", proc, msg, ok)
+
+
 @app.on_event("shutdown")
 async def _stop_file_watcher() -> None:
     from app import file_watcher

@@ -1,5 +1,6 @@
 """Session-list / transcript / active-proc / cancel / inject endpoints."""
 
+import asyncio
 import json
 import os
 import time
@@ -785,19 +786,36 @@ async def post_ambient_decide(session_id: str, request: Request):
         "reasoning": reasoning,
     })
 
-    # Silent decision → cancel the running turn so the agent doesn't waste
-    # further output tokens. The finally clause in `_run_turn` consults
-    # the decision state and writes the correct breadcrumb either way.
+    # Silent decision → ask the loop to stop after the current iteration
+    # so the agent doesn't waste further output tokens. We can't set the
+    # cancel_event synchronously here: the in-flight tool call that
+    # triggered this handler is racing against cancel_event in the
+    # harness loop, so a synchronous set would cancel the ambient_decide
+    # dispatch itself and surface a misleading "Tool 'ambient_decide'
+    # cancelled by user" result. Schedule it on a delay so the tool
+    # result propagates back to the harness first; the loop's
+    # top-of-iteration cancel check then stops the turn cleanly.
+    # Capture the event reference now — if the turn ends naturally
+    # before the delay elapses, we set a now-orphaned event, which is
+    # a no-op for any later turn.
     if not surface:
         ev = get_cancel_event(session_id)
         if ev is not None:
-            ev.set()
+            asyncio.create_task(_deferred_ambient_cancel(ev))
 
     return JSONResponse({
         "decision_recorded": True,
         "surface": surface,
         "turn_id": current.turn_id,
     })
+
+
+async def _deferred_ambient_cancel(event: asyncio.Event) -> None:
+    """Set cancel_event after a brief delay so the in-flight
+    ambient_decide tool dispatch completes first. See post_ambient_decide
+    for the race we're avoiding."""
+    await asyncio.sleep(0.5)
+    event.set()
 
 
 @router.post("/api/sessions/clear")

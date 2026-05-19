@@ -258,22 +258,17 @@ AUTORESEARCH_PRIORITY = 1  # interactive (chat, inner voice) = 0; all background
 
 def get_model_env(model: str) -> dict[str, str]:
     """Resolve model → env vars. All callers talk to vLLM directly and
-    set `"priority": AUTORESEARCH_PRIORITY` in the request body."""
-    if model == "primary":
-        return {
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8096",
-            "ANTHROPIC_API_KEY": "no-key-required",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION": "primary",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Primary",
-        }
-    if model == "secondary":
-        return {
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8091",
-            "ANTHROPIC_API_KEY": "no-key-required",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION": "secondary",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Secondary",
-        }
-    return {}
+    set `"priority": AUTORESEARCH_PRIORITY` in the request body.
+
+    Routes through `resolve_model_alias` so when `secondary_enabled: false`
+    a request for "secondary" transparently resolves to primary's env.
+    """
+    try:
+        from app.config import resolve_model_alias, _get_model_env as _env
+    except Exception:
+        return {}
+    name = resolve_model_alias(model)
+    return dict(_env(name) or {})
 
 
 def load_bench_tasks(bench_dir: Path) -> list[dict[str, Any]]:
