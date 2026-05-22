@@ -36,7 +36,7 @@ autoresearch:
   ledger_path: ~/lloyd/_pipeline/research/ledger.jsonl
   max_variants_per_round: 7
   promotion:
-    min_bench_win_fraction: 0.5
+    min_bench_win_fraction: 0.55
     min_composite_delta: 0.05
     require_safety_pass: true
     tool_allowlist_consecutive_wins: 2
