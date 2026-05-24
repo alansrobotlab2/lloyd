@@ -286,7 +286,7 @@ Falls back to `qmd` subprocess if daemon is unavailable. Graph traversal is addi
 | `vault_search` | `(query, max_results, min_score, scope, consolidate)` | RRF-fused hybrid search (QMD + graph) |
 | `vault_recall` | `(query, limit, include_facts)` | Parallel vault search + fact retrieval |
 | `vault_graph_search` | `(entities, max_hops)` | Graph-only traversal from seed entities |
-| `vault_get` | `(path, start_line, num_lines)` | Read vault file by path |
+| `vault_read` | `(path, start_line, num_lines)` | Read vault file by path |
 | `vault_write` | `(path, content)` | Write vault file with audit logging |
 | `vault_overview` | `(detail)` | Vault statistics (summary/hubs) |
 

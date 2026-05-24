@@ -484,7 +484,11 @@ export interface ActiveProc {
   streaming: boolean
 }
 
-const API_BASE = '/api'
+// The chrome side-panel build sets VITE_API_BASE='http://127.0.0.1:8080/api'
+// (loopback bypasses the mTLS middleware at server.py:76-113). Main web app
+// keeps the relative '/api' default so the Vite proxy injects client-cert
+// headers.
+const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || '/api'
 
 export const api = {
   async sendMessage(text: string, clientId: string, sessionId?: string): Promise<ApiResponse> {

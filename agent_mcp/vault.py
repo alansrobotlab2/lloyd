@@ -3,7 +3,7 @@
 Lloyd MCP Server: Vault — obsidian vault read/write/search and hybrid recall.
 
 Tools:
-    vault_get, vault_write, vault_overview, vault_search, vault_recall (5 tools)
+    vault_read, vault_write, vault_overview, vault_search, vault_recall (5 tools)
 
 Vault root: ~/obsidian/
 QMD daemon: http://localhost:8181/query
@@ -578,7 +578,7 @@ def _audit_write(path: str, byte_count: int) -> None:
 
 # ── Tool handlers ────────────────────────────────────────────────────────────
 
-def _vault_get(params: dict) -> dict:
+def _vault_read(params: dict) -> dict:
     path = params.get("path", "").strip()
     if not path:
         return _err("path is required", ErrorCode.MISSING_PARAM)
@@ -876,7 +876,7 @@ def _vault_recall(params: dict) -> dict:
 @app.list_tools()
 async def list_tools():
     return [
-        Tool(name="vault_get", description="Read a file from the obsidian vault by vault-relative path.", inputSchema={
+        Tool(name="vault_read", description="Read a file from the obsidian vault by vault-relative path.", inputSchema={
             "type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "num_lines": {"type": "integer"}}, "required": ["path"]}),
         Tool(name="vault_write", description="Write content to a vault file. Audit-logged.", inputSchema={
             "type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
@@ -892,7 +892,7 @@ async def list_tools():
 @app.call_tool()
 async def call_tool(name: str, arguments: dict):
     handlers = {
-        "vault_get": _vault_get, "vault_write": _vault_write, "vault_overview": _vault_overview,
+        "vault_read": _vault_read, "vault_write": _vault_write, "vault_overview": _vault_overview,
         "vault_search": _vault_search, "vault_recall": _vault_recall,
     }
     handler = handlers.get(name)

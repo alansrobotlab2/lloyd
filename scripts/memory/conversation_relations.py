@@ -144,7 +144,7 @@ def extract_vault_docs_from_trajectory(entry: dict) -> list[dict]:
         paths_found = []
 
         # Direct file access tools
-        if name in ("vault_get", "vault_write", "file_read", "read_file",
+        if name in ("vault_read", "vault_write", "file_read", "read_file",
                      "file_write", "write_file", "file_edit", "patch",
                      "mem_get", "mem_write"):
             p = _extract_path_from_param(params.get("path", ""))

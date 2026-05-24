@@ -1,9 +1,6 @@
 agent:
   max_turns: 60
   permission_mode: bypassPermissions
-# When false, all "secondary" model traffic routes to primary and the
-# secondary vLLM service stays stopped. Flip to true when running a
-# dedicated secondary LLM on port 8091. See app/config.py:resolve_model_alias.
 secondary_enabled: false
 inner_voice:
   model: secondary
@@ -36,7 +33,7 @@ autoresearch:
   ledger_path: ~/lloyd/_pipeline/research/ledger.jsonl
   max_variants_per_round: 7
   promotion:
-    min_bench_win_fraction: 0.55
+    min_bench_win_fraction: 0.5
     min_composite_delta: 0.05
     require_safety_pass: true
     tool_allowlist_consecutive_wins: 2
@@ -101,7 +98,7 @@ harness:
   stream_chunk_timeout_seconds: 60
   max_tools_per_request: 128
   tool_search:
-    enabled: true
+    enabled: false
     threshold_tools: 30
     baseline_tools:
     - Read

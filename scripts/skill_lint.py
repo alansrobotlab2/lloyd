@@ -60,25 +60,67 @@ STOP_OPENERS = frozenset({
 
 # ── Frontmatter parser (mirrors agent_mcp.skills._parse_frontmatter) ─────────
 
+def _extract_first_block(content: str) -> tuple[str, str, str | None]:
+    """Return (frontmatter_text, body, yaml_error_or_None) from the first --- block."""
+    if not content.startswith("---"):
+        return "", content, None
+    end = content.find("\n---", 3)
+    if end == -1:
+        return "", content, "no closing --- delimiter"
+    fm_text = content[3:end]
+    return fm_text, content[end + 4:].strip(), None
+
+
 def parse_frontmatter(content: str) -> tuple[dict, str, str | None]:
     """Return (frontmatter, body, yaml_error_msg_or_None).
 
-    Mirrors the live scorer's parser so lint verdicts match retrieval reality.
+    Handles dual-block files: tries the first --- block, and if it lacks
+    description/tags, tries a second --- block.  This mirrors the common
+    pattern where skills have an obsidian metadata block (segment, tags)
+    followed by a skill metadata block (description, tags, category).
+
+    Also mirrors the live scorer's parser so lint verdicts match retrieval
+    reality.  NOTE: the live scorer currently only reads the first block —
+    this is a known gap (see lint report) and should be fixed in skills.py.
     """
     if not content.startswith("---"):
         return {}, content, None
-    end = content.find("\n---", 3)
-    if end == -1:
-        return {}, content, "no closing --- delimiter"
-    fm_text = content[3:end]
-    body = content[end + 4:].strip()
+
+    fm_text, rest, err = _extract_first_block(content)
+    if err:
+        return {}, rest, err
+
     try:
         fm = yaml.safe_load(fm_text) or {}
         if not isinstance(fm, dict):
-            return {}, body, f"frontmatter is not a mapping (got {type(fm).__name__})"
-        return fm, body, None
+            # Not a mapping — try second block if it has skill-relevant keys
+            pass
+        else:
+            # Has valid YAML.  Check whether it contains skill-relevant keys.
+            # If it does (description or tags), use it directly.
+            if "description" in fm or "tags" in fm:
+                return fm, rest, None
+            # First block has YAML but no skill keys (e.g. segment/tags-only).
+            # Try to find a second frontmatter block in the remainder.
     except yaml.YAMLError as exc:
-        return {}, body, f"YAML parse error: {exc.__class__.__name__}: {str(exc)[:120]}"
+        return {}, rest, f"YAML parse error: {exc.__class__.__name__}: {str(exc)[:120]}"
+
+    # ── Try second block ────────────────────────────────────────────────────
+    rest_stripped = rest.lstrip("\n")
+    if rest_stripped.startswith("---"):
+        fm2_text, body2, err2 = _extract_first_block(rest_stripped)
+        if err2:
+            return {}, rest, err2
+        try:
+            fm2 = yaml.safe_load(fm2_text) or {}
+            if not isinstance(fm2, dict):
+                return {}, rest, "second frontmatter block is not a mapping"
+            return fm2, body2, None
+        except yaml.YAMLError as exc:
+            return {}, rest, f"second block YAML error: {str(exc)[:120]}"
+
+    # No second block — use whatever we got (may be empty)
+    return {}, rest, None
 
 
 # ── Checks ────────────────────────────────────────────────────────────────────

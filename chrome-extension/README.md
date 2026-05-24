@@ -1,188 +1,55 @@
-# Lloyd Web Capture Chrome Extension
+# Lloyd Chrome Side Panel
 
-A Chrome extension that captures **any web page** (YouTube videos, articles, documentation), summarizes them with your local LLM, and saves the knowledge to your Obsidian vault.
+A Chrome extension that opens a side panel mirroring Lloyd's chat UI, with **one Lloyd session per browser tab and per webpage**.
 
-## Architecture
+When you navigate to a new page (or open a new tab), the extension:
+
+1. Creates a Lloyd session tagged `platform: "browser"`.
+2. Fires a kickoff message asking Lloyd to fetch the page and produce highlights — YouTube transcripts on `youtube.com`/`youtu.be`, regular webpage content elsewhere.
+3. Switches the side panel to that session.
+
+Switching tabs re-focuses the panel on the matching session. Closing a tab orphans the session (it stays in Lloyd's main session list).
+
+## Layout
 
 ```
-Chrome Extension (popup) 
-    → HTTP POST → Backend Server (localhost:8087)
-    → Detects page type:
-      - YouTube → transcript extraction
-      - Article → content scraping
-    → Local LLM (Qwen3.5-35B-A3B on localhost:8091)
-    → Knowledge vault (~/obsidian/knowledge/ai/ or knowledge/software/)
+chrome-extension/
+  manifest.json                      # MV3 manifest
+  sidepanel.html                     # (build output, copied from web/sidepanel.html)
+  icons/{16,48,128}.png
+  src/background/
+    service-worker.ts                # tab/nav/session orchestration
+    url.ts                           # canonicalize() + isYouTube()
+    tab-session-map.ts               # chrome.storage.session wrapper
+    lloyd-client.ts                  # fetch wrappers for the SW
+  dist/                              # built unpacked extension (load this)
 ```
 
-## Prerequisites
+The React side panel lives in [web/src/sidepanel/](../web/src/sidepanel/) (it reuses [ChatPanel](../web/src/components/ChatPanel.tsx) and the rest of `web/src`).
 
-- **uv** - Python package manager (`~/.local/bin/uv`)
-- **Python 3.10+**
-- **Local LLM** running on `http://localhost:8091` (Qwen3.5-35B-A3B)
-- **youtube-transcript-api** (installed via uv when needed)
-
-## Installation
-
-### 1. Install Dependencies
+## Build
 
 ```bash
-# Install uv if not already installed
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Verify uv is in PATH
-export PATH="$HOME/.local/bin:$PATH"
-uv --version
+cd web
+VITE_API_BASE='http://127.0.0.1:8080/api' \
+  npx vite build -c vite.chrome.config.ts --watch
 ```
 
-### 2. Load the Extension
+This emits everything into `chrome-extension/dist/`. The `--watch` flag keeps rebuilding on source change.
 
-1. Open Chrome and go to `chrome://extensions/`
-2. Enable **Developer mode** (toggle in top right)
-3. Click **Load unpacked**
-4. Select the `~/lloyd/chrome-extension` directory
-5. The extension icon (blue circle with "L") should appear in your toolbar
+## Load in Chrome
 
-### 3. Start the Backend Server
+1. `chrome://extensions` → enable Developer mode.
+2. **Load unpacked** → pick `chrome-extension/dist/`.
+3. Click the extension icon to open the side panel.
 
-```bash
-cd ~/lloyd/chrome-extension
-chmod +x start-backend.sh
-./start-backend.sh
-```
+After a code change, vite re-emits; click the extension's reload icon on the extensions page to pick it up. (MV3 service workers can't HMR.)
 
-The server will run on `http://localhost:8087`. Keep it running while using the extension.
+## Backend touchpoints
 
-### 4. Verify Setup
+- `POST /api/sessions/create` with `{platform: "browser"}` — creates the session.
+- `PATCH /api/sessions/{id}/metadata` with `{url, title}` — stashes page metadata.
+- `POST /api/message/stream` — fires the kickoff (response is abandoned; backend keeps running on disconnect, see [messages.py:10](../app/routers/messages.py)).
+- `GET /api/messages/{id}` — side panel uses this via [web/src/api.ts](../web/src/api.ts) to render the transcript.
 
-```bash
-# Test YouTube capture
-curl -X POST http://localhost:8087/capture \
-  -H "Content-Type: application/json" \
-  -d '{
-    "pageType": "youtube",
-    "videoId": "dQw4w9WgXcQ",
-    "url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
-    "title": "Test Video"
-  }'
-
-# Test article capture
-curl -X POST http://localhost:8087/capture \
-  -H "Content-Type: application/json" \
-  -d '{
-    "pageType": "article",
-    "url": "https://example.com/article",
-    "title": "Test Article"
-  }'
-```
-
-You should get an error about the content not existing (not a connection error).
-
-## Usage
-
-1. **Navigate to a YouTube video** you want to capture
-2. **Click the extension icon** in your Chrome toolbar
-3. The popup will show the video title and a "Capture to Vault" button
-4. **Click "Capture to Vault"**
-5. Wait for the status message:
-   - ✅ "Captured to ~/obsidian/knowledge/ai/..." on success
-   - ❌ Error message if something failed
-
-## Output Format
-
-Captured videos are saved to `~/obsidian/knowledge/ai/<slug>.md` with:
-
-```yaml
----
-type: reference
-tags: [youtube, transcript, summary, ai]
-source: https://youtube.com/watch?v=VIDEO_ID
-video_id: VIDEO_ID
-date: YYYY-MM-DD
-summary: "First 150 chars of summary..."
----
-```
-
-Followed by:
-- Full summary from LLM
-- Complete transcript
-- Metadata (URL, video ID, capture timestamp)
-
-## Logs
-
-Capture activity is logged to:
-- `~/lloyd/_pipeline/youtube-capture.log`
-
-## Troubleshooting
-
-### Extension won't load
-- Check that you selected the correct directory (`~/lloyd/chrome-extension`)
-- Look for errors in `chrome://extensions/` (click "Details" on the extension)
-
-### "Not on a YouTube page"
-- Make sure you're on `youtube.com` or `youtu.be`
-- The extension only works on YouTube domains
-
-### Backend connection error
-- Check if the backend server is running (`ps aux | grep server.py`)
-- Verify port 8087 is available (`lsof -i :8087`)
-- Check the log file for errors
-
-### Transcript fetch failed
-- Some videos don't have captions available
-- Try a different video to confirm the setup works
-- Check that `uv` can install packages
-
-### LLM summarization failed
-- Verify your local LLM is running on `http://localhost:8091`
-- Check that the model `Qwen3.5-35B-A3B` is loaded
-- Look at the backend logs for specific errors
-
-### Vault save failed
-- Check that `~/obsidian/knowledge/ai/` exists
-- Verify write permissions
-- Check the log file for the exact error
-
-## Development
-
-### Hot Reload
-
-The extension doesn't auto-reload. After changing files:
-1. Go to `chrome://extensions/`
-2. Click the refresh icon on the Lloyd extension
-
-### Backend Development
-
-```bash
-# Run server in debug mode
-cd ~/lloyd/chrome-extension/backend
-python3 -m pdb server.py
-
-# Or just run directly
-python3 server.py
-```
-
-### Testing Without Extension
-
-```bash
-# Manually trigger a capture
-curl -X POST http://localhost:8087/capture \
-  -H "Content-Type: application/json" \
-  -d '{
-    "videoId": "dQw4w9WgXcQ",
-    "url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
-    "title": "Test Video"
-  }'
-```
-
-## Future Enhancements
-
-- [ ] Add transcription language selection
-- [ ] Support for playlists
-- [ ] Direct integration with Lloyd MCP (instead of HTTP)
-- [ ] Customizable output paths and tags
-- [ ] Batch capture from history
-- [ ] Summary customization (length, style)
-
-## License
-
-MIT (same as the rest of your Lloyd setup)
+The Lloyd backend's mTLS middleware skips loopback ([server.py:76-113](../server.py)), so the extension's calls to `http://127.0.0.1:8080` need no client cert.
