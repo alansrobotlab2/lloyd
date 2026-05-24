@@ -133,7 +133,7 @@ Lloyd's tool and permission surface in Discord is **caller-dependent**. The owne
 - `/model`, `/personality`, `/reset`, `/stop`, `/status` slash commands
 
 **Others** (`allowed_users`) — reduced surface:
-- Memory: read-only — `fact_get`, `fact_profile`, `fact_check`, `vault_get`, `vault_overview`, `vault_search`, `vault_recall` allowed; **`fact_add`, `fact_resolve`, `vault_write` blocked**
+- Memory: read-only — `fact_get`, `fact_profile`, `fact_check`, `vault_read`, `vault_overview`, `vault_search`, `vault_recall` allowed; **`fact_add`, `fact_resolve`, `vault_write` blocked**
 - `http_tools`: all tools allowed (fetch, search — no side effects)
 - `pipeline`: read/status tools allowed
 - All other MCP servers blocked entirely (autonomy, mission_control, backlog, subliminal, thunderbird, browser)

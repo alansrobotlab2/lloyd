@@ -21,14 +21,14 @@ This plan adds both capabilities as natural extensions of existing infrastructur
 
 Two-stage pipeline running as an autonomy task (depends on trajectory extraction #45):
 
-- **Stage 1 (deterministic):** Mine trajectory JSONL for document co-access pairs. Extract vault paths from tool calls (`vault_get`, `vault_search`, `file_read`, etc.), compute weighted co-access scores based on proximity (same call > adjacent > same session > same day), aggregate across sessions.
+- **Stage 1 (deterministic):** Mine trajectory JSONL for document co-access pairs. Extract vault paths from tool calls (`vault_read`, `vault_search`, `file_read`, etc.), compute weighted co-access scores based on proximity (same call > adjacent > same session > same day), aggregate across sessions.
 - **Stage 2 (LLM-assisted):** For high-confidence pairs (aggregate weight >= 0.8), extract surrounding conversation context from raw session JSON, use 122B to classify relationship type and extract a one-sentence reason.
 
 ### Files to Create
 
 1. **`scripts/memory/conversation_relations.py`** — Core extraction engine
    - `normalize_vault_path(raw_path)` — Strips `~/obsidian/`, validates segment membership, returns vault-relative path
-   - `extract_vault_docs_from_trajectory(entry)` — Maps tool names to path extraction rules (vault_get->path, skills_get->constructed path, etc.)
+   - `extract_vault_docs_from_trajectory(entry)` — Maps tool names to path extraction rules (vault_read->path, skills_get->constructed path, etc.)
    - `extract_co_access_pairs(trajectory_dir, since_date)` — Stage 1: reads JSONL, builds (doc_a, doc_b) pairs with weights
    - `aggregate_pairs(pairs)` — Dampened sum across sessions: `sum(w_i) * (1 - 0.3^n)`
    - `extract_conversation_context(session_path, doc_a, doc_b)` — Finds message window around co-access in raw session JSON
@@ -75,7 +75,7 @@ Proposals written to `~/obsidian/memory/_pipeline/conversation-relation-proposal
 | Signal | Weight | Example |
 |--------|--------|---------|
 | Same tool call (multi-doc) | 1.0 | vault_recall returns doc A + B |
-| Adjacent calls (distance <= 2) | 0.8 | vault_get(A) then vault_get(B) |
+| Adjacent calls (distance <= 2) | 0.8 | vault_read(A) then vault_read(B) |
 | Same session (distance > 2) | 0.4 | Both accessed during same conversation |
 | Same day, different sessions | 0.15 | Weak, only useful if reinforced |
 

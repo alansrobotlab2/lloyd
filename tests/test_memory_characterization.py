@@ -225,7 +225,7 @@ EXPECTED_TOOL_NAMES = {
     "fact_get", "fact_add", "fact_profile", "fact_check", "fact_resolve",
     "fact_invalidate", "fact_relate", "fact_relationships", "fact_path",
     "fact_neighbors",
-    "vault_get", "vault_write", "vault_overview", "vault_search",
+    "vault_read", "vault_write", "vault_overview", "vault_search",
     "vault_recall",
     "memory_read", "memory_add", "memory_replace", "memory_remove",
     "session_recall",
@@ -253,7 +253,7 @@ def test_list_tools_required_inputs_present():
     assert by_name["fact_get"].inputSchema.get("required") == ["entity"]
     assert by_name["fact_add"].inputSchema.get("required") == ["entity", "category", "fact"]
     assert by_name["fact_relate"].inputSchema.get("required") == ["source", "target", "type"]
-    assert by_name["vault_get"].inputSchema.get("required") == ["path"]
+    assert by_name["vault_read"].inputSchema.get("required") == ["path"]
     assert by_name["vault_write"].inputSchema.get("required") == ["path", "content"]
     assert by_name["vault_search"].inputSchema.get("required") == ["query"]
 

@@ -120,21 +120,21 @@ def test_fact_neighbors_missing_entity_returns_dict_with_code():
     assert result["code"] == "MISSING_PARAM"
 
 
-def test_vault_get_missing_path_returns_dict_with_code():
-    result = vault._vault_get({})
+def test_vault_read_missing_path_returns_dict_with_code():
+    result = vault._vault_read({})
     assert isinstance(result, dict)
     assert result["code"] == "MISSING_PARAM"
 
 
-def test_vault_get_path_escape_returns_dict_with_path_escape_code():
+def test_vault_read_path_escape_returns_dict_with_path_escape_code():
     # `..` traversal trips the path-escape guard.
-    result = vault._vault_get({"path": "../../../etc/passwd"})
+    result = vault._vault_read({"path": "../../../etc/passwd"})
     assert isinstance(result, dict)
     assert result["code"] == "PATH_ESCAPE"
 
 
-def test_vault_get_missing_file_returns_not_found():
-    result = vault._vault_get({"path": "definitely-does-not-exist-xyz123.md"})
+def test_vault_read_missing_file_returns_not_found():
+    result = vault._vault_read({"path": "definitely-does-not-exist-xyz123.md"})
     assert isinstance(result, dict)
     assert result["code"] == "NOT_FOUND"
 

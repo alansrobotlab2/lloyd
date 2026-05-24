@@ -59,6 +59,9 @@ async def list_sessions():
                 # for the Inner Voice tab's session list.
                 "experiment_id": data.get("experiment_id"),
                 "inner_voice": bool(data.get("inner_voice", False)),
+                # Chrome side-panel sessions stash {url, title} so the
+                # session list can render a per-row page label.
+                "browser_metadata": data.get("browser_metadata"),
             })
         except Exception:
             continue
@@ -330,6 +333,48 @@ async def patch_session(session_id: str, request: Request):
         "inner_voice_evaluate_user_turns": bool(
             data.get("inner_voice_evaluate_user_turns", False)
         ),
+    })
+
+
+@router.patch("/api/sessions/{session_id}/metadata")
+async def patch_session_metadata(session_id: str, request: Request):
+    """Merge browser-side metadata (url + title) into the session JSON.
+
+    Stored under a single ``browser_metadata`` object so the chrome
+    side-panel can label sessions in the main app's session list. Kept
+    on its own endpoint (rather than widening the generic PATCH
+    whitelist) so chrome-only fields never collide with Inner Voice
+    flags.
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    patch: dict = {}
+    for key in ("url", "title"):
+        if key in body:
+            value = body[key]
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(status_code=400, detail=f"{key} must be string or null")
+            patch[key] = value
+
+    if not patch:
+        return JSONResponse({"session_key": session_id, "patched": {}, "noop": True})
+
+    def _apply(data):
+        existing = data.get("browser_metadata") or {}
+        existing.update(patch)
+        data["browser_metadata"] = existing
+
+    ok = await mutate_session(session_id, _apply)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    data = json.loads(meta_path.read_text())
+    return JSONResponse({
+        "session_key": session_id,
+        "browser_metadata": data.get("browser_metadata"),
     })
 
 
