@@ -43,6 +43,9 @@ VAULT_GH_DIR = os.path.expanduser("~/obsidian/knowledge/github")
 VAULT_PAPER_DIR = os.path.expanduser("~/obsidian/knowledge/papers")
 TMP_CLONES = os.path.expanduser("~/.cache/ai-engineer-clones")
 
+MAX_FAILURE_RETRIES = 12
+RETRY_INTERVAL_SECONDS = 900
+
 # LLM endpoints
 LLM_URL = os.environ.get("LLM_API_URL", "http://localhost:8096/v1/chat/completions")
 LLM_MODEL = os.environ.get("LLM_MODEL", "primary")
@@ -643,11 +646,41 @@ Processing failed — transcript below.
 
 # ── Main ────────────────────────────────────────────────────────────────
 
+def _is_retry_eligible(entry, now):
+    """A failed entry is retry-eligible if it hasn't exceeded MAX_FAILURE_RETRIES
+    and at least RETRY_INTERVAL_SECONDS has passed since the last attempt.
+
+    Why: transcripts often appear 1–2 hours after a video is published; a
+    transcript-fetch failure on the first try is normal and should be retried."""
+    if entry.get("status") != "failed":
+        return False
+    if entry.get("failure_count", 0) >= MAX_FAILURE_RETRIES:
+        return False
+    last_attempt = entry.get("last_attempt_at")
+    if not last_attempt:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last_attempt)
+        return (now - last_dt).total_seconds() >= RETRY_INTERVAL_SECONDS
+    except (ValueError, TypeError):
+        return True
+
+
 def get_next_video(state, all_videos):
-    """Find next unprocessed video (most recent first)."""
-    seen_ids = set(state["seen"].keys())
+    """Find next video to process.
+
+    Priority:
+      1. Unseen videos (truly new, newest first per channel ordering)
+      2. Failed videos eligible for retry — never let one failed video at the
+         top of the feed block fresh uploads behind it."""
+    seen = state["seen"]
+    now = datetime.now(timezone.utc)
     for video in all_videos:
-        if video["id"] not in seen_ids:
+        if video["id"] not in seen:
+            return video
+    for video in all_videos:
+        entry = seen.get(video["id"])
+        if entry and _is_retry_eligible(entry, now):
             return video
     return None
 
@@ -727,20 +760,32 @@ def main():
             next_video["title"],
             next_video.get("published", ""),
         )
+        note_path = os.path.join(VAULT_YT_DIR, f"video-{next_video['id']}.md")
         if success:
             state["seen"][next_video["id"]] = {
                 "title": next_video["title"],
                 "published": next_video.get("published", ""),
                 "status": "completed",
-                "youtube_note": os.path.join(
-                    VAULT_YT_DIR,
-                    f"video-{next_video['id']}.md",
-                ),
+                "youtube_note": note_path,
             }
             save_state(state)
             print(f"\n✓ Processed: {next_video['title']}")
         else:
-            print(f"\n✗ Failed: {next_video['title']}")
+            prior = state["seen"].get(next_video["id"], {})
+            failure_count = prior.get("failure_count", 0) + 1
+            state["seen"][next_video["id"]] = {
+                "title": next_video["title"],
+                "published": next_video.get("published", ""),
+                "status": "failed",
+                "youtube_note": note_path,
+                "failure_count": failure_count,
+                "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+            }
+            save_state(state)
+            if failure_count >= MAX_FAILURE_RETRIES:
+                print(f"\n✗ Failed (giving up after {failure_count} attempts): {next_video['title']}")
+            else:
+                print(f"\n✗ Failed (attempt {failure_count}/{MAX_FAILURE_RETRIES}, will retry): {next_video['title']}")
     else:
         print("No new videos to process. Channel caught up.")
 
