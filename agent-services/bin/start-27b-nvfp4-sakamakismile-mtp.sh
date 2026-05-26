@@ -76,6 +76,7 @@ fi
 export PATH="$VLLM_VENV/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
 export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDA_HOME="/opt/cuda"
+export NVCC_CCBIN=/usr/bin/g++-15
 # Single-GPU host: index 0 = RTX PRO 6000 Blackwell (this server, port 8096).
 # 5090 removed 2026-05-18.
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
