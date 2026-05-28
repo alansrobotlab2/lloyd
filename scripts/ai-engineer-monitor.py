@@ -44,11 +44,69 @@ VAULT_PAPER_DIR = os.path.expanduser("~/obsidian/knowledge/papers")
 TMP_CLONES = os.path.expanduser("~/.cache/ai-engineer-clones")
 
 MAX_FAILURE_RETRIES = 12
+TRANSIENT_RETRIES = 3  # Transient failures (network, quota) before hard-fail
 RETRY_INTERVAL_SECONDS = 900
 
 # LLM endpoints
 LLM_URL = os.environ.get("LLM_API_URL", "http://localhost:8096/v1/chat/completions")
 LLM_MODEL = os.environ.get("LLM_MODEL", "primary")
+
+
+def is_video_playable(video_id):
+    """Quick check if a video is playable (not a scheduled premiere, not age-restricted, etc).
+    Returns (playable: bool, reason: str)."""
+    code = '''
+import sys, json, re
+try:
+    import yt_dlp
+except ImportError:
+    print("NOT_PLAYABLE: yt-dlp not available")
+    sys.exit(0)
+
+ydl = yt_dlp.YoutubeDL({
+    "quiet": True, "no_warnings": True, "extract_flat": False,
+})
+try:
+    info = ydl.extract_info(sys.argv[1], download=False)
+    status = info.get("status", "")
+    availability = info.get("availability", "")
+    reason = info.get("reason", "")
+    # Check the raw playability status
+    play_status = info.get("_playability_status", {})
+    play_reason = play_status.get("reason", "") if play_status else ""
+    print(json.dumps({
+        "playable": status != "premiere_scheduled" and availability != "private" and availability != "unlisted",
+        "status": status,
+        "availability": availability,
+        "reason": reason,
+        "play_reason": play_reason,
+    }))
+except Exception as e:
+    err_msg = str(e).lower()
+    if "premiere" in err_msg or "unplayable" in err_msg or "not available" in err_msg:
+        print("NOT_PLAYABLE: " + str(e)[:200])
+    else:
+        print("UNKNOWN: " + str(e)[:200])
+'''
+    result = subprocess.run(
+        ["uv", "run", "--with", "yt-dlp", "python3", "-c", code,
+         f"https://www.youtube.com/watch?v={video_id}"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        return False, "yt-dlp unavailable"
+    output = result.stdout.strip()
+    if output.startswith("NOT_PLAYABLE") or output.startswith("UNKNOWN"):
+        return False, output.split(": ", 1)[-1] if ": " in output else output
+    if output.startswith("{"):
+        try:
+            data = json.loads(output)
+            if not data.get("playable"):
+                return False, data.get("reason") or data.get("play_reason") or data.get("status", "unplayable")
+            return True, ""
+        except json.JSONDecodeError:
+            pass
+    return True, ""  # Assume playable if we can't determine
 
 
 # ── State management ───────────────────────────────────────────────────
@@ -650,11 +708,26 @@ def _is_retry_eligible(entry, now):
     """A failed entry is retry-eligible if it hasn't exceeded MAX_FAILURE_RETRIES
     and at least RETRY_INTERVAL_SECONDS has passed since the last attempt.
 
-    Why: transcripts often appear 1–2 hours after a video is published; a
-    transcript-fetch failure on the first try is normal and should be retried."""
+    WHY: transcripts often appear 1–2 hours after a video is published; a
+    transcript-fetch failure on the first try is normal and should be retried.
+
+    However, *permanent* errors (no transcript exists, video unavailable, age
+    restricted) should be hard-failed after TRANSIENT_RETRIES attempts to avoid
+    blocking the queue indefinitely."""
     if entry.get("status") != "failed":
         return False
-    if entry.get("failure_count", 0) >= MAX_FAILURE_RETRIES:
+    failure_count = entry.get("failure_count", 0)
+    error = entry.get("transcript_error", "")
+
+    # Permanent errors: give up after TRANSIENT_RETRIES
+    if _is_permanent_error(error):
+        if failure_count >= TRANSIENT_RETRIES:
+            return False
+        retries_used = failure_count
+    else:
+        retries_used = failure_count
+
+    if retries_used >= MAX_FAILURE_RETRIES:
         return False
     last_attempt = entry.get("last_attempt_at")
     if not last_attempt:
@@ -666,17 +739,53 @@ def _is_retry_eligible(entry, now):
         return True
 
 
+def _is_permanent_error(error_msg):
+    """Return True if the transcript error is permanent (not a network glitch)."""
+    if not error_msg:
+        return False
+    low = error_msg.lower()
+    permanent_keywords = [
+        "transcriptdata", "notranscriptfound", "no subtitles",
+        "no transcript", "age restriction", "unavailable", "private",
+        "deleted", "premiere", "unplayable", "region",
+        "videounplayable",
+        "couldn't find", "could not fetch transcript", "could not find transcript",
+    ]
+    return any(kw in low for kw in permanent_keywords)
+
+
+def mark_video_skipped(state, video_id, reason):
+    """Mark a video as permanently skipped (e.g. premiere scheduled, unplayable)."""
+    if "seen" not in state:
+        state["seen"] = {}
+    now = datetime.now(timezone.utc).isoformat()
+    state["seen"][video_id] = {
+        "status": "skipped",
+        "reason": reason,
+        "skipped_at": now,
+    }
+
+
 def get_next_video(state, all_videos):
     """Find next video to process.
 
     Priority:
       1. Unseen videos (truly new, newest first per channel ordering)
+         — skip unplayable ones (premieres, region-locked, etc.)
       2. Failed videos eligible for retry — never let one failed video at the
          top of the feed block fresh uploads behind it."""
     seen = state["seen"]
     now = datetime.now(timezone.utc)
     for video in all_videos:
-        if video["id"] not in seen:
+        vid_id = video["id"]
+        if vid_id not in seen:
+            # Check if video is actually playable
+            playable, reason = is_video_playable(vid_id)
+            if not playable:
+                print(f"  Skipping unplayable video {vid_id}: {reason}")
+                mark_video_skipped(state, vid_id, reason)
+                save_state(state)
+                continue
             return video
     for video in all_videos:
         entry = seen.get(video["id"])
@@ -734,7 +843,38 @@ def main():
         return
 
     # Process one (default)
-    pending_vids = [(vid, info) for vid, info in state["seen"].items() if info["status"] == "pending"]
+    pending_vids = [(vid, info) for vid, info in state["seen"].items() if isinstance(info, dict) and info.get("status") == "pending"]
+
+    # Also check for retry-eligible failed videos
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    retry_candidates = []
+    for vid, info in state["seen"].items():
+        if isinstance(info, dict) and info.get("status") == "failed" and _is_retry_eligible(info, now):
+            retry_candidates.append((vid, info))
+
+    if retry_candidates:
+        vid, info = retry_candidates[0]
+        title = info.get("title", "Unknown")
+        print(f"Retrying failed video: {title} ({vid})")
+        success = process_video(vid, title, info.get("published", ""))
+        prior_count = info.get("failure_count", 0)
+        state["seen"][vid]["status"] = "completed" if success else "failed"
+        if not success:
+            state["seen"][vid]["failure_count"] = prior_count + 1
+            state["seen"][vid]["last_attempt_at"] = now.isoformat()
+        else:
+            state["seen"][vid].pop("failure_count", None)
+            state["seen"][vid].pop("last_attempt_at", None)
+        state["seen"][vid]["youtube_note"] = os.path.join(
+            VAULT_YT_DIR, f"video-{vid}.md"
+        )
+        save_state(state)
+        if success:
+            print(f"\n✓ Retry succeeded: {title}")
+        else:
+            print(f"\n✗ Retry failed: {title}")
+        return
 
     if pending_vids:
         vid, info = pending_vids[0]
