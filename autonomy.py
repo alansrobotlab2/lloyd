@@ -439,6 +439,11 @@ async def run_task(task_id) -> dict:
 
     logger.info("Running task #%s: %s (model=%s)", task_id, task.get("name"), task_model)
     started_at = now_iso
+    # Capture tool/script failures that happen INSIDE the run (e.g. a Bash command
+    # exiting non-zero). The harness returns these to the model as tool_results with
+    # is_error=True rather than raising, so without this they never reach the run
+    # record. Defined before the try so the except path can reference it safely.
+    tool_errors: list[str] = []
 
     try:
         from app.harness import run_query, RunOptions
@@ -473,6 +478,14 @@ async def run_task(task_id) -> dict:
                 async for evt in run_query(messages, options):
                     if evt["type"] == "text_delta":
                         final_response += evt["text"]
+                    elif evt["type"] == "tool_result" and evt.get("is_error"):
+                        content = evt.get("content")
+                        if isinstance(content, list):
+                            content = " ".join(
+                                str(b.get("text", b)) if isinstance(b, dict) else str(b)
+                                for b in content
+                            )
+                        tool_errors.append(str(content)[:600])
         except asyncio.TimeoutError:
             logger.warning("Task #%s timed out after %ds", task_id, timeout)
             return {
@@ -487,6 +500,9 @@ async def run_task(task_id) -> dict:
 
         silent_failures = _detect_silent_failures(final_response)
         body_parts = [f"## Prompt\n\n{prompt[:500]}...", f"## Response\n\n{final_response}"]
+        if tool_errors:
+            errs_md = "\n\n".join(f"```\n{e}\n```" for e in tool_errors[:10])
+            body_parts.insert(1, f"## ⚠ Tool/script errors during run ({len(tool_errors)})\n\n{errs_md}")
         if silent_failures:
             indicators_md = "\n".join(f"- `{s}`" for s in silent_failures[:5])
             body_parts.insert(1, f"## ⚠ Silent failure indicators detected\n\n{indicators_md}")
@@ -514,6 +530,12 @@ async def run_task(task_id) -> dict:
                 f"Run {run_id} — success ({duration:.0f}s) ⚠ silent-failure indicators: "
                 f"{silent_failures[0][:120]}",
             )
+        elif tool_errors:
+            _append_activity_log(
+                task_id,
+                f"Run {run_id} — success ({duration:.0f}s) ⚠ {len(tool_errors)} "
+                f"tool error(s); see autonomy-runs/{task_id}/{run_id}.md",
+            )
         else:
             _append_activity_log(task_id, f"Run {run_id} — success ({duration:.0f}s)")
 
@@ -533,14 +555,25 @@ async def run_task(task_id) -> dict:
         _update_task_field(task_id, status="up_next",
                            failure_count=current_failures + 1, updated=completed_at)
 
+        tool_errs_md = ""
+        if tool_errors:
+            joined = "\n\n".join(f"```\n{e}\n```" for e in tool_errors[-10:])
+            tool_errs_md = f"\n\n## Tool/script errors before failure ({len(tool_errors)})\n\n{joined}"
+
         _write_run_record(
             task_id=task_id, run_id=run_id, status="failed",
             started_at=started_at, completed_at=completed_at,
             duration_seconds=duration, summary=error_msg[:200],
-            body=f"## Error\n\n```\n{error_msg}\n\n{traceback.format_exc()}\n```",
+            body=f"## Error\n\n```\n{error_msg}\n\n{traceback.format_exc()}\n```{tool_errs_md}",
         )
 
-        _append_activity_log(task_id, f"Run {run_id} — FAILED: {error_msg[:100]}")
+        # Keep enough of the error to be diagnosable from the activity log itself,
+        # and point at the full run record for the traceback + tool stderr.
+        _append_activity_log(
+            task_id,
+            f"Run {run_id} — FAILED: {error_msg[:280]} "
+            f"[full: autonomy-runs/{task_id}/{run_id}.md]",
+        )
         logger.error("Task #%s failed: %s", task_id, error_msg)
         return {"success": False, "task_id": task_id, "run_id": run_id,
                 "error": error_msg, "duration_seconds": round(duration, 1)}

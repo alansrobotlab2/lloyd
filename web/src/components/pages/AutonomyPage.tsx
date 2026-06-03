@@ -46,18 +46,6 @@ const FREQUENCIES = ["one-time", "every-15min", "hourly", "daily", "weekly", "mo
 
 // ── Helper Functions ────────────────────────────────────────────────────
 
-function parseTags(raw: any): string[] {
-  if (Array.isArray(raw)) return raw;
-  if (typeof raw === "string") {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    } catch { /* not JSON, try comma-split */ }
-    return raw.split(",").map((t: string) => t.trim()).filter(Boolean);
-  }
-  return [];
-}
-
 function formatRunsPerDay(rpd: number | null): string {
   if (!rpd || rpd <= 0) return "manual";
   const intervalMin = 86400 / rpd / 60;
@@ -125,7 +113,6 @@ function TaskModal({
   const [notifyOnComplete, setNotifyOnComplete] = useState(task?.notify_on_complete ?? true);
   const [preemptible, setPreemptible] = useState(task?.preemptible ?? true);
   const [frequency, setFrequency] = useState(task?.frequency || "");
-  const [tags, setTags] = useState(parseTags(task?.tags).join(", "));
   const [maxRetries, setMaxRetries] = useState(task?.max_retries?.toString() || "");
   const [preferredHours, setPreferredHours] = useState(task?.preferred_hours || "");
   const [runs, setRuns] = useState<Array<{id: number; started: string; started_at?: string; completed: string | null; completed_at?: string; status: string; summary: string | null; activity_log: string | null; duration_seconds: number | null}>>([]);
@@ -170,7 +157,6 @@ function TaskModal({
         notify_on_complete: notifyOnComplete,
         preemptible: preemptible,
         frequency: frequency || null,
-        tags: tags || null,
         max_retries: maxRetries ? parseInt(maxRetries) : null,
         preferred_hours: preferredHours || null,
         runs_per_day: runsPerDay ? parseFloat(runsPerDay) : null,
@@ -471,18 +457,6 @@ function TaskModal({
           </div>
 
           {/* Tags */}
-          <div>
-            <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
-              Tags
-            </label>
-            <input
-              type="text"
-              value={tags}
-              onChange={(e) => setTags(e.target.value)}
-              placeholder="comma, separated, tags"
-              className="w-full bg-secondary text-xs text-foreground rounded-lg px-3 py-2 border border-border/50 outline-none focus:border-primary/50"
-            />
-          </div>
 
           {/* Toggles */}
           <div className="space-y-2">
@@ -742,11 +716,6 @@ function TaskCard({
               </span>
             );
           })()}
-          {parseTags(task.tags).length > 0 && parseTags(task.tags).map((tag: string) => (
-            <span key={tag} className="text-[10px] text-teal-400 bg-teal-400/10 px-1.5 py-0.5 rounded">
-              {tag}
-            </span>
-          ))}
         </div>
       </div>
       {insertIndicator === "below" && (

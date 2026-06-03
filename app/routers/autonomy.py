@@ -130,7 +130,7 @@ def _autonomy_write_file(task_dict: dict) -> Path:
     path = existing if existing else _AUTONOMY_DIR / f"{task_id}-{_autonomy_slugify(name)}.md"
     fm = {}
     for key in ("type", "id", "name", "description", "status", "priority", "frequency",
-                 "agent_id", "model", "tags", "auto_advance", "preemptible", "pipeline_mode",
+                 "agent_id", "model", "auto_advance", "preemptible", "pipeline_mode",
                  "timeout_seconds", "max_retries", "failure_count", "skill_name", "cron_id",
                  "runs_per_day", "scheduled_at", "last_run", "next_run", "depends_on",
                  "preferred_hours", "notify_on_complete", "pipeline", "created", "updated"):
@@ -151,8 +151,8 @@ async def autonomy_tasks(status: str = "", tag: str = ""):
         return JSONResponse({"tasks": []})
     tasks = []
     for path in _AUTONOMY_DIR.glob("*.md"):
-        if path.name == "_config.md":
-            continue
+        if not re.match(r"\d+-", path.name):
+            continue  # only NN-name.md task files; skip _config.md, reports, notes
         task = _autonomy_parse(path)
         if task is None:
             continue
@@ -175,9 +175,6 @@ async def autonomy_task_write(request: Request):
         if not name:
             raise HTTPException(status_code=400, detail="name required for new task")
         new_id = _autonomy_next_id()
-        tags = data.get("tags", [])
-        if isinstance(tags, str):
-            tags = [t.strip() for t in tags.split(",") if t.strip()]
         task_dict = {
             "type": "autonomy",
             "id": new_id,
@@ -190,7 +187,6 @@ async def autonomy_task_write(request: Request):
             "agent_id": data.get("agent_id") or "memory",
             "model": data.get("model", ""),
             "timeout_seconds": data.get("timeout_seconds") or 1800,
-            "tags": tags,
             "auto_advance": data.get("auto_advance", False),
             "preemptible": data.get("preemptible", True),
             "pipeline_mode": data.get("pipeline_mode", False),
@@ -218,11 +214,6 @@ async def autonomy_task_write(request: Request):
                      "max_retries", "depends_on", "preferred_hours", "cron_id", "runs_per_day"):
             if key in data:
                 task[key] = data[key]
-        if "tags" in data:
-            tags = data["tags"]
-            if isinstance(tags, str):
-                tags = [t.strip() for t in tags.split(",") if t.strip()]
-            task["tags"] = tags
         task["created"] = task.get("created_at") or task.get("created", "")
         task["updated"] = now
         _autonomy_write_file(task)
