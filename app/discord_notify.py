@@ -44,3 +44,28 @@ async def _discord_notify_task_complete(task_id: int, task_name: str, response_p
             )
     except Exception as e:
         logger.warning("Discord notify failed: %s", e)
+
+
+async def discord_alert(message: str, title: str = "⚠️ Autonomy health alert") -> None:
+    """Post a plain operational alert (e.g. scheduler stall, unparseable tasks)."""
+    home_channel = CONFIG.get("discord", {}).get("home_channel")
+    token = _discord_token()
+    if not home_channel or not token:
+        logger.warning("discord_alert (no channel/token configured): %s", message)
+        return
+    embed = {
+        "title": title,
+        "description": message[:2000],
+        "color": 15548997,  # red
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"https://discord.com/api/v10/channels/{home_channel}/messages",
+                headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
+                json={"embeds": [embed]},
+            )
+    except Exception as e:
+        logger.warning("Discord alert failed: %s", e)

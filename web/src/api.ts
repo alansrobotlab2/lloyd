@@ -425,7 +425,6 @@ export interface AutonomyTask {
   preemptible: boolean;
   pipeline_mode: boolean;
   notify_on_complete: boolean;
-  tags: string[];
   created_at: string;
   updated_at: string;
   created?: string;

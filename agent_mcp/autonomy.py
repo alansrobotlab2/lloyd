@@ -63,7 +63,6 @@ def _parse_task_file(path: Path) -> dict | None:
             "auto_advance": bool(frontmatter.get("auto_advance", False)),
             "preemptible": bool(frontmatter.get("preemptible", True)),
             "board_id": frontmatter.get("board_id", 4),
-            "tags": frontmatter.get("tags", []) or [],
             "created_at": _to_iso(frontmatter.get("created", frontmatter.get("created_at", ""))),
             "updated_at": _to_iso(frontmatter.get("updated", frontmatter.get("updated_at", ""))),
             "skill_name": frontmatter.get("skill_name", frontmatter.get("skill_path", "")),
@@ -105,7 +104,6 @@ def _write_task_file(task_dict: dict) -> Path:
         "frequency": task_dict.get("frequency", ""),
         "agent_id": task_dict.get("agent_id", "memory"),
         "model": task_dict.get("model", ""),
-        "tags": task_dict.get("tags", []),
         "auto_advance": task_dict.get("auto_advance", False),
         "preemptible": task_dict.get("preemptible", True),
         "pipeline_mode": task_dict.get("pipeline_mode", False),
@@ -208,7 +206,6 @@ async def list_tools():
             "type": "object",
             "properties": {
                 "status": {"type": "string", "description": "Filter by status (draft, up_next, in_progress)"},
-                "tag": {"type": "string", "description": "Filter by tag"},
                 "frequency": {"type": "string", "description": "Filter by frequency"},
                 "agent_id": {"type": "string", "description": "Filter by agent_id"},
             },
@@ -226,7 +223,6 @@ async def list_tools():
                 "agent_id": {"type": "string", "description": "Agent ID to run the task"},
                 "model": {"type": "string", "description": "Model to use"},
                 "timeout_seconds": {"type": "integer", "description": "Timeout in seconds"},
-                "tags": {"type": "string", "description": "Comma-separated tags"},
                 "auto_advance": {"type": "boolean"},
                 "preemptible": {"type": "boolean"},
                 "scheduled_at": {"type": "string"},
@@ -285,7 +281,6 @@ def _handle_tasks(params: dict) -> str:
     if not AUTONOMY_DIR.exists():
         return json.dumps({"tasks": []})
     status = params.get("status", "")
-    tag = params.get("tag", "")
     frequency = params.get("frequency", "")
     agent_id = params.get("agent_id", "")
     tasks = []
@@ -301,15 +296,6 @@ def _handle_tasks(params: dict) -> str:
             continue
         if agent_id and task.get("agent_id") != agent_id:
             continue
-        if tag:
-            task_tags = task.get("tags", [])
-            if not isinstance(task_tags, list):
-                try:
-                    task_tags = json.loads(task_tags) if task_tags else []
-                except (json.JSONDecodeError, TypeError):
-                    task_tags = []
-            if tag not in task_tags:
-                continue
         tasks.append(task)
     return json.dumps({"tasks": tasks})
 
@@ -323,8 +309,6 @@ def _handle_write(params: dict) -> str:
         if not name:
             return json.dumps({"error": "name is required when creating a task"})
         new_id = _next_task_id()
-        tags_str = params.get("tags", "")
-        effective_tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
         task_dict = {
             "id": new_id,
             "name": name,
@@ -336,7 +320,6 @@ def _handle_write(params: dict) -> str:
             "agent_id": params.get("agent_id", "") or "memory",
             "model": params.get("model", ""),
             "timeout_seconds": params.get("timeout_seconds", 0) or 1800,
-            "tags": effective_tags,
             "auto_advance": params.get("auto_advance", False),
             "preemptible": params.get("preemptible", True),
             "scheduled_at": params.get("scheduled_at", ""),
@@ -361,8 +344,6 @@ def _handle_write(params: dict) -> str:
                 task_dict[key] = params[key]
         if params.get("timeout_seconds", 0) > 0:
             task_dict["timeout_seconds"] = params["timeout_seconds"]
-        if params.get("tags"):
-            task_dict["tags"] = [t.strip() for t in params["tags"].split(",") if t.strip()]
         if params.get("depends_on", 0) > 0:
             task_dict["depends_on"] = params["depends_on"]
         if "auto_advance" in params:

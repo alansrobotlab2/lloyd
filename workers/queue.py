@@ -12,7 +12,7 @@ import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -144,6 +144,12 @@ class WorkQueue:
     def _init_db(self) -> None:
         with self._lock, self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # Additive migration: retry-backoff support. `not_before` gates when a
+            # requeued item becomes claimable again, so a failing item (e.g. during
+            # a vLLM wedge) backs off instead of being re-claimed instantly.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(queue)").fetchall()}
+            if "not_before" not in cols:
+                conn.execute("ALTER TABLE queue ADD COLUMN not_before TEXT")
             conn.commit()
         logger.info("workers.db initialized at %s", self.db_path)
 
@@ -212,7 +218,9 @@ class WorkQueue:
             }
             rows = conn.execute(
                 "SELECT * FROM queue WHERE state='queued' "
-                "ORDER BY priority ASC, enqueued_at ASC LIMIT 50"
+                "AND (not_before IS NULL OR not_before <= ?) "
+                "ORDER BY priority ASC, enqueued_at ASC LIMIT 50",
+                (_now_iso(),),
             ).fetchall()
             for row in rows:
                 src = row["source"]
@@ -286,9 +294,17 @@ class WorkQueue:
                 )
                 new_state = "poisoned"
             else:
+                # Exponential backoff before the item is claimable again, so a
+                # failing item (esp. during a vLLM wedge) doesn't get re-claimed
+                # instantly in a tight failure loop. 30s, 60s, 120s, ... capped 10m.
+                backoff = min(600, 30 * (2 ** max(0, attempts - 1)))
+                not_before = (
+                    datetime.now(timezone.utc) + timedelta(seconds=backoff)
+                ).isoformat()
                 conn.execute(
-                    "UPDATE queue SET state='queued', claimed_at=NULL, claimed_by=NULL, error=? WHERE id=?",
-                    (error[:2000], item_id),
+                    "UPDATE queue SET state='queued', claimed_at=NULL, claimed_by=NULL, "
+                    "error=?, not_before=? WHERE id=?",
+                    (error[:2000], not_before, item_id),
                 )
                 new_state = "queued"
             conn.commit()
