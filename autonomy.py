@@ -60,8 +60,8 @@ def recover_stuck_tasks() -> list:
         return recovered
     now = datetime.datetime.now(datetime.timezone.utc)
     for path in AUTONOMY_DIR.glob("*.md"):
-        if path.name == "_config.md":
-            continue
+        if not re.match(r"\d+-", path.name):
+            continue  # only NN-name.md task files; skip _config.md, reports, notes
         task = _parse_task_file(path)
         if not task or str(task.get("status", "")).strip() != "in_progress":
             continue
@@ -79,13 +79,61 @@ def recover_stuck_tasks() -> list:
 
 # ── Task file I/O ─────────────────────────────────────────────────────────────
 
+def _sanitize_frontmatter(fm_text: str) -> str:
+    """Repair the recurring `tags:` corruption so a bad tag line can never again
+    silently drop a task from the scheduler.
+
+    The corruption is a block→inline replacement of the tags field that orphans
+    the pre-existing block-list items, producing invalid YAML, e.g.:
+        tags: [38-foo, autonomy, pipeline]
+        - nightly
+        - reflection
+    We fold the orphan `- item` lines back into the inline list. The task stays
+    scheduled; the next yaml.dump write (e.g. _update_task_field) normalizes the
+    file on disk. See project_autonomy_silent_task_drop memory.
+    """
+    lines = fm_text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^(\s*)tags:\s*\[(.*)\]\s*$", lines[i])
+        if m:
+            indent, inside = m.group(1), m.group(2)
+            items = [x.strip().strip("'\"") for x in inside.split(",") if x.strip()]
+            j = i + 1
+            while j < len(lines) and re.match(r"^\s*-\s+\S", lines[j]):
+                it = lines[j].strip()[1:].strip().strip("'\"").strip("[]").strip().strip("'\"")
+                if it and it not in items:
+                    items.append(it)
+                j += 1
+            if j > i + 1:  # there were orphan items → repair
+                out.append(f"{indent}tags: [{', '.join(items)}]")
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
 def _parse_task_file(path: Path) -> Optional[dict]:
     try:
         content = path.read_text(encoding="utf-8")
         parts = content.split("---\n", 2)
         if len(parts) < 3:
             return None
-        fm = yaml.safe_load(parts[1])
+        try:
+            fm = yaml.safe_load(parts[1])
+        except Exception as e:
+            # Self-heal the known recurring `tags:` corruption rather than
+            # silently dropping the task (which dormant-killed 34/40 tasks on
+            # 2026-05-28). Retry once after sanitizing.
+            repaired = _sanitize_frontmatter(parts[1])
+            try:
+                fm = yaml.safe_load(repaired)
+                logger.warning("Recovered corrupted frontmatter in %s (%s)", path.name, e)
+            except Exception:
+                logger.error("Failed to parse %s (unrecoverable): %s", path, e)
+                return None
         if not isinstance(fm, dict):
             return None
         fm["body"] = parts[2] if len(parts) > 2 else ""
@@ -99,8 +147,8 @@ def _parse_task_file(path: Path) -> Optional[dict]:
 def _find_task_file(task_id) -> Optional[Path]:
     task_id = str(task_id)
     for path in AUTONOMY_DIR.glob("*.md"):
-        if path.name == "_config.md":
-            continue
+        if not re.match(r"\d+-", path.name):
+            continue  # only NN-name.md task files; skip _config.md, reports, notes
         if path.name.startswith(f"{task_id}-"):
             return path
     return None
@@ -159,8 +207,8 @@ def _all_runnable_tasks() -> list[dict]:
         return []
     tasks = []
     for path in AUTONOMY_DIR.glob("*.md"):
-        if path.name == "_config.md":
-            continue
+        if not re.match(r"\d+-", path.name):
+            continue  # only NN-name.md task files; skip _config.md, reports, notes
         task = _parse_task_file(path)
         if not task:
             continue
