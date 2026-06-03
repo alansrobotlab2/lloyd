@@ -51,7 +51,15 @@ VAULT_SEGMENTS = {
 WEIGHT_ADJACENT = 0.8        # sequence_distance <= 2
 WEIGHT_SAME_SESSION = 0.4    # sequence_distance > 2
 MIN_AGGREGATE_WEIGHT = 0.5   # minimum to propose
-LLM_CLASSIFY_THRESHOLD = 0.8 # minimum to run Stage 2
+# Stage-2 classify gate. Pre-classification confidence is capped at min(0.7, weight/2),
+# so co-access weights rarely reach 0.8 and proposals piled up unclassified (911 stuck
+# as of 2026-06-03). Lowered to match MIN_AGGREGATE_WEIGHT so every proposed pair gets
+# LLM-typed. Classification is non-destructive; auto-approve stays gated at 0.85 below.
+LLM_CLASSIFY_THRESHOLD = 0.5 # minimum to run Stage 2
+# Per-run cap on Stage-2 LLM classification so the every-15min #51 task drains a large
+# pending backlog (911 as of 2026-06-03) in bounded batches instead of attempting all
+# at once and timing out. Progress is saved incrementally so a kill never loses work.
+MAX_CLASSIFY_PER_RUN = 40
 
 # Autonomy sessions are maintenance, not meaningful user work
 AUTONOMY_WEIGHT_FACTOR = 0.3
@@ -407,6 +415,10 @@ def classify_relationship(doc_a: str, doc_b: str, context: str) -> Optional[dict
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "max_tokens": 200,
+        # primary is a reasoning model; without this it spends the whole token budget
+        # "thinking" and returns empty content (finish_reason=length). Classification
+        # needs no reasoning — force a direct JSON answer.
+        "chat_template_kwargs": {"enable_thinking": False},
     }).encode()
 
     req = urllib.request.Request(
@@ -608,6 +620,34 @@ def cmd_classify():
         print("Stage 2: No candidates above LLM threshold. Nothing to classify.")
         return
 
+    # Prune proposals whose source sessions no longer exist (old UUID-named sessions
+    # that predate the current timestamp naming). They can never be classified and
+    # would otherwise clog the front of every bounded batch with skips. Mark them so
+    # they leave the pending pool. Spend each run's batch only on resolvable proposals.
+    orphaned = 0
+    resolvable = []
+    for p in candidates:
+        if any(find_session_file(s) for s in p.get("evidence", {}).get("sessions", [])[:3]):
+            resolvable.append(p)
+        else:
+            p["status"] = "skipped-no-session"
+            orphaned += 1
+    if orphaned:
+        print(f"Stage 2: pruned {orphaned} proposals with no resolvable session "
+              f"(status=skipped-no-session)")
+        save_proposals(data)
+    candidates = resolvable
+
+    if not candidates:
+        print("Stage 2: No classifiable candidates with resolvable sessions.")
+        return
+
+    total_eligible = len(candidates)
+    if total_eligible > MAX_CLASSIFY_PER_RUN:
+        print(f"Stage 2: {total_eligible} eligible; capping this run to "
+              f"{MAX_CLASSIFY_PER_RUN} (remaining drain on subsequent runs)")
+        candidates = candidates[:MAX_CLASSIFY_PER_RUN]
+
     print(f"Stage 2: Classifying {len(candidates)} proposals via LLM")
     classified = 0
 
@@ -648,6 +688,10 @@ def cmd_classify():
         classified += 1
         print(f"  Classified: {p['source']} --[{p['type']}]--> {p['target']} "
               f"(conf={p['confidence']})")
+
+        # Incremental save so a timeout/kill mid-batch never loses classified work
+        if classified % 10 == 0:
+            save_proposals(data)
 
     save_proposals(data)
     print(f"  Classified: {classified}/{len(candidates)}")

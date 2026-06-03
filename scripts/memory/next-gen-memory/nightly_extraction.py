@@ -225,7 +225,7 @@ class NightlyExtraction:
         
         print(f"  → Facts directory cleaned")
     
-    def run_full_extraction(self, full_mode=False, workers=1, clean=False):
+    def run_full_extraction(self, full_mode=False, workers=1, clean=False, limit=0):
         """Run complete nightly extraction pipeline."""
         start_time = datetime.now()
         log_lines = [
@@ -257,7 +257,7 @@ class NightlyExtraction:
             
             # Step 1: Full vault fact extraction
             log_lines.append("\n[Step 1] Full Vault Fact Extraction")
-            facts_extracted = self._extract_all_facts(full_mode=full_mode, workers=workers)
+            facts_extracted = self._extract_all_facts(full_mode=full_mode, workers=workers, limit=limit)
             log_lines.append(f"  → Extracted {facts_extracted} new facts")
             
             # Step 2: Derives relationship inference
@@ -347,7 +347,7 @@ class NightlyExtraction:
         
         return processed, facts_count
     
-    def _extract_all_facts(self, full_mode=False, workers=1) -> int:
+    def _extract_all_facts(self, full_mode=False, workers=1, limit=0) -> int:
         """Extract facts from all documents."""
         total_facts = 0
         processed = 0
@@ -390,15 +390,36 @@ class NightlyExtraction:
         total_files = len(eligible_files)
         print(f"Found {total_files} eligible files")
 
-        # Filter by content hash - skip files unchanged since last extraction
-        skipped_unchanged = 0
-        if _HAS_HASHER and not full_mode:
-            hasher = ContentHasher()
+        # Filter by content hash - skip files already extracted (unchanged content).
+        # Applied in BOTH window and full mode so --full is a resumable backfill that
+        # skips already-done files rather than reprocessing the whole corpus.
+        hasher = ContentHasher() if _HAS_HASHER else None
+        if hasher is not None:
             changed_files = hasher.get_changed_files(eligible_files)
             skipped_unchanged = len(eligible_files) - len(changed_files)
             eligible_files = changed_files
             if skipped_unchanged > 0:
                 print(f"Skipped {skipped_unchanged} unchanged files (content hash match)")
+
+        # Optional per-run cap so a long backfill makes durable, bounded progress and
+        # exits cleanly before the bash timeout (use with --full).
+        if limit and limit > 0 and len(eligible_files) > limit:
+            print(f"Limiting this run to {limit} of {len(eligible_files)} eligible files")
+            eligible_files = eligible_files[:limit]
+
+        # Incremental checkpoint: persist hashes for already-processed files every
+        # CHECKPOINT_EVERY files so a timeout/kill never loses the whole run's work.
+        CHECKPOINT_EVERY = 25
+        pending: list = []
+
+        def _flush_checkpoint():
+            if hasher is not None and pending:
+                try:
+                    hasher.update_hashes(pending)
+                    hasher.save()
+                except Exception as e:
+                    print(f"Warning: checkpoint failed: {e}")
+                pending.clear()
 
         if workers == 1:
             # Sequential processing (default)
@@ -406,16 +427,19 @@ class NightlyExtraction:
                 p, f = self._process_single_file(md_file, full_mode, index, total_files)
                 processed += p
                 total_facts += f
+                pending.append(md_file)
+                if len(pending) >= CHECKPOINT_EVERY:
+                    _flush_checkpoint()
         else:
             # Parallel processing
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 # Submit all tasks
                 futures = {
-                    executor.submit(self._process_single_file, md_file, full_mode, index, total_files): 
+                    executor.submit(self._process_single_file, md_file, full_mode, index, total_files):
                     (index, md_file)
                     for index, md_file in enumerate(eligible_files, 1)
                 }
-                
+
                 # Collect results
                 for future in as_completed(futures):
                     index, md_file = futures[future]
@@ -423,20 +447,18 @@ class NightlyExtraction:
                         p, f = future.result()
                         processed += p
                         total_facts += f
+                        pending.append(md_file)
+                        if len(pending) >= CHECKPOINT_EVERY:
+                            _flush_checkpoint()
                     except Exception as e:
                         print(f"Error processing {md_file}: {e}")
-        
+
         print(f"Processed {processed} documents, extracted {total_facts} facts")
 
-        # Update content hashes for processed files
-        if _HAS_HASHER:
-            try:
-                hasher = ContentHasher()
-                hasher.update_hashes(eligible_files)
-                hasher.save()
-                print(f"Updated content hashes for {len(eligible_files)} files")
-            except Exception as e:
-                print(f"Warning: Failed to update content hashes: {e}")
+        # Final checkpoint for any remaining processed files
+        _flush_checkpoint()
+        if hasher is not None:
+            print(f"Updated content hashes for {processed} processed files")
 
         return total_facts
     
@@ -572,7 +594,15 @@ def main():
         action="store_true",
         help="Just rebuild index (existing behavior)"
     )
-    
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Process at most N eligible files this run (0 = no cap). "
+             "Use with --full for durable, bounded backfill that checkpoints "
+             "progress and exits cleanly before the bash timeout."
+    )
+
     args = parser.parse_args()
     
     extraction = NightlyExtraction()
@@ -587,7 +617,8 @@ def main():
         result = extraction.run_full_extraction(
             full_mode=args.full,
             workers=args.workers,
-            clean=args.clean
+            clean=args.clean,
+            limit=args.limit
         )
         print("\nResult:", json.dumps(result, indent=2))
 
