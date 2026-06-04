@@ -254,6 +254,17 @@ def build_system_prompt(
     )
     parts.append(bg_tasks)
 
+    turn_discipline = (
+        "Turn discipline: never end a turn on an unfulfilled announcement. If you "
+        "say \"Let me …\", \"I'll …\", \"Now I'll …\", or end a sentence on a colon "
+        "promising a next step, the matching tool call MUST be in that same message "
+        "— do not stop and wait. Either do the thing now or don't announce it. When "
+        "a task has multiple steps, keep working across iterations until it is "
+        "actually complete, then state the result explicitly. Do not hand control "
+        "back mid-task with work still pending."
+    )
+    parts.append(turn_discipline)
+
     return "\n\n".join(parts)
 
 

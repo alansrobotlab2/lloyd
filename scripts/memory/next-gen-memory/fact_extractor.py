@@ -105,6 +105,18 @@ Rules:
 5. Note confidence level (0.0-1.0)
 6. If a fact contradicts a known fact, flag it as an update
 
+CRITICAL GUARDRAILS:
+- NEVER extract "session" as an entity. Session metadata (duration, message count,
+  triviality, health checks, emptiness) is NOT a valid entity.
+- NEVER create entities named "session", "session-distill", "session_<timestamp>",
+  "session_pong5", or any session identifier. Sessions are the SOURCE of data,
+  not entities to be extracted.
+- If content is from a trivial/empty session (<5 messages, health check, routine
+  maintenance), return an empty facts list. Do NOT fabricate observations like
+  "the session was short" or "had no unresolved threads".
+- Only extract facts about actual domain knowledge, tools, decisions, people,
+  systems, and concepts discussed — never about the session container itself.
+
 Content:
 {content}
 
