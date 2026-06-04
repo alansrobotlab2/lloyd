@@ -225,7 +225,7 @@ class NightlyExtraction:
         
         print(f"  → Facts directory cleaned")
     
-    def run_full_extraction(self, full_mode=False, workers=1, clean=False, limit=0):
+    def run_full_extraction(self, full_mode=False, workers=1, clean=False, limit=0, force=False):
         """Run complete nightly extraction pipeline."""
         start_time = datetime.now()
         log_lines = [
@@ -257,9 +257,35 @@ class NightlyExtraction:
             
             # Step 1: Full vault fact extraction
             log_lines.append("\n[Step 1] Full Vault Fact Extraction")
+            self.last_files_processed = 0
             facts_extracted = self._extract_all_facts(full_mode=full_mode, workers=workers, limit=limit)
-            log_lines.append(f"  → Extracted {facts_extracted} new facts")
-            
+            files_processed = getattr(self, "last_files_processed", 0)
+            log_lines.append(f"  → Processed {files_processed} files, extracted {facts_extracted} new facts")
+
+            # Gate: Steps 2-5 (derives, relation discovery, index rebuild, overview
+            # generation) only have new material to chew on when extraction touched
+            # at least one file. Running them every poll on an unchanged vault is the
+            # expense the outer skill used to guard with a git-commit watermark — now
+            # the content-hash result is the authoritative signal. --full/--clean/--force
+            # always run the complete pipeline.
+            if files_processed == 0 and not full_mode and not clean and not force:
+                end_time = datetime.now()
+                duration = (end_time - start_time).total_seconds()
+                log_lines.append("  → No new/changed files; skipping relation, index, and overview steps")
+                log_lines.append(f"\nNightly Extraction Complete (noop): {end_time.isoformat()} ({duration:.1f}s)")
+                self.log_file.write_text("\n".join(log_lines))
+                return {
+                    "success": True,
+                    "noop": True,
+                    "files_processed": 0,
+                    "facts_extracted": 0,
+                    "derives_created": 0,
+                    "relations_found": 0,
+                    "total_relationships": None,
+                    "overviews_generated": 0,
+                    "duration_seconds": duration,
+                }
+
             # Step 2: Derives relationship inference
             log_lines.append("\n[Step 2] Derives Relationship Inference")
             derives_created = self._infer_derives_relationships()
@@ -295,6 +321,8 @@ class NightlyExtraction:
 
             return {
                 "success": True,
+                "noop": False,
+                "files_processed": files_processed,
                 "duration_seconds": duration,
                 "facts_extracted": facts_extracted,
                 "derives_created": derives_created,
@@ -375,8 +403,12 @@ class NightlyExtraction:
             if any(part in path_str for part in ["node_modules", ".venv", ".cache"]):
                 continue
             
-            # Skip fact files, pipeline artifacts, skills, and agent workspace files
-            if any(skip in path_str for skip in ["/facts/", "/_pipeline/", "/skills/", "/agents/"]):
+            # Skip fact files, pipeline artifacts, skills, and agent workspace files.
+            # /autonomy/ is excluded too: the scheduler rewrites task frontmatter
+            # (last_run/next_run) every ~15 min, so those files always look "changed"
+            # — they'd keep the content-hash gate from ever going noop and produce
+            # junk entities like "Autonomy Task #32". Task defs are not knowledge.
+            if any(skip in path_str for skip in ["/facts/", "/_pipeline/", "/skills/", "/agents/", "/autonomy/"]):
                 continue
             
             # Check modification time (unless full mode)
@@ -460,6 +492,9 @@ class NightlyExtraction:
         if hasher is not None:
             print(f"Updated content hashes for {processed} processed files")
 
+        # Expose file-processed count so run_full_extraction can gate the
+        # expensive downstream steps on whether any new/changed file was seen.
+        self.last_files_processed = processed
         return total_facts
     
     def _infer_derives_relationships(self) -> int:
@@ -595,6 +630,12 @@ def main():
         help="Just rebuild index (existing behavior)"
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Run the full downstream pipeline (relations/index/overviews) even "
+             "when no new files were processed (overrides the noop short-circuit)."
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -618,9 +659,18 @@ def main():
             full_mode=args.full,
             workers=args.workers,
             clean=args.clean,
-            limit=args.limit
+            limit=args.limit,
+            force=args.force,
         )
         print("\nResult:", json.dumps(result, indent=2))
+        # Single-line, grep-friendly summary for the autonomy-data-pipeline skill's
+        # gate. status=noop means nothing changed → caller should skip downstream work.
+        print(
+            f"PIPELINE_RESULT files_processed={result.get('files_processed', 0)} "
+            f"facts={result.get('facts_extracted', 0)} "
+            f"relations={result.get('relations_found', 0)} "
+            f"status={'noop' if result.get('noop') else 'ran'}"
+        )
 
 
 if __name__ == "__main__":
