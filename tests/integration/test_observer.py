@@ -25,8 +25,10 @@ from app.inner_voice.observer import (
     ObserverState,
     _apply_lever,
     _bash_command_is_safely_readonly,
+    _STUB_ANNOUNCE_RE,
     _build_event_user_prompt,
     _extract_tool_call,
+    _fast_path_assistant_message,
     _fast_path_pretool,
     _fast_path_tool_result,
     extract_goal_card,
@@ -331,6 +333,75 @@ def test_budget_exhausted():
     assert state.interventions_used == 1, "budget should not advance"
     assert len(state.chat_messages_handle) == 1, "second inject should not have appended"
     print("test_budget_exhausted: OK")
+
+
+# ---------------------------------------------------------------------------
+# Terminal stall rescue — the "stop stopping" regression
+# (text-only "Let me …:" iterations that end the turn with work undone)
+# ---------------------------------------------------------------------------
+
+
+def test_stub_announce_regex_matches_real_stalls():
+    """Patterns lifted verbatim from the 20260602_204609_iv1734 stall storm."""
+    stalls = [
+        "The invalidate didn't fully take — they still have active facts. Let me force-expire them:",
+        "Let me check what's actually still active after the previous invalidation batch:",
+        "Those are clean. Let me batch-check the rest:",
+        "I'll go ahead and remove the noise entities.",
+    ]
+    completes = [
+        "Done. I removed 10 noise session entities; the 4 legitimate facts remain intact.",
+        "The root cause is the nightly pipeline: it extracts a session entity per run, which is noise.",
+        "Here is the complete list of session-prefixed facts: session_pong5, session-distill.",
+    ]
+    for s in stalls:
+        assert _STUB_ANNOUNCE_RE.search(s.strip()), f"should flag stall: {s!r}"
+    for s in completes:
+        assert not _STUB_ANNOUNCE_RE.search(s.strip()), f"should NOT flag complete: {s!r}"
+    print("test_stub_announce_regex_matches_real_stalls: OK")
+
+
+def test_fast_path_flags_terminal_stub_announce_as_inject():
+    """A text-only 'Let me …:' iteration → deterministic budget-bypassing inject."""
+    fp = _fast_path_assistant_message("Let me force-expire them:", [])
+    assert fp is not None and fp.action == "inject", fp
+    assert fp.bypass_budget is True
+    assert fp.content.strip()
+    print("test_fast_path_flags_terminal_stub_announce_as_inject: OK")
+
+
+def test_fast_path_ignores_completed_answer():
+    """A delivered answer (no announce) is left to terminate naturally."""
+    fp = _fast_path_assistant_message(
+        "Done — removed 10 noise entities; legitimate session facts intact.", []
+    )
+    assert fp is None, fp
+    print("test_fast_path_ignores_completed_answer: OK")
+
+
+def test_fast_path_tool_dispatch_only_still_noops():
+    """Existing behavior preserved: text-less tool dispatch → noop, not a stall."""
+    fp = _fast_path_assistant_message("", [{"function": {"name": "Bash"}}])
+    assert fp is not None and fp.action == "noop", fp
+    print("test_fast_path_tool_dispatch_only_still_noops: OK")
+
+
+def test_stall_rescue_inject_bypasses_budget():
+    """A stall-rescue inject must continue the loop even after the discretionary
+    budget is spent — otherwise a multi-stall storm ends the turn with work
+    undone (the original 'stop stopping' failure)."""
+    state = _make_state(budget=1)
+    spent = ObserverDecision(action="inject", reason="nudge", content="first")
+    run_async(_apply_lever(state, spent, trigger="assistant_message"))
+    assert state.interventions_used == 1
+    # Budget is now exhausted; a normal inject would be downgraded.
+    rescue = ObserverDecision(
+        action="inject", reason="stall", content="keep going", bypass_budget=True
+    )
+    run_async(_apply_lever(state, rescue, trigger="assistant_message"))
+    assert rescue.action == "inject", "stall-rescue must not be budget-downgraded"
+    assert len(state.chat_messages_handle) == 2, "stall-rescue must append to continue loop"
+    print("test_stall_rescue_inject_bypasses_budget: OK")
 
 
 # ---------------------------------------------------------------------------
@@ -881,6 +952,11 @@ TESTS = [
     test_inject_on_result_degrades_when_no_callback,
     test_cancel_on_result_degrades_to_noop,
     test_budget_exhausted,
+    test_stub_announce_regex_matches_real_stalls,
+    test_fast_path_flags_terminal_stub_announce_as_inject,
+    test_fast_path_ignores_completed_answer,
+    test_fast_path_tool_dispatch_only_still_noops,
+    test_stall_rescue_inject_bypasses_budget,
     # _call_observer (tools-mode mocked)
     test_call_observer_parses_tool_call,
     test_call_observer_timeout_falls_back_to_noop,

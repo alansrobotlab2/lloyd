@@ -83,9 +83,11 @@ def normalize_full(name: str) -> str:
 
     Used for *clustering* — grouping candidates that might be the same thing.
     Not used for semantic equivalence decisions.
+    Never strips the last remaining token — a single-word entity whose name
+    IS a suffix token (e.g. 'agent', 'System', 'SDK') must not normalize to empty.
     """
     toks = tokens(name)
-    while toks and (toks[-1] in STOP_SUFFIX_TOKENS_SAFE or toks[-1] in STOP_SUFFIX_TOKENS_AMBIGUOUS):
+    while len(toks) > 1 and (toks[-1] in STOP_SUFFIX_TOKENS_SAFE or toks[-1] in STOP_SUFFIX_TOKENS_AMBIGUOUS):
         toks.pop()
     return "".join(toks)
 
@@ -567,8 +569,10 @@ def apply_merges(
 
     # ── Update alias table
     if rebuild_aliases:
-        # Start fresh: only include this sweep's canonical merges + case-variants of canonicals
-        new_aliases: dict[str, str] = {}
+        # Rebuild from existing table so we don't lose aliases from prior sweeps.
+        # (The "rebuild" semantics: add fresh normalization coverage on top of
+        #  what's already there, not wipe-start.)
+        new_aliases: dict[str, str] = dict(aliases)
     else:
         new_aliases = dict(aliases)
 

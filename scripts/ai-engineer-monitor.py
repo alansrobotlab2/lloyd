@@ -754,8 +754,26 @@ def _is_permanent_error(error_msg):
     return any(kw in low for kw in permanent_keywords)
 
 
+def _is_transient_unplayable(reason):
+    """Return True if a video is unplayable for a reason that resolves on its own —
+    a scheduled premiere or an upcoming/in-progress live stream that becomes a
+    normal, transcribable video once it airs. These must NOT be permanently
+    skipped; they're deferred and re-checked each run until they go live."""
+    if not reason:
+        return False
+    low = reason.lower()
+    transient_keywords = [
+        "premiere", "live event", "will begin", "begins in",
+        "starts in", "upcoming", "scheduled", "live stream will",
+        "this live stream",
+    ]
+    return any(kw in low for kw in transient_keywords)
+
+
 def mark_video_skipped(state, video_id, reason):
-    """Mark a video as permanently skipped (e.g. premiere scheduled, unplayable)."""
+    """Mark a video as permanently skipped (unavailable, private, deleted,
+    region-locked, age-restricted). For premieres/livestreams that haven't aired
+    yet, use mark_video_deferred() instead — those become playable later."""
     if "seen" not in state:
         state["seen"] = {}
     now = datetime.now(timezone.utc).isoformat()
@@ -764,6 +782,23 @@ def mark_video_skipped(state, video_id, reason):
         "reason": reason,
         "skipped_at": now,
     }
+
+
+def mark_video_deferred(state, video_id, reason, video=None):
+    """Mark a video as temporarily unavailable (premiere/livestream not yet aired).
+    Unlike skipped, deferred entries are re-checked every run via is_video_playable
+    and processed once they go live — so a talk first seen as a premiere is never
+    dropped permanently."""
+    if "seen" not in state:
+        state["seen"] = {}
+    now = datetime.now(timezone.utc).isoformat()
+    prior = state["seen"].get(video_id)
+    entry = prior if isinstance(prior, dict) else {}
+    entry.update({"status": "deferred", "reason": reason, "deferred_at": now})
+    if video:
+        entry.setdefault("title", video.get("title", ""))
+        entry.setdefault("published", video.get("published", ""))
+    state["seen"][video_id] = entry
 
 
 def get_next_video(state, all_videos):
@@ -778,18 +813,24 @@ def get_next_video(state, all_videos):
     now = datetime.now(timezone.utc)
     for video in all_videos:
         vid_id = video["id"]
-        if vid_id not in seen:
-            # Check if video is actually playable
+        entry = seen.get(vid_id)
+        # Unseen, or previously deferred (transiently unplayable) → (re)check
+        # playability. A premiere/livestream stays deferred until it airs.
+        if entry is None or (isinstance(entry, dict) and entry.get("status") == "deferred"):
             playable, reason = is_video_playable(vid_id)
             if not playable:
-                print(f"  Skipping unplayable video {vid_id}: {reason}")
-                mark_video_skipped(state, vid_id, reason)
+                if _is_transient_unplayable(reason):
+                    print(f"  Deferring not-yet-available video {vid_id}: {reason}")
+                    mark_video_deferred(state, vid_id, reason, video)
+                else:
+                    print(f"  Skipping unplayable video {vid_id}: {reason}")
+                    mark_video_skipped(state, vid_id, reason)
                 save_state(state)
                 continue
             return video
     for video in all_videos:
         entry = seen.get(video["id"])
-        if entry and _is_retry_eligible(entry, now):
+        if isinstance(entry, dict) and _is_retry_eligible(entry, now):
             return video
     return None
 
@@ -843,7 +884,17 @@ def main():
         return
 
     # Process one (default)
-    pending_vids = [(vid, info) for vid, info in state["seen"].items() if isinstance(info, dict) and info.get("status") == "pending"]
+    # Force-process any entry not handled by another path. Statuses with their
+    # own handling: completed/skipped (terminal), failed (retry path below),
+    # deferred (playability re-check in get_next_video). Everything else —
+    # including orphaned/legacy statuses like "new" that older script versions
+    # wrote but the current loop never consumed — is reprocessed here so it
+    # never silently stalls.
+    _NOT_PENDING = {"completed", "skipped", "failed", "deferred"}
+    pending_vids = [
+        (vid, info) for vid, info in state["seen"].items()
+        if isinstance(info, dict) and info.get("status") not in _NOT_PENDING
+    ]
 
     # Also check for retry-eligible failed videos
     from datetime import timedelta

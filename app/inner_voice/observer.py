@@ -57,6 +57,10 @@ class ObserverDecision:
     action: str = "noop"
     reason: str = ""
     content: str = ""
+    # Stall-rescue injects (terminal text-only "Let me …:" stops) bypass the
+    # discretionary intervention budget: they're not nagging, they prevent a
+    # premature turn end, and the harness's max_turns is the real backstop.
+    bypass_budget: bool = False
     # Forensic / persistence fields
     raw_response: str = ""
     input_tokens: int = 0
@@ -487,20 +491,62 @@ def _fast_path_tool_result(tool_name: str, content: str, is_error: bool) -> Obse
     return None
 
 
-def _fast_path_assistant_message(text: str, tool_calls: list) -> ObserverDecision | None:
-    """Cheap noop for assistant messages that don't need LLM judgment.
+# A text-only iteration whose text only ANNOUNCES a next action without
+# dispatching it — the classic "stop at a colon" / "Let me check …" stall.
+# Anchored so the announce verb is the LAST thing in the message (the model
+# promised an action and then stopped), or the whole thing ends on a colon.
+_STUB_ANNOUNCE_RE = re.compile(
+    r"(?:"
+    r":\s*$"                                   # ends on a colon — "announce then nothing"
+    r"|(?:^|\n)\s*(?:let me|let's|i'll|i will|i'm going to|i am going to|"
+    r"now i'll|now let me|next,?\s+i'll|first,?\s+i'll|i need to|i should|"
+    r"going to|let me go ahead and)\b[^\n]*[.:]?\s*$"   # last line is a bare announce
+    r")",
+    re.IGNORECASE,
+)
 
-    The pretool gate already evaluates each proposed tool with its real
-    args, so re-evaluating the same tool call at the assistant_message
-    boundary is duplicate work. Skip the LLM call when the iteration is
-    pure tool dispatch (no text, just tool_calls). The IV will see the
-    tool result on the next event and judge progress then.
+# Content for the deterministic stall-rescue inject (fast-path + lever paths).
+_STALL_RESCUE_CONTENT = (
+    "You ended the turn by announcing an action without doing it. Do not stop — "
+    "execute the action you just described now, in this same turn, and keep going "
+    "until the task is actually complete and you have delivered the result. If you "
+    "are genuinely finished, state the result explicitly instead of announcing more work."
+)
+
+
+def _fast_path_assistant_message(text: str, tool_calls: list) -> ObserverDecision | None:
+    """Cheap deterministic decision for assistant messages that don't need
+    LLM judgment.
+
+    Two fast paths:
+
+    1. Pure tool dispatch (text-less, just tool_calls) → noop. The pretool
+       gate already evaluated each proposed tool with its real args, so
+       re-judging here is duplicate work; the IV sees the tool result next.
+
+    2. Terminal stub-announce stall: a text-only iteration (no tool calls)
+       whose text only ANNOUNCES a next action ("Let me …:", trailing colon)
+       without dispatching it. The harness is about to END the turn —
+       loop.py only continues if the observer appends an inject — so force a
+       continue-inject deterministically. This makes stall rescue instant
+       (no observer-LLM round-trip) and, because it never touches the
+       consecutive-inject suppressor in the LLM path, a re-stall on the very
+       next iteration is rescued again rather than left to die.
     """
     if tool_calls and not text.strip():
         return ObserverDecision(
             action="noop",
             reason="fast-path: tool-dispatch-only iteration; pretool gate handles it",
         )
+    if not tool_calls:
+        stripped = text.strip()
+        if stripped and _STUB_ANNOUNCE_RE.search(stripped):
+            return ObserverDecision(
+                action="inject",
+                reason="fast-path: terminal stub-announce stall — forcing continuation",
+                content=_STALL_RESCUE_CONTENT,
+                bypass_budget=True,
+            )
     return None
 
 
@@ -746,7 +792,11 @@ async def _apply_lever(
     # Budget gate — applies to inject/ambient/clarify only. Cancel is the
     # escape hatch lever: it terminates the loop and exits, so rationing it
     # would prevent recovery from "primary keeps ignoring my injects" cases.
-    if a != "cancel" and state.interventions_used >= state.intervention_budget:
+    if (
+        a != "cancel"
+        and not decision.bypass_budget
+        and state.interventions_used >= state.intervention_budget
+    ):
         decision.action = "noop_budget_exhausted"
         decision.reason = ((decision.reason or "") + " [budget exhausted]").strip()
         return
@@ -1308,6 +1358,11 @@ def install_observer(
             if fast_path_enabled:
                 fp = _fast_path_assistant_message(text, tool_calls)
                 if fp is not None:
+                    # A stub-announce stall returns an inject — apply it so it
+                    # appends to chat_messages and the loop continues this turn.
+                    # noop fast-paths are persist-only.
+                    if fp.action == "inject":
+                        await _apply_lever(state, fp, trigger="assistant_message")
                     _persist(state, fp, trigger="assistant_message")
                     return
 
@@ -1337,14 +1392,35 @@ def install_observer(
                 ).strip()
                 _persist(state, decision, trigger="assistant_message")
                 return
-            # Block consecutive injects. The prompt's escalation rule asks the
-            # IV to convert a second-on-same-theme decision to cancel/noop, but
-            # small models reliably ignore that. If the immediately previous
-            # assistant_message decision was also an inject, force this one to
-            # noop — give the primary at least one full iteration to act on the
-            # earlier nudge before we fire again. The IV can still escalate to
-            # cancel through the normal path; this only suppresses inject-on-inject.
-            if decision.action == "inject":
+            # Terminal-iteration stall rescue. A text-only iteration (no tool
+            # calls) means the harness is about to END the turn — loop.py only
+            # keeps going if the observer appends an inject to chat_messages.
+            # If IV flagged a problem here it may have chosen `ambient`, but
+            # ambient goes to the background channel and does NOT continue the
+            # loop, so the turn would die with work undone. On a terminal
+            # iteration, upgrade ambient→inject so the nudge actually keeps
+            # primary working. (The same condition exempts the inject from the
+            # consecutive-inject suppressor below.)
+            is_terminal_iteration = not tool_calls
+            if is_terminal_iteration and decision.action == "ambient":
+                if not (decision.content or "").strip():
+                    decision.content = _STALL_RESCUE_CONTENT
+                decision.reason = (
+                    (decision.reason or "")
+                    + " [stall-rescue: ambient→inject so the loop continues]"
+                ).strip()
+                decision.action = "inject"
+                decision.bypass_budget = True
+            # Block consecutive injects — but ONLY mid-work (tool calls in
+            # flight), where the rationale holds: give primary an iteration to
+            # act on the earlier nudge before firing again. On a terminal
+            # text-only iteration the inject is the ONLY thing keeping the loop
+            # alive, so suppressing a consecutive one there guarantees the turn
+            # ends with work undone (the exact "multiple stalls" failure). A
+            # stall must always be allowed to re-fire. The IV can still escalate
+            # to cancel through the normal path; this only suppresses
+            # inject-on-inject while tools are running.
+            if decision.action == "inject" and not is_terminal_iteration:
                 last_inject_idx = -1
                 for i in range(len(state.decisions_this_turn) - 1, -1, -1):
                     d = state.decisions_this_turn[i]
