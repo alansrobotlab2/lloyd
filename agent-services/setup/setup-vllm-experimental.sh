@@ -71,24 +71,46 @@ $PIP install cuda-python==13.0.3
 # Install vLLM nightly (cu130)
 # Using nightly for latest MTP/spec-decode fixes
 #
-# IMPORTANT: --pre is REQUIRED. The cu130 wheel index only ships dev nightlies
-# (e.g. 0.19.1rc1.dev86+g70406eb1d.cu130). Without --pre, pip falls back to the
-# stable PyPI vllm wheel, which is built against CUDA 12 and crashes at import
-# with "libcudart.so.12: cannot open shared object file".
+# IMPORTANT: --pre is REQUIRED, but is NO LONGER SUFFICIENT on its own.
+# The cu130 wheel index only ships dev nightlies (e.g.
+# 0.22.1rc1.dev221+gb593396c7). PyPI now also ships FINAL releases (0.22.0,
+# 0.22.1, ...) built against CUDA 12. An unpinned `pip install vllm --pre`
+# with PyPI as an extra index resolves the PyPI cu12 final wheel — a final
+# release outranks a .devN pre-release of the same version — and that wheel
+# crashes at import with "libcudart.so.12: cannot open shared object file".
+#
+# Fix: read the single version the cu130 nightly index actually publishes and
+# pin to it, so PyPI can only ever supply transitive deps, never vllm itself.
 echo ""
-echo "=== Installing vLLM nightly (cu130) ==="
-$PIP install vllm --pre \
+echo "=== Resolving latest vLLM cu130 nightly ==="
+VLLM_NIGHTLY=$("$VLLM_VENV/bin/python" -m pip index versions vllm --pre \
+    --index-url https://wheels.vllm.ai/nightly/cu130 2>/dev/null \
+    | grep -oP '^vllm \(\K[^)]+')
+if [[ -z "$VLLM_NIGHTLY" ]]; then
+    echo "ERROR: could not resolve latest cu130 nightly version from wheels.vllm.ai"
+    exit 1
+fi
+echo "Latest cu130 nightly: $VLLM_NIGHTLY"
+echo ""
+echo "=== Installing vLLM nightly (cu130) — pinned to $VLLM_NIGHTLY ==="
+$PIP install "vllm==$VLLM_NIGHTLY" --pre \
     --index-url https://wheels.vllm.ai/nightly/cu130 \
     --extra-index-url https://pypi.org/simple
 
-# Install FlashInfer 0.6.9 (ships PR #3080 — B12x CuTe-DSL micro-kernel for
-# SM120 NVFP4 MoE; previously the missing piece for Qwen3.6-35B-A3B perf).
-# vLLM nightly metadata pins to ==0.6.8.post1 but 0.6.9 is API-compatible
-# in practice; ignore the pip dependency-resolver warning.
+# FlashInfer is now a HARD dependency of the cu130 nightly and is resolved to
+# the correct version automatically (0.6.12 as of 2026-06-05, which ships the
+# SM120 NVFP4 MoE CuTe-DSL kernels). Do NOT pin an older version here: the
+# previous explicit `flashinfer-python==0.6.9` step ran AFTER the vllm install
+# and would now DOWNGRADE the 0.6.12 that vLLM just pulled in. Just verify it
+# imports; only (re)install if somehow absent.
 echo ""
-echo "=== Installing FlashInfer 0.6.9 ==="
-$PIP install flashinfer-python==0.6.9 flashinfer-cubin==0.6.9 \
-    || $PIP install flashinfer-python flashinfer-cubin
+echo "=== Verifying FlashInfer (pulled in by vLLM) ==="
+if "$VLLM_VENV/bin/python" -c "import flashinfer; print('FlashInfer', flashinfer.__version__)"; then
+    :
+else
+    echo "FlashInfer missing — installing latest"
+    $PIP install flashinfer-python flashinfer-cubin
+fi
 
 # Install ninja (required for FlashInfer JIT compilation)
 $PIP install ninja

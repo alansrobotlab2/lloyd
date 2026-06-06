@@ -94,14 +94,26 @@ HOME = Path.home()
 VAULT = HOME / "obsidian"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
+
+# Chunked extraction. The old hard `content[:3000]` cap dropped ~40% of the median
+# vault doc (70% of docs exceed 3000 chars) — including the structured Tools /
+# GitHub / Papers sections at the bottom of YouTube notes. We now window the doc
+# so most files (≤ CHUNK_SIZE) are still a single LLM call, while longer docs get
+# full coverage across a bounded number of chunks.
+CHUNK_SIZE = 8000          # chars per chunk (~2000 tokens); 90% of docs fit in one
+CHUNK_OVERLAP = 200        # carry a little context across the cut so facts aren't split
+MAX_CHUNKS = 6             # bound cost on huge docs (sessions can be 100KB+)
+
 EXTRACTION_PROMPT = """You are a fact extraction engine. Analyze the following content and extract
 atomic facts about entities mentioned.
 
 Rules:
 1. Each fact must be a single, unambiguous statement
 2. Include temporal context if mentioned ("moved last week" → event_date)
-3. Identify the entity each fact is about (person, project, system)
-4. Categorize: preference, relationship, event, state, skill, goal, temporary
+3. A document usually covers SEVERAL distinct entities (people, projects, tools,
+   papers, systems). Attribute EACH fact to the specific entity it is about via
+   that fact's "entity" field — do NOT collapse everything onto one entity.
+4. Categorize each fact: preference, relationship, event, state, skill, goal, temporary
 5. Note confidence level (0.0-1.0)
 6. If a fact contradicts a known fact, flag it as an update
 
@@ -123,18 +135,19 @@ Content:
 Known facts about relevant entities:
 {existing_facts}
 
-Extract facts as structured JSON with the following format:
+Extract facts as structured JSON. Set the top-level "entity" to the single most
+central entity of the content; give EVERY fact its own "entity" naming the
+specific thing that fact is about (it may differ from the top-level entity):
 {{
-  "entity": "entity_name",
+  "entity": "primary_entity_name",
   "category": "category_name",
-  "source": "document_path",
-  "document_date": "YYYY-MM-DD",
   "facts": [
     {{
+      "entity": "entity this fact is about",
       "fact": "Fact statement",
       "confidence": 0.95,
       "event_date": null,
-      "category": "preference"
+      "category": "state"
     }}
   ]
 }}
@@ -147,49 +160,91 @@ class FactExtractor:
         self.model_port = model_port
         self.facts_dir = FACTS_DIR
     
-    def extract_from_document(self, doc_path: Path, content: str, 
-                              existing_facts: str = "") -> dict:
-        """Extract facts from a document."""
-        # Build prompt
-        prompt = EXTRACTION_PROMPT.format(
-            content=content[:3000],  # Limit context
-            existing_facts=existing_facts[:1000] if existing_facts else "None"
-        )
-        
-        # Call local LLM (primary model on port 8096)
-        response = self._call_llm(prompt)
-        
-        # Parse JSON response
+    def _chunk_content(self, content: str) -> list:
+        """Window long docs so most files stay a single LLM call but long docs get
+        full coverage. Returns [content] unchanged for docs <= CHUNK_SIZE."""
+        if len(content) <= CHUNK_SIZE:
+            return [content]
+        chunks = []
+        start = 0
+        step = CHUNK_SIZE - CHUNK_OVERLAP
+        while start < len(content) and len(chunks) < MAX_CHUNKS:
+            chunks.append(content[start:start + CHUNK_SIZE])
+            start += step
+        if start < len(content):
+            covered = (MAX_CHUNKS - 1) * step + CHUNK_SIZE
+            print(f"  ⚠️ doc is {len(content)} chars; capped at {MAX_CHUNKS} chunks "
+                  f"(~{covered} chars covered)")
+        return chunks
+
+    def _parse_response(self, response: str) -> dict:
+        """Parse one LLM response into {entity, category, facts}. Tolerant of code
+        fences and list-vs-object shapes."""
         try:
-            # Strip markdown code blocks if present
             if response.startswith("```"):
-                # Remove ```json and ``` markers
                 response = re.sub(r'^```\w*\n?', '', response)
                 response = re.sub(r'\n?```$', '', response)
             result = json.loads(response)
-            # Handle array responses
-            if isinstance(result, list):
-                if not result:
-                    return {"entity": None, "category": None, "facts": []}
-                # Take first element as base, merge facts from remaining
-                base = result[0] if isinstance(result[0], dict) else {"entity": None, "category": None, "facts": []}
-                for extra in result[1:]:
-                    if isinstance(extra, dict) and extra.get("facts"):
-                        base.setdefault("facts", []).extend(extra["facts"])
-                result = base
-            elif not isinstance(result, dict):
-                return {"entity": None, "category": None, "facts": []}
-            
-            # Sanitize entity to prevent nested path creation
-            if result.get("entity"):
-                result["entity"] = self._sanitize_entity(result["entity"])
-            if result.get("category"):
-                result["category"] = self._sanitize_entity(result["category"])
-            
-            return result
         except json.JSONDecodeError:
             print(f"Failed to parse LLM response as JSON: {response[:200]}")
             return {"entity": None, "category": None, "facts": []}
+
+        if isinstance(result, list):
+            if not result:
+                return {"entity": None, "category": None, "facts": []}
+            base = result[0] if isinstance(result[0], dict) else {"entity": None, "category": None, "facts": []}
+            for extra in result[1:]:
+                if isinstance(extra, dict) and extra.get("facts"):
+                    base.setdefault("facts", []).extend(extra["facts"])
+            result = base
+        elif not isinstance(result, dict):
+            return {"entity": None, "category": None, "facts": []}
+        return result
+
+    def extract_from_document(self, doc_path: Path, content: str,
+                              existing_facts: str = "") -> dict:
+        """Extract facts from a document.
+
+        Long docs are windowed (see CHUNK_SIZE) and extracted chunk-by-chunk;
+        facts from all chunks are merged and de-duplicated by text. Each fact
+        carries its own sanitized "entity" so a multi-entity doc fans out to
+        per-entity fact files instead of collapsing onto one primary entity.
+        Return shape stays {entity, category, facts} for backward compatibility.
+        """
+        existing = existing_facts[:1000] if existing_facts else "None"
+        primary_entity = None
+        primary_category = None
+        all_facts = []
+        seen_fact_text = set()
+
+        for chunk in self._chunk_content(content):
+            prompt = EXTRACTION_PROMPT.format(content=chunk, existing_facts=existing)
+            parsed = self._parse_response(self._call_llm(prompt))
+
+            if primary_entity is None and parsed.get("entity"):
+                primary_entity = self._sanitize_entity(parsed["entity"])
+                primary_category = self._sanitize_entity(parsed.get("category") or "general")
+
+            for f in parsed.get("facts", []):
+                if not isinstance(f, dict):
+                    continue
+                text = (f.get("fact") or "").strip()
+                if not text or text in seen_fact_text:
+                    continue
+                seen_fact_text.add(text)
+                # Resolve each fact to its own entity (falls back to the doc primary
+                # at write time when absent).
+                if f.get("entity"):
+                    f["entity"] = self._sanitize_entity(f["entity"])
+                if f.get("category"):
+                    f["category"] = self._sanitize_entity(f["category"])
+                all_facts.append(f)
+
+        return {
+            "entity": primary_entity or "general",
+            "category": primary_category or "general",
+            "facts": all_facts,
+        }
     
     def _call_llm(self, prompt: str) -> str:
         """Call the local 2B model."""
@@ -203,7 +258,7 @@ class FactExtractor:
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.3,
-            "max_tokens": 4000,
+            "max_tokens": 6000,
             "chat_template_kwargs": {"enable_thinking": False}
         }
 
