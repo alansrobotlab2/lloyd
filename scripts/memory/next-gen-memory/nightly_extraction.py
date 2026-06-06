@@ -356,19 +356,30 @@ class NightlyExtraction:
             )
             
             if result.get("facts"):
-                entity = result.get("entity", "general")
-                category = result.get("category", "general")
-                
-                # Thread-safe write with entity-specific lock
-                lock = self._get_entity_lock(entity)
-                with lock:
-                    fact_file = self.extractor.write_fact_file(
-                        entity, category, result
-                    )
-                
-                facts_count += len(result["facts"])
+                default_entity = result.get("entity") or "general"
+                default_category = result.get("category") or "general"
+
+                # Fan out: file each fact under its OWN entity/category (the
+                # extractor tags every fact), so a multi-entity doc populates
+                # multiple entity files instead of collapsing onto one primary.
+                groups = {}
+                for f in result["facts"]:
+                    key = (f.get("entity") or default_entity,
+                           f.get("category") or default_category)
+                    groups.setdefault(key, []).append(f)
+
+                for (entity, category), gfacts in groups.items():
+                    lock = self._get_entity_lock(entity)
+                    with lock:
+                        self.extractor.write_fact_file(
+                            entity, category,
+                            {"entity": entity, "category": category, "facts": gfacts},
+                        )
+                    facts_count += len(gfacts)
+
                 processed = 1
-                print(f"[{index}/{total}] Processing: {doc_path}")
+                print(f"[{index}/{total}] Processing: {doc_path} "
+                      f"→ {len(groups)} entities, {facts_count} facts")
         
         except Exception as e:
             print(f"Error processing {md_file}: {e}")
