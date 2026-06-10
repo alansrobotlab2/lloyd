@@ -232,12 +232,16 @@ def decide_merge(
     total = sum(sorted_degs)
 
     if tier in ("CASE", "PUNCT", "IDENTICAL"):
-        if total > HIGH_VALUE_GATE:
+        # When one variant has 0 degree (ghost entity), the high-value gate
+        # is meaningless — there's no risk of merging distinct high-degree
+        # entities. Only the high-degree variant's edges are at stake, and
+        # they map 1:1 to the canonical.
+        if total > HIGH_VALUE_GATE and smallest_deg > 0:
             return (
                 False,
                 f"high-value cluster (total degree {total} > {HIGH_VALUE_GATE}) — hand-review",
             )
-        return (True, f"{tier} merge, total degree {total}")
+        return (True, f"{tier} merge, total degree {total} (smallest={smallest_deg})")
 
     if tier == "SUFFIX_SAFE":
         if smallest_deg == 0:
