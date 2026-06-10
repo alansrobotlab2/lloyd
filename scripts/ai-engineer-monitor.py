@@ -181,7 +181,12 @@ print(json.dumps(videos))
 # ── Transcript fetching ────────────────────────────────────────────────
 
 def fetch_transcript(video_id):
-    """Fetch transcript using youtube-transcript-api via uv."""
+    """Fetch transcript using youtube-transcript-api via uv.
+
+    Returns (transcript_text, error_msg). On success transcript_text is
+    the text and error_msg is None. On failure transcript_text is None
+    and error_msg contains the reason.
+    """
     code = '''
 import sys
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -195,9 +200,10 @@ print(" ".join(s.text for s in segments))
         capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
-        print(f"  Transcript fetch failed: {result.stderr[:500]}")
-        return None
-    return result.stdout.strip()
+        error_msg = result.stderr[:500].strip()
+        print(f"  Transcript fetch failed: {error_msg}")
+        return None, error_msg
+    return result.stdout.strip(), None
 
 
 # ── Video metadata via yt-dlp ─────────────────────────────────────────
@@ -626,9 +632,9 @@ def process_video(video_id, title, published_text):
 
     # Fetch transcript
     print("  Fetching transcript...")
-    transcript = fetch_transcript(video_id)
+    transcript, err = fetch_transcript(video_id)
     if not transcript:
-        print("  ERROR: Could not fetch transcript")
+        print(f"  ERROR: Could not fetch transcript: {err}")
         return False
 
     print(f"  Transcript: {len(transcript)} chars, {len(transcript.split())} words")
