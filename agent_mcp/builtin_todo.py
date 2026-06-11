@@ -12,7 +12,7 @@ The frontend reads ``GET /api/sessions/{id}/todos`` after every TodoWrite
 tool result and re-renders.
 
 Session correlation: the harness aggregator binds ``_session_id`` from
-the call's args into ``_task_registry.current_session_id`` before
+the call's args into the session contextvar (read via ``_shared.get_bound_session()``) before
 dispatch (see ``agent_mcp/main.py:99-106``); we read it from there so
 the per-tool schema doesn't need to advertise an internal field.
 """
@@ -26,7 +26,7 @@ from typing import Any
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
-from agent_mcp import _task_registry
+from agent_mcp._shared import get_bound_session
 from agent_mcp._todo_validation import VALID_STATUSES, validate_todos
 from app.sessions_io import mutate_session
 
@@ -47,7 +47,7 @@ async def _todo_write(args: dict[str, Any]) -> str:
     if err is not None:
         return json.dumps({"error": err})
 
-    session_id = _task_registry.current_session_id.get()
+    session_id = get_bound_session()
     if not session_id:
         return json.dumps({
             "error": "TodoWrite called outside a session context — _session_id not bound",

@@ -122,6 +122,35 @@ def _wrap(result: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(result, default=str))]
 
 
+# ── Session binding & HTTP clients ───────────────────────────────────────────
+
+def get_bound_session() -> str:
+    """Session id the aggregator bound for the current tool call ('' if none).
+
+    main.py strips `_session_id` from tool arguments and sets it in the
+    _task_registry contextvar; every session-aware tool should read it
+    through this helper rather than touching the contextvar directly.
+    """
+    from agent_mcp import _task_registry
+    return _task_registry.current_session_id.get()
+
+
+def make_http_client(timeout: float | None = 10.0, **kwargs) -> "httpx.AsyncClient":
+    """Standard async HTTP client for agent_mcp modules.
+
+    One construction point so cross-cutting concerns (proxies, retries,
+    default headers) have a single home when they arrive.
+    """
+    import httpx
+    return httpx.AsyncClient(timeout=timeout, **kwargs)
+
+
+def make_sync_http_client(timeout: float | None = 10.0, **kwargs) -> "httpx.Client":
+    """Sync twin of make_http_client for non-async call paths."""
+    import httpx
+    return httpx.Client(timeout=timeout, **kwargs)
+
+
 # ── Resilient frontmatter parsing ────────────────────────────────────────────
 #
 # The agent writes its own task/backlog frontmatter, so malformed YAML is a

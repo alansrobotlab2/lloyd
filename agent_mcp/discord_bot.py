@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+
+from agent_mcp._shared import make_http_client
 import yaml
 
 logger = logging.getLogger("lloyd-discord")
@@ -174,7 +176,7 @@ async def discord_rest_send(channel_id: str, content: str = "", embed: Optional[
     if not payload:
         return {"error": "No content or embed provided"}
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with make_http_client(timeout=15.0) as client:
             resp = await client.post(
                 f"{DISCORD_API}/channels/{channel_id}/messages",
                 headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
@@ -385,7 +387,7 @@ def _build_bot():
         success = False
 
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with make_http_client(timeout=None) as client:
                 async with client.stream(
                     "POST",
                     f"{LLOYD_BACKEND}/api/message/stream",
@@ -634,7 +636,7 @@ def _build_bot():
             return
         session_id = _sid_from_interaction(interaction)
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with make_http_client(timeout=10.0) as client:
                 await client.post(
                     f"{LLOYD_BACKEND}/api/model/switch",
                     json={"model": model_name, "session_id": session_id},
@@ -667,7 +669,7 @@ def _build_bot():
         followup_msg = None
 
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with make_http_client(timeout=None) as client:
                 async with client.stream(
                     "POST",
                     f"{LLOYD_BACKEND}/api/message/stream",

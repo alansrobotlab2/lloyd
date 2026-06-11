@@ -25,6 +25,8 @@ tools just mint requests.
 import json
 
 import httpx
+
+from agent_mcp._shared import make_http_client
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
@@ -36,7 +38,7 @@ app = Server("lloyd-ambient")
 async def _post_json(path: str, body: dict, timeout: float = 10.0) -> tuple[int, dict]:
     """POST JSON to the Lloyd backend. Returns (status, parsed_body_or_raw)."""
     url = f"{LLOYD_BACKEND}{path}"
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with make_http_client(timeout=timeout) as client:
         r = await client.post(url, json=body)
         try:
             return r.status_code, r.json()
@@ -45,7 +47,7 @@ async def _post_json(path: str, body: dict, timeout: float = 10.0) -> tuple[int,
 
 
 async def _get_json(path: str, timeout: float = 5.0) -> tuple[int, dict]:
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with make_http_client(timeout=timeout) as client:
         r = await client.get(f"{LLOYD_BACKEND}{path}")
         try:
             return r.status_code, r.json()

@@ -22,7 +22,7 @@ import httpx
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
-from agent_mcp._shared import _err, _wrap, ErrorCode
+from agent_mcp._shared import _err, _wrap, ErrorCode, make_http_client
 
 LLOYD_API = os.environ.get("LLOYD_API_URL", "http://127.0.0.1:8080")
 
@@ -37,7 +37,7 @@ app = Server("lloyd-mission-control-ui")
 
 async def _mc_get_state(_params: dict) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with make_http_client(timeout=5.0) as client:
             r = await client.get(f"{LLOYD_API}/api/mc/state")
             r.raise_for_status()
             data = r.json()
@@ -71,7 +71,7 @@ async def _mc_navigate(params: dict) -> dict:
         body["focus_id"] = focus_id
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with make_http_client(timeout=10.0) as client:
             r = await client.post(f"{LLOYD_API}/api/mc/navigate", json=body)
             if r.status_code >= 400:
                 # Surface the FastAPI `detail` message so the caller sees the
@@ -106,7 +106,7 @@ async def _mc_close_modal(params: dict) -> dict:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with make_http_client(timeout=10.0) as client:
             r = await client.post(
                 f"{LLOYD_API}/api/mc/close_modal", json={"tab": tab}
             )
