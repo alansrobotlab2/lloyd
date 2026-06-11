@@ -469,6 +469,26 @@ async def load_and_compact_session(
     )
     tokens_after = estimate_conversation_tokens(truncated_msgs, system_prompt)
 
+    if dropped > 0 and mode == "summarize" and not summarized:
+        # Summarization was supposed to handle this but didn't (import
+        # failure, wedged vLLM, empty summary) — turns were dropped
+        # unsummarized. The fallback itself is correct design; losing
+        # memory silently is not, so leave a visible trail.
+        session_id = Path(session_path).stem
+        logger.warning(
+            "compaction: summarize fell back to truncation for %s (%d tokens dropped)",
+            session_id, dropped,
+        )
+        try:
+            from app.event_log import log_event
+            log_event(session_id, "compaction.summarize_fallback", {
+                "tokens_dropped": dropped,
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_after,
+            })
+        except Exception as e:  # noqa: BLE001
+            logger.warning("compaction: event_log write failed: %s", e)
+
     return {
         "history": truncated_msgs,
         "tokens_before": tokens_before,
