@@ -212,7 +212,7 @@ def test_query_stopwords_superset_of_entity():
 
 def test_path_constants_resolved_under_home():
     home = Path.home()
-    assert memory.FACTS_ROOT == home / "obsidian" / "facts"
+    assert memory.FACTS_ROOT == home / "lloyd" / "_pipeline" / "vault-derived" / "facts"
     assert memory.ALIASES_PATH == memory.FACTS_ROOT / "entity-aliases.json"
     assert memory.VAULT == home / "obsidian"
 
