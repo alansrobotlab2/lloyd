@@ -31,9 +31,18 @@ from pathlib import Path
 
 TASKS_DIR = Path.home() / "lloyd" / "_pipeline" / "tasks"
 SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
+AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
+AUTONOMY_TASKS_DIR = Path.home() / "obsidian" / "autonomy"
+CANDIDATES_DIR = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
 
 TASK_LOG_MAX_AGE_DAYS = 30
 SESSION_ARCHIVE_AGE_DAYS = 90
+RUN_RECORD_MAX_AGE_DAYS = 30
+ACTIVITY_LOG_MAX_ENTRIES = 200
+CANDIDATE_MAX_AGE_DAYS = 30
+# candidates still awaiting action are never pruned regardless of age
+CANDIDATE_KEEP_STATUSES = ("pending", "proposed", "flagged_for_authoring")
+_CANDIDATE_STATUS_RE = re.compile(r"^status:\s*(\S+)", re.MULTILINE)
 
 # last_active sits near the top of the session JSON (insertion order,
 # indent=2) — read a small prefix instead of parsing 390MB of transcripts.
@@ -114,6 +123,102 @@ def sweep_sessions(apply: bool, now: float) -> tuple[int, int]:
     return count, saved
 
 
+def sweep_autonomy_runs(apply: bool, now: float) -> tuple[int, int]:
+    """Delete autonomy-runs run records older than RUN_RECORD_MAX_AGE_DAYS.
+    Only run_*.md transcripts are touched — summary files like
+    wiki-sweep-latest.json are kept. Returns (count, bytes)."""
+    count = freed = 0
+    if not AUTONOMY_RUNS_DIR.exists():
+        return 0, 0
+    cutoff = now - RUN_RECORD_MAX_AGE_DAYS * 86400
+    for path in AUTONOMY_RUNS_DIR.glob("*/run_*.md"):
+        try:
+            if path.is_symlink() or path.stat().st_mtime >= cutoff:
+                continue
+            size = path.stat().st_size
+            if apply:
+                path.unlink()
+            count += 1
+            freed += size
+        except OSError as e:
+            print(f"  ! skip {path.name}: {e}", file=sys.stderr)
+    return count, freed
+
+
+def sweep_activity_logs(apply: bool) -> tuple[int, int]:
+    """Truncate '## Activity Log' sections in autonomy task files to the
+    last ACTIVITY_LOG_MAX_ENTRIES entries. Returns (files_touched,
+    lines_removed)."""
+    files = removed = 0
+    if not AUTONOMY_TASKS_DIR.exists():
+        return 0, 0
+    for path in sorted(AUTONOMY_TASKS_DIR.glob("[0-9]*.md")):
+        try:
+            lines = path.read_text(encoding="utf-8").split("\n")
+        except OSError as e:
+            print(f"  ! skip {path.name}: {e}", file=sys.stderr)
+            continue
+        try:
+            start = next(i for i, ln in enumerate(lines)
+                         if ln.strip().lower() == "## activity log") + 1
+        except StopIteration:
+            continue
+        entries = [i for i in range(start, len(lines))
+                   if lines[i].lstrip().startswith("- ")
+                   and not lines[i].lstrip().startswith("- …")]
+        excess = entries[:-ACTIVITY_LOG_MAX_ENTRIES] \
+            if len(entries) > ACTIVITY_LOG_MAX_ENTRIES else []
+        if not excess:
+            continue
+        # fold any prior marker lines into the new one
+        prior = n_markers = 0
+        for i in range(start, len(lines)):
+            stripped = lines[i].lstrip()
+            if stripped.startswith("- …"):
+                m = re.search(r"(\d+) older entries", stripped)
+                prior += int(m.group(1)) if m else 0
+                n_markers += 1
+                excess.append(i)
+        drop = set(excess)
+        kept = [ln for i, ln in enumerate(lines) if i not in drop]
+        marker = (f"- … {len(drop) - n_markers + prior} older entries "
+                  f"pruned by retention sweep "
+                  f"(keeping last {ACTIVITY_LOG_MAX_ENTRIES})")
+        kept.insert(start, marker)
+        if apply:
+            path.write_text("\n".join(kept), encoding="utf-8")
+        files += 1
+        removed += len(drop) - n_markers
+    return files, removed
+
+
+def sweep_candidates(apply: bool, now: float) -> tuple[int, int]:
+    """Delete processed skill-candidate files older than
+    CANDIDATE_MAX_AGE_DAYS. Candidates whose status is still actionable
+    (CANDIDATE_KEEP_STATUSES) are kept. Returns (count, bytes)."""
+    count = freed = 0
+    if not CANDIDATES_DIR.exists():
+        return 0, 0
+    cutoff = now - CANDIDATE_MAX_AGE_DAYS * 86400
+    for path in CANDIDATES_DIR.glob("candidate-*.md"):
+        try:
+            if path.is_symlink() or path.stat().st_mtime >= cutoff:
+                continue
+            m = _CANDIDATE_STATUS_RE.search(
+                path.read_text(encoding="utf-8", errors="replace"))
+            status = (m.group(1) if m else "").lower()
+            if any(status.startswith(k) for k in CANDIDATE_KEEP_STATUSES):
+                continue
+            size = path.stat().st_size
+            if apply:
+                path.unlink()
+            count += 1
+            freed += size
+        except OSError as e:
+            print(f"  ! skip {path.name}: {e}", file=sys.stderr)
+    return count, freed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -124,6 +229,9 @@ def main() -> int:
 
     logs_n, logs_b = sweep_task_logs(args.apply, now)
     sess_n, sess_b = sweep_sessions(args.apply, now)
+    runs_n, runs_b = sweep_autonomy_runs(args.apply, now)
+    act_f, act_l = sweep_activity_logs(args.apply)
+    cand_n, cand_b = sweep_candidates(args.apply, now)
 
     print(f"[retention-sweep] {mode}")
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
@@ -131,6 +239,12 @@ def main() -> int:
     print(f"  sessions >{SESSION_ARCHIVE_AGE_DAYS}d inactive: "
           f"{sess_n} gzipped, {sess_b / 1024 / 1024:.1f} MiB "
           f"{'saved' if args.apply else 'candidate'}")
+    print(f"  autonomy runs >{RUN_RECORD_MAX_AGE_DAYS}d: "
+          f"{runs_n} deleted, {runs_b / 1024 / 1024:.1f} MiB freed")
+    print(f"  activity logs: {act_f} task files truncated, "
+          f"{act_l} entries pruned (keep last {ACTIVITY_LOG_MAX_ENTRIES})")
+    print(f"  skill candidates >{CANDIDATE_MAX_AGE_DAYS}d processed: "
+          f"{cand_n} deleted, {cand_b / 1024:.0f} KiB freed")
     return 0
 
 

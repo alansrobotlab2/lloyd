@@ -215,6 +215,9 @@ def _frequency_interval_seconds(task: dict) -> Optional[float]:
     return freq_map.get(freq)
 
 
+_no_skill_warned: set[str] = set()
+
+
 def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
     dep_id = task.get("depends_on")
     if not dep_id or str(dep_id).strip().lower() in ("null", "none", ""):
@@ -229,6 +232,16 @@ def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
         return True
     dep_last_run = _parse_iso(dep_task.get("last_run"))
     if not dep_last_run:
+        return False
+    # Freshness gate: the dependency must have completed within the current
+    # scheduling cycle (half this task's interval), not just "since my last
+    # run". Without this, yesterday's upstream run satisfies the gate and the
+    # nightly pipelines settle into a stable inverted order where downstream
+    # tasks always consume day-old upstream artifacts (observed June 2026:
+    # reflection ran 39→38/40→42, trajectory ran 57 before 56).
+    interval = _frequency_interval_seconds(task) or 86400.0
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if (now - dep_last_run).total_seconds() > interval / 2:
         return False
     my_last_run = _parse_iso(task.get("last_run"))
     if not my_last_run:
@@ -253,6 +266,14 @@ def _is_task_due(task: dict, all_tasks: list[dict]) -> bool:
     skill_name = str(task.get("skill_name", "") or "").strip()
     skill_path = str(task.get("skill_path", "") or "").strip()
     if not skill_name and not skill_path:
+        # Loud skip: an empty skill_name otherwise dead-letters the task
+        # forever with no signal (bit task 79 in June 2026).
+        task_id = str(task.get("id", "?"))
+        if task_id not in _no_skill_warned:
+            _no_skill_warned.add(task_id)
+            logger.warning(
+                "Task #%s (%s) has no skill_name/skill_path — it will NEVER "
+                "run until one is set", task_id, task.get("name"))
         return False
     interval = _frequency_interval_seconds(task)
     if interval is None:
@@ -455,7 +476,28 @@ async def run_task(task_id) -> dict:
                             )
                         tool_errors.append(str(content)[:600])
         except asyncio.TimeoutError:
+            # Without this bookkeeping the task file stays in_progress on
+            # disk with no run record or activity-log line — the run just
+            # vanishes (recover_stuck_tasks was written for the fallout but
+            # was never wired up).
             logger.warning("Task #%s timed out after %ds", task_id, timeout)
+            completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            duration = (datetime.datetime.now(datetime.timezone.utc) - now).total_seconds()
+            partial = f"## Partial response before timeout\n\n{final_response}" \
+                if final_response else "(no output before timeout)"
+            _write_run_record(
+                task_id=task_id, run_id=run_id, status="failed",
+                started_at=started_at, completed_at=completed_at,
+                duration_seconds=duration,
+                summary=f"timed out after {timeout}s",
+                body=f"## Prompt\n\n{prompt[:500]}...\n\n{partial}",
+            )
+            current_failures = int(task.get("failure_count") or 0)
+            _update_task_field(task_id, status="up_next",
+                               failure_count=current_failures + 1,
+                               updated=completed_at)
+            _append_activity_log(
+                task_id, f"Run {run_id} — FAILED: timed out after {timeout}s")
             return {
                 "success": False, "error": f"Task #{task_id} timed out after {timeout}s",
             }

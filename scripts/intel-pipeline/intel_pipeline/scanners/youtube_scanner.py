@@ -21,65 +21,16 @@ def _http_get(url: str, headers: Optional[Dict] = None, timeout: int = 30) -> st
         return resp.read().decode()
 
 
-def _parse_yaml_list(text: str) -> List[Dict]:
-    """Minimal YAML parser for youtube channels config."""
-    result = []
-    current: Optional[Dict[str, Any]] = None
-    current_list_key: Optional[str] = None
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        indent = len(raw) - len(raw.lstrip())
-        if indent >= 4 and stripped.startswith("- "):
-            if current is not None and current_list_key:
-                if current_list_key not in result:
-                    result.append(current)
-                current = None
-            m = re.match(r"^- (.+?):\s*(.*)", stripped)
-            if m:
-                k, v = m.group(1).strip(), m.group(2).strip()
-                current = {k: _yaml_val(v)}
-                current_list_key = k
-        elif current is not None and indent >= 4:
-            m = re.match(r"^  (\w[\w_-]*):\s*(.*)", raw)
-            if m:
-                k, v = m.group(1), m.group(2).strip()
-                if v:
-                    current[k] = _yaml_val(v)
-                else:
-                    current_list_key = k
-    if current is not None and current_list_key:
-        if current_list_key not in result:
-            result.append(current)
-    return result
-
-
-def _yaml_val(s: str) -> Any:
-    s = s.strip().strip("'\"")
-    if s.startswith("[") and s.endswith("]"):
-        inner = s[1:-1]
-        if not inner.strip():
-            return []
-        return [v.strip() for v in inner.split(",")]
-    if s.lower() == "true":
-        return True
-    if s.lower() == "false":
-        return False
-    try:
-        return int(s)
-    except ValueError:
-        pass
-    try:
-        return float(s)
-    except ValueError:
-        pass
-    return s
-
-
 def load_youtube_channels_config() -> List[Dict[str, Any]]:
-    """Load YouTube channels configuration."""
+    """Load YouTube channels configuration.
+
+    The previous hand-rolled line parser required 4-space indentation and
+    never read the top-level ``channels:`` key, so it returned 0 of the 65
+    configured channels while every run still logged success.
+    """
     from pathlib import Path
+
+    import yaml
 
     config_path = Path.home() / "lloyd/scripts/intel-pipeline/config/youtube-channels.yml"
 
@@ -87,9 +38,10 @@ def load_youtube_channels_config() -> List[Dict[str, Any]]:
         return []
 
     with open(config_path, "r") as f:
-        config = _parse_yaml_list(f.read())
+        config = yaml.safe_load(f) or {}
 
-    return config
+    channels = config.get("channels", []) if isinstance(config, dict) else config
+    return [c for c in channels if isinstance(c, dict) and c.get("channel_id")]
 
 
 # State keys for YouTube scanner

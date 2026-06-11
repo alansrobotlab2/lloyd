@@ -109,6 +109,13 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
             logger.error("STARTUP: %s", msg)
             await _alert(msg)
 
+    # Reset tasks stuck in_progress past their timeout (e.g. worker died
+    # mid-run). Cheap relative to the get_due_tasks parse below.
+    import autonomy
+    recovered = await loop.run_in_executor(None, autonomy.recover_stuck_tasks)
+    if recovered:
+        logger.warning("Recovered %d stuck task(s): %s", len(recovered), recovered)
+
     # vLLM health gate — skip this tick entirely if the model server is down.
     if not await loop.run_in_executor(None, _vllm_healthy):
         if not _state["vllm_down_logged"]:
@@ -163,6 +170,17 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     task_id = item.payload.get("task_id")
     if task_id is None:
         raise RuntimeError("scheduled-task item has no task_id in payload")
+
+    # The enqueue-side health gate can't help items already in the queue when
+    # vLLM wedges — without this wait they burn all attempts in ~90s of
+    # ConnectErrors. Poll briefly for recovery before spending an attempt.
+    loop = asyncio.get_event_loop()
+    for _ in range(18):  # up to 90s
+        if await loop.run_in_executor(None, _vllm_healthy):
+            break
+        await asyncio.sleep(5)
+    else:
+        raise RuntimeError("vLLM unhealthy — deferring task (backoff retry)")
 
     result = await run_task(int(task_id))
 
