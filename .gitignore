@@ -52,4 +52,4 @@ __pycache__/
 # ─── OS / misc ──────────────────────────────────────
 .DS_Store
 ada.zip
-.backups/
+.backups/data/

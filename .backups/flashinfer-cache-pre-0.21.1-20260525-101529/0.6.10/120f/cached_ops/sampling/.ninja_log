@@ -1,0 +1,5 @@
+# ninja log v7
+0	8322	1778083261823115158	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/sampling/csrc_flashinfer_sampling_binding.cuda.o	1af188ef6aaca2df
+0	24615	1778083261822948372	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/sampling/csrc_renorm.cuda.o	dbf395b5a5484fc9
+0	56878	1778083261822445649	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/sampling/csrc_sampling.cuda.o	dec49138d9a38c57
+56878	56964	1778083318699767576	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/sampling/sampling.so	3d3cfeb10b31001f

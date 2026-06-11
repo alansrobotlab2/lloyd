@@ -1,0 +1,17 @@
+# ninja log v7
+1	14403	1777998997150430462	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/csrc_fp4_gemm_cutlass_sm120.cuda.o	f14af50f1c62d4bd
+1	46823	1777998997150840667	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass___nv_bfloat16_128_128_128.cuda.o	a01381d1a9c982e4
+1	47548	1777998997151019306	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass_half_128_128_128.cuda.o	80ba012129facd7
+1	48745	1777998997151359742	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass_half_128_128_256.cuda.o	657227e28a973d1b
+1	49052	1777998997151220238	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass___nv_bfloat16_128_128_256.cuda.o	354e4eae7c8cc908
+2	54520	1777998997151667226	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass_half_256_128_128.cuda.o	dcdc829f94b054f0
+1	54583	1777998997151512643	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass___nv_bfloat16_256_128_128.cuda.o	70b9549fb6a5e438
+54583	54631	1777999051731678475	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/fp4_gemm_cutlass_sm120.so	eec362d09cfd7ffa
+4	15719	1778085301952377691	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/csrc_fp4_gemm_cutlass_sm120.cuda.o	f14af50f1c62d4bd
+4	53268	1778085301953108919	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass___nv_bfloat16_128_128_128.cuda.o	a01381d1a9c982e4
+4	53528	1778085301953260797	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass_half_128_128_128.cuda.o	80ba012129facd7
+4	54091	1778085301953412766	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass___nv_bfloat16_128_128_256.cuda.o	354e4eae7c8cc908
+5	54298	1778085301953557771	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass_half_128_128_256.cuda.o	657227e28a973d1b
+5	60656	1778085301953852450	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass_half_256_128_128.cuda.o	dcdc829f94b054f0
+5	60793	1778085301953710821	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/gen_gemm_sm120_cutlass_fp4_fp4_gemm_cutlass___nv_bfloat16_256_128_128.cuda.o	70b9549fb6a5e438
+60793	60850	1778085362740741993	/home/alansrobotlab/.cache/flashinfer/0.6.10/120f/cached_ops/fp4_gemm_cutlass_sm120/fp4_gemm_cutlass_sm120.so	eec362d09cfd7ffa
