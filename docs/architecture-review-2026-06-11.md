@@ -34,18 +34,16 @@ The real issues: non-atomic writes of unrecoverable state, event-loop blocking, 
 | 2.4 | `services:` endpoint block in config.yaml — port 8096 was hardcoded in 15+ files and backends get swapped regularly | `config.yaml`, `app/config.py`, `app/` + `agent_mcp/` call sites |
 | 2.5 | API contract tests pinning response shapes the hand-maintained `web/src/api.ts` (1,419 lines) depends on | `tests/test_api_contracts.py` (new) |
 
-## Tier 3 — backlog for the nightly loop (NOT implemented)
+## Tier 3 — implemented 2026-06-11 (same branch), except item 8
 
-Each fits one nightly-improvement branch:
-
-1. **Disk retention groundskeeping** (S): `_pipeline/` = 920MB (259 task dirs never evicted), `sessions/` = 389MB, `logs/` = 294MB. Extend `scripts/groundskeeper/` to delete `_pipeline/tasks/*` >30d and gzip sessions >90d (don't delete — they feed `scripts/mine-trajectories.py`). Wire as an autonomy task.
-2. **Pin dependencies** (S): requirements.txt is all `>=`; `mcp>=1.0.0` is the scariest line. Check in a `requirements.lock` from `pip freeze`; rebuilds install from the lock. No poetry/pip-tools needed.
-3. **Warn on unknown model alias** (S): `app/config.py` `_get_model_cfg` returns `{}` for unknown names → call silently proceeds against the wrong endpoint. One `logger.warning`.
-4. **Cap exception text returned to the model** (S): `str(exc)[:500]` in `_err()` call sites. Don't sanitize — exception text enables model self-correction; just cap it so a traceback doesn't eat context budget.
-5. **Root clutter sweep** (S): delete `2026-06-06` (0-byte stray, now tracked in main), relocate `-.en.srt`, `tgs_rag_*.{pdf,txt}`, and the `yt-dlp` binary out of root.
-6. **Tool-name length validation at registration** (S): move the 64-char check from harness translation time into `agent_mcp/main.py` listing so bad names fail at startup, not mid-conversation.
-7. **Background bash log eviction** (S): `_pipeline/tasks/*.log` never auto-evicted (overlaps with item 1).
-8. **Pydantic response models, opportunistically** (M, ongoing): add when touching a router anyway; revisit OpenAPI→TS codegen only if routers ever get fully modeled.
+1. **Disk retention groundskeeping** — `scripts/groundskeeper/retention-sweep.py` (dry-run by default, `--apply` to act): deletes `_pipeline/tasks/*` >30d, gzips sessions with `last_active` >90d (round-trip-validated before the original is removed; never deleted — they feed trajectory mining). Wired as weekly autonomy task **#79**. First apply removed 28 logs; sessions start aging into the window ~mid-June.
+2. **Pin dependencies** — `requirements.lock` checked in (pip freeze, 156 packages); requirements.txt documents the rebuild-from-lock flow.
+3. **Warn on unknown model alias** — `_get_model_cfg()` logs a warning before returning `{}`.
+4. **Cap exception text** — `_err()` truncates messages at 500 chars (not sanitized — exception text stays visible for model self-correction).
+5. **Root clutter sweep** — strays deleted, papers moved to `docs/papers/`, duplicate root `yt-dlp` removed (real one is in `~/.local/bin`).
+6. **Tool-name length validation** — aggregator `list_tools()` rejects >64-char names at registration; `tool_schema.py` check kept as backstop.
+7. **Background bash log eviction** — covered by item 1.
+8. **Pydantic response models, opportunistically** (M, ongoing — the one item left open by design): add when touching a router anyway; revisit OpenAPI→TS codegen only if routers ever get fully modeled.
 
 ## What NOT to do (judged and rejected)
 
