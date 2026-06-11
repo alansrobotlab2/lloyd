@@ -1,5 +1,8 @@
-# Lloyd Python dependencies
-# Install in venv: python -m venv .venv && .venv/bin/pip install -r requirements.txt
+# Lloyd Python dependencies — human-edited intent (loose pins).
+# For a reproducible rebuild, install from the frozen snapshot instead:
+#   python -m venv .venvs/lloyd && .venvs/lloyd/bin/pip install -r requirements.lock
+# Use this file only when intentionally upgrading; then refreeze
+# (regeneration command in requirements.lock header).
 
 # FastAPI server
 fastapi>=0.115.0
