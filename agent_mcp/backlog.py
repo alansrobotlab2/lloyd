@@ -16,6 +16,8 @@ import yaml
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
+from agent_mcp._shared import parse_frontmatter_text
+
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 VALID_STATUSES = {"draft", "up_next", "in_progress", "done"}
 
@@ -28,26 +30,11 @@ def parse_frontmatter(content: str) -> tuple:
     parts = content.split("---", 2)
     if len(parts) < 3:
         return {}, content
-    try:
-        frontmatter = yaml.safe_load(parts[1]) or {}
-    except Exception as e:
-        # YAML parse failed (e.g. unquoted colons in string values).
-        # Fall back to regex extraction of known fields so boards
-        # enumeration stays accurate even with malformed frontmatter.
-        import sys
-        print(
-            f"[backlog] WARNING: YAML frontmatter parse failed ({type(e).__name__}: {e}); "
-            "falling back to regex extraction.",
-            file=sys.stderr,
-        )
-        fm_text = parts[1]
-        fm = {}
-        fm["_yaml_broken"] = True
-        for field in ("board", "status", "priority", "tags", "blocked", "assigned"):
-            m = re.search(rf"^{field}:\s*(.+)$", fm_text, re.MULTILINE)
-            if m:
-                fm[field] = m.group(1).strip()
-        frontmatter = fm
+    frontmatter = parse_frontmatter_text(
+        parts[1],
+        fallback_fields=("board", "status", "priority", "tags", "blocked", "assigned"),
+        log_label="backlog",
+    )
     return frontmatter, parts[2].strip()
 
 
