@@ -117,6 +117,31 @@ def _resolve_model_name(model_input: str) -> str:
     return model_input
 
 
+def service_url(name: str, default: str = "") -> str:
+    """Resolve an internal service endpoint from config.yaml `services:`.
+
+    One registry for non-model service URLs (backend, lloyd-mcp aggregator,
+    QMD daemon) so swapping a port is a config edit, not a multi-file grep.
+    Model endpoints stay under `models:` — that remains their single source
+    of truth.
+    """
+    services = CONFIG.get("services") or {}
+    url = services.get(name)
+    return str(url) if url else default
+
+
+def default_model_base_url() -> str:
+    """Base URL of the default model — the fallback when a caller has no
+    explicit ANTHROPIC_BASE_URL in its resolved model env."""
+    default = (CONFIG.get("model") or {}).get("default", "primary")
+    cfg = _get_model_cfg(default)
+    return (
+        cfg.get("base_url")
+        or cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")
+        or "http://127.0.0.1:8096"
+    )
+
+
 def resolve_model_alias(name: str) -> str:
     """Route 'secondary' → 'primary' when secondary_enabled is false.
 

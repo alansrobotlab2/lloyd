@@ -31,6 +31,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from app.config import service_url
 from mcp.server import Server
 from mcp.types import Tool
 
@@ -60,7 +61,7 @@ import math
 AUDIT_LOG_DIR = VAULT / "memory" / "audit"
 AUDIT_LOG_FILE = AUDIT_LOG_DIR / "writes.jsonl"
 QMD_BIN = Path.home() / ".bun" / "bin" / "qmd"
-QMD_DAEMON_URL = "http://localhost:8181/query"
+QMD_DAEMON_URL = service_url("qmd", "http://localhost:8181/query")
 
 VAULT_SEGMENTS = [
     "facts", "memory", "knowledge", "projects", "personal", "work", "skills",

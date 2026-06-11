@@ -23,12 +23,13 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
+from app.config import service_url
 from app.harness.errors import ToolDispatchError
 
 logger = logging.getLogger("lloyd-harness-mcp-pool")
 
 # Default URL for the unified lloyd-mcp aggregator (agent_mcp/main.py).
-DEFAULT_LLOYD_MCP_URL = "http://127.0.0.1:8500/sse"
+DEFAULT_LLOYD_MCP_URL = service_url("lloyd_mcp", "http://127.0.0.1:8500/sse")
 
 
 class MCPPool:

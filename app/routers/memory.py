@@ -9,6 +9,8 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.config import service_url
+
 
 router = APIRouter()
 
@@ -107,7 +109,7 @@ async def memory_search(q: str = "", limit: int = 10, scope: str = ""):
         "limit": limit,
         "collections": scope.split(",") if scope else _VAULT_SEGMENTS,
     }).encode()
-    req = urllib.request.Request("http://localhost:8181/query", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    req = urllib.request.Request(service_url("qmd", "http://localhost:8181/query"), data=payload, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
