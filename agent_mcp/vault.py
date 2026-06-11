@@ -18,6 +18,7 @@ Imports from agent_mcp.facts for the fact-side of vault_recall (entity
 extraction, graph expansion, fact ranking).
 """
 
+import asyncio
 import concurrent.futures
 import datetime
 import json
@@ -897,5 +898,8 @@ async def call_tool(name: str, arguments: dict):
     }
     handler = handlers.get(name)
     if handler:
-        return _wrap(handler(arguments))
+        # Handlers are sync and do subprocess/urllib I/O (QMD search, rg,
+        # consolidation LLM call) with multi-second timeouts — run them in a
+        # worker thread so the shared event loop never stalls.
+        return _wrap(await asyncio.to_thread(handler, arguments))
     return _wrap(_err(f"Unknown tool: {name}", ErrorCode.UNKNOWN_TOOL))
