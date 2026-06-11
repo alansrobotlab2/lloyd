@@ -35,6 +35,7 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from agent_mcp import _task_registry
+from agent_mcp._shared import get_bound_session
 
 logger = logging.getLogger("lloyd-builtin-bash")
 
@@ -165,7 +166,7 @@ async def _spawn_background(command: str, description: str) -> str:
     `proc.wait()` and pushes a completion record onto the registry; the
     harness drains it on the next turn boundary.
     """
-    session_id = _task_registry.current_session_id.get()
+    session_id = get_bound_session()
     record, log_fd = await _task_registry.register(
         session_id=session_id, command=command, description=description,
     )
@@ -208,7 +209,7 @@ async def _bg_task_drain(args: dict[str, Any]) -> str:
     ``app.harness.tool_schema.build_tool_list``); only the harness's
     between-turn drain hook calls this.
     """
-    session_id = _task_registry.current_session_id.get()
+    session_id = get_bound_session()
     records = await _task_registry.drain_completed_for_session(session_id)
     return json.dumps({
         "notifications": [

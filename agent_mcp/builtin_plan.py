@@ -24,7 +24,7 @@ can edit/diff/grep it as a real file. Session JSON holds `plan_md_path`
 and the stages.
 
 Session correlation: same pattern as builtin_todo — read
-`_task_registry.current_session_id` from the contextvar bound by the
+`_shared.get_bound_session()` — the contextvar bound by the
 aggregator at dispatch time.
 """
 
@@ -39,7 +39,7 @@ from typing import Any
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
-from agent_mcp import _task_registry
+from agent_mcp._shared import get_bound_session
 from agent_mcp._todo_validation import validate_todos
 from app.sessions_io import mutate_session
 
@@ -83,7 +83,7 @@ def _validate_stages(raw: Any) -> tuple[list[dict[str, Any]] | None, str | None]
 
 
 async def _enter_plan_mode(_args: dict[str, Any]) -> str:
-    session_id = _task_registry.current_session_id.get()
+    session_id = get_bound_session()
     if not session_id:
         return json.dumps({
             "error": "EnterPlanMode called outside a session context — _session_id not bound",
@@ -120,7 +120,7 @@ async def _enter_plan_mode(_args: dict[str, Any]) -> str:
 
 
 async def _exit_plan_mode(args: dict[str, Any]) -> str:
-    session_id = _task_registry.current_session_id.get()
+    session_id = get_bound_session()
     if not session_id:
         return json.dumps({
             "error": "ExitPlanMode called outside a session context — _session_id not bound",

@@ -25,7 +25,7 @@ Met → mark achieved, stop looping. `attempts >= max_attempts` →
 escalate to clarify so the user can intervene.
 
 Session correlation: same pattern as builtin_todo / builtin_plan — read
-``_task_registry.current_session_id`` from the contextvar bound by the
+``_shared.get_bound_session()`` — the contextvar bound by the
 aggregator at dispatch time.
 """
 
@@ -39,7 +39,7 @@ from typing import Any
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
-from agent_mcp import _task_registry
+from agent_mcp._shared import get_bound_session
 from app.sessions_io import mutate_session
 
 logger = logging.getLogger("lloyd-builtin-goal")
@@ -59,7 +59,7 @@ async def _set_goal(args: dict[str, Any]) -> str:
     if len(text) > 4000:
         return json.dumps({"error": "text must be <= 4000 chars"})
 
-    session_id = _task_registry.current_session_id.get()
+    session_id = get_bound_session()
     if not session_id:
         return json.dumps({
             "error": "SetGoal called outside a session context — _session_id not bound",
@@ -91,7 +91,7 @@ async def _set_goal(args: dict[str, Any]) -> str:
 
 
 async def _clear_goal(_args: dict[str, Any]) -> str:
-    session_id = _task_registry.current_session_id.get()
+    session_id = get_bound_session()
     if not session_id:
         return json.dumps({
             "error": "ClearGoal called outside a session context — _session_id not bound",
