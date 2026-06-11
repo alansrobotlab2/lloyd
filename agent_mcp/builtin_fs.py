@@ -372,16 +372,18 @@ async def list_tools():
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict):
+    # Sync handlers run in a worker thread — this loop also serves SSE chat,
+    # voice, and the inner-voice observer; a slow disk read must not stall it.
     if name == "Read":
-        text = _read(arguments)
+        text = await asyncio.to_thread(_read, arguments)
     elif name == "Write":
-        text = _write(arguments)
+        text = await asyncio.to_thread(_write, arguments)
     elif name == "Edit":
-        text = _edit(arguments)
+        text = await asyncio.to_thread(_edit, arguments)
     elif name == "Grep":
         text = await _grep(arguments)
     elif name == "Glob":
-        text = _glob(arguments)
+        text = await asyncio.to_thread(_glob, arguments)
     else:
         text = json.dumps({"error": f"Unknown tool: {name}"})
     return [TextContent(type="text", text=text)]
