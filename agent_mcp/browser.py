@@ -54,6 +54,10 @@ _browser = None   # Browser instance
 _context = None   # BrowserContext
 _active_page = None  # Currently focused Page
 _ref_map: dict[str, dict] = {}  # "e1" -> {"role": ..., "name": ..., "occurrence": ...}
+# Serializes launch/teardown: concurrent turns (user + ambient + autonomy)
+# could otherwise interleave _ensure_browser() and launch two Chromiums,
+# leaking one.
+_launch_lock = asyncio.Lock()
 
 _INTERACTIVE_ROLES = {
     "button", "link", "textbox", "searchbox", "checkbox",
@@ -77,6 +81,15 @@ _ARIA_LINE_RE = re.compile(
 
 async def _ensure_browser():
     global _pw, _browser, _context
+    if _browser and _browser.is_connected() and _context:
+        return _context
+    async with _launch_lock:
+        return await _launch_browser_locked()
+
+
+async def _launch_browser_locked():
+    global _pw, _browser, _context
+    # Re-check under the lock: a concurrent caller may have just launched.
     if _browser and _browser.is_connected() and _context:
         return _context
     # Clean up stale instance
