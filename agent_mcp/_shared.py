@@ -37,6 +37,7 @@ from app.paths import (
     VAULT_FACTS_ROOT as FACTS_ROOT,
     VAULT_FACTS_ALIASES as ALIASES_PATH,
 )
+from app.atomic_io import atomic_write_text  # noqa: F401  (re-export for agent_mcp modules)
 
 
 # ── Result types & dispatch helpers (#340 PR 4) ──────────────────────────────

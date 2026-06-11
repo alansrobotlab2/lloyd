@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Optional
 
+from app.atomic_io import atomic_write_text
 from app.paths import SESSIONS_DIR
 
 logger = logging.getLogger("lloyd-server")
@@ -445,7 +446,7 @@ async def mutate_session(session_id: str, fn) -> bool:
             return False
         data = json.loads(meta_path.read_text())
         fn(data)
-        meta_path.write_text(json.dumps(data, indent=2))
+        atomic_write_text(meta_path, json.dumps(data, indent=2))
         return True
 
 
@@ -478,7 +479,7 @@ async def _save_session_meta(session_id: str, model: str, preview: str = ""):
                 # sessions where this is True. Stage 0 always False.
                 "inner_voice": False,
             }
-        meta_path.write_text(json.dumps(data, indent=2))
+        atomic_write_text(meta_path, json.dumps(data, indent=2))
 
 
 async def _append_messages(session_id: str, new_messages: list[dict]):
