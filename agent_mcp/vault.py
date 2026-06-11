@@ -14,8 +14,9 @@ Split out of agent_mcp/memory.py as part of Task #340 PR 5. Owns:
     - QMD daemon hybrid search (BM25 + vector) with stopword cleanup
     - vault_recall, the parallel doc + fact retrieval entry point
 
-Imports from agent_mcp.facts for the fact-side of vault_recall (entity
-extraction, graph expansion, fact ranking).
+Imports from agent_mcp.retrieval for the fact-side of vault_recall
+(entity extraction, graph expansion, fact ranking) — the shared core
+also used by agent_mcp.facts.
 """
 
 import asyncio
@@ -42,17 +43,17 @@ from agent_mcp._shared import (
     _err,
     _wrap,
 )
-from agent_mcp.facts import (
+from agent_mcp.retrieval import (
     FACT_GODNODE_THRESHOLD,
     FACT_RANK_CAP_SEED,
     FACT_RANK_CAP_GRAPH,
-    _extract_entities_from_query,
-    _graph_weighted_neighbors,
-    _fact_query_tokens,
-    _fact_matches_tokens,
-    _fact_score,
-    _get_facts_sync,
-    _get_entity_edge_counts,
+    extract_entities_from_query,
+    fact_matches_tokens,
+    fact_query_tokens,
+    fact_score,
+    get_entity_edge_counts,
+    get_facts_sync,
+    graph_weighted_neighbors,
 )
 import math
 
@@ -393,7 +394,7 @@ def _graph_rerank(
 
     For each doc, extract entities mentioned in its title+snippet. Each
     seed/neighbor entity contributes a vote weighted by its graph weight
-    (seeds=1.0, neighbors=their _graph_weighted_neighbors weight) and
+    (seeds=1.0, neighbors=their graph_weighted_neighbors weight) and
     divided by log(1+degree) so god-nodes (e.g. "lloyd" with ~991 edges)
     don't dominate. Final score = alpha * QMD_score + (1-alpha) * normalized_topo.
 
@@ -417,10 +418,10 @@ def _graph_rerank(
 
     # Precompute per-voter score contribution (degree penalty baked in)
     # and a word-boundary regex. This collapses what used to be a full
-    # `_extract_entities_from_query(doc_text)` call per doc — which
+    # `extract_entities_from_query(doc_text)` call per doc — which
     # iterates ~2,700 entity dirs — into a tight regex scan over ~15
     # voter terms. Drops rerank latency by ~10x.
-    edge_counts = _get_entity_edge_counts()
+    edge_counts = get_entity_edge_counts()
     voter_contribs: dict[str, float] = {}
     voter_patterns: dict[str, re.Pattern] = {}
     for vk, vw in voters.items():
@@ -673,14 +674,14 @@ def _vault_recall(params: dict) -> dict:
     # canonical entity; e.g. "Knowledge Graph Consistency" and "Knowledge
     # Graph System" both score 0.27 for the same query, and with k=5 the
     # canonical one can be cut off.
-    seed_entities = [e for e, _ in _extract_entities_from_query(query)[:10]]
+    seed_entities = [e for e, _ in extract_entities_from_query(query)[:10]]
 
     # If graph_rerank is requested, we need neighbors regardless of expand_graph,
     # because rerank uses them as voters. Force graph expansion in that case.
     need_neighbors = expand_graph or graph_rerank
     weighted_neighbors: list[tuple[str, float]] = []
     if need_neighbors and seed_entities:
-        weighted_neighbors = _graph_weighted_neighbors(seed_entities, top_k=5, hops=1)
+        weighted_neighbors = graph_weighted_neighbors(seed_entities, top_k=5, hops=1)
 
     def _do_search():
         # Daemon is the only search path. Subprocess fallback was removed
@@ -765,7 +766,7 @@ def _vault_recall(params: dict) -> dict:
         if not include_facts:
             return [], []
         # Query-aware fact ranking (Fix A, #322).
-        qtoks = _fact_query_tokens(query)
+        qtoks = fact_query_tokens(query)
 
         def _collect(entity_names: list[str], godnode_threshold: int) -> list[dict]:
             """Pull facts from entities, applying god-node guardrail (Fix C).
@@ -775,14 +776,14 @@ def _vault_recall(params: dict) -> dict:
             out: list[dict] = []
             for ent in entity_names:
                 try:
-                    entity_data = _get_facts_sync(ent)
+                    entity_data = get_facts_sync(ent)
                 except Exception:
                     continue
                 ef = entity_data.get("facts") or []
                 if not ef:
                     continue
                 if len(ef) > godnode_threshold and qtoks:
-                    kept = [f for f in ef if _fact_matches_tokens(f, qtoks)]
+                    kept = [f for f in ef if fact_matches_tokens(f, qtoks)]
                     if not kept:
                         continue
                     ef = kept
@@ -794,7 +795,7 @@ def _vault_recall(params: dict) -> dict:
             if not candidates:
                 return []
             scored = [
-                (_fact_score(f, qtoks), float(f.get("confidence", 0.5)), idx, f)
+                (fact_score(f, qtoks), float(f.get("confidence", 0.5)), idx, f)
                 for idx, f in enumerate(candidates)
             ]
             scored.sort(key=lambda t: (-t[0], -t[1], t[2]))

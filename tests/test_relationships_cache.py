@@ -18,12 +18,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent_mcp import facts as memory  # noqa: E402  (post-PR5: cache moved here)
+from agent_mcp import retrieval as memory  # noqa: E402  (cache lives in the shared retrieval core)
 
 
 def _reset_cache():
     """Clear the relationships cache between tests."""
-    memory._invalidate_relationships_cache()
+    memory.invalidate_relationships_cache()
 
 
 def _write_index(path: Path, edges: list) -> None:
@@ -43,7 +43,7 @@ def test_load_returns_empty_when_file_missing():
         rel_path = Path(td) / "_relationships.json"  # does not exist
         with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
             _reset_cache()
-            data = memory._load_relationships()
+            data = memory.load_relationships()
             assert data == {"edges": [], "schema_version": 1}
             # Missing file → cache stays None
             assert memory._relationships_cache is None
@@ -56,7 +56,7 @@ def test_load_populates_cache_on_first_call():
         with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
             _reset_cache()
             assert memory._relationships_cache is None
-            data = memory._load_relationships()
+            data = memory.load_relationships()
             assert len(data["edges"]) == 1
             # Cache populated
             assert memory._relationships_cache is not None
@@ -73,8 +73,8 @@ def test_load_returns_cached_object_on_second_call():
         _write_index(rel_path, [{"source": "A", "target": "B", "type": "uses"}])
         with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
             _reset_cache()
-            first = memory._load_relationships()
-            second = memory._load_relationships()
+            first = memory.load_relationships()
+            second = memory.load_relationships()
             assert first is second, "expected same object reference (cache hit)"
 
 
@@ -89,7 +89,7 @@ def test_load_reloads_when_mtime_changes():
         _write_index(rel_path, [{"source": "A", "target": "B", "type": "uses"}])
         with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
             _reset_cache()
-            first = memory._load_relationships()
+            first = memory.load_relationships()
             assert len(first["edges"]) == 1
 
             # External writer adds an edge and bumps mtime.
@@ -104,7 +104,7 @@ def test_load_reloads_when_mtime_changes():
             new_atime_mtime = (rel_path.stat().st_atime + 2, rel_path.stat().st_mtime + 2)
             os.utime(rel_path, new_atime_mtime)
 
-            second = memory._load_relationships()
+            second = memory.load_relationships()
             assert len(second["edges"]) == 2, "expected reload after mtime bump"
             assert first is not second, "expected new object after reload"
 
@@ -119,9 +119,9 @@ def test_save_refreshes_cache_with_new_mtime():
         _write_index(rel_path, [])
         with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
             _reset_cache()
-            data = memory._load_relationships()
+            data = memory.load_relationships()
             data["edges"].append({"source": "X", "target": "Y", "type": "uses"})
-            memory._save_relationships(data)
+            memory.save_relationships(data)
 
             # Cache mtime now matches the freshly-written file
             assert memory._relationships_cache is not None
@@ -129,7 +129,7 @@ def test_save_refreshes_cache_with_new_mtime():
             assert cached_mtime == rel_path.stat().st_mtime_ns
             assert cached_data is data
             # And next load returns the same object — no reparse needed
-            again = memory._load_relationships()
+            again = memory.load_relationships()
             assert again is data
 
 
@@ -139,13 +139,13 @@ def test_save_then_load_returns_persisted_data():
         _write_index(rel_path, [])
         with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
             _reset_cache()
-            data = memory._load_relationships()
+            data = memory.load_relationships()
             data["edges"].append({"source": "X", "target": "Y", "type": "uses"})
-            memory._save_relationships(data)
+            memory.save_relationships(data)
 
             # Force cache miss by clearing
             _reset_cache()
-            reloaded = memory._load_relationships()
+            reloaded = memory.load_relationships()
             assert len(reloaded["edges"]) == 1
             assert reloaded["edges"][0]["source"] == "X"
 
@@ -160,7 +160,7 @@ def test_corrupt_json_returns_empty_does_not_poison_cache():
         rel_path.write_text("{not valid json", encoding="utf-8")
         with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
             _reset_cache()
-            data = memory._load_relationships()
+            data = memory.load_relationships()
             assert data == {"edges": [], "schema_version": 1}
             # Cache should NOT hold the empty placeholder — that would mask
             # the real file once it's repaired.
@@ -168,7 +168,7 @@ def test_corrupt_json_returns_empty_does_not_poison_cache():
 
             # Now write valid JSON. Next load should pick it up.
             _write_index(rel_path, [{"source": "A", "target": "B", "type": "uses"}])
-            data2 = memory._load_relationships()
+            data2 = memory.load_relationships()
             assert len(data2["edges"]) == 1
 
 
@@ -178,9 +178,9 @@ def test_invalidate_helper_clears_cache():
         _write_index(rel_path, [{"source": "A", "target": "B", "type": "uses"}])
         with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
             _reset_cache()
-            memory._load_relationships()
+            memory.load_relationships()
             assert memory._relationships_cache is not None
-            memory._invalidate_relationships_cache()
+            memory.invalidate_relationships_cache()
             assert memory._relationships_cache is None
 
 
