@@ -122,6 +122,98 @@ def _wrap(result: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(result, default=str))]
 
 
+# ── Resilient frontmatter parsing ────────────────────────────────────────────
+#
+# The agent writes its own task/backlog frontmatter, so malformed YAML is a
+# routine input, not an edge case. A hard-drop on parse failure dormant-killed
+# 34/40 autonomy tasks on 2026-05-28 (see project_autonomy_silent_task_drop).
+# Every reader of agent-written frontmatter must degrade gracefully; this is
+# the one parser that does.
+
+def _fold_orphaned_tag_items(fm_text: str) -> str:
+    """Repair the recurring `tags:` corruption: a block→inline replacement of
+    the tags field that orphans the pre-existing block-list items, e.g.
+        tags: [38-foo, autonomy, pipeline]
+        - nightly
+        - reflection
+    Folds the orphan `- item` lines back into the inline list."""
+    lines = fm_text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^(\s*)tags:\s*\[(.*)\]\s*$", lines[i])
+        if m:
+            indent, inside = m.group(1), m.group(2)
+            items = [x.strip().strip("'\"") for x in inside.split(",") if x.strip()]
+            j = i + 1
+            while j < len(lines) and re.match(r"^\s*-\s+\S", lines[j]):
+                it = lines[j].strip()[1:].strip().strip("'\"").strip("[]").strip().strip("'\"")
+                if it and it not in items:
+                    items.append(it)
+                j += 1
+            if j > i + 1:  # there were orphan items → repair
+                out.append(f"{indent}tags: [{', '.join(items)}]")
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def parse_frontmatter_text(
+    fm_text: str,
+    *,
+    fallback_fields: tuple[str, ...] = (),
+    log_label: str = "frontmatter",
+) -> dict:
+    """Parse the YAML between frontmatter fences with graduated recovery.
+
+    1. Plain yaml.safe_load.
+    2. Retry after repairing the known orphaned-tags corruption.
+    3. Regex-extract `fallback_fields` line by line, marking the result with
+       `_yaml_broken: True` so writers know the file needs normalizing.
+
+    Never raises and never returns None — a record may come back degraded,
+    but it can't silently vanish from a listing or the scheduler.
+    """
+    logger = logging.getLogger("agent_mcp.shared")
+    first_err: Exception | None = None
+    try:
+        fm = yaml.safe_load(fm_text)
+        if isinstance(fm, dict):
+            return fm
+    except Exception as e:
+        first_err = e
+
+    repaired = _fold_orphaned_tag_items(fm_text)
+    if repaired != fm_text:
+        try:
+            fm = yaml.safe_load(repaired)
+            if isinstance(fm, dict):
+                logger.warning("[%s] recovered corrupted frontmatter (%s)", log_label, first_err)
+                return fm
+        except Exception:
+            pass
+
+    logger.warning(
+        "[%s] YAML frontmatter parse failed (%s); falling back to regex extraction",
+        log_label, first_err or "frontmatter is not a mapping",
+    )
+    fm = {"_yaml_broken": True}
+    for field in fallback_fields:
+        m = re.search(rf"^{re.escape(field)}:\s*(.+)$", fm_text, re.MULTILINE)
+        if not m:
+            continue
+        raw = m.group(1).strip()
+        try:
+            # Recover scalar types ("38" → int, "[a, b]" → list) where the
+            # individual line is still valid YAML.
+            fm[field] = yaml.safe_load(raw)
+        except Exception:
+            fm[field] = raw
+    return fm
+
+
 # ── Stopword sets ────────────────────────────────────────────────────────────
 
 _ENTITY_STOPWORDS = {

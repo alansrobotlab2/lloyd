@@ -20,6 +20,8 @@ import yaml
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
+from agent_mcp._shared import parse_frontmatter_text
+
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 
 app = Server("lloyd-autonomy")
@@ -39,9 +41,18 @@ def _parse_task_file(path: Path) -> dict | None:
         parts = content.split("---\n", 2)
         if len(parts) < 3:
             return None
-        frontmatter = yaml.safe_load(parts[1])
-        if not isinstance(frontmatter, dict):
-            return None
+        # Resilient parse: bad YAML degrades to regex extraction instead of
+        # returning None (a None here silently drops the task from listings —
+        # the same failure mode that dormant-killed 34/40 scheduler tasks).
+        frontmatter = parse_frontmatter_text(
+            parts[1],
+            fallback_fields=(
+                "id", "name", "description", "status", "priority", "frequency",
+                "scheduled_at", "next_run", "last_run", "agent_id", "skill_name",
+                "timeout_seconds", "board_id",
+            ),
+            log_label=f"autonomy:{path.name}",
+        )
 
         def _to_iso(val):
             if val is None:

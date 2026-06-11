@@ -47,6 +47,8 @@ def _detect_silent_failures(text: str) -> list[str]:
 
 import yaml
 
+from agent_mcp._shared import parse_frontmatter_text
+
 logger = logging.getLogger("lloyd-autonomy")
 
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
@@ -79,63 +81,29 @@ def recover_stuck_tasks() -> list:
 
 # ── Task file I/O ─────────────────────────────────────────────────────────────
 
-def _sanitize_frontmatter(fm_text: str) -> str:
-    """Repair the recurring `tags:` corruption so a bad tag line can never again
-    silently drop a task from the scheduler.
-
-    The corruption is a block→inline replacement of the tags field that orphans
-    the pre-existing block-list items, producing invalid YAML, e.g.:
-        tags: [38-foo, autonomy, pipeline]
-        - nightly
-        - reflection
-    We fold the orphan `- item` lines back into the inline list. The task stays
-    scheduled; the next yaml.dump write (e.g. _update_task_field) normalizes the
-    file on disk. See project_autonomy_silent_task_drop memory.
-    """
-    lines = fm_text.split("\n")
-    out: list[str] = []
-    i = 0
-    while i < len(lines):
-        m = re.match(r"^(\s*)tags:\s*\[(.*)\]\s*$", lines[i])
-        if m:
-            indent, inside = m.group(1), m.group(2)
-            items = [x.strip().strip("'\"") for x in inside.split(",") if x.strip()]
-            j = i + 1
-            while j < len(lines) and re.match(r"^\s*-\s+\S", lines[j]):
-                it = lines[j].strip()[1:].strip().strip("'\"").strip("[]").strip().strip("'\"")
-                if it and it not in items:
-                    items.append(it)
-                j += 1
-            if j > i + 1:  # there were orphan items → repair
-                out.append(f"{indent}tags: [{', '.join(items)}]")
-                i = j
-                continue
-        out.append(lines[i])
-        i += 1
-    return "\n".join(out)
-
-
 def _parse_task_file(path: Path) -> Optional[dict]:
+    """Parse a task file with graduated recovery (shared parser in
+    agent_mcp._shared): plain YAML → orphaned-tags repair → regex field
+    extraction. A task can come back degraded (`_yaml_broken: True`) but it
+    can never silently vanish from the scheduler — that failure mode
+    dormant-killed 34/40 tasks on 2026-05-28 (see
+    project_autonomy_silent_task_drop memory). The next yaml.dump write
+    (e.g. _update_task_field) normalizes a repaired file on disk."""
     try:
         content = path.read_text(encoding="utf-8")
         parts = content.split("---\n", 2)
         if len(parts) < 3:
             return None
-        try:
-            fm = yaml.safe_load(parts[1])
-        except Exception as e:
-            # Self-heal the known recurring `tags:` corruption rather than
-            # silently dropping the task (which dormant-killed 34/40 tasks on
-            # 2026-05-28). Retry once after sanitizing.
-            repaired = _sanitize_frontmatter(parts[1])
-            try:
-                fm = yaml.safe_load(repaired)
-                logger.warning("Recovered corrupted frontmatter in %s (%s)", path.name, e)
-            except Exception:
-                logger.error("Failed to parse %s (unrecoverable): %s", path, e)
-                return None
-        if not isinstance(fm, dict):
-            return None
+        fm = parse_frontmatter_text(
+            parts[1],
+            fallback_fields=(
+                "id", "name", "description", "status", "priority", "frequency",
+                "scheduled_at", "next_run", "last_run", "agent_id", "skill_name",
+                "timeout_seconds", "preemptible", "auto_advance", "depends_on",
+                "max_retries", "failure_count", "runs_per_day", "preferred_hours",
+            ),
+            log_label=f"scheduler:{path.name}",
+        )
         fm["body"] = parts[2] if len(parts) > 2 else ""
         fm["_path"] = str(path)
         return fm
