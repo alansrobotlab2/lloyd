@@ -49,6 +49,11 @@ WATERMARKS_FILE = os.path.expanduser("~/lloyd/_pipeline/autonomy-watermarks.json
 OBSIDIAN_DIR = os.path.expanduser("~/obsidian")
 PENDING_IMPROVEMENTS_FILE = os.path.expanduser("~/lloyd/_pipeline/metrics/pending-improvements.jsonl")
 
+# Diff-size guard (validate_proposal check 5): proposals beyond these caps
+# are queued for human review instead of auto-evaluated.
+MAX_NET_DELETED_LINES = 20
+MAX_CHURN_LINES = 80
+
 # Local LLM config
 LLM_ENDPOINT = "http://127.0.0.1:8096/v1/chat/completions"
 LLM_MODEL = "primary"
@@ -698,7 +703,23 @@ def validate_proposal(change: dict) -> tuple[bool, str]:
     after_original = file_content[idx + len(original_text):idx + len(original_text) + 50]
     if after_original and replacement_text.rstrip().endswith(after_original[:20].rstrip()):
         return False, "replacement text overlaps with text after original"
-    
+
+    # Check 5: diff-size guard. A weak judge majority must not be able to
+    # gut the live system prompt (2026-06-11: a +30/−178-line SOUL.md
+    # deletion was kept on a 3/5 vote, one day after the identical change
+    # was reverted 1/5). Large rewrites need a human, not this loop.
+    removed = len(original_text.splitlines())
+    added = len(replacement_text.splitlines())
+    deleted_lines = max(0, removed - added)
+    if deleted_lines > MAX_NET_DELETED_LINES:
+        return False, (f"diff too destructive: net −{deleted_lines} lines "
+                       f"(cap {MAX_NET_DELETED_LINES}) — large rewrites "
+                       f"require human review")
+    if removed + added > MAX_CHURN_LINES:
+        return False, (f"diff too large: {removed + added} lines churned "
+                       f"(cap {MAX_CHURN_LINES}) — large rewrites require "
+                       f"human review")
+
     return True, "ok"
 
 
@@ -876,7 +897,9 @@ Reply ONLY "A" or "B". /no_think"""
             logger.info(f"Judgment {i+1}: Original wins")
     
     # 7. Decide
-    keep = wins >= 3
+    # 4/5 supermajority: a 3/5 keep is judge noise — the same change has
+    # flipped between 1/5 and 3/5 on consecutive nights (2026-06-10/11).
+    keep = wins >= 4
     logger.info(f"Results: {wins}/{len(user_messages)} for modified — {'KEEPING' if keep else 'REVERTING'}")
     
     # Commit change if keeping
