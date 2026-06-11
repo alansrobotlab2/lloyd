@@ -1,0 +1,39 @@
+mcp_servers:
+  lloyd-mcp:
+    disabled_tools:
+    - browser_screenshot
+    - discord_get_home_channel
+    - discord_list_channels
+    - discord_send
+    - discord_send_embed
+harness:
+  tool_search:
+    enabled: false
+    threshold_tools: 30
+    baseline_tools:
+    - Read
+    - Edit
+    - Write
+    - Grep
+    - Glob
+    - skills_search
+    - skills_read
+    - Bash
+    - http_fetch
+    - http_request
+    - http_search
+    - vault_write
+    - vault_recall
+    - mc_get_state
+    - mc_navigate
+    - ide_open_folder
+    - ide_open_file
+    - ide_close_tab
+    - Task
+    - vault_search
+    - TodoWrite
+    - ambient_decide
+    - mc_close_modal
+    - SetGoal
+    max_results_default: 5
+    max_results_cap: 20

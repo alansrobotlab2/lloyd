@@ -1,9 +1,13 @@
 """Config loading and model resolution helpers.
 
-Loads `config.yaml` once at import. `CONFIG` and `MODEL_CONFIGS` are
-mutable dicts — the `/api/tool-toggle` route mutates `CONFIG` in place
-then dumps it back to disk, so importers should access `CONFIG` via
-attribute lookup on this module rather than copying references.
+Loads `config.yaml` once at import, then merges `data/tool_overrides.yaml`
+on top. config.yaml is read-at-boot and hand-edited / git-tracked; the
+overrides file holds the UI-mutable state (server enabled, disabled_tools,
+tool_search settings) and is the ONLY file the toggle routes write — a UI
+click can no longer rewrite (and de-comment) the whole config, nor race a
+hand-edit. `CONFIG` and `MODEL_CONFIGS` are mutable dicts; importers should
+access `CONFIG` via attribute lookup on this module rather than copying
+references.
 
 The repo's `.env` (if present) is loaded into `os.environ` first, and
 any `${VAR}` placeholders in config.yaml are then expanded against the
@@ -19,9 +23,16 @@ import re
 from pathlib import Path
 from typing import Any
 
+import logging
+
 import yaml
 
+from app.atomic_io import atomic_write_text
 from app.paths import LLOYD_HOME
+
+logger = logging.getLogger("lloyd-config")
+
+TOOL_OVERRIDES_PATH = LLOYD_HOME / "data" / "tool_overrides.yaml"
 
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
@@ -69,6 +80,57 @@ def _expand(value: Any) -> Any:
     return value
 
 
+def _merge_tool_overrides(config: dict) -> dict:
+    """Overlay data/tool_overrides.yaml onto the boot config.
+
+    Only the UI-mutable keys are honored: per-server `enabled` /
+    `disabled_tools` and the `harness.tool_search` block. Anything else in
+    the overrides file is ignored, so a stray write can't shadow hand-edited
+    config. Missing or unparseable file → config unchanged.
+    """
+    if not TOOL_OVERRIDES_PATH.exists():
+        return config
+    try:
+        overrides = yaml.safe_load(TOOL_OVERRIDES_PATH.read_text()) or {}
+    except Exception as e:
+        logger.warning("tool_overrides.yaml unreadable, ignoring: %s", e)
+        return config
+    for server, o in (overrides.get("mcp_servers") or {}).items():
+        if server not in (config.get("mcp_servers") or {}):
+            continue  # overrides can't introduce servers, only adjust them
+        cfg = config["mcp_servers"][server]
+        if "enabled" in o:
+            cfg["enabled"] = bool(o["enabled"])
+        if "disabled_tools" in o:
+            cfg["disabled_tools"] = list(o["disabled_tools"] or [])
+    ts = (overrides.get("harness") or {}).get("tool_search")
+    if isinstance(ts, dict):
+        config.setdefault("harness", {}).setdefault("tool_search", {}).update(ts)
+    return config
+
+
+def save_tool_overrides() -> None:
+    """Persist the UI-mutable slice of CONFIG to data/tool_overrides.yaml.
+
+    Replaces the old behavior of yaml.dump-ing the entire CONFIG back over
+    config.yaml on every toggle.
+    """
+    out: dict = {"mcp_servers": {}}
+    for name, cfg in (CONFIG.get("mcp_servers") or {}).items():
+        entry: dict = {"disabled_tools": list(cfg.get("disabled_tools") or [])}
+        if "enabled" in cfg:
+            entry["enabled"] = bool(cfg["enabled"])
+        out["mcp_servers"][name] = entry
+    ts = (CONFIG.get("harness") or {}).get("tool_search")
+    if isinstance(ts, dict):
+        out["harness"] = {"tool_search": ts}
+    TOOL_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        TOOL_OVERRIDES_PATH,
+        yaml.dump(out, default_flow_style=False, allow_unicode=True, sort_keys=False),
+    )
+
+
 def _load_config() -> dict:
     _load_env_file(LLOYD_HOME / ".env")
     config_path = LLOYD_HOME / "config.yaml"
@@ -76,7 +138,7 @@ def _load_config() -> dict:
         return {}
     with open(config_path, "r") as f:
         raw = yaml.safe_load(f) or {}
-    return _expand(raw)
+    return _merge_tool_overrides(_expand(raw))
 
 
 CONFIG = _load_config()

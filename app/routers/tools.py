@@ -9,13 +9,10 @@ the parent server's `disabled_tools` list.
 
 import time
 
-import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.atomic_io import atomic_write_text
-from app.config import CONFIG
-from app.paths import LLOYD_HOME
+from app.config import CONFIG, save_tool_overrides
 from app.mcp_discovery import (
     _MCP_SERVER_META,
     _tools_cache,
@@ -79,7 +76,7 @@ async def get_tools():
 @router.post("/api/tool-toggle")
 async def toggle_tool(request: Request):
     """Toggle a server, individual tool, or baseline membership, persisting
-    changes to config.yaml.
+    changes to data/tool_overrides.yaml (config.yaml is read-only at boot).
 
     Payloads:
       {type: "server",   server, enabled}
@@ -89,7 +86,6 @@ async def toggle_tool(request: Request):
     data = await request.json()
     toggle_type = data.get("type")
     enabled = bool(data.get("enabled", True))
-    config_path = LLOYD_HOME / "config.yaml"
 
     if toggle_type == "server":
         server_name = data.get("server", "")
@@ -126,10 +122,7 @@ async def toggle_tool(request: Request):
     else:
         raise HTTPException(status_code=400, detail=f"Unknown type: {toggle_type}")
 
-    atomic_write_text(
-        config_path,
-        yaml.dump(CONFIG, default_flow_style=False, allow_unicode=True, sort_keys=False),
-    )
+    save_tool_overrides()
 
     _tools_cache.clear()
 
@@ -231,10 +224,6 @@ async def set_tool_discovery(request: Request):
             if x and not (x in seen or seen.add(x))
         ]
 
-    config_path = LLOYD_HOME / "config.yaml"
-    atomic_write_text(
-        config_path,
-        yaml.dump(CONFIG, default_flow_style=False, allow_unicode=True, sort_keys=False),
-    )
+    save_tool_overrides()
 
     return JSONResponse({"updated": True, "tool_search": ts})
