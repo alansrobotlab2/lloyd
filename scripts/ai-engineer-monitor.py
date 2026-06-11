@@ -23,6 +23,7 @@ Usage:
 import json
 import os
 import re
+import tempfile
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -181,12 +182,13 @@ print(json.dumps(videos))
 # ── Transcript fetching ────────────────────────────────────────────────
 
 def fetch_transcript(video_id):
-    """Fetch transcript using youtube-transcript-api via uv.
+    """Fetch transcript using youtube-transcript-api via uv, with yt-dlp fallback.
 
     Returns (transcript_text, error_msg). On success transcript_text is
     the text and error_msg is None. On failure transcript_text is None
     and error_msg contains the reason.
     """
+    # ── Primary: youtube-transcript-api ────────────────────────────
     code = '''
 import sys
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -199,11 +201,141 @@ print(" ".join(s.text for s in segments))
         ["uv", "run", "--with", "youtube-transcript-api", "python3", "-c", code, video_id],
         capture_output=True, text=True, timeout=30,
     )
-    if result.returncode != 0:
-        error_msg = result.stderr[:500].strip()
-        print(f"  Transcript fetch failed: {error_msg}")
-        return None, error_msg
-    return result.stdout.strip(), None
+    if result.returncode == 0:
+        return result.stdout.strip(), None
+
+    err_primary = result.stderr[:500].strip()
+    print(f"  Primary transcript fetch failed: {err_primary}")
+
+    # ── Fallback chain: yt-dlp VTT → HLS (m3u8) captions → failure ──
+
+    def parse_vtt_to_text(raw_vtt):
+        """Parse a VTT file into cleaned text."""
+        clean = re.sub(r'<[^>]*>', ' ', raw_vtt)
+        clean = re.sub(r'X-TIMESTAMP-MAP[^ ]*|Kind: \w+', '', clean)
+        clean = re.sub(r'^WEBVTT\s*$', '', clean, flags=re.MULTILINE)
+        lines = clean.split('\n')
+        text_parts = []
+        skip = False
+        for line in lines:
+            if '-->' in line:
+                skip = True
+                continue
+            if skip:
+                skip = False
+                continue
+            stripped = line.strip()
+            if stripped:
+                text_parts.append(stripped)
+        # Deduplicate consecutive repeated lines
+        deduped = []
+        prev = None
+        for p in text_parts:
+            if p != prev:
+                deduped.append(p)
+                prev = p
+        return " ".join(deduped)
+
+    # 1a. Try yt-dlp --write-auto-sub (works for regular auto-captions)
+    import glob
+    with tempfile.NamedTemporaryFile(prefix='yt_sub_', suffix='.vtt', delete=False) as tmp:
+        tmp_path = tmp.name
+    base = tmp_path.replace('.vtt', '')
+    dl_result = subprocess.run(
+        ["yt-dlp", "--write-auto-sub", "--sub-lang", "en",
+         "--skip-download", "--no-warnings",
+         "-o", base, f"https://www.youtube.com/watch?v={video_id}"],
+        capture_output=True, text=True, timeout=60,
+    )
+    vtt_files = glob.glob(base + '*')
+    vtt_file = None
+    for f in vtt_files:
+        if f.endswith('.en.vtt') and os.path.getsize(f) > 100:
+            vtt_file = f
+            break
+    if vtt_file:
+        with open(vtt_file) as fh:
+            transcript = parse_vtt_to_text(fh.read())
+        for f in vtt_files:
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
+        if len(transcript) > 200:
+            print(f"  yt-dlp VTT fallback succeeded: {len(transcript)} chars")
+            return transcript, None
+
+    # 1b. Try HLS (m3u8) caption stream — used for live premiere captions
+    # yt-dlp may not be able to download these directly
+    try:
+        info_result = subprocess.run(
+            ["yt-dlp", "--dump-json", "--no-download", "--no-warnings",
+             f"https://www.youtube.com/watch?v={video_id}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if info_result.returncode == 0:
+            info = json.loads(info_result.stdout)
+            caps = info.get('automatic_captions', {}).get('en', [])
+            for cap in caps:
+                url = cap.get('url', '')
+                if 'm3u8' in url:
+                    print(f"  HLS caption stream found: {url[:80]}...")
+                    # Fetch m3u8 index
+                    import urllib.request
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    resp = urllib.request.urlopen(req, timeout=30)
+                    m3u8 = resp.read().decode('utf-8')
+                    seg_urls = [line.strip() for line in m3u8.split('\n')
+                               if line.strip().startswith('http')]
+                    print(f"  Found {len(seg_urls)} VTT segments")
+                    all_text = []
+                    for seg_url in seg_urls:
+                        req2 = urllib.request.Request(seg_url, headers={'User-Agent': 'Mozilla/5.0'})
+                        resp2 = urllib.request.urlopen(req2, timeout=30)
+                        vtt = resp2.read().decode('utf-8')
+                        clean = re.sub(r'<[^>]*>', ' ', vtt)
+                        clean = re.sub(r'X-TIMESTAMP-MAP[^ ]*|Kind: \w+', '', clean)
+                        clean = re.sub(r'^WEBVTT\s*$', '', clean, flags=re.MULTILINE)
+                        lines = clean.split('\n')
+                        skip = False
+                        for line in lines:
+                            if '-->' in line:
+                                skip = True
+                                continue
+                            if skip:
+                                skip = False
+                                continue
+                            stripped = line.strip()
+                            if stripped:
+                                all_text.append(stripped)
+                    # Deduplicate consecutive
+                    deduped = []
+                    prev = None
+                    for p in all_text:
+                        if p != prev:
+                            deduped.append(p)
+                            prev = p
+                    transcript = " ".join(deduped)
+                    transcript = re.sub(r'\.{2,}', '.', transcript)
+                    transcript = re.sub(r'\s+', ' ', transcript).strip()
+                    if len(transcript) > 200:
+                        print(f"  HLS caption fallback succeeded: {len(transcript)} chars")
+                        return transcript, None
+    except Exception as e:
+        print(f"  HLS caption fallback error: {e}")
+
+    # Clean up
+    for f in vtt_files:
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
+
+    error_msg = f"Primary: {err_primary}"
+    if dl_result.returncode != 0:
+        error_msg += f"; yt-dlp: {dl_result.stderr[:300]}"
+    print(f"  Transcript fetch failed (all methods): {error_msg}")
+    return None, error_msg
 
 
 # ── Video metadata via yt-dlp ─────────────────────────────────────────
