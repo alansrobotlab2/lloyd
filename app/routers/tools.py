@@ -13,6 +13,7 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.atomic_io import atomic_write_text
 from app.config import CONFIG
 from app.paths import LLOYD_HOME
 from app.mcp_discovery import (
@@ -125,8 +126,10 @@ async def toggle_tool(request: Request):
     else:
         raise HTTPException(status_code=400, detail=f"Unknown type: {toggle_type}")
 
-    with open(config_path, "w") as f:
-        yaml.dump(CONFIG, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    atomic_write_text(
+        config_path,
+        yaml.dump(CONFIG, default_flow_style=False, allow_unicode=True, sort_keys=False),
+    )
 
     _tools_cache.clear()
 
@@ -229,7 +232,9 @@ async def set_tool_discovery(request: Request):
         ]
 
     config_path = LLOYD_HOME / "config.yaml"
-    with open(config_path, "w") as f:
-        yaml.dump(CONFIG, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    atomic_write_text(
+        config_path,
+        yaml.dump(CONFIG, default_flow_style=False, allow_unicode=True, sort_keys=False),
+    )
 
     return JSONResponse({"updated": True, "tool_search": ts})

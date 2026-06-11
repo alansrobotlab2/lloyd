@@ -32,6 +32,7 @@ from mcp.types import Tool
 from agent_mcp._shared import (
     FACTS_ROOT,
     ErrorCode,
+    atomic_write_text,
     _FACT_QUERY_STOPWORDS,
     _SCORING_STOPWORDS,
     _err,
@@ -347,7 +348,7 @@ def _fact_add(params: dict) -> dict:
         frontmatter.setdefault("facts", []).append(new_fact)
         frontmatter["last_updated"] = now_iso
         body = f"\n# {entity} - {category}\n\n**Entity:** {entity}\n**Category:** {category}\n**Fact Count:** {len(frontmatter['facts'])}\n"
-        fact_file.write_text(_write_fact_frontmatter(frontmatter) + body, encoding="utf-8")
+        atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
         _invalidate_entity_dirs_cache()
         result: dict = {"success": True, "fact_id": fact_id, "entity": entity, "category": category}
         if entity != raw_entity:
@@ -419,7 +420,7 @@ def _fact_resolve(params: dict) -> dict:
                         if changed:
                             body_start = content.find("---", 3)
                             body = content[body_start + 3:] if body_start != -1 else ""
-                            fact_file.write_text(_write_fact_frontmatter(frontmatter) + body, encoding="utf-8")
+                            atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
                             resolved += 1
         return {"entity": entity, "resolved": resolved, "remaining": len(contradictions) - resolved}
     except Exception as exc:
@@ -471,7 +472,7 @@ def _fact_invalidate(params: dict) -> dict:
             if changed:
                 body_start = content.find("---", 3)
                 body = content[body_start + 3:] if body_start != -1 else ""
-                fact_file.write_text(_write_fact_frontmatter(frontmatter) + body, encoding="utf-8")
+                atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
         return {"success": True, "entity": resolved, "expired_count": expired_count, "matched_facts": matched_facts}
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, expired_count=0)
@@ -507,8 +508,10 @@ def _save_relationships(data: dict) -> None:
     """Persist the relationships index and refresh the cache."""
     global _relationships_cache
     RELATIONSHIPS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RELATIONSHIPS_PATH.write_text(
-        json.dumps(data, indent=2, sort_keys=False), encoding="utf-8"
+    atomic_write_text(
+        RELATIONSHIPS_PATH,
+        json.dumps(data, indent=2, sort_keys=False),
+        fsync=True,
     )
     try:
         new_mtime = RELATIONSHIPS_PATH.stat().st_mtime_ns
