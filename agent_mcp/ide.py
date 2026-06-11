@@ -18,12 +18,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from app.config import service_url
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
 from agent_mcp._shared import _err, _wrap, ErrorCode
 
-LLOYD_API = os.environ.get("LLOYD_API_URL", "http://127.0.0.1:8080")
+LLOYD_API = os.environ.get("LLOYD_API_URL") or service_url("backend", "http://127.0.0.1:8080")
 
 app = Server("lloyd-ide")
 

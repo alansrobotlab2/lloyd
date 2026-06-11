@@ -27,10 +27,11 @@ import json
 import httpx
 
 from agent_mcp._shared import make_http_client
+from app.config import service_url
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
-LLOYD_BACKEND = "http://127.0.0.1:8080"
+LLOYD_BACKEND = service_url("backend", "http://127.0.0.1:8080")
 
 app = Server("lloyd-ambient")
 

@@ -23,6 +23,7 @@ import uuid
 from typing import Any
 
 import yaml
+from app.config import default_model_base_url
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
@@ -77,7 +78,7 @@ async def _task(args: dict[str, Any]) -> str:
 
     # Resolve model and base_url — fall back to primary defaults.
     model = profile["model"] or "primary"
-    base_url = profile["base_url"] or "http://127.0.0.1:8096"
+    base_url = profile["base_url"] or default_model_base_url()
 
     # Subagent always disallows Task to prevent infinite recursion.
     disallowed = list(profile["disallowed_tools"])
