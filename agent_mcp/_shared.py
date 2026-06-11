@@ -108,7 +108,14 @@ def _err(message: str, code: str = ErrorCode.INTERNAL, **extra: Any) -> dict:
     The order is fixed: error first, code second, then any caller-supplied
     extras (e.g. empty list/dict companions that pre-existing callers may
     expect on the error path).
+
+    Messages are capped at 500 chars: exception text is deliberately shown
+    to the model (it enables self-correction) but many handlers pass raw
+    str(exc), and a deep traceback or bad-input echo shouldn't eat context
+    budget. Intentional error messages are far shorter than the cap.
     """
+    if len(message) > 500:
+        message = message[:500] + " …[truncated]"
     return {"error": message, "code": code, **extra}
 
 

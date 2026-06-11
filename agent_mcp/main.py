@@ -82,6 +82,13 @@ combined = Server("lloyd")
 _dispatch: dict[str, object] = {}
 
 
+# OpenAI's spec caps tool names at 64 chars. Enforced here at registration
+# so a bad name fails loudly on the first list_tools() instead of
+# mid-conversation in the harness translator (tool_schema.py keeps its own
+# check as a backstop for non-aggregator servers).
+TOOL_NAME_MAX = 64
+
+
 @combined.list_tools()
 async def list_tools():
     _dispatch.clear()
@@ -89,6 +96,11 @@ async def list_tools():
     for mod in MODULES:
         tools = await mod.list_tools()
         for tool in tools:
+            if len(tool.name) > TOOL_NAME_MAX:
+                raise ValueError(
+                    f"tool name {tool.name!r} from {mod.__name__} is "
+                    f"{len(tool.name)} chars (max {TOOL_NAME_MAX})"
+                )
             _dispatch[tool.name] = mod
         all_tools.extend(tools)
     return all_tools

@@ -151,6 +151,10 @@ def _get_model_cfg(model_name: str) -> dict:
     for _name, c in MODEL_CONFIGS.items():
         if c.get("alias") == model_name:
             return c
+    # An unknown name silently resolving to {} means the caller proceeds
+    # with no env overrides — i.e. against the wrong endpoint. Make the
+    # misroute greppable.
+    logger.warning("unknown model %r — no config/env overrides applied", model_name)
     return {}
 
 
