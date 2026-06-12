@@ -1,10 +1,10 @@
 ---
 segment: agents
-generated: 2026-06-10 03:00 PST
-data_range: 2026-06-07 to 2026-06-10
+generated: 2026-06-11 17:44 PST
+data_range: 2026-06-08 to 2026-06-11
 ---
 
-# Signal Report — 2026-06-10
+# Signal Report — 2026-06-11
 
 ## Queued Signals (met threshold)
 
@@ -12,44 +12,39 @@ data_range: 2026-06-07 to 2026-06-10
 
 | ID | Date | Type | Category | Description | Source |
 |----|------|------|----------|-------------|--------|
-| 1  | 2026-06-08 | failure | tool-use | `browser_evaluate` or transcript extraction returned empty — session failed to generate summary | daily note |
-| 2  | 2026-06-08 | failure | tool-use | Local LLM service technical issues during transcript processing — partial summary with cutoff | daily note |
+| 1  | 2026-06-08 | tool_failure | amazon-scraping | Amazon search: 20+ tool calls with cascading failures — syntax errors, variable name mismatches (`controHits`/`contigo_hits`), regex extraction loops. Session produced results but via ~15 retries and errors | session 20260608_140102 |
+| 2  | 2026-06-08 | tool_failure | local-llm | Local LLM (ollama/vllm) timeout on transcript summarization — 300s timeout exceeded on large transcripts. 2 sessions affected (20260608_134240, 20260608_153854) | session extraction |
+| 3  | 2026-06-08 | incomplete_output | summarization | Session completed tool calls but produced no summary output — ended with "(Lloyd completed its tool calls but did not produce a summary. Ask again if you'd like an answer.)" | session 20260608_134326 |
+| 4  | 2026-06-08 | tool_failure | browser-closed | `Page.goto: Target page, context or browser has been closed` on 3 separate sessions (Amazon, 17track, Prusa alt URL). Browser session closing between navigations | session extraction |
 
 ### Inferred (met 2+ threshold)
 
 | ID | Date | Type | Category | Description | Frequency | Source |
 |----|------|------|----------|-------------|-----------|--------|
-| 1  | 2026-06-06 to 2026-06-10 | pattern | tool-use | Amazon http_fetch consistently blocked by anti-bot — browser fallback (navigate → snapshot → extract) is the reliable path | 5x+ | daily notes, memory |
-| 2  | 2026-06-07 to 2026-06-10 | pattern | autonomy | Zero corrections in 70+ day window (since 2026-03-29). System behavior is stable and satisfactory. | 4 days | daily notes |
-| 3  | 2026-06-07 to 2026-06-10 | pattern | response-quality | Responses truncated mid-summary on multiple sessions (Prusa CORE One+ June 9, tool list June 8) — user never corrected or followed up | 3x | daily notes |
+| 1  | 2026-06-08/09 | pattern | amazon-scraping | Amazon anti-bot blocking triggers cascading tool failure loops. `http_fetch` returns 503, browser returns closed, raw HTTP returns 2.4MB of HTML requiring manual regex parsing with multiple bugs | 2 sessions | extraction |
+| 2  | 2026-06-08 | pattern | bash-syntax | Repeated variable name typos in inline Python (`controHits` vs `contigo_hits`, `controSpans` vs `contigo_spans`, `controblocks` vs `contigo_blocks`) — same pattern repeated 6+ times across 3 parse scripts | 6+ occurrences | session 20260608_140102 |
+| 3  | 2026-06-08/11 | pattern | bash-which | `which: command not found` error on multiple sessions — PATH or shell environment doesn't include standard utilities | 2 sessions | extraction |
+| 4  | 2026-06-08 | pattern | js-spa-tracking | JavaScript SPA sites (17track, Parliament) return empty content via fetch, browser sessions close unexpectedly, requires iterative workaround | 3 sessions | extraction |
 
 ## Pending Signals (below threshold)
 
-- Local LLM transcript processing sometimes produces incomplete results — 2 occurrences, may be situational (service load, video length)
-- Microsoft Teams URLs consistently return "Unsupported Browser" — 1 occurrence, documented limitation
-- No new "bad lloyd" entries in past 4 days
+- Browser snapshot returning "empty accessibility tree" on JS-heavy pages — 1 occurrence (17track), monitor
+- Tool call JSON parse error ("Tool call arguments could not be parsed as JSON") — 1 occurrence (Joe Santagato session), monitor
 
 ## Tool Failure Patterns
 
-- **Tool:** `http_fetch` — **Error type:** Amazon anti-bot CAPTCHA/gate (returns 200 with non-product content) — **Occurrences:** 5 (4-day window) — **Recommendation:** Browser fallback is already the documented pattern in MEMORY.md. Keep enforcing browser-first for Amazon.
-- **Tool:** `browser_evaluate` — **Error type:** Failed to generate summary for YouTube transcript — **Occurrences:** 1 — **Recommendation:** Already have fallback chain (yt-dlp → browser_evaluate → http_search). Ensure fallback is triggered immediately rather than retrying the same tool.
-- **Tool:** `browser_navigate` — **Error type:** Microsoft Teams/Claude login pages return auth walls — **Occurrences:** 2 — **Recommendation:** Detect login/auth pages early and explain to user rather than attempting extraction.
-- **Tool:** `youtube-transcript-api` — **Error type:** Empty transcript for newer/non-English videos — **Occurrences:** 3 (historical baseline) — **Recommendation:** Fallback chain implemented in SKILL.md. No action needed.
+- **Tool:** `browser_navigate` — **Error type:** `Page.goto: Target page, context or browser has been closed` — **Occurrences:** 3 (Jun 8) — **Recommendation:** Browser session is being closed between calls. Ensure browser session persists across tool calls. Consider `browser_wait` after navigate before snapshot. Skill `browser-navigate-handling` already exists but session lifecycle needs fixing.
+
+- **Tool:** `run_bash` (local LLM calls) — **Error type:** Command timeout (300s) — **Occurrences:** 2 (Jun 8) — **Recommendation:** Skip local LLM for summarization on large transcripts (>50K chars). Read transcript directly and summarize inline, or use `http_request` to remote endpoints. Do NOT fall back to ollama/vllm — they're too slow for interactive use.
+
+- **Tool:** `http_fetch` + `browser_navigate` (Amazon) — **Error type:** HTTP 503 + anti-bot — **Occurrences:** 1 session with 20+ failed tool calls — **Recommendation:** When Amazon fetch fails, use `browser_navigate` → `browser_snapshot` → extract product info directly. Do NOT attempt raw HTML regex parsing. The existing `browser-evaluate-logic-handling` skill should be extended to include Amazon-specific fallback.
 
 ## Positive Patterns to Reinforce
 
-- **Pattern:** Zero-correction stability — **Evidence:** 70+ consecutive days without user corrections (since 2026-03-29). All 4 days in this window clean. — **Action:** Do not change current behavior patterns. System is in a healthy operating state.
-- **Pattern:** Amazon browser fallback (navigate → snapshot → extract) — **Evidence:** 10+ successful sessions across the 4-day period and wider history. Products researched: Contigo mugs, Sony LinkBuds Clip, Soundcore AeroClip, Prusa CORE One+, USB adapters. — **Action:** Already in MEMORY.md best practice section. Reinforce in research-related skills.
-- **Pattern:** Graceful auth-block handling — **Evidence:** Teams (June 9) and Claude login (June 7) both handled with clear explanation to user. No frustration expressed. — **Action:** Encode as a guardrail: detect auth/login pages and respond immediately rather than retrying.
-- **Pattern:** Morning brief + email triage pipeline — **Evidence:** Running daily with correct filtering (Nextdoor soft-rejected, LinkedIn/marketing rejected, watch list honored). Zero filter corrections. — **Action:** Stable workflow, no changes needed.
+- **Pattern:** YouTube transcript extraction pipeline (`yt-dlp` → transcript → read sections → summarize) — **Evidence:** 10+ successful sessions across Jun 8-11 with consistent quality output. Zero failures in Jun 9-11. — **Action:** This is the gold-standard workflow. Encode as a canonical skill if not already formalized. The `youtube-transcript` skill should codify this exact sequence.
 
-## Context
+- **Pattern:** Browser fallback on JS-rendered pages — **Evidence:** Parliamentary page (Jun 9), Prusa3D product pages (Jun 9), 17track (Jun 8) — correctly identified fetch failure and switched to browser. — **Action:** Reinforce this pattern: when `http_fetch` returns empty or error, immediately try `browser_navigate` → `browser_snapshot`. Don't retry fetch 3+ times before trying browser.
 
-**Data sources scanned:**
-- `~/obsidian/memory/corrections.md` — Full file, last entry 2026-05-08 (ToolSearch schema loading + port mismatch)
-- `~/obsidian/memory/corrections-tail.md` — Same consolidated content
-- `~/obsidian/memory/2026-06-07.md` through `2026-06-10.md` — Daily notes (23 total sessions)
-- No enriched session extraction data available (sessions directory empty, data captured in daily notes instead)
-- Previous signal report at `~/lloyd/_pipeline/reflection/signals-latest.md` (dated 2026-06-09)
+- **Pattern:** Clean tool result interpretation — **Evidence:** YouTube sessions consistently produce well-structured markdown summaries with highlights, ratings, and context. Browser tool explanation (Jun 9) was thorough and clear. — **Action:** These sessions demonstrate the right pattern: read tool output → extract key facts → produce structured markdown output. Preserve this workflow template.
 
-**Notable:** This is the longest correction-free period since the 2026-03-29 burst. The 70+ day streak suggests either (a) the system has genuinely stabilized, or (b) the user's interaction pattern has shifted to consumption-only mode with less behavioral feedback. The daily notes confirm the latter: sessions are almost entirely "highlights from [URL]" content summarization requests. This is an important context signal — don't over-optimize for project-work patterns that aren't being exercised.
+- **Pattern:** Multi-link batching with independent processing — **Evidence:** Jun 8 had 8 YouTube links processed sequentially, each producing independent quality summaries. No merging or collapsing of distinct inputs. — **Action:** This is correct behavior. Reinforce that N links → N independent summaries.
