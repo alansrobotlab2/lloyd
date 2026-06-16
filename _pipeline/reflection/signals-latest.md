@@ -1,50 +1,90 @@
+# Nightly Reflection - Signal Report
+## 2026-06-14 PST
+
+**Signal:** negative
+**Category:** scheduling
+**Severity:** high
+**Source:** daily note 2026-06-14
+**Description:** Nightly reflection tasks running at 5pm instead of 2am (local time). 23 failed runs in 10 days. Root cause: schedule misalignment - cron jobs triggering at wrong time.
+**Recommendation:** Fix cron schedule config in autonomy task definitions.
+
 ---
-segment: agents
-generated: 2026-06-11 17:44 PST
-data_range: 2026-06-08 to 2026-06-11
+
+**Signal:** negative
+**Category:** infrastructure
+**Severity:** high
+**Source:** vault-maintenance 2026-06-12
+**Description:** `semantic_relationships.py` extraction timing out. LLM endpoint on port 8096 not running. Ollama is on 11434, Open WebUI on 8091.
+**Recommendation:** Fix LLM endpoint config or route through working port 8091.
+
 ---
 
-# Signal Report — 2026-06-11
+**Signal:** negative
+**Category:** data-quality
+**Severity:** medium
+**Source:** vault-maintenance 2026-06-12, 13, 14
+**Description:** 980 docs missing `segment:` field. Same issue recurring across 3 days of maintenance.
+**Recommendation:** Batch fix missing segments during next maintenance run.
 
-## Queued Signals (met threshold)
+---
 
-### Explicit (act on first occurrence)
+**Signal:** negative
+**Category:** data-quality
+**Severity:** medium
+**Source:** vault-maintenance 2026-06-12, 13, 14
+**Description:** Knowledge graph has duplicate facts from multiple extraction runs. Karpathy: 175 facts with 25 contradictions. vLLM: 195 facts. GR00T: 25 contradictions.
+**Recommendation:** Implement fact deduplication before insertion.
 
-| ID | Date | Type | Category | Description | Source |
-|----|------|------|----------|-------------|--------|
-| 1  | 2026-06-08 | tool_failure | amazon-scraping | Amazon search: 20+ tool calls with cascading failures — syntax errors, variable name mismatches (`controHits`/`contigo_hits`), regex extraction loops. Session produced results but via ~15 retries and errors | session 20260608_140102 |
-| 2  | 2026-06-08 | tool_failure | local-llm | Local LLM (ollama/vllm) timeout on transcript summarization — 300s timeout exceeded on large transcripts. 2 sessions affected (20260608_134240, 20260608_153854) | session extraction |
-| 3  | 2026-06-08 | incomplete_output | summarization | Session completed tool calls but produced no summary output — ended with "(Lloyd completed its tool calls but did not produce a summary. Ask again if you'd like an answer.)" | session 20260608_134326 |
-| 4  | 2026-06-08 | tool_failure | browser-closed | `Page.goto: Target page, context or browser has been closed` on 3 separate sessions (Amazon, 17track, Prusa alt URL). Browser session closing between navigations | session extraction |
+---
 
-### Inferred (met 2+ threshold)
+**Signal:** negative
+**Category:** data-quality
+**Severity:** low
+**Source:** vault-maintenance 2026-06-12, 13, 14
+**Description:** 1,840 tags used only once (78.6%). 87.4% of 2,340 tags used 1-2 times. Tag fragmentation makes indexing less effective.
+**Recommendation:** Consolidate tags, merge near-duplicates.
 
-| ID | Date | Type | Category | Description | Frequency | Source |
-|----|------|------|----------|-------------|-----------|--------|
-| 1  | 2026-06-08/09 | pattern | amazon-scraping | Amazon anti-bot blocking triggers cascading tool failure loops. `http_fetch` returns 503, browser returns closed, raw HTTP returns 2.4MB of HTML requiring manual regex parsing with multiple bugs | 2 sessions | extraction |
-| 2  | 2026-06-08 | pattern | bash-syntax | Repeated variable name typos in inline Python (`controHits` vs `contigo_hits`, `controSpans` vs `contigo_spans`, `controblocks` vs `contigo_blocks`) — same pattern repeated 6+ times across 3 parse scripts | 6+ occurrences | session 20260608_140102 |
-| 3  | 2026-06-08/11 | pattern | bash-which | `which: command not found` error on multiple sessions — PATH or shell environment doesn't include standard utilities | 2 sessions | extraction |
-| 4  | 2026-06-08 | pattern | js-spa-tracking | JavaScript SPA sites (17track, Parliament) return empty content via fetch, browser sessions close unexpectedly, requires iterative workaround | 3 sessions | extraction |
+---
 
-## Pending Signals (below threshold)
+**Signal:** negative
+**Category:** data-quality
+**Severity:** medium
+**Source:** vault-maintenance 2026-06-13, 14
+**Description:** 772 stale wiki-links (92% of all wiki links in knowledge/ and memory/ directories).
+**Recommendation:** Clean up broken links during maintenance.
 
-- Browser snapshot returning "empty accessibility tree" on JS-heavy pages — 1 occurrence (17track), monitor
-- Tool call JSON parse error ("Tool call arguments could not be parsed as JSON") — 1 occurrence (Joe Santagato session), monitor
+---
 
-## Tool Failure Patterns
+**Signal:** negative
+**Category:** data-quality
+**Severity:** low
+**Source:** vault-maintenance 2026-06-13
+**Description:** GR00T entity has facts about Alfie's sensors mixed in. Entity cross-pollution between unrelated entities.
+**Recommendation:** Review entity extraction logic to prevent cross-pollution.
 
-- **Tool:** `browser_navigate` — **Error type:** `Page.goto: Target page, context or browser has been closed` — **Occurrences:** 3 (Jun 8) — **Recommendation:** Browser session is being closed between calls. Ensure browser session persists across tool calls. Consider `browser_wait` after navigate before snapshot. Skill `browser-navigate-handling` already exists but session lifecycle needs fixing.
+---
 
-- **Tool:** `run_bash` (local LLM calls) — **Error type:** Command timeout (300s) — **Occurrences:** 2 (Jun 8) — **Recommendation:** Skip local LLM for summarization on large transcripts (>50K chars). Read transcript directly and summarize inline, or use `http_request` to remote endpoints. Do NOT fall back to ollama/vllm — they're too slow for interactive use.
+**Signal:** positive
+**Category:** workflow
+**Severity:** medium
+**Source:** vault-maintenance 2026-06-13, 14
+**Description:** Full pipeline extraction works well when infrastructure is available. 2 files processed, 96 facts, 27,614 relationships, 32,567 index edges.
+**Recommendation:** Preserve pipeline configuration.
 
-- **Tool:** `http_fetch` + `browser_navigate` (Amazon) — **Error type:** HTTP 503 + anti-bot — **Occurrences:** 1 session with 20+ failed tool calls — **Recommendation:** When Amazon fetch fails, use `browser_navigate` → `browser_snapshot` → extract product info directly. Do NOT attempt raw HTML regex parsing. The existing `browser-evaluate-logic-handling` skill should be extended to include Amazon-specific fallback.
+---
 
-## Positive Patterns to Reinforce
+**Signal:** positive
+**Category:** output-quality
+**Severity:** medium
+**Source:** daily note 2026-06-11
+**Description:** Deep research outputs are comprehensive and well-structured. AI Agent Arena report: 2,863 tokens with clear sections.
+**Recommendation:** Maintain current research pipeline.
 
-- **Pattern:** YouTube transcript extraction pipeline (`yt-dlp` → transcript → read sections → summarize) — **Evidence:** 10+ successful sessions across Jun 8-11 with consistent quality output. Zero failures in Jun 9-11. — **Action:** This is the gold-standard workflow. Encode as a canonical skill if not already formalized. The `youtube-transcript` skill should codify this exact sequence.
+---
 
-- **Pattern:** Browser fallback on JS-rendered pages — **Evidence:** Parliamentary page (Jun 9), Prusa3D product pages (Jun 9), 17track (Jun 8) — correctly identified fetch failure and switched to browser. — **Action:** Reinforce this pattern: when `http_fetch` returns empty or error, immediately try `browser_navigate` → `browser_snapshot`. Don't retry fetch 3+ times before trying browser.
-
-- **Pattern:** Clean tool result interpretation — **Evidence:** YouTube sessions consistently produce well-structured markdown summaries with highlights, ratings, and context. Browser tool explanation (Jun 9) was thorough and clear. — **Action:** These sessions demonstrate the right pattern: read tool output → extract key facts → produce structured markdown output. Preserve this workflow template.
-
-- **Pattern:** Multi-link batching with independent processing — **Evidence:** Jun 8 had 8 YouTube links processed sequentially, each producing independent quality summaries. No merging or collapsing of distinct inputs. — **Action:** This is correct behavior. Reinforce that N links → N independent summaries.
+## Summary
+- **Negative signals:** 7 (3 high, 2 medium, 2 low)
+- **Positive signals:** 2
+- **Recurring issues:** Scheduling (23 failed runs), LLM endpoints, data quality (segments, duplicates, stale links)
+- **Key pattern:** Infrastructure issues (scheduling, LLM endpoints) blocking effective nightly operations
+- **Action items:** Fix cron schedules, route LLM through working port, batch-fix missing segments

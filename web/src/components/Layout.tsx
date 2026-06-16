@@ -298,7 +298,7 @@ export default function Layout() {
 
   return (
     <MessageProvider>
-      <div className={cn('h-screen flex bg-background text-foreground', isMobile && 'flex-col')}>
+      <div className={cn('h-dvh flex bg-background text-foreground safe-area', isMobile && 'flex-col')}>
         {/* Desktop sidebar */}
         {!isMobile && (
           <Sidebar

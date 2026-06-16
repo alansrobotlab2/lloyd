@@ -100,9 +100,13 @@ EOF
 openssl genrsa -out "$SRV_KEY" 2048 2>/dev/null
 chmod 600 "$SRV_KEY"
 openssl req -new -key "$SRV_KEY" -out "$SRV_CSR" -config "$SRV_CONF" 2>/dev/null
+# 397 days, NOT 3650: Apple platforms (iOS 13.4+/Safari) reject TLS *server*
+# certs with validity > 398 days as invalid ("this connection is not private"),
+# even when the signing CA is trusted. The CA itself (above) is exempt and stays
+# long-lived, so this leaf can be re-minted without re-installing the CA on devices.
 openssl x509 -req -in "$SRV_CSR" \
   -CA "$CA_CRT" -CAkey "$CA_KEY" -CAcreateserial \
-  -out "$SRV_CRT" -days 3650 -sha256 \
+  -out "$SRV_CRT" -days 397 -sha256 \
   -extfile "$SRV_CONF" -extensions v3_req 2>/dev/null
 chmod 644 "$SRV_CRT"
 

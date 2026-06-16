@@ -7,37 +7,44 @@ import path from "node:path";
 import type { TLSSocket } from "node:tls";
 
 const certDir = path.resolve(__dirname, "../agent-services/cert");
-const serverCert = path.join(certDir, "lloyd.crt");
-const serverKey = path.join(certDir, "lloyd.key");
-const caCert = path.join(certDir, "ca.crt");
 
-const haveCa = fs.existsSync(caCert);
+// Prefer the publicly-trusted Tailscale (Let's Encrypt) cert for the tailnet
+// MagicDNS name if it's been provisioned (`tailscale cert <name>`). It's
+// trusted by every device out of the box — no CA install, no warnings, works
+// in standalone home-screen apps. Falls back to the private Lloyd server cert.
+const tsHost = "goliath.taile37041.ts.net";
+const tsCert = path.join(certDir, `${tsHost}.crt`);
+const tsKey = path.join(certDir, `${tsHost}.key`);
+const haveTs = fs.existsSync(tsCert) && fs.existsSync(tsKey);
+
+const serverCert = haveTs ? tsCert : path.join(certDir, "lloyd.crt");
+const serverKey = haveTs ? tsKey : path.join(certDir, "lloyd.key");
+
 const haveServer = fs.existsSync(serverCert) && fs.existsSync(serverKey);
 
+// eslint-disable-next-line no-console
+console.log(
+  haveTs
+    ? `[vite] HTTPS using Tailscale public cert for ${tsHost}`
+    : "[vite] HTTPS using private Lloyd cert (no Tailscale cert found yet)",
+);
 if (!haveServer) {
   // eslint-disable-next-line no-console
   console.warn(
     "[vite] server cert missing — falling back to plain HTTP. Run: bash scripts/gen-cert.sh",
   );
 }
-if (haveServer && !haveCa) {
-  // eslint-disable-next-line no-console
-  console.warn(
-    "[vite] CA cert missing — serving HTTPS without mTLS. Run: bash scripts/gen-cert.sh --force",
-  );
-}
 
+// mTLS dropped 2026-06-14: client-cert auth can't work in iOS Chrome (and
+// other third-party iOS browsers) — they can't present keychain identities
+// for mutual TLS, only Safari can. Tailscale is the access boundary now:
+// only tailnet devices can reach :5173. We still serve HTTPS with the Lloyd
+// server cert (encrypted + secure context for SSE/voice); we just no longer
+// request or require a client cert, so any browser on the tailnet works.
 const httpsConfig = haveServer
   ? {
       key: fs.readFileSync(serverKey),
       cert: fs.readFileSync(serverCert),
-      ...(haveCa
-        ? {
-            ca: fs.readFileSync(caCert),
-            requestCert: true,
-            rejectUnauthorized: true,
-          }
-        : {}),
     }
   : undefined;
 

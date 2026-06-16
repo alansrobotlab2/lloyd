@@ -75,12 +75,16 @@ app.add_middleware(
 
 @app.middleware("http")
 async def _require_client_cert(request: Request, call_next):
-    """Enforce the per-device client cert allowlist on /api/* routes.
+    """Per-device client-cert allowlist on /api/* routes — now optional.
 
-    Vite has already verified the cert was signed by the Lloyd CA at the TLS
-    layer (requestCert + rejectUnauthorized). Vite's configureServer plugin
-    forwards the SHA-256 fingerprint as X-Client-Fingerprint. Here we check
-    that the fingerprint is in clients.json — revocation = remove from json.
+    mTLS was dropped 2026-06-14: iOS Chrome (and other third-party iOS
+    browsers) can't present keychain identities for mutual TLS, so Vite no
+    longer requests a client cert. Tailscale is the access boundary now —
+    only tailnet devices can reach the frontend.
+
+    We still honor the allowlist when a fingerprint IS forwarded (e.g. a
+    browser with the Lloyd client cert installed, or if Vite mTLS is
+    re-enabled), but no longer reject requests that lack one.
     """
     if request.method == "OPTIONS":
         return await call_next(request)
@@ -89,27 +93,24 @@ async def _require_client_cert(request: Request, call_next):
         return await call_next(request)
 
     # Loopback bypass: same-host services (LiveKit worker, autonomy ticker)
-    # POST directly to 127.0.0.1:8080 without going through Vite's TLS
-    # layer. mTLS is a LAN-browser allowlist; trust same-host callers.
+    # POST directly to 127.0.0.1:8080 without going through Vite's TLS layer.
     client_host = request.client.host if request.client else ""
     if client_host in ("127.0.0.1", "::1"):
         return await call_next(request)
 
     fp = (request.headers.get("x-client-fingerprint") or "").upper().replace(":", "")
-    if not fp:
-        return JSONResponse(
-            {"detail": "no client cert fingerprint forwarded — Vite mTLS not configured?"},
-            status_code=401,
-        )
-    allowlist = _load_allowlist()
-    if fp not in allowlist:
-        return JSONResponse(
-            {"detail": "client cert revoked or unknown"},
-            status_code=403,
-        )
-    # Stash the cert identity for handlers that want to log/use it.
-    request.state.client_name = allowlist[fp]
-    request.state.client_fingerprint = fp
+    if fp:
+        # A cert was presented — keep enforcing the allowlist so revocation
+        # still works for cert-bearing clients.
+        allowlist = _load_allowlist()
+        if fp not in allowlist:
+            return JSONResponse(
+                {"detail": "client cert revoked or unknown"},
+                status_code=403,
+            )
+        # Stash the cert identity for handlers that want to log/use it.
+        request.state.client_name = allowlist[fp]
+        request.state.client_fingerprint = fp
     return await call_next(request)
 
 app.include_router(_messages_router.router)
