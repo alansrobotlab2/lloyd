@@ -27,7 +27,9 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
-from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
+# Direct path — avoid importing app.* (triggers full FastAPI router chain → uvloop dep)
+from pathlib import Path as _P
+FACTS_DIR = _P("/home/alansrobotlab/lloyd/_pipeline/vault-derived/facts")
 HOME = Path.home()
 
 # Entities whose facts fall into these categories are treated as personal

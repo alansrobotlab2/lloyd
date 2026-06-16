@@ -1,0 +1,19 @@
+{
+  "name": "Lloyd -- Mission Control",
+  "short_name": "Lloyd",
+  "description": "Lloyd Mission Control",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [
+    {
+      "src": "/apple-touch-icon.png",
+      "type": "image/png",
+      "sizes": "180x180",
+      "purpose": "any"
+    }
+  ]
+}
