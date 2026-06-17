@@ -1,7 +1,6 @@
 mcp_servers:
   lloyd-mcp:
     disabled_tools:
-    - browser_screenshot
     - discord_get_home_channel
     - discord_list_channels
     - discord_send
