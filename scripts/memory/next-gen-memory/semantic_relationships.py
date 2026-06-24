@@ -181,7 +181,7 @@ class SemanticRelationshipDiscoverer:
                 if len(shared) >= self.MIN_SHARED_TAGS:
                     self._add_relationship(
                         p1, p2, "related-to",
-                        f"Shared tags: {', '.join(sorted(shared)[:5])}",
+                        f"Shared tags: {', '.join(str(t) for t in sorted(shared, key=str)[:5])}",
                         score=len(shared) * 10
                     )
     
@@ -204,7 +204,7 @@ class SemanticRelationshipDiscoverer:
                 if len(shared) >= self.MIN_ENTITY_OVERLAP:
                     self._add_relationship(
                         p1, p2, "related-to",
-                        f"Shared entities: {', '.join(sorted(shared)[:5])}",
+                        f"Shared entities: {', '.join(str(e) for e in sorted(shared, key=str)[:5])}",
                         score=len(shared) * 5
                     )
     

@@ -297,22 +297,62 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
     # merged into their canonical partners.
     entities = list(set(degrees.keys()) | existing_dirs)
 
-    # Two-stage clustering:
-    #   Stage A: cluster by normalize_full to surface candidates.
-    #   Stage B: within each cluster, classify tier.
+    # Three-stage clustering:
+    #   Stage A: cluster by normalize_full (suffix-stripped) to surface candidates.
+    #   Stage B: cluster by normalize_punct (case+only) to catch space/hyphen/underscore variants
+    #            that diverge under suffix stripping (e.g. "Auto Research" vs "Autoresearch").
+    #   Stage C: merge candidate sets, deduplicate, then classify tier.
     clusters_by_full: dict[str, list[str]] = collections.defaultdict(list)
     for ent in entities:
         key = normalize_full(ent)
         if key:
             clusters_by_full[key].append(ent)
 
-    dupes = {k: v for k, v in clusters_by_full.items() if len(v) > 1}
+    clusters_by_punct: dict[str, list[str]] = collections.defaultdict(list)
+    for ent in entities:
+        key = normalize_punct(ent)
+        if key:
+            clusters_by_punct[key].append(ent)
+
+    # Merge candidate sets: entities that collide by either method go together
+    ent_to_candidates: dict[str, set[str]] = collections.defaultdict(set)
+    for group in clusters_by_full.values():
+        if len(group) > 1:
+            for ent in group:
+                for other in group:
+                    ent_to_candidates[ent].add(other)
+    for group in clusters_by_punct.values():
+        if len(group) > 1:
+            for ent in group:
+                for other in group:
+                    ent_to_candidates[ent].add(other)
+
+    # Build connected components from candidate edges
+    visited = set()
+    dupe_clusters: list[list[str]] = []
+    for ent in entities:
+        if ent in visited or ent not in ent_to_candidates:
+            continue
+        # BFS to find connected component
+        component: list[str] = []
+        queue = [ent]
+        while queue:
+            node = queue.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            component.append(node)
+            for neighbor in ent_to_candidates.get(node, set()):
+                if neighbor not in visited:
+                    queue.append(neighbor)
+        if len(component) > 1:
+            dupe_clusters.append(component)
 
     safe_merges: list[dict] = []
     ambiguous: list[dict] = []
     skipped: list[dict] = []
 
-    for norm_key, variants in dupes.items():
+    for variants in dupe_clusters:
         # Classify cluster-wide tier: take the most conservative pairwise tier.
         pairwise_tiers = set()
         for i, a in enumerate(variants):
@@ -338,6 +378,7 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
         )
         auto_ok, decide_reason = decide_merge(cluster_worst, canonical, variants, degrees)
 
+        norm_key = normalize_punct(canonical)
         base = {
             "norm_key": norm_key,
             "canonical": canonical,
@@ -364,7 +405,7 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
     return {
         "entity_count": len(entities),
         "active_edges": len(edges),
-        "clusters_analyzed": len(dupes),
+        "clusters_analyzed": len(dupe_clusters),
         "safe_clusters": len(safe_merges),
         "ambiguous_clusters": len(ambiguous),
         "skipped_clusters": len(skipped),
