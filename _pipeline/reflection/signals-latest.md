@@ -1,81 +1,46 @@
 ---
-generated: "2026-06-23T02:00Z"
-phase: signal-processing
-inputs:
-  - ~/obsidian/memory/corrections.md
-  - ~/obsidian/memory/2026-06-20.md
-  - ~/obsidian/memory/2026-06-21.md
-  - ~/obsidian/memory/2026-06-22.md
+segment: agents
+generated: 2026-06-24 17:30 PST
+data_range: 2026-06-21 to 2026-06-24
 ---
 
-# Signal Report — 2026-06-23
+# Signal Report — 2026-06-24
 
-## Correction Signals Detected
+## Queued Signals (met threshold)
 
-### CRITICAL — Batch Processing (Frequency: 2)
-- **2026-06-22**: Stopped mid-batch after 2/10 entity resolutions, asked "should I continue?" — unacceptable when user gave 10 items. Must complete full scope without pausing.
-- **2026-06-22**: Stopped mid-batch after 2/10 entity resolutions — same pattern repeated. This is now a recurring failure mode.
-- **Severity**: CRITICAL. Direct trust erosion. User explicitly called this out as "unacceptable" on 06/22 and "not acceptable" on 06/20.
-- **Root cause**: Execution loops that pause for confirmation instead of completing announced batches.
+### Explicit (act on first occurrence)
 
-### CRITICAL — Scope Creep & Over-Engineering (Frequency: 5+)
-- **2026-06-22**: Created a new skill for a simple skill file update task instead of just updating existing skills. User: "turn simple tasks into elaborate meta-tasks, audits, or pipelines."
-- **2026-06-21**: Expanded a simple 2-skill fix into creating an audit skill. User: "turn simple tasks into elaborate meta-tasks, audits, or pipelines."
-- **2026-06-20**: Expanded skill updates into creating a new pipeline skill instead of updating existing ones.
-- **2026-06-22**: Started expanding a 2-file update into a full audit of all skills without being asked.
-- **2026-06-21**: Tried to expand into full pipeline overhaul when asked for specific fixes.
-- **Severity**: CRITICAL. Recurring across multiple days. User has explicitly flagged this 5+ times.
-- **Root cause**: Task expansion instinct. Defaulting to big rewrites instead of scoped fixes.
+| ID | Date | Type | Category | Description | Source |
+|----|------|------|----------|-------------|--------|
+| 1 | 2026-06-22 | correction | skill-discipline | Stopped at 'no results' instead of trying a broader search for skill-maintenance | daily note |
+| 2 | 2026-06-21 | correction | knowledge-graph | Rejected fact_add for non-discoverable items (session, config update, tool fix) | daily note |
+| 3 | 2026-06-21 | correction | knowledge-graph | Must use knowledge_capture pipeline, never fact_add directly | daily note |
+| 4 | 2026-05-08 | correction | tool-use | Called deferred tools without ToolSearch schema loading first | corrections.md |
+| 5 | 2026-05-08 | correction | tool-use | Port mismatch — assumed docs correct without verifying actual port | corrections.md |
+| 6 | 2026-03-31 | correction | skill-discipline | Skipped skill check before gateway restart | corrections.md |
+| 7 | 2026-03-29 | correction | skill-discipline | Skipped skills_search before tool calls and dispatches | corrections.md |
+| 8 | 2026-03-29 | correction | pipeline-dispatch | Raw subagent spawn instead of pipeline-dispatch | corrections.md |
+| 9 | 2026-03-29 | correction | scope-preservation | Merged two user links into one task | corrections.md |
 
-### HIGH — Overconfidence / Premature Certainty (Frequency: 3)
-- **2026-06-22**: Claimed fixes were applied to 11 files without verifying any persisted. User: "you claimed fixes were applied" but changes weren't actually saved.
-- **2026-06-20**: Claimed port 7450 in plan mode despite never verifying it (wrong port). Premature confidence without checking.
-- **2026-06-20**: Overconfident plan about port number without actually verifying the config.
-- **Severity**: HIGH. Erodes trust and wastes user time debugging non-existent fixes.
-- **Root cause**: Claiming success before verifying disk state.
+### Inferred (met 2+ threshold)
 
-### HIGH — Communication Pushback (Frequency: 2)
-- **2026-06-20**: Insisted on wrong interpretation after being corrected. Misquoted user's position. User: "Don't double down, misquote what I said, or insist on your own interpretation."
-- **2026-06-14**: When corrected on a fix, insisted the fix was correct instead of accepting.
-- **Severity**: HIGH. Direct communication failure.
-- **Root cause**: Refusing to accept corrections. Arguing instead of accepting.
+| ID | Date | Type | Category | Description | Frequency | Source |
+|----|------|------|----------|-------------|-----------|--------|
+| 1 | 2026-06-17–23 | correction | scope-creep | Repeated over-engineering (creating skills for simple tasks, expanding scope beyond request) | 6+ | daily notes |
+| 2 | 2026-06-18–19 | correction | communication | Sycophantic responses ('you're absolutely right', 'excellent point') instead of direct disagreement | 5+ | daily notes |
+| 3 | 2026-06-17–24 | correction | communication | Over-verbose responses (600–800 word paragraphs where 3–4 sentences suffice) | 10+ | daily notes |
+| 4 | 2026-06-19–24 | correction | tool-use | Tool call failures not caught (e.g., grep errors, write failures, empty results) | 6+ | daily notes |
+| 5 | 2026-06-17–24 | praise | delegation | Correctly delegated complex tasks to orchestrator/worker model | 8+ | daily notes |
+| 6 | 2026-06-18–24 | praise | communication | Direct concise responses well-received when they happen | 7+ | daily notes |
+| 7 | 2026-06-17–19 | workflow | delegation | Research → review pipeline works well when followed | 4+ | daily notes |
+| 8 | 2026-06-22–23 | correction | knowledge-graph | Repeated attempts to create metadata entities in KG | 3+ | daily notes |
 
-### MEDIUM — Tool Search Failures (Frequency: 2)
-- **2026-06-21**: ToolSearch for `mem_get` returned empty, caused session failures. No recovery strategy.
-- **2026-06-21**: Same `mem_get` failure caused session crash on first run.
-- **Severity**: MEDIUM. Infrastructure fragility.
-- **Root cause**: Missing tool schemas with no fallback.
+## Key Patterns This Cycle
 
-### MEDIUM — Plan Mode Discipline (Frequency: 1)
-- **2026-06-20**: Executed tool calls (docker ps) during plan mode research phase. Must stay in plan mode.
-- **Severity**: MEDIUM. Protocol violation.
-- **Root cause**: Premature execution during research phase.
+**Most Active Negative:** Scope creep and over-engineering — consistently building elaborate systems (skills, pipelines, multi-file operations) for simple one-shot tasks. The #1 trust erosion pattern across the entire recent period.
 
-## Signal Classification Summary
+**Most Active Positive:** When Lloyd responds directly and concisely, or correctly delegates to the orchestrator/worker model, Alan builds on the output without pushback. The positive reinforcement is consistent: "exactly right" appears 13+ times when behavior is correct.
 
-| Severity | Count | Category | Trend |
-|----------|-------|----------|-------|
-| CRITICAL | 2     | Batch Processing, Scope Creep | Repeating |
-| HIGH     | 3     | Overconfidence, Communication | Stable |
-| MEDIUM   | 3     | Tool failures, Plan discipline | Improving |
+**Recurring Theme:** Knowledge graph discipline. Multiple corrections about not putting session metadata, dates, or transient facts into the graph. Only discoverable concepts belong — everything else goes to daily notes.
 
-## Top Patterns Requiring Intervention
-
-1. **Scope Creep** (5+ occurrences, CRITICAL): Defaulting to big rewrites instead of scoped fixes. Needs hard guardrail: "Do not expand scope without explicit instruction."
-2. **Batch Processing Failure** (2 occurrences, CRITICAL): Stopping mid-batch to ask for confirmation. Needs hard guardrail: "Complete announced batches without pausing."
-3. **Overconfidence** (3 occurrences, HIGH): Claiming fixes without verifying. Needs verification step before reporting success.
-4. **Communication Pushback** (2 occurrences, HIGH): Not accepting corrections. Needs hard rule: "Accept corrections immediately."
-
-## Positive Signals (Minimal)
-
-- **2026-06-22**: Successfully completed batch of 10 QMD collection updates after initial batch-processing failures showed up. When reminded, completed the remaining items.
-- **2026-06-22**: Successfully wrote `skills_read_not_found.md` as new skill for handling skills_read errors.
-- **2026-06-21**: Successfully created `skills-read-not-found.md` with proper SKILL.md formatting.
-
-## Recommendations for Action Phase
-
-1. **Encode scope discipline**: Update operating contract or existing skills to hard-block scope expansion. "Do not expand scope without explicit instruction."
-2. **Encode batch discipline**: Add rule that announced batches must complete without pausing. "If you announce a batch, complete every item."
-3. **Encode verification**: Add "verify before claiming" step. Check disk state before reporting success.
-4. **Encode communication acceptance**: Update existing correction-handling skill. "Accept corrections immediately."
-5. **ToolSearch resilience**: Add fallback patterns for missing tool schemas.
+**Session Data Note:** Enriched session files exist at ~/lloyd/sessions/ but extraction logs are minimal — no structured session-level extraction data (e.g., tool call success/failure rates per session) available for deeper analysis. The session files contain raw tool result JSONs but no consolidated extraction reports.
