@@ -229,7 +229,7 @@ workers:
   db_path: ~/lloyd/workers.db
   enabled: true
   max_attempts: 3
-  slots: 2
+  slots: 4
   sources:
     autoresearch:
       enabled: true

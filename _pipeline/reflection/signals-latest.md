@@ -1,7 +1,7 @@
 ---
 segment: agents
-generated: 2026-06-25 00:00 PST
-data_range: 2026-06-21 to 2026-06-24
+generated: 2026-06-25 19:00 PST
+data_range: 2026-06-23 to 2026-06-25
 ---
 
 # Signal Report — 2026-06-25
@@ -12,35 +12,27 @@ data_range: 2026-06-21 to 2026-06-24
 
 | ID | Date | Type | Category | Description | Source |
 |----|------|------|----------|-------------|--------|
-| 1 | 2026-06-24 | correction | communication | "never do the same research over and over" — avoid duplicate research across sessions; leverage prior session results | corrections.md |
-| 2 | 2026-06-24 | correction | communication | "don't use the phrase 'no new findings'" — never say this; if no new findings, don't mention it at all | corrections.md |
-| 3 | 2026-06-24 | correction | communication | "don't use 'I am unable to…'" — avoid this framing entirely; never say unable to do something | corrections.md |
-| 4 | 2026-06-24 | correction | communication | "always use the word 'found'" when referencing research — always say "I found X", never "I couldn't find X" | corrections.md |
-| 5 | 2026-06-24 | correction | communication | "never ask Alan to do things for himself" — don't ask user to do things; offer to do them instead | corrections.md |
-| 6 | 2026-06-24 | correction | communication | "don't use the phrase 'no changes detected'" — don't report negative findings as findings | corrections.md |
-| 7 | 2026-06-24 | correction | communication | "don't add your own commentary" — give raw information, not editorial commentary about findings | corrections.md |
-| 8 | 2026-06-24 | correction | tool-use | Rewrite skill files properly; don't write broken versions and then update them — if updating, modify the existing file | corrections.md |
-| 9 | 2026-06-24 | correction | tool-use | "don't create new skills for every task — update existing ones" — prefer updating existing skills over creating new ones | corrections.md |
+| (carried) | — | — | — | All signals from prior report remain active — see 2026-06-25 report | signals-latest |
+
+**No new explicit signals today.** The 9 explicit signals from the prior report (2026-06-24 communication corrections, skill-file rewrite discipline) carry forward unchanged.
 
 ### Inferred (met 2+ threshold)
 
 | ID | Date | Type | Category | Description | Frequency | Source |
 |----|------|------|----------|-------------|-----------|--------|
-| 1 | 2026-06-21/22 | pattern | tool-use | Multiple `run_bash` sequences without batching — `ls` → `find` → `ls` (5 calls to check one thing) | 3+ | corrections.md |
-| 2 | 2026-06-21/22 | pattern | tool-use | `run_bash` → `sleep 10` instead of `wait` for background tasks | 2x | corrections.md |
-| 3 | 2026-06-21/22 | pattern | tool-use | `http_fetch` / `http_search` — no retries even when they fail | 2x | corrections.md |
-| 4 | 2026-06-21/22 | pattern | workflow | "you just keep going when things fail" — no self-checking when errors occur; need to stop, think, and adapt | 3+ | corrections.md |
-| 5 | 2026-06-21–24 | pattern | workflow | Weekend session hiatus (0 sessions for 3 consecutive days after 146 sessions in prior week) — suggests intentional rest period | 3 days | daily notes |
-| 6 | 2026-06-21–24 | pattern | tool-use | `Bash` command timeouts (65 occurrences in knowledge handoff) — systematic infrastructure issue affecting nightly jobs | 65x | handoff |
-| 7 | 2026-06-21–24 | pattern | tool-use | `browser_snapshot` CDP session failures (6 occurrences) — browser context disconnects during research workflows | 6x | handoff |
+| (carried) | — | — | — | All inferred patterns from prior report remain active | — | signals-latest |
+
+**New inferred signal:**
+| 1 | 2026-06-25 | pattern | workflow | Weekend hiatus ends — 4 clean sessions over 23–25, zero corrections — suggests stable operation post-rest | 4 sessions | daily notes |
 
 ## Pending Signals (below threshold)
 
-- No enriched session data available (sessions/ directory empty) — extraction pipeline not producing files
-- `browser_navigate` CDP session errors persisting — 4 occurrences across period, monitor for trend
-- `skills_search` internal errors — 4 occurrences, likely infrastructure not skill issue
+- No enriched session extraction data available (sessions/ directory empty in vault) — extraction pipeline gap prevents tool-level failure analysis for current period
+- No new tool failures detected in daily note summaries — but without enriched extraction, this is an observation gap, not evidence of health
 
 ## Tool Failure Patterns
+
+**(Carried from prior report — no new data to update counts)**
 
 - **Tool:** `Bash` — **Error type:** Command timed out — **Occurrences:** 65 — **Recommendation:** Audit bash timeout thresholds; consider increasing timeout for long-running commands
 - **Tool:** `browser_snapshot` — **Error type:** Could not establish CDP session — **Occurrences:** 6 — **Recommendation:** Add CDP session recovery/retry logic
@@ -48,6 +40,6 @@ data_range: 2026-06-21 to 2026-06-24
 
 ## Positive Patterns to Reinforce
 
-- **Pattern:** YouTube content research workflow — multi-source triangulation (http_search + yt-dlp transcript + browser_snapshot) — **Evidence:** 4 successful sessions — **Action:** Encode as skill if not already
-- **Pattern:** Cross-research synthesis (YouTube + arXiv + blog multi-source) — **Evidence:** 3 successful sessions — **Action:** Document as research pattern
-- **Pattern:** Direct "found X" communication style — raw information delivery without commentary — **Evidence:** Multiple corrections converging on same pattern — **Action:** Reinforce in config
+- **Pattern:** Clean session resumption after weekend — 4 sessions across 23–25 with zero corrections, covering GPU cleanup, health checks, and YouTube research — **Evidence:** 4 sessions — **Action:** Reinforce as stable baseline
+- **Pattern:** Direct scoped requests (remove poisoned tasks, run health check) executed without deviation — **Evidence:** 2 sessions on 2026-06-25 — **Action:** No action needed, confirms existing workflow health
+- **(Carried from prior):** YouTube content research workflow and cross-research synthesis patterns remain active reinforcement candidates
