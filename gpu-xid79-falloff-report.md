@@ -32,7 +32,7 @@ an NVIDIA response or fix as of this date.
 | RAM | 256 GB |
 | PCIe link | Gen4 x16 (current == max; WRX80 platform is PCIe 4.0) |
 | GPU power limit | 500 W (capped from 600 W default via systemd unit) |
-| PSU | older **ATX 2.x** unit, 1600 W (predates ATX 3.0 transient/excursion spec; GPU fed via 8-pin→12V-2x6 adapter) |
+| PSU (during all 9 faults) | older **ATX 2.x** 1600 W (predates ATX 3.0 excursion spec; GPU fed via 8-pin→12V-2x6 adapter) — **replaced 2026-06-25** with a 3000 W / 240 V unit; see Mitigations |
 | Display stack | Hyprland / Wayland |
 | Workload | local vLLM inference server, sustained high GPU-mem-util |
 
@@ -119,13 +119,41 @@ All 9 events occurred under driver/GSP **610.43.02**, VBIOS **98.02.81.00.07**.
 ## Mitigations applied / planned (frequency-reducers; none eliminate the fault)
 
 - Board power limit **600 W → 500 W** (persistent systemd unit) — still crashes at 500 W.
-- Autonomy worker concurrency **4 → 2** slots (applied 2026-06-21) — under observation.
+- Autonomy worker concurrency **4 → 2** slots (2026-06-21), then **restored to 4**
+  (2026-06-25) after the PSU swap — full autonomy load is now part of the validation run.
 - **Transient-clamp test (applied 2026-06-21):** power limit **→ 400 W** *and* max
   graphics clock locked **≤ 2400 MHz** (`nvidia-smi -lgc 0,2400`), both persisted in the
   `nvidia-pl.service` unit. Purpose: flatten the sub-millisecond transient envelope an
   aged ATX 2.x PSU may be failing on. **Diagnostic value:** if the crash rate drops
   sharply, it implicates PSU/transient delivery over pure GSP firmware.
-- Pending hardware fix: replace PSU with a modern ATX 3.1 unit + native 12V-2x6 cable.
+- **PSU REPLACED 2026-06-25** — new 3000 W / 240 V unit. The transient clamp was
+  reverted (power → 600 W max, clocks unlocked) to validate the new PSU at full load.
+  **Test:** if the fall-off-bus fault does not recur while running unclamped at 600 W,
+  the old ATX 2.x PSU's transient handling was the dominant local cause. If it recurs at
+  full power on the new PSU, weight returns to the GSP-firmware bug / a marginal GPU unit
+  (RMA). Baseline crash rate before this change: ~1 per 1.9 days.
+- **RESULT — the clamp is an effective mitigation; full-clock running triggers the fault.**
+  The clamp (`-pl 400` + clock lock ≤2400 MHz) kept the card **stable** from 2026-06-21
+  through the old→new PSU swap (no crashes while clamped). Event #10 (2026-06-25
+  17:25:41, Xid 79 at PCI 41:00, GSP signature `rpcSendMessage status 0x0000000f` → Xid
+  154 reboot of all cards) occurred during a **deliberate full-speed/unclamped load
+  test** — the mitigation was intentionally removed, not a spontaneous failure.
+  - Inference: the GSP fault is triggered by the **high-clock/voltage transient
+    envelope**. All 9 original crashes were at 500 W but with **unlocked clocks**, so the
+    **clock lock is the likely effective lever** (a power cap alone never prevented it).
+    Proven-stable config = **400 W *and* clock-lock 2400 together**.
+  - PSU is **not the differentiator** (clamp held on both PSUs; full speed crashed on
+    both) — but it is also not the cure; the lever is the clock/transient envelope.
+  - **Current state is risky:** card is at 500 W with clocks **unlocked** — the same
+    envelope that crashed 9×. The proven clamp (esp. the clock lock) should be restored,
+    pinned to the correct GPU.
+
+> **TOPOLOGY CHANGE (2026-06-25):** host is now **multi-GPU** — GPU0 = RTX 3090 @ PCI
+> 01:00, **GPU1 = RTX PRO 6000 @ PCI 41:00** (UUID GPU-71ed578a-…-3a1d), GPU2 = RTX 3090
+> @ PCI 61:00. All 9 prior events were logged at PCI 01:00 *when the PRO 6000 lived
+> there*; event #10 is at PCI **41:00** = same physical card, new slot. **Config bug:**
+> `nvidia-pl.service` targets `-i 0`, which is now a 3090 — power/clock settings must be
+> re-pinned to the PRO 6000 by **PCI bus id 41:00.0 or UUID**, never by index.
 
 ## Related reports (all open, no NVIDIA response/fix as of 2026-06-21)
 
