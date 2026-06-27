@@ -1,10 +1,10 @@
 ---
 segment: agents
-generated: 2026-06-25 19:00 PST
-data_range: 2026-06-23 to 2026-06-25
+generated: 2026-06-26 02:00 PST
+data_range: 2026-06-24 to 2026-06-26
 ---
 
-# Signal Report — 2026-06-25
+# Signal Report — 2026-06-26
 
 ## Queued Signals (met threshold)
 
@@ -12,34 +12,28 @@ data_range: 2026-06-23 to 2026-06-25
 
 | ID | Date | Type | Category | Description | Source |
 |----|------|------|----------|-------------|--------|
-| (carried) | — | — | — | All signals from prior report remain active — see 2026-06-25 report | signals-latest |
-
-**No new explicit signals today.** The 9 explicit signals from the prior report (2026-06-24 communication corrections, skill-file rewrite discipline) carry forward unchanged.
+| 1  | 2026-06-25 | concern | autonomy | "lloyd's autonomy tasks are not consistently scheduled/run" — autonomy reliability concern | daily note |
+| 2  | 2026-06-25 | observation | memory | "I need to update memory files for lloyd, there's too much outdated stuff in there" — memory staleness | daily note |
+| 3  | 2026-06-25 | infrastructure | gpu | GPU configuration change triggered 3 poisoned worker tasks — system fragility | daily note |
 
 ### Inferred (met 2+ threshold)
 
 | ID | Date | Type | Category | Description | Frequency | Source |
 |----|------|------|----------|-------------|-----------|--------|
-| (carried) | — | — | — | All inferred patterns from prior report remain active | — | signals-latest |
-
-**New inferred signal:**
-| 1 | 2026-06-25 | pattern | workflow | Weekend hiatus ends — 4 clean sessions over 23–25, zero corrections — suggests stable operation post-rest | 4 sessions | daily notes |
+| 1  | 2026-06-24/25 | pattern | session-data | Enriched session data missing — ~/obsidian/sessions/ is empty, no extraction logs available | 3 days | filesystem |
+| 2  | 2026-06-24/25 | pattern | daily-notes | Daily notes are extremely thin — only auto-captured summaries, no user corrections or rich feedback captured | 3 days | daily notes |
 
 ## Pending Signals (below threshold)
 
-- No enriched session extraction data available (sessions/ directory empty in vault) — extraction pipeline gap prevents tool-level failure analysis for current period
-- No new tool failures detected in daily note summaries — but without enriched extraction, this is an observation gap, not evidence of health
+- None
 
 ## Tool Failure Patterns
 
-**(Carried from prior report — no new data to update counts)**
-
-- **Tool:** `Bash` — **Error type:** Command timed out — **Occurrences:** 65 — **Recommendation:** Audit bash timeout thresholds; consider increasing timeout for long-running commands
-- **Tool:** `browser_snapshot` — **Error type:** Could not establish CDP session — **Occurrences:** 6 — **Recommendation:** Add CDP session recovery/retry logic
-- **Tool:** `skills_search` — **Error type:** Internal skill_search error — **Occurrences:** 4 — **Recommendation:** Check skill search infrastructure; may need index rebuild
+- **Tool:** autonomy tasks — **Error type:** Inconsistent scheduling/execution — **Occurrences:** 1 (user concern) — **Recommendation:** Audit autonomy task scheduler, verify cron/systemd entries are active
+- **Tool:** GPU-dependent workers — **Error type:** Poisoned after config change (3 tasks) — **Occurrences:** 1 — **Recommendation:** Add infrastructure change detection to prevent poisoned workers; auto-clear on config change
 
 ## Positive Patterns to Reinforce
 
-- **Pattern:** Clean session resumption after weekend — 4 sessions across 23–25 with zero corrections, covering GPU cleanup, health checks, and YouTube research — **Evidence:** 4 sessions — **Action:** Reinforce as stable baseline
-- **Pattern:** Direct scoped requests (remove poisoned tasks, run health check) executed without deviation — **Evidence:** 2 sessions on 2026-06-25 — **Action:** No action needed, confirms existing workflow health
-- **(Carried from prior):** YouTube content research workflow and cross-research synthesis patterns remain active reinforcement candidates
+- **Pattern:** YouTube transcript extraction — **Evidence:** 2 consecutive successful sessions (Jun 24) with `[OK]` status, no corrections — **Action:** Maintain current workflow
+- **Pattern:** System health check after infrastructure changes — **Evidence:** Jun 25 full system check completed successfully — **Action:** Reinforce as standard post-change procedure
+- **Pattern:** Worker task cleanup — **Evidence:** Jun 25 user-directed cleanup executed correctly with `[OK]` status — **Action:** Preserve task management workflow
