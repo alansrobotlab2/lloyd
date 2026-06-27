@@ -61,6 +61,10 @@ normal sustained load:
   display active and at idle, ruling out a display/modeset cause.
 - **PCIe** — link runs at platform-max Gen4 x16 (no downshift); no PCIe AER/DPC
   containment event coincident with the drops.
+- **PCIe slot / lane** — the card has been installed in multiple physical slots on
+  different CPU PCIe root complexes over its life (PCI buses 01, 41, 61). It falls off the
+  bus in every slot used during the failure period (9 events in bus 01, 1 in bus 41) →
+  not a slot, lane-group, or motherboard-port problem; the fault follows the card.
 - **Thermal** — GPU core temperature is normal (50–69 °C) at the time of failures; no
   thermal-slowdown throttle flags are ever asserted.
 - **Workload-independent** — occurs under multiple compute workloads and is not tied to
