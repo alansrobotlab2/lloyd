@@ -66,7 +66,14 @@ normal sustained load:
   bus in every slot used during the failure period (9 events in bus 01, 1 in bus 41) →
   not a slot, lane-group, or motherboard-port problem; the fault follows the card.
 - **Thermal** — GPU core temperature is normal (50–69 °C) at the time of failures; no
-  thermal-slowdown throttle flags are ever asserted.
+  thermal-slowdown throttle flags are ever asserted. Note: a healthy GPU responds to
+  thermal stress by *throttling* (asserting slowdown, reducing clocks), not by dropping
+  off the PCIe bus. This unit falls off the bus at core temperatures well within its
+  rated operating range, with no throttle event — i.e. not a normal thermal-protection
+  response, indicating a fault (power-stage/VRM under load, or GSP firmware) rather than
+  expected hot-but-safe operation. The card also remains stable when run *hotter*
+  (~82 °C core) under a clock clamp than at the cooler temps (~60 °C) where it failed
+  unclamped — further evidence core temperature is not the trigger.
 - **Workload-independent** — occurs under multiple compute workloads and is not tied to
   any single process.
 
