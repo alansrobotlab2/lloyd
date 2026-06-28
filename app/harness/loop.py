@@ -80,6 +80,84 @@ def _looks_like_unexecuted_command(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Leaked tool-call recovery
+# ---------------------------------------------------------------------------
+#
+# vLLM's qwen3_xml streaming tool parser only extracts a tool call when the
+# assistant emits it as the *first* thing in the content channel. If the model
+# emits any content text first — even a one-line "Let me run this." preamble or
+# a couple of blank lines — the parser stays in content mode and the whole
+# `<tool_call>…</tool_call>` block leaks through as plain text, so nothing
+# executes. (Observed cleanly: 36/36 pure-tool-call turns parsed; the only two
+# that leaked both had content before the block.) The inner-voice observer then
+# nags "you didn't include results", which induces another preamble next turn —
+# a loop. We recover by parsing well-formed blocks out of the content ourselves,
+# mirroring the tolerant approach already used for the trailing-brace args quirk.
+
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+_TOOL_CALL_FUNCTION_RE = re.compile(r"<function=([^>\s]+)\s*>(.*)</function>", re.DOTALL)
+_TOOL_CALL_PARAM_RE = re.compile(
+    r"<parameter=([^>\s]+)\s*>\n?(.*?)\n?</parameter>", re.DOTALL
+)
+
+
+def _coerce_param_value(raw: str) -> Any:
+    """Best-effort scalar coercion for a recovered parameter value.
+
+    Without the tool schema we can't fully type-coerce the way vLLM's parser
+    does, so we only touch values that are unambiguous: bare booleans, null,
+    and pure integers (common for limit/offset/max_results). Everything else —
+    notably shell commands, which may coincidentally contain digits — is left
+    as the captured string.
+    """
+    s = raw.strip()
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if s == "null":
+        return None
+    if re.fullmatch(r"-?\d+", s):
+        try:
+            return int(s)
+        except ValueError:
+            return raw
+    return raw
+
+
+def _recover_xml_tool_calls(text: str) -> tuple[list[dict[str, Any]], str]:
+    """Parse leaked ``<tool_call>`` blocks out of assistant content.
+
+    Returns ``(committed_tool_calls, cleaned_text)`` in the same shape
+    ``_commit_tool_calls`` produces, so the recovered calls flow through the
+    normal dispatch path. ``cleaned_text`` is the content with the tool-call
+    blocks stripped (preamble preserved). Only well-formed blocks (with a
+    closing ``</tool_call>``) match, so a truncated mid-stream block is left
+    alone rather than dispatched half-built.
+    """
+    committed: list[dict[str, Any]] = []
+    for block in _TOOL_CALL_BLOCK_RE.findall(text):
+        fn = _TOOL_CALL_FUNCTION_RE.search(block)
+        if not fn:
+            continue
+        name = fn.group(1).strip()
+        if not name:
+            continue
+        args = {
+            pname.strip(): _coerce_param_value(pval)
+            for pname, pval in _TOOL_CALL_PARAM_RE.findall(fn.group(2))
+        }
+        committed.append({
+            "id": f"call_{uuid.uuid4().hex[:12]}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+            "_args_dict": args,
+        })
+    cleaned = _TOOL_CALL_BLOCK_RE.sub("", text).strip()
+    return committed, cleaned
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -290,6 +368,27 @@ async def run_query(
                 yield events.thinking_done(thinking_text)
 
             tool_calls_committed = _commit_tool_calls(tool_calls_acc)
+
+            # Recover tool calls that vLLM's qwen3_xml parser leaked into the
+            # content channel (happens when the model emits content text before
+            # the <tool_call> block). Without this they'd never dispatch and the
+            # turn would dead-end on raw XML. Strip the recovered markup from the
+            # text so history/UI show only the preamble, not the leaked block.
+            if (
+                getattr(options, "recover_leaked_tool_calls", True)
+                and not tool_calls_committed
+                and "<tool_call>" in assistant_text
+            ):
+                recovered, cleaned_text = _recover_xml_tool_calls(assistant_text)
+                if recovered:
+                    logger.warning(
+                        "loop: recovered %d leaked <tool_call> block(s) from content "
+                        "(qwen3_xml parser miss, iter=%d): %s",
+                        len(recovered), num_turns,
+                        ", ".join(tc["function"]["name"] for tc in recovered),
+                    )
+                    tool_calls_committed = recovered
+                    assistant_text = cleaned_text
 
             iteration_duration_ms = int((time.perf_counter() - iteration_started_at) * 1000)
             last_iteration_usage = iteration_usage
