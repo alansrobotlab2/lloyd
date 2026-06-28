@@ -1,4 +1,4 @@
-[updated 2025-07-18, refreshed 2026-06-07, extended 2026-07-11, 2026-07-14]
+[updated 2025-07-18, refreshed 2026-06-07, extended 2026-07-11, 2026-07-14, major update 2026-07-16, OmniRobotHome update 2026-07-27]
 
 # Real-Time VLM-Based Perception for Mobile Manipulation: Fused Depth-Pose-Segmentation Pipeline
 
@@ -37,6 +37,16 @@ Real-time VLM-based perception for mobile manipulation fuses monocular depth est
 - **Declarative memory for long-horizon manipulation (EchoVLA)**: EchoVLA (arXiv:2511.18112) introduces synergistic declarative memory mechanisms for long-horizon mobile manipulation, extending VLA models beyond short-horizon table-top manipulation. It enables embodied agents to maintain persistent scene understanding and memory-aware reasoning across extended navigation and manipulation sequences [17].
 
 - **World Action Models survey (WAMs)**: The WAM survey (arXiv:2606.20781) catalogs modular Render-and-Decode architectures that project depth, pose, and segmentation into semantic, depth, and flow latent-action codebooks before action decoding. The shared insight is that rendered future states serve as a common planning currency across perception modules, unifying depth estimation, pose tracking, and segmentation under a single world-model framework [18].
+
+- **Implicit depth enhancement (Evo-Depth)**: Evo-Depth (arXiv:2605.14950) introduces a lightweight Implicit Depth Encoding Module (IDEM) that extracts compact depth features from multi-view RGB images without requiring explicit 3D sensors. Depth features are incorporated into vision-language representations via a Spatial Enhancement Module (SEM) using depth-aware modulation, enabling efficient spatial-semantic enhancement. The model is lightweight enough for Jetson Orin edge deployment and improves spatially grounded manipulation by implicitly reasoning about depth from RGB alone [19].
+
+- **Universal pose pretraining (Pose-VLA)**: Pose-VLA (arXiv:2602.19710) decouples VLA training into two stages: (1) pre-training on 1.4M images with 6.5M 3D annotations to extract universal spatial priors in a unified camera-centric space, and (2) lightweight post-training for embodiment alignment. It introduces discrete Pose Tokens encoding SE(3) transformations that serve as a universal interface between non-robotic 3D datasets and robotic demonstrations. Pose-VLA achieves 79.5% average success on RoboTwin 2.0 and 96.0% on LIBERO, with real-world experiments showing robust generalization across rigid, articulated, and deformable objects using only 100 demonstrations per task [20].
+
+- **Vision-agnostic pretraining (LA4VLA)**: LA4VLA (arXiv:2606.27295) proposes a vision-agnostic language-action pretraining framework where models learn from language instructions, proprioceptive states, and action trajectories without visual inputs. This "act without seeing" paradigm decouples action policy learning from visual perception, enabling the policy to be composited with any perception front-end (depth, segmentation, pose) at inference time — directly supporting plug-and-play fused perception pipelines [21].
+
+- **Phase-aware MoE action experts (PAMAE)**: PAMAE (arXiv:2606.27144) replaces the shared action expert in VLA models with a sparse mixture of phase-aware action experts, preserving the pretrained VLA backbone and flow-matching interface. Phase-aware experts specialize in different manipulation phases (approach, grasp, place) and are routed dynamically, improving reliability for long-horizon mobile manipulation tasks [22].
+
+- **Real-world fused perception testbed (OmniRobotHome)**: OmniRobotHome (arXiv:2604.28197) provides a home-scale testbed with 48 hardware-synchronized cameras and 3 manipulators in a unified world frame. The stereo manipulation pipeline combines depth estimation, FoundationPose-based 6D tracking, and detector-based mask acquisition running at ~16 Hz — sufficient for closed-loop tracking of manipulated objects. The platform treats perception quality as an experimental variable, demonstrating that interaction quality degrades measurably as real-timeness, granularity, coverage, accuracy, forecasting, or memory is weakened [23].
 
 ## Details
 
@@ -106,12 +116,46 @@ IROS demonstrates a dual-process architecture where the VLM runs asynchronously 
 
 No standardized benchmark exists for "perception pipeline latency → manipulation success rate" on mobile manipulation platforms, making system-level evaluation difficult.
 
+### Implicit Depth from RGB (Evo-Depth)
+
+Evo-Depth eliminates the need for explicit depth sensors by extracting implicit depth features directly from multi-view RGB via a lightweight IDEM (Implicit Depth Encoding Module). The depth features are fused into the VLM via a Spatial Enhancement Module (SEM) that modulates vision-language features with depth-aware gating. Key advantages:
+- **No additional hardware**: Works with standard RGB cameras, avoiding LiDAR/ToF dependencies
+- **Edge deployable**: Lightweight enough for Jetson Orin-class hardware
+- **Spatial-semantic coupling**: Depth cues directly modulate VL representations, improving grasp accuracy for overlapping objects
+
+### Universal Pose Pretraining (Pose-VLA)
+
+Pose-VLA resolves the fundamental misalignment between VLM pretraining (semantic/categorical) and robotic action needs (fine-grained 3D states) via a two-stage pipeline:
+
+**Stage 1 — Spatial foundation pre-training**: Trains on 1.4M images with 6.5M 3D annotations using discrete pose tokens representing SE(3) transformations in a camera-centric frame. RGB images are paired with depth maps and camera intrinsics encoded as raymaps, providing intrinsic 3D awareness.
+
+**Stage 2 — Embodiment alignment**: Lightweight fine-tuning maps spatial priors to robot-specific action spaces. The unified pose token format allows seamless ingestion of both non-robotic 3D datasets and robotic demonstrations.
+
+**Key insight**: Pose tokens serve as the universal geometric primitive — in static contexts they localize objects (spatial grounding), in temporal sequences they characterize motion trajectories (motion estimation).
+
+### Vision-Agnostic Pretraining (LA4VLA)
+
+LA4VLA inverts the standard VLA paradigm: instead of training on vision + language + action jointly, it learns language-action mappings without visual inputs. This creates a perception-agnostic policy that can be composed with any perception front-end at inference time:
+- Enables plug-and-play integration of depth, pose, and segmentation modules
+- Decouples action policy learning from visual perception quality
+- Supports hot-swapping perception pipelines without retraining the policy
+
+### Phase-Aware Mixture-of-Experts (PAMAE)
+
+PAMAE improves long-horizon mobile manipulation reliability by replacing the monolithic action expert with a sparse mixture of phase-aware experts:
+- Separate experts specialize in approach, grasp, and place phases
+- Dynamic routing selects active experts based on task phase
+- Preserves pretrained VLA backbone while improving phase-specific reliability
+- Demonstrates that manipulating the action expert architecture (not just perception) is critical for robust mobile manipulation
+
 ### Failure Modes
 
 - **Transparent objects**: Glass, acrylic, water produce depth predictions 15–40 cm off ground truth.
 - **Specular surfaces**: Polished metal and mirrors violate Lambertian assumptions, causing depth discontinuities.
 - **Camera intrinsic sensitivity**: Models trained on specific camera intrinsics degrade on out-of-distribution setups.
 - **Close-range limitations**: Performance degrades below 10 cm, outside typical training distribution depth ranges.
+- **Implicit depth ambiguity**: Evo-Depth-style implicit depth extraction from multi-view RGB suffers from baseline ambiguity — large baselines (>2m) reduce accuracy as depth cues become less distinct between views.
+- **Pose token discretization error**: Pose-VLA's discrete pose tokens introduce quantization error when representing continuous SE(3) transformations, particularly for fine-grained manipulations requiring sub-centimeter precision.
 
 ## Open Questions
 
@@ -119,7 +163,7 @@ No standardized benchmark exists for "perception pipeline latency → manipulati
 - What is the optimal fusion strategy (early vs. late vs. spatial token injection vs. geometric inductive bias) across different VLA architectures?
 - Can the pipeline achieve real-time operation (≥20 Hz end-to-end) on consumer-grade edge hardware without cloud inference?
 - How do we benchmark the perception-to-manipulation-latency relationship in a standardized way?
-- What is the cost/benefit tradeoff between monocular depth, stereo depth, and event-based sensors for mobile manipulation perception?
+- How does the OmniRobotHome testbed approach (treating perception quality as experimental variable) inform the design of real-world fused perception systems?
 - Can VLM-based open-vocabulary segmentation replace dedicated segmentation networks, or is a hybrid approach necessary?
 - How does the spatial chain-of-thought paradigm (Perceptio) generalize to video-based VLAs for temporal perception?
 - Can VLM-inferred physical priors (Phys2Real) be combined with fused perception pipelines for real-time dynamic object manipulation?
@@ -155,6 +199,12 @@ No standardized benchmark exists for "perception pipeline latency → manipulati
 16. LingBot-VLA + LingBot-Depth — self-supervised Masked Depth Modeling for spatial perception [github.com/Robbyant/lingbot-depth]
 17. EchoVLA — synergistic declarative memory for long-horizon mobile manipulation [arxiv.org/abs/2511.18112]
 18. World Action Models survey — Render-and-Decode framework unifying depth/pose/segmentation [arxiv.org/abs/2606.20781]
+19. Evo-Depth — lightweight Implicit Depth Encoding Module for depth-from-RGB without explicit sensors [arxiv.org/abs/2605.14950]
+20. Pose-VLA — universal pose pretraining via discrete SE(3) Pose Tokens [arxiv.org/abs/2602.19710]
+21. LA4VLA — vision-agnostic language-action pretraining for plug-and-play perception [arxiv.org/abs/2606.27295]
+22. PAMAE — phase-aware Mixture-of-Experts action routing for long-horizon manipulation [arxiv.org/abs/2606.27144]
+23. OmniRobotHome — room-scale multi-camera testbed for real-time fused perception [arxiv.org/abs/2604.28197]
+24. MoMani Benchmark — large-scale automated benchmark for long-horizon mobile manipulation [emergentmind.com/topics/momani-benchmark]
 
 ## Confidence
 

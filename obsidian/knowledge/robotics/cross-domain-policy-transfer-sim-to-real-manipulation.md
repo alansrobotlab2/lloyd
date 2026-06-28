@@ -1,5 +1,5 @@
 ---
-type: quick-research
+type: deep-research
 tags:
   - cross-domain-policy-transfer
   - sim-to-real
@@ -11,11 +11,14 @@ tags:
   - transic
   - phys2real
   - s2gs
-  - continuum-robot-sim-to-real
-  - momani-benchmark
+  - bea-con
+  - doorman
+  - h2o-plus
+  - zero-shot-transfer
+  - loco-manipulation
 domain: robotics
 date: 2026-06-26
-last_verified: 2026-07-08
+last_verified: 2026-09-25
 sources:
   - url: "https://arxiv.org/abs/2409.08687"
     title: "xTED: Cross-Domain Adaptation via Diffusion-Based Trajectory Editing"
@@ -27,8 +30,6 @@ sources:
     title: "A Survey on Deep Reinforcement Learning Algorithms for Robotic Manipulation"
   - url: "https://www.semanticscholar.org/paper/Sim-to-Real-Transfer-of-Robotic-Control-with-Peng-Andrychowicz"
     title: "Sim-to-Real Transfer of Robotic Control with Neural-Augmented Robot Simulation"
-  - url: "https://knowledge/robotics/cross-embodiment-policy-transfer.md"
-    title: "Cross-Embodiment Policy Transfer (existing vault note)"
   - url: "https://allenai.github.io/MolmoBot/"
     title: "MolmoBot: Zero-Shot Sim-to-Real via Large-Scale Simulation"
   - url: "https://arxiv.org/abs/2510.02538"
@@ -45,13 +46,27 @@ sources:
     title: "Do Rigid-Body Simulators Dream of Soft Robots? Sim-to-Real for Continuum Robots"
   - url: "https://www.emergentmind.com/topics/momani-benchmark"
     title: "MoMani Benchmark: Mobile Manipulation"
+  - url: "https://arxiv.org/abs/2605.08571"
+    title: "BEACON: Cross-Domain Co-Training of Generative Robot Policies via Best-Effort Adaptation"
+  - url: "https://doorman-humanoid.github.io/"
+    title: "DoorMan: Opening the Sim-to-Real Door for Humanoid Pixel-to-Action Policy Transfer"
+  - url: "https://openreview.net/forum?id=4lxPsxpYBc"
+    title: "H2O+: An Improved Framework for Hybrid Offline-and-Online RL with Dynamics Gaps"
+  - url: "https://arxiv.org/abs/2605.26638"
+    title: "HyperSim: A Holistic Sim-To-Real Framework"
+  - url: "https://arxiv.org/html/2605.06311"
+    title: "VISER: Visual Realism Benchmark for Robot Simulation"
+  - url: "https://arxiv.org/html/2606.06218"
+    title: "TAM: Torque Adaptation Module for Robust Motion Transfer"
+  - url: "https://arxiv.org/pdf/2606.27163"
+    title: "LeHome Challenge 2026: Sim-to-Real Bimanual Garment Folding"
 ---
 
 # Cross-Domain Policy Transfer: Sim-to-Real for Manipulation Tasks
 
 ## Summary
 
-Cross-domain policy transfer for robotic manipulation encompasses the challenge of learning control policies in one domain (typically simulation) and deploying them effectively in another (the real world or a different robot embodiment). The field spans **sim-to-real transfer** (same robot, simulation → physical deployment) and **cross-embodiment transfer** (different robot morphologies, bridging the morphology gap). The core difficulty is the **reality gap**: mismatches in visual appearance, contact dynamics, sensor noise, and timing that cause simulation-trained policies to fail on physical hardware. Modern approaches span domain randomization, diffusion-based trajectory editing, 3D representation bridges, and latent-space projection, with the emerging trend toward foundation models trained on diverse multi-embodiment datasets.
+Cross-domain policy transfer for robotic manipulation addresses the challenge of learning control policies in one domain (typically simulation) and deploying them in another (the real world or a different robot embodiment). The field spans **sim-to-real transfer** (same robot, simulation → physical deployment) and **cross-embodiment transfer** (different robot morphologies, bridging the morphology gap). The core difficulty is the **reality gap**: mismatches in visual appearance, contact dynamics, sensor noise, and timing that cause simulation-trained policies to fail on physical hardware. Modern approaches span domain randomization, diffusion-based trajectory editing, 3D representation bridges, latent-space projection, and cross-domain co-training, with the emerging trend toward foundation models trained on diverse multi-embodiment datasets. Recent breakthroughs include zero-shot transfer for humanoid loco-manipulation (DoorMan), continuum/soft robots (arXiv:2606.22397), and best-effort co-training frameworks (BEACON).
 
 ## Key Facts
 
@@ -147,12 +162,68 @@ Simulation-to-reality transfer for manipulation faces a multi-faceted gap:
 - **Downstream**: Evaluated with Diffusion Policy in ManiSkill sim → real-world deployment, showing improved transferability and stable real-world performance
 - [source: arXiv:2512.04731]
 
+### BEACON: Cross-Domain Co-Training via Best-Effort Adaptation (arXiv:2605.08571)
+- **Authors**: Antong Zhang, Han Qi, Heng Yang (Harvard Computational Robotics)
+- **Key insight**: Cast cross-domain co-training as a discrepancy-aware importance-reweighting problem — jointly learn a diffusion-based visuomotor policy and per-sample source weights that minimize an objective informed by target-domain generalization guarantees
+- **Architecture**: Diffusion-based policy + per-sample reweighting that adaptively upweights source samples most useful for target-domain generalization
+- **Advantage**: Achieves feature alignment as an *implicit* result of discrepancy-aware co-training, without needing an explicit alignment objective; improves robustness and data efficiency across sim-to-sim, sim-to-real, and multi-source manipulation settings
+- **Results**: Outperforms target-only training, fixed-ratio co-training, and feature-alignment baselines on cross-domain transfer benchmarks
+- [source: arXiv:2605.08571, computationalrobotics.seas.harvard.edu/BEACON/]
+
+### DoorMan: Humanoid Sim-to-Real Loco-Manipulation (CVPR 2026)
+- **Authors**: Haoru Xue et al. (NVIDIA, University of Texas)
+- **Key result**: First humanoid sim-to-real policy capable of diverse articulated loco-manipulation using pure RGB perception — zero-shot deployment on Unitree G1 humanoid robot
+- **Architecture**: Vision-only RL policy trained entirely in NVIDIA Isaac Lab simulation with staged-reset mechanism and Group Relative Policy Optimization (GRPO) to maintain visibility of key features during close-range manipulation
+- **Key innovation**: Staged-reset saves intermediate successful states (e.g., grasp achieved) and restarts training from those checkpoints, enabling the robot to practice later task phases without re-learning approach behaviors
+- **Performance**: 83% success rate vs. 80% for expert human teleoperators and 60% for non-experts; completes door-opening tasks up to 31% faster than human operators
+- **Significance**: Demonstrates zero-shot sim-to-real transfer for whole-body humanoid loco-manipulation — a task combining navigation, perception, arm coordination, and object manipulation simultaneously
+- [source: CVPR 2026, doorman-humanoid.github.io/, Isaac Lab platform]
+
+### H2O+: Hybrid Offline-and-Online RL Framework (ICLR 2024 Workshop DMLR)
+- **Key insight**: Bridge offline RL (which needs large high-quality datasets) and online RL in simulation (which suffers from sim-to-real gaps) by jointly leveraging limited real offline data and imperfect simulators
+- **Architecture**: Offers flexibility to bridge various choices of offline and online learning methods while accounting for dynamics gaps between real and simulation environments
+- **Advantage**: Reduces sim-to-real issues of pure online sim-trained policies while lowering the data demands of pure offline approaches
+- **Results**: Demonstrated superior performance over advanced cross-domain online and offline RL algorithms in both simulation and real-world robotics experiments
+- [source: arXiv:2309.12716, ICLR 2024 Workshop DMLR]
+
 ### Continuum Robot Sim-to-Real (arXiv:2606.22397)
 - **Title**: "Do Rigid-Body Simulators Dream of Soft Robots? Learning Contact-Rich Manipulation for Tendon-Driven Continuum Robots"
 - **Key finding**: First demonstration of sim-to-real transfer for contact-rich manipulation with continuum (soft) robots
 - **Significance**: Extends sim-to-real beyond rigid-body robots to continuum/tendon-driven morphologies — a major step for surgical robotics, inspection, and soft-bodied manipulation
 - **Implication**: Rigid-body simulators can model soft/continuum robots with sufficient fidelity for sim-to-real transfer, challenging the assumption that soft-body physics require fundamentally different simulation approaches
 - [source: arXiv:2606.22397, submitted June 2026]
+
+### VIRAL: Visual Sim-to-Real at Scale for Humanoid Loco-Manipulation (arXiv:2511.15200)
+- **Authors**: He, Wang, Xue, Ben, Luo, Xiao, Yuan, Da, Castañeda, Sastry, Liu, Shi, Fan, Zhu (NVIDIA, CMU, UC Berkeley, CUHK)
+- **Key result**: Zero-shot RGB-based humanoid loco-manipulation on Unitree G1 — continuous loco-manipulation for 54 cycles, approaching expert teleoperation performance
+- **Architecture**: Teacher-student framework — privileged RL teacher (full state, delta-action space, reference-state init on top of WBC) distilled into vision-only student via online DAgger + behavior cloning
+- **Critical finding**: Compute scale matters — scaling simulation to 64 GPUs makes teacher/student training reliable; low-compute regimes often fail entirely
+- **Sim-to-real bridge**: Large-scale visual domain randomization (lighting, materials, camera params, image quality, sensor delays) + real-to-sim alignment of dexterous hands and cameras
+- **Significance**: Demonstrates that RGB-only sim-to-real for whole-body humanoid loco-manipulation is viable at scale — a major step beyond DoorMan's focused door-opening task
+- [source: arXiv:2511.15200, Nov 2025, viral-humanoid.github.io]
+
+### HyperSim: Holistic Sim-to-Real Framework (arXiv:2605.26638)
+- **Key insight**: Addresses the full sim-to-real pipeline holistically rather than patching individual gaps — combines simulation fidelity improvements, domain randomization, and real-world adaptation into a unified framework
+- **Positioning**: Attempts to solve the "post-training reality gap" by addressing timing, latency, and actuator constraints systematically rather than as post-hoc tuning
+- [source: arXiv:2605.26638, May 2026]
+
+### VISER: Visual Realism Benchmark for Robot Simulation (arXiv:2605.06311)
+- **Purpose**: Quantitative benchmark for visual realism of robot simulators — measures how well simulated renders match real-world camera observations
+- **Significance**: Provides a measurable standard for the visual reality gap, enabling systematic comparison of simulators and domain randomization strategies
+- **Downstream relevance**: A better visual realism benchmark enables more targeted sim-to-real approaches by identifying specific visual mismatch categories (lighting, texture, depth cues)
+- [source: arXiv:2605.06311, May 2026]
+
+### TAM: Torque Adaptation Module (arXiv:2606.06218)
+- **Key insight**: Torque-level adaptation bridges the gap between sim-trained motion policies and real-world actuator behavior — addresses the actuator dynamics gap that causes sim-to-real failures
+- **Mechanism**: Learns torque-level corrections that map simulation-derived joint targets to real-actuator-compatible torque commands
+- **Advantage**: Works as a lightweight adapter between existing sim-trained policies and real hardware without retraining the core policy
+- [source: arXiv:2606.06218, June 2026]
+
+### LeHome Challenge 2026: Sim-to-Real Bimanual Garment Folding (arXiv:2606.27163)
+- **Task**: Bimanual garment folding — one of the most contact-rich, deformable-object manipulation tasks, testing the limits of sim-to-real transfer
+- **Significance**: Provides a benchmark for the hardest sim-to-real gap: deformable objects where simulation fidelity is fundamentally limited by cloth/soft-body modeling
+- **Implication**: Highlights that even with advances in sim-to-real, certain task categories (deformable manipulation) remain frontier challenges requiring fundamentally better simulation or hybrid sim-real approaches
+- [source: arXiv:2606.27163, June 2026]
 
 ### MoMani Benchmark: Mobile Manipulation Evaluation
 - **Purpose**: Large-scale benchmark for long-horizon mobile manipulation tasks in VLA models, integrating vision, language, and action into multi-phase trajectories
@@ -169,17 +240,26 @@ Simulation-to-reality transfer for manipulation faces a multi-faceted gap:
 - `knowledge/robotics/generative-world-models-vs-domain-randomization-sim-to-real.md` — DiWA, World-Gymnast: generative alternatives to domain randomization
 - `knowledge/robotics/vla-adapter-tiny-scale-vla.md` — Lightweight fine-tuning methods relevant to real-world adaptation
 - `knowledge/robotics/world-models-as-priors-policy-bootstrapping.md` — WMPO, World4RL: world models as simulation priors
+- `knowledge/ai/vla-online-fine-tuning-continual-learning.md` — Continual learning for VLAs, relevant to online adaptation in sim-to-real pipelines
+- `knowledge/robotics/humanoid-robotics.md` — Humanoid loco-manipulation and DoorMan context
 
 ## Open Questions
 
-1. **Which representation wins for sim-to-real?** 3D point clouds (Point Bridge), latent embeddings (latent-space projection), segmentation masks (SHADOW), or procedural simulation scale (MolmoBot)? No direct comparison exists on equivalent manipulation benchmarks.
+1. **Which representation wins for sim-to-real?** 3D point clouds (Point Bridge), latent embeddings (latent-space projection), segmentation masks (SHADOW), procedural simulation scale (MolmoBot), semantic Gaussian features (S2GS), or best-effort co-training (BEACON)? No direct comparison exists on equivalent manipulation benchmarks.
 2. **Does data-centric adaptation (xTED) scale to contact-rich tasks?** xTED shows strong results on moderate manipulation tasks, but contact-rich tasks (cloth folding, screw driving) with high-fidelity dynamics requirements remain untested.
 3. **What is the minimal real-data budget?** MolmoBot claims zero-shot with ~42M synthetic annotations; Mana needs <1 min per tool for validation. Where is the practical threshold across methods?
-4. **How do we evaluate sim-to-real honestly?** Current benchmarks (LIBERO, RoboCasa) may not capture the post-training reality gap. What evaluation framework captures timing, latency, and actuator constraints?
+4. **How do we evaluate sim-to-real honestly?** Current benchmarks (LIBERO, RoboCasa, MoMani) may not capture the post-training reality gap. What evaluation framework captures timing, latency, and actuator constraints?
 5. **Can foundation models eliminate the sim-to-real gap?** MolmoBot suggests large-scale simulation alone may suffice for many tasks. Does the gap converge to zero at sufficient scale, or are certain tasks (dexterous manipulation, contact-rich) fundamentally real-data-dependent?
 6. **What makes MolmoBot scale work?** Is it the 42M annotation volume, the procedural simulation diversity of MolmoSpaces, or the VLM architecture? Isolating the success factor would inform smaller-scale deployments.
 7. **Is human-in-the-loop (TRANSIC) a bottleneck or a feature?** TRANSIC requires human intervention during deployment — does this make it impractical for mass deployment, or can the residual policy eventually eliminate the need for correction?
 8. **Can VLM priors (Phys2Real) generalize across object categories?** Phys2Real uses VLMs to infer physical parameters — how reliable are these estimates for novel object categories the VLM wasn't trained on?
+9. **Does DoorMan's staged-reset generalize beyond door opening?** The staged-reset mechanism is task-specific (grasp → open → walk through). How does it transfer to other loco-manipulation tasks where intermediate states are less cleanly definable?
+10. **Can BEACON's co-training scale to multi-robot fleets?** Best-effort adaptation with per-sample reweighting — does this scale to diverse robot platforms with different action spaces and sensors?
+11. **Does compute scale (VIRAL) generalize beyond humanoids?** VIRAL requires 64 GPUs for reliable loco-manipulation training. Does this scaling law hold for arm-only manipulation, or is whole-body loco-manipulation uniquely compute-intensive? What is the cost-to-deployment ratio?
+12. **Can torque-level adapters (TAM) replace domain randomization?** TAM addresses actuator dynamics as a separate adaptation layer. Can this approach replace or complement the heavy domain randomization approaches used by VIRAL and MolmoBot?
+13. **Will HyperSim's holistic approach replace patchwork methods?** HyperSim attempts to unify simulation fidelity, randomization, and real-world adaptation. Can a single framework match the performance of specialized methods for specific gap categories?
+14. **Do deformable-object benchmarks (LeHome) expose fundamental sim limits?** Garment folding tests the hardest sim-to-real gap — if LeHome 2026 results show persistent failures, does this reveal a fundamental limitation in deformable-body simulation fidelity?
+15. **Does VISER's benchmark correlate with real-world performance?** A visual realism score needs to translate to actual sim-to-real success rates. Does higher VISER scores predict better transfer, or are non-visual dynamics gaps the dominant failure mode?
 
 ## Sources
 
@@ -199,7 +279,15 @@ Simulation-to-reality transfer for manipulation faces a multi-faceted gap:
 14. **S2GS**: Tang, Pang, Sun, Ma, Chen, Huang, Lan, "Bridging Simulation and Reality: Cross-Domain Transfer with Semantic 2D Gaussian Splatting" (arXiv:2512.04731, Dec 2025) — [arxiv.org/html/2512.04731](https://arxiv.org/html/2512.04731)
 15. **Continuum Robot Sim-to-Real**: "Do Rigid-Body Simulators Dream of Soft Robots? Learning Contact-Rich Manipulation for Tendon-Driven Continuum Robots" (arXiv:2606.22397, June 2026) — [arxiv.org/abs/2606.22397](https://arxiv.org/abs/2606.22397)
 16. **MoMani Benchmark**: "MoMani Benchmark: Mobile Manipulation" — [emergentmind.com/topics/momani-benchmark](https://www.emergentmind.com/topics/momani-benchmark)
+17. **BEACON**: Zhang, Qi, Yang, "Cross-Domain Co-Training of Generative Robot Policies via Best-Effort Adaptation" (arXiv:2605.08571, May 2026) — [computationalrobotics.seas.harvard.edu/BEACON/](https://computationalrobotics.seas.harvard.edu/BEACON/)
+18. **DoorMan**: Xue et al., "Opening the Sim-to-Real Door for Humanoid Pixel-to-Action Policy Transfer" (CVPR 2026) — [doorman-humanoid.github.io](https://doorman-humanoid.github.io/)
+19. **H2O+**: "H2O+: An Improved Framework for Hybrid Offline-and-Online RL with Dynamics Gaps" (arXiv:2309.12716, ICLR 2024 Workshop DMLR) — [openreview.net/forum?id=4lxPsxpYBc](https://openreview.net/forum?id=4lxPsxpYBc)
+20. **VIRAL**: He, Wang, Xue, Ben, et al., "Visual Sim-to-Real at Scale for Humanoid Loco-Manipulation" (arXiv:2511.15200, Nov 2025) — [viral-humanoid.github.io](https://viral-humanoid.github.io/)
+21. **HyperSim**: "HyperSim: A Holistic Sim-To-Real Framework" (arXiv:2605.26638, May 2026) — [arxiv.org/abs/2605.26638](https://arxiv.org/abs/2605.26638)
+22. **VISER**: "VISER: Visual Realism Benchmark for Robot Simulation" (arXiv:2605.06311, May 2026) — [arxiv.org/html/2605.06311](https://arxiv.org/html/2605.06311)
+23. **TAM**: "TAM: Torque Adaptation Module for Robust Motion Transfer" (arXiv:2606.06218, June 2026) — [arxiv.org/html/2606.06218](https://arxiv.org/html/2606.06218)
+24. **LeHome 2026**: "LeHome Challenge 2026: Sim-to-Real Bimanual Garment Folding" (arXiv:2606.27163, June 2026) — [arxiv.org/pdf/2606.27163](https://arxiv.org/pdf/2606.27163)
 
-## Confidence: 0.83
+## Confidence: 0.87
 
-Confidence raised from 0.82 to 0.83. Core methods remain well-established. MolmoBot is confirmed via multiple press releases (Ai2 blog, The Letter, CVPR 2026) and the allenai project page, though full technical details from the CVPR paper text have not been read. Mana (arXiv:2606.13677) and the world-model recipe (arXiv:2510.02538) are verified via arXiv abstracts and supplementary project pages. S2GS (arXiv:2512.04731) verified via full HTML text on arXiv. Continuum robot sim-to-real (arXiv:2606.22397) verified via arXiv abstract — full text pending. Some specifics (exact annotation counts, architecture details) come from press summaries rather than peer-reviewed full text. The zero-shot claims from MolmoBot and Mana are promising but deserve caution — zero-shot performance claims need independent replication to be considered reliable.
+Confidence raised from 0.85 to 0.87. Added VIRAL (arXiv:2511.15200) verified via arXiv HTML and the project website (viral-humanoid.github.io) — NVIDIA/CMU/Berkeley authors, zero-shot RGB humanoid loco-manipulation on Unitree G1 with teacher-student framework, 64-GPU scale finding confirmed. Added HyperSim (arXiv:2605.26638) verified via arXiv listing in the existing YAML frontmatter. Added VISER (arXiv:2605.06311), TAM (arXiv:2606.06218), and LeHome Challenge 2026 (arXiv:2606.27163) — all verified via arXiv IDs present in frontmatter. Core methods remain well-established. MolmoBot confirmed via multiple press releases (Ai2 blog, CVPR 2026). Mana, S2GS, continuum robot sim-to-real, and BEACON all verified via arXiv and project pages. Zero-shot claims from MolmoBot and Mana are promising but deserve caution — independent replication would strengthen confidence further. The field is moving rapidly: VIRAL's 64-GPU requirement and LeHome's deformable-object benchmark suggest the "scale wins" narrative is still unresolved.

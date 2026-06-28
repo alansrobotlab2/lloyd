@@ -8,7 +8,7 @@ tags:
   - ml/online-fine-tuning
   - research/domain-research
 created: 2026-07-14
-updated: 2026-07-15
+updated: 2026-07-28
 confidence: 0.85
 ---
 
@@ -38,9 +38,17 @@ Vision-Language-Action (VLA) models present unique opportunities and challenges 
 
 - **lifelong-RFT — replay-fine-tuning for long-lived robots**: Yuan Liu et al.'s lifelong-RFT framework achieves a 22% gain in average success rate over standard SFT on LIBERO continual learning benchmarks while adapting to new tasks using only 20% of the training data. The method provides a post-training paradigm where experience replay is integrated with replay-fine-tuning cycles for efficient continual adaptation.
 
-- **OpenVLA-OFT recipe**: The OpenVLA Optimized Fine-Tuning (OFT) recipe combines parallel decoding, action chunking, continuous action representation, and L1 regression to achieve 25-50× inference speedup and 20%+ success rate improvement — enabling fast online adaptation cycles essential for deployment.
+- **Stellar VLA — self-evolving skill knowledge space**: Stellar VLA jointly learns task-centric representations and a self-evolving knowledge space without additional network parameters. Two variants: T-Stellar (task-level) and TS-Stellar (hierarchical task-skill). Requires only ~10MB replay storage per task at 1% replay ratio, making it suitable for deployment-constrained robots with limited on-device storage.
 
 - **Fleet-scale online learning**: AgileX's Learning-while-Deploying (LWD) framework demonstrates fleet-scale RL where multiple robots collect trajectories into a shared online replay buffer, enabling population-level continual learning across distributed deployments.
+
+- **RankQ — offline-to-online RL via self-supervised action ranking**: RankQ (arXiv:2605.11151, Horizon Robotics) replaces uniform pessimistic penalties (CQL/Cal-QL) with structured self-supervised action ranking. It generates synthetic negative examples (noisy, random, permuted actions) and enforces a quality hierarchy via pairwise ranking loss: successful actions > slightly noisy > very noisy > random. This shapes a smoother Q-value landscape, enabling 42.7% higher simulation success and 41.6 percentage-point real-world improvement on cube stacking over baseline VLA policies during online fine-tuning.
+
+- **BORA — bridging offline RL and online residual adaptation**: BORA (arXiv:2605.30226) bridges offline reinforcement learning and online residual adaptation for real-world dexterous VLA models. Instead of full fine-tuning, BORA learns a residual policy on top of a frozen offline-pretrained model, combining the stability of offline pretraining with the adaptability of online RL — a structural parallel to PHASER's frozen-base + residual-latent approach.
+
+- **VLA-OPD — on-policy distillation for online fine-tuning**: VLA-OPD (arXiv:2603.26666) introduces an On-Policy Distillation framework bridging offline Supervised Fine-Tuning (SFT) and online Reinforcement Learning. Instead of relying on sparse environmental rewards, VLA-OPD uses an expert teacher to provide dense, token-level supervision on the student's self-generated trajectories, enabling active error correction on policy-induced states while preserving the offline-pretrained knowledge base — a direct continual learning mechanism for transitioning from offline SFT to online RL.
+
+- **TwinBrainVLA — asymmetric mixture-of-transformers**: TwinBrainVLA (arXiv:2601.14133) addresses catastrophic forgetting during VLA fine-tuning using a dual-pathway architecture: a frozen generalist VLM ("Left Brain") and a trainable specialist ("Right Brain") coordinated via Asymmetric Mixture-of-Transformers (AsyMoT). The Right Brain dynamically queries intact semantic knowledge from the Left Brain while learning task-specific skills, achieving substantial gains on complex manipulation benchmarks (SimplerEnv, RoboCasa) by explicitly retaining general VLM capabilities that are typically lost during standard robotic fine-tuning.
 
 ## Method Categories
 
@@ -57,6 +65,13 @@ Vision-Language-Action (VLA) models present unique opportunities and challenges 
 |--------|---------------|-----------|------------|
 | **CLARE** | Adapter expansion + autoencoder routing | Exemplar-free, no task labels needed | Requires adapter insertion, routing overhead |
 | **Simple Seq. FT** | Direct sequential fine-tuning | Minimal overhead, surprisingly effective | Works best with large pretrained models |
+
+### Offline-to-Online RL Approaches
+| Method | Key Mechanism | Strengths | Limitations |
+|--------|---------------|-----------|------------|
+| **RankQ** | Self-supervised action ranking replaces uniform pessimism | 42.7% sim gain, 41.6% real-world improvement over baseline VLA | Requires offline success/failure split, synthetic negative generation |
+| **BORA** | Frozen offline-pretrained model + online residual adaptation | Bridges offline RL safety with online adaptability | Requires offline pretraining phase, residual learning overhead |
+| **VLA-OPD** | Expert teacher provides dense token-level supervision on student's self-generated trajectories | Enables active error correction without forgetting offline knowledge | Requires expert teacher model, computational overhead |
 
 ### Key Design Factors for Real-World Success (Zhu et al., 2026)
 - **Buffer size**: Even small buffers (100-500 samples/task) suffice for pretrained VLAs
@@ -116,9 +131,19 @@ Vision-Language-Action (VLA) models present unique opportunities and challenges 
 
 - **Karli & Fitzgerald (2026)** — "RECALL: Recovery Experience Collection for Active Lifelong Learning in Vision-Language-Action Models" — arXiv:2606.23617 — [https://arxiv.org/abs/2606.23617](https://arxiv.org/abs/2606.23617)
 
-- **PHASER authors (2025/2026)** — "PHASER: Phase-Aware and Semantic Experience Replay for Vision-Language-Action Models" — Evaluated on LIBERO-Goal CL, 87.8% final ASR, +31% over matched-budget ER.
+- **PHASER authors (2026)** — "PHASER: Phase-Aware and Semantic Experience Replay for Vision-Language-Action Models" — arXiv:2606.03598 — Reinterprets VLA continual learning through Semi-Markov Decision Process (SMDP) lens to expose structural mismatch between trajectory data and uniform frame-level replay. Evaluated on LIBERO-Goal CL, 87.8% final ASR, +31% over matched-budget ER.
+
+- **Stellar VLA (2025)** — "Continually Evolving Skill Knowledge in Vision Language Action Model" — arXiv:2511.18085 — Jointly learns task-centric representations and a self-evolving knowledge space with two variants (T-Stellar for task-level, TS-Stellar for hierarchical task-skill modeling). Requires only ~10MB replay storage per task at 1% replay ratio on LIBERO-scale data.
 
 - **Yuan Liu et al. (2026)** — "Towards Long-Lived Robots: Continual Learning VLA Models via Replay Fine-Tuning" — lifelong-RFT — [yuan-liu-lifelong-rft.github.io](https://yuan-liu-lifelong-rft.github.io/) — 22% ASR gain over SFT on LIBERO CL using 20% training data
+
+- **RankQ (2026)** — "Offline-to-Online Reinforcement Learning via Self-Supervised Action Ranking" — arXiv:2605.11151 — [https://arxiv.org/abs/2605.11151](https://arxiv.org/abs/2605.11151) — Horizon Robotics
+
+- **BORA (2026)** — "Bridging Offline Reinforcement Learning and Online Residual Adaptation for Real-World Dexterous VLA Models" — arXiv:2605.30226 — [https://arxiv.org/abs/2605.30226](https://arxiv.org/abs/2605.30226) — Chen et al.
+
+- **VLA-OPD (2026)** — "VLA-OPD: Bridging Offline SFT and Online RL for Vision-Language-Action Models via On-Policy Distillation" — arXiv:2603.26666 — [https://arxiv.org/abs/2603.26666](https://arxiv.org/abs/2603.26666) — Yu et al.
+
+- **TwinBrainVLA (2026)** — "TwinBrainVLA: Unleashing the Potential of Generalist VLMs for Embodied Tasks via Asymmetric Mixture-of-Transformers" — arXiv:2601.14133 — [https://arxiv.org/abs/2601.14133](https://arxiv.org/abs/2601.14133) — Yu et al. — Code: [github.com/ZGC-EmbodyAI/TwinBrainVLA](https://github.com/ZGC-EmbodyAI/TwinBrainVLA)
 
 ## Confidence: 0.85
 
