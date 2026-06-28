@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, AsyncIterator
@@ -40,6 +41,42 @@ from app.harness.tool_search import (
 )
 
 logger = logging.getLogger("lloyd-harness-loop")
+
+
+# ---------------------------------------------------------------------------
+# Echo guard
+# ---------------------------------------------------------------------------
+#
+# Failure mode this defends against: the model emits a fenced *shell* block
+# (```bash …```) as plain text and then stops, WITHOUT calling the Bash tool —
+# i.e. it prints the command instead of running it. This shows up when a
+# command-dense skill (an auto-generated bash runbook) lands in context and
+# the fenced examples act as few-shot "print this" demonstrations. When that
+# happens and Bash is actually available, nudge the model once to either call
+# the tool or, if it was only showing the command for reference, finish
+# normally. Bounded to one re-prompt per turn so a model that keeps echoing
+# can't spin the loop.
+
+# Shell-family fences only. We deliberately exclude ```python / ```json / etc.
+# — those are far more often legitimately *shown* to the user, whereas a bare
+# shell fence in an agent turn almost always means "I meant to run this".
+_EXEC_FENCE_RE = re.compile(r"```[ \t]*(?:bash|sh|shell|zsh|console)\b", re.IGNORECASE)
+
+_ECHO_GUARD_NUDGE = (
+    "You wrote a shell command inside a code block but did not actually call a "
+    "tool, so nothing ran. If you intended to execute it, call the Bash tool now "
+    "with that exact command. If you were only showing the command to the user "
+    "for reference, reply normally and do not include a fenced shell block."
+)
+
+_MAX_ECHO_GUARD_REPROMPTS = 1
+
+
+def _looks_like_unexecuted_command(text: str) -> bool:
+    """True if `text` contains a fenced shell block (a likely echoed command)."""
+    if not text:
+        return False
+    return bool(_EXEC_FENCE_RE.search(text))
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +143,7 @@ async def run_query(
         stop_reason = "stop"
         context_overflow_recoveries = 0
         max_context_overflow_recoveries = 2
+        echo_guard_reprompts = 0
 
         while True:
             num_turns += 1
@@ -290,6 +328,27 @@ async def run_query(
                     # so the model gets to read it and respond.
                     logger.info(
                         "loop: observer injected on terminal iteration — continuing loop",
+                    )
+                    continue
+                # Echo guard — the model printed a shell command in a fenced
+                # block but called no tool. If Bash is available and we haven't
+                # already nudged this turn, append a user-role nudge and loop
+                # once more so it can actually call the tool (or confirm it was
+                # only showing the command). A user message is used rather than
+                # a second system message because vLLM chat templates reject a
+                # non-leading system role.
+                if (
+                    getattr(options, "echo_guard_enabled", True)
+                    and echo_guard_reprompts < _MAX_ECHO_GUARD_REPROMPTS
+                    and _looks_like_unexecuted_command(assistant_text)
+                    and "Bash" not in current_disallowed
+                ):
+                    echo_guard_reprompts += 1
+                    chat_messages.append({"role": "user", "content": _ECHO_GUARD_NUDGE})
+                    logger.info(
+                        "loop: echo-guard re-prompt #%d — assistant emitted a shell "
+                        "fence with no tool call (iter=%d)",
+                        echo_guard_reprompts, num_turns,
                     )
                     continue
                 stop_reason = finish_reason or "stop"
