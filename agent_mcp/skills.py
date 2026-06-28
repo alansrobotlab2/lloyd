@@ -30,6 +30,14 @@ SKILLS_DIRS = [
     Path(__file__).parent.parent / "skills",
 ]
 
+# Frontmatter `status:` values that quarantine a skill — it stays on disk
+# (and in git history) but is excluded from retrieval entirely. This is the
+# lever for pulling a misbehaving skill out of circulation without deleting
+# it (e.g. auto-generated bash-runbook skills that the model echoes verbatim
+# instead of acting on). The norm is `status: active`; anything in this set
+# is skipped. Comparison is case-insensitive on the stripped value.
+_QUARANTINE_STATUSES = {"inactive", "archived", "disabled", "retired", "quarantined"}
+
 app = Server("lloyd-skills")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -60,6 +68,10 @@ def _load_skill(skill_dir: Path) -> Optional[dict]:
     except OSError:
         return None
     fm, body = _parse_frontmatter(content)
+    status = str(fm.get("status", "") or "").strip().lower()
+    if status in _QUARANTINE_STATUSES:
+        # Quarantined — present on disk but pulled from retrieval.
+        return None
     return {
         "name": skill_dir.name,
         "description": fm.get("description", ""),
