@@ -8,7 +8,7 @@ tags:
   - ml/online-fine-tuning
   - research/domain-research
 created: 2026-07-14
-updated: 2026-07-28
+updated: 2026-07-30
 confidence: 0.85
 ---
 
@@ -136,6 +136,10 @@ Vision-Language-Action (VLA) models present unique opportunities and challenges 
 - **Stellar VLA (2025)** — "Continually Evolving Skill Knowledge in Vision Language Action Model" — arXiv:2511.18085 — Jointly learns task-centric representations and a self-evolving knowledge space with two variants (T-Stellar for task-level, TS-Stellar for hierarchical task-skill modeling). Requires only ~10MB replay storage per task at 1% replay ratio on LIBERO-scale data.
 
 - **Yuan Liu et al. (2026)** — "Towards Long-Lived Robots: Continual Learning VLA Models via Replay Fine-Tuning" — lifelong-RFT — [yuan-liu-lifelong-rft.github.io](https://yuan-liu-lifelong-rft.github.io/) — 22% ASR gain over SFT on LIBERO CL using 20% training data
+
+- **Simple Recipe Works (2026)** — "Vision-Language-Action Models are Natural Agents for Continual Reinforcement Learning" — arXiv:2603.11653 — Shows that simple sequential fine-tuning works surprisingly well for CRL in large pretrained VLA models, challenging the assumption that complex regularization or replay mechanisms are always necessary.
+
+- **antoniomari/vla-continual-learning** — Official implementation for CRL with VLA models — [github.com/antoniomari/vla-continual-learning](https://github.com/antoniomari/vla-continual-learning) — Built on RLinf; includes EWC, Experience Replay, Dark Experience Replay, Weight Merge, SLCA baselines, and multitask oracle upper bound.
 
 - **RankQ (2026)** — "Offline-to-Online Reinforcement Learning via Self-Supervised Action Ranking" — arXiv:2605.11151 — [https://arxiv.org/abs/2605.11151](https://arxiv.org/abs/2605.11151) — Horizon Robotics
 
