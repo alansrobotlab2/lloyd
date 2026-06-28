@@ -307,10 +307,16 @@ async def run_query(
                             assistant_text += txt
                             yield events.text_delta(txt)
 
-                    if (rc := delta.get("reasoning_content")) is not None:
-                        if rc:
-                            thinking_text += rc
-                            yield events.thinking_delta(rc)
+                    # vLLM's qwen3 reasoning parser emitted reasoning under
+                    # `reasoning_content` through ~0.22; 0.23+ renamed the
+                    # streaming/message field to `reasoning`. Accept both so the
+                    # thinking panel keeps working across vLLM versions.
+                    rc = delta.get("reasoning_content")
+                    if rc is None:
+                        rc = delta.get("reasoning")
+                    if rc:
+                        thinking_text += rc
+                        yield events.thinking_delta(rc)
 
                     for tc_delta in delta.get("tool_calls") or []:
                         _accumulate_tool_call(tool_calls_acc, tc_delta)

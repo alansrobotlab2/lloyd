@@ -11,8 +11,9 @@ Event types:
     text_delta        — incremental assistant text chunk (analog of SDK
                         text_delta)
     thinking_delta    — incremental reasoning chunk (vLLM
-                        delta.reasoning_content under
-                        --reasoning-parser qwen3)
+                        delta.reasoning_content on <=0.22, renamed to
+                        delta.reasoning on 0.23+, under --reasoning-parser
+                        qwen3)
     thinking_done     — final accumulated reasoning text for this
                         assistant message
     tool_call         — a single fully-accumulated tool call from the
