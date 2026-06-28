@@ -76,6 +76,11 @@ Cross-embodiment transfer must simultaneously address:
 - **Positioning**: Follows the data-centric scaling route; adds world-model-based reasoning to human-centric pretraining
 - [source: arXiv:2605.00078]
 
+### X-Sim: Real-to-Sim-to-Real (arXiv:2505.07096, May 2025)
+- **Approach**: Real-to-sim-to-real framework using object motion as a dense, embodiment-agnostic signal. Reconstructs real-world object dynamics in simulation and learns policies on simulated objects, then deploys to different robot embodiments.
+- **Key insight**: Object trajectories (position, orientation, velocity) are independent of which robot manipulates them — unlike robot joint actions, object motion transfers across embodiments naturally
+- [source: arXiv:2505.07096]
+
 ### SPACE: Cross-Robot Data Learning (Jun 2026)
 - **Focus**: Addresses limitations of control-command action spaces for cross-embodiment learning; proposes action-adapter methods for generalist policies
 - **Key question**: Can cross-hardware learning improve policies trained on heterogeneous robot data?
