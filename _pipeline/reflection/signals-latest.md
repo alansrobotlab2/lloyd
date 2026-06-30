@@ -1,42 +1,49 @@
 ---
 segment: agents
-generated: 2026-06-27 02:00 PST
-data_range: 2026-06-25 to 2026-06-27
+generated: 2026-06-29 16:40 PST
+data_range: 2026-06-27 to 2026-06-29
 ---
 
-# Signal Report — 2026-06-27
+# Signal Report — 2026-06-29
 
 ## Queued Signals (met threshold)
 
 ### Explicit (act on first occurrence)
 
-| ID | Date | Type | Category | Description | Source |
-|----|------|------|----------|-------------|--------|
-| 1  | 2026-06-27 | infrastructure | hardware | NVIDIA GPU1 crash — dropped off PCIe bus, triggered kernel errors and system reboot | daily note |
-| 2  | 2026-06-27 | operational | system | 5 timeout-poisoned run tasks remain uncleared from Jun 25 GPU config change | daily note |
+_No explicit signals in the 3-day window._
 
 ### Inferred (met 2+ threshold)
 
-| ID | Date | Type | Category | Description | Frequency | Source |
-|----|------|------|----------|-------------|-----------|--------|
-| 1  | 2026-06-25 to 2026-06-27 | pattern | session-data | ~/obsidian/sessions/ is empty — no enriched session extraction running, 3 consecutive days | 3 days | filesystem |
-| 2  | 2026-06-25 to 2026-06-27 | pattern | daily-notes | Daily notes contain only auto-captured summaries — no user corrections, feedback, or rich annotations captured | 3 days | daily notes |
-| 3  | 2026-06-25 to 2026-06-27 | pattern | tool-failures | browser_snapshot timeouts (3), http_search failures when browser uninitialized (2), youtube_transcript timeout on large videos (2) — persistent tool fragility | 7 total | knowledge handoff |
+_No inferred signals in the 3-day window._
 
 ## Pending Signals (below threshold)
 
-- None (prev report's signals have matured or resolved)
+_No pending signals._
+
+## Historical Signals (from corrections.md, no recent activity)
+
+| ID | Date | Type | Category | Description | Status |
+|----|------|------|----------|-------------|--------|
+| H1 | 2026-05-08 | correction | tool-use | Deferred tool calls without ToolSearch schema loading | Quiescent (no recurrence since May) |
+| H2 | 2026-05-08 | correction | infra | Port mismatch — assumed doc was current without verifying running service | Quiescent |
+| H3 | 2026-03-31 | correction | skill-check | Skipped skills_search before gateway restart | Quiescent (no recurrence since April) |
+| H4 | 2026-03-29 | correction | skill-check | Skipped skills_search before tool calls — entire sprint ran without prefix | Quiescent |
+| H5 | 2026-03-29 | correction | dispatch | Raw subagent spawn instead of pipeline-dispatch for research | Quiescent |
+| H6 | 2026-03-29 | correction | scope | Merged 3 user links into 2 tasks — violated 1:1 input mapping | Quiescent |
 
 ## Tool Failure Patterns
 
-- **Tool:** `browser_snapshot` — **Error type:** Frequent timeouts on complex pages — **Occurrences:** 3 — **Recommendation:** Add retry logic with exponential backoff; consider fallback to browser_evaluate for structured extraction
-- **Tool:** `http_search` — **Error type:** Fails when browser not initialized — **Occurrences:** 2 — **Recommendation:** Add pre-flight browser health check before search; or add fallback to http_fetch-based search
-- **Tool:** `youtube_transcript` — **Error type:** Timeout on large videos — **Occurrences:** 2 — **Recommendation:** Add video duration check before transcript extraction; fallback to browser_evaluate with page.transcriptExtractor
+_No tool failures detected in the 3-day window._
 
 ## Positive Patterns to Reinforce
 
-- **Pattern:** 85+ day correction-free streak — zero explicit corrections since May 8, format and detail level consistently satisfactory — **Evidence:** 85+ days, corrections.md unchanged — **Action:** Preserve current behavior; this is the strongest positive signal in the system
-- **Pattern:** System health check as post-change procedure — **Evidence:** Jun 25 and Jun 27 both ran full health checks after infrastructure changes — **Action:** Encode as standard operating procedure
-- **Pattern:** Hardware diagnostic investigation — **Evidence:** Jun 27 GPU crash investigation correctly identified root cause (GPU dropped off PCIe bus) — **Action:** Maintain log analysis workflow for hardware incidents
-- **Pattern:** Multi-batch YouTube processing via subagent orchestration — **Evidence:** 4 successful sessions — **Action:** Keep as-is, already skill-qualified
-- **Pattern:** Research → skill dev → documentation pipeline — **Evidence:** 5 successful cycles — **Action:** Preserve current workflow
+- **Pattern:** YouTube transcript extraction + summarization — **Evidence:** 3 sessions across 2 days (GLM 5.2 review, Gleb interview x2, Agentic OS video) — **Action:** Already well-encoded in workflow; no changes needed
+- **Pattern:** Research-to-knowledge-graph pipeline — **Evidence:** Loop engineering research session produced knowledge note + 13 facts + 6 relationships without correction — **Action:** Reinforce as a default pattern for deep-research tasks
+- **Pattern:** Batch vault note creation — **Evidence:** 10 open-source AI tool notes created in a single session with GitHub data verification — **Action:** No action needed; pattern is working
+- **Pattern:** System health diagnostics — **Evidence:** GPU crash root cause analysis, poisoned worker cleanup, multi-tool health checks all executing with skills loaded — **Action:** No action needed; the skill-first protocol is holding
+
+## Observations
+
+- **Session enrichment gap:** `~/obsidian/sessions/` is empty — no enriched session data available for extraction-log-based signal detection. All signals this cycle are derived from auto-captured daily notes only. This limits ability to detect tool-level success/failure patterns.
+- **Overall health:** 3-day window is clean. No corrections, no tool failures, no user frustrations. All ~12 sessions appear to have completed without issue.
+- **Historical decay:** All 6 corrections.md entries are quiescent with no recurrence since April (tool-use/skill-check violations) or May (ToolSearch/port issues). The behavioral fixes appear to have stuck.

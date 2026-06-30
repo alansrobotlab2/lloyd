@@ -18,7 +18,7 @@ tags:
   - loco-manipulation
 domain: robotics
 date: 2026-06-26
-last_verified: 2026-09-25
+last_verified: 2026-07-01
 sources:
   - url: "https://arxiv.org/abs/2409.08687"
     title: "xTED: Cross-Domain Adaptation via Diffusion-Based Trajectory Editing"
