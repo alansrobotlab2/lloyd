@@ -8,8 +8,8 @@ tags:
   - embodied-ai
   - research/domain-research
 created: 2026-07-15
-updated: 2026-12-08
-confidence: 0.82
+updated: 2026-12-22
+confidence: 0.87
 ---
 
 # Real-time SLAM Integration with VLA Policies — Mapping During Manipulation Tasks
@@ -38,7 +38,7 @@ Integrating simultaneous localization and mapping (SLAM) with Vision-Language-Ac
 
 - **NaVILA (OpenReview: gkDRrvqeWF, RSS 2025)** proposes a two-level VLA framework for legged robot navigation. A high-level VLA generates language-based commands while a real-time locomotion policy handles obstacle avoidance. Demonstrates that VLA models can be adapted for Vision-and-Language Navigation (VLN) on legged platforms in cluttered scenes. Benchmarks on IsaacLab with realistic scenes and real-robot experiments.
 
-- **3D Gaussian Splatting for SLAM is maturing rapidly**: Multiple systems (DynaGSLAM, GS-SLAM, AG-SLAM, GSORBSLAM) now demonstrate real-time 3DGS-SLAM with dynamic environment handling. GSWorld combines 3DGS with physics engines for closed-loop photorealistic sim-to-real simulation. LEGS (legsvla.github.io) uses 3DGS-based hybrid simulation for teleop-free VLA fine-tuning on humanoid robots (Unitree G1), showing Gaussian splatting maps can serve as realistic training environments for loco-manipulation VLAs. SemGauss-SLAM (IROS 2025) adds semantic labeling to Gaussian SLAM, directly bridging the geometric-to-semantic gap for VLA input.
+- **3D Gaussian Splatting for SLAM is maturing rapidly**: Multiple systems (DynaGSLAM, GS-SLAM, AG-SLAM, GSORBSLAM) now demonstrate real-time 3DGS-SLAM with dynamic environment handling. GSWorld combines 3DGS with physics engines for closed-loop photorealistic sim-to-real simulation. LEGS (legsvla.github.io) uses 3DGS-based hybrid simulation for teleop-free VLA fine-tuning on humanoid robots (Unitree G1), showing Gaussian splatting maps can serve as realistic training environments for loco-manipulation VLAs. SemGauss-SLAM (IROS 2025) addss semantic labeling to Gaussian SLAM, directly bridging the geometric-to-semantic gap for VLA input.
 
 - **MemoryVLA** (Guo et al., GitHub: G-U-O/memvla) proposes a Cognition-Memory-Action framework for long-horizon robotic manipulation, achieving +14.6% gain on Bridge and +11.8% on Mikasa-Robo benchmarks. Integrates with the Dexbotic VLA codebase, demonstrating that memory-augmented VLA architectures are becoming integrated into open-source tooling.
 
@@ -47,6 +47,22 @@ Integrating simultaneous localization and mapping (SLAM) with Vision-Language-Ac
 - **Map consistency during manipulation remains unsolved**: Manipulation induces camera ego-motion (arm movements, gripper self-occlusion, scene changes) that corrupt SLAM estimates. Existing systems decouple navigation/exploration phases from manipulation phases. Continuous mapping during manipulation — where the robot must maintain spatial consistency while actively changing the scene — is an open research challenge. RSV-SLAM makes progress on dynamic scene handling but does not address manipulation-induced ego-motion specifically.
 
 - **Edge deployment is feasible but requires split compute**: AnywhereVLA splits compute across two devices (Jetson Orin NX for VLA/perception, Intel NUC for SLAM/control). The full SLAM + semantic mapping + VLA inference + exploration planning pipeline at >10 Hz is resource-intensive. VL-Nav demonstrates 30 Hz operation on single Jetson Orin NX for navigation alone, but unified SLAM+VLA+manipulation on a single device remains open.
+
+- **Spectral GS-SLAM (arXiv:2606.21258, Jun 2026)** introduces observability-aware, degeneracy-robust tracking for Gaussian Splatting SLAM. Uses second-order optimization with neural rendering for real-time SLAM across diverse indoor environments. Critical for SLAM+VLA integration: addresses tracking reliability under degeneracy conditions (textureless surfaces, repetitive patterns) common in manipulation environments.
+
+### Mid-2026 Developments
+
+- **DIM-WAM (Wang et al., arXiv:2606.27677, Jun 2026)** is a memory-augmented world-action model for long-horizon robot manipulation. It augments a base world-action model with diverse historical event memory: extracting compact visual events from real observations, updating multiple memory banks through independent similarity-based merging, and reading bank-identity- and time-embedded long-term context to condition video and action denoising. A progress-supervision objective encourages memory tokens to encode completed events, the current task stage, and implications for the remaining task. On RMBench, DIM-WAM raises average success from 28.4% (LingBot-VA baseline) to 69.8%, exceeding Mem-0 at 42.0%. On four real-world Franka tasks, it improves average stage success from 70.7% to 91.5% and full-task success from 52.5% to 80.0%. This directly demonstrates that structured historical event memory — a SLAM-adjacent capability — dramatically improves long-horizon manipulation.
+
+- **μVLA (arXiv:2606.12497, Jun 2026)** is a controlled isolation study of recurrence in a strong pretrained VLA backbone. Learnable memory tokens carried across timesteps and trained with TBPTT improve manipulation under partial observability on MIKASA-Robo and LIBERO benchmarks. The model produces updated memory tokens recurrently passed to t+1, providing a lightweight alternative to external SLAM for short-horizon spatial reasoning under partial observability.
+
+- **MUVLA (Han et al., arXiv:2509.25966, Sep 2025)** is a Map Understanding VLA tailored for object navigation. It takes current and history observations plus a semantic map as input and predicts action sequences based on a textual goal description. The three-stage training pipeline (map-level spatial understanding → behavior imitation → reward amplification) enables the model to unify diverse demonstrations into a robust spatial representation. Evaluated on HM3D and Gibson benchmarks, demonstrating effective exploration behaviors even from low-quality or partially successful trajectories. This is a concrete SLAM-to-VLA bridge: semantic maps serve as structured spatial context for VLA action prediction.
+
+- **RoboMME (arXiv:2603.04639, Mar 2026)** benchmarks memory for robotic generalist policies across 16 manipulation tasks spanning temporal, spatial, object, and procedural memory. The study develops 14 memory-augmented VLA variants on the π0.5 backbone to systematically explore different memory representations. Provides a systematic evaluation framework for comparing memory-augmented VLA approaches — including those that incorporate SLAM-derived spatial context vs. internal memory — against the "no memory" baseline.
+
+- **EgoHumanoid (arXiv:2602.10106, Feb 2026)** is the first framework for human-to-humanoid loco-manipulation transfer. By aligning egocentric human demonstrations with robot data through view transformation and unified action space, it enables effective VLA co-training without requiring robot-specific demonstrations. Relevant to SLAM+VLA integration because it demonstrates loco-manipulation transfer in a framework that could incorporate spatial memory.
+
+- **Vesta (arXiv:2606.20905, Jun 2026)** is a generalist embodied reasoning model evaluated on real robotic manipulation tasks using tabletop bimanual grippers. Demonstrates the maturation of generalist embodied models capable of reasoning across multiple manipulation modalities.
 
 ## Related (vault entities)
 - [[Online Fine-Tuning for VLA Models — Continual Learning with Experience Replay]]
@@ -112,6 +128,24 @@ Integrating simultaneous localization and mapping (SLAM) with Vision-Language-Ac
 
 - Bourgeois, D. "12 Predictions for Embodied AI and Robotics in 2026." 2026 outlook on 3DGS as standard spatial representation.
 
+- Wang et al. "DIM-WAM: World-Action Modeling with Diverse Historical Event Memory," arXiv:2606.27677, Jun 2026. Memory-augmented world-action model with multi-bank event memory for long-horizon manipulation. Project: [https://wangkai-casia.github.io/dim-wam/](https://wangkai-casia.github.io/dim-wam/)
+
+- "μVLA: On Recurrent Memory for Partially Observable Manipulation," arXiv:2606.12497, Jun 2026. Recurrent learnable memory tokens for manipulation under partial observability. GitHub: [https://github.com/CognitiveAISystems/muVLA](https://github.com/CognitiveAISystems/muVLA)
+
+- Han et al. "MUVLA: Learning to Explore Object Navigation via Map Understanding," arXiv:2509.25966, Sep 2025. Map-understanding VLA that takes semantic maps as structured spatial context. Three-stage training pipeline for spatial understanding.
+
+- "RoboMME: Benchmarking and Understanding Memory for Robotic Generalist Policies," arXiv:2603.04639, Mar 2026. Systematic evaluation of 14 memory-augmented VLA variants across temporal, spatial, object, and procedural memory categories.
+
+- "EgoHumanoid: Unlocking In-the-Wild Loco-Manipulation with Robot-Free Egocentric Demonstrations," arXiv:2602.10106, Feb 2026. Human-to-humanoid loco-manipulation transfer framework.
+
+- "Vesta: A Generalist Embodied Reasoning Model," arXiv:2606.20905, Jun 2026. Generalist embodied reasoning with real robot evaluation on bimanual manipulation tasks.
+
+- Huang et al. "GraphCoT-VLA: A 3D Spatial-Aware Reasoning Vision-Language-Action Model for Robotic Manipulation with Ambiguous Instructions," arXiv:2508.07650, Aug 2025. Graph-based spatial reasoning for VLA. [https://arxiv.org/abs/2508.07650](https://arxiv.org/abs/2508.07650)
+
+- Sandipan D. Asan. "From Pixels to Actions: The Hidden Role of SLAM in VLA Model Training and Evaluation," 2025. Comprehensive analysis of SLAM's role in VLA training and evaluation. [https://mrsandipandas.github.io/files/slam-vla.pdf](https://mrsandipandas.github.io/files/slam-vla.pdf)
+
+- "Spectral GS-SLAM: Observability-Aware, Degeneracy-Robust Tracking for Gaussian Splatting SLAM," arXiv:2606.21258, Jun 2026. Real-time 3DGS-SLAM with second-order optimization. [https://arxiv.org/pdf/2606.21258](https://arxiv.org/pdf/2606.21258)
+
 ## Confidence
 
-0.82: The modular SLAM+VLA integration paradigm is well-established, with AnywhereVLA providing the most concrete architecture reference with empirical results (46% task success on unseen multi-room labs). The addition of memory-augmented VLA systems (MAP-VLA, EvoVLA, MemoryVLA) from late 2025 significantly strengthens the evidence base for how VLA policies can maintain spatial context — addressing the core "VLA models lack spatial memory" gap directly. The 3DGS-SLAM ecosystem (DynaGSLAM, SemGauss-SLAM, GSWorld, LEGS) now has multiple real-time systems with published results, elevating 3DGS from "promising trend" to "actively developed technology." VL-Nav's 30 Hz edge operation and 86.3% success rate provide concrete benchmarks for VLA navigation performance. Confidence increased from 0.78 due to MAP-VLA (ICRA 2026 accepted) and EvoVLA providing direct evidence for memory-augmented approaches, plus the maturation of 3DGS-SLAM systems. Still capped below 0.90 because: (1) continuous mapping during manipulation remains unsolved, (2) no system demonstrates end-to-end differentiable SLAM+VLA, (3) real-world deployment beyond controlled lab settings is unproven, and (4) single-device unified deployment of full SLAM+VLA+manipulation is not yet demonstrated.
+0.87: The modular SLAM+VLA integration paradigm is well-established, with AnywhereVLA providing the most concrete architecture reference with empirical results (46% task success on unseen multi-room labs). The addition of memory-augmented VLA systems (MAP-VLA, EvoVLA, MemoryVLA) from late 2025 significantly strengthens the evidence base for how VLA policies can maintain spatial context — addressing the core "VLA models lack spatial memory" gap directly. The 3DGS-SLAM ecosystem (DynaGSLAM, SemGauss-SLAM, GSWorld, LEGS, Spectral GS-SLAM) now has multiple real-time systems with published results, elevating 3DGS from "promising trend" to "actively developed technology." VL-Nav's 30 Hz edge operation and 86.3% success rate provide concrete benchmarks for VLA navigation performance. Confidence increased to 0.87 from 0.85 due to: (1) **GraphCoT-VLA** (Aug 2025) demonstrating graph-based spatial representations as VLA reasoning input, providing a concrete SLAM-output-to-VLA-input bridge; (2) **"From Pixels to Actions"** (2025) establishing that SLAM-derived spatial context is a prerequisite for metric-scale VLA evaluation, strengthening the theoretical case for SLAM+VLA integration; (3) **Spectral GS-SLAM** (Jun 2026) addressing tracking reliability under degeneracy conditions, a key practical requirement for SLAM+VLA systems in manipulation environments; (4) Prior mid-2026 developments remain foundational: DIM-WAM, μVLA, MUVLA, and RoboMME. Still capped below 0.90 because: (1) continuous mapping during manipulation remains unsolved — no system maintains SLAM consistency while actively changing the scene; (2) no system demonstrates end-to-end differentiable SLAM+VLA; (3) real-world deployment beyond controlled lab settings is unproven; (4) single-device unified deployment of full SLAM+VLA+manipulation is not yet demonstrated; (5) 3DGS maps as direct VLA conditioning input remains unrealized despite promising prototypes.

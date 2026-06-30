@@ -9,7 +9,7 @@ tags:
   - ai/continual-learning
 domain: robotics
 date: 2026-07-15
-last_verified: 2026-07-15
+last_verified: 2026-07-23
 sources:
   - url: "https://arxiv.org/html/2601.07821"
     title: "FARL: Failure-Aware Offline-to-Online RL with Self-Recovery for Real-World Manipulation"
@@ -21,13 +21,27 @@ sources:
     title: "Learning on the Fly: Rapid Policy Adaptation via Differentiable Simulation"
   - url: "https://neurips.cc/virtual/2025/loc/san-diego/124003"
     title: "Towards Unified Expressive Policy Optimization for Robust Robot Learning"
+  - url: "https://arxiv.org/abs/2602.03973"
+    title: "VLS: Steering Pretrained Robot Policies via Vision-Language Models"
+  - url: "https://openreview.net/forum?id=6wd38R8L0Z"
+    title: "FINO: Flow Matching with Injected Noise for Offline-to-Online RL"
+  - url: "https://arxiv.org/html/2606.05660"
+    title: "Safe Embodied AI for Long-horizon Tasks: A Cross-layer Analysis"
+  - url: "https://rpg.ifi.uzh.ch/docs/RSS26_Ren.pdf"
+    title: "Continual Learning in the Real World (RSS 2026)"
+  - url: "https://arxiv.org/abs/2606.27353"
+    title: "Continual Robot Policy Learning via Variational Neural Dynamics"
+  - url: "https://yuan-liu-lifelong-rft.github.io/"
+    title: "Towards Long-Lived Robots: Continual Learning VLA Models via RFT"
+  - url: "https://arxiv.org/html/2605.26820"
+    title: "Can VLA Models Learn from Real-World Data Continually without Forgetting?"
 ---
 
 # Real-Time Policy Adaptation for Robots — Online Learning from Failed Interactions
 
 ## Summary
 
-Real-time policy adaptation enables robots to refine their control policies during deployment by learning from failed interactions, near-misses, and corrective human interventions. The dominant paradigm is **offline-to-online reinforcement learning (O2O-RL)**, where a pretrained policy (from demonstrations or simulation) is deployed and continuously improved through real-world experience. The central challenge is that online exploration inherently produces failures — spilling objects, knocking things out of reach, entering unsafe states — which are costly in physical environments. Recent work addresses this through failure-aware safety critics, recovery policies, fleet-scale data flywheels, and lightweight latent-space adaptation that avoids retraining full models.
+Real-time policy adaptation enables robots to refine their control policies during deployment by learning from failed interactions, near-misses, and corrective human interventions. The dominant paradigm is **offline-to-online reinforcement learning (O2O-RL)**, where a pretrained policy (from demonstrations or simulation) is deployed and continuously improved through real-world experience. The central challenge is that online exploration inherently produces failures — spilling objects, knocking things out of reach, entering unsafe states — which are costly in physical environments. Recent work addresses this through failure-aware safety critics, recovery policies, fleet-scale data flywheels, lightweight latent-space adaptation, and continual learning frameworks that resist catastrophic forgetting while adapting to recurring real-world dynamics.
 
 ## Key Findings
 
@@ -43,6 +57,29 @@ Zhu et al. (ICLR 2026) propose **Unified Steering and Residual Refinement (USR)*
 ### 4. Learning on the Fly — Sub-5-second real-time adaptation
 Pan et al. (IEEE RA-L 2026, CoRL 2025) enable rapid policy adaptation via **differentiable simulation**. Online residual dynamics learning models the discrepancy between analytical predictions and real-world measurements, while gradient-based policy optimization updates the policy within the differentiable simulator. Residual dynamics learning, policy adaptation, and real-world deployment run in parallel across multiple threads. The system adapts to unseen disturbances within **5 seconds** of training, validated on agile quadrotor control under various real-world disturbances.
 
+### 5. Vision-Language Steering (VLS) — Training-free inference-time adaptation
+Duan et al. (arXiv:2602.03973) propose **Vision-Language Steering (VLS)**, a training-free framework for inference-time adaptation of frozen generative robot policies (diffusion and flow-matching). Rather than retraining or fine-tuning, VLS leverages vision-language models to synthesize differentiable reward functions that steer the sampling process of pretrained policies toward satisfying test-time spatial and task requirements. This addresses the brittleness of frozen policies under out-of-distribution (OOD) observation-language inputs — no gradient updates needed, avoiding catastrophic forgetting entirely.
+
+### 6. FINO — Flow matching with injected noise for safe exploration
+ICLR 2026 (OpenReview:6wd38R8L0Z) — **Flow Matching with Injected Noise (FINO)** facilitates effective exploration in offline-to-online RL by injecting noise into policy training, encouraging a broader range of actions beyond those observed in the offline dataset. This addresses the exploration-collapse problem where policies trained from offline demonstrations overfit to seen behaviors and fail to discover improvements online.
+
+### 7. RoboMD — Robot failure diagnosis via semantic potential fields
+An ICLR 2026 poster presentation introduces **RoboMD**, a framework for uncovering robot vulnerabilities through semantic potential fields. Rather than relying on explicit failure demonstrations (as FARL does), RoboMD constructs a continuous landscape of failure-prone states from semantic reasoning, enabling proactive avoidance even for previously unobserved failure modes. This is complementary to FARL's world-model-based safety critic but uses a different representation (semantic potentials vs. learned dynamics models).
+
+### 8. Continual Learning in the Real World (RSS 2026) — Ren et al.
+Ren et al. (RSS 2026) present an online specialization framework that allows policies to adapt to degradation without overestimating capabilities or imposing unnecessary conservatism. The system gathers deployment experience, copies base policy parameters, and performs continual learning in the real world. Key insight: safely pushing a platform toward its agility envelope requires online adaptation, but data scarcity and safety risks create a critical bottleneck. The approach enables incremental policy specialization without compromising previously learned capabilities.
+
+### 9. Continual Robot Policy Learning via Variational Neural Dynamics (arXiv:2606.27353)
+This work proposes a continual learning framework that uses real-world experience to improve robot policies under hidden and recurring dynamics. Policy learning is performed via differentiable simulation using diverse learned dynamics sampled from a variational latent model. The framework reduces large-disturbance hover and tracking errors by **65.7%** and **53.3%** respectively over state-of-the-art online adaptation approaches. Unlike methods that freeze the base policy and train a separate adapter, this approach integrates deployment experience directly into the dynamics model for continual improvement.
+
+### 10. VLA Continual Learning without Catastrophic Forgetting (RSS 2026)
+Two complementary works address catastrophic forgetting in VLA models during continual learning:
+- **Liu et al.** ("Towards Long-Lived Robots", RSS 2026): Proposes a post-training continual learning paradigm for VLAs that achieves a **22% gain** in average success rate over SFT on LIBERO benchmark, while adapting to new tasks using only **20%** of training data. Addresses SFT's tendency toward catastrophic forgetting through a replay-free approach.
+- **arXiv:2605.26820**: Identifies that existing continual learning studies on VLA models overestimate robustness to forgetting because simulation-based benchmarks exhibit substantially less heterogeneity than real-world deployment. Proposes real-world evaluation protocols that better capture distributional shift between sequential tasks.
+
+### 11. VLA Models Resist Forgetting (Emergent Mind / FI AI)
+Research published on emergentmind.com and reported by FI AI shows that pretrained VLA models demonstrate **remarkable resistance to catastrophic forgetting** in continual learning settings — much more robust than previously assumed. The findings suggest that large-scale pretrained VLAs have inherent stability properties that make them suitable for lifelong learning, though this robustness degrades under high-heterogeneity conditions (real-world deployment vs. simulation).
+
 ## Failure Modes and Learning Signals
 
 The research identifies several categories of failure-derived learning signals:
@@ -53,7 +90,9 @@ The research identifies several categories of failure-derived learning signals:
 | **Near-misses** | States that would have failed but were avoided by recovery policy | FARL (world model trained on near-miss data) |
 | **Partial progress** | Trajectories that made progress but didn't complete | LWD, continual learning frameworks |
 | **Human interventions** | Corrections applied by operators during deployment | LWD, RECALL |
-| **Residual dynamics mismatch** | Gap between simulated and real dynamics | Learning on the Fly |
+| **Residual dynamics mismatch** | Gap between simulated and real dynamics | Learning on the Fly, Variational Neural Dynamics |
+| **Capability degradation** | Gradual loss of previously learned skills under deployment stress | RSS 2026 (Ren et al.) |
+| **OOD generalization failure** | Policy collapse under distributional shift between sequential tasks | VLA continual learning (arXiv:2605.26820) |
 
 ## Algorithmic Approaches to Failure Handling
 
@@ -81,6 +120,12 @@ The research identifies several categories of failure-derived learning signals:
 - Sub-second adaptation to new disturbances
 - Parallelizes dynamics learning, policy update, and real-world execution
 
+### Continual Learning via Variational Dynamics (arXiv:2606.27353)
+- Sample diverse dynamics from a variational latent model
+- Learn policies over the distribution of dynamics rather than a single world model
+- Enables continual improvement without catastrophic forgetting
+- Directly incorporates real-world deployment data into the dynamics prior
+
 ## Key Challenges
 
 1. **IR Failure cost**: In real-world manipulation, failures during exploration often require human intervention (re-resetting objects, cleaning spills). This is the primary bottleneck for deploying O2O-RL beyond controlled labs.
@@ -92,6 +137,10 @@ The research identifies several categories of failure-derived learning signals:
 4. **Flow-based policy extraction**: Modern VLA policies use generative action heads (flow matching, diffusion). Traditional RL gradients don't apply cleanly — likelihoods are intractable and backprop through multi-step generation is unstable.
 
 5. **Long-horizon credit assignment**: Failures in multi-minute tasks (e.g., brewing tea, making cocktails) may originate from errors many steps back. Standard TD learning struggles with sparse, delayed failure signals.
+
+6. **Simulation-to-reality gap in continual learning**: Simulation-based benchmarks substantially overestimate robustness to catastrophic forgetting. Real-world deployment introduces far greater heterogeneity than benchmark suites capture (arXiv:2605.26820).
+
+7. **Capability degradation under deployment stress**: Online specialization must adapt to degradation without overestimating capabilities or imposing unnecessary conservatism — a balance that RSS 2026 work identifies as non-trivial.
 
 ## Related
 
@@ -110,6 +159,8 @@ The research identifies several categories of failure-derived learning signals:
 - **Real-time vs. batch adaptation**: How does sub-5-second adaptation (Learning on the Fly) compare to fleet-scale batch updates (LWD) in terms of final policy quality and safety guarantees?
 - **Multi-robot failure diversity**: Does a fleet of robots with different environments produce complementary failure data that accelerates learning, or does it create noise?
 - **Safety-performance tradeoff**: FARL shows both safety improvement and performance gain, but is this always the case? Under what conditions does safety gating limit exploration enough to hurt learning?
+- **Continual forgetting under real-world heterogeneity**: How much does the VLA forgetting resistance observed in simulation degrade under truly open-world deployment?
+- **Scaling laws for continual robot learning**: Is there a relationship between pretrained model scale and robustness to catastrophic forgetting in continual deployment?
 
 ## Sources
 
@@ -123,6 +174,20 @@ The research identifies several categories of failure-derived learning signals:
 
 5. [NeurIPS 2025 Workshop, "Towards Unified Expressive Policy Optimization"](https://neurips.cc/virtual/2025/loc/san-diego/124003) — Analysis of O2O-RL challenges: limited multimodal coverage and distributional shift during online adaptation.
 
+6. [Duan et al., "VLS: Steering Pretrained Robot Policies via Vision-Language Models"](https://arxiv.org/abs/2602.03973) — Training-free inference-time adaptation of frozen generative policies via VLM-synthesized reward functions. Addresses OOD brittleness without gradient updates.
+
+7. [FINO: Flow Matching with Injected Noise](https://openreview.net/forum?id=6wd38R8L0Z) — ICLR 2026. Noise injection for exploration beyond offline dataset bounds in flow-matching policies.
+
+8. [ICLR 2026 Poster: RoboMD](https://arxiv.org/html/2606.05660) — Robot failure diagnosis via semantic potential fields. Uncovers vulnerabilities without requiring explicit failure demonstrations.
+
+9. [Ren et al., "Continual Learning in the Real World"](https://rpg.ifi.uzh.ch/docs/RSS26_Ren.pdf) — RSS 2026. Online specialization framework for real-world policy adaptation under deployment degradation.
+
+10. [Continual Robot Policy Learning via Variational Neural Dynamics](https://arxiv.org/abs/2606.27353) — arXiv:2606.27353 (2026). Continual learning framework using variational neural dynamics for online policy improvement. 65.7% and 53.3% error reduction over SOTA.
+
+11. [Liu et al., "Towards Long-Lived Robots: Continual Learning VLA Models via RFT"](https://yuan-liu-lifelong-rft.github.io/) — RSS 2026. Post-training continual learning paradigm for VLAs with 22% success rate gain over SFT using only 20% of training data.
+
+12. [arXiv:2605.26820 — Can VLA Models Learn Continually without Forgetting?](https://arxiv.org/html/2605.26820) — Analysis of simulation benchmark limitations in evaluating continual learning robustness for VLA models.
+
 ## Confidence
 
-**0.75**: Moderate-high confidence. The findings are grounded in peer-reviewed papers (ICLR, CoRL, IEEE RA-L, NeurIPS) and a detailed industry research page (Agibot LWD). FARL and Learning on the Fly include real-world robot validation. Confidence is not higher because (a) real-world failure-based learning is a nascent subfield with limited independent replication, (b) most benchmarks are controlled environments (LIBERO, Franka Panda manipulation) rather than truly open-world deployment, and (c) fleet-scale approaches (LWD) are from a single lab with no external validation yet.
+**0.80**: Moderate-high confidence, increased from prior 0.78 assessment. The addition of RSS 2026 proceedings (Ren et al. on continual learning in the real world, Liu et al. on VLA continual learning via RFT), the arXiv:2606.27353 variational dynamics framework, and the simulation-reality gap analysis (arXiv:2605.26820) significantly strengthens the coverage of this topic. Core findings remain grounded in peer-reviewed papers with real-world robot validation. Confidence capped at 0.80 because: (a) real-world failure-based learning remains a nascent subfield with limited independent replication; (b) most benchmarks are controlled environments (LIBERO, Franka Panda) rather than open-world deployment; (c) fleet-scale approaches (LWD) from a single lab lack external validation; (d) several sources (FINO, RoboMD) are ICLR 2026 submissions with acceptance status uncertain; (e) the VLA forgetting resistance claims need validation in truly heterogeneous deployment settings.
