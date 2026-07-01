@@ -106,6 +106,8 @@ Scalable robot evaluation benchmarks are standardized test suites for measuring 
 - **Visual Realism Benchmark** (May 2026, arXiv:2605.06311): Simulation visual fidelity evaluation addressing visual domain gap between sim and reality.
 - **WM4VLA Benchmark v4** (April 2026): Dataset curation benchmark filtering for arm visibility, minimum frame count, per-dataset allocation for VLA model evaluation.
 - **DROID** (Toyota Research / Berkeley, arXiv:2403.12945): 76K trajectories, 564 scenes, 86 tasks across 18 research labs. Primary training corpus for Octo and RT-X alongside OXE. Prioritizes environment diversity (564 distinct physical environments) over embodiment diversity.
+- **AgiBot World** (2026): First large-scale enterprise-quality real-robot dataset from Agibot (Shanghai). Targets humanoid robot mass production with open-source simulation and real-robot data at scale comparable to OXE. Positions A2 humanoid as direct Optimus competitor; dataset available on HuggingFace.
+- **ArcheBase** (2026): Chinese data-compilation engine for robot learning. Addresses data scarcity in industrial-grade real-robot datasets; 10× data scale increase and 100× scene coverage expansion compared to OXE, targeting production robotics deployment.
 
 ### Quantitative Results Summary
 | Benchmark | Model | Success Rate / Metric | Notes |
@@ -176,6 +178,9 @@ Scalable robot evaluation benchmarks are standardized test suites for measuring 
 18. **VLA Survey 2026**: arXiv:2604.23001 (April 2026) — "Vision-Language-Action in Robotics: A Survey of Datasets..."
 19. **ManiSkill3**: arXiv:2410.00425 (RSS 2025) — GPU-parallelized simulation
 20. **Being-H0.5**: Scaling Human-Centric Robot Learning for Cross-Embodiment Generalization — [liner.com](https://liner.com/review/beingh05-scaling-humancentric-robot-learning-for-crossembodiment-generalization)
+21. **AgiBot World**: Agibot Innovation (Shanghai), "AgiBot World: First Large Scale Enterprise Quality Realistic Task Dataset" (2026) — [agibot.com](https://www.agibot.com/) — [HuggingFace: agibot-world/AgiBotWorld2026](https://huggingface.co/datasets/agibot-world/AgiBotWorld2026)
+22. **ArcheBase**: Data Infrastructure report, Robots Daily (2026) — [robots-daily.com](https://robots-daily.com/data-infrastructure-the-next-race-in-embodied-ai/)
+23. **RoboMIND**: arXiv:2412.13877 — Multi-embodiment Intelligence Normative Data benchmark for robot manipulation
 
 ## Confidence: 0.93
 

@@ -2,8 +2,8 @@
 type: research-note
 tags: [robotic-grasping, part-level-grasping, yolo-seg, sam2, instance-segmentation, vision-language-action, foundation-models]
 domain: robotics
-date: 2026-07-16
-last_verified: 2026-07-16
+date: 2026-06-30
+last_verified: 2026-06-30
 sources:
   - url: "https://arxiv.org/abs/2512.02609"
     title: "SAM2Grasp: Prompt-Conditioned Temporal Action Prediction for Robotic Grasping"

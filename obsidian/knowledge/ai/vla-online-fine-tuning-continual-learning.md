@@ -3,7 +3,7 @@ type: medium-research
 tags: [vla, continual-learning, experience-replay, catastrophic-forgetting, reinforcement-learning, robotics, pretrained-models]
 domain: ai
 date: 2026-06-29
-last_verified: 2026-07-07
+last_verified: 2026-09-01
 sources:
   - url: "https://arxiv.org/abs/2603.03818"
     title: "Pretrained Vision-Language-Action Models are Surprisingly Resistant to Forgetting in Continual Learning"
@@ -18,7 +18,7 @@ sources:
     authors: "Zeng et al."
     accessed: "2026-06-29"
   - url: "https://arxiv.org/abs/2601.09512"
-    title: "CLARE: Continual Learning for VLA Models via Autonomous Adapter Routing and Expansion"
+    title: "CLARE: Continual Learning for Vision-Language-Action Models via Autonomous Adapter Routing and Expansion"
     authors: "Rmer et al."
     accessed: "2026-06-29"
   - url: "https://arxiv.org/abs/2606.23617"
@@ -49,6 +49,22 @@ sources:
     title: "Black-Box Continual Learning for Vision-Language Models"
     authors: "Li et al."
     accessed: "2026-07-07"
+  - url: "https://arxiv.org/abs/2606.27374"
+    title: "World Action Models Enable Continual Imitation Learning with Generative Replay"
+    authors: "WAM-CL authors"
+    accessed: "2026-08-07"
+  - url: "https://arxiv.org/abs/2604.27063"
+    title: "Learning to Forget: Continual Learning with Adaptive Weight Decay"
+    authors: "Swiss AI Lab / Univ. of Alberta"
+    accessed: "2026-08-07"
+  - url: "https://arxiv.org/abs/2606.03598"
+    title: "PHASER: Phase-Aware Semantic Experience Replay for VLA Models"
+    authors: "Chen et al."
+    accessed: "2026-08-07"
+  - url: "https://arxiv.org/abs/2606.30988"
+    title: "Multisensory Continual Learning: Adapting Pretrained Visuomotor Policies to Force"
+    authors: "MuSe authors"
+    accessed: "2026-08-09"
 ---
 
 # Online Fine-Tuning for VLA Models: Continual Learning Without Catastrophic Forgetting
@@ -153,6 +169,19 @@ Online fine-tuning of Vision-Language-Action (VLA) models enables robots to cont
   - Only 0.05M trainable parameters (180–3000× fewer than white-box CL methods)
   - Achieves performance on par with or exceeding white-box CL methods
   - Relevant for cloud-hosted VLA models where fine-tuning access is restricted
+
+- **FADE: Learning to Forget** (arXiv:2604.27063, Swiss AI Lab / Univ. of Alberta):
+  - Proposes per-parameter adaptive weight decay via approximate meta-gradient descent
+  - Views weight decay as controlled forgetting: a fixed decay rate is fundamentally mismatched to continual learning
+  - Dynamically adapts decay rates so stable knowledge is retained while rapidly changing targets can be updated
+  - Complements the VLA CL literature by addressing the "controlled forgetting" problem rather than just preventing it
+  - General CL method (not VLA-specific) but directly applicable to VLA online fine-tuning scenarios
+
+- **MuSe** (Clark et al., arXiv:2606.30988):
+  - Multisensory continual learning: adapting pretrained visuomotor policies to force-torque sensing
+  - Policy pretrained on diverse vision-action data without F/T labels, then adapted with small amount of multisensory data from contact-rich tasks
+  - Addresses the modality-shift challenge in continual learning when extending VLAs to force-controlled manipulation
+  - Explores how much multisensory data is needed for successful cross-modal adaptation
 
 ## Related (vault entities)
 

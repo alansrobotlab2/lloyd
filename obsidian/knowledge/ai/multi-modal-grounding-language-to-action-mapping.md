@@ -11,8 +11,8 @@ tags:
   - robotics/embodied-ai
   - research/domain-research
 created: 2026-07-15
-updated: 2026-06-29
-confidence: 0.86
+updated: 2026-08-20
+confidence: 0.90
 ---
 
 # Multi-Modal Grounding for Agents — Language-to-Action Mapping in VLMs
@@ -28,6 +28,12 @@ Multi-modal grounding is the process of aligning linguistic expressions with vis
 - **Token-based unification** is the dominant grounding mechanism in modern VLAs. Visual inputs are encoded via ViT or ConvNeXt into vision tokens, language instructions via LLMs (T5, LLaMA, Qwen) into language tokens, and robot state (joint angles, gripper pose) via MLP into state tokens. Cross-attention fuses these into a shared embedding space, and an autoregressive decoder generates action tokens step-by-step — effectively treating motor control as "language generation" where the vocabulary is physical actions.
 
 - **Five VLA paradigms** (per the 2025 Pure VLA Survey, arXiv:2509.19012, covering 300+ studies): (1) **Autoregression-based**: RT-2, Octo — treat action generation as next-token prediction; (2) **Diffusion-based**: Diffusion Policy — continuous action prediction via denoising; (3) **Reinforcement-based**: policy optimization via RL on VLA priors; (4) **Hybrid**: combine autoregressive planning with diffusion execution; (5) **Specialized**: domain-specific architectures (e.g., NaVILA for legged navigation).
+
+- **VLA architectural taxonomy** (Shao et al., arXiv:2508.13073, covering large VLM-based VLAs for robotic manipulation):
+  1. **Monolithic models** integrate perception, language understanding, and action generation within a unified architecture.
+     - **Single-system** (e.g., OpenVLA, RT-2): all modalities processed in one model with autoregressive or parallel decoding.
+     - **Dual-system** (e.g., π₀): VLM backbone (System 2, slow reasoning) cooperates with an action expert (System 1, fast/reactive), exchanging information via latent representations.
+  2. **Hierarchical models** explicitly decouple planning from policy execution through interpretable intermediate representations (subtasks, keypoints, programs, affordances). Planner modules generate structured outputs (keypoint detections, trajectory proposals) that policy modules convert to executable actions. This differs from dual-system approaches through decoupled training paradigms with specialized loss functions.
 
 - **Three evolutionary phases** have shaped VLA grounding:
   1. **Foundational Integration (2022–2023)**: CLIPort, Gato, RT-1, VIMA — combined pretrained vision-language representations with task-conditioned policies. CLIPort encoded CLIP embeddings to output pixel-level pick-and-place distributions. RT-1 used scaled imitation learning at 97% success rates.
@@ -54,6 +60,10 @@ Multi-modal grounding is the process of aligning linguistic expressions with vis
 
 - **The action tokenization problem** is central: how to discretize continuous motor commands into tokens a transformer can generate. Approaches include: (a) quantization into discrete bins (RT-2), (b) diffusion-based action prediction (Diffusion Policy), (c) flow matching for continuous action generation (π0), and (d) hybrid discrete-continuous tokenization. The choice affects grounding fidelity — coarse quantization loses precision, while continuous methods lack the compositional benefits of token-based generation.
 
+- **MMaDA-VLA** (arXiv:2603.25406) represents a paradigm shift from autoregressive to discrete diffusion VLA grounding: unifies language, images, and robot actions into a single discrete token space via native masked token prediction. Eliminates the "module boundary" problem where policy heads lose fidelity from pretrained VLMs. Uses MAGVIT-v2 for image quantization and 256-bin action discretization. Key insight: action dimensions within a chunk are inherently unordered — parallel iterative denoising (24 steps) allows full trajectory refinement without sequential error compounding. Achieves 98.0% on LIBERO and 4.78/5 on CALVIN ABC→D, significantly outperforming DreamVLA (4.44). Goal image prediction is critical for grounding — removing it drops performance, confirming the model uses "imagined" future states to ground physical actions. Addresses dLLM-Cache training-free caching for real-time inference.
+
+- **DAM-VLA** (arXiv:2606.12105) addresses the synchronous-clock bottleneck: traditional VLAs process all modalities at one rate inherited from VLM pretraining. Decoupled asynchronous processing lets vision, language, and action streams update at independent frequencies, improving grounding fidelity for high-frequency sensor inputs without wasting compute on stale language tokens.
+
 - **Visual grounding survey** (arXiv:2509.10345) systematically reviews visual grounding in general-purpose VLMs, covering core components (region proposal, cross-modal alignment, fine-grained grounding), benchmarks, evaluation metrics, and the interrelation between visual grounding, multimodal chain-of-thought, and reasoning capabilities.
 
 - **Cross-modal grounding benchmarks** remain sparse. Existing evaluation focuses on manipulation success rates (e.g., LIBERO, BridgeData) rather than explicit grounding accuracy. This makes it difficult to isolate whether failures stem from poor grounding (misidentifying targets) vs. poor action execution (correctly identifying but failing to manipulate).
@@ -72,6 +82,16 @@ Multi-modal grounding is the process of aligning linguistic expressions with vis
 
 - **Cross-embodiment grounding**: X-VLA proposes a soft-prompted transformer as a scalable cross-embodiment policy, enabling grounding to transfer across different robot morphologies through conditioning rather than architecture changes.
 
+- **ProGAL-VLA** (arXiv:2604.09824) addresses the *language ignorance* problem — where VLAs rely on visual shortcuts and remain insensitive to instruction changes. Constructs a 3D entity-centric **Graph Scene Model (GSM)**, uses a slow planner to produce symbolic sub-goals, and aligns them with grounded entities via a **Grounding Alignment Contrastive (GAC) loss**. This represents a shift from implicit grounding to explicit, contrastive language-entity alignment during prospective reasoning.
+
+- **LabVLA** (arXiv:2606.13578) demonstrates grounding for **domain-specific VLA deployment**: adapts a Qwen3-VL backbone to map visual observations, robot state, and language instructions into continuous action chunks through a DiT action expert. Trained with a two-stage approach (action token pretraining + flow matching) and demonstrates that grounding generalizes to scientific laboratory tasks (transparent liquids, specialized instruments) where existing policies trained on household/tabletop data fail.
+
+- **GIVE** (arXiv:2606.13435) introduces **gestural grounding** for VLAs: addresses the gap where current models treat manipulation as a pure text-driven task, overlooking human gesture input. Integrates gesture-as-grounding-channel, showing that pointing, directing, and gesturing provide a complementary grounding modality alongside language and vision — especially useful for ambiguous instructions where language alone is insufficient.
+
+- **RL Token (RLT)** (arXiv:2604.23073) introduces a compressed, task-relevant **RL token** — a learned readout representation that compresses a VLA's deep understanding into a small vector, enabling fast and sample-efficient online RL fine-tuning. The lightweight actor-critic refines actions based on the RL token while anchoring to the VLA, making it possible to fine-tune large VLAs with RL on real robots. This bridges the gap between VLA grounding (what to do) and online learning (how well to do it).
+
+- **JEPA-VLA** (arXiv:2602.11832) explores grounding via **Joint Embedding Predictive Architectures** that enable reasoning, perception, and decision-making without tight coupling to textual representations. Demonstrates that MLLM-style language dependence can be partially decoupled, opening a path for grounding that is less brittle to language formulation changes.
+
 ## Related (vault entities)
 - [[Online Fine-Tuning for VLA Models — Continual Learning with Experience Replay]]
 - [[Real-time SLAM Integration with VLA Policies — Mapping During Manipulation Tasks]]
@@ -87,6 +107,11 @@ Multi-modal grounding is the process of aligning linguistic expressions with vis
 - InternVLA-M1 (spatially guided dual-system VLA training)
 - Green-VLA (staged curriculum for generalist humanoid VLA)
 - IRef-VLA (benchmark for grounding with imperfect language)
+- ProGAL-VLA (prospective reasoning with grounded alignment, 3D entity-centric graph)
+- LabVLA (domain-specific grounding for scientific laboratories)
+- GIVE (gestural grounding as complementary modality)
+- RL Token (online RL fine-tuning compressed readout)
+- JEPA-VLA (grounding decoupled from textual representation)
 
 ## Open Questions
 
@@ -113,6 +138,16 @@ Multi-modal grounding is the process of aligning linguistic expressions with vis
 11. **Multi-modal grounding beyond vision-language**: TacVLA shows tactile can be fused via contact-aware gating. What about audio, proprioceptive, and force-torque grounding? Can a truly multi-modal grounding stack emerge that unifies vision, language, touch, sound, and force?
 
 12. **Grounding with imperfect language**: IRef-VLA demonstrates that real-world language references are rarely perfect. How do VLAs handle disfluency, deixis, coreference, and incomplete instructions during grounding?
+
+13. **Language ignorance and shortcut learning**: ProGAL-VLA shows that VLAs can rely on visual shortcuts and remain insensitive to instruction changes. How do we ensure models genuinely ground language rather than learning spurious visual correlations?
+
+14. **Domain-specific grounding transfer**: LabVLA shows grounding trained on household/tabletop data fails in scientific laboratories. How far can domain adaptation go? Do we need domain-specific grounding pretraining or can cross-domain grounding be bootstrapped?
+
+15. **Gestural grounding as a complement**: GIVE shows human gestures provide complementary grounding when language is ambiguous. How do we integrate gestural, visual, and linguistic grounding channels without modality dominance?
+
+16. **Online RL on top of grounding**: RL Token demonstrates that VLA grounding can be bootstrapped with online RL via compressed readout vectors. Does online RL improve or degrade the underlying grounding representation? Can RL fine-tuning be applied without catastrophic forgetting of grounding priors?
+
+17. **Grounding without language dependence**: JEPA-VLA explores decoupling grounding from tight language coupling. Can grounding be learned through joint embedding prediction rather than language supervision?
 
 ## Sources
 
@@ -152,6 +187,28 @@ Multi-modal grounding is the process of aligning linguistic expressions with vis
 
 - Lewis, P. et al. "PaLM-E: An Embodied Multimodal Language Model," Google DeepMind 2022.
 
+- ProGAL-VLA: "Grounded Alignment through Prospective Reasoning in Vision-Language-Action Models," arXiv:2604.09824, 2026. [https://arxiv.org/abs/2604.09824](https://arxiv.org/abs/2604.09824)
+
+- LabVLA: "Grounding Vision-Language-Action Models in Scientific Laboratories," arXiv:2606.13578, 2026. [https://arxiv.org/abs/2606.13578](https://arxiv.org/abs/2606.13578)
+
+- GIVE: "Grounding Human Gestures in Vision-Language-Action Models," arXiv:2606.13435, 2026. [https://arxiv.org/abs/2606.13435](https://arxiv.org/abs/2606.13435)
+
+- RL Token: "Bootstrapping Online RL with Vision-Language-Action Models," arXiv:2604.23073, 2026. [https://arxiv.org/abs/2604.23073](https://arxiv.org/abs/2604.23073)
+
+- JEPA-VLA: "Joint Embedding Predictive Architecture for Vision-Language-Action Models," arXiv:2602.11832, 2026. [https://arxiv.org/abs/2602.11832](https://arxiv.org/abs/2602.11832)
+
+- Shao et al. "Large VLM-based Vision-Language-Action Models for Robotic Manipulation: A Survey," arXiv:2508.13073, 2025. First taxonomy of large VLM-based VLAs organized around monolithic (single-system, dual-system) and hierarchical architectures. [https://arxiv.org/abs/2508.13073](https://arxiv.org/abs/2508.13073)
+
+- Li et al. "Survey of Vision-Language-Action Models for Embodied Manipulation," arXiv:2508.15201, 2025. Comprehensive review across 5 dimensions: model structures, training datasets, pre-training methods, post-training methods, model evaluation. [https://arxiv.org/abs/2508.15201](https://arxiv.org/abs/2508.15201)
+
+- vla-survey.github.io — Vision-Language-Action Models for Robotics: A Survey. Comprehensive review covering architectures, learning paradigms, and real-world applications. [https://vla-survey.github.io/](https://vla-survey.github.io/)
+
+- MMaDA-VLA: "Large Diffusion Vision-Language-Action Model with Unified Multi-Modal Instruction and Generation," arXiv:2603.25406, 2026. First native discrete diffusion VLA — unifies vision, language, and actions in a single token space via masked generation, achieving 98% LIBERO and shattering CALVIN records. [https://arxiv.org/abs/2603.25406](https://arxiv.org/abs/2603.25406)
+
+- DAM-VLA: "Decoupled Asynchronous Multimodal Vision Language Action Model," arXiv:2606.12105, 2026. Decouples modality update rates for asynchronous grounding. [https://arxiv.org/abs/2606.12105](https://arxiv.org/abs/2606.12105)
+
+- GroundingGPT: "Language Enhanced Multi-modal Grounding Model," ACL ARR 2024. Apple's GEA framework grounds MLLMs across embodiments via multi-embodiment action tokenizers trained with SL + online RL. [https://machinelearning.apple.com/research/grounding-multimodal-large](https://machinelearning.apple.com/research/grounding-multimodal-large)
+
 ## Confidence
 
-**0.86**: High confidence. The core architecture (token-based fusion, cross-modal alignment) and evolution timeline are well-documented across the Sapkota et al. VLA survey (80+ models) and the Pure VLA survey (300+ studies). Qwen-VLA (arXiv:2605.30280), G2VLM (CVPR 2026), InternVLA-M1 (arXiv:2510.13778), and Green-VLA (arXiv:2602.00919) provide concrete, verifiable results for unified grounding, geometry-grounded reasoning, spatially guided training, and staged humanoid deployment. The visual grounding survey (arXiv:2509.10345) and TacVLA (arXiv:2603.12665) add breadth to grounding-specific and multi-modal grounding literature. Confidence elevated from 0.82 due to: (a) InternVLA-M1 establishing spatial grounding pre-training as a concrete recipe with 2.3M samples and verified gains; (b) Green-VLA providing a practical staged curriculum for real-world humanoid deployment; (c) TacVLA and IRef-VLA extending grounding into tactile and imperfect-language domains with concrete benchmarks. Remaining uncertainty centers on: (a) the scarcity of grounding-specific benchmarks beyond IRef-VLA (most evaluation is task-success rate, not grounding accuracy), (b) the nascent state of tri-modal (vision-language-tactile) grounding, and (c) the open question of grounding fidelity tradeoffs during fine-tuning, which lacks systematic empirical study across model families.
+**0.88**: High confidence. The core architecture (token-based fusion, cross-modal alignment) and evolution timeline are well-documented across the Sapkota et al. VLA survey (80+ models) and the Pure VLA survey (300+ studies). Qwen-VLA (arXiv:2605.30280), G2VLM (CVPR 2026), InternVLA-M1 (arXiv:2510.13778), and Green-VLA (arXiv:2602.00919) provide concrete, verifiable results for unified grounding, geometry-grounded reasoning, spatially guided training, and staged humanoid deployment. The visual grounding survey (arXiv:2509.10345) and TacVLA (arXiv:2603.12665) add breadth to grounding-specific and multi-modal grounding literature. Confidence elevated from 0.86 due to: (a) ProGAL-VLA establishing explicit contrastive language-entity alignment via 3D scene graphs as a concrete grounding mechanism; (b) LabVLA demonstrating that grounding generalizes to domain-specific environments (scientific laboratories) beyond household/tabletop; (c) RL Token (RLT) providing a practical bridge between VLA grounding and online RL fine-tuning; (d) GIVE and TacVLA expanding the grounding modality space beyond vision-language into gestures, touch, and contact-aware fusion. Remaining uncertainty centers on: (a) the scarcity of grounding-specific benchmarks beyond IRef-VLA (most evaluation is task-success rate, not grounding accuracy), (b) the nascent state of multi-modal grounding beyond vision-language (gestural, tactile, audio), (c) the open question of grounding fidelity tradeoffs during fine-tuning, which lacks systematic empirical study across model families, and (d) whether JEPA-style decoupling from textual representations meaningfully improves grounding robustness — this remains a promising direction but is not yet empirically validated at scale.
