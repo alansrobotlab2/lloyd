@@ -1,4 +1,4 @@
-[updated 2025-07-18, refreshed 2026-06-07, extended 2026-07-11, 2026-07-14, major update 2026-07-16, OmniRobotHome update 2026-07-27, fused consolidation 2026-07-28, PosA-VLA + PointACT update 2026-08-04]
+[updated 2025-07-18, refreshed 2026-06-07, extended 2026-07-11, 2026-07-14, major update 2026-07-16, OmniRobotHome update 2026-07-27, fused consolidation 2026-07-28, PosA-VLA + PointACT update 2026-08-04, InCoM + 3D HAMSTER + MobileManiBench update 2026-09-10]
 
 # Real-Time VLM-Based Perception for Mobile Manipulation: Fused Depth-Pose-Segmentation Pipeline
 
@@ -209,6 +209,18 @@ PointACT (RSS 2026) takes a fundamentally different approach: rather than inject
 
 SimpleSeg (Moonshot AI, arXiv:2601.19228) eliminates the need for a separate segmentation decoder by reframing segmentation as a sequence generation problem: the MLLM directly predicts a sequence of point coordinates delineating object boundaries, entirely within its language space. This is the simplest path to pixel-level VLM perception — no decoder heads, no additional training branches, just point prediction as text. Key implications for fused pipelines: segmentation becomes a native VLM capability that can be called alongside depth and pose estimation without separate models, simplifying the architecture and reducing latency.
 
+### Intent-Driven Perception (InCoM)
+
+InCoM (arXiv:2602.23024v4) proposes an intent-driven perception framework for mobile manipulation that infers latent motion intent to dynamically reweight multi-scale perceptual features. The system performs stage-adaptive allocation of perceptual attention — redirecting more compute to the perception modality most needed at each manipulation stage (e.g., depth for approach, pose for grasp, segmentation for placement). This addresses a key efficiency gap in fused pipelines where all three modalities run at fixed bandwidth regardless of task phase.
+
+### 3D-Aware Hierarchical Planning (3D HAMSTER)
+
+3D HAMSTER (arXiv:2606.31329v1) bridges planning and control in hierarchical VLM pipelines by operating in 3D space rather than 2D image space. The paper identifies that 2D representations introduce ambiguity under 3D-sensitive shifts (occlusion, viewpoint changes) and proposes a 3D-aware planning architecture that fuses depth, pose, and semantic information in a hierarchical representation. This addresses the fundamental 2D-to-3D grounding gap that limits fused perception pipelines.
+
+### Mobile Manipulation Benchmarking (MobileManiBench)
+
+MobileManiBench (arXiv:2602.05233) provides a benchmark pipeline built on NVIDIA Isaac Sim that autonomously generates diverse manipulation trajectories with rich multi-modal annotations: language instructions, multi-view RGB-depth-segmentation images, synchronized object/robot states and actions. The dataset supports model verification for mobile manipulation — a critical missing piece for evaluating fused perception-to-action pipelines on mobile platforms.
+
 ### 3D Spatial Reasoning Foundation (SpatialVLM)
 
 SpatialVLM (Google DeepMind, CVPR 2024) demonstrates that VLMs' limited spatial reasoning is a data problem, not an architecture problem. By automatically generating 2 billion VQA examples on 10 million real-world images — lifting 2D images into metric-scale 3D point clouds — they co-train a VLM that achieves:
@@ -256,6 +268,9 @@ This demonstrates that VLM-based perception can be combined with conventional gr
 - **SimpleSeg decoder-free segmentation**: Can point-sequence prediction entirely replace decoder-based segmentation heads in fused pipelines? SimpleSeg shows it works as a standalone method, but its integration with depth and pose estimation modules remains untested.
 - **Spatial reasoning data scale**: How much synthetic spatial VQA data is sufficient? SpatialVLM used 2 billion examples; does performance saturate, or does more data continue to improve quantitative spatial reasoning for manipulation?
 - **HoloAgent-0 composability**: Can the unified command/status interface between HoloNavi and HoloBrain be generalized to other navigation + perception skill compositions?
+- **Intent-driven resource allocation (InCoM)**: Can perception bandwidth be dynamically re-routed between depth, pose, and segmentation based on manipulation stage? InCoM shows stage-adaptive attention works, but whether it generalizes across task types and robot morphologies is untested.
+- **3D planning space for fused perception (3D HAMSTER)**: Can fused perception pipelines eliminate the 2D-to-3D ambiguity gap entirely by operating natively in 3D space? 3D HAMSTER demonstrates this reduces occlusion/viewpoint failures, but the computational cost of 3D representations vs. 2D image-space approaches is unmeasured.
+- **Benchmark coverage (MobileManiBench)**: Can Isaac Sim-based benchmarking produce mobile manipulation datasets with the multi-modal annotation richness needed to train fused perception pipelines end-to-end? The current benchmark has rich annotations but coverage of real-world edge cases (lighting, novel objects, dynamic scenes) is limited.
 
 ## Related
 
@@ -302,7 +317,10 @@ This demonstrates that VLM-based perception can be combined with conventional gr
 28. MoMani Benchmark — large-scale automated benchmark for long-horizon mobile manipulation [emergentmind.com/topics/momani-benchmark]
 29. PosA-VLA — pose-conditioned anchor attention for consistent VLA action generation [arxiv.org/abs/2512.03724]
 30. PointACT — multi-scale point-action interaction via hierarchical 3D point clouds, RSS 2026 [arxiv.org/abs/2605.21414]
+31. InCoM — intent-driven perception with stage-adaptive multi-scale perceptual attention for mobile manipulation [arxiv.org/abs/2602.23024]
+32. 3D HAMSTER — 3D-aware hierarchical planning bridging VLM planning and control [arxiv.org/abs/2606.31329]
+33. MobileManiBench — Isaac Sim-based benchmark for mobile manipulation with multi-modal trajectory annotations [arxiv.org/abs/2602.05233]
 
 ## Confidence
 
-0.84: Core architectural claims (FALCON token injection, OpenVLA fusion, Depth Anything V2 performance) are well-supported by published papers with concrete numbers. Previous extensions (Perceptio, CogVLA, Phys2Real, G^3VLA, MolmoAct2, IROS) bring in 2025–2026 developments with new evidence. The July 2026 update adds four major architectures: TwinBrainVLA (asymmetric dual-stream, resolving catastrophic forgetting via AsyMoT), LingBot-VLA/LingBot-Depth (self-supervised masked depth modeling with cross-modal RGB-Depth alignment), EchoVLA (declarative memory for long-horizon mobile manipulation), and the World Action Models survey (unifying depth/pose/segmentation via Render-and-Decode latent codebooks). Confidence increased from 0.82 due to TwinBrainVLA's explicit decoupling of semantic vs embodied perception streams (validating the knowledge insulation hypothesis from CogVLA) and LingBot-Depth's metric-scale preservation (addressing close-range depth limitations). The WAM survey provides a formal unifying framework across perception modules. Confidence remains tempered by the field's rapid evolution and fragmented evaluation protocols — no single paper demonstrates a complete fused depth-pose-segmentation pipeline operating at 20+ Hz on edge hardware for mobile manipulation end-to-end.
+0.85: Core architectural claims (FALCON token injection, OpenVLA fusion, Depth Anything V2 performance) are well-supported by published papers with concrete numbers. The expanded 2026 update now covers 33 distinct architectures/systems spanning spatial token injection, geometric inductive bias, asymmetric dual-stream VLAs, declarative memory, intent-driven perception, and 3D-aware planning. Confidence increased slightly (from 0.84) due to InCoM's explicit stage-adaptive perceptual allocation (validating the hypothesis that fused pipelines should reweight modality bandwidth by task phase) and MobileManiBench's rich multi-modal annotations (establishing benchmark infrastructure for evaluating end-to-end fused pipelines). Confidence remains tempered by: (a) no single paper demonstrates a complete fused depth-pose-segmentation pipeline at 20+ Hz on edge hardware for mobile manipulation end-to-end; (b) field evolution is rapid with fragmented evaluation protocols; (c) 3DGS-as-VLA-conditioning remains untested on real robots.
