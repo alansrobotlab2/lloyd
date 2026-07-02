@@ -9,7 +9,7 @@ tags:
   - ai/continual-learning
 domain: robotics
 date: 2026-07-28
-last_verified: 2026-08-28
+last_verified: 2026-09-17
 sources:
   - url: "https://arxiv.org/html/2601.07821"
     title: "FARL: Failure-Aware Offline-to-Online RL with Self-Recovery for Real-World Manipulation"
@@ -41,13 +41,33 @@ sources:
     title: "PLD: Self-Improving VLAs with Data Generation via Residual RL"
   - url: "https://arxiv.org/html/2411.16627"
     title: "ITPS: Inference-Time Policy Steering through Human Interactions"
+  - url: "https://arxiv.org/abs/2601.06748"
+    title: "TT-VLA: On-the-Fly VLA Adaptation via Test-Time Reinforcement Learning"
+  - url: "https://www.themoonlight.io/en/review/evolve-vla-test-time-training-from-environment-feedback-for-vision-language-action-models"
+    title: "EVOLVE-VLA: Test-Time Training from Environment Feedback"
+  - url: "https://arxiv.org/html/2605.08434"
+    title: "Failing Forward: Adaptive Failure-Informed Learning for Vision-Language-Action Models"
+  - url: "https://arxiv.org/html/2604.23360"
+    title: "Learning from Demonstration with Failure Awareness for Safe Robot Navigation"
+  - url: "https://arxiv.org/html/2606.22860"
+    title: "HiL-ResRL: A Model-Agnostic Finetuning Adapter via Human-in-the-loop Residual Reinforcement Learning"
+  - url: "https://arxiv.org/html/2601.03044"
+    title: "SOP: A Scalable Online Post-Training System for Vision-Language-Action Models"
+  - url: "https://arxiv.org/html/2606.03127"
+    title: "TTT-VLA: Test-Time Latent Prompt Optimization for Vision-Language-Action Models"
+  - url: "https://arxiv.org/html/2606.31958"
+    title: "Adapting Generalist Robot Policies with Semantic Reinforcement Learning"
+  - url: "https://arxiv.org/html/2605.08215"
+    title: "T3VF: Test-Time Training Visual Foresight Vision-Language-Action Models"
+  - url: "https://arxiv.org/abs/2509.01746"
+    title: "Fail2Progress: Learning from Real-World Robot Failures with Stein Variational Inference"
 ---
 
 # Real-Time Policy Adaptation for Robots — Online Learning from Failed Interactions
 
 ## Summary
 
-Real-time policy adaptation enables robots to refine control policies during deployment by learning from failed interactions, near-misses, and corrective human interventions. The dominant paradigm is **offline-to-online reinforcement learning (O2O-RL)**: a pretrained policy is deployed and continuously improved through real-world experience. The central challenge is that online exploration inherently produces failures — spilling objects, entering unsafe states — which are costly in physical environments. Recent work addresses this through failure-aware safety critics with recovery policies, fleet-scale data flywheels, latent-space refinement of diffusion policies, differentiable-simulation-based adaptation, and training-free inference-time steering via vision-language models.
+Real-time policy adaptation enables robots to refine control policies during deployment by learning from failed interactions, near-misses, and corrective interventions. The dominant paradigm is **offline-to-online reinforcement learning (O2O-RL)**: a pretrained policy is deployed and continuously improved through real-world experience. The central challenge is that online exploration inherently produces failures — spilling objects, entering unsafe states — which are costly in physical environments. Recent work addresses this through failure-aware safety critics with recovery policies, fleet-scale data flywheels, latent-space refinement of diffusion policies, failure-informed negative guidance, and training-free inference-time steering via vision-language models.
 
 ## Key Facts
 
@@ -64,6 +84,18 @@ Real-time policy adaptation enables robots to refine control policies during dep
 - **Real-world forgetting** (arXiv:2605.26820): forgetting is ~16× worse in physical deployment than simulation suggests, driven by visual similarity and action primitive overlap. Experience replay reduces NBT from +80.0 to +5.0.
 - **Pretrained VLA models resist forgetting** (Kim et al., ICLR 2025): GR00T N1.5 achieves near-zero backward transfer (NBT = 0.007), essentially no forgetting. Knowledge is dormant, not erased — recovery fine-tuning restores peak performance in <10% of original steps.
 
+### Failure-Informed Negative Guidance
+
+- **AFIL / "Failing Forward"** (arXiv:2605.08434): Adaptive Failure-Informed Learning uses failure trajectories as negative guidance for diffusion/flow-based VLA models. Introduces a Dual Action Generator (DAG) architecture: a shared VLM backbone feeds both a success action head (trained on expert demos) and a lightweight failure action head (trained on autonomously generated failure rollouts). During inference, an adaptive guidance scale combines both outputs via $\epsilon^*_{FI} = \epsilon_{succ} - \hat{\lambda}_\eta \cdot \epsilon_{fail}$, steering generation away from failure regions. Achieves 98.4% average success on LIBERO vs. 96.9% baseline, with largest gains on long-horizon and out-of-domain tasks. Failure data is collected via automated rollouts + motion planner corrections (RRT/IK solvers).
+
+### Failure-Aware Learning from Demonstration
+
+- **LfD with Failure Awareness** (arXiv:2604.23360): Addresses the limitation that demonstrations consist predominantly of successful behaviors with limited coverage of unsafe states. Core principle: failure data should not be used for direct policy supervision but should influence policy learning indirectly through value estimation. Enables safe robot navigation when encountering states outside the demonstration distribution.
+
+### Human-in-the-Loop Residual RL
+
+- **HiL-ResRL** (arXiv:2606.22860): Model-agnostic finetuning adapter via human-in-the-loop residual RL. Collects correction data from human operators interacting with deployed policies and trains a compact residual RL adapter without modifying the base policy. Avoids catastrophic forgetting by design — the pretrained policy remains frozen while the residual adapts to real-world distribution shifts.
+
 ### Meta-Learning-Based Adaptation
 
 - **OMLA** (arXiv:2503.18684): Online Meta-Learned Adapters learn a shared adapter prior via meta-learning, enabling knowledge transfer between tasks without catastrophic forgetting. Achieves 0.86 average FWT on LIBERO-OBJECT vs. 0.71 for standard LoRA. Uses similarity-based anchor sampling to make meta-learning computationally tractable for vision-language policies.
@@ -77,6 +109,25 @@ Real-time policy adaptation enables robots to refine control policies during dep
 ### Inference-Time Steering
 
 - **ITPS** (Wang et al., arXiv:2411.16627): Inference-Time Policy Steering lets frozen generative policies be guided by real-time human interactions (point goals, trajectory sketches, physical corrections) via conditional sampling with likelihood constraints. Stochastic sampling achieves the best alignment-constraint satisfaction trade-off. No fine-tuning needed — the policy remains frozen.
+
+### Test-Time Learning for VLAs
+
+- **TT-VLA** (arXiv:2601.06748): Test-Time RL for VLAs formulates a dense reward mechanism leveraging step-by-step task-progress signals to refine action policies during test time while preserving SFT/RL-trained priors. Enables on-the-fly policy adaptation during inference without full fine-tuning — an effective supplement to current VLA pipelines.
+- **EVOLVE-VLA**: Test-time training framework enabling VLA models to continuously adapt through autonomous environment feedback. Operates during deployment, collecting interaction data to iteratively update policies without offline retraining cycles.
+- **TTT-VLA** (arXiv:2606.03127): Test-Time Latent Prompt Optimization — a deployment-time improvement framework that learns a latent prompt during training, then performs prompt-only test-time training on a frozen policy. Optimizes the latent prompt on collected interaction data using self-supervised proxy task signals, without modifying the policy itself. Enables deployment-time improvement with consistent success rate gains in single and multi-embodiment settings.
+- **T3VF** (arXiv:2605.08215): Test-Time Training Visual Foresight VLA — leverages predicted future image and subsequent observation as a natural supervision pair for test-time training. Addresses vulnerability to visual distribution shifts by using visual foresight as self-supervised signal during deployment.
+
+### Fleet-Scale Online Post-Training
+
+- **SOP** (arXiv:2601.03044): Scalable Online Post-training — a closed-loop actor-learner framework enabling online, distributed, multi-task post-training of VLA models in physical environments. Couples multi-robot parallel deployment ("Parallel Realities") with centralized cloud learning and instant model synchronization. Transforms VLA post-training from offline/single-machine/sequential to online/fleet-based/parallel. Evaluated on heterogeneous Agibot robot fleet.
+
+### Semantic RL Adaptation
+
+- **Semantic-Action RL** (Bhatia et al., arXiv:2606.31958): Adapting generalist robot policies by optimizing prompt inputs with reinforcement learning, enabling efficient real-robot adaptation on complex & long-horizon tasks. Uses semantic action representations to bridge the gap between generalist priors and task-specific online RL, where existing methods struggle with long-horizon adaptation.
+
+### Failure-Informed Simulation Learning
+
+- **Fail2Progress** (Huang et al., CoRL 2025, arXiv:2509.01746): Learning from real-world robot failures using Stein Variational Inference to generate multiple simulation environments in parallel, enabling efficient data sample generation similar to observed failures. Uses skill effect models to translate real-world failure observations into parallelizable sim-based training data.
 
 ## Related (vault entities)
 
@@ -104,6 +155,12 @@ Real-time policy adaptation enables robots to refine control policies during dep
 - **Weight-space generalization**: How far can meta-learned adapter generation (WIZARD) generalize to truly novel task distributions beyond training suite boundaries?
 - **PLD failure coverage**: What fraction of real-world failure modes can PLD's residual actors actually discover, and what requires explicit failure demonstrations?
 - **Inference-time steering overhead**: At what computational cost does ITPS conditional sampling become impractical for high-frequency control loops?
+- **Negative guidance scaling**: For AFIL, does the dual-action-head architecture scale to policies with larger action horizons, and how does guidance stability degrade with more diffusion/flow steps?
+- **Failure data contamination**: Can autonomously generated failure rollouts (AFIL) introduce self-reinforcing error modes if the policy repeatedly fails the same way?
+- **Fleet-scale synchronization latency**: For SOP, what is the minimum synchronization frequency needed to prevent distribution drift across a heterogeneous fleet?
+- **Prompt-only adaptation limits**: How far can TTT-VLA's latent prompt optimization go before the frozen policy becomes a bottleneck?
+- **Semantic RL sample efficiency**: Does optimizing only prompt inputs (semantic-action RL) converge faster than full policy fine-tuning, and at what generalization cost?
+- **Stein inference scaling**: For Fail2Progress, how does variational inference scale with failure diversity — does the simulation parallelism bottleneck or scale linearly?
 
 ## Sources
 
@@ -123,7 +180,17 @@ Real-time policy adaptation enables robots to refine control policies during dep
 14. WIZARD: Robotic Policy Adaptation via Weight-Space Meta-Learning — [arXiv:2606.07217](https://arxiv.org/abs/2606.07217)
 15. Xiao et al., "PLD: Self-Improving Vision-Language-Action Models" — [UT Austin ICLR 2026](https://rpl.cs.utexas.edu/publications/2026/04/01/xiao-iclr26-pld/)
 16. Wang et al., "ITPS: Inference-Time Policy Steering through Human Interactions" — [arXiv:2411.16627](https://arxiv.org/html/2411.16627)
+17. TT-VLA: On-the-Fly VLA Adaptation via Test-Time Reinforcement Learning — [arXiv:2601.06748](https://arxiv.org/abs/2601.06748)
+18. EVOLVE-VLA: Test-Time Training from Environment Feedback — [moonlight.io review](https://www.themoonlight.io/en/review/evolve-vla-test-time-training-from-environment-feedback-for-vision-language-action-models)
+19. "Failing Forward: Adaptive Failure-Informed Learning for VLAs" — [arXiv:2605.08434](https://arxiv.org/html/2605.08434)
+20. "Learning from Demonstration with Failure Awareness for Safe Robot Navigation" — [arXiv:2604.23360](https://arxiv.org/html/2604.23360)
+21. "HiL-ResRL: A Model-Agnostic Finetuning Adapter via Human-in-the-loop Residual RL" — [arXiv:2606.22860](https://arxiv.org/html/2606.22860)
+22. SOP: Scalable Online Post-Training for VLA Models — [arXiv:2601.03044](https://arxiv.org/html/2601.03044)
+23. TTT-VLA: Test-Time Latent Prompt Optimization — [arXiv:2606.03127](https://arxiv.org/html/2606.03127)
+24. Bhatia et al., "Adapting Generalist Robot Policies with Semantic Reinforcement Learning" — [arXiv:2606.31958](https://arxiv.org/html/2606.31958)
+25. T3VF: Test-Time Training Visual Foresight VLAs — [arXiv:2605.08215](https://arxiv.org/html/2605.08215)
+26. Huang et al., "Fail2Progress: Learning from Real-World Robot Failures with Stein Variational Inference" — [arXiv:2509.01746](https://arxiv.org/abs/2509.01746)
 
 ## Confidence
 
-**0.85**: High confidence in the synthesized coverage. Core findings are grounded in peer-reviewed sources (ICLR 2026, RSS 2026, arXiv 2025–2026) with real-world robot validation. Multiple independent labs (UT Austin, HKU, Agibot, ICL-ETH Zurich) converge on the offline-to-online RL paradigm with failure-aware adaptation. Confidence capped because: (a) real-world open-world deployment remains largely unvalidated beyond controlled benchmarks; (b) fleet-scale approaches (LWD) lack external replication; (c) several sources (FINO, RoboMD) are conference submissions with uncertain acceptance; (d) the simulation-reality gap in forgetting metrics (arXiv:2605.26820) suggests current benchmarks may overstate robustness.
+**0.88**: High confidence in synthesized coverage. Core findings grounded in peer-reviewed sources (ICLR 2026, RSS 2026, CoRL 2025, arXiv 2025–2026) with real-world robot validation. Multiple independent labs (UT Austin, HKU, Agibot, ICL-ETH Zurich, UC Berkeley, NVIDIA Research) converge on offline-to-online RL with failure-aware adaptation. The fleet-scale SOP framework adds concrete multi-robot synchronization mechanisms. Confidence capped because: (a) real-world open-world deployment remains largely unvalidated beyond controlled benchmarks; (b) fleet-scale approaches (LWD, SOP) lack external replication; (c) TTT-VLA and T3VF are deployment-time frameworks with limited multi-embodiment evaluation; (d) semantic-action RL has not yet been evaluated on open-world tasks; (e) Fail2Progress relies on skill effect model fidelity, which may not transfer across embodiments.

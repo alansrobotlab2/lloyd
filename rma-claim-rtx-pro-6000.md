@@ -31,8 +31,11 @@ underclocked below its rated specification** (see "What keeps it alive").
 
 ## Frequency
 
-**10 fall-off-bus events in 21 days** (2026-06-04 → 2026-06-25), ≈ 1 per 1.9 days under
-normal sustained load:
+**11 fall-off-bus events in 27 days** (2026-06-04 → 2026-07-01), ≈ 1 per 1.9 days under
+normal (unclamped) sustained load. The card is stable *only* while clamped below its rated
+spec (see "What keeps it alive"); each recurrence below either predates the clamp or
+occurred when the clamp was deliberately removed to validate the card at its rated
+envelope:
 
 | # | Timestamp (local) | Signature |
 |---|---|---|
@@ -46,6 +49,7 @@ normal sustained load:
 | 8 | 2026-06-19 04:48:25 | Xid 79 → 154 |
 | 9 | 2026-06-21 08:18:52 | Xid 79 → 154 |
 | 10 | 2026-06-25 17:25:41 | Xid 79 → 154 (GSP RPC timeout `0x0000000f`) |
+| 11 | 2026-07-01 12:18:06 | Xid 79 → 154 (500 W / clocks unlocked, revamped airflow; ~5 h 20 m after boot) |
 
 ## Troubleshooting already performed (defect persists through all of it)
 
@@ -74,6 +78,10 @@ normal sustained load:
   expected hot-but-safe operation. The card also remains stable when run *hotter*
   (~82 °C core) under a clock clamp than at the cooler temps (~60 °C) where it failed
   unclamped — further evidence core temperature is not the trigger.
+- **Cooling / airflow** — case airflow was revamped and the card re-tested at 500 W with
+  clocks unlocked (core 81–82 °C, well under limit). It fell off the bus again after
+  ~5 h 20 m (event #11, 2026-07-01) → improved cooling does not resolve the fault; core
+  temperature is not the trigger.
 - **Workload-independent** — occurs under multiple compute workloads and is not tied to
   any single process.
 
