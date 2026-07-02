@@ -18,7 +18,7 @@ tags:
   - atom-bench
 domain: robotics
 researched_at: 2026-06-30T00:00:00Z
-last_verified: 2026-07-01
+last_verified: 2026-07-09
 source_type: synthesized
 research-depth: deep
 ---
@@ -40,12 +40,15 @@ Scalable robot evaluation benchmarks are standardized test suites for measuring 
 
 ### Open X-Embodiment (Google DeepMind + 21 institutions, ICRA 2024 Best Paper, arXiv:2310.08864)
 - **1M+ total trajectories** (970K curated subset) across **22 robot embodiments** (single-arm, dual-arm, mobile manipulators, quadrupeds)
-- **527 skills** from **21 institutions** / 34 labs including Google DeepMind, Berkeley, KIT, Stanford
+- **527 skills** / **160,266 tasks** from **21 institutions** / 33–34 labs including Google DeepMind, Berkeley, KIT, Stanford
 - Data in **RLDS format** (Apache Parquet, columnar compression) with lazy-loading and synchronized multi-modal inputs
-- **RT-X model family**: RT-1-X (35M-parameter transformer, OXE-only) and RT-2-X (VLM-backed)
+- **RT-X model family**: RT-1-X (35M-parameter transformer: EfficientNet vision → USE language FiLM → TokenLearner 81 tokens → Transformer, 15-image history at 3 Hz) and RT-2-X (55B-parameter: ViT + UL2, actions as text tokens, co-fine-tuned VLM+robotics ~1:1)
 - RT-1-X outperforms dataset-specific models by 50% on held-out tasks from contributing institutions (3,600 real-world trials across 6 platforms)
+- RT-2-X: 75.8% success on emergent cross-embodiment skills vs 27.3% for RT-2 (~3× improvement); removing Bridge data drops to 42.8%
+- Ablation: web pretraining required (0% from scratch vs 48.7% with), image history critical (14.5% without vs 44.4% with)
 - OXE now serves as shared pre-training infrastructure; most teams fine-tune from pretrained models rather than pre-training from scratch
 - Physics audit found 78.1% pass rate — ~22% of trajectories contain physically implausible actions
+- **OXE-AugE** (Dec 2025): augmented with 9 additional embodiments → 4.4M+ trajectories (3× original), 24–45% success improvement on unseen robot-gripper combos vs original OXE fine-tuning
 
 ### SIMPLER: Simulated Evaluation Framework (arXiv:2405.05941)
 - Simulation environments replicating real robot setups (BridgeData V2 + Google Robot) on SAPIEN physics engine / ManiSkill
@@ -80,6 +83,11 @@ Scalable robot evaluation benchmarks are standardized test suites for measuring 
 - **RoboMIND** (Dec 2024): Multi-embodiment normative data benchmark for robot manipulation.
 - **WM4VLA v4** (April 2026): Dataset curation benchmark filtering for arm visibility, minimum frame count, per-dataset allocation.
 - **RoboLab** (2026): 120-task benchmark; SOTA models score <26% average success rate.
+- **Colosseum V2** (May 2026, arXiv:2605.27759): Large-scale simulation benchmark for VLA generalization. 28 tasks across 13 task categories and 2 robot morphologies on ManiSkill. GPU-parallelized evaluation supports in-domain and out-of-domain testing at scale. Evaluates ACT and Pi0.5, revealing base performance and generalization limitations. Demonstrates strong simulation-to-real-world metric correlations.
+- **LIBERO-Safety**: Comprehensive safety benchmark for VLAs covering perceptual perturbations, parametric task definitions (L0–L2), scene dynamics (static/dynamic), physical and semantic safety, and proximal human-robot interaction.
+- **vla-evaluation-harness** (Allen AI, April 2026): Unified, containerized evaluation framework across 14 simulation environments (CALVIN, RLBench, Habitat, Isaac Sim, RoboSuite, etc.). Single `run_eval.py` command with Docker isolation per environment, standardized action-space translation layer, and zero-setup inference contract (image + text → action vector). Addresses the fragmented evaluation ecosystem where dependency resolution previously consumed weeks of engineering effort. Enables true cross-benchmark leaderboards and reproducible baselines.
+- **Robotics Failure Benchmark** (HaptalAI, 2026): First benchmark for robot training data annotation quality. Addresses the gap where no standardized metric exists for failure detection accuracy in OXE, BridgeData V2, DROID, and LeRobot datasets. Available on HuggingFace.
+- **dWorldEval** (April 2026, arXiv:2604.22152): Scalable robotic policy evaluation proxy using discrete diffusion world models. Uses a discrete diffusion world model as a scalable evaluation proxy — maps vision, language, and robotic actions into a unified token space for policy evaluation at scale. Addresses the infeasibility of evaluating robotics policies across thousands of environments and tasks.
 
 ### VLA Training Data Volume Reference
 | Task Type | Demo Volume | Key Systems |
@@ -132,7 +140,7 @@ Scalable robot evaluation benchmarks are standardized test suites for measuring 
 
 7. **Compositional generalization**: ATOM-Bench (June 2026) shows policies trained on atomic skills don't generalize to held-out compositions. Is this a fundamental limitation or a training gap?
 
-8. **Unified leaderboard**: Unlike vision-language (HELM, Big-Bench), robot learning lacks a unified leaderboard. PhAIL, vla-eval, and RoboGate are emerging but not yet standard.
+8. **Unified leaderboard**: Unlike vision-language (HELM, Big-Bench), robot learning lacked a unified leaderboard — the Allen AI vla-evaluation-harness (April 2026) may now fill this gap by providing containerized, reproducible cross-benchmark evaluation across 14 environments. Whether it becomes the de facto standard remains to be seen.
 
 9. **Value-aligned evaluation**: RobotValues (10K value-conflict scenarios) exposes that existing benchmarks evaluate task completion, not ethical decision-making.
 
@@ -161,6 +169,10 @@ Scalable robot evaluation benchmarks are standardized test suites for measuring 
 19. KinDERBench (2026) — Physical reasoning benchmark suite
 20. RoboMIND (arXiv:2412.13877) — Multi-embodiment normative data benchmark
 21. JFan5/awesome-vla-benchmarks — [github.com/JFan5/awesome-vla-benchmarks](https://github.com/JFan5/awesome-vla-benchmarks)
+22. Colosseum V2 (arXiv:2605.27759, May 2026) — Large-scale simulation VLA generalization benchmark
+23. LIBERO-Safety — [libero-safety.github.io](https://libero-safety.github.io/) — VLA safety benchmark
+24. Allen AI vla-evaluation-harness (April 2026) — [github.com/allenai/vla-evaluation-harness](https://github.com/allenai/vla-evaluation-harness) — Containerized cross-benchmark evaluation across 14 simulators
+25. Li et al., "dWorldEval: Scalable Robotic Policy Evaluation via Discrete Diffusion World Model" (arXiv:2604.22152, April 2026) — [current-robotics.com/research/dworldeval](https://current-robotics.com/research/dworldeval)
 
 ## Confidence
 
