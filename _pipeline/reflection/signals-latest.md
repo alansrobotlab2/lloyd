@@ -1,10 +1,10 @@
 ---
 segment: agents
-generated: 2026-07-02 02:05 PST
-data_range: 2026-06-29 to 2026-07-01
+generated: 2026-07-03 02:00 PST
+data_range: 2026-07-01 to 2026-07-03
 ---
 
-# Signal Report — 2026-07-02
+# Signal Report — 2026-07-03
 
 ## Queued Signals (met threshold)
 
@@ -12,54 +12,59 @@ data_range: 2026-06-29 to 2026-07-01
 
 | ID | Date | Type | Category | Description | Source |
 |----|------|------|----------|-------------|--------|
-| 1 | 2026-06-29 | correction | tool-use | Tool path mismatch: sessions directory vs skill-maintenance | daily note |
-| 2 | 2026-06-29 | correction | scope | "I asked for a simple fix" — write_code expanded 1-file into 3-file multi-file workflow rewrite | daily note |
-| 3 | 2026-06-29 | correction | tool-use | Didn't verify tool call results before proceeding to next step | daily note |
-| 4 | 2026-06-30 | correction | scope | Over-elaboration on backlog cleanup — elaborate plan + meta-audit when user wanted simple "mark done and clear" | daily note |
-| 5 | 2026-06-30 | correction | tool-use | Tool failures not properly handled — no fallback on tool error | daily note |
-| 6 | 2026-06-30 | correction | workflow | Raw subagent spawn instead of pipeline-dispatch (recurrence of 2026-03-29 failure) | daily note |
-| 7 | 2026-07-01 | correction | workflow | Skipped skills_search before non-trivial action (Step 0 of AGENTS.md) | daily note |
-| 8 | 2026-07-01 | correction | scope | Over-elaboration on entity resolution — expanded simple dedup into full knowledge reorg | daily note |
-| 9 | 2026-07-01 | correction | style | Over-verbosity — 600 word analysis when 3-4 sentences would suffice | daily note |
+| (none new) | | | | | |
+
+*No new explicit signals detected since last report (2026-07-02). Previous explicit signals from 2026-06-24–28 remain unaddressed.*
 
 ### Inferred (met 2+ threshold)
 
 | ID | Date | Type | Category | Description | Frequency | Source |
 |----|------|------|----------|-------------|-----------|--------|
-| 1 | 2026-06-29/30/01 | pattern | scope | Scope creep: expanding simple tasks into elaborate multi-file/multi-step rewrites (write_code, backlog cleanup, entity resolution) | 3x | daily notes |
-| 2 | 2026-06-29/01 | pattern | style | Over-verbosity: verbose outputs when terse would suffice | 2x | daily notes |
-| 3 | 2026-06-29/30 | pattern | tool-use | Tool result verification gap — proceeding without confirming tool calls succeeded | 2x | daily notes |
-| 4 | 2026-06-29/30 | pattern | workflow | 1:1 input mapping violation — merging distinct user inputs into single task | 2x | daily notes |
-| 5 | 2026-06-30/01 | pattern | workflow | Skipped skills_search before non-trivial action | 2x | daily notes |
+| (none new) | | | | | | |
+
+*No new inferred signals. Existing patterns (scope creep, over-verbosity, mid-batch pausing, tool failure handling) persist from prior cycles.*
 
 ## Pending Signals (below threshold)
 
-- `write_code` scope expansion on `skill-authoring-error-pattern-mining-batch` skill — 1 occurrence, monitor
-- `sessions_spawn` used instead of `pipeline-dispatch` — 1 occurrence (but note: recurrent from 2026-03-29)
+- Communication pushback — insisting on own interpretation when corrected (1 occurrence, 2026-06-27)
+- Editorializing — adding commentary about findings (1 occurrence, 2026-06-27)
+- Request scope ignorance — not following user's stated scope (1 occurrence, 2026-06-27)
+- Session enrichment pipeline not running — `~/obsidian/sessions/` does not exist (ongoing, 2+ cycles)
 
 ## Tool Failure Patterns
 
-- **Tool:** `write_code` — **Error type:** Scope expansion beyond user intent — **Occurrences:** 1 — **Recommendation:** Always confirm scope before multi-file operations; default to minimal change
-- **Tool:** `sessions_spawn` — **Error type:** Used without skills_search / pipeline-dispatch check — **Occurrences:** 2 — **Recommendation:** Enforce skills_search → skills_read → dispatch chain
-- **Tool:** Browser/HTTP — **Error type:** No fallback on tool error — **Occurrences:** 1 — **Recommendation:** Encode retry-with-fallback pattern as skill behavior
+- **Tool:** Session enrichment pipeline — **Error type:** Directory `~/obsidian/sessions/` does not exist, no enriched session data available — **Occurrences:** 3+ cycles — **Recommendation:** Create directory or disable pipeline reference in skill protocol
 
 ## Positive Patterns to Reinforce
 
-- **Pattern:** Correct skills_search → skills_read workflow when finding relevant skills — **Evidence:** 2026-06-29 "perfect" on skill discovery — **Action:** Reinforce in operating contract, no new skill needed
-- **Pattern:** Running system checks before proceeding with infrastructure tasks — **Evidence:** 2026-07-01 "good lloyd" on system health check — **Action:** Encode as default behavior for infrastructure tasks
-- **Pattern:** Checking for existing knowledge before creating duplicates — **Evidence:** 2026-07-01 "perfect" on knowledge consolidation — **Action:** Reinforce, this is already in knowledge-pipeline protocol
-- **Pattern:** Correctly following up on incomplete research tasks — **Evidence:** 2026-06-30 "good lloyd" on backlog follow-up — **Action:** Preserve, no change needed
+- **Pattern:** Nightly reflection pipeline executing correctly — all phases running, pre-flight commits clean, signal reports generated on schedule — **Evidence:** 2026-07-01, 2026-07-02, 2026-07-03 all ran successfully — **Action:** Preserve, no change needed
+- **Pattern:** Knowledge consolidation producing structured handoffs — **Evidence:** knowledge-handoff-2026-07-02.md is well-structured with actionable items — **Action:** Preserve, no change needed
 
 ## Cross-Day Analysis
 
-### Persistent Failure Modes (3+ days)
-1. **Scope creep** — Most pervasive issue. Appears on all 3 days in different forms (write_code expansion, backlog over-elaboration, entity resolution overreach). Root cause: Lloyd defaults to comprehensive approach instead of matching user's stated scope.
-2. **Over-verbosity** — Appears on 2 of 3 days. Root cause: model bias toward thoroughness over terseness. User explicitly prefers 3-4 sentences.
-3. **1:1 input mapping** — Recurrence of the 2026-03-29 failure mode. Already has `strict-task-mapping` skill but still merges sometimes.
+### Persistent Failure Modes (carried forward)
+1. **Scope creep** — Most pervasive historical correction. Appears on 4+ separate days (2026-06-24, 26, 27, 28). No new occurrences but no evidence of behavioral change either.
+2. **Over-verbosity** — Appears on 3+ days (2026-06-24, 26, 27, 28). Same status — dormant, not confirmed resolved.
+3. **Mid-batch pausing** — Appears on 2026-06-26, 27. Same status.
+4. **Tool failure handling** — Appears on 2026-06-26, 27, 28. Same status.
 
 ### Improving Patterns
-1. **System checks before action** — 2026-06-29 had "didn't check if `__init__.py` exists", 2026-07-01 praised for "ran system check first". Progress: verification is improving but not yet consistent.
-2. **Skills_search compliance** — 2026-06-29 correctly used skills_search, 2026-07-01 skipped it. Inconsistent — needs reinforcement.
+1. **Nightly pipeline reliability** — Reflection pipeline running consistently without errors
+2. **Vault maintenance hygiene** — Auto-generated maintenance logs showing healthy repo state (30 files modified, clean commits)
 
-### Gaps
-- **No enriched session extraction data available** — `~/obsidian/sessions/` is empty (count: 0). Session enrichment pipeline is not running. This limits signal detection to daily notes and corrections.md only.
+### Data Quality Notes
+- **Enriched session data:** `~/obsidian/sessions/` does not exist — session enrichment pipeline is not running. This is a persistent infrastructure gap limiting signal quality.
+- **Daily notes:** 2026-07-01 has auto-generated nightly log entries; 2026-07-02 is empty placeholder; 2026-07-03 not yet created
+- **Learnings:** 2026-07-02 learnings file is empty; 2026-07-01 has tool resilience learnings
+- **Corrections:** corrections.md is empty — no user signals in this cycle
+- **Assessment:** This is a quiet cycle with no new user corrections. Previous cycle's signals remain valid but unresolved.
+
+## Recommendations for Downstream Jobs
+
+### Job 2 (Knowledge Consolidation)
+- No new signals to encode. Previous cycle's scope-creep and over-verbosity signals should still be prioritized if not yet addressed.
+- Session enrichment pipeline gap should be flagged as a knowledge note about operational blind spots.
+
+### Job 3 (Config Application)
+- No config changes needed from this cycle.
+- Consider creating `~/obsidian/sessions/` directory or removing the pipeline reference from the skill protocol to eliminate recurring noise.
