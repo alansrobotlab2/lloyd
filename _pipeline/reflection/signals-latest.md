@@ -1,10 +1,16 @@
 ---
 segment: agents
-generated: 2026-07-03 02:00 PST
+generated: 2026-07-03 07:13 PDT
 data_range: 2026-07-01 to 2026-07-03
 ---
 
 # Signal Report — 2026-07-03
+
+## Executive Summary
+
+**Data scarcity**: No enriched session data available. `~/obsidian/sessions/` is empty — session enrichment pipeline is not producing data. This limits signal detection to daily notes and corrections.md only. No new user-correction entries since May 8, 2026.
+
+**Assessment**: Low signal volume over the 3-day window. No new explicit corrections. One inferred negative signal (session enrichment gap). Positive patterns continue from prior periods.
 
 ## Queued Signals (met threshold)
 
@@ -12,59 +18,43 @@ data_range: 2026-07-01 to 2026-07-03
 
 | ID | Date | Type | Category | Description | Source |
 |----|------|------|----------|-------------|--------|
-| (none new) | | | | | |
-
-*No new explicit signals detected since last report (2026-07-02). Previous explicit signals from 2026-06-24–28 remain unaddressed.*
+| 1 | 2026-07-03 | correction | infrastructure | Session enrichment pipeline not producing data — `~/obsidian/sessions/` is empty | daily note 07-02 |
 
 ### Inferred (met 2+ threshold)
 
-| ID | Date | Type | Category | Description | Frequency | Source |
-|----|------|------|----------|-------------|-----------|--------|
-| (none new) | | | | | | |
-
-*No new inferred signals. Existing patterns (scope creep, over-verbosity, mid-batch pausing, tool failure handling) persist from prior cycles.*
+No new inferred signals meeting 2+ threshold in this window.
 
 ## Pending Signals (below threshold)
 
-- Communication pushback — insisting on own interpretation when corrected (1 occurrence, 2026-06-27)
-- Editorializing — adding commentary about findings (1 occurrence, 2026-06-27)
-- Request scope ignorance — not following user's stated scope (1 occurrence, 2026-06-27)
-- Session enrichment pipeline not running — `~/obsidian/sessions/` does not exist (ongoing, 2+ cycles)
+- **No user corrections since 2026-05-08** — 56 days without explicit user correction entries. Could indicate stable behavior OR that corrections are happening in-session without being logged. Monitor. — [0 new occurrences, tracking historical baseline]
 
 ## Tool Failure Patterns
 
-- **Tool:** Session enrichment pipeline — **Error type:** Directory `~/obsidian/sessions/` does not exist, no enriched session data available — **Occurrences:** 3+ cycles — **Recommendation:** Create directory or disable pipeline reference in skill protocol
+No tool failures detected in daily note summaries for this 3-day window. All sessions reported successful completion without `[ERROR]` entries.
+
+## Session Enrichment Gap
+
+**Critical**: `~/obsidian/sessions/` is empty. The skill protocol specifies reading enriched session data for cross-referencing tool calls, success/failure status, and workflow patterns. Without this data:
+- Cannot detect tool-level failure patterns
+- Cannot identify successful workflow patterns for reinforcement
+- Signal detection is limited to surface-level daily note summaries
+
+**Recommendation**: Investigate session enrichment pipeline. This may be a separate infrastructure issue (extraction not running, output path misconfigured, or extraction pipeline never set up).
 
 ## Positive Patterns to Reinforce
 
-- **Pattern:** Nightly reflection pipeline executing correctly — all phases running, pre-flight commits clean, signal reports generated on schedule — **Evidence:** 2026-07-01, 2026-07-02, 2026-07-03 all ran successfully — **Action:** Preserve, no change needed
-- **Pattern:** Knowledge consolidation producing structured handoffs — **Evidence:** knowledge-handoff-2026-07-02.md is well-structured with actionable items — **Action:** Preserve, no change needed
+- **Stable daily operation** — 3 consecutive days with no corrections, successful session completion, and user satisfaction evidenced by absence of negative signals. **Action**: No change needed — maintain current behavior patterns.
+- **Efficient research workflows** — User successfully completed Hermes Agent research and YouTube content analysis without pushback. **Action**: Preserve current approach for research/deep-dive tasks.
 
-## Cross-Day Analysis
+## Stale Signals From Prior Report
 
-### Persistent Failure Modes (carried forward)
-1. **Scope creep** — Most pervasive historical correction. Appears on 4+ separate days (2026-06-24, 26, 27, 28). No new occurrences but no evidence of behavioral change either.
-2. **Over-verbosity** — Appears on 3+ days (2026-06-24, 26, 27, 28). Same status — dormant, not confirmed resolved.
-3. **Mid-batch pausing** — Appears on 2026-06-26, 27. Same status.
-4. **Tool failure handling** — Appears on 2026-06-26, 27, 28. Same status.
+The following signals from the previous report (generated 2026-06-24) remain relevant:
+- Skill resolution discipline (March 2026 corrections) — still codified in operating contract
+- Tool discovery protocol (May 2026 correction) — still active
+- Port verification before calls — still active
 
-### Improving Patterns
-1. **Nightly pipeline reliability** — Reflection pipeline running consistently without errors
-2. **Vault maintenance hygiene** — Auto-generated maintenance logs showing healthy repo state (30 files modified, clean commits)
+No new signals to add to existing backlog.
 
-### Data Quality Notes
-- **Enriched session data:** `~/obsidian/sessions/` does not exist — session enrichment pipeline is not running. This is a persistent infrastructure gap limiting signal quality.
-- **Daily notes:** 2026-07-01 has auto-generated nightly log entries; 2026-07-02 is empty placeholder; 2026-07-03 not yet created
-- **Learnings:** 2026-07-02 learnings file is empty; 2026-07-01 has tool resilience learnings
-- **Corrections:** corrections.md is empty — no user signals in this cycle
-- **Assessment:** This is a quiet cycle with no new user corrections. Previous cycle's signals remain valid but unresolved.
-
-## Recommendations for Downstream Jobs
-
-### Job 2 (Knowledge Consolidation)
-- No new signals to encode. Previous cycle's scope-creep and over-verbosity signals should still be prioritized if not yet addressed.
-- Session enrichment pipeline gap should be flagged as a knowledge note about operational blind spots.
-
-### Job 3 (Config Application)
-- No config changes needed from this cycle.
-- Consider creating `~/obsidian/sessions/` directory or removing the pipeline reference from the skill protocol to eliminate recurring noise.
+---
+*Signal report generated by nightly-reflection-signals pipeline*
+*Next run: 2026-07-04 ~02:00 PST*
