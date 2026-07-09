@@ -11,6 +11,8 @@ import {
   Flag,
   Calendar,
   RefreshCw,
+  FileText,
+  Check,
 } from "lucide-react";
 import { api, type AutonomyTask } from "../../api";
 import { Button } from "@/components/ui/button";
@@ -616,6 +618,22 @@ function TaskCard({
   onDragOverCard: (taskId: number, half: "top" | "bottom") => void;
   insertIndicator: "above" | "below" | null;
 }) {
+  const [copied, setCopied] = useState(false);
+
+  // Derive the file path for this task (skill SKILL.md)
+  const filePath = task.skill_name
+    ? `~/obsidian/skills/${task.skill_name}/SKILL.md`
+    : null;
+
+  const handleCopyPath = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (filePath) {
+      navigator.clipboard.writeText(filePath);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  };
+
   const handleDragStart = (e: DragEvent) => {
     e.dataTransfer.setData("text/plain", String(task.id));
     e.dataTransfer.effectAllowed = "move";
@@ -653,9 +671,24 @@ function TaskCard({
               </p>
             )}
           </div>
-          <span className="text-[10px] text-muted-foreground/70 font-mono flex-shrink-0">
-            #{task.id}
-          </span>
+          <div className="flex flex-col items-end gap-1 flex-shrink-0">
+            {filePath && (
+              <button
+                onClick={handleCopyPath}
+                title={`Copy: ${filePath}`}
+                className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground hover:text-primary transition-colors p-0.5 rounded"
+              >
+                {copied ? (
+                  <Check className="w-3 h-3 text-emerald-400" />
+                ) : (
+                  <FileText className="w-3 h-3" />
+                )}
+              </button>
+            )}
+            <span className="text-[10px] text-muted-foreground/70 font-mono">
+              #{task.id}
+            </span>
+          </div>
         </div>
 
         <div className="flex items-center gap-1.5 mt-2 flex-wrap">
