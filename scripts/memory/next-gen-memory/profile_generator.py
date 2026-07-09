@@ -186,58 +186,12 @@ class ProfileGenerator:
     def web_augment(self, entity: str, facts: list[dict] | None = None) -> tuple[str, list[str]]:
         """Query DuckDuckGo via a subprocess; return (concatenated snippets, source URLs).
 
-        Silent failure: returns ("", []) on any error. We never want a web
-        hiccup to break profile generation. Subprocess isolation lets many
-        workers run DDGS in parallel without hitting primp's threading bug.
-
-        Disambiguation: short/acronym names (e.g. GR00T, PPO, LoRA) reliably
-        pull wrong-sense results from the open web (Marvel character,
-        healthcare PPO, etc.). If the name is ≤6 chars or mostly uppercase
-        with digits, we either skip web search entirely or append a
-        domain-hint token derived from the entity's fact categories.
+        DISABLED: DDGS is consistently rate-limited in batch runs (every search
+        errors out). Profiles now rely on fact-only enrichment instead.
+        Returns ("", []) immediately. Re-enable subprocess.run block below
+        if DDGS reliability improves.
         """
-        query = entity
-        if self._is_ambiguous_name(entity):
-            hint = self._category_hint(facts or [])
-            if hint:
-                query = f"{entity} {hint}"
-            else:
-                # No domain context available — refuse to search rather than
-                # pull in wrong-sense garbage.
-                return "", []
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-c", _DDGS_WORKER_SCRIPT, query, "5"],
-                capture_output=True, text=True,
-                timeout=_DDGS_SUBPROCESS_TIMEOUT,
-            )
-            if proc.returncode != 0:
-                print(f"  [web] subprocess rc={proc.returncode} for {entity!r}: {proc.stderr[:200]}", file=sys.stderr)
-                return "", []
-            payload = json.loads(proc.stdout)
-            if not payload.get("ok"):
-                print(f"  [web] search failed for {entity!r}: {payload.get('error')}", file=sys.stderr)
-                return "", []
-            results = payload["results"]
-        except subprocess.TimeoutExpired:
-            print(f"  [web] timeout for {entity!r}", file=sys.stderr)
-            return "", []
-        except Exception as exc:
-            print(f"  [web] search failed for {entity!r}: {exc}", file=sys.stderr)
-            return "", []
-        if not results:
-            return "", []
-        lines = []
-        urls = []
-        for r in results:
-            title = r.get("title", "").strip()
-            snippet = r.get("body", "").strip()
-            url = r.get("href", "").strip()
-            if url:
-                urls.append(url)
-            if snippet:
-                lines.append(f"- [{title}] {snippet}")
-        return "\n".join(lines), urls
+        return "", []
 
     # ── LLM ─────────────────────────────────────────────────────────────
 

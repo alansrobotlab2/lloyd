@@ -9,7 +9,7 @@ tags:
   - ai/continual-learning
 domain: robotics
 date: 2026-07-28
-last_verified: 2026-09-17
+last_verified: 2026-09-14
 sources:
   - url: "https://arxiv.org/html/2601.07821"
     title: "FARL: Failure-Aware Offline-to-Online RL with Self-Recovery for Real-World Manipulation"
@@ -61,6 +61,30 @@ sources:
     title: "T3VF: Test-Time Training Visual Foresight Vision-Language-Action Models"
   - url: "https://arxiv.org/abs/2509.01746"
     title: "Fail2Progress: Learning from Real-World Robot Failures with Stein Variational Inference"
+  - url: "https://arxiv.org/abs/2607.01111"
+    title: "FAR: Failure-Aware Retry for Test-Time Recovery and Continual Policy Improvement"
+  - url: "https://openreview.net/forum?id=e5jGTEiJMT"
+    title: "Policy Decorator: Model-Agnostic Online Refinement for Large Policy Model"
+  - url: "https://www.pi.website/research/rlt"
+    title: "Precise Manipulation with Efficient Online RL (RL Tokens)"
+  - url: "https://arxiv.org/abs/2508.12252"
+    title: "Robot Trains Robot: Automatic Real-World Policy Adaptation for Humanoids"
+  - url: "https://arxiv.org/html/2602.02331"
+    title: "TTT-Parkour: Rapid Test-Time Training for Perceptive Robot Parkour"
+  - url: "https://arxiv.org/abs/2505.24068"
+    title: "DiffCoTune: Differentiable Co-Tuning for Cross-Domain Robot Control"
+  - url: "https://arxiv.org/html/2606.31846"
+    title: "Z-1: Efficient Reinforcement Learning for Vision-Language-Action Models"
+  - url: "https://arxiv.org/abs/2510.02298"
+    title: "ARMADA: Autonomous Online Failure Detection and Human Shared Control"
+  - url: "https://arxiv.org/abs/2605.11750"
+    title: "DreamAvoid: Critical-Phase Test-Time Dreaming to Avoid Failures in VLA Policies"
+  - url: "https://arxiv.org/html/2606.09258"
+    title: "Back to the Familiar Future: Failure Recovery for VLA Policies via Pre-Imagined Milestone Selection"
+  - url: "https://arxiv.org/html/2605.11951"
+    title: "From Reaction to Anticipation: Proactive Failure Recovery through Agentic Task Graph"
+  - url: "https://arxiv.org/abs/2505.12224"
+    title: "RoboFAC: A Comprehensive Framework for Robotic Failure Analysis and Classification"
 ---
 
 # Real-Time Policy Adaptation for Robots — Online Learning from Failed Interactions
@@ -129,6 +153,42 @@ Real-time policy adaptation enables robots to refine control policies during dep
 
 - **Fail2Progress** (Huang et al., CoRL 2025, arXiv:2509.01746): Learning from real-world robot failures using Stein Variational Inference to generate multiple simulation environments in parallel, enabling efficient data sample generation similar to observed failures. Uses skill effect models to translate real-world failure observations into parallelizable sim-based training data.
 
+### Failure-Aware Test-Time Retry
+
+- **FAR** (arXiv:2607.01111): Failure-Aware Retry enables robots to learn from their own failures at test time without human intervention or environment resets. Combines Failure-Contrastive Preference Adaptation (FCPA) with lightweight action perturbations — FCPA identifies failure-inducing action chunks via conservative Q/V critic value drops, then steers the diffusion policy away from those actions using preference learning against perturbed safe alternatives. Successful recovery trajectories feed a continual policy improvement loop with advantage-weighted updates. Achieves +17.6% average success over standard diffusion policies in simulation and +11.7% on real-world xArm tasks.
+
+### Model-Agnostic Residual Refinement
+
+- **PolicyDecorator** (Yuan et al., UC San Diego, arXiv:2412.13630): A model-agnostic framework that refines frozen large pre-trained policies (BeT, Diffusion Policy) via a small learnable residual policy. Final action is the sum of base policy output and residual correction: a = π_base(o) + π_residual(o). Controlled exploration strategies (bounded residual magnitude, progressive exploration schedule) ensure stable online learning. Consistently achieves near-optimal success rates across ManiSkill and Adroit benchmarks, outperforming direct fine-tuning methods that suffer from entropy explosion and unstable critic optimization.
+
+### RL Tokens: Efficient Online RL for Precise Manipulation
+
+- **RLT** (Physical Intelligence, March 2026): RL Tokens extract a compact state representation from frozen VLA models via an encoder-decoder bottleneck. The RL token feeds lightweight actor/critic networks trained with sample-efficient off-policy RL directly on the robot. Actor receives VLA's predicted action as input (edit-then-apply, not replace), with reference-action dropout forcing independent action pathways. Human interventions fold directly into RL updates. Achieves up to 3× speedup on the most precise phases of tasks (screwdriver alignment, zip-tie fastening, ethernet/cord insertion) with as little as 15 minutes of real-world data, surpassing human teleoperation speed on ethernet insertion.
+
+### Autonomous Robot-to-Robot Teaching
+
+- **Robot-Trains-Robot** (Hu et al., CoRL 2025, arXiv:2508.12252): A robot arm teacher actively trains a humanoid student through real-world RL. The arm provides compliant physical guidance via F/T sensing and generates a graduated learning curriculum. Includes automatic reset mechanisms for continuous real-world training. Enables practical and highly efficient real-world humanoid policy adaptation and learning without human intervention.
+
+### Test-Time Training for Perceptive Robot Parkour
+
+- **TTT-Parkour** (arXiv:2602.02331): Rapid test-time training for humanoid robots on unseen terrain. Combines scene capturing, reconstruction, and test-time fine-tuning in simulation to master complex obstacles (wedges, stakes, boxes, trapezoids, narrow beams) within <10 minutes. Demonstrated on Unitree G1, turning initial failure into successful traversal.
+
+### Differentiable Cross-Domain Co-Tuning
+
+- **DiffCoTune** (Krishna et al., IEEE RA-L 2025, arXiv:2505.24068): Automated gradient-based co-tuning framework for cross-domain robot control transfer. Leverages differentiable simulators to tune nominal controllers with <5 real-world trials, bridging sim-to-real gaps through systematic parameter optimization rather than full retraining.
+
+### Efficient RL for Flow-Based VLAs
+
+- **Z-1** (arXiv:2606.31846): Addresses efficient and stable RL post-training for flow-based VLA models. Builds on SOP (scalable online post-training) while focusing on the specific challenges of post-training diffusion/flow-based policies — a gap in the landscape where most post-training methods target autoregressive or token-level architectures.
+
+### Autonomous Online Failure Detection
+
+- **ARMADA** (arXiv:2510.02298): A multi-robot deployment and adaptation system with human-in-the-loop shared control. Features FLOAT — an autonomous online failure detection method enabling robots to detect failures during deployment and invoke human shared control for correction without full handover. Empowers scalable real-world deployment by maintaining robot autonomy while providing safety nets.
+
+### Test-Time Dreaming for Failure Avoidance
+
+- **DreamAvoid** (arXiv:2605.11750): Critical-phase test-time dreaming framework that enables VLA models to anticipate and avoid failures. The base policy executes directly during routine steps; test-time dreaming is invoked only when the system predicts an imminent transition into a critical phase. Reduces unnecessary computational overhead by gating test-time reasoning to failure-prone phases.
+
 ## Related (vault entities)
 
 - [[VLA Online Fine-Tuning Continual Learning]] — Continual learning for VLA models with experience replay
@@ -190,6 +250,12 @@ Real-time policy adaptation enables robots to refine control policies during dep
 24. Bhatia et al., "Adapting Generalist Robot Policies with Semantic Reinforcement Learning" — [arXiv:2606.31958](https://arxiv.org/html/2606.31958)
 25. T3VF: Test-Time Training Visual Foresight VLAs — [arXiv:2605.08215](https://arxiv.org/html/2605.08215)
 26. Huang et al., "Fail2Progress: Learning from Real-World Robot Failures with Stein Variational Inference" — [arXiv:2509.01746](https://arxiv.org/abs/2509.01746)
+27. "FAR: Failure-Aware Retry for Test-Time Recovery and Continual Policy Improvement" — [arXiv:2607.01111](https://arxiv.org/abs/2607.01111)
+28. Yuan et al., "Policy Decorator: Model-Agnostic Online Refinement for Large Policy Model" — [OpenReview](https://openreview.net/forum?id=e5jGTEiJMT)
+29. ARMADA: Autonomous Online Failure Detection and Human Shared Control — [arXiv:2510.02298](https://arxiv.org/abs/2510.02298)
+30. DreamAvoid: Critical-Phase Test-Time Dreaming to Avoid Failures in VLA Policies — [arXiv:2605.11750](https://arxiv.org/abs/2605.11750)
+31. Physical Intelligence, "RL Tokens: Precise Manipulation with Efficient Online RL" — [pi.website/research/rlt](https://www.pi.website/research/rlt)
+32. Hu et al., "Robot Trains Robot: Automatic Real-World Policy Adaptation for Humanoids" — [arXiv:2508.12252](https://arxiv.org/abs/2508.12252)
 
 ## Confidence
 
