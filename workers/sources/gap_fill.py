@@ -10,12 +10,21 @@ confidence) updates the fact.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# Prefer the libyaml-backed C loader — ~10-20x faster than the pure-Python
+# parser. The gap scan parses tens of thousands of frontmatter blocks, so
+# this is the difference between a multi-minute scan and a few seconds.
+try:
+    from yaml import CSafeLoader as _FastYamlLoader
+except ImportError:  # pragma: no cover - libyaml not built
+    from yaml import SafeLoader as _FastYamlLoader
 
 from workers.queue import WorkQueue, QueueItem
 from workers.sources._common import write_staging_note, run_prompt_on_primary
@@ -26,24 +35,45 @@ logger = logging.getLogger("lloyd-workers.gap_fill")
 NAME = "gap-fill"
 DEFAULT_PRIORITY = 50
 
-_MAX_ENQUEUE_PER_TICK = 5  # don't flood the queue with every gap at once
+def _scan_gap_facts(since_mtime: float = 0.0) -> tuple[list[dict], float]:
+    """Find unresolved gap facts. Returns ``(gaps, highwater_mtime)``.
 
+    Only files whose mtime is newer than ``since_mtime`` are read + YAML-parsed;
+    everything else is skipped after a cheap ``stat()``. ``highwater_mtime`` is
+    the newest mtime seen across the whole tree so the caller can advance its
+    watermark. On the facts tree (tens of thousands of files) this turns a
+    ~17s full parse into a ~0.8s stat-only walk on the common tick where
+    nothing changed.
 
-def _scan_gap_facts() -> list[dict]:
-    """Find facts tagged as gaps. Returns a list of {entity, category, id, text}."""
+    Why the watermark is correct: a gap fact is caught on the first scan after
+    its file is written (its mtime crosses the watermark), enqueued once
+    (dedup_key), and when it's later resolved the file is rewritten — its mtime
+    advances again, so the scan re-reads it, sees ``resolved_at``/no gap, and
+    stops re-enqueuing. A file that hasn't changed since the last scan cannot
+    have gained a new gap, so skipping its parse loses nothing.
+    """
     results: list[dict] = []
+    highwater = since_mtime
     if not FACTS_ROOT.exists():
-        return results
+        return results, highwater
     for entity_dir in FACTS_ROOT.iterdir():
         if not entity_dir.is_dir() or entity_dir.name.startswith("."):
             continue
         for md in entity_dir.glob("*.md"):
             try:
+                m = md.stat().st_mtime
+            except OSError:
+                continue
+            if m > highwater:
+                highwater = m
+            if m <= since_mtime:
+                continue  # unchanged since last scan — no new gaps possible
+            try:
                 content = md.read_text(encoding="utf-8")
                 parts = content.split("---\n", 2)
                 if len(parts) < 3:
                     continue
-                fm = yaml.safe_load(parts[1])
+                fm = yaml.load(parts[1], Loader=_FastYamlLoader)
                 if not isinstance(fm, dict):
                     continue
                 for fact in fm.get("facts", []) or []:
@@ -66,15 +96,26 @@ def _scan_gap_facts() -> list[dict]:
                     })
             except Exception as e:
                 logger.debug("Skipping %s: %s", md, e)
-    return results
+    return results, highwater
 
 
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
-    gaps = _scan_gap_facts()
-    if not gaps:
-        return
+    # The scan walks the entire facts tree (tens of thousands of files). Even
+    # the stat-only watermark pass is blocking I/O, and changed files add
+    # blocking YAML parse — so run it in a worker thread and never on the
+    # shared asyncio event loop (which serves all HTTP/UI). See
+    # [[project_gap_fill_event_loop_freeze]]: this scan, run synchronously on
+    # the loop every 5 minutes, froze the whole server for minutes.
+    last_mtime = float(queue.wm_get(NAME, "last_scan_mtime") or 0.0)
+    gaps, highwater = await asyncio.to_thread(_scan_gap_facts, last_mtime)
+
+    # Enqueue every gap found in the changed files. We intentionally do NOT
+    # cap per tick here: with the watermark, each tick only surfaces gaps from
+    # files changed since the last scan (naturally a handful), and the queue's
+    # dedup_key makes any repeat a no-op. Capping would strand gaps in already-
+    # scanned files once the watermark advanced past them.
     enqueued = 0
-    for gap in gaps[:_MAX_ENQUEUE_PER_TICK]:
+    for gap in gaps:
         fact_id = gap["fact_id"] or re.sub(r"[^a-z0-9]+", "-", gap["text"].lower())[:40]
         dedup_key = f"gap-fill:{gap['entity']}:{fact_id}"
         new_id = queue.enqueue(
@@ -86,8 +127,14 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         )
         if new_id is not None:
             enqueued += 1
+
+    # Advance the watermark only after a successful scan+enqueue, so a crash
+    # mid-scan re-does the work rather than skipping files.
+    if highwater > last_mtime:
+        queue.wm_set(NAME, "last_scan_mtime", f"{highwater:.6f}")
     if enqueued:
-        logger.info("Enqueued %d gap-fill items (scanned %d total)", enqueued, len(gaps))
+        logger.info("Enqueued %d gap-fill items (found %d in changed files)",
+                    enqueued, len(gaps))
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
