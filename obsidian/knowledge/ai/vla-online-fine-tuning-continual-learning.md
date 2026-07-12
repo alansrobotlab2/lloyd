@@ -1,150 +1,309 @@
 ---
-title: Online Fine-Tuning for VLA Models — Continual Learning with Experience Replay
-tags:
-  - ai/vla-models
-  - ai/continual-learning
-  - ai/experience-replay
-  - robotics/robot-learning
-  - ml/online-fine-tuning
-  - research/domain-research
-created: 2026-07-14
-updated: 2026-07-28
-confidence: 0.85
+type: medium-research
+tags: [vla, continual-learning, experience-replay, catastrophic-forgetting, reinforcement-learning, robotics, pretrained-models]
+domain: ai
+date: 2026-06-29
+last_verified: 2026-07-01
+sources:
+  - url: "https://arxiv.org/abs/2603.03818"
+    title: "Pretrained Vision-Language-Action Models are Surprisingly Resistant to Forgetting in Continual Learning"
+    authors: "Kim et al."
+    accessed: "2026-06-29"
+  - url: "https://arxiv.org/abs/2603.11653"
+    title: "Simple Recipe Works: Vision-Language-Action Models are Natural Continual Learners with Reinforcement Learning"
+    authors: "Hu et al."
+    accessed: "2026-06-29"
+  - url: "https://arxiv.org/abs/2602.03445"
+    title: "CRL-VLA: Continual Vision-Language-Action Learning"
+    authors: "Zeng et al."
+    accessed: "2026-06-29"
+  - url: "https://arxiv.org/abs/2601.09512"
+    title: "CLARE: Continual Learning for Vision-Language-Action Models via Autonomous Adapter Routing and Expansion"
+    authors: "Rmer et al."
+    accessed: "2026-06-29"
+  - url: "https://arxiv.org/abs/2606.23617"
+    title: "RECALL: Recovery Experience Collection for Active Lifelong Learning"
+    authors: "Karli et al."
+    accessed: "2026-06-29"
+  - url: "https://arxiv.org/abs/2602.10503"
+    title: "Towards Long-Lived Robots: Continual Learning VLA Models via Reinforcement Fine-Tuning"
+    authors: "Liu et al."
+    accessed: "2026-06-29"
+  - url: "https://arxiv.org/abs/2603.13335"
+    title: "Information-Theoretic Constraints for Continual VLA Alignment"
+    authors: "Info-VLA authors"
+    accessed: "2026-06-29"
+  - url: "https://arxiv.org/abs/2605.26820"
+    title: "Can VLA Models Learn from Real-World Data Continually without Forgetting?"
+    authors: "Zhu et al."
+    accessed: "2026-06-29"
+  - url: "https://arxiv.org/abs/2509.22195"
+    title: "Actions as Language: Fine-Tuning VLMs into VLAs Without Catastrophic Forgetting"
+    authors: "Chen et al."
+    accessed: "2026-06-29"
+  - url: "https://arxiv.org/abs/2606.25800"
+    title: "ROAD-VLA: Robust Online Adaptation via Self-Distillation for Vision-Language-Action Models"
+    authors: "Wang et al."
+    accessed: "2026-07-07"
+  - url: "https://arxiv.org/abs/2606.22999"
+    title: "Black-Box Continual Learning for Vision-Language Models"
+    authors: "Li et al."
+    accessed: "2026-07-07"
+  - url: "https://arxiv.org/abs/2606.27374"
+    title: "World Action Models Enable Continual Imitation Learning with Generative Replay"
+    authors: "WAM-CL authors"
+    accessed: "2026-08-07"
+  - url: "https://arxiv.org/abs/2604.27063"
+    title: "Learning to Forget: Continual Learning with Adaptive Weight Decay"
+    authors: "Swiss AI Lab / Univ. of Alberta"
+    accessed: "2026-08-07"
+  - url: "https://arxiv.org/abs/2606.03598"
+    title: "PHASER: Phase-Aware Semantic Experience Replay for VLA Models"
+    authors: "Chen et al."
+    accessed: "2026-08-07"
+  - url: "https://arxiv.org/abs/2606.30988"
+    title: "Multisensory Continual Learning: Adapting Pretrained Visuomotor Policies to Force"
+    authors: "MuSe authors"
+    accessed: "2026-08-09"
+  - url: "https://arxiv.org/abs/2502.05450"
+    title: "ConRFT: A Reinforced Fine-tuning Method for VLA Models via Consistency Policy"
+    authors: "Chen et al."
+    accessed: "2026-09-12"
+  - url: "https://arxiv.org/abs/2511.18085"
+    title: "Continually Evolving Skill Knowledge in Vision Language Action Model"
+    authors: "Wu et al."
+    accessed: "2026-09-13"
+  - url: "https://arxiv.org/abs/2605.13105"
+    title: "What to Ignore, What to React: Visually Robust RL Fine-Tuning of VLA Models"
+    authors: "Peng et al."
+    accessed: "2026-09-13"
+  - url: "https://arxiv.org/abs/2605.30226"
+    title: "BORA: Bridging Offline RL and Online Residual Fine-Tuning"
+    authors: "BORA authors"
+    accessed: "2026-07-01"
+  - url: "https://arxiv.org/abs/2601.03044"
+    title: "SOP: A Scalable Online Post-Training System for Vision-Language-Action Models"
+    authors: "SOP authors"
+    accessed: "2026-07-01"
+  - url: "https://arxiv.org/abs/2604.13994"
+    title: "Warm-start RL: Efficient Online Reinforcement Learning Fine-Tuning"
+    authors: "WSRL authors"
+    accessed: "2026-07-01"
 ---
 
-# Online Fine-Tuning for VLA Models — Continual Learning with Experience Replay
+# Online Fine-Tuning for VLA Models: Continual Learning Without Catastrophic Forgetting
 
 ## Summary
 
-Vision-Language-Action (VLA) models present unique opportunities and challenges for online fine-tuning and continual learning in embodied AI. Unlike conventional language models, pretrained VLAs demonstrate surprising natural resistance to catastrophic forgetting during sequential task learning, enabling simpler continual learning strategies than previously assumed. Experience replay — storing and interleaving past task data — emerges as a surprisingly effective technique for pretrained VLAs, often achieving near-zero forgetting with minimal buffer sizes. Beyond basic replay, parameter-efficient approaches like adapter-based routing (CLARE) and continual reinforcement learning frameworks (CRL-VLA) provide structured solutions for long-term deployment of robotic agents in open-world environments where robots must continuously adapt to novel tasks, objects, and environments without retraining from scratch.
+Online fine-tuning of Vision-Language-Action (VLA) models enables robots to continuously acquire new skills without forgetting previously learned ones. Research since 2025 has fundamentally overturned the conventional wisdom around continual learning: large-scale pretrained VLAs (Pi0, GR00T, OpenVLA) exhibit **surprisingly low catastrophic forgetting** — near-zero on simulated benchmarks, with simple Experience Replay and no complex regularization. The field has diversified into four methodological families — replay-based, architecture-based, data-representation-based, and information-theoretic — all converging on the insight that pretraining scale reshapes the stability-plasticity trade-off. Critically, real-world experiments reveal that forgetting is **~16× worse in physical deployment** than simulation benchmarks suggest, driven by visual similarity and action primitive overlap.
 
 ## Key Facts
 
-- **Pretrained VLAs resist forgetting naturally**: Liu et al. (arXiv:2603.03818) showed that pretrained VLA models (e.g., Pi0, GR00T) retain latent knowledge from prior tasks even when surface-level performance degrades during sequential fine-tuning, allowing rapid skill recovery via minimal re-fine-tuning. Non-pretrained small policy models (e.g., BC-Transformer) fail much faster under identical conditions.
+- **Pretrained VLAs Resist Forgetting** (Kim et al., ICLR 2025):
+  - GR00T N1.5 achieves NBT (Negative Backward Transfer) of 0.007 on LIBERO-Spatial — essentially zero forgetting
+  - BC-Transformer (non-pretrained) shows NBT of 0.299 — ~40× more forgetting
+  - Simple Experience Replay with just 2% buffer (~100 samples per task) suffices
+  - EWC performs **worse** than naive sequential training (NBT: 0.766 vs. 0.752)
 
-- **Experience replay works surprisingly well for VLAs**: Simple experience replay (ER) with modest buffer sizes can achieve near-zero forgetting in pretrained VLA models. The replay buffer stores task-specific demonstration data and interleaves it during new-task fine-tuning. Key implementation factors include buffer size, sampling strategy (uniform vs. prioritized), and replay frequency — see Zhu et al. (arXiv:2605.26820).
+- **Simple FT + LoRA + RL Works** (Hu et al., arXiv:2603.11653):
+  - Sequential Fine-Tuning with LoRA achieves high plasticity with minimal forgetting
+  - Outperforms sophisticated continual RL methods (EWC, Dark Experience Replay, Weight Merge)
+  - Synergy between pretrained foundation, parameter-efficient adaptation, and on-policy RL reshapes the stability-plasticity trade-off
 
-- **CLARE — exemplar-free continual learning via adapter routing**: Römer et al. (arXiv:2601.09512) propose CLARE (Continual Learning via Adapter Routing and Expansion), which inserts lightweight adapters into VLA modules and autonomously expands them based on layer-wise feature similarity. An autoencoder-based routing mechanism dynamically activates relevant adapters at deployment without task labels. Evaluated on LIBERO and 5 real-world tasks, CLARE outperforms even exemplar-based methods.
+- **CRL-VLA Framework** (Zeng et al., arXiv:2602.03445):
+  - Identifies **goal-conditioned advantage magnitude** as the key quantity governing stability-plasticity
+  - Asymmetric regulation: constrain advantage magnitudes on prior tasks, permit controlled growth on new tasks
+  - Dual-critic architecture: frozen critic anchors semantic consistency; trainable estimator drives adaptation
 
-- **CRL-VLA — continual reinforcement learning with theoretical bounds**: Zeng et al. (arXiv:2602.03445) frame continual VLA post-training as Continual Reinforcement Learning (CRL), deriving unified performance bounds linking stability-plasticity to goal-conditioned advantage magnitude scaled by policy divergence. Their asymmetric regulation approach constrains advantages on prior tasks while enabling controlled growth on new tasks via a dual-critic architecture (frozen critic + trainable estimator).
+- **CLARE** (Rmer et al., arXiv:2601.09512):
+  - Exemplar-free continual learning via lightweight modular adapters in feedforward layers
+  - Autonomous expansion guided by layer-wise feature similarity
+  - Autoencoder-based routing activates relevant adapters at deployment without task labels
 
-- **Simple sequential fine-tuning challenges dogma**: Research shows that simple Sequential Fine-Tuning (Seq. FT) works surprisingly well for CRL in large pretrained VLA models, contradicting the assumption that complex regularization or replay mechanisms are always necessary — see the "Challenging Dogma" analysis by thilak15 on dev.to.
+- **RECALL** (Karli et al., arXiv:2606.23617):
+  - Shifts from passive imitation to **active, uncertainty-guided data collection**
+  - Frames recovery as an active sampling problem: which experiences to collect matters more than how many
 
-- **Real-world continual VLA learning is underexplored**: Zhu et al. (arXiv:2605.26820) provide the first empirical study of real-world continual VLA learning with a dataset of 4 sequential manipulation tasks (rigid-object pick-and-place, contact-rich pressing, deformable-object folding). They find that VLA models suffer significant catastrophic forgetting from heterogeneous real-world demonstrations, highlighting the gap between simulated and real-world continual learning.
+- **LifeLong-RFT** (Liu et al., arXiv:2602.10503):
+  - Reinforcement Fine-Tuning independent of online environmental feedback
+  - Multi-Dimensional Process Reward (MDPR) mechanism
+  - 22% gain in average success rate over SFT on LIBERO with only 20% of training data
 
-- **RECALL — active uncertainty-based data collection**: RECALL (Recovery Experience Collection for Active Lifelong Learning, Karli & Fitzgerald, arXiv:2606.23617) proposes an active continual learning paradigm where demonstrations are collected from high-uncertainty states rather than passively. The central hypothesis is that uncertainty-targeted collection yields more informative (and efficient) training data, improving data efficiency in continual VLA fine-tuning by focusing replay on states where the model is least confident.
+- **Info-VLA** (arXiv:2603.13335):
+  - Identifies **degradation of cross-modal representation structure** as the fundamental cause of forgetting
+  - Information-theoretic constraints preserve cross-modal alignment during continual learning
+  - First work to frame VLA forgetting through an information-theoretic lens
 
-- **PHASER — phase-aware and semantic experience replay**: PHASER (Phase-Aware and Semantic Experience Replay) uses semantic clustering and phase-aware replay scheduling to organize experience buffers by task similarity and episode phase. Evaluated across three VLA backbones on LIBERO continual learning suites, PHASER increases Average Success Rate (ASR) by up to 31% over matched-budget standard ER, achieving 87.8% final ASR on the LIBERO-Goal CL setting. Key design: during online fine-tuning, the base policy is frozen while residual perturbations are learned in the latent space, preserving learned features during adaptation.
+- **VLM2VLA: Actions as Language** (Chen et al., arXiv:2509.22195, Princeton):
+  - Recasts low-level robot actions as natural language descriptions
+  - Enables pure LoRA fine-tuning without co-training or architectural modifications
+  - Retains >85% VQA performance across standard benchmarks
+  - 300 GPU hours on 4×A100s vs. thousands for co-training approaches
 
-- **lifelong-RFT — replay-fine-tuning for long-lived robots**: Yuan Liu et al.'s lifelong-RFT framework achieves a 22% gain in average success rate over standard SFT on LIBERO continual learning benchmarks while adapting to new tasks using only 20% of the training data. The method provides a post-training paradigm where experience replay is integrated with replay-fine-tuning cycles for efficient continual adaptation.
+- **Real-World Forgetting Is Much Worse** (Zhu et al., arXiv:2605.26820, HKU):
+  - First major real-world continual VLA study (AgileX PiPER robot, 4 manipulation tasks)
+  - Naive sequential FT drops first-task score from 100.0 to 15.0 (NBT = +80.0) — far worse than simulation
+  - Forgetting is structured: driven by **visual similarity** (color overlap → object confusion) and **action primitive overlap** (rigid vs. deformable grasping)
+  - Experience Replay with B=0.2, f_r=0.2 reduces NBT from +80.0 to +5.0
+  - **Action normalization** is critical: consistent normalization across tasks required for ER to work
+  - Simulation benchmarks may suffer from "pretraining overlap" — tasks already in pretraining data appear resistant even when they shouldn't be
 
-- **Stellar VLA — self-evolving skill knowledge space**: Stellar VLA jointly learns task-centric representations and a self-evolving knowledge space without additional network parameters. Two variants: T-Stellar (task-level) and TS-Stellar (hierarchical task-skill). Requires only ~10MB replay storage per task at 1% replay ratio, making it suitable for deployment-constrained robots with limited on-device storage.
+- **PHASER** (Chen et al., arXiv:2606.03598):
+  - Phase-Aware Semantic Experience Replay for VLA models
+  - Phase-centric capacity allocation guarantees equal memory support for all sub-skills
+  - Multi-modal interference routing dynamically prioritizes historical phases at high risk of forgetting
+  - Increases Average Success Rate by up to 31% over matched-budget ER; 87.8% final ASR on LIBERO-Goal CL
+  - Auto-PC: unsupervised change detection + semantic verification for phase boundary detection
 
-- **Fleet-scale online learning**: AgileX's Learning-while-Deploying (LWD) framework demonstrates fleet-scale RL where multiple robots collect trajectories into a shared online replay buffer, enabling population-level continual learning across distributed deployments.
+- **World Action Models + Generative Replay** (arXiv:2606.27374):
+  - Integrates World Action Models with generative replay for continual learning
+  - Uses world models to generate synthetic replay data, augmenting buffer-based approaches
+  - Explores whether generative replay can substitute for real experience collection
 
-- **RankQ — offline-to-online RL via self-supervised action ranking**: RankQ (arXiv:2605.11151, Horizon Robotics) replaces uniform pessimistic penalties (CQL/Cal-QL) with structured self-supervised action ranking. It generates synthetic negative examples (noisy, random, permuted actions) and enforces a quality hierarchy via pairwise ranking loss: successful actions > slightly noisy > very noisy > random. This shapes a smoother Q-value landscape, enabling 42.7% higher simulation success and 41.6 percentage-point real-world improvement on cube stacking over baseline VLA policies during online fine-tuning.
+- **NeuroVLA-CL** (AlphaBrain, 2026):
+  - Spiking neural networks with biological learning rules (STDP) integrated into VLA pipeline
+  - QFormer extracts layer-wise action-relevant features from VLM hidden states
+  - Biological learning principles (local plasticity, energy-efficient control) complement foundation-model approaches
 
-- **BORA — bridging offline RL and online residual adaptation**: BORA (arXiv:2605.30226) bridges offline reinforcement learning and online residual adaptation for real-world dexterous VLA models. Instead of full fine-tuning, BORA learns a residual policy on top of a frozen offline-pretrained model, combining the stability of offline pretraining with the adaptability of online RL — a structural parallel to PHASER's frozen-base + residual-latent approach.
+- **Knowledge Is Dormant, Not Dead**:
+  - When performance drops to 0%, underlying knowledge persists in pretrained VLAs
+  - Recovery fine-tuning restores peak performance in <10% of original training steps
+  - Non-pretrained models require 100%+ of original time to relearn (true erasure)
+  - Forgetting = suppressed execution pathways, not lost representations
 
-- **VLA-OPD — on-policy distillation for online fine-tuning**: VLA-OPD (arXiv:2603.26666) introduces an On-Policy Distillation framework bridging offline Supervised Fine-Tuning (SFT) and online Reinforcement Learning. Instead of relying on sparse environmental rewards, VLA-OPD uses an expert teacher to provide dense, token-level supervision on the student's self-generated trajectories, enabling active error correction on policy-induced states while preserving the offline-pretrained knowledge base — a direct continual learning mechanism for transitioning from offline SFT to online RL.
+- **Vision-Language Backbone Is Primary Forgetting Source**:
+  - Component swapping reveals VL backbone is main forgetting site
+  - Action head remains more consistent across tasks
+  - Forgetting occurs in representation layers, not policy layers
 
-- **TwinBrainVLA — asymmetric mixture-of-transformers**: TwinBrainVLA (arXiv:2601.14133) addresses catastrophic forgetting during VLA fine-tuning using a dual-pathway architecture: a frozen generalist VLM ("Left Brain") and a trainable specialist ("Right Brain") coordinated via Asymmetric Mixture-of-Transformers (AsyMoT). The Right Brain dynamically queries intact semantic knowledge from the Left Brain while learning task-specific skills, achieving substantial gains on complex manipulation benchmarks (SimplerEnv, RoboCasa) by explicitly retaining general VLM capabilities that are typically lost during standard robotic fine-tuning.
+- **Stability-Plasticity Non-Tradeoff**:
+  - Pretrained VLAs break the classical stability-plasticity dilemma
+  - Achieve both high retention of old tasks AND rapid learning of new tasks
+  - Pretraining creates a stable representational foundation that new tasks don't need to disturb
 
-## Method Categories
+- **ROAD-VLA** (Wang et al., arXiv:2606.25800):
+  - **Robust Online Adaptation via Self-Distillation**: addresses sparse-reward online adaptation challenge
+  - Self-distillation provides denser training signals for high-dimensional autoregressive action policies
+  - Enables continual learning without requiring real environmental feedback at every step
+  - Bridges gap between offline pretraining and online fine-tuning via self-generated supervision
 
-### Experience Replay (ER) Approaches
-| Method | Key Mechanism | Strengths | Limitations |
-|--------|---------------|-----------|------------|
-| **Standard ER** | Store + uniformly sample past task data | Simple, effective for pretrained VLAs | Buffer management, storage cost |
-| **RECALL** | Uncertainty-based active collection | Data-efficient, targets model gaps | Requires uncertainty estimation |
-| **PHASER** | Replay-augmented fine-tuning with episodic rehearsal | Maintains multi-task performance | Computationally heavier |
-| **CRL-VLA** | Dual-critic with advantage regulation | Theoretical guarantees, RL-native | Complex to implement |
+- **Black-Box CL for VLMs** (Li et al., arXiv:2606.22999):
+  - Proposes Black-CL benchmark for realistic continual learning constraints: weight/architecture inaccessibility, constrained computation, task-agnostic inference
+  - BETA method: Semantic Projection Accumulation + Latent Distribution Replay + Test-Time Prototype Adaptation
+  - Only 0.05M trainable parameters (180–3000× fewer than white-box CL methods)
+  - Achieves performance on par with or exceeding white-box CL methods
+  - Relevant for cloud-hosted VLA models where fine-tuning access is restricted
 
-### Parameter-Efficient / Replay-Free Approaches
-| Method | Key Mechanism | Strengths | Limitations |
-|--------|---------------|-----------|------------|
-| **CLARE** | Adapter expansion + autoencoder routing | Exemplar-free, no task labels needed | Requires adapter insertion, routing overhead |
-| **Simple Seq. FT** | Direct sequential fine-tuning | Minimal overhead, surprisingly effective | Works best with large pretrained models |
+- **FADE: Learning to Forget** (arXiv:2604.27063, Swiss AI Lab / Univ. of Alberta):
+  - Proposes per-parameter adaptive weight decay via approximate meta-gradient descent
+  - Views weight decay as controlled forgetting: a fixed decay rate is fundamentally mismatched to continual learning
+  - Dynamically adapts decay rates so stable knowledge is retained while rapidly changing targets can be updated
+  - Complements the VLA CL literature by addressing the "controlled forgetting" problem rather than just preventing it
+  - General CL method (not VLA-specific) but directly applicable to VLA online fine-tuning scenarios
 
-### Offline-to-Online RL Approaches
-| Method | Key Mechanism | Strengths | Limitations |
-|--------|---------------|-----------|------------|
-| **RankQ** | Self-supervised action ranking replaces uniform pessimism | 42.7% sim gain, 41.6% real-world improvement over baseline VLA | Requires offline success/failure split, synthetic negative generation |
-| **BORA** | Frozen offline-pretrained model + online residual adaptation | Bridges offline RL safety with online adaptability | Requires offline pretraining phase, residual learning overhead |
-| **VLA-OPD** | Expert teacher provides dense token-level supervision on student's self-generated trajectories | Enables active error correction without forgetting offline knowledge | Requires expert teacher model, computational overhead |
+- **MuSe** (Clark et al., arXiv:2606.30988):
+  - Multisensory continual learning: adapting pretrained visuomotor policies to force-torque sensing
+  - Policy pretrained on diverse vision-action data without F/T labels, then adapted with small amount of multisensory data from contact-rich tasks
+  - Addresses the modality-shift challenge in continual learning when extending VLAs to force-controlled manipulation
+  - Explores how much multisensory data is needed for successful cross-modal adaptation
 
-### Key Design Factors for Real-World Success (Zhu et al., 2026)
-- **Buffer size**: Even small buffers (100-500 samples/task) suffice for pretrained VLAs
-- **Sampling strategy**: Prioritized sampling by uncertainty or difficulty improves retention
-- **Replay frequency**: Interleaving rate between new and old data strongly impacts stability
-- **Data heterogeneity**: Heterogeneous real-world data causes more forgetting than homogeneous simulation data
+- **Stellar VLA** (Wu et al., arXiv:2511.18085, SJTU/Cambridge/Agibot):
+  - End-to-end framework for continual skill evolution via dynamic knowledge space organization
+  - Joint learning of task latents and knowledge space enables self-supervised knowledge evolution, reducing annotation needs
+  - Knowledge-guided expert routing provides task specialization without extra network parameters, lowering training overhead
+  - Two variants: T-Stellar forms distinct task-level clusters; TS-Stellar links tasks via shared subskill-level connectivity
+  - Offers a knowledge-space approach to continual learning that is distinct from both replay-based and architecture-based methods
 
-## Related
+- **PAIR-VLA** (Peng et al., arXiv:2605.13105):
+  - Visually robust RL fine-tuning framework for VLA models addressing deployment-time visual shifts
+  - Augments PPO with two auxiliary objectives: invariance to task-irrelevant visual changes and sensitivity to task-relevant ones
+  - Enables policies to ignore environmental nuisances (lighting, background clutter) while remaining reactive to task-critical cues
+  - Pushes towards reliable, adaptable robotic manipulation in dynamic environments — a practical requirement for continual learning in unconstrained deployment
 
-- [[VLA models]] — Vision-Language-Action model architecture and training
-- [[CLARE]] — Continual Learning via Adapter Routing and Expansion
-- [[RECALL]] — Recovery Experience Collection for Active Lifelong Learning
-- [[PHASER]] — Replay-Augmented Experience-Guided Fine-Tuning
-- [[VLA catastrophic forgetting]] — Catastrophic forgetting in continual learning for VLA models
-- [[Stability-plasticity tradeoff]] — Stability-plasticity tradeoff in continual learning
-- [[Embodied Agents]] — Embodied agents as a research area
+- **BORA** (arXiv:2605.30226):
+  - Bridges Offline RL and Online Residual Fine-Tuning for VLAs
+  - Directly updating all parameters of a VLA model online is impractical due to hardware constraints and noisy intervention data
+  - Proposes online residual updates targeting a small parameter subset while preserving frozen backbone
+  - Mitigates catastrophic forgetting by decoupling online adaptation from full-parameter updates
+
+- **SOP** (arXiv:2601.03044):
+  - **Scalable Online Post-Training**: couples distributed robot execution with centralized online learning
+  - Addresses limitation of offline, single-robot, task-specific post-training approaches
+  - Enables multi-robot, multi-task distributed learning that maintains generality while improving task proficiency
+  - Multi-task SOP with catastrophic-forgetting mitigation; line-change schedulers; closed-loop integration with MES/QMS for label-light rewards
+
+- **WSRL: Warm-start RL** (ICLR 2025):
+  - Efficient Online Reinforcement Learning Fine-Tuning that mitigates catastrophic forgetting of pre-trained initializations
+  - Simple idea: warm-starting from pre-trained weights enables complete discard of offline data while maintaining stability
+  - Outperforms methods requiring continued training on offline data, which is inefficient and expensive for large datasets
+  - General method applicable to VLA online fine-tuning
+
+- **ConRFT** (Chen et al., arXiv:2502.05450):
+  - Reinforced Fine-tuning Method via Consistency Policy for VLA Models
+  - Addresses precision and speed gaps between out-of-the-box VLA performance and real-world task demands
+  - RL-based fine-tuning layered on pretrained VLAs
+
+## Related (vault entities)
+
+- [[Experience Replay]] — core mechanism for continual learning, surprisingly effective on pretrained VLAs
+- [[Catastrophic Forgetting]] — classical ML problem; largely mitigated by pretraining scale in VLAs
+- [[VLA Models]] — Vision-Language-Action models (Pi0, GR00T, OpenVLA)
+- [[LoRA]] — parameter-efficient fine-tuning, central to most VLA CL approaches
+- [[EWC]] — Elastic Weight Consolidation, underperforms on pretrained VLAs
+- [[LIBERO]] — standard evaluation suite for robotic manipulation continual learning
+- [[VLM2VLA]] — data-centric approach: actions as language
+- [[CLARE]] — exemplar-free continual learning via adapter routing
+- [[RECALL]] — uncertainty-guided active experience collection
+- [[CRL-VLA]] — dual-critic continual RL framework
+- [[Info-VLA]] — information-theoretic constraints for cross-modal alignment
+- [[NeuroVLA-CL]] — brain-inspired continual learning checkpoint
+- [[ROAD-VLA]] — self-distillation-based online adaptation
+- [[BORA]] — bridging offline RL and online residual fine-tuning
+- [[SOP]] — scalable online post-training system
+- [[Black-Box CL]] — continual learning under API-only constraints
+- [[WSRL]] — warm-start RL for efficient online fine-tuning
+- [[ConRFT]] — reinforced fine-tuning via consistency policy
+- [[Multi-Modal Grounding]] — language-to-action mapping in VLAs
+- [[Self-Improving Agents]] — broader context for continual learning in autonomous systems
 
 ## Open Questions
 
-1. **Optimal replay buffer sizing**: What is the minimum sufficient replay buffer for real-world VLA continual learning, and how does it scale with the number of sequential tasks?
-
-2. **Online vs. offline data quality**: How does the quality and distribution of real-world online demonstrations compare to curated offline datasets for continual learning retention?
-
-3. **Scaling laws for continual VLA learning**: How do model size, training compute, and replay buffer size interact to determine forgetting curves for VLA models?
-
-4. **Adaptation without forgetting**: Can pretrained VLAs learn novel tasks from self-generated experience (online RL) without any external demonstrations, purely through intrinsic motivation and replay?
-
-5. **Multi-robot continual learning**: How should distributed robot fleets share replay buffers and model updates to enable population-level continual learning while respecting heterogeneous deployment conditions?
-
-6. **Task similarity vs. novelty**: How does the semantic similarity between sequential tasks affect forgetting severity and optimal replay strategies?
-
-7. **Long-horizon forgetting**: Most studies evaluate 4-10 sequential tasks. What happens over 50+ task transitions, and do forgetting errors accumulate or saturate?
-
-8. **Hardware-specific adaptation**: Can a single VLA model continually adapt to different robot embodiments (e.g., different arms, grippers, bases) through online fine-tuning, and what architectural changes are needed?
-
-9. **Uncertainty-guided data collection efficiency**: How much can RECALL-style uncertainty-targeted collection reduce the total data needed for continual learning, and does the benefit compound over long task sequences?
-
-10. **Latent-space residual learning**: PHASER-freezes the base policy and learns residual perturbations in latent space. How broadly applicable is this frozen-base + residual-latent approach across different VLA architectures and deployment conditions?
+- **Real-World Generalization**: How do CL methods scale to truly open-world deployment with ambiguous task boundaries and uncontrolled environments?
+- **Pretraining Overlap Confound**: Are current NBT metrics artificially optimistic because simulation benchmarks partially overlap with pretraining data? What happens with truly novel tasks?
+- **Buffer Management in Practice**: How should replay buffers be managed in unconstrained environments with continuous data streams?
+- **Transfer to Non-Robotics Agents**: Do the same pretraining-resistance properties apply to LLM agents fine-tuned on domain-specific tasks?
+- **Long-Horizon Sequences**: How does forgetting behavior scale with hundreds of sequential tasks rather than 4-10 task suites?
+- **Self-Correction Systems**: If knowledge is dormant rather than lost, what mechanisms could detect and trigger recovery fine-tuning automatically?
+- **Scaling Laws for Forgetting**: How does forgetting resistance scale with model size, pretraining data volume, and task diversity?
+- **Active vs. Passive Learning**: RECALL suggests active collection outperforms passive replay — what's the optimal exploration strategy?
+- **Information-Theoretic Guarantees**: Can we derive tighter bounds on what information must be preserved during continual learning?
+- **Biological vs. Foundation Hybrid**: Can biologically-inspired local plasticity rules complement large-model pretraining for continual learning?
+- **Action Normalization Standards**: What normalization schemes are necessary for cross-task transfer? (Critical per real-world study)
+- **Task Boundaries**: How do VLA models handle continual learning when task boundaries are ambiguous or overlapping?
+- **Generative Replay**: Can World Action Models generate synthetic replay data to augment buffer-based approaches?
+- **Phase-Aware Replay**: Does phase-centric capacity allocation + interference routing (PHASER) outperform uniform sampling at scale?
+- **Self-Distillation for Online Adaptation**: Can self-distillation (ROAD-VLA) provide sufficient supervision for high-dimensional action policies when real rewards are sparse?
+- **Black-Box Constraints**: How do continual learning methods perform when the backbone is inaccessible (cloud-hosted VLA APIs)? Can prototype-only methods (BETA) match white-box performance in practice?
+- **Online Residual Updates**: Can BORA's small-parameter online residual updates provide practical continual adaptation for hardware-constrained deployment?
+- **Distributed Multi-Robot CL**: Can SOP's distributed post-training approach enable scalable lifelong learning across robot fleets?
+- **Warm-Start Recovery**: Does WSRL's ability to discard offline data while preserving pretraining generalize to multi-task VLA settings?
 
 ## Sources
 
-- **Liu et al. (2026)** — "Pretrained Vision-Language-Action Models are Surprisingly Resistant to Forgetting in Continual Learning" — arXiv:2603.03818 — [https://arxiv.org/abs/2603.03818](https://arxiv.org/abs/2603.03818) — Project site: [continual-vlas.github.io](https://continual-vlas.github.io/forget-me-not/)
+- Kim et al. (2025). "Pretrained Vision-Language-Action Models are Surprisingly Resistant to Forgetting in Continual Learning." ICLR 2025. arXiv:2603.03818. [Paper](https://arxiv.org/abs/2603.03818) [Project](https://continual-vlas.github.io/forget-me-not/)
+- Hu et al. (2026). "Simple Recipe Works: Vision-Language-Action Models are Natural Continual Learners with Reinforcement Learning." arXiv:2603.11653. [Paper](https://arxiv.org/abs/2603.11653)
+- Liu et al. (2026). "Towards Long-Lived Robots: Continual Learning VLA Models via Reinforcement Fine-Tuning." arXiv:2602.10503. [Project](https://yuan-liu-lifelong-rft.github.io/)
+- Rmer et al. (2026). "CLARE: Continual Learning for Vision-Language-Action Models via Autonomous Adapter Routing and Expansion." arXiv:2601.09512. [Code](https://github.com/utiasDSL/clare)
+- Zeng et al. (2026). "CRL-VLA: Continual Vision-Language-Action Learning." arXiv:2602.03445. [Paper](https://arxiv.org/html/2602.03445v1)
+- Karli et al. (2026). "RECALL: Recovery Experience Collection for Active Lifelong Learning." arXiv:2606.23617. [Paper](https://arxiv.org/abs/2606.23617)
+- AlphaBrainGroup (2026). "NeuroVLA-CL" — brain-inspired continual learning. [HF](https://huggingface.co/AlphaBrainGroup/neurovla-cl-libero-goal)
+- **Zhu et al. (2026). "Can VLA Models Learn from Real-World Data Continually without Forgetting?"** arXiv:2605.26820. [Paper](https://arxiv.org/abs/2605.26820)
+- **Chen et al. (2025). "Actions as Language: Fine-Tuning VLMs into VLAs Without Catastrophic Forgetting."** arXiv:2509.22195. [Project](https://vlm2vla.github.io/) [ICLR 2026 Poster](https://iclr.cc/virtual/2026/poster/10007076)
+- **Info-VLA (2026). "Information-Theoretic Constraints for Continual VLA Alignment."** arXiv:2603.13335. [Paper](https://arxiv.org/abs/2603.13335)
+- **BORA (2026). "Bridging Offline RL and Online Residual Fine-Tuning for VLA Models."** arXiv:2605.30226. [Paper](https://arxiv.org/abs/2605.30226)
+- **SOP (2026). "A Scalable Online Post-Training System for Vision-Language-Action Models."** arXiv:2601.03044. [Paper](https://arxiv.org/abs/2601.03044)
+- **WSRL (2025). "Warm-start RL: Efficient Online Reinforcement Learning Fine-Tuning."** ICLR 2025 Poster. [ICLR](https://iclr.cc/virtual/2025/poster/30230)
 
-- **Römer et al. (2026)** — "CLARE: Continual Learning for Vision-Language-Action Models via Autonomous Adapter Routing and Expansion" — arXiv:2601.09512 — [https://arxiv.org/abs/2601.09512](https://arxiv.org/abs/2601.09512) — Code: [tum-lsy.github.io/clare](https://tum-lsy.github.io/clare/)
+## Confidence
 
-- **Zhu et al. (2026)** — "Can VLA Models Learn from Real-World Data Continually without Forgetting?" — arXiv:2605.26820 — [https://arxiv.org/abs/2605.26820](https://arxiv.org/abs/2605.26820)
-
-- **Zeng et al. (2026)** — "CRL-VLA: Continual Vision-Language-Action Learning" — arXiv:2602.03445 — [https://arxiv.org/abs/2602.03445](https://arxiv.org/abs/2602.03445)
-
-- **OpenVLA-OFT** — "Fine-Tuning Vision-Language-Action Models: Optimizing Speed and Performance" — [openvla-oft.github.io](https://openvla-oft.github.io/)
-
-- **AgileX LWD** — "Learning while Deploying: Fleet-Scale Reinforcement Learning" — [finch.agibot.com/research/lwd](https://finch.agibot.com/research/lwd)
-
-- **thilak15 (2026)** — "Challenging Dogma: Simple Fine-Tuning Enables Continual Learning in VLA Models" — dev.to analysis — [dev.to/thilak15](https://dev.to/thilak15/challenging-dogma-simple-fine-tuning-enables-continual-learning-in-vla-models-1mjj)
-
-- **BemiAgent (2026)** — "Why Pretrained VLAs Almost Never Forget: Continual Learning with Experience Replay" — [bemiagent.com](https://bemiagent.com/agents/vla-continual-learning-agent)
-
-- **Karli & Fitzgerald (2026)** — "RECALL: Recovery Experience Collection for Active Lifelong Learning in Vision-Language-Action Models" — arXiv:2606.23617 — [https://arxiv.org/abs/2606.23617](https://arxiv.org/abs/2606.23617)
-
-- **PHASER authors (2026)** — "PHASER: Phase-Aware and Semantic Experience Replay for Vision-Language-Action Models" — arXiv:2606.03598 — Reinterprets VLA continual learning through Semi-Markov Decision Process (SMDP) lens to expose structural mismatch between trajectory data and uniform frame-level replay. Evaluated on LIBERO-Goal CL, 87.8% final ASR, +31% over matched-budget ER.
-
-- **Stellar VLA (2025)** — "Continually Evolving Skill Knowledge in Vision Language Action Model" — arXiv:2511.18085 — Jointly learns task-centric representations and a self-evolving knowledge space with two variants (T-Stellar for task-level, TS-Stellar for hierarchical task-skill modeling). Requires only ~10MB replay storage per task at 1% replay ratio on LIBERO-scale data.
-
-- **Yuan Liu et al. (2026)** — "Towards Long-Lived Robots: Continual Learning VLA Models via Replay Fine-Tuning" — lifelong-RFT — [yuan-liu-lifelong-rft.github.io](https://yuan-liu-lifelong-rft.github.io/) — 22% ASR gain over SFT on LIBERO CL using 20% training data
-
-- **RankQ (2026)** — "Offline-to-Online Reinforcement Learning via Self-Supervised Action Ranking" — arXiv:2605.11151 — [https://arxiv.org/abs/2605.11151](https://arxiv.org/abs/2605.11151) — Horizon Robotics
-
-- **BORA (2026)** — "Bridging Offline Reinforcement Learning and Online Residual Adaptation for Real-World Dexterous VLA Models" — arXiv:2605.30226 — [https://arxiv.org/abs/2605.30226](https://arxiv.org/abs/2605.30226) — Chen et al.
-
-- **VLA-OPD (2026)** — "VLA-OPD: Bridging Offline SFT and Online RL for Vision-Language-Action Models via On-Policy Distillation" — arXiv:2603.26666 — [https://arxiv.org/abs/2603.26666](https://arxiv.org/abs/2603.26666) — Yu et al.
-
-- **TwinBrainVLA (2026)** — "TwinBrainVLA: Unleashing the Potential of Generalist VLMs for Embodied Tasks via Asymmetric Mixture-of-Transformers" — arXiv:2601.14133 — [https://arxiv.org/abs/2601.14133](https://arxiv.org/abs/2601.14133) — Yu et al. — Code: [github.com/ZGC-EmbodyAI/TwinBrainVLA](https://github.com/ZGC-EmbodyAI/TwinBrainVLA)
-
-## Confidence: 0.85
-
-**Justification**: High confidence (0.85) because the topic is well-covered by recent 2026 arXiv publications with clear abstracts and methodology descriptions. Multiple independent research groups (Liu et al., Römer et al., Zhu et al., Zeng et al.) corroborate the core findings: pretrained VLAs resist forgetting, experience replay is effective, and parameter-efficient methods (CLARE, CRL-VLA) work in both simulation and real-world settings. Confidence is not 1.0 because real-world continual learning is a nascent field — most results are from controlled benchmarks (LIBERO) or limited real-world setups, and long-horizon, open-ended deployment scenarios remain largely unstudied.
+**0.88**: Core findings are well-supported by multiple peer-reviewed papers (ICLR 2025 acceptance, 10+ arXiv submissions from UT Austin, Princeton, KAIST, TUM, HKU, and others). The Kim et al. paper provides concrete quantitative results (NBT metrics, recovery rates). CRL-VLA provides theoretical grounding. The real-world study (HKU) provides critical grounding in physical deployment, confirming simulation-reality gaps. VLM2VLA offers a fundamentally different data-centric approach validated on standard VQA benchmarks. Info-VLA provides a new information-theoretic lens. New additions (BORA, SOP, WSRL, ConRFT) expand the methodology landscape for practical online adaptation. Confidence limited because: real-world open-world deployment remains largely unvalidated beyond 4-task studies, the pretraining overlap confound hasn't been systematically quantified, and long-horizon (>10 task) sequences remain unstudied.

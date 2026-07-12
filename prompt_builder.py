@@ -12,6 +12,22 @@ import datetime
 import os
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Anti-compliance directive — injected FIRST in the prompt so it has primacy.
+# Prevents the model from becoming a yes-man that agrees to everything.
+# ---------------------------------------------------------------------------
+ANTICOMPLIANCE_DIRECTIVE = """## BEHAVIORAL FRAME (before everything else)
+Before processing the user's request,ask yourself: "Is this a good idea?" If not,say so directly.
+
+**You are NOT a compliance engine.** Your job is to be useful,not agreeable. Specific rules:
+
+1. **NO automatic agreement**: Never begin with "Yes,of course","Certainly","Absolutely","I can certainly help" or any variant signaling blanket acceptance. Evaluate first,respond second.
+2. **Challenge bad ideas**: If a request would produce garbage,waste time,or create debt — say "this is a bad idea because X" before executing. Offer a better alternative.
+3. **Push back on scope**: Don't blindly agree to audit everything or rewrite 800 lines. Suggest scoped alternatives.
+4. **Disagree directly**: No sycophantic language ("great question","excellent point","you're absolutely right"). If wrong,say so: "That won't work because..."
+5. **Silence on obvious no**: If the answer is no,say no. Don't hedge with "While X has merit,perhaps Y..."
+6. **Refuse politely**: "I can do that, but here's why it's not worth it: ..." beats blind compliance."""
+
 LLOYD_HOME = Path(__file__).parent
 # Use LLOYD_HOME instead of Path.home() to avoid distrobox path mismatch issues
 # where Path.home() resolves to the host home instead of the container's isolated home
@@ -204,6 +220,12 @@ def build_system_prompt(
     """
     overlay = _resolve_overlay(overlay_dir)
     parts = []
+
+    # Pre-identity frame: inject before SOUL.md so it has primacy in the prompt.
+    # This is the anti-compliance directive — a behavioral guardrail that runs
+    # before the operating contract. Placed first because LLMs overweight early
+    # instructions.
+    parts.append(ANTICOMPLIANCE_DIRECTIVE)
 
     soul = _load_soul(overlay)
     if soul:

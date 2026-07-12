@@ -8,6 +8,7 @@ line as checked in-place (so the same topic isn't re-enqueued).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -26,11 +27,18 @@ _MAX_ENQUEUE_PER_TICK = 3
 _ITEM_RE = re.compile(r"^\s*-\s+\[ \]\s+(.+?)\s*$", re.MULTILINE)
 
 
-async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+def _scan_queue_file() -> list[str]:
+    """Read the research-queue file and extract unchecked topics."""
     if not QUEUE_FILE.exists():
-        return
+        return []
     content = QUEUE_FILE.read_text(encoding="utf-8")
-    items = _ITEM_RE.findall(content)
+    return _ITEM_RE.findall(content)
+
+
+async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+    # File read + regex — small today, but keep it off the event loop on
+    # principle so the scheduler tick can never block HTTP/UI.
+    items = await asyncio.to_thread(_scan_queue_file)
     if not items:
         return
     enqueued = 0

@@ -1,4 +1,4 @@
-[updated 2025-07-18, refreshed 2026-06-07, extended 2026-07-11, 2026-07-14, major update 2026-07-16, OmniRobotHome update 2026-07-27]
+[updated 2025-07-18, refreshed 2026-06-07, extended 2026-07-11, 2026-07-14, major update 2026-07-16, OmniRobotHome update 2026-07-27, fused consolidation 2026-07-28, PosA-VLA + PointACT update 2026-08-04, InCoM + 3D HAMSTER + MobileManiBench update 2026-09-10]
 
 # Real-Time VLM-Based Perception for Mobile Manipulation: Fused Depth-Pose-Segmentation Pipeline
 
@@ -46,7 +46,19 @@ Real-time VLM-based perception for mobile manipulation fuses monocular depth est
 
 - **Phase-aware MoE action experts (PAMAE)**: PAMAE (arXiv:2606.27144) replaces the shared action expert in VLA models with a sparse mixture of phase-aware action experts, preserving the pretrained VLA backbone and flow-matching interface. Phase-aware experts specialize in different manipulation phases (approach, grasp, place) and are routed dynamically, improving reliability for long-horizon mobile manipulation tasks [22].
 
+- **Pose-conditioned anchor attention (PosA-VLA)**: PosA-VLA (arXiv:2512.03724) addresses VLA action inconsistency rooted in spatially uniform perception fields. It anchors visual attention via pose-conditioned supervision — generating two complementary anchors (task-relevant anchor at interaction moments, end-effector anchor at each timestep) that break uniform perception and dynamically maintain spatial correspondence between robot pose and visual scene. Operates on lightweight backbones without auxiliary perception modules (no segmentation or grounding networks), achieving faster, smoother trajectories with fewer action steps. Demonstrates strong generalization across background/lighting/distractor changes [29].
+
+- **Multi-scale point-action interaction (PointACT)**: PointACT (arXiv:2605.21414, RSS 2026) proposes a dual-system 3D-aware VLA policy integrating hierarchical 3D point cloud representations directly into action decoding. It uses a frozen VLM backbone for semantic encoding, incorporates point tokens into a dedicated point-action expert, and applies multi-scale point-action attention with bottleneck window self-attention. Point tokens evolve to densely attend to both local geometric detail and global scene structure, providing explicit depth-pose-segmentation fusion via 3D point representations [30].
+
 - **Real-world fused perception testbed (OmniRobotHome)**: OmniRobotHome (arXiv:2604.28197) provides a home-scale testbed with 48 hardware-synchronized cameras and 3 manipulators in a unified world frame. The stereo manipulation pipeline combines depth estimation, FoundationPose-based 6D tracking, and detector-based mask acquisition running at ~16 Hz — sufficient for closed-loop tracking of manipulated objects. The platform treats perception quality as an experimental variable, demonstrating that interaction quality degrades measurably as real-timeness, granularity, coverage, accuracy, forecasting, or memory is weakened [23].
+
+- **Geometry-grounded VLMs (G2VLM)**: G2VLM (InternRobotics, CVPR 2026) represents a shift from treating geometry as an auxiliary input to making it a core grounding modality — the model jointly reasons about "what is this object" and "where is it in 3D space" through interleaved spatial-semantic reasoning, predicting 3D geometry (depth, structure-from-motion) alongside spatial reasoning tasks [24].
+
+- **3D Gaussian Splatting as unified perception representation**: SemGauss-SLAM (IROS 2025) merges depth, pose, and segmentation into a single dense 3D scene representation by adding semantic labels to Gaussian Splatting maps — producing a unified structure that simultaneously encodes geometry (depth proxy), object locations (pose proxy), and semantics (segmentation). GSWorld extends this to closed-loop sim-to-real training. Feeding 3DGS as VLA conditioning remains untested for real-robot manipulation [25].
+
+- **Mobile manipulation at scale (AnywhereVLA)**: AnywhereVLA (arXiv:2509.21006) demonstrates a real-time mobile manipulation architecture by splitting perception/VLA (SmolVLA, 450M params) on Jetson Orin NX and SLAM/control on an Intel NUC, achieving multi-room mobile manipulation at real-time frequencies — the closest published architecture to a production fused pipeline [26].
+
+- **Memory-augmented VLA prompting (MAP-VLA + MemoryVLA)**: MAP-VLA (arXiv:2511.09516, ICRA 2026) and MemoryVLA introduce cognition-memory-action frameworks that augment VLA perception with persistent memory, enabling the fused pipeline to accumulate and reuse perception knowledge across manipulation episodes — addressing the single-shot limitation of current perception-to-action loops [27].
 
 ## Details
 
@@ -148,6 +160,18 @@ PAMAE improves long-horizon mobile manipulation reliability by replacing the mon
 - Preserves pretrained VLA backbone while improving phase-specific reliability
 - Demonstrates that manipulating the action expert architecture (not just perception) is critical for robust mobile manipulation
 
+### Geometry-Grounded VLMs (G2VLM)
+
+G2VLM (InternRobotics, CVPR 2026) represents a shift from treating geometry as an auxiliary input module to making it a core grounding modality. The model jointly predicts 3D geometry (depth maps, structure-from-motion reconstructions) alongside spatial reasoning tasks, interleaving "what is this object" with "where is it in 3D space" reasoning. This is conceptually distinct from FALCON's token-injection approach — G2VLM bakes geometric understanding into the VLM backbone rather than augmenting it post-hoc.
+
+### 3D Gaussian Splatting as Unified Perception Representation
+
+SemGauss-SLAM (IROS 2025) merges depth, pose, and segmentation into a single dense 3D scene representation by adding semantic labels to Gaussian Splatting maps. The resulting 3DGS representation simultaneously encodes geometry (depth proxy), object locations (pose proxy), and semantics (segmentation) — making it the closest realization of a fully fused perception pipeline. GSWorld extends this to closed-loop sim-to-real training. Feeding 3DGS as direct VLA conditioning remains untested for real-robot manipulation.
+
+### Mobile Manipulation at Scale (AnywhereVLA)
+
+AnywhereVLA (arXiv:2509.21006) demonstrates a deployable architecture for real-time mobile manipulation: perception/VLA (SmolVLA, 450M params) runs on Jetson Orin NX while SLAM/control runs on an Intel NUC. The split enables multi-room mobile manipulation at real-time frequencies and provides the closest published architecture to a production fused depth-pose-segmentation pipeline.
+
 ### Failure Modes
 
 - **Transparent objects**: Glass, acrylic, water produce depth predictions 15–40 cm off ground truth.
@@ -156,6 +180,73 @@ PAMAE improves long-horizon mobile manipulation reliability by replacing the mon
 - **Close-range limitations**: Performance degrades below 10 cm, outside typical training distribution depth ranges.
 - **Implicit depth ambiguity**: Evo-Depth-style implicit depth extraction from multi-view RGB suffers from baseline ambiguity — large baselines (>2m) reduce accuracy as depth cues become less distinct between views.
 - **Pose token discretization error**: Pose-VLA's discrete pose tokens introduce quantization error when representing continuous SE(3) transformations, particularly for fine-grained manipulations requiring sub-centimeter precision.
+
+### Pose-Conditioned Anchor Attention (PosA-VLA)
+
+PosA-VLA identifies the root cause of VLA action inconsistency: existing models use a **spatially uniform perception field** that lacks explicit mechanisms to focus on task-relevant regions and the end-effector simultaneously. Without pose-conditioned attention, VLAs reactively scan the entire scene rather than proactively maintaining spatial focus.
+
+**Architecture**: Generates two complementary anchors:
+- **Task-relevant anchor**: Activated at moments when end-effector state changes (indicating interaction with a region of interest)
+- **End-effector anchor**: Tracks end-effector position at each timestep
+
+These anchors serve as pose-conditioned spatial priors that transform continuous 3D interaction space into localized 2D supervision, breaking the model's spatially uniform perception. The anchors dynamically update as the robot moves, maintaining spatial correspondence between pose and visual scene.
+
+**Key advantage**: Built on lightweight backbones with no auxiliary perception modules (no dedicated segmentation or grounding networks needed), making it efficient for deployment while producing smoother, more stable trajectories with fewer action steps than OpenVLA, Smol-VLA, DexGraspVLA, or π₀.
+
+### Multi-Scale Point-Action Interaction (PointACT)
+
+PointACT (RSS 2026) takes a fundamentally different approach: rather than injecting depth/pose/segmentation tokens into the VLM or action head, it represents the entire scene as **hierarchical 3D point cloud** inputs to a dedicated point-action expert.
+
+**Architecture**:
+- Frozen VLM backbone for semantic encoding
+- Point tokens extracted from 3D point cloud representations
+- **Multi-scale point-action attention** via bottleneck window self-attention: point tokens densely attend to local geometric detail and global scene structure
+- Action tokens evolve through multi-scale interaction with point tokens
+
+**Fusion insight**: By using 3D point representations as the unified geometric primitive, PointACT naturally integrates depth, pose, and spatial structure without requiring separate perception modules — the point cloud itself carries all three signals.
+
+### Decoder-Free Pixel-Level Segmentation (SimpleSeg)
+
+SimpleSeg (Moonshot AI, arXiv:2601.19228) eliminates the need for a separate segmentation decoder by reframing segmentation as a sequence generation problem: the MLLM directly predicts a sequence of point coordinates delineating object boundaries, entirely within its language space. This is the simplest path to pixel-level VLM perception — no decoder heads, no additional training branches, just point prediction as text. Key implications for fused pipelines: segmentation becomes a native VLM capability that can be called alongside depth and pose estimation without separate models, simplifying the architecture and reducing latency.
+
+### Intent-Driven Perception (InCoM)
+
+InCoM (arXiv:2602.23024v4) proposes an intent-driven perception framework for mobile manipulation that infers latent motion intent to dynamically reweight multi-scale perceptual features. The system performs stage-adaptive allocation of perceptual attention — redirecting more compute to the perception modality most needed at each manipulation stage (e.g., depth for approach, pose for grasp, segmentation for placement). This addresses a key efficiency gap in fused pipelines where all three modalities run at fixed bandwidth regardless of task phase.
+
+### 3D-Aware Hierarchical Planning (3D HAMSTER)
+
+3D HAMSTER (arXiv:2606.31329v1) bridges planning and control in hierarchical VLM pipelines by operating in 3D space rather than 2D image space. The paper identifies that 2D representations introduce ambiguity under 3D-sensitive shifts (occlusion, viewpoint changes) and proposes a 3D-aware planning architecture that fuses depth, pose, and semantic information in a hierarchical representation. This addresses the fundamental 2D-to-3D grounding gap that limits fused perception pipelines.
+
+### Mobile Manipulation Benchmarking (MobileManiBench)
+
+MobileManiBench (arXiv:2602.05233) provides a benchmark pipeline built on NVIDIA Isaac Sim that autonomously generates diverse manipulation trajectories with rich multi-modal annotations: language instructions, multi-view RGB-depth-segmentation images, synchronized object/robot states and actions. The dataset supports model verification for mobile manipulation — a critical missing piece for evaluating fused perception-to-action pipelines on mobile platforms.
+
+### 3D Spatial Reasoning Foundation (SpatialVLM)
+
+SpatialVLM (Google DeepMind, CVPR 2024) demonstrates that VLMs' limited spatial reasoning is a data problem, not an architecture problem. By automatically generating 2 billion VQA examples on 10 million real-world images — lifting 2D images into metric-scale 3D point clouds — they co-train a VLM that achieves:
+- 37.2% of quantitative distance estimates within 0.5x–2x of ground truth
+- Strong qualitative spatial VQA outperforming baselines by large margins
+- Chain-of-thought spatial reasoning by orchestrating the SpatialVLM with an LLM
+- Dense reward annotation for open-vocabulary robotic tasks (monotonically decreasing distance estimation for RL reward signals)
+
+This establishes that internet-scale spatial data synthesis is the foundation for VLMs to reason about geometry quantitatively — a prerequisite for fused depth-pose-segmentation pipelines to produce meaningful spatial actions.
+
+### Unified Embodied Agent Framework (HoloAgent-0)
+
+HoloAgent-0 (arXiv:2606.23565) provides a unified framework for long-horizon mobile manipulation by composing navigation and perception skills through a common command/status interface. For perception, it integrates HoloNavi for scene understanding and HoloBrain for local manipulation skills, with 3D spatial memory enabling persistent scene understanding across extended manipulation sequences. This demonstrates how fused perception can be integrated into a broader agent architecture where navigation and manipulation share perception resources.
+
+### Spatio-Temporal Reasoning with Memory (RoboStream)
+
+RoboStream (arXiv:2603.12939) weaves spatio-temporal reasoning with persistent memory into VLM-based planners for long-horizon manipulation. It outperforms existing VLM-based planners across all settings, demonstrating that spatio-temporal reasoning and persistent memory are essential for robust mobile manipulation. The system segments instructions into atomic commands with persistent spatial memory, enabling the perception pipeline to maintain context across extended manipulation sequences.
+
+### Zero-Shot Mobile Manipulation (OK-Robot)
+
+OK-Robot (Meta) combines three primary subsystems for zero-shot pick-and-place in novel environments:
+1. **Open-vocabulary object navigation**: VLM-driven detection guides the robot to target objects
+2. **RGB-D grasping module**: Fuses depth and visual features for grasping planning
+3. **Dropping heuristic system**: Determines safe drop locations
+
+This demonstrates that VLM-based perception can be combined with conventional grasping modules to achieve zero-shot mobile manipulation without full end-to-end VLA training.
 
 ## Open Questions
 
@@ -169,6 +260,17 @@ PAMAE improves long-horizon mobile manipulation reliability by replacing the mon
 - Can VLM-inferred physical priors (Phys2Real) be combined with fused perception pipelines for real-time dynamic object manipulation?
 - How do geometric inductive biases (G^3VLA ray embeddings) compare to spatial token injection (FALCON) in terms of transferability across robot platforms?
 - Can MolmoAct2-level open-source VLA models be fine-tuned with fused perception heads for specific mobile manipulation deployments?
+- **3DGS-as-perception-replacement**: Can 3D Gaussian Splatting maps serve as the sole perception representation for mobile manipulation, replacing separate depth maps, pose estimates, and segmentation masks? SemGauss-SLAM shows the representation is possible; feeding it as VLA conditioning is untested.
+- **Monocular depth metric calibration**: How do we calibrate monocular depth for manipulation without LiDAR or stereo — using known object priors, IMU fusion, or self-supervised calibration through grasping feedback? No system has demonstrated robust metric depth from monocular RGB alone in uncalibrated environments.
+- **Cross-modal consistency guarantees**: When depth, pose, and segmentation disagree (e.g., depth suggests an object is 2m away, pose suggests it's on a surface 1.5m away), how does the pipeline resolve conflicts? A consistency-aware fused architecture is an open design problem.
+- **Active perception for pose refinement**: Can the robot actively move the camera to improve pose estimates of occluded objects — choosing viewpoints that simultaneously improve depth, pose, and segmentation?
+- **Perception-to-action latency budget**: How much of the total perception-to-action latency budget is consumed by the fused perception pipeline vs. VLA inference? Understanding this split is needed for real-time systems design.
+- **SimpleSeg decoder-free segmentation**: Can point-sequence prediction entirely replace decoder-based segmentation heads in fused pipelines? SimpleSeg shows it works as a standalone method, but its integration with depth and pose estimation modules remains untested.
+- **Spatial reasoning data scale**: How much synthetic spatial VQA data is sufficient? SpatialVLM used 2 billion examples; does performance saturate, or does more data continue to improve quantitative spatial reasoning for manipulation?
+- **HoloAgent-0 composability**: Can the unified command/status interface between HoloNavi and HoloBrain be generalized to other navigation + perception skill compositions?
+- **Intent-driven resource allocation (InCoM)**: Can perception bandwidth be dynamically re-routed between depth, pose, and segmentation based on manipulation stage? InCoM shows stage-adaptive attention works, but whether it generalizes across task types and robot morphologies is untested.
+- **3D planning space for fused perception (3D HAMSTER)**: Can fused perception pipelines eliminate the 2D-to-3D ambiguity gap entirely by operating natively in 3D space? 3D HAMSTER demonstrates this reduces occlusion/viewpoint failures, but the computational cost of 3D representations vs. 2D image-space approaches is unmeasured.
+- **Benchmark coverage (MobileManiBench)**: Can Isaac Sim-based benchmarking produce mobile manipulation datasets with the multi-modal annotation richness needed to train fused perception pipelines end-to-end? The current benchmark has rich annotations but coverage of real-world edge cases (lighting, novel objects, dynamic scenes) is limited.
 
 ## Related
 
@@ -178,6 +280,10 @@ PAMAE improves long-horizon mobile manipulation reliability by replacing the mon
 - [[Semantic Segmentation Robotics]]
 - [[Mobile Manipulation]]
 - [[Edge AI for Robotics]]
+- [[Real-time SLAM Integration with VLA Policies]]
+- [[Multi-Modal Grounding: Language-to-Action Mapping]]
+- [[VLA Edge Deployment: Qwen2.5-VL, Mobile-VideoGPT, SmolVLM]]
+- [[Online Fine-Tuning for VLA Models]]
 
 ## Sources
 
@@ -204,8 +310,17 @@ PAMAE improves long-horizon mobile manipulation reliability by replacing the mon
 21. LA4VLA — vision-agnostic language-action pretraining for plug-and-play perception [arxiv.org/abs/2606.27295]
 22. PAMAE — phase-aware Mixture-of-Experts action routing for long-horizon manipulation [arxiv.org/abs/2606.27144]
 23. OmniRobotHome — room-scale multi-camera testbed for real-time fused perception [arxiv.org/abs/2604.28197]
-24. MoMani Benchmark — large-scale automated benchmark for long-horizon mobile manipulation [emergentmind.com/topics/momani-benchmark]
+24. G2VLM — geometry-grounded VLM with unified 3D reconstruction & spatial reasoning, CVPR 2026 [github.com/InternRobotics/G2VLM]
+25. SemGauss-SLAM — dense semantic Gaussian Splatting SLAM, IROS 2025; GSWorld extends to closed-loop sim-to-real
+26. AnywhereVLA — real-time mobile manipulation with Jetson Orin + NUC split [arxiv.org/abs/2509.21006]
+27. MAP-VLA — memory-augmented prompting for VLA manipulation [arxiv.org/abs/2511.09516]; MemoryVLA — cognition-memory-action framework [github.com/G-U-O/memvla]
+28. MoMani Benchmark — large-scale automated benchmark for long-horizon mobile manipulation [emergentmind.com/topics/momani-benchmark]
+29. PosA-VLA — pose-conditioned anchor attention for consistent VLA action generation [arxiv.org/abs/2512.03724]
+30. PointACT — multi-scale point-action interaction via hierarchical 3D point clouds, RSS 2026 [arxiv.org/abs/2605.21414]
+31. InCoM — intent-driven perception with stage-adaptive multi-scale perceptual attention for mobile manipulation [arxiv.org/abs/2602.23024]
+32. 3D HAMSTER — 3D-aware hierarchical planning bridging VLM planning and control [arxiv.org/abs/2606.31329]
+33. MobileManiBench — Isaac Sim-based benchmark for mobile manipulation with multi-modal trajectory annotations [arxiv.org/abs/2602.05233]
 
 ## Confidence
 
-0.84: Core architectural claims (FALCON token injection, OpenVLA fusion, Depth Anything V2 performance) are well-supported by published papers with concrete numbers. Previous extensions (Perceptio, CogVLA, Phys2Real, G^3VLA, MolmoAct2, IROS) bring in 2025–2026 developments with new evidence. The July 2026 update adds four major architectures: TwinBrainVLA (asymmetric dual-stream, resolving catastrophic forgetting via AsyMoT), LingBot-VLA/LingBot-Depth (self-supervised masked depth modeling with cross-modal RGB-Depth alignment), EchoVLA (declarative memory for long-horizon mobile manipulation), and the World Action Models survey (unifying depth/pose/segmentation via Render-and-Decode latent codebooks). Confidence increased from 0.82 due to TwinBrainVLA's explicit decoupling of semantic vs embodied perception streams (validating the knowledge insulation hypothesis from CogVLA) and LingBot-Depth's metric-scale preservation (addressing close-range depth limitations). The WAM survey provides a formal unifying framework across perception modules. Confidence remains tempered by the field's rapid evolution and fragmented evaluation protocols — no single paper demonstrates a complete fused depth-pose-segmentation pipeline operating at 20+ Hz on edge hardware for mobile manipulation end-to-end.
+0.85: Core architectural claims (FALCON token injection, OpenVLA fusion, Depth Anything V2 performance) are well-supported by published papers with concrete numbers. The expanded 2026 update now covers 33 distinct architectures/systems spanning spatial token injection, geometric inductive bias, asymmetric dual-stream VLAs, declarative memory, intent-driven perception, and 3D-aware planning. Confidence increased slightly (from 0.84) due to InCoM's explicit stage-adaptive perceptual allocation (validating the hypothesis that fused pipelines should reweight modality bandwidth by task phase) and MobileManiBench's rich multi-modal annotations (establishing benchmark infrastructure for evaluating end-to-end fused pipelines). Confidence remains tempered by: (a) no single paper demonstrates a complete fused depth-pose-segmentation pipeline at 20+ Hz on edge hardware for mobile manipulation end-to-end; (b) field evolution is rapid with fragmented evaluation protocols; (c) 3DGS-as-VLA-conditioning remains untested on real robots.
