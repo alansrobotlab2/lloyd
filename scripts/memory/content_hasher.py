@@ -65,6 +65,8 @@ class ContentHasher:
         if not current_hash:
             return True  # Can't read = treat as changed
         stored = self._hashes.get(key, {})
+        if isinstance(stored, str):
+            return stored != current_hash  # legacy format: bare hash string
         return stored.get("sha256") != current_hash
 
     def get_changed_files(self, paths: list[Path]) -> list[Path]:

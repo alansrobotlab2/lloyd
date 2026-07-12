@@ -13,6 +13,7 @@ moves the best ones into ~/obsidian/lloyd/bench/ for actual evaluation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -69,7 +70,10 @@ def _recent_ledger_losers(days: int = 7, limit: int = 5) -> list[dict]:
 
 
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
-    losers = _recent_ledger_losers()
+    # _recent_ledger_losers reads and json-parses the full ledger.jsonl
+    # (tens of MB) line by line — blocking I/O + CPU. Keep it off the shared
+    # event loop so it can't stall HTTP/UI. See [[project_gap_fill_event_loop_freeze]].
+    losers = await asyncio.to_thread(_recent_ledger_losers)
     if not losers:
         return
     enqueued = 0

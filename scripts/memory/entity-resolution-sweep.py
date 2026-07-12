@@ -613,20 +613,22 @@ def apply_merges(
         )
 
     # ── Update alias table
-    if rebuild_aliases:
-        # Rebuild from existing table so we don't lose aliases from prior sweeps.
-        # (The "rebuild" semantics: add fresh normalization coverage on top of
-        #  what's already there, not wipe-start.)
-        new_aliases: dict[str, str] = dict(aliases)
-    else:
-        new_aliases = dict(aliases)
+    # Always filter out self-referential noise entries on each apply run.
+    # Per skill guardrail: any entry where normalize_full(alias) ==
+    # normalize_full(canonical) is pipeline noise.
+    new_aliases = {
+        k: v for k, v in aliases.items()
+        if k.strip().lower() != v.strip().lower()
+    }
 
     for variant, canonical in variant_to_canonical.items():
         new_aliases[variant.lower()] = canonical
         # Also ensure exact case variants resolve
         new_aliases[variant] = canonical
 
-    # Canonicals should self-resolve (identity)
+    # Canonicals should self-resolve (identity) — these are useful for the
+    # lookup path (alias_lower -> canonical) so we keep them, but only for
+    # entities actually involved in this sweep's merges.
     for canonical in set(variant_to_canonical.values()):
         new_aliases[canonical.lower()] = canonical
 

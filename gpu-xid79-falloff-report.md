@@ -1,18 +1,20 @@
 # RTX PRO 6000 Blackwell — recurring Xid 79 "GPU has fallen off the bus" under sustained compute
 
-**Prepared:** 2026-06-21 · **Host:** goliath · **Reporter contact:** gestalt73@gmail.com
+**Prepared:** 2026-06-21 · **Last updated:** 2026-07-01 · **Host:** goliath · **Reporter contact:** gestalt73@gmail.com
 
 ## Summary
 
 A single **NVIDIA RTX PRO 6000 Blackwell Workstation Edition** repeatedly drops off the
 PCIe bus (Xid 79 → Xid 154 "OS Reboot required") under sustained local LLM-inference
-load. The fault has occurred **9 times in the 17 days from 2026-06-04 to 2026-06-21**
-(≈ one every ~1.9 days), every time on driver/GSP **610.43.02**. Each event is
-unrecoverable without a full reboot/power-cycle. The failure is **not** tied to a
-specific process, time of day, the display path, PCIe gen, or core temperature, and
-persists with the board power limit already capped to 500 W. The signature matches
-several other unresolved Blackwell reports (see *Related reports*), none of which have
-an NVIDIA response or fix as of this date.
+load. The fault has occurred **11 times in the 27 days from 2026-06-04 to 2026-07-01**
+(≈ one every ~1.9 days under unclamped load), every time on driver/GSP **610.43.02**.
+Each event is unrecoverable without a full reboot/power-cycle. The failure is **not** tied
+to a specific process, time of day, the display path, PCIe gen, core temperature, the PSU,
+or case airflow, and persists with the board power limit capped to 500 W. The card is
+stable **only** when both power (400 W) and graphics clock (≤ 2400 MHz) are clamped
+*below rated spec*; at its rated full-power/full-clock envelope it falls off the bus within
+hours to ~2 days. The signature matches several other unresolved Blackwell reports (see
+*Related reports*), none of which have an NVIDIA response or fix as of this date.
 
 ## System configuration
 
@@ -71,10 +73,14 @@ NVRM: GPU0 _intrServiceStallCommonCheckBegin: Failed GPU reg read : 0xffffffff. 
 | 7 | 2026-06-18 15:02:34 | 79 → 154 | chrome |
 | 8 | 2026-06-19 04:48:25 | 79 → 154 | chrome |
 | 9 | 2026-06-21 08:18:52 | 79 → 154 | chrome |
+| 10 | 2026-06-25 17:25:41 | 79 → 154 | (none) — GSP RPC timeout `0x0000000f`; deliberate full-speed/unclamped load test |
+| 11 | 2026-07-01 12:18:06 | 79 → 154 | (none) — 500 W / clocks unlocked, revamped airflow; ~5 h 20 m after boot |
 
 Precursor (same uptime as #9): `2026-06-19 15:25:23  Xid 31 MMU Fault, name=VLLM::EngineCor, GPCCLIENT_T1_2 @ 0x23_17000000, FAULT_PDE`.
 
-All 9 events occurred under driver/GSP **610.43.02**, VBIOS **98.02.81.00.07**.
+All events occurred under driver/GSP **610.43.02**, VBIOS **98.02.81.00.07**. Events #1–9
+were logged at PCI **01:00** (card's prior slot); #10–11 at PCI **41:00** after the card
+was moved (same physical unit — see *Topology change*).
 
 ## What has been ruled out
 
@@ -111,10 +117,13 @@ All 9 events occurred under driver/GSP **610.43.02**, VBIOS **98.02.81.00.07**.
   contact-resistance cause. A `-pl 500` average cap does not constrain these transients,
   consistent with it not having fixed the fault. **Decisive test: swap to a modern ATX
   3.1 PSU with a native 12V-2x6 cable.**
-- **Board-level (chipset/VRM) thermal** — unobservable here (no NVML memory/VRM sensor)
-  but considered *unlikely* on this rig: workstation WRX80 board with heatsinked/actively
-  cooled chipset, generous slot spacing, large case with forced airflow — unlike the
-  cramped consumer AM5 boards where the #369440 airflow fix applied.
+- **Board-level (chipset/VRM) thermal** — unobservable here (no NVML memory/VRM sensor),
+  and now **effectively ruled out**: case airflow was revamped and the card re-tested at
+  500 W with clocks unlocked (core 81–82 °C). It fell off the bus again after ~5 h 20 m
+  (event #11, 2026-07-01) → improved airflow did not resolve the fault, unlike the
+  cramped consumer AM5 boards where the #369440 airflow fix applied. This rig is already a
+  workstation WRX80 board with heatsinked/actively cooled chipset, generous slot spacing,
+  and a large case with forced airflow.
 
 ## Mitigations applied / planned (frequency-reducers; none eliminate the fault)
 
@@ -147,6 +156,13 @@ All 9 events occurred under driver/GSP **610.43.02**, VBIOS **98.02.81.00.07**.
   - **Current state is risky:** card is at 500 W with clocks **unlocked** — the same
     envelope that crashed 9×. The proven clamp (esp. the clock lock) should be restored,
     pinned to the correct GPU.
+- **AIRFLOW TEST RESULT (event #11, 2026-07-01):** with case airflow revamped and the card
+  run at 500 W / clocks unlocked (core 81–82 °C), it fell off the bus again after
+  ~5 h 20 m — confirming the fault is **independent of cooling** and that the effective
+  lever remains the clock/transient clamp, not temperature. Signature: Xid 79 → 154 at PCI
+  41:00; the whole host (all 3 GPUs) was forced to reboot. A boot-time corrected AER
+  event was also logged on the *01:00* RTX 3090's link (not on the PRO 6000, not
+  time-correlated with the drop).
 
 > **TOPOLOGY CHANGE (2026-06-25):** host is now **multi-GPU** — GPU0 = RTX 3090 @ PCI
 > 01:00, **GPU1 = RTX PRO 6000 @ PCI 41:00** (UUID GPU-71ed578a-…-3a1d), GPU2 = RTX 3090
@@ -177,7 +193,8 @@ driver (610.43.02), confirming the fault is **not** fixed by current firmware/dr
 Requesting acknowledgment, a bug ID, and guidance on whether a VBIOS/GSP firmware
 update is planned.
 
-**For RMA / vendor:** a single unit falling off the PCIe bus 9 times in 17 days under
-nominal thermal and power conditions, with the documented mitigations (power cap,
-reduced load) ineffective, is requested for inspection/replacement. Full kernel logs
-(`journalctl`) for all 9 events are available on request.
+**For RMA / vendor:** a single unit falling off the PCIe bus 11 times in 27 days under
+nominal thermal and power conditions, with every documented mitigation (power cap, reduced
+load, PSU replacement, revamped airflow) ineffective and the card **only stable when
+clamped below its rated spec**, is requested for inspection/replacement. Full kernel logs
+(`journalctl`) for all 11 events are available on request.

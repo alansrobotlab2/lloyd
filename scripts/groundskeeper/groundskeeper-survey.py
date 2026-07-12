@@ -1005,34 +1005,52 @@ def compute_health_score(items, all_files, basenames, rel_paths):
 
 def main():
     """Run the survey and produce queue JSON."""
+    import time as _t
     print("Groundskeeper Survey Starting...")
-    
+
+    _log = lambda m: print(f"  {_t.strftime('%H:%M:%S')} {m}", flush=True)
+
     existing_queue = load_existing_queue()
     all_files = get_all_md_files()
+    _log(f"Files indexed: {len(all_files)}")
     basenames, rel_paths = build_file_index(all_files)
-    
+
     # Filter files for enrichment checks
     knowledge_files = [f for f in all_files if f.startswith(os.path.join(VAULT_ROOT, 'knowledge/'))]
     projects_files = [f for f in all_files if f.startswith(os.path.join(VAULT_ROOT, 'projects/'))]
-    
+
     all_items = []
-    
+
+    t0 = _t.time()
     print("  Scanning broken links...")
-    all_items.extend(check_broken_links(existing_queue, basenames, rel_paths, all_files))
-    
+    items = check_broken_links(existing_queue, basenames, rel_paths, all_files)
+    all_items.extend(items)
+    _log(f"broken_links: {len(items)} items in {_t.time()-t0:.1f}s")
+
+    t0 = _t.time()
     print("  Scanning stale facts...")
-    all_items.extend(check_stale_facts(existing_queue))
-    
+    items = check_stale_facts(existing_queue)
+    all_items.extend(items)
+    _log(f"stale_facts: {len(items)} items in {_t.time()-t0:.1f}s")
+
+    t0 = _t.time()
     print("  Scanning memory hygiene...")
-    all_items.extend(check_memory_hygiene(existing_queue))
-    
+    items = check_memory_hygiene(existing_queue)
+    all_items.extend(items)
+    _log(f"memory_hygiene: {len(items)} items in {_t.time()-t0:.1f}s")
+
+    t0 = _t.time()
     print("  Scanning orphan files...")
-    all_items.extend(check_orphan_files(existing_queue, all_files, basenames, rel_paths))
-    
+    items = check_orphan_files(existing_queue, all_files, basenames, rel_paths)
+    all_items.extend(items)
+    _log(f"orphan_files: {len(items)} items in {_t.time()-t0:.1f}s")
+
+    t0 = _t.time()
     print("  Scanning thin profiles...")
     thin_profiles, enrich_thin_profiles = check_thin_profiles(existing_queue, knowledge_files, projects_files)
     all_items.extend(thin_profiles)
     all_items.extend(enrich_thin_profiles)
+    _log(f"thin_profiles: {len(thin_profiles)+len(enrich_thin_profiles)} items in {_t.time()-t0:.1f}s")
     
     print("  Scanning stale relations...")
     all_items.extend(check_stale_relations(existing_queue, all_files))
