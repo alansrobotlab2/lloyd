@@ -1,4 +1,0 @@
-## [2026-06-29] research | Online fine-tuning for VLA models — continual learning with experience replay — medium-research, 10 sources, knowledge/ai/vla-online-fine-tuning-continual-learning.md (frontmatter added, verified)
-## [2026-06-26] research | Cross-embodiment policy transfer — medium-research, 12 sources, knowledge/robotics/cross-embodiment-policy-transfer.md
-## [2026-07-03] research | Self-improving agent architectures — medium-research, 5 sources, knowledge/ai/self-improving-agent-architectures.md
-## [2026-07-08] research | Cross-domain policy transfer sim-to-real manipulation — quick-research, 3 new sources added (S2GS, continuum robot sim-to-real, MoMani), knowledge/robotics/cross-domain-policy-transfer-sim-to-real-manipulation.md + knowledge/research/2026-07-cross-domain-policy-transfer-sim-to-real-manipulation.md
