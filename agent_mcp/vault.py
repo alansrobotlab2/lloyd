@@ -569,6 +569,43 @@ def _resolve_case_insensitive(rel_path: str) -> Optional[Path]:
     return current if current.is_file() else None
 
 
+def _normalize_vault_path(path: str) -> tuple[str | None, str | None]:
+    """Reduce a caller-supplied path to a vault-relative POSIX path.
+
+    Callers routinely pass the documented ``~/obsidian/...`` or absolute
+    ``/home/.../obsidian/...`` forms. ``Path.__truediv__`` does NOT expand
+    ``~`` (only ``expanduser()`` does), so ``VAULT / "~/obsidian/x"`` silently
+    creates a literal ``~`` directory *inside* the vault — the escape guard
+    passes because the path is still under VAULT. That produced the recurring
+    stray ``~/obsidian/`` tree (2026-07 incident). Strip the known vault
+    prefixes and reject anything that points outside the vault.
+
+    Returns ``(relative_path, None)`` on success or ``(None, error_message)``.
+    """
+    raw = path.strip()
+    if not raw:
+        return None, "path is required"
+    vault_str = str(VAULT)
+    p = raw
+    if p.startswith("~/obsidian/"):
+        p = p[len("~/obsidian/"):]
+    elif p in ("~/obsidian", "~"):
+        p = ""
+    elif p == vault_str or p.startswith(vault_str + "/"):
+        p = p[len(vault_str):]
+    elif p.startswith("/") or p.startswith("~"):
+        # Absolute path outside the vault, or a ~/<other-root> home path
+        # (e.g. ~/lloyd/...). These are never valid vault targets.
+        return None, f"path must be vault-relative or under {vault_str}, got {raw!r}"
+    p = p.lstrip("/")
+    if not p:
+        return None, "path resolves to the vault root, not a file"
+    parts = Path(p).parts
+    if "~" in parts or ".." in parts:
+        return None, f"invalid path segment in {raw!r}"
+    return p, None
+
+
 def _audit_write(path: str, byte_count: int) -> None:
     try:
         AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -582,9 +619,9 @@ def _audit_write(path: str, byte_count: int) -> None:
 # ── Tool handlers ────────────────────────────────────────────────────────────
 
 def _vault_read(params: dict) -> dict:
-    path = params.get("path", "").strip()
-    if not path:
-        return _err("path is required", ErrorCode.MISSING_PARAM)
+    path, norm_err = _normalize_vault_path(params.get("path", ""))
+    if norm_err:
+        return _err(norm_err, ErrorCode.MISSING_PARAM if "required" in norm_err else ErrorCode.PATH_ESCAPE)
     try:
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
@@ -608,10 +645,10 @@ def _vault_read(params: dict) -> dict:
 
 
 def _vault_write(params: dict) -> dict:
-    path = params.get("path", "").strip()
+    path, norm_err = _normalize_vault_path(params.get("path", ""))
+    if norm_err:
+        return _err(norm_err, ErrorCode.MISSING_PARAM if "required" in norm_err else ErrorCode.PATH_ESCAPE)
     content = params.get("content", "")
-    if not path:
-        return _err("path is required", ErrorCode.MISSING_PARAM)
     try:
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
@@ -879,10 +916,10 @@ def _vault_recall(params: dict) -> dict:
 @app.list_tools()
 async def list_tools():
     return [
-        Tool(name="vault_read", description="Read a file from the obsidian vault by vault-relative path.", inputSchema={
-            "type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "num_lines": {"type": "integer"}}, "required": ["path"]}),
-        Tool(name="vault_write", description="Write content to a vault file. Audit-logged.", inputSchema={
-            "type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
+        Tool(name="vault_read", description="Read a file from the obsidian vault. Path is vault-relative (e.g. 'memory/learnings/DAILY_NOTES.md'); a leading '~/obsidian/' is stripped automatically.", inputSchema={
+            "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "start_line": {"type": "integer"}, "num_lines": {"type": "integer"}}, "required": ["path"]}),
+        Tool(name="vault_write", description="Write content to a vault file. Audit-logged. Path is vault-relative (e.g. 'memory/learnings/DAILY_NOTES.md'); a leading '~/obsidian/' is stripped automatically.", inputSchema={
+            "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "content": {"type": "string"}}, "required": ["path", "content"]}),
         Tool(name="vault_overview", description="Get vault statistics: file counts per segment.", inputSchema={
             "type": "object", "properties": {"detail": {"type": "string", "enum": ["summary", "hubs"]}}}),
         Tool(name="vault_search", description="Hybrid BM25+vector search across the obsidian vault.", inputSchema={
