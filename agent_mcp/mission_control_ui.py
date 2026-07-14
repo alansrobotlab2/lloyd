@@ -164,7 +164,7 @@ async def list_tools():
                 "  autonomy           → numeric task id (opens edit modal)\n"
                 "  workers            → source name (filters queue)\n"
                 "  memory             → entity name, OR vault path like "
-                "\"agents/lloyd/SOUL.md\" — paths open the file in the explorer\n"
+                "\"lloyd/SOUL.md\" — paths open the file in the explorer\n"
                 "  tools              → MCP server id (expands server)\n"
                 "  skills             → skill name (selects + opens viewer)\n"
                 "  services           → service unit name (expands)\n"
