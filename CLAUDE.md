@@ -13,7 +13,7 @@ Lloyd is a fully local AI agent. It runs its own in-process agent loop (`app/har
 
 ## Service Management
 
-Lloyd runs under **supervisord inside the `lloyd` distrobox container**. We are already inside the container — use supervisorctl directly:
+Lloyd runs **directly on the host** under supervisord (installed as the `agent-supervisord.service` systemd `--user` unit; supervisord itself is the uv tool at `~/.local/bin/supervisord`). There is no longer any distrobox container in the loop. Use supervisorctl directly:
 
 ```bash
 /home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-backend

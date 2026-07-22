@@ -25,7 +25,7 @@ if [[ ! -f "$MODEL" ]]; then
   exit 1
 fi
 
-export LD_LIBRARY_PATH="$PROJECT_DIR/llm/llama-b8746-unsloth:/run/host/usr/lib:/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$PROJECT_DIR/llm/llama-b8746-unsloth:/usr/lib:/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 \
 "$LLAMA_SERVER" \

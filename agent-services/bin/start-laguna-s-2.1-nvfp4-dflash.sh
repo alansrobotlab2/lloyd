@@ -93,7 +93,7 @@ if [[ ! -f "$DRAFT_DIR/config.json" ]]; then
 fi
 
 export PATH="$VLLM_VENV/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
-export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDA_HOME="/opt/cuda"
 export NVCC_CCBIN=/usr/bin/g++-15
 # Multi-GPU host: PCI_BUS_ID order is index 0 = RTX 3090 (24GB),

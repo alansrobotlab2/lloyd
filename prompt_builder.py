@@ -29,8 +29,8 @@ Before processing the user's request,ask yourself: "Is this a good idea?" If not
 6. **Refuse politely**: "I can do that, but here's why it's not worth it: ..." beats blind compliance."""
 
 LLOYD_HOME = Path(__file__).parent
-# Use LLOYD_HOME instead of Path.home() to avoid distrobox path mismatch issues
-# where Path.home() resolves to the host home instead of the container's isolated home
+# Anchor paths to the repo location rather than Path.home() so they resolve
+# regardless of who/where the process runs as.
 _CANON_SOUL_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "SOUL.md"
 _CANON_MEMORIES_DIR = LLOYD_HOME.parent / "obsidian" / "lloyd"
 _CANON_SKILLS_DIRS = [

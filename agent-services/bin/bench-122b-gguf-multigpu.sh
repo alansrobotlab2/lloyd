@@ -13,7 +13,7 @@ BENCH="$PROJECT_DIR/llm/llama.cpp/build/bin/llama-bench"
 MODEL="$PROJECT_DIR/llm/models/Qwen3.5-122B-A10B-UD-IQ4-NL/Qwen3.5-122B-A10B-UD-IQ4_NL-00001-of-00003.gguf"
 RESULTS_DIR="$PROJECT_DIR/benchmarks"
 
-export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/lib64:$PROJECT_DIR/llm/llama.cpp/build/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/lib64:$PROJECT_DIR/llm/llama.cpp/build/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 mkdir -p "$RESULTS_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)

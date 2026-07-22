@@ -28,7 +28,7 @@ fi
 echo "==> Starting 122B with TurboQuant (${KV_DTYPE})"
 
 export PATH="$VLLM_VENV/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
-export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDA_HOME="/opt/cuda"
 export CUDA_VISIBLE_DEVICES=0
 export VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=1073741824

@@ -46,8 +46,8 @@ if [[ ! -f "$MODEL_DIR/config.json" ]]; then
   exit 1
 fi
 
-export PATH="$SGLANG_VENV/bin:/opt/cuda/bin:/run/host/usr/bin:/usr/bin:/usr/sbin:$PATH"
-export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PATH="$SGLANG_VENV/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
+export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDA_HOME="/opt/cuda"
 # PCI bus order: index 0 = RTX 5090 (secondary), index 1 = RTX PRO 6000 Blackwell.
 export CUDA_DEVICE_ORDER=PCI_BUS_ID

@@ -14,7 +14,7 @@ MODEL_DIR="$PROJECT_DIR/llm/models/Sehyo-Qwen3.5-122B-A10B-NVFP4"
 RESULTS_DIR="$PROJECT_DIR/benchmarks"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDA_HOME="/opt/cuda"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=1073741824
