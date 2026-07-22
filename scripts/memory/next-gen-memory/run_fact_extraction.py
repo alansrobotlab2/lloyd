@@ -78,7 +78,8 @@ def main():
                     category = result.get("category", "general")
                     fact_file = extractor.write_fact_file(entity, category, result)
                     total_facts += len(result["facts"])
-                    print(f"  + {len(result['facts'])} facts -> {fact_file.name}")
+                    if fact_file:
+                        print(f"  + {len(result['facts'])} facts -> {fact_file.name}")
                 
                 processed_docs.add(doc_path)
                 

@@ -124,6 +124,9 @@ def repair_file(path: Path) -> tuple[str, str | None]:
 
     name = repaired.get("name") or path.parent.name
     repaired["name"] = name
+    # OKF v0.1: every concept file needs a non-empty `type`.
+    if not str(repaired.get("type", "") or "").strip():
+        repaired["type"] = "skill"
     if not repaired.get("description"):
         # no description anywhere — tags still make it non-DEAD; leave it
         pass
@@ -139,6 +142,7 @@ def repair_file(path: Path) -> tuple[str, str | None]:
         + body.lstrip("\n")
     )
     if fm is not None and fm.get("description") and fm.get("tags") \
+            and fm.get("type") \
             and "SIGNAL:TASK_COMPLETE" not in text \
             and not body_stripped.startswith("---"):
         return "ok", None

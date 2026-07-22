@@ -27,6 +27,12 @@ import uuid
 from mcp.server import Server
 from mcp.types import Tool
 
+try:
+    from app.entity_naming import looks_like_junk_entity as _is_junk_entity
+except Exception:  # pragma: no cover - defensive import
+    def _is_junk_entity(name: str) -> bool:
+        return False
+
 from agent_mcp._shared import (
     FACTS_ROOT,
     ErrorCode,
@@ -117,6 +123,12 @@ def _fact_add(params: dict) -> dict:
     fact_text = params.get("fact", "").strip()
     if not raw_entity or not category or not fact_text:
         return _err("entity, category, and fact are required", ErrorCode.MISSING_PARAM)
+    if _is_junk_entity(raw_entity):
+        return _err(
+            f"'{raw_entity}' looks like a filename or code fragment, not an entity; "
+            "use a concept/project/person name",
+            ErrorCode.INVALID_PARAM,
+        )
     confidence = float(params.get("confidence", 0.9))
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:

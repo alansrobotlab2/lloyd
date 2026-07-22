@@ -1,13 +1,20 @@
 # RTX PRO 6000 Blackwell — recurring Xid 79 "GPU has fallen off the bus" under sustained compute
 
-**Prepared:** 2026-06-21 · **Last updated:** 2026-07-01 · **Host:** goliath · **Reporter contact:** gestalt73@gmail.com
+**Prepared:** 2026-06-21 · **Last updated:** 2026-07-21 · **Host:** goliath · **Reporter contact:** gestalt73@gmail.com
 
 ## Summary
 
 A single **NVIDIA RTX PRO 6000 Blackwell Workstation Edition** repeatedly drops off the
 PCIe bus (Xid 79 → Xid 154 "OS Reboot required") under sustained local LLM-inference
-load. The fault has occurred **11 times in the 27 days from 2026-06-04 to 2026-07-01**
-(≈ one every ~1.9 days under unclamped load), every time on driver/GSP **610.43.02**.
+load. The fault has occurred **14 times in the 47 days from 2026-06-04 to 2026-07-21**
+(≈ one every ~1.9 days under unclamped load), on driver/GSP **610.43.02** and, for the
+latest two events, **610.43.03** — a driver update did not resolve it. Event #14 also
+establishes the fault is **workload-independent within vLLM**: it fired on a completely
+different model (Laguna S 2.1 118B MoE), engine build (vLLM 0.25.1), and venv than
+events #1–13 (Qwen dense/MoE on the 0.19–0.23 stack). As of 2026-07-18 the
+fault is **reproducible on demand in ~11 minutes** with a documented saturation workload
+(see *Controlled reproduction*), eliminating the intermittency problem for any bench
+validation.
 Each event is unrecoverable without a full reboot/power-cycle. The failure is **not** tied
 to a specific process, time of day, the display path, PCIe gen, core temperature, the PSU,
 or case airflow, and persists with the board power limit capped to 500 W. The card is
@@ -24,8 +31,8 @@ hours to ~2 days. The signature matches several other unresolved Blackwell repor
 | GPU serial | 1794625038151 |
 | GPU UUID | GPU-71ed578a-0901-df7b-cbe7-3aadde3b3a1d |
 | VBIOS | 98.02.81.00.07 |
-| GSP firmware | 610.43.02 |
-| Driver | nvidia-open (open kernel modules) 610.43.02 |
+| GSP firmware | 610.43.02 (events #1–12); 610.43.03 (events #13–14) |
+| Driver | nvidia-open (open kernel modules) 610.43.02 → 610.43.03 (fault persists on both) |
 | CUDA | 13.3 |
 | Kernel | 7.0.12-arch1-1 (Arch Linux) |
 | CPU | AMD Ryzen Threadripper PRO 5955WX (16-core) |
@@ -75,12 +82,75 @@ NVRM: GPU0 _intrServiceStallCommonCheckBegin: Failed GPU reg read : 0xffffffff. 
 | 9 | 2026-06-21 08:18:52 | 79 → 154 | chrome |
 | 10 | 2026-06-25 17:25:41 | 79 → 154 | (none) — GSP RPC timeout `0x0000000f`; deliberate full-speed/unclamped load test |
 | 11 | 2026-07-01 12:18:06 | 79 → 154 | (none) — 500 W / clocks unlocked, revamped airflow; ~5 h 20 m after boot |
+| 12 | 2026-07-03 ~07:33:40 | (inferred) | hard lock; journal cut off mid-line with no shutdown sequence and **no Xid flushed to disk** — kernel died before writing the fault. Collateral: an in-flight config-file save was left 0 bytes on btrfs (rename committed, data extents lost) |
+| 13 | 2026-07-18 21:08:48 | 79 → 154 | (none) — **deliberate controlled reproduction** under saturation load; driver **610.43.03**; Xid 154 issued for **all three GPUs** (01:00, 41:00, 61:00). See *Controlled reproduction* below |
+| 14 | 2026-07-21 16:07:09 | 79 → 154 | (none) — first event on the **Laguna S 2.1** workload (118B-A8B MoE NVFP4 + DFlash, vLLM 0.25.1, new `.venvs/vllm-laguna` stack): fired ~2 min after a ~50-min DFlash bench sweep (three cold boots, concurrent `ignore_eos` batches up to 8×32K ctx) while the follow-on supervised restart was loading weights. One 96K bench stream returned zero tokens just before sweep end — possibly the first symptom. Xid 154 again issued for all three GPUs; clamp state at fault time unverified |
 
 Precursor (same uptime as #9): `2026-06-19 15:25:23  Xid 31 MMU Fault, name=VLLM::EngineCor, GPCCLIENT_T1_2 @ 0x23_17000000, FAULT_PDE`.
 
-All events occurred under driver/GSP **610.43.02**, VBIOS **98.02.81.00.07**. Events #1–9
-were logged at PCI **01:00** (card's prior slot); #10–11 at PCI **41:00** after the card
-was moved (same physical unit — see *Topology change*).
+Events #1–12 occurred under driver/GSP **610.43.02**; events #13–14 under **610.43.03**.
+VBIOS **98.02.81.00.07** throughout. Events #1–9 were logged at PCI **01:00** (card's
+prior slot); #10–14 at PCI **41:00** after the card was moved (same physical unit — see
+*Topology change*).
+
+## Controlled reproduction (event #13, 2026-07-18)
+
+The fault was reproduced **on demand, from idle, in ~11 minutes** — the first
+non-spontaneous occurrence. Configuration: driver **610.43.03** (open modules), power
+limit at the **default 600 W**, clocks **unlocked**, vLLM 0.23.1rc1.dev1218 serving
+Qwen3.6-27B-NVFP4 (MTP speculative decode).
+
+**Discriminating observation — duty cycle matters, not just load.** In the ~40 minutes
+immediately prior, the card ran 13 back-to-back agentic-inference tasks (bursty
+generation with tool-execution gaps): peaks of 100 % util / **595 W** / **89 °C**, zero
+faults, no throttle flags. The card then survived only ~11 minutes of *gap-free*
+saturation: **32 concurrent chat completions with `ignore_eos`, 3 000 tokens each,
+re-issued continuously** (steady state ≈ 92 % util, 470–487 W, throughput steady at
+8 completions/min, 24 000 tokens/min, zero request errors until the drop).
+
+Thermal/throttle timeline (15 s samples of `utilization.gpu, power.draw,
+temperature.gpu, clocks_event_reasons.active`):
+
+```
+20:56–21:04   steady climb 80 → 87 °C @ ~475 W, throttle mask 0x0 throughout
+21:05:11      100 %, 487 W, **92 °C**, mask 0x0000000000000020  ← sw_thermal_slowdown asserts (first time ever observed on this card)
+21:05:26      throttle recovery: 81 °C, mask back to 0x0; temp re-climbs to 86 °C
+21:08:42      last good sample: 93 %, 472 W, 86 °C, mask 0x0
+21:08:48      Xid 79 — GPU has fallen off the bus
+21:09:18+     nvidia-smi: "Unable to determine the device handle for GPU1: 0000:41:00.0: Unknown Error"
+```
+
+```
+Jul 18 21:08:48 kernel: NVRM: Xid (PCI:0000:41:00): 79, GPU has fallen off the bus.
+Jul 18 21:08:48 kernel: NVRM: Xid (PCI:0000:61:00): 154, GPU recovery action changed from 0x0 (None) to 0x2 (OS Reboot)
+Jul 18 21:08:48 kernel: NVRM: Xid (PCI:0000:41:00): 154, GPU recovery action changed from 0x0 (None) to 0x2 (OS Reboot)
+Jul 18 21:08:48 kernel: NVRM: Xid (PCI:0000:01:00): 154, GPU recovery action changed from 0x0 (None) to 0x2 (OS Reboot)
+Jul 18 21:08:48 kernel: NVRM: krcRcAndNotifyAllChannels_IMPL: RC all channels for critical error 79.
+Jul 18 21:08:48+ kernel: NVRM: _issueRpcAndWait: rpcSendMessage failed with status 0x0000000f  (storm, ongoing)
+```
+
+Application-side signature: the vLLM EngineCore died with `torch.AcceleratorError: CUDA
+error: unspecified launch failure` (cudaErrorLaunchFailure), first surfacing at the
+speculative-decode sync point (`gpu_model_runner._prepare_inputs →
+num_accepted_tokens_event.synchronize()`); the API server then hung in shutdown.
+
+Interpretation (two readings, not mutually exclusive, both consistent with the data):
+
+1. **Board-level thermal:** the drop followed the card's first-ever excursion into
+   sw_thermal_slowdown (92 °C core) by ~3.5 min. Core temp at the moment of the drop was
+   only 86 °C — but this card exposes no memory/VRM junction temperature, so a board
+   hotspot that continued heat-soaking during sustained saturation (while the gappy
+   agent workload always got cooling breathers) fits: **core temperature is not the
+   trigger variable; sustained duty cycle is.**
+2. **Transient/clock envelope:** the throttle event itself introduces large clock/voltage
+   swings (2 797 MHz ↔ throttled), i.e. exactly the transient envelope already implicated
+   by the clamp results (stable at `-lgc 0,2400`, crashes unlocked).
+
+Either way, the practical repro recipe for a bench or RMA validation is simply:
+*sustained saturated inference with no idle gaps, stock settings — fault in ≈ 11 min.*
+The exact load generator used is preserved at `~/lloyd/scripts/xid79_repro_heat_soak.py`
+(32 async workers, `ignore_eos`, 3 000 tokens/request, against any OpenAI-compatible
+endpoint).
 
 ## What has been ruled out
 
@@ -92,10 +162,13 @@ was moved (same physical unit — see *Topology change*).
   and #9 fired with the display fully active.
 - **PCIe Gen5 signal integrity** — link runs at platform-max **Gen4 x16**, not a
   downshift.
-- **Steady-state core thermal** — GPU core reads **52–59 °C** around the faults; no
-  `hw_thermal_slowdown` / `sw_thermal_slowdown` flags ever asserted. (Note: this card
-  exposes **no** memory/VRM-junction temperature via NVML, so board-level/VRM thermal
-  cannot be observed in software and is *not* ruled out — see #369440.)
+- **Steady-state core thermal** — GPU core reads **52–59 °C** around events #1–11; no
+  throttle flags asserted in any spontaneous event. *(Revised by event #13: under a
+  deliberate gap-free saturation soak the card did reach 92 °C / sw_thermal_slowdown and
+  dropped off the bus 3.5 min later at 86 °C core — so while instantaneous core temp is
+  clearly not the trigger, **sustained duty cycle** is now an established aggravator.
+  This card exposes **no** memory/VRM-junction temperature via NVML, so board-level/VRM
+  thermal remains unobservable in software and is *not* ruled out — see #369440.)*
 - **PCIe link fault as primary cause** — no DPC containment at the drop (platform
   firmware reports `_OSC: platform does not support [AER LTR DPC]`). Corrected
   Data-Link-Layer AER errors do appear on the GPU's upstream root port `0000:00:01.1`,
@@ -188,13 +261,15 @@ was moved (same physical unit — see *Topology change*).
 ## Request
 
 **For NVIDIA / upstream:** another RTX PRO 6000 Blackwell data point for the open Xid 79
-/ GSP-fall-off-bus cluster, on a *newer* VBIOS (98.02.81.00.07) and the latest open
-driver (610.43.02), confirming the fault is **not** fixed by current firmware/driver.
-Requesting acknowledgment, a bug ID, and guidance on whether a VBIOS/GSP firmware
-update is planned.
+/ GSP-fall-off-bus cluster, now confirmed on **two consecutive drivers (610.43.02 and
+610.43.03)** and VBIOS 98.02.81.00.07, and now **reproducible on demand in ~11 minutes**
+(see *Controlled reproduction*). Requesting acknowledgment, a bug ID, and guidance on
+whether a VBIOS/GSP firmware update is planned.
 
-**For RMA / vendor:** a single unit falling off the PCIe bus 11 times in 27 days under
-nominal thermal and power conditions, with every documented mitigation (power cap, reduced
-load, PSU replacement, revamped airflow) ineffective and the card **only stable when
-clamped below its rated spec**, is requested for inspection/replacement. Full kernel logs
-(`journalctl`) for all 11 events are available on request.
+**For RMA / vendor:** a single unit falling off the PCIe bus **13 times in 44 days**,
+with every documented mitigation (power cap, reduced load, PSU replacement, revamped
+airflow, driver update) ineffective and the card **only stable when clamped below its
+rated spec**. The failure is no longer intermittent-only: a documented stock-settings
+workload (sustained saturated inference, no idle gaps) reproduces it from idle in
+≈ 11 minutes, so it **will fail a bench test**. Full kernel logs (`journalctl`) for all
+events are available on request.

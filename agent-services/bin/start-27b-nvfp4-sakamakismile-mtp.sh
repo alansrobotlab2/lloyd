@@ -34,9 +34,10 @@ set -euo pipefail
 #     re-quant ships no preprocessor_config.json.
 #   - --quantization modelopt: explicit per the model card; auto-detect may pick
 #     compressed-tensors fallback and lose the SM120 fast path.
-#   - --max-num-seqs 2: load-bearing per the model card. --max-num-seqs >=4 under
-#     kv-cache fp8 + speculative n=3 + max-model-len 262144 silently OOMs during
-#     cuda-graph capture on vLLM 0.19.1rc1.
+#   - --max-num-seqs 4 (2026-07-18, was 2): 2 was load-bearing on vLLM 0.19.1rc1
+#     — >=4 under kv-cache fp8 + speculative n=3 + max-model-len 262144 silently
+#     OOM'd during cuda-graph capture. Retesting on the 0.23 nightly stack:
+#     capture + smoke test passed at 4; revert to 2 if the OOM recurs.
 #   - --max-num-batched-tokens 8192: DeltaNet block-size constraint requires >4288.
 #   - --speculative-config method=qwen3_5_mtp, num_speculative_tokens=3: canonical
 #     per the model card. Single MTP layer applied recursively 3x per draft pass;
@@ -50,6 +51,10 @@ set -euo pipefail
 #     default for the Qwen3.5 thinking family; reusing here since this is the
 #     same base model.
 #   - --performance-mode interactivity: +10-15% single-user decode, sub-second TTFT.
+#   - --gpu-memory-utilization 0.95 (2026-07-18, was 0.80): primary is now the
+#     only tenant on the 96GB card, so the extra ~14GB goes to KV/prefix cache.
+#     0.95 matches the other Blackwell scripts and the -tuned variant of this
+#     model verified it stable.
 #
 # Weights ~19 GiB on disk (single model.safetensors: ~18 GiB NVFP4 main +
 # ~850 MiB BF16 MTP/conv1d/lm_head). On the 96 GiB card at gpu-util 0.95 that
@@ -98,10 +103,10 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --quantization modelopt \
   --tensor-parallel-size 1 \
   --max-model-len 262144 \
-  --max-num-seqs 2 \
+  --max-num-seqs 4 \
   --enable-chunked-prefill \
   --max-num-batched-tokens 8192 \
-  --gpu-memory-utilization 0.80 \
+  --gpu-memory-utilization 0.90 \
   --scheduling-policy priority \
   --kv-cache-dtype fp8_e4m3 \
   --attention-backend FLASHINFER \
