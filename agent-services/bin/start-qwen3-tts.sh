@@ -22,7 +22,7 @@ fi
 export PYTHONUNBUFFERED=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
-export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/lib64:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/lib64:${LD_LIBRARY_PATH:-}"
 export TTS_BACKEND=optimized
 export TTS_CONFIG="$QWEN3_TTS_DIR/config.yaml"
 export PORT=8090

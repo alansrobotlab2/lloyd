@@ -173,7 +173,7 @@ if [[ ! -f "$MODEL_DIR/config.json" ]]; then
 fi
 
 export PATH="$VLLM_VENV/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
-export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDA_HOME="/opt/cuda"
 # PCI bus order: index 0 = RTX 5090 (35B), index 1 = RTX PRO 6000 Blackwell (122B).
 # Matches the convention in start-llm-35b.sh; without explicit CUDA_DEVICE_ORDER

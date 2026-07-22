@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # Launch Qwen3.5-122B-A10B-NVFP4 via SGLang on RTX PRO 6000 Blackwell (SM120)
 #
-# Run this INSIDE the lloyd distrobox container, e.g.:
-#   distrobox enter lloyd
+# Runs directly on the host (either standalone or via supervisord):
 #   ~/lloyd/scripts/run-sglang.sh
-#
-# Or via supervisord (already runs inside lloyd).
 #
 # Usage:
 #   ./scripts/run-sglang.sh            # TP=1, 65K context (single GPU)
@@ -43,9 +40,9 @@ echo ""
 # CUDA env — mirrors the working start-llm-122b.sh pattern
 export CUDA_HOME="/opt/cuda"
 export CUDA_VISIBLE_DEVICES=0
-export PATH="$VENV_DIR/bin:/opt/cuda/bin:/run/host/usr/bin:/usr/bin:/usr/sbin:$PATH"
+export PATH="$VENV_DIR/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
 
-export LD_LIBRARY_PATH="/run/host/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # --- SM120 / Blackwell required env vars ---
 # export SGLANG_ENABLE_SPEC_V2=True     # Only needed with --speculative-algo NEXTN
