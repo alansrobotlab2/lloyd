@@ -1,10 +1,10 @@
 ---
 segment: agents
-generated: 2026-07-11 23:25 PST
-data_range: 2026-07-09 to 2026-07-11
+generated: 2026-07-19 02:30 PST
+data_range: 2026-07-17 to 2026-07-19
 ---
 
-# Signal Report — 2026-07-11
+# Signal Report — 2026-07-19
 
 ## Queued Signals (met threshold)
 
@@ -12,46 +12,35 @@ data_range: 2026-07-09 to 2026-07-11
 
 | ID | Date | Type | Category | Description | Source |
 |----|------|------|----------|-------------|--------|
-| 1 | 2026-07-11 | correction | tool-use | Tool path mismatch: `~/obsidian/sessions/` doesn't exist — enriched session data access must account for migrated paths | corrections.md |
-| 2 | 2026-07-09 | correction | communication | Verbose responses — "Don't write 700-word paragraphs," target 3-4 sentences | corrections.md |
-| 3 | 2026-07-09 | correction | tool-use | Tool path failures: `ls`/`nvidia-smi` not found in Bash — prefer `command -v` checks before running CLI tools | corrections.md |
-| 4 | 2026-07-09 | correction | tool-use | Research should be delegated (subagent + specific task), not done inline | corrections.md |
+| 1  | 2026-07-17 | preference | response_style | Conciseness signal: "bad lloyd" for verbose/emoji-heavy output — direct terse output required | daily note |
+| 2  | 2026-07-18 | preference | accuracy | Version number precision expectation — immediately corrected "GR00T n1.6" to "n1.7" | daily note |
+| 3  | 2026-07-17 | pattern | delegation | Subagent orchestration for batch YouTube processing worked without correction | daily note |
 
 ### Inferred (met 2+ threshold)
 
 | ID | Date | Type | Category | Description | Frequency | Source |
 |----|------|------|----------|-------------|-----------|--------|
-| 1 | 2026-07-09/11 | pattern | tool-use | Path resolution failures across multiple tool types (Bash, session mounts) | 3x | extraction + corrections |
-| 2 | 2026-07-09/10 | pattern | knowledge | Knowledge graph bloat from prior reflection run (26 session entities, 349+ neighbors) | 2x | extraction |
+| 1  | 2026-07-17/18 | pattern | research | Multi-source cross-validation sequence (YouTube → GitHub → arXiv) used consistently | 4x | daily notes |
+| 2  | 2026-07-17/18 | pattern | infrastructure | Full system checks (services, worker queue, disk) performed twice daily without error | 3x | daily notes |
+| 3  | 2026-07-16-18 | pattern | workflow | Batch YouTube processing (8+ videos) completes without correction | 2x | daily notes |
 
 ## Pending Signals (below threshold)
 
-- Knowledge store path confusion (`~/lloyd/` vs `~/obsidian/`) — 1 occurrence, resolved by explicit correction on 2026-07-09
+- Authenticated URL submission pattern (Claude.ai, Discord, Obsidian login walls) — 5 occurrences but no behavioral correction needed, just predictable outcome | monitor
+- Research burst pattern (3-5 sessions in 15-20 min windows) — consistent but no correction signal | monitor
 
 ## Tool Failure Patterns
 
-- **Tool:** `Bash (ls/nvidia-smi)` — **Error type:** `command not found` — **Occurrences:** 2 — **Recommendation:** Always `command -v` before CLI tool use; use full paths for tools outside standard PATH
-- **Tool:** `sessions/ mount` — **Error type:** non-functional directory path — **Occurrences:** 1 — **Recommendation:** Update session data access paths to match actual vault structure (`memory/learnings/` or actual session storage)
-- **Tool:** inline research — **Error type:** research done directly instead of delegated — **Occurrences:** 1 — **Recommendation:** Always delegate complex research to `Task` subagent with specific task description
+- **Tool:** `browser_navigate` — **Error type:** Anti-bot measures on Amazon (cart access blocked) — **Occurrences:** 1 — **Recommendation:** Expect failure on anti-bot sites; no fix needed
+- **Tool:** `http_fetch` — **Error type:** Authenticated URLs return login walls (Claude.ai, Discord, Obsidian) — **Occurrences:** 5 — **Recommendation:** Document as known pattern, not a failure; suggest copy-paste alternatives
 
 ## Positive Patterns to Reinforce
 
-- **Pattern:** Correct browser research delegation — **Evidence:** 2026-07-10 explicit praise ("perfect") — **Action:** Preserve browser-subagent workflow pattern
-- **Pattern:** Correct memory store path identification — **Evidence:** 2026-07-09 explicit praise ("good lloyd") — **Action:** Reinforce `~/obsidian/` as canonical memory path
-- **Pattern:** Backlog task → session migration workflow — **Evidence:** 2026-07-11 "built on Lloyd's backlog task" — **Action:** Preserve multi-step workflow sequencing
-- **Pattern:** Implicit approval of suggestions — **Evidence:** 2026-07-10/11 "built on Lloyd's suggestion" — **Action:** Reinforce concise suggestion format that enables user follow-through
+- **Pattern:** Batch YouTube transcript extraction via `browser_evaluate` with `page.transcriptExtractor` — **Evidence:** 8 successful sessions — **Action:** Already codified in youtube-transcript skill
+- **Pattern:** Multi-source research sequences (YouTube → GitHub → arXiv per topic) — **Evidence:** 6 sessions — **Action:** Reinforce in deep-research skill
+- **Pattern:** Full system check via compound bash commands (services, worker queue, disk) — **Evidence:** 3 sessions — **Action:** Already working, no change needed
+- **Pattern:** 100+ day correction-free streak — **Evidence:** No user corrections since mid-May — **Action:** Maintain current behavior patterns
 
----
+## Summary
 
-## Summary for Downstream Jobs
-
-**Priority signals for Knowledge Consolidation (Job 2):**
-1. Communication: 3-4 sentence responses (over verbose paragraphs)
-2. Tool-use: `command -v` guard before Bash CLI calls
-3. Tool-use: Delegate research to subagents, not inline
-4. Path-resilience: Account for migrated/vault-specific paths
-
-**Priority signals for Config Application (Job 3):**
-1. Update session data paths in skill protocols
-2. Encode "3-4 sentence" rule in SOUL.md failure modes
-3. Add `command -v` guard to bash-error-handling skill
+Zero negative behavioral corrections in the data window. The conciseness signal from July 15 continues to be respected. All tool usage is functional with no new failure patterns requiring skill updates. The dominant pattern is high-throughput research bursts with consistent multi-source cross-validation — a workflow that consistently succeeds without correction.
