@@ -22,9 +22,13 @@ if str(_LLOYD_ROOT) not in sys.path:
     sys.path.insert(0, str(_LLOYD_ROOT))
 try:
     from app.entity_naming import normalize_and_register as _entity_normalize
+    from app.entity_naming import looks_like_junk_entity as _is_junk_entity
 except Exception:
     def _entity_normalize(name: str) -> str:  # fallback: pass-through
         return name
+
+    def _is_junk_entity(name: str) -> bool:  # fallback: never junk
+        return False
 
 # Try to import yaml, provide fallback if not available
 try:
@@ -330,12 +334,22 @@ class FactExtractor:
         # Alias-resolve + self-register. Safe on unknowns (pass-through).
         return _entity_normalize(entity)
     
-    def write_fact_file(self, entity: str, category: str, facts_data: dict) -> Path:
-        """Write or update a fact file."""
+    def write_fact_file(self, entity: str, category: str, facts_data: dict) -> Path | None:
+        """Write or update a fact file.
+
+        Returns the written path, or ``None`` when the entity is rejected as
+        junk (a leaked filename / code fragment — see
+        ``app.entity_naming.looks_like_junk_entity``).
+        """
         # Sanitize entity and category to prevent nested path creation
         entity = self._sanitize_entity(entity)
         category = self._sanitize_entity(category)
-        
+
+        # Skip leaked filenames / code fragments so they never become entity dirs.
+        if _is_junk_entity(entity):
+            print(f"  ⤫ skipped junk entity '{entity}' ({len(facts_data.get('facts', []))} facts dropped)")
+            return None
+
         entity_dir = self.facts_dir / entity
         entity_dir.mkdir(parents=True, exist_ok=True)
         
@@ -491,7 +505,8 @@ def extract_from_daily_notes():
             fact_file = extractor.write_fact_file(
                 entity, category, result
             )
-            print(f"  → Wrote {len(result['facts'])} facts to {fact_file.name}")
+            if fact_file:
+                print(f"  → Wrote {len(result['facts'])} facts to {fact_file.name}")
 
 
 if __name__ == "__main__":

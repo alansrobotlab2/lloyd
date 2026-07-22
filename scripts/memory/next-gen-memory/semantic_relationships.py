@@ -168,11 +168,18 @@ class SemanticRelationshipDiscoverer:
         
         for doc in self.documents:
             for tag in doc.get("tags", []):
-                tag_docs[tag].append(doc["path"])
+                tag_key = str(tag).strip() if not isinstance(tag, str) else tag.strip()
+                if tag_key:
+                    tag_docs[tag_key].append(doc["path"])
         
         # Find documents sharing 2+ tags
-        path_tag_map: Dict[str, Set[str]] = {doc["path"]: set(doc.get("tags", [])) 
-                                              for doc in self.documents}
+        path_tag_map: Dict[str, Set[str]] = {
+            doc["path"]: set(
+                str(t).strip() if not isinstance(t, str) else t.strip()
+                for t in doc.get("tags", []) if str(t).strip()
+            )
+            for doc in self.documents
+        }
         
         paths = list(path_tag_map.keys())
         for i, p1 in enumerate(paths):

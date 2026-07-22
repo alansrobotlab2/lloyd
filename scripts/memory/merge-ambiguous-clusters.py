@@ -6,7 +6,8 @@ from pathlib import Path
 from datetime import datetime
 
 VAULT = Path.home() / "obsidian"
-FACTS = VAULT / "facts"
+# Fact graph lives under ~/lloyd, NOT the vault (migrated 2026-06-03).
+FACTS = Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "facts"
 RELATIONS = FACTS / "_relationships.json"
 ALIASES = FACTS / "entity-aliases.json"
 

@@ -31,7 +31,8 @@ from typing import Optional
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 VAULT = Path.home() / "obsidian"
-FACTS_ROOT = VAULT / "facts"
+# Fact graph lives under ~/lloyd, NOT the vault (migrated 2026-06-03).
+FACTS_ROOT = Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "facts"
 TRAJECTORY_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
 PROPOSALS_FILE = Path.home() / "lloyd" / "_pipeline" / "conversation-relation-proposals.json"
 RELATIONS_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"

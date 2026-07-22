@@ -133,7 +133,9 @@ def rebuild_relations_index() -> dict:
     tag_docs = defaultdict(list)
     for doc in documents:
         for tag in doc.get("tags", []):
-            tag_docs[tag].append(doc["path"])
+            tag_key = str(tag).strip() if not isinstance(tag, str) else tag.strip()
+            if tag_key:
+                tag_docs[tag_key].append(doc["path"])
     
     tag_doc_sets = {tag: set(docs) for tag, docs in tag_docs.items()}
     all_tags = list(tag_docs.keys())
