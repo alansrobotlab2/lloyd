@@ -54,6 +54,23 @@ PENDING_IMPROVEMENTS_FILE = os.path.expanduser("~/lloyd/_pipeline/metrics/pendin
 MAX_NET_DELETED_LINES = 20
 MAX_CHURN_LINES = 80
 
+# Grader-coaching guard (validate_proposal check 6): the optimizer must not
+# write eval scaffolding into the live system prompt. 2026-07-22: a
+# 'TRACE:SKILL_LOADED' output-token mandate (introduced by the loop in vault
+# commit a5d6d79d) leaked into nearly every live response. Proposals whose
+# replacement text introduces benchmark references or mandates to emit
+# verification tokens/markers are queued for human review.
+GRADER_COACHING_PATTERNS = [
+    r"TRACE:",
+    r"\bbench_\d+",
+    r"\bbenchmarks?\b",
+    r"verification token",
+    r"\bINPUT_COUNT\b",
+    r"\bPLAN_COUNT\b",
+    r"\brubric\b",
+    r"\bgrader\b",
+]
+
 # Local LLM config
 LLM_ENDPOINT = "http://127.0.0.1:8096/v1/chat/completions"
 LLM_MODEL = "primary"
@@ -546,6 +563,7 @@ Analyze the metrics and system files. Identify the weakest metric and propose ON
 - Only modify: SOUL.md, AGENTS.md, or TOOLS.md
 - NEVER remove safety rules or boundaries
 - NEVER change task routing rules (those need human approval)
+- NEVER add benchmark names, grader/rubric references, or mandates to emit verification tokens or trace markers in responses — eval scaffolding must not leak into the live system prompt
 - Prefer small, targeted edits over rewrites
 
 ## Output Format
@@ -719,6 +737,18 @@ def validate_proposal(change: dict) -> tuple[bool, str]:
         return False, (f"diff too large: {removed + added} lines churned "
                        f"(cap {MAX_CHURN_LINES}) — large rewrites require "
                        f"human review")
+
+    # Check 6: grader-coaching guard. Eval scaffolding must not leak into
+    # the live prompt (2026-07-22: a TRACE:SKILL_LOADED token mandate got
+    # appended to nearly every live response). Reject proposals whose
+    # replacement introduces new benchmark/token-mandate references.
+    for pattern in GRADER_COACHING_PATTERNS:
+        new_hits = len(re.findall(pattern, replacement_text, re.IGNORECASE))
+        old_hits = len(re.findall(pattern, original_text, re.IGNORECASE))
+        if new_hits > old_hits:
+            return False, (f"grader-coaching guard: replacement introduces "
+                           f"'{pattern}' — eval scaffolding must not be "
+                           f"written into the live prompt")
 
     return True, "ok"
 
