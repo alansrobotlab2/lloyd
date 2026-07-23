@@ -89,8 +89,9 @@ except Exception as e:
     else:
         print("UNKNOWN: " + str(e)[:200])
 '''
+    uv_path = os.path.expanduser("~/.local/bin/uv")
     result = subprocess.run(
-        ["uv", "run", "--with", "yt-dlp", "python3", "-c", code,
+        [uv_path, "run", "--with", "yt-dlp", "python3", "-c", code,
          f"https://www.youtube.com/watch?v={video_id}"],
         capture_output=True, text=True, timeout=30,
     )
@@ -158,8 +159,9 @@ if info and 'entries' in info:
         }})
 print(json.dumps(videos))
 '''
+    uv_path = os.path.expanduser("~/.local/bin/uv")
     result = subprocess.run(
-        ["uv", "run", "--with", "yt-dlp", "python3", "-c", code],
+        [uv_path, "run", "--with", "yt-dlp", "python3", "-c", code],
         capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
@@ -198,7 +200,7 @@ segments = list(t)
 print(" ".join(s.text for s in segments))
 '''
     result = subprocess.run(
-        ["uv", "run", "--with", "youtube-transcript-api", "python3", "-c", code, video_id],
+        [uv_path, "run", "--with", "youtube-transcript-api", "python3", "-c", code, video_id],
         capture_output=True, text=True, timeout=30,
     )
     if result.returncode == 0:
@@ -356,8 +358,9 @@ print(json.dumps({
     "description": info.get("description", "")[:3000],
 }))
 '''
+    uv_path = os.path.expanduser("~/.local/bin/uv")
     result = subprocess.run(
-        ["uv", "run", "--with", "yt-dlp", "python3", "-c", code,
+        [uv_path, "run", "--with", "yt-dlp", "python3", "-c", code,
          f"https://www.youtube.com/watch?v={video_id}"],
         capture_output=True, text=True, timeout=30,
     )
