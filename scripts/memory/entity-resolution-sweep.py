@@ -297,19 +297,43 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
     # merged into their canonical partners.
     entities = list(set(degrees.keys()) | existing_dirs)
 
-    # Three-stage clustering:
-    #   Stage A: cluster by normalize_full (suffix-stripped) to surface candidates.
-    #   Stage B: cluster by normalize_punct (case+only) to catch space/hyphen/underscore variants
+    # Four-stage clustering:
+    #   Stage A: cluster by normalize_case (case-only) — these are always SAFE_CASE.
+    #            Process first so case-only variants don't get absorbed into
+    #            larger suffix-ambiguous clusters (e.g. "agent" vs "Agent" shouldn't
+    #            merge with "Agent Loop" into one AMBIGUOUS cluster).
+    #   Stage B: cluster by normalize_full (suffix-stripped) to surface candidates.
+    #   Stage C: cluster by normalize_punct (case+only) to catch space/hyphen/underscore variants
     #            that diverge under suffix stripping (e.g. "Auto Research" vs "Autoresearch").
-    #   Stage C: merge candidate sets, deduplicate, then classify tier.
-    clusters_by_full: dict[str, list[str]] = collections.defaultdict(list)
+    #   Stage D: merge candidate sets from B+C, deduplicate, then classify tier.
+
+    # Stage A: case-only clusters (processed independently, always SAFE_CASE)
+    clusters_by_case: dict[str, list[str]] = collections.defaultdict(list)
     for ent in entities:
+        key = normalize_case(ent)
+        if key:
+            clusters_by_case[key].append(ent)
+
+    case_only_clusters = [
+        sorted(v) for v in clusters_by_case.values() if len(v) > 1
+    ]
+
+    # Track which entities are already in case-only clusters
+    case_clustered: set[str] = set()
+    for variants in case_only_clusters:
+        case_clustered.update(variants)
+
+    # Stages B+C: suffix/punct clustering for remaining entities
+    remaining = [e for e in entities if e not in case_clustered]
+
+    clusters_by_full: dict[str, list[str]] = collections.defaultdict(list)
+    for ent in remaining:
         key = normalize_full(ent)
         if key:
             clusters_by_full[key].append(ent)
 
     clusters_by_punct: dict[str, list[str]] = collections.defaultdict(list)
-    for ent in entities:
+    for ent in remaining:
         key = normalize_punct(ent)
         if key:
             clusters_by_punct[key].append(ent)
@@ -329,8 +353,8 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
 
     # Build connected components from candidate edges
     visited = set()
-    dupe_clusters: list[list[str]] = []
-    for ent in entities:
+    suffix_clusters: list[list[str]] = []
+    for ent in remaining:
         if ent in visited or ent not in ent_to_candidates:
             continue
         # BFS to find connected component
@@ -346,31 +370,44 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
                 if neighbor not in visited:
                     queue.append(neighbor)
         if len(component) > 1:
-            dupe_clusters.append(component)
+            suffix_clusters.append(component)
+
+    # Combine: case-only clusters are always SAFE, suffix clusters are classified
+    dupe_clusters = case_only_clusters + suffix_clusters
 
     safe_merges: list[dict] = []
     ambiguous: list[dict] = []
     skipped: list[dict] = []
 
     for variants in dupe_clusters:
-        # Classify cluster-wide tier: take the most conservative pairwise tier.
-        pairwise_tiers = set()
-        for i, a in enumerate(variants):
-            for b in variants[i + 1 :]:
-                t, _ = classify_pair(a, b)
-                pairwise_tiers.add(t)
-        if "OTHER" in pairwise_tiers:
-            cluster_worst = "OTHER"
-        elif "SUFFIX_AMBIGUOUS" in pairwise_tiers:
-            cluster_worst = "SUFFIX_AMBIGUOUS"
-        elif "SUFFIX_SAFE" in pairwise_tiers:
-            cluster_worst = "SUFFIX_SAFE"
-        elif "PUNCT" in pairwise_tiers:
-            cluster_worst = "PUNCT"
-        elif "CASE" in pairwise_tiers:
+        # Case-only clusters are always SAFE_CASE — they were pre-separated
+        # in build_plan to avoid absorption into suffix-ambiguous clusters.
+        is_case_only = all(
+            normalize_case(a) == normalize_case(b)
+            for i, a in enumerate(variants)
+            for b in variants[i + 1 :]
+        )
+        if is_case_only:
             cluster_worst = "CASE"
         else:
-            cluster_worst = "IDENTICAL"
+            # Classify cluster-wide tier: take the most conservative pairwise tier.
+            pairwise_tiers = set()
+            for i, a in enumerate(variants):
+                for b in variants[i + 1 :]:
+                    t, _ = classify_pair(a, b)
+                    pairwise_tiers.add(t)
+            if "OTHER" in pairwise_tiers:
+                cluster_worst = "OTHER"
+            elif "SUFFIX_AMBIGUOUS" in pairwise_tiers:
+                cluster_worst = "SUFFIX_AMBIGUOUS"
+            elif "SUFFIX_SAFE" in pairwise_tiers:
+                cluster_worst = "SUFFIX_SAFE"
+            elif "PUNCT" in pairwise_tiers:
+                cluster_worst = "PUNCT"
+            elif "CASE" in pairwise_tiers:
+                cluster_worst = "CASE"
+            else:
+                cluster_worst = "IDENTICAL"
 
         canonical = pick_canonical(variants, degrees, existing_dirs)
         variant_degs = sorted(
@@ -413,6 +450,7 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
         "ambiguous": ambiguous,
         "skipped": skipped,
         "existing_dirs_count": len(existing_dirs),
+        "all_entities": sorted(entities),
     }
 
 
@@ -448,9 +486,17 @@ def _merge_facts_lists(a: list, b: list) -> list:
         if existing is None:
             seen[text] = fact
             continue
-        if float(fact.get("confidence", 0)) > float(existing.get("confidence", 0)):
+        try:
+            fact_conf = float(fact.get("confidence", 0))
+        except (TypeError, ValueError):
+            fact_conf = 0.0
+        try:
+            existing_conf = float(existing.get("confidence", 0))
+        except (TypeError, ValueError):
+            existing_conf = 0.0
+        if fact_conf > existing_conf:
             seen[text] = fact
-        elif float(fact.get("confidence", 0)) == float(existing.get("confidence", 0)):
+        elif fact_conf == existing_conf:
             if fact.get("created_at", "") > existing.get("created_at", ""):
                 seen[text] = fact
     return list(seen.values())
@@ -501,6 +547,8 @@ def apply_merges(
     aliases: dict[str, str],
     facts_root: Path,
     rebuild_aliases: bool,
+    existing_dirs: set[str] | None = None,
+    entities: list[str] | None = None,
 ) -> dict:
     """
     Execute all SAFE merges in the plan. Mutates rel_data and aliases in place.
@@ -613,19 +661,33 @@ def apply_merges(
         )
 
     # ── Update alias table
-    # Always filter out self-referential noise entries on each apply run.
-    # Per skill guardrail: any entry where normalize_full(alias) ==
-    # normalize_full(canonical) is pipeline noise.
-    new_aliases = {
-        k: v for k, v in aliases.items()
-        if k.strip().lower() != v.strip().lower()
-    }
+    if rebuild_aliases:
+        # Rebuild alias table from scratch: keep all existing aliases that
+        # are not noise (k.strip().lower() != v.strip().lower()), regardless
+        # of whether the canonical has a fact directory. This preserves
+        # legitimate alias mappings for entities without fact directories
+        # (e.g., entities that exist only in the relationship graph).
+        # Noise entries (case-only differences) are filtered out.
+        new_aliases = {
+            k: v for k, v in aliases.items()
+            if k.strip().lower() != v.strip().lower()
+        }
+    else:
+        # Filter existing aliases: keep only entries where the canonical has a
+        # fact directory (avoids stale entries for deleted entities).
+        # Filter case-only noise: k.strip().lower() == v.strip().lower() is noise.
+        if existing_dirs is None:
+            existing_dirs = {d.name for d in facts_root.iterdir() if d.is_dir()} if facts_root.exists() else set()
+        new_aliases = {
+            k: v for k, v in aliases.items()
+            if v in existing_dirs and k.strip().lower() != v.strip().lower()
+        }
 
+    # Add new aliases from this sweep's merges
     for variant, canonical in variant_to_canonical.items():
         new_aliases[variant.lower()] = canonical
         # Also ensure exact case variants resolve
         new_aliases[variant] = canonical
-
     # Canonicals should self-resolve (identity) — these are useful for the
     # lookup path (alias_lower -> canonical) so we keep them, but only for
     # entities actually involved in this sweep's merges.
@@ -754,7 +816,7 @@ def main() -> int:
     if alias_bak:
         print(f"  Backed up: {alias_bak}")
 
-    report = apply_merges(plan, rel_data, aliases, facts_root, args.rebuild_aliases)
+    report = apply_merges(plan, rel_data, aliases, facts_root, args.rebuild_aliases, existing_dirs=existing_dirs, entities=plan.get("all_entities", []))
 
     # Persist
     with rel_path.open("w") as f:
