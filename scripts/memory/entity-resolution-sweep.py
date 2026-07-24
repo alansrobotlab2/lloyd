@@ -661,26 +661,32 @@ def apply_merges(
         )
 
     # ── Update alias table
+    # Noise filter: per skill guardrail, any entry where normalize_full(alias)
+    # == normalize_full(canonical) is pipeline noise and must be filtered out.
+    # This catches case-only, punctuation-only, AND suffix-stripped variants
+    # that collapse to the same normalized form.
+    def _is_noise(k: str, v: str) -> bool:
+        return normalize_full(k) == normalize_full(v)
+
     if rebuild_aliases:
         # Rebuild alias table from scratch: keep all existing aliases that
-        # are not noise (k.strip().lower() != v.strip().lower()), regardless
+        # are not noise (normalize_full(k) != normalize_full(v)), regardless
         # of whether the canonical has a fact directory. This preserves
         # legitimate alias mappings for entities without fact directories
         # (e.g., entities that exist only in the relationship graph).
-        # Noise entries (case-only differences) are filtered out.
         new_aliases = {
             k: v for k, v in aliases.items()
-            if k.strip().lower() != v.strip().lower()
+            if not _is_noise(k, v)
         }
     else:
         # Filter existing aliases: keep only entries where the canonical has a
         # fact directory (avoids stale entries for deleted entities).
-        # Filter case-only noise: k.strip().lower() == v.strip().lower() is noise.
+        # Also filter noise: normalize_full(k) == normalize_full(v) is noise.
         if existing_dirs is None:
             existing_dirs = {d.name for d in facts_root.iterdir() if d.is_dir()} if facts_root.exists() else set()
         new_aliases = {
             k: v for k, v in aliases.items()
-            if v in existing_dirs and k.strip().lower() != v.strip().lower()
+            if v in existing_dirs and not _is_noise(k, v)
         }
 
     # Add new aliases from this sweep's merges
