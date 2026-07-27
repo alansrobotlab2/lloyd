@@ -1,10 +1,10 @@
 ---
 segment: agents
-generated: 2026-07-22 04:00 PST
+generated: 2026-07-23 02:00 PST
 data_range: 2026-07-20 to 2026-07-22
 ---
 
-# Signal Report — 2026-07-22
+# Signal Report — 2026-07-23
 
 ## Queued Signals (met threshold)
 
@@ -12,34 +12,39 @@ data_range: 2026-07-20 to 2026-07-22
 
 | ID | Date | Type | Category | Description | Source |
 |----|------|------|----------|-------------|--------|
-| 1  | 2026-07-21 | correction | tool-use | Claude.ai authentication wall — user sent authenticated URL knowing it would fail; pattern of testing access to private content | daily note |
-| 2  | 2026-07-21 | correction | tool-use | Claude.ai `/new` URL redirects to marketing landing page with no chat content; assistant correctly identified the real entry point is `https://claude.ai/` | daily note |
-| 3  | 2026-07-22 | correction | tool-use | Discord authentication wall — assistant correctly identified Discord requires authentication and offered alternatives (copy-paste or browser login) | daily note |
+| 1  | 2026-07-22 | correction | communication | Verbose/emoji-heavy responses flagged as "bad lloyd" — direct terse output required (July 15 signal reinforced) | daily note |
+| 2  | 2026-07-22 | preference | communication | "Conversation over task-ification" — unsolicited status reports are a negative pattern | daily note |
+| 3  | 2026-07-22 | praise | tool-use | Correctly identified Claude.ai authentication barrier and offered alternatives instead of failing | daily note |
+| 4  | 2026-07-22 | praise | tool-use | Correctly identified Discord authentication barrier and offered alternatives | daily note |
+| 5  | 2026-07-21 | praise | tool-use | Successfully extracted YouTube transcript and provided highlights using browser_evaluate with transcriptExtractor | daily note |
+| 6  | 2026-07-21 | praise | research | Correctly summarized multiple YouTube videos (Kimi K3, Apple Mac Pro cancellation, Google Turboquant, Trellis Tyron) | daily note |
+| 7  | 2026-07-21 | praise | tool-use | System health check correctly reported DEGRADED disk space (13% free) while services normal | daily note |
+| 8  | 2026-07-21 | praise | troubleshooting | Correctly identified and cleared poisoned worker for task_id 68 (Email & Calendar Triage) | daily note |
+| 9  | 2026-07-20 | praise | research | Correctly extracted and summarized YouTube transcript highlights (dating dynamics, Hormozi AI warnings, Matt Walker sleep science) | daily note |
 
 ### Inferred (met 2+ threshold)
 
-_None new this cycle. Previous inferred signals from prior reports remain resolved._
+| ID | Date | Type | Category | Description | Frequency | Source |
+|----|------|------|----------|-------------|-----------|--------|
+| 1  | 2026-07-20/21/22 | pattern | research | Batch YouTube transcript extraction — 15 sessions across 3 days, consistent 1:1 mapping per video | 15x | daily notes |
+| 2  | 2026-07-20/21/22 | pattern | communication | Daily notes auto-captured with session timestamps — consistent metadata tracking | 15x | daily notes |
+| 3  | 2026-07-21/22 | pattern | tool-use | Authenticated URL testing — user sends known-failing auth-gated URLs (claude.ai/new, Discord) | 3x | daily notes |
+| 4  | 2026-07-20/21 | pattern | research | Multi-source research validation — YouTube → GitHub → technical details for same topic | 5x | daily notes |
+| 5  | 2026-07-20/21 | pattern | research | Personal development treated with same structured extraction as technical research | 5x | daily notes |
 
 ## Pending Signals (below threshold)
 
-_None._
+- [Signal description] — [1 occurrence, monitor]
 
 ## Tool Failure Patterns
 
-- **Tool:** `http_fetch` / `browser_navigate` — **Error type:** Authentication wall on Claude.ai and Discord URLs — **Occurrences:** 3 (July 21: Claude.ai `/new`, July 22: Discord channel, July 22: Claude.ai `/new`) — **Recommendation:** Add a pre-check skill for authentication-gated URLs that detects login walls and immediately offers alternatives (browser navigation with auth, copy-paste, or alternative source) rather than attempting multiple fetch methods.
-
-- **Tool:** `browser_navigate` — **Error type:** Amazon anti-bot detection on authenticated URLs — **Occurrences:** 2 (July 20 tool-patterns) — **Recommendation:** Guard against anti-bot detection by checking for auth requirements before navigating to known problematic domains.
+- **Tool:** `cat` — **Error type:** FILE_NOT_FOUND when reading daily notes for 2026-07-23 and 2026-07-17 — **Occurrences:** 2 — **Recommendation:** Guard daily note reads with existence check before cat
+- **Tool:** `cat` — **Error type:** FILE_NOT_FOUND when reading USER.md from ~/lloyd/USER.md and ~/lloyd/agents/lloyd/USER.md — **Occurrences:** 2 — **Recommendation:** Standardize USER.md path resolution to ~/obsidian/memory/USER.md
 
 ## Positive Patterns to Reinforce
 
-- **Pattern:** Research burst consistency — 19 sessions across July 20–22 in tight 15-20 min clusters, matching established cadence. **Evidence:** Zero corrections across all sessions. **Action:** Maintain current subagent orchestration and batch processing pipeline.
-
-- **Pattern:** Multi-source research workflow maturing — YouTube → GitHub → arXiv cross-validation producing zero-correction output for complex topics. **Evidence:** 20+ sessions without correction on multi-source research tasks. **Action:** Preserve existing subagent dispatch pattern; no changes needed.
-
-- **Pattern:** System health awareness — two full systems checks (July 20 AM/PM), both clean. User initiating checks suggests confidence in monitoring infrastructure. **Evidence:** 4 systems checks across July 17–20, all clean. **Action:** Continue proactive reporting; don't over-report when systems are healthy.
-
-- **Pattern:** Correction-free streak sustained — 104+ days since last correction (May 8). **Evidence:** 19 sessions across July 20–22 with zero corrections. **Action:** Strong validation that current operating parameters are aligned with user expectations.
-
-- **Pattern:** Efficient tool chaining — compound browser_evaluate → vault_write sequences completing in single passes for research synthesis. **Evidence:** Multiple sessions completed research → synthesis → vault write without retries. **Action:** Continue favoring compound commands over sequential tool calls.
-
-- **Pattern:** Authentication wall handling — assistant correctly identified auth-gated content (Discord, Claude.ai) and offered alternatives instead of retrying failed fetches. **Evidence:** 3 sessions (July 21–22) where auth walls were correctly diagnosed and alternatives offered. **Action:** Encode as a standard response pattern for auth-gated URLs.
+- **Pattern:** YouTube transcript highlight extraction — **Evidence:** 15 successful sessions (July 20-22) — **Action:** Encode as skill/update existing skill
+- **Pattern:** Authenticated URL handling — correctly identifying auth barriers and offering alternatives — **Evidence:** 3 successful sessions (July 21-22) — **Action:** Encode as skill/update existing skill
+- **Pattern:** Multi-source research validation (YouTube → GitHub → arXiv per topic) — **Evidence:** 5 successful sessions — **Action:** Encode as skill/update existing skill
+- **Pattern:** Batch reading daily notes with sequential cat commands — **Evidence:** 7 successful sessions — **Action:** Encode as skill/update existing skill
+- **Pattern:** Systems health checks — **Evidence:** 2 successful sessions — **Action:** Encode as skill/update existing skill
