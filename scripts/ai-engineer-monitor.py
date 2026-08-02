@@ -191,6 +191,7 @@ def fetch_transcript(video_id):
     and error_msg contains the reason.
     """
     # ── Primary: youtube-transcript-api ────────────────────────────
+    uv_path = os.path.expanduser("~/.local/bin/uv")
     code = '''
 import sys
 from youtube_transcript_api import YouTubeTranscriptApi

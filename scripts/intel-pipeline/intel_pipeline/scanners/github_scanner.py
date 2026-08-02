@@ -20,30 +20,37 @@ GITHUB_STATE_KEY = "github_repos"
 
 
 def _yaml_load_repos(path: str) -> List[Dict]:
-    """Parse a simple YAML file containing a list of repo dicts (no external deps)."""
-    with open(path) as f:
-        text = f.read()
-    repos = []
-    # Match each - owner: ... block
-    for m in re.finditer(r'-\s*owner:\s*(.+?)(?:\n|$)', text):
-        owner = m.group(1).strip().strip('"').strip("'")
-        # Collect block until next '-' or end
-        block_start = m.start()
-        next_dash = re.search(r'\n\s+-\s+owner:', text[block_start + 1:])
-        end = block_start + 1 + (next_dash.start() if next_dash else len(text) - block_start - 1)
-        block = text[block_start:end]
-        lines = block.strip().split('\n')
-        repo = {"owner": owner}
-        for line in lines[1:]:  # skip owner line
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            kv = line.split(':', 1)
-            if len(kv) == 2:
-                k, v = kv[0].strip(), kv[1].strip()
-                repo[k] = _yaml_parse_val(v)
-        repos.append(repo)
-    return repos
+    """Parse a YAML file containing a list of repo dicts."""
+    try:
+        import yaml
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        if data and "repos" in data:
+            return data["repos"]
+        return data if isinstance(data, list) else []
+    except ImportError:
+        # Fallback to regex parser if PyYAML is not available
+        with open(path) as f:
+            text = f.read()
+        repos = []
+        for m in re.finditer(r'-\s*owner:\s*(.+?)(?:\n|$)', text):
+            owner = m.group(1).strip().strip('"').strip("'")
+            block_start = m.start()
+            next_dash = re.search(r'\n\s+-\s+owner:', text[block_start + 1:])
+            end = block_start + 1 + (next_dash.start() if next_dash else len(text) - block_start - 1)
+            block = text[block_start:end]
+            lines = block.strip().split('\n')
+            repo = {"owner": owner}
+            for line in lines[1:]:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                kv = line.split(':', 1)
+                if len(kv) == 2:
+                    k, v = kv[0].strip(), kv[1].strip()
+                    repo[k] = _yaml_parse_val(v)
+            repos.append(repo)
+        return repos
 
 
 def _yaml_parse_val(s: str) -> Any:

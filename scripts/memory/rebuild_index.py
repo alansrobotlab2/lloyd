@@ -203,7 +203,7 @@ def rebuild_facts_index() -> dict:
                                     last_updated = last_updated.isoformat()
                                 
                                 facts.append({
-                                    "path": str(fact_file.relative_to(VAULT)),
+                                    "path": str(fact_file.relative_to(FACTS_DIR)),
                                     "entity": frontmatter.get("entity", entity_name),
                                     "category": frontmatter.get("category", "unknown"),
                                     "fact_count": len(frontmatter.get("facts", [])),
