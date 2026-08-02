@@ -254,16 +254,9 @@ def decide_merge(
         return (False, f"SUFFIX_SAFE but imbalance {ratio:.1f}× < {SUFFIX_SAFE_RATIO}")
 
     if tier == "SUFFIX_AMBIGUOUS":
-        # Generally hand-review, but allow when there's a clear bare-name
-        # dominant (ratio >= threshold or second-largest is small).
-        if smallest_deg == 0:
-            return (True, "SUFFIX_AMBIG, a variant has 0 degree")
-        if second_deg <= SUFFIX_SAFE_SMALL_VARIANT:
-            return (True, f"SUFFIX_AMBIG, second-largest variant is small ({second_deg})")
-        ratio = top_deg / second_deg if second_deg else float("inf")
-        if ratio >= SUFFIX_SAFE_RATIO:
-            return (True, f"SUFFIX_AMBIG, imbalance {ratio:.1f}× >= {SUFFIX_SAFE_RATIO}")
-        return (False, f"SUFFIX_AMBIG, imbalance {ratio:.1f}× < {SUFFIX_SAFE_RATIO} — hand-review")
+        # Suffix-ambiguous clusters (match only after stripping Loop/Research/Tool/…)
+        # always go to hand-review per skill spec — no auto-merge exceptions.
+        return (False, "SUFFIX_AMBIG — always hand-review")
 
     if tier == "OTHER":
         return (False, f"OTHER — always hand-review")
