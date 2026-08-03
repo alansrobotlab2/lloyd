@@ -682,16 +682,20 @@ def apply_merges(
             if v in existing_dirs and not _is_noise(k, v)
         }
 
-    # Add new aliases from this sweep's merges
+    # Add new aliases from this sweep's merges.
+    # Guardrail: filter out noise entries where normalize_full(variant) ==
+    # normalize_full(canonical) — these are pipeline noise per the skill spec.
     for variant, canonical in variant_to_canonical.items():
-        new_aliases[variant.lower()] = canonical
-        # Also ensure exact case variants resolve
-        new_aliases[variant] = canonical
+        if not _is_noise(variant, canonical):
+            new_aliases[variant.lower()] = canonical
+            # Also ensure exact case variants resolve
+            new_aliases[variant] = canonical
     # Canonicals should self-resolve (identity) — these are useful for the
     # lookup path (alias_lower -> canonical) so we keep them, but only for
     # entities actually involved in this sweep's merges.
     for canonical in set(variant_to_canonical.values()):
-        new_aliases[canonical.lower()] = canonical
+        if not _is_noise(canonical, canonical):
+            new_aliases[canonical.lower()] = canonical
 
     return {
         "rewritten_edges": rewrite_count,
