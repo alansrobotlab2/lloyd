@@ -459,39 +459,98 @@ def _write_fact_frontmatter(data: dict) -> str:
 # ── Entity directory cache ──────────────────────────────────────────────────
 
 _entity_dirs_cache: Optional[tuple[float, list[str]]] = None
+# Lowercased name → on-disk name, rebuilt whenever _entity_dirs_cache is.
+_entity_dirs_index: Optional[dict[str, str]] = None
+# st_mtime_ns of FACTS_ROOT at the last real scan; lets TTL expiry skip the
+# 64k-entry rescan when no entity dir was added or removed.
+_entity_dirs_mtime: Optional[int] = None
 _ENTITY_DIRS_TTL = 60
 
 
 def _get_entity_dirs_cached() -> list[str]:
-    """List entity directory names under FACTS_ROOT, cached for 60s."""
-    global _entity_dirs_cache
+    """List entity directory names under FACTS_ROOT, cached for 60s.
+
+    On TTL expiry the directory's own mtime is checked before rescanning: a
+    directory's mtime changes precisely when entries are added or removed,
+    which is exactly the set this cache tracks. Rescanning 64k entries and
+    rebuilding the match index costs ~500ms, so without this probe one query
+    per minute paid that toll even when nothing had changed. Now the common
+    case is a single stat().
+    """
+    global _entity_dirs_cache, _entity_dirs_index, _entity_dirs_mtime
     now = time.monotonic()
     if _entity_dirs_cache is not None and (now - _entity_dirs_cache[0]) < _ENTITY_DIRS_TTL:
         return _entity_dirs_cache[1]
     if not FACTS_ROOT.exists():
         _entity_dirs_cache = (now, [])
+        _entity_dirs_index = {}
+        _entity_dirs_mtime = None
         return []
+    try:
+        root_mtime = FACTS_ROOT.stat().st_mtime_ns
+    except OSError:
+        root_mtime = None
+    if (_entity_dirs_cache is not None and _entity_dirs_index is not None
+            and root_mtime is not None and root_mtime == _entity_dirs_mtime):
+        # Nothing added or removed — renew the lease, skip the rescan.
+        _entity_dirs_cache = (now, _entity_dirs_cache[1])
+        return _entity_dirs_cache[1]
+    _entity_dirs_mtime = root_mtime
     names = [d.name for d in FACTS_ROOT.iterdir() if d.is_dir()]
     _entity_dirs_cache = (now, names)
+    # Built in the same pass so the O(1) lookup below never triggers its own
+    # scan. FIRST occurrence wins, because `names` preserves iterdir() order
+    # and the scan this replaces returned the first case-insensitive match.
+    # A dict comprehension would give last-wins and silently resolve the 4
+    # case-colliding dirs (OpenClaw/openclaw, Schema/schema, ...) to the other
+    # directory — worth 0.005 MRR when it changed which facts got loaded.
+    idx: dict[str, str] = {}
+    for n in names:
+        idx.setdefault(n.lower(), n)
+    _entity_dirs_index = idx
     return names
+
+
+def _get_entity_dirs_index() -> dict[str, str]:
+    """Lowercased-name → on-disk-name map for FACTS_ROOT, cached for 60s."""
+    _get_entity_dirs_cached()  # refreshes both cache and index when stale
+    return _entity_dirs_index or {}
 
 
 def _invalidate_entity_dirs_cache() -> None:
     """Clear the entity-dir cache. Call after creating a new entity dir."""
-    global _entity_dirs_cache
+    global _entity_dirs_cache, _entity_dirs_index, _entity_dirs_mtime
     _entity_dirs_cache = None
+    _entity_dirs_index = None
+    _entity_dirs_mtime = None
 
 
 # ── Entity resolution ───────────────────────────────────────────────────────
 
 def _find_entity_dir(entity: str) -> Optional[Path]:
-    """Find an entity directory under FACTS_ROOT, case-insensitive."""
+    """Find an entity directory under FACTS_ROOT, case-insensitive.
+
+    O(1) via the cached lowercase index. This used to walk
+    ``FACTS_ROOT.iterdir()`` with an ``is_dir()`` stat per entry on EVERY
+    call — ~30 calls per `vault_recall`, so ~1.9M stat syscalls per query
+    once the corpus reached 64k entity dirs. That was ~200ms at the ~2,700
+    entities this code was written against and ~5s by 2026-08-06; it was the
+    dominant cost in retrieval latency (#380).
+
+    The exact-path fallback preserves the old contract: a directory created
+    after the last cache refresh is still found immediately, so writers that
+    forget `_invalidate_entity_dirs_cache()` don't silently 404.
+    """
     if not FACTS_ROOT.exists():
         return None
-    entity_lower = entity.lower()
-    for entry in FACTS_ROOT.iterdir():
-        if entry.is_dir() and entry.name.lower() == entity_lower:
-            return entry
+    hit = _get_entity_dirs_index().get(entity.lower())
+    if hit is not None:
+        return FACTS_ROOT / hit
+    # Cache miss: the dir may have been created since the last refresh.
+    # An exact-name probe is one stat, versus a full 64k-entry rescan.
+    direct = FACTS_ROOT / entity
+    if direct.is_dir():
+        return direct
     return None
 
 

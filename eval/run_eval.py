@@ -127,7 +127,8 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
 
 def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
              graph_rerank: bool = False, rerank_alpha: float = 0.5,
-             demote_factor: float | None = None) -> list[dict]:
+             demote_factor: float | None = None,
+             graph_top_k: int = 5, graph_hops: int = 1) -> list[dict]:
     records = []
     for spec in queries:
         qid = spec.get("id")
@@ -142,6 +143,8 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
                 "expand_graph": expand_graph,
                 "graph_rerank": graph_rerank,
                 "rerank_alpha": rerank_alpha,
+                "graph_top_k": graph_top_k,
+                "graph_hops": graph_hops,
             }
             if demote_factor is not None:
                 recall_params["demote_factor"] = demote_factor
@@ -255,6 +258,8 @@ def main() -> int:
     ap.add_argument("--graph-rerank", action="store_true", help="Enable Phase 3 graph-vote re-ranking")
     ap.add_argument("--alpha", type=float, default=0.5, help="Re-rank alpha: 1.0=pure QMD, 0.0=pure graph (default 0.5)")
     ap.add_argument("--demote-factor", type=float, default=None, help="Daily-log demote factor (default uses module constant 0.4)")
+    ap.add_argument("--graph-top-k", type=int, default=5, help="Graph expansion breadth (neighbours kept; historic default 5)")
+    ap.add_argument("--graph-hops", type=int, default=1, help="Graph expansion depth (historic default 1)")
     args = ap.parse_args()
 
     spec_file = Path(args.queries)
@@ -268,6 +273,8 @@ def main() -> int:
         graph_rerank=args.graph_rerank,
         rerank_alpha=args.alpha,
         demote_factor=args.demote_factor,
+        graph_top_k=args.graph_top_k,
+        graph_hops=args.graph_hops,
     )
     summary = summarize(records)
 
@@ -279,6 +286,8 @@ def main() -> int:
         "expand_graph": not args.no_graph,
         "graph_rerank": args.graph_rerank,
         "rerank_alpha": args.alpha,
+        "graph_top_k": args.graph_top_k,
+        "graph_hops": args.graph_hops,
         "summary": summary,
         "records": records,
     }

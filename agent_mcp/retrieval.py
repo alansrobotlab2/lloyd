@@ -110,6 +110,48 @@ FACT_RANK_CAP_GRAPH = 5
 
 # ── Fact reading ─────────────────────────────────────────────────────────────
 
+# Parsed fact-file cache: path → (mtime_ns, facts).
+#
+# God-node entities make the uncached path brutal: `QMD` carries 4,328 facts
+# and re-parsing its YAML cost 1,338 ms on EVERY vault_recall that seeded on
+# it (2026-08-06, #380). FACT_GODNODE_THRESHOLD limits how many of those facts
+# reach results, but only after the whole file set has already been parsed.
+#
+# Invalidated by mtime, same contract as _relationships_cache above.
+#
+# MUTATION CONTRACT: the returned fact dicts are shared with the cache.
+# Callers must not mutate them in place — copy first. `vault._collect` already
+# does (`{**f, "entity": ...}`).
+_fact_file_cache: dict[str, tuple[int, list]] = {}
+_FACT_FILE_CACHE_MAX = 3000
+
+
+def _read_facts_cached(fact_file) -> list:
+    """Parse one fact file's `facts:` list, memoised on (path, mtime_ns)."""
+    key = str(fact_file)
+    try:
+        mtime_ns = fact_file.stat().st_mtime_ns
+    except OSError:
+        return []
+    hit = _fact_file_cache.get(key)
+    if hit is not None and hit[0] == mtime_ns:
+        return hit[1]
+    try:
+        frontmatter = _parse_fact_frontmatter(fact_file.read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    facts = frontmatter.get("facts") or []
+    if len(_fact_file_cache) >= _FACT_FILE_CACHE_MAX:
+        _fact_file_cache.clear()
+    _fact_file_cache[key] = (mtime_ns, facts)
+    return facts
+
+
+def invalidate_fact_file_cache() -> None:
+    """Drop the parsed fact-file cache (used by writers and tests)."""
+    _fact_file_cache.clear()
+
+
 def get_facts_sync(entity: str, category: str = None, as_of: str = None,
                    include_expired: bool = False) -> dict:
     resolved, _ = _resolve_entity(entity, mode="read")
@@ -122,12 +164,10 @@ def get_facts_sync(entity: str, category: str = None, as_of: str = None,
         if not fact_file.exists():
             fact_file = entity_dir / f"{entity}-{category}.md"
         if fact_file.exists():
-            frontmatter = _parse_fact_frontmatter(fact_file.read_text(encoding="utf-8"))
-            facts = frontmatter.get("facts", [])
+            facts = list(_read_facts_cached(fact_file))
     else:
         for fact_file in entity_dir.glob("*.md"):
-            frontmatter = _parse_fact_frontmatter(fact_file.read_text(encoding="utf-8"))
-            facts.extend(frontmatter.get("facts", []))
+            facts.extend(_read_facts_cached(fact_file))
     if not include_expired:
         if as_of:
             # Return facts valid at a specific point in time
@@ -166,6 +206,65 @@ def get_entity_edge_counts() -> dict:
 
 
 # ── Entity extraction ────────────────────────────────────────────────────────
+
+# ── Entity match index ───────────────────────────────────────────────────────
+# extract_entities_from_query used to walk all entity names twice per query:
+# once compiling a fresh `re.escape(name)` pattern each (step 2) and once
+# re-tokenising each name (step 3). At 64k entities that was ~128k regex
+# compilations per query — far past CPython's 512-entry pattern cache, so every
+# one was a full parse+compile. Profiling on 2026-08-06 (#380) put it at ~1.8s
+# of a 2.7s call.
+#
+# Both loops are inverted here against a token index built once per entity-dir
+# cache refresh (60s), not per query. Candidate sets are provably supersets of
+# the originals, so scoring is unchanged:
+#   - step 2 needs the entity's full name inside the query, which implies its
+#     first token is present → first-token index is sound.
+#   - step 3 skips any entity with zero token overlap → token index is sound.
+_entity_index_cache: Optional[tuple] = None
+_ENTITY_PATTERN_CACHE: dict[str, "re.Pattern"] = {}
+_ENTITY_PATTERN_CACHE_MAX = 4096
+
+
+def _entity_match_index(entities: list) -> tuple[dict, dict, dict]:
+    """Return (first_token→names, token→names, name→token_set) for `entities`.
+
+    Cached on the identity of the list returned by `_get_entity_dirs_cached()`,
+    which is stable for the 60s TTL and replaced wholesale on refresh.
+    """
+    global _entity_index_cache
+    if _entity_index_cache is not None and _entity_index_cache[0] is entities:
+        return _entity_index_cache[1], _entity_index_cache[2], _entity_index_cache[3]
+
+    first_tok: dict[str, list] = {}
+    tok_index: dict[str, list] = {}
+    tok_sets: dict[str, set] = {}
+    word_re = re.compile(r"\b\w+\b")
+    for e in entities:
+        el = e.lower()
+        toks = word_re.findall(el)
+        if not toks:
+            continue
+        first_tok.setdefault(toks[0], []).append(el)
+        scored = {w for w in toks if w not in _SCORING_STOPWORDS and len(w) >= 2}
+        tok_sets[el] = scored
+        for w in scored:
+            tok_index.setdefault(w, []).append(el)
+
+    _entity_index_cache = (entities, first_tok, tok_index, tok_sets)
+    return first_tok, tok_index, tok_sets
+
+
+def _entity_pattern(e_lower: str) -> "re.Pattern":
+    """Word-boundary pattern for an entity name, memoised across queries."""
+    pat = _ENTITY_PATTERN_CACHE.get(e_lower)
+    if pat is None:
+        if len(_ENTITY_PATTERN_CACHE) >= _ENTITY_PATTERN_CACHE_MAX:
+            _ENTITY_PATTERN_CACHE.clear()
+        pat = re.compile(r"(?<!\w)" + re.escape(e_lower) + r"(?!\w)")
+        _ENTITY_PATTERN_CACHE[e_lower] = pat
+    return pat
+
 
 def extract_entities_from_query(query: str) -> list:
     """Rank known entities by how well they match the query.
@@ -218,21 +317,28 @@ def extract_entities_from_query(query: str) -> list:
             if hit:
                 _bump(hit, 10.0)
 
+    first_tok, tok_index, tok_sets = _entity_match_index(entities)
+    # Unfiltered query tokens — an entity's first token may be a stopword
+    # ("the vault") or single-char, which q_tokens drops.
+    q_tokens_all = set(re.findall(r"\b\w+\b", q_lower))
+
     # 2. Full-name match at word boundaries.
-    for e_lower, e_cased in entity_lookup.items():
-        if len(e_lower) < 3:
-            continue
-        if re.search(r"(?<!\w)" + re.escape(e_lower) + r"(?!\w)", q_lower):
-            _bump(e_cased, 5.0 + min(len(e_lower) / 20.0, 2.0))
+    for tok in q_tokens_all:
+        for e_lower in first_tok.get(tok, ()):
+            if len(e_lower) < 3:
+                continue
+            if _entity_pattern(e_lower).search(q_lower):
+                _bump(entity_lookup[e_lower], 5.0 + min(len(e_lower) / 20.0, 2.0))
 
     # 3. Token-overlap scoring. Reward specificity on both sides.
     if q_tokens:
         q_norm = max(len(q_tokens), 2)
-        for e_lower, e_cased in entity_lookup.items():
-            e_tokens = {
-                w for w in re.findall(r"\b\w+\b", e_lower)
-                if w not in _SCORING_STOPWORDS and len(w) >= 2
-            }
+        candidates = set()
+        for w in q_tokens:
+            candidates.update(tok_index.get(w, ()))
+        for e_lower in candidates:
+            e_cased = entity_lookup[e_lower]
+            e_tokens = tok_sets.get(e_lower)
             if not e_tokens:
                 continue
             overlap = e_tokens & q_tokens

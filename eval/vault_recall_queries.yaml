@@ -17,13 +17,27 @@
 #   entity_hit:   any expected entity appears in result.facts entities or graph_neighbors
 #   doc_hit:      any expected doc substring appears in result.documents paths
 #   topk_overlap: fraction of expect_entities that appear in top-K facts/neighbors
+#
+# 2026-08-06 (#380 Phase 0b) — expectation audit.
+#   9 of 46 expect_entities were UNSATISFIABLE: no entity directory contained
+#   the string, so no retrieval improvement could ever score them. They were
+#   silently capping ent_recall / fER and masking graph changes.
+#
+#   Rule applied: only remove an expectation that is factually wrong, and only
+#   replace it with the entity that is genuinely the correct answer — never
+#   substitute an easier target to inflate the score. Each change is annotated
+#   inline. Two changes make a query HARDER (FACT_GODNODE_THRESHOLD,
+#   Agent Harness); one is a genuine WEAKENING and is flagged as such
+#   (nightly-reflection).
 
 queries:
   # --- Single-entity lookups (basic retrieval) ---
   - id: backlog-363
     query: "tell me about backlog item 363"
     category: single
-    expect_entities: ["Backlog Item 363", "Task #363"]
+    # 2026-08-06: "Backlog Item 363" → "Backlog Item #363" (real dir; the
+    # expectation was missing the '#' and could never match).
+    expect_entities: ["Backlog Item #363", "Task #363"]
     expect_docs: ["backlog/363-implement-tgs-rag", "Backlog Item 363"]
 
   - id: entity-resolution-sweep
@@ -35,7 +49,9 @@ queries:
   - id: inner-voice
     query: "explain the inner voice architecture"
     category: single
-    expect_entities: ["Inner Voice", "Inner Voice (Task #345)"]
+    # 2026-08-06: dropped "Inner Voice (Task #345)" — no such dir; the
+    # parenthetical variant was redundant with the satisfiable "Inner Voice".
+    expect_entities: ["Inner Voice"]
     expect_docs: ["lloyd/inner_voice", "inner_voice"]
 
   - id: vault-recall
@@ -67,13 +83,24 @@ queries:
   - id: harness-tools
     query: "how does the agent harness dispatch tool calls?"
     category: multi-hop
-    expect_entities: ["app/harness", "lloyd"]
+    # 2026-08-06: "app/harness" → "Agent Harness". The old value is a code
+    # path, which looks_like_junk_entity() deliberately refuses to create —
+    # the eval was requiring an entity the system is designed never to make.
+    # "Agent Harness" is the real entity and a stricter target than "lloyd".
+    expect_entities: ["Agent Harness", "lloyd"]
     expect_docs: ["app/harness/loop.py", "app/harness/tool_schema.py", "harness"]
 
   - id: nightly-reflection
     query: "what skills are involved in nightly reflection?"
     category: multi-hop
-    expect_entities: ["Nightly Reflection — Knowledge Analysis", "Nightly Reflection — Knowledge Write"]
+    # 2026-08-06: BOTH original expectations were unsatisfiable (no such dirs),
+    # leaving this query with no scorable entity target at all. Replaced with
+    # the general concept, which many real dirs satisfy
+    # ("Nightly Reflection Process/Cluster/Cron/...").
+    # ⚠️ THIS IS A GENUINE WEAKENING — the original named two specific skills;
+    # the replacement only tests that *some* nightly-reflection entity surfaces.
+    # Restore specific skill names if/when those entities actually exist.
+    expect_entities: ["Nightly Reflection"]
     expect_docs: ["autonomy/39-", "autonomy/42-", "nightly-reflection"]
 
   - id: qwen35-users
@@ -86,7 +113,9 @@ queries:
   - id: tgs-rag-state
     query: "what's the current state of TGS-RAG research?"
     category: recent
-    expect_entities: ["Backlog Item 363", "Implement TGS-RAG"]
+    # 2026-08-06: both were unsatisfiable, leaving no scorable entity target.
+    # → real dirs "Backlog Item #363" and "TGS-RAG Implementation".
+    expect_entities: ["Backlog Item #363", "TGS-RAG Implementation"]
     expect_docs: ["tgs-rag", "neuro-symbolic-rag", "363-implement-tgs-rag"]
 
   - id: graph-quality
@@ -106,7 +135,10 @@ queries:
   - id: godnode-threshold
     query: "what's the FACT_GODNODE_THRESHOLD and why does it exist?"
     category: technical
-    expect_entities: ["facts.py", "Knowledge Graph"]
+    # 2026-08-06: "facts.py" → "FACT_GODNODE_THRESHOLD". The old value is a
+    # code path the junk guard correctly rejects; the new one is the actual
+    # subject of the question and a STRICTER, more precise target.
+    expect_entities: ["FACT_GODNODE_THRESHOLD", "Knowledge Graph"]
     expect_docs: ["agent_mcp/facts.py", "fact_graph"]
     notes: "Niche technical detail — tests whether retrieval finds source code references."
 
@@ -133,7 +165,9 @@ queries:
   - id: robotics-projects
     query: "what robotics projects have I worked on?"
     category: hard
-    expect_entities: ["GR00T", "Isaac GR00T N1.7", "1X Neo", "Six-Servo Robot Dog", "3D-Printing-Robotics Project"]
+    # 2026-08-06: "3D-Printing-Robotics Project" → "3D Printing" (no dir for
+    # the compound project name; "3D Printing" is the real entity).
+    expect_entities: ["GR00T", "Isaac GR00T N1.7", "1X Neo", "Six-Servo Robot Dog", "3D Printing"]
     expect_docs: ["GR00T", "robot", "robotics"]
     notes: "Cross-domain. Many candidates, semantic search may favor only the most-mentioned."
 
