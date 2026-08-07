@@ -706,6 +706,15 @@ def _vault_recall(params: dict) -> dict:
     rerank_alpha = float(params.get("rerank_alpha", 0.3))
     demote_daily_logs = bool(params.get("demote_daily_logs", True))
     demote_factor = float(params.get("demote_factor", DAILY_LOG_DEMOTE_FACTOR))
+    # Graph expansion breadth/depth. Both were hardcoded (top_k=5, hops=1)
+    # until 2026-08-06 (#380): with only 5 neighbour slots, low-weight edge
+    # types can never surface — a `mentions` edge scores 0.3 × 0.8 = 0.24
+    # against typed edges at 0.4–0.6, so density changes were invisible to
+    # retrieval and to the eval. hops=1 also meant the "multi-hop" eval
+    # category was in fact being served by single-hop expansion.
+    # Defaults preserve the historic behaviour exactly.
+    graph_top_k = int(params.get("graph_top_k", 5))
+    graph_hops = int(params.get("graph_hops", 1))
 
     # Take top-10 seeds (was 5). Ties at low scores can knock out the
     # canonical entity; e.g. "Knowledge Graph Consistency" and "Knowledge
@@ -718,7 +727,9 @@ def _vault_recall(params: dict) -> dict:
     need_neighbors = expand_graph or graph_rerank
     weighted_neighbors: list[tuple[str, float]] = []
     if need_neighbors and seed_entities:
-        weighted_neighbors = graph_weighted_neighbors(seed_entities, top_k=5, hops=1)
+        weighted_neighbors = graph_weighted_neighbors(
+            seed_entities, top_k=graph_top_k, hops=graph_hops
+        )
 
     def _do_search():
         # Daemon is the only search path. Subprocess fallback was removed
@@ -843,7 +854,7 @@ def _vault_recall(params: dict) -> dict:
 
         graph_facts: list[dict] = []
         if expand_graph and weighted_neighbors:
-            neighbor_names = [e for e, _w in weighted_neighbors[:5]]
+            neighbor_names = [e for e, _w in weighted_neighbors[:graph_top_k]]
             graph_pool = _collect(neighbor_names, FACT_GODNODE_THRESHOLD)
             graph_facts = _rank(graph_pool, FACT_RANK_CAP_GRAPH)
 

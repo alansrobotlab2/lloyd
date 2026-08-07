@@ -659,7 +659,12 @@ def apply_merges(
     # This catches case-only, punctuation-only, AND suffix-stripped variants
     # that collapse to the same normalized form.
     def _is_noise(k: str, v: str) -> bool:
-        return normalize_full(k) == normalize_full(v)
+        # Only filter entries where variant and canonical are truly identical
+        # (case-sensitive). Case-only and punctuation-only variants are
+        # legitimate aliases that the v4 classifier needs — its
+        # resolve_canonical() does exact-match first, then lowercased match,
+        # so without the alias entry the variant won't resolve to canonical.
+        return k == v
 
     if rebuild_aliases:
         # Rebuild alias table from scratch: keep all existing aliases that
