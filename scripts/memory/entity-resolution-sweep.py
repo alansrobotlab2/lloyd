@@ -656,15 +656,36 @@ def apply_merges(
     # ── Update alias table
     # Noise filter: per skill guardrail, any entry where normalize_full(alias)
     # == normalize_full(canonical) is pipeline noise and must be filtered out.
-    # This catches case-only, punctuation-only, AND suffix-stripped variants
-    # that collapse to the same normalized form.
+    # normalize_full lowercases and strips stop suffixes, so it catches
+    # suffix-stripped variants that collapse to the same form.
+    # However, case-only (SAFE_CASE) and punctuation-only (SAFE_PUNCT) variants
+    # are legitimate aliases that MUST be preserved — the v4 classifier's
+    # resolve_canonical() does exact-match first, then lowercased match.
+    # So we only filter as noise when the variant and canonical differ ONLY
+    # by suffix stripping (i.e., they have the same tokens after case/punct
+    # normalization but differ in suffix).
     def _is_noise(k: str, v: str) -> bool:
-        # Only filter entries where variant and canonical are truly identical
-        # (case-sensitive). Case-only and punctuation-only variants are
-        # legitimate aliases that the v4 classifier needs — its
-        # resolve_canonical() does exact-match first, then lowercased match,
-        # so without the alias entry the variant won't resolve to canonical.
-        return k == v
+        # Noise if normalize_full(k) == normalize_full(v) AND the difference
+        # is only suffix-based (not case or punctuation).
+        # Case-only and punctuation-only variants are NOT noise.
+        nk = normalize_full(k)
+        nv = normalize_full(v)
+        if nk != nv:
+            return False
+        # Same normalized form — check if the difference is only case/punct
+        # (legitimate) or only suffix (noise).
+        # If tokens differ only in case or punctuation, it's legitimate.
+        tk = tokens(k)
+        tv = tokens(v)
+        # If token counts differ, the difference is suffix-based → noise
+        if len(tk) != len(tv):
+            return True
+        # Same token count — check if they differ only by case
+        # (punctuation-only variants are caught by token equality since
+        # tokens() strips punctuation)
+        if all(a.lower() == b.lower() for a, b in zip(tk, tv)):
+            return False  # Case-only variant — legitimate
+        return True  # Different tokens but same normalize_full → noise
 
     if rebuild_aliases:
         # Rebuild alias table from scratch: keep all existing aliases that
