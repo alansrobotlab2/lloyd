@@ -558,6 +558,8 @@ def main() -> int:
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC)
     p.add_argument("--skip-judge", action="store_true",
                    help="Stop after candidate generation (for tuning thresholds)")
+    p.add_argument("--from-candidates", type=Path, default=None,
+                   help="Skip candidate generation; load candidates from existing JSONL file")
     p.add_argument("--replay", type=Path, default=None,
                    help="Skip candidate gen + judging; replay apply plan from existing judgments JSONL")
     args = p.parse_args()
@@ -587,6 +589,20 @@ def main() -> int:
         verdict_counts = Counter(r["verdict"] for r in judgments)
         print(f"[info] verdicts: {dict(verdict_counts)}")
         candidates = []  # not used in replay
+    elif args.from_candidates:
+        candidates = []
+        with args.from_candidates.open() as f:
+            for line in f:
+                if line.strip():
+                    candidates.append(json.loads(line))
+        print(f"[info] loaded {len(candidates)} candidates from {args.from_candidates}")
+
+        if args.skip_judge:
+            return 0
+
+        if args.limit:
+            candidates = candidates[: args.limit]
+            print(f"[info] limited to first {len(candidates)} candidates")
     else:
         print("[info] generating candidates…")
         candidates = generate_candidates(entities, aliases, neighbors)
