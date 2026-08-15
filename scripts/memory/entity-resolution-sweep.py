@@ -290,15 +290,17 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
     # merged into their canonical partners.
     entities = list(set(degrees.keys()) | existing_dirs)
 
-    # Four-stage clustering:
+    # Five-stage clustering:
     #   Stage A: cluster by normalize_case (case-only) — these are always SAFE_CASE.
     #            Process first so case-only variants don't get absorbed into
     #            larger suffix-ambiguous clusters (e.g. "agent" vs "Agent" shouldn't
     #            merge with "Agent Loop" into one AMBIGUOUS cluster).
-    #   Stage B: cluster by normalize_full (suffix-stripped) to surface candidates.
-    #   Stage C: cluster by normalize_punct (case+only) to catch space/hyphen/underscore variants
-    #            that diverge under suffix stripping (e.g. "Auto Research" vs "Autoresearch").
-    #   Stage D: merge candidate sets from B+C, deduplicate, then classify tier.
+    #   Stage B: cluster by normalize_punct (case+punct) — these are SAFE_PUNCT.
+    #            Process second so pure case/punct variants (e.g. "Claude Code" vs
+    #            "claude-code") are merged before being absorbed into suffix-ambiguous
+    #            clusters via normalize_full connected components.
+    #   Stage C: cluster by normalize_full (suffix-stripped) to surface candidates.
+    #   Stage D: merge candidate sets from C, deduplicate, then classify tier.
 
     # Stage A: case-only clusters (processed independently, always SAFE_CASE)
     clusters_by_case: dict[str, list[str]] = collections.defaultdict(list)
@@ -316,8 +318,39 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
     for variants in case_only_clusters:
         case_clustered.update(variants)
 
-    # Stages B+C: suffix/punct clustering for remaining entities
-    remaining = [e for e in entities if e not in case_clustered]
+    # Stage B: punct-only clusters (processed independently, always SAFE_PUNCT)
+    # These are entities that differ only by punctuation/separators (space, hyphen,
+    # underscore) but are NOT case-only. Process them before suffix clustering so
+    # they don't get absorbed into suffix-ambiguous groups.
+    remaining_after_case = [e for e in entities if e not in case_clustered]
+    clusters_by_punct: dict[str, list[str]] = collections.defaultdict(list)
+    for ent in remaining_after_case:
+        key = normalize_punct(ent)
+        if key:
+            clusters_by_punct[key].append(ent)
+
+    punct_only_clusters: list[list[str]] = []
+    for variants in clusters_by_punct.values():
+        if len(variants) < 2:
+            continue
+        # A cluster is "punct-only" if every pair differs only by punctuation
+        # (normalize_punct matches but normalize_case does not).
+        is_punct_only = all(
+            normalize_punct(a) == normalize_punct(b)
+            and normalize_case(a) != normalize_case(b)
+            for i, a in enumerate(variants)
+            for b in variants[i + 1 :]
+        )
+        if is_punct_only:
+            punct_only_clusters.append(sorted(variants))
+
+    # Track which entities are in punct-only clusters
+    punct_clustered: set[str] = set()
+    for variants in punct_only_clusters:
+        punct_clustered.update(variants)
+
+    # Stage C: suffix clustering for remaining entities
+    remaining = [e for e in remaining_after_case if e not in punct_clustered]
 
     clusters_by_full: dict[str, list[str]] = collections.defaultdict(list)
     for ent in remaining:
@@ -325,26 +358,14 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
         if key:
             clusters_by_full[key].append(ent)
 
-    clusters_by_punct: dict[str, list[str]] = collections.defaultdict(list)
-    for ent in remaining:
-        key = normalize_punct(ent)
-        if key:
-            clusters_by_punct[key].append(ent)
-
-    # Merge candidate sets: entities that collide by either method go together
+    # Build connected components from normalize_full candidate edges
     ent_to_candidates: dict[str, set[str]] = collections.defaultdict(set)
     for group in clusters_by_full.values():
         if len(group) > 1:
             for ent in group:
                 for other in group:
                     ent_to_candidates[ent].add(other)
-    for group in clusters_by_punct.values():
-        if len(group) > 1:
-            for ent in group:
-                for other in group:
-                    ent_to_candidates[ent].add(other)
 
-    # Build connected components from candidate edges
     visited = set()
     suffix_clusters: list[list[str]] = []
     for ent in remaining:
@@ -365,8 +386,9 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
         if len(component) > 1:
             suffix_clusters.append(component)
 
-    # Combine: case-only clusters are always SAFE, suffix clusters are classified
-    dupe_clusters = case_only_clusters + suffix_clusters
+    # Combine: case-only and punct-only clusters are always SAFE,
+    # suffix clusters are classified
+    dupe_clusters = case_only_clusters + punct_only_clusters + suffix_clusters
 
     safe_merges: list[dict] = []
     ambiguous: list[dict] = []
@@ -383,24 +405,35 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
         if is_case_only:
             cluster_worst = "CASE"
         else:
-            # Classify cluster-wide tier: take the most conservative pairwise tier.
-            pairwise_tiers = set()
-            for i, a in enumerate(variants):
-                for b in variants[i + 1 :]:
-                    t, _ = classify_pair(a, b)
-                    pairwise_tiers.add(t)
-            if "OTHER" in pairwise_tiers:
-                cluster_worst = "OTHER"
-            elif "SUFFIX_AMBIGUOUS" in pairwise_tiers:
-                cluster_worst = "SUFFIX_AMBIGUOUS"
-            elif "SUFFIX_SAFE" in pairwise_tiers:
-                cluster_worst = "SUFFIX_SAFE"
-            elif "PUNCT" in pairwise_tiers:
+            # Punct-only clusters are always SAFE_PUNCT — they were pre-separated
+            # in build_plan to avoid absorption into suffix-ambiguous clusters.
+            is_punct_only = all(
+                normalize_punct(a) == normalize_punct(b)
+                and normalize_case(a) != normalize_case(b)
+                for i, a in enumerate(variants)
+                for b in variants[i + 1 :]
+            )
+            if is_punct_only:
                 cluster_worst = "PUNCT"
-            elif "CASE" in pairwise_tiers:
-                cluster_worst = "CASE"
             else:
-                cluster_worst = "IDENTICAL"
+                # Classify cluster-wide tier: take the most conservative pairwise tier.
+                pairwise_tiers = set()
+                for i, a in enumerate(variants):
+                    for b in variants[i + 1 :]:
+                        t, _ = classify_pair(a, b)
+                        pairwise_tiers.add(t)
+                if "OTHER" in pairwise_tiers:
+                    cluster_worst = "OTHER"
+                elif "SUFFIX_AMBIGUOUS" in pairwise_tiers:
+                    cluster_worst = "SUFFIX_AMBIGUOUS"
+                elif "SUFFIX_SAFE" in pairwise_tiers:
+                    cluster_worst = "SUFFIX_SAFE"
+                elif "PUNCT" in pairwise_tiers:
+                    cluster_worst = "PUNCT"
+                elif "CASE" in pairwise_tiers:
+                    cluster_worst = "CASE"
+                else:
+                    cluster_worst = "IDENTICAL"
 
         canonical = pick_canonical(variants, degrees, existing_dirs)
         variant_degs = sorted(
