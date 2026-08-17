@@ -221,6 +221,13 @@ services:
   backend: http://127.0.0.1:8080
   lloyd_mcp: http://127.0.0.1:8500/sse
   qmd: http://localhost:8181/query
+youtube:
+  transcript_fallback_chain:
+  - youtube_transcript_api
+  - browser_evaluate_transcript_extractor
+  - vtt_parsing
+  max_retries: 5
+  retry_delay_seconds: 2
 skills:
   directories:
   - ~/obsidian/skills

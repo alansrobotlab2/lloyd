@@ -5,6 +5,7 @@
 watch_senders:
   - alan@example.com
   - alan@alansrobotlab.com
+  - gestalt73@gmail.com
 
 # Allowlist — domains whose emails are always kept
 watch_domains:
