@@ -670,6 +670,34 @@ def apply_merges(
             else:
                 shutil.move(str(f), str(dest))
             moved += 1
+        # Move nested subdirs (writer pattern: <variant>/<variant>-experiment.md).
+        # The file loop above skips non-files, so without this a non-empty
+        # variant dir survives the merge, rmdir fails silently, and the next
+        # sweep re-detects the same SAFE merge (2026-08-18 experiments/
+        # recurrence #5 left a nested autoresearch fact dir behind).
+        for d in list(vdir.iterdir()):
+            if not d.is_dir():
+                continue
+            dest = cdir / d.name
+            if dest.exists():
+                # Name collision: merge file-by-file, never overwrite
+                for inner in list(d.iterdir()):
+                    if not inner.is_file():
+                        continue
+                    dest_file = dest / inner.name
+                    if dest_file.exists():
+                        _merge_fact_file_into(inner, dest_file)
+                        inner.unlink()
+                    else:
+                        shutil.move(str(inner), str(dest_file))
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
+                moved += 1
+            else:
+                shutil.move(str(d), str(dest))
+                moved += 1
         # Remove variant dir if empty
         removed = False
         try:
