@@ -372,8 +372,17 @@ print(json.dumps({
 
 # ── LLM calls ──────────────────────────────────────────────────────────
 
-def call_llm(system_prompt, user_content, max_tokens=2000):
-    """Call the LLM. Handles both content and reasoning-only models."""
+def call_llm(system_prompt, user_content, max_tokens=2000, thinking=False):
+    """Call the LLM. Handles both content and reasoning-only models.
+
+    thinking: when False (default) the Qwen reasoning tokens are suppressed via
+    llama.cpp's chat_template enable_thinking flag. WHY: with thinking ON the
+    model burns the ENTIRE max_tokens budget on reasoning (verified: 4000/4000
+    reasoning_tokens, 0 content), so call_llm's fallback carves the note out of
+    the reasoning tail — producing either a thinking-trace fragment or a note
+    truncated mid-sentence. Disabling it returns the note in `content` directly
+    and leaves the full budget for the output.
+    """
     payload = {
         "model": LLM_MODEL,
         "messages": [
@@ -383,15 +392,21 @@ def call_llm(system_prompt, user_content, max_tokens=2000):
         "max_tokens": max_tokens,
         "temperature": 0.3,
     }
+    if not thinking:
+        # llama.cpp knob; tested 2026-08-19: reasoning_tokens=0, finish_reason=stop
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     body = json.dumps(payload).encode()
     req = request.Request(LLM_URL, data=body, headers={"Content-Type": "application/json"})
     try:
         resp = request.urlopen(req, timeout=180)
         result = json.loads(resp.read())
-        msg = result["choices"][0]["message"]
+        choice = result["choices"][0]
+        msg = choice["message"]
 
         content = msg.get("content")
+        from_reasoning = False
         if not content:
+            from_reasoning = True
             reasoning = msg.get("reasoning", "")
             if reasoning:
                 final_match = re.search(r"Final(?:[_ ]Answer)?[^\n]*\n\n(.*)", reasoning, re.DOTALL)
@@ -400,6 +415,13 @@ def call_llm(system_prompt, user_content, max_tokens=2000):
                 else:
                     sentences = re.split(r'(?<=[.!?])\s+', reasoning.strip())
                     content = " ".join(sentences[-5:]) if len(sentences) > 1 else reasoning.strip()
+        # Definitive truncation signal: the model hit the token budget while
+        # writing the actual content. The note is cut mid-sentence — treat as
+        # a failed attempt so the caller records a retry instead of sealing a
+        # truncated note as completed.
+        if not from_reasoning and choice.get("finish_reason") == "length":
+            print(f"  LLM output truncated at max_tokens ({max_tokens}) — treating as failure")
+            return None
         return content if content else None
     except Exception as e:
         print(f"  LLM call failed: {e}")
@@ -737,11 +759,28 @@ published: {publish_date}
 - [Things that could be investigated further]
 
 """
+    # thinking=False (default): Qwen3.8 burns the entire token budget on
+    # reasoning otherwise (verified 4000/4000 reasoning_tokens, 0 content),
+    # which used to produce truncated or thinking-trace notes.
+    # 8192 budget: measured notes run 1.4–2k content tokens, leaving headroom
+    # for the longest talks without hitting finish_reason=length.
     result = call_llm(
         "You are a knowledge engineer creating structured technical notes. Output ONLY the markdown note in the format shown — no preamble, no explanations, no conversational filler. Include frontmatter, executive summary, key points, technical details, tools, related resources, and open questions.",
         prompt,
-        max_tokens=4000,
+        max_tokens=8192,
+        thinking=False,
     )
+    if result:
+        # Qwen sometimes wraps the whole note in a ```markdown fence
+        # (verified 2026-08-19). Strip a single wrapping fence if present.
+        r = result.strip()
+        if r.startswith("```") and r.endswith("```"):
+            first_nl = r.find("\n")
+            if first_nl != -1:
+                r = r[first_nl + 1:]
+                if r.endswith("```"):
+                    r = r[:-3].rstrip()
+            result = r
     return result if result else None
 
 
@@ -750,6 +789,36 @@ published: {publish_date}
 def slugify(text, max_len=80):
     slug = re.sub(r"[^\w\s-]", "", text).lower().replace(" ", "-")[:max_len]
     return re.sub(r"-+", "-", slug).strip("-")
+
+
+def validate_note(text, video_id):
+    """Validate LLM-generated note content before it is written to disk / marked seen.
+
+    WHY: call_llm can return a thinking-trace fragment instead of the final
+    markdown (e.g. "Let's craft 3 sentences:" with no body). The old flow wrote
+    that verbatim and marked the entry completed, so the backfill loop never
+    retried it. This gate makes such output a *failed* attempt (retry-eligible)
+    instead of a sealed corrupt note.
+
+    Returns (ok, reason). ok is checked by callers; reason goes into state's
+    last_error for the failure path.
+    """
+    text = (text or "").strip()
+    if len(text) < 400:
+        return False, f"note too short ({len(text)} chars — likely thinking-trace leak or empty output)"
+    if not text.startswith("---"):
+        return False, "note has no YAML frontmatter"
+    # A real note has at least one section heading. Old-format notes use
+    # "## Summary"; current format uses "## Executive Summary".
+    if "## Summary" not in text and "## Executive Summary" not in text:
+        return False, "note has no Summary section"
+    # Body evidence: real notes have "## Key Points"; the transcript-fallback
+    # note (built below when the LLM returns nothing) has "## Transcript"
+    # instead. Accept either — the two failures we're guarding against
+    # (thinking-trace leak, empty output) have neither.
+    if "## Key Points" not in text and "## Transcript" not in text and "## Technical Details" not in text:
+        return False, "note has no body section (Key Points / Technical Details / Transcript)"
+    return True, ""
 
 
 def process_video(video_id, title, published_text):
@@ -831,6 +900,16 @@ Processing failed — transcript below.
 ## Transcript
 {transcript[:8000]}
 """
+
+    # Validate BEFORE writing: the LLM can return a thinking-trace fragment
+    # ("Let's craft 3 sentences:" + no body) instead of markdown. The old
+    # flow wrote that verbatim and the caller marked it completed, so the
+    # backfill loop never retried it. Now a bad output → False → caller
+    # records a retry-eligible failure and nothing is written.
+    ok, reason = validate_note(knowledge_note, video_id)
+    if not ok:
+        print(f"  ✗ NOTE VALIDATION FAILED ({reason}) — nothing written, will retry")
+        return False
 
     # Write note
     video_slug = slugify(title)
