@@ -1,12 +1,12 @@
 ---
 segment: agents
-generated: 2026-08-18 23:26 PST
-data_range: 2026-08-16 to 2026-08-18
+generated: 2026-08-19 23:35 PST
+data_range: 2026-08-19 to 2026-08-19
 ---
 
-# Signal Report — 2026-08-18
+# Signal Report — 2026-08-19
 
-**Input data status:** Daily notes for 08-16 (changelog only) and 08-18 (no session) were sparse. 08-17 has 4 auto-captured sessions (Qwen 3.8 27B ×2, FreeCAD tutorial ×2). `corrections.md` has NO new entries — last update 2026-05-08 (stale ~3.5 months). This run is driven almost entirely by extraction logs + the 08-19 daily note (autonomy task #48, ran 08-18 23:19 PST).
+**Scope note:** Prior report (2026-08-19 00:36, range 08-16→08-18) covered the 08-18 sessions (21:06–23:33, 3 transcript extractions) and its downstream jobs applied both guardrails. Verified in this run: (a) `yt-dlp` prohibition present in `youtube-transcript-error-handling/SKILL.md`, (b) truncation-check hard guardrail present there (added 2026-08-19). Enriched trajectories for 08-17/18 show zero new signals/errors. 08-19 trajectory not yet extracted — the 08-19 session lands in the next nightly extraction; signals below are sourced from the 08-19 daily note and pipeline verification.
 
 ## Queued Signals (met threshold)
 
@@ -14,33 +14,30 @@ data_range: 2026-08-16 to 2026-08-18
 
 | ID | Date | Type | Category | Description | Source |
 |----|------|------|----------|-------------|--------|
-| 1 | 2026-08-18 | data-integrity | tool-use | Entity-alias table has 2,677 pre-existing entries failing the `normalize_full(alias) == normalize_full(canonical)` invariant (unchanged this run, old=new=2,677). Look like note-filename/title-mapping aliases from another writer (e.g. `2026-04-03.md` → `2026-04-03`). Flagged in daily note as "needs human review of who writes `entity-aliases.json`". Action: identify all writers of entity-aliases.json; decide which writer owns title-mapping aliases or quarantine that entry class | 2026-08-19 daily note (task #48, 06:19Z) |
+| 1  | 2026-08-19 | correction | tool-use | 08-18 AutoDesign transcript extraction cut off mid-summary — truncation guardrail (added 08-19) must be applied to the 08-18 note on a continuation pass, not just prospectively | daily note 08-19 |
 
 ### Inferred (met 2+ threshold)
 
 | ID | Date | Type | Category | Description | Frequency | Source |
 |----|------|------|----------|-------------|-----------|--------|
-| 1 | 2026-08-05/09/17 | pattern | tool-use | Transcript-extraction cut-off: video summary truncated mid-sentence/mid-explanation (FreeCAD bike stem 08-17; prior hits 08-05 TencentDB ×2, 08-09 Robotics Tech). Recurring across 4 distinct sessions over 2.5 weeks. Action: add length guard to the transcript summary pipeline — detect truncation (summary doesn't end cleanly / source transcript not fully covered) and either continue extraction or flag the note as partial | 4x cumulative (1x this window) | extraction (08-17 session) + prior notes in USER.md |
-| 2 | 2026-08-12/17 | pattern | tool-use | yt-dlp selected for transcript pull then fails (missing JS runtime — no node in environment). Wrong tool choice for this environment; fallback to youtube-transcript-api recovered. Action: drop yt-dlp from the transcript fallback chain entirely in this environment (already documented in USER.md; this is a re-occurrence confirming the rule should be a hard skill guardrail) | 2x | extraction (08-17 session) + 08-12 record |
+| 1  | 2026-08-19 | pattern | tool-use | Truncation guardrail execution confirmed working: 2nd and 3rd video transcripts on 08-19 were correctly marked incomplete and the session continued without retry — guardrail closed the loop on the 4-cut-off pattern (08-05 ×2, 08-09, 08-17) | 3x (2 new + 08-18) | daily note 08-19 |
 
 ## Pending Signals (below threshold)
 
-- **corrections.md staleness** — no entries since 2026-05-08 while daily notes + extraction logs carry continuing signal volume (this run proves it). 1 occurrence, monitor: if next run also finds zero new corrections.md entries, treat corrections.md as a dead input and stop pre-flight loading it (or wire daily-note corrections into it).
-- **Entity-resolution: 96 AMBIGUOUS clusters** — all SUFFIX_AMBIGUOUS, stable set across 08-19 passes (02:11Z, 03:53Z, 23:19Z); norm-key diff 0/0. Byte-identical = no drift, nothing to act on yet, but top clusters (NVIDIA d=106+11, CLAUDE d=53, Isaac GR00T d=42) are candidates for manual alias decisions. Monitor.
+- Read tool `not found` on absolute-path read, recovered via Bash cat — 1 occurrence, 08-18 21:17 session; one-off path quirk, recovered in one retry, no systemic pattern. Monitor for recurrence (2nd occurrence would warrant a guardrail note in `read-not-found-handling`).
 
 ## Tool Failure Patterns
 
-- **Tool:** yt-dlp — **Error type:** missing JS runtime (no node) — **Occurrences:** 2 (08-12, 08-17) — **Recommendation:** hard guardrail in transcript skill: never select yt-dlp for transcripts in this environment; chain is youtube-transcript-api → browser_evaluate(page.transcriptExtractor) → VTT parsing.
-- **Tool:** transcript-summary generation — **Error type:** output truncated mid-sentence — **Occurrences:** 4 (08-05 ×2, 08-09, 08-17) — **Recommendation:** fix — post-hoc truncation check (final sentence incomplete or transcript tail uncovered) + one continuation pass; if still truncated, mark the vault note `[partial extraction]`.
-- **Tool:** entity-resolution sweep (task #48) — **Error type:** in-session edit accidentally truncated the 96-row ambiguous table — **Occurrences:** 1 — **Recommendation:** guardrail — sweep sessions must regenerate derived markdown tables from the source jsonl (`entity-merges-*.jsonl`), never hand-edit; this run self-corrected (regenerated, verified 96 rows).
+- **Tool:** youtube-transcript (browser_evaluate + transcriptExtractor) — **Error type:** silent truncation of summary mid-sentence — **Occurrences:** 5 (08-05 ×2, 08-09, 08-17, 08-18) — **Recommendation:** ALREADY APPLIED — truncation check is a hard guardrail in `youtube-transcript-error-handling/SKILL.md` (verify-on-write: final sentence complete + source tail covered; one continuation pass; `[partial extraction]` marker otherwise). Remaining action: apply continuation pass to the 08-18 AutoDesign note (queued signal 1).
+- **Tool:** Read — **Error type:** not found on absolute path — **Occurrences:** 1 — **Recommendation:** monitor; no guardrail needed at current frequency.
 
 ## Positive Patterns to Reinforce
 
-- **Pattern:** Transcript fallback chain (yt-dlp fails → youtube-transcript-api recovers) completed the FreeCAD tutorial extraction end-to-end — the fallback chain encoded from the 08-16 signals run is working in production — **Evidence:** 08-17 session (Qwen/FreeCAD batch); plus 08-16 config change — **Action:** no new encoding needed; the 2× yt-dlp re-failure supports making the skip-yt-dlp rule a hard skill guardrail instead of a soft note.
-- **Pattern:** Verify-then-apply autonomy workflow for entity merges: dry run → apply SAFE only → post-apply dry run → byte-level diff against prior passes → backups before mutation → no restarts performed when not needed — **Evidence:** 08-19 task #48 session (2 merges applied cleanly, 96-row artifact verified, 2 backups taken) — **Action:** encode as a guardrail reference in the entity-resolution/autonomy skill: the dry-run-verify-backup-apply sequence is the template for batch vault mutations.
-- **Pattern:** Self-recovery from in-session artifact corruption — the truncated 96-row table was detected by the post-apply verification and regenerated from source jsonl with row-count verification — **Evidence:** 1 session (08-19 task #48) — **Action:** reinforce: "verify derived artifacts against source data after every batch mutation" as an explicit step in sweep-type autonomy tasks.
+- **Pattern:** Truncation guardrail executed correctly end-to-end — incomplete transcripts marked, pipeline continued, no retry churn, no user intervention — **Evidence:** 2 successful applications on 08-19 (videos 2 and 3), guardrail written after the 4-cut-off series — **Action:** maintain; consolidate into `youtube-transcript-error-handling` skill at next skill-harvest pass rather than duplicating elsewhere.
+- **Pattern:** Batch YouTube research with structured multi-source validation continues to run clean — DeepSeek-moment/Qwen 3.8 27B (08-18, 2 sessions) and 08-19 batch all produced vault notes without correction — **Evidence:** 2 clean research batches (08-18, 08-19) — **Action:** encode as skill candidate (consistent with USER.md research-pattern entries); no behavioral change needed.
+- **Pattern:** Pre-flight commit + guardrail verification in the signal job itself — both repos committed clean, prior-report fixes verified in place before writing this report — **Evidence:** this run — **Action:** preserve the verify-prior-fixes step in the nightly-reflection-signals protocol.
 
-## Notes for downstream jobs
+## Pipeline Hygiene Notes (not user signals)
 
-- Job 2 (Knowledge Consolidation): the 4 auto-captured 08-17 research sessions (Qwen 3.8 27B, FreeCAD 1.1) are research-content, not signal-content; their knowledge already surfaced in prior USER.md consolidation (Qwen 3.8 27B "DeepSeek moment", FreeCAD "make internal lines" fix). Do not re-propagate.
-- Job 3 (Config Application): no config changes warranted this run. Signal 1 (entity-alias writers) is an investigation task, not a config change; consider queueing it as a backlog item rather than acting tonight.
+- `memory-capture.log` is stale (last entry 2026-06-03) — either the job moved logging elsewhere or it is no longer running; worth a one-time check at the next autonomy-task diagnosis pass.
+- 08-19 trajectory will be extracted by the next nightly run (watermark currently at 2026-08-18); the 08-19 session's tool-call-level data will be available to tomorrow's signal job for confirmation of the queued signals above.
