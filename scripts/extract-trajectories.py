@@ -17,6 +17,13 @@ import os
 import re
 import sys
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+
+# Daily notes are dated by local time (America/Los_Angeles, PST/PDT).
+# Bucket trajectory output by local date so {date}.jsonl aligns with
+# memory/learnings/{date}.md — UTC bucketing misfiles 17:00-24:00 PDT
+# sessions one day late (flagged 2026-08-19/20, fixed 2026-08-21).
+LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 from pathlib import Path
 
 
@@ -362,13 +369,15 @@ def filter_by_days(paths: list[Path], days: int) -> list[Path]:
 # ── Output writing ────────────────────────────────────────────────────────────
 
 def trajectory_date_key(traj: dict) -> str:
-    """Return YYYY-MM-DD from trajectory timestamp, defaulting to today."""
+    """Return YYYY-MM-DD in LOCAL_TZ (America/Los_Angeles) from trajectory
+    timestamp, defaulting to today. Buckets must match daily-note dates
+    (local), not UTC — sessions after 17:00 PDT otherwise land one day late."""
     ts = traj.get("timestamp", "")
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d")
+        return dt.astimezone(LOCAL_TZ).strftime("%Y-%m-%d")
     except (ValueError, AttributeError):
-        return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        return datetime.now(tz=LOCAL_TZ).strftime("%Y-%m-%d")
 
 
 def append_trajectories(trajectories: list[dict]) -> None:
