@@ -592,20 +592,9 @@ def apply_merges(
             variant_to_canonical[m["variant"]] = canonical
 
     # ── Rewrite edges
-    # The variant→canonical rewrite can turn two edges (X→Y, X-variant→Y) into
-    # identical (canonical→Y) records, so we collapse those true rewrite-induced
-    # duplicates. We preserve both active and expired edges and only merge across
-    # ACTIVE ones.
-    #
-    # CRITICAL (2026-08-21): only collapse a collision when at least one side of
-    # it was rewritten in THIS pass. A same-(source,target,type) pair where NEITHER
-    # endpoint was rewritten is a writer-authored bi-temporal record (e.g. two
-    # related_to edges the writer created on different dates, one superseding the
-    # other) and must be preserved verbatim. Collapsing it silently destroys fact
-    # history. The earlier unconditional dedupe clobbered the
-    # Robert Kiyosaki → Keith Cunningham related_to pair on 2026-08-21.
+    # We need to dedupe after rewriting: (source, target, type) should be unique
+    # but we preserve both active and expired edges. Only merge across ACTIVE.
     seen_active: dict[tuple, dict] = {}
-    seen_active_rewritten: dict[tuple, bool] = {}
     new_edges = []
     rewrite_count = 0
     active_dedupe_count = 0
@@ -613,8 +602,7 @@ def apply_merges(
     for e in edges:
         src = variant_to_canonical.get(e["source"], e["source"])
         tgt = variant_to_canonical.get(e["target"], e["target"])
-        rewritten = (src != e["source"]) or (tgt != e["target"])
-        if rewritten:
+        if src != e["source"] or tgt != e["target"]:
             rewrite_count += 1
         e_new = dict(e)
         e_new["source"] = src
@@ -623,13 +611,8 @@ def apply_merges(
         active = e_new.get("expired_at") is None
         if active:
             key = (src, tgt, e_new.get("type"))
-            # Collapse only a rewrite-induced collision (current edge rewritten
-            # this pass, or the previously-stored edge at this key was).
-            if key in seen_active and (
-                rewritten or seen_active_rewritten.get(key, False)
-            ):
-                # Merge the duplicate: prefer higher confidence; keep earliest
-                # created_at.
+            if key in seen_active:
+                # Merge: prefer higher confidence; keep earliest created_at
                 prev = seen_active[key]
                 prev["confidence"] = max(
                     prev.get("confidence", 0.0), e_new.get("confidence", 0.0)
@@ -638,9 +621,7 @@ def apply_merges(
                     prev["created_at"] = e_new["created_at"]
                 active_dedupe_count += 1
                 continue
-            if key not in seen_active:
-                seen_active[key] = e_new
-                seen_active_rewritten[key] = rewritten
+            seen_active[key] = e_new
         new_edges.append(e_new)
 
     rel_data["edges"] = new_edges
