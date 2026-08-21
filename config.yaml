@@ -29,7 +29,7 @@ autoresearch:
   bench_dir: ~/obsidian/lloyd/bench
   default_budget_minutes: 120
   default_model: primary
-  facts_experiments_dir: ~/lloyd/_pipeline/vault-derived/facts/experiments
+  facts_experiments_dir: ~/lloyd/_pipeline/vault-derived/facts/Experiments
   ledger_path: ~/lloyd/_pipeline/research/ledger.jsonl
   max_variants_per_round: 7
   promotion:
