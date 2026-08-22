@@ -11,6 +11,18 @@ Lloyd is a fully local AI agent. It runs its own in-process agent loop (`app/har
 - **Agent harness**: `app/harness/` (`run_query(messages, options)` — async generator)
 - **Venv**: `.venvs/lloyd/bin/python`
 
+## Setup
+
+Rebuilding on a fresh OS: **[SETUP.md](SETUP.md)** is the authority — system
+packages, the uv/bun/npm-global toolchain, all four venvs, supervisord + the
+systemd unit, and what must be backed up first (several runtime assets are
+untracked and not re-downloadable). `agent-services/setup/setup-all.sh --check`
+reports what's missing without changing anything.
+
+Secrets live in `.env` (gitignored) and reach `config.yaml` through `${VAR}`
+placeholders that `app/config.py` expands at boot. Never put a literal secret in
+`config.yaml` — it is tracked.
+
 ## Service Management
 
 Lloyd runs **directly on the host** under supervisord (installed as the `agent-supervisord.service` systemd `--user` unit; supervisord itself is the uv tool at `~/.local/bin/supervisord`). There is no longer any distrobox container in the loop. Use supervisorctl directly:

@@ -52,7 +52,11 @@ __pycache__/
 # ─── OS / misc ──────────────────────────────────────
 .DS_Store
 ada.zip
-.backups/data/
+# Pre-upgrade snapshots of flashinfer / torch-compile caches. Regenerable build
+# artifacts — 4.1 GB across 17k files. These were tracked until 2026-08-21; the
+# useful part (a vllm-experimental pip freeze) now lives at
+# agent-services/setup/vllm-experimental.versions.txt.
+.backups/
 
 # ─── Stray writes / scratch ─────────────────────────
 # Raw yt-dlp subtitle dumps land in cwd when the transcript

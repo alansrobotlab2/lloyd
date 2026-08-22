@@ -1,0 +1,56 @@
+# qmd collection definitions — reference copy of ~/.config/qmd/index.yml
+#
+# qmd reads ~/.config/qmd/index.yml, NOT this file. This is the tracked
+# source of truth so a rebuild does not depend on a backup existing:
+#   mkdir -p ~/.config/qmd && cp agent-services/conf/qmd-index.yml ~/.config/qmd/index.yml
+#   qmd update && qmd embed
+#
+# Re-sync after changing collections:
+#   cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml
+#
+collections:
+  facts:
+    path: /home/alansrobotlab/obsidian/facts
+    pattern: "**/*.md"
+  memory:
+    path: /home/alansrobotlab/obsidian/memory
+    pattern: "**/*.md"
+  knowledge:
+    path: /home/alansrobotlab/obsidian/knowledge
+    pattern: "**/*.md"
+  projects:
+    path: /home/alansrobotlab/obsidian/projects
+    pattern: "**/*.md"
+  lloyd:
+    path: /home/alansrobotlab/obsidian/lloyd
+    pattern: "**/*.md"
+  personal:
+    path: /home/alansrobotlab/obsidian/personal
+    pattern: "**/*.md"
+  work:
+    path: /home/alansrobotlab/obsidian/work
+    pattern: "**/*.md"
+  skills:
+    path: /home/alansrobotlab/obsidian/skills
+    pattern: "**/*.md"
+  people:
+    path: /home/alansrobotlab/obsidian/people
+    pattern: "**/*.md"
+  subliminal:
+    path: /home/alansrobotlab/obsidian
+    pattern: "**/*.md"
+    ignore:
+      - agents/**
+      - templates/**
+  backlog:
+    path: /home/alansrobotlab/obsidian/backlog
+    pattern: "**/*.md"
+  autonomy:
+    path: /home/alansrobotlab/obsidian/autonomy
+    pattern: "*.md"
+  sessions:
+    path: /home/alansrobotlab/obsidian/sessions
+    pattern: "**/*.md"
+  architecture:
+    path: /home/alansrobotlab/obsidian/architecture
+    pattern: "**/*.md"

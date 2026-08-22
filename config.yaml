@@ -167,8 +167,8 @@ models:
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Secondary
 livekit:
   url: ws://127.0.0.1:7880
-  api_key: lloyd_1eec02918cf4
-  api_secret: JHjfOpGpwxNs6R4YIx_3dFeoL_XDuC4w7u7QZNWfxfXIs4mp
+  api_key: ${LIVEKIT_API_KEY}
+  api_secret: ${LIVEKIT_API_SECRET}
   room_prefix: lloyd-
   agent_identity: lloyd-agent
   stt:

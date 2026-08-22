@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs systemd user service files by symlinking from systemd/ to ~/.config/systemd/user/
-# Then reloads the systemd daemon.
+# Installs the systemd user unit by symlinking from systemd/ to ~/.config/systemd/user/,
+# then reloads the systemd daemon.
+#
+# There is exactly ONE unit: agent-supervisord.service. It runs supervisord,
+# which in turn manages every Lloyd service (see supervisor/conf.d/). Individual
+# per-service systemd units were retired — do not expect lloyd-llm.service etc.
+#
+# Lingering must also be enabled or supervisord dies at logout and never starts
+# at boot:
+#   sudo loginctl enable-linger "$USER"
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SYSTEMD_SRC="$PROJECT_DIR/systemd"
@@ -41,6 +49,18 @@ for f in "$SYSTEMD_SRC"/*.service; do
     echo "  $name — $status"
 done
 
+LINGER=$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || echo "no")
+if [ "$LINGER" != "yes" ]; then
+    echo ""
+    echo "WARNING: lingering is not enabled for $USER."
+    echo "         supervisord will stop at logout and will not start at boot."
+    echo "         Enable it with:  sudo loginctl enable-linger $USER"
+fi
+
 echo ""
-echo "Start all: systemctl --user start lloyd-llm lloyd-tts lloyd-voice-mode lloyd-voice-mcp lloyd-tool-mcp openclaw-gateway openclaw-cert lloyd-qmd-daemon lloyd-qmd-watcher"
-echo "Enable at boot: systemctl --user enable lloyd-llm lloyd-tts lloyd-voice-mode lloyd-voice-mcp lloyd-tool-mcp openclaw-gateway openclaw-cert lloyd-qmd-daemon lloyd-qmd-watcher"
+echo "Enable and start:"
+echo "  systemctl --user enable --now agent-supervisord.service"
+echo ""
+echo "Then check the services supervisord manages:"
+echo "  $HOME/.local/share/uv/tools/supervisor/bin/supervisorctl \\"
+echo "    -c $PROJECT_DIR/supervisor/supervisord.conf status"

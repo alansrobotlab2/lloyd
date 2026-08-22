@@ -1,0 +1,1 @@
+308fbd4 perf: re-enable flash_attention_2 + torch.compile (2.7x throughput)

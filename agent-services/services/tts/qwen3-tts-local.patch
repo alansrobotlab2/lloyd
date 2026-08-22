@@ -1,0 +1,53 @@
+diff --git a/api/backends/optimized_backend.py b/api/backends/optimized_backend.py
+index 8b527c3..71a0138 100644
+--- a/api/backends/optimized_backend.py
++++ b/api/backends/optimized_backend.py
+@@ -127,8 +127,32 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+ 
+         logger.info(f"Loading {model_key!r} ({hf_id})…")
+ 
+-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+-        self.dtype = torch.bfloat16 if self.device != "cpu" else torch.float32
++        cuda_ok = torch.cuda.is_available()
++        logger.info(
++            f"CUDA available: {cuda_ok}, "
++            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}"
++        )
++
++        if not cuda_ok:
++            logger.warning("CUDA not available on first check, retrying in 3s...")
++            time.sleep(3)
++            if hasattr(torch.cuda, '_initialized'):
++                torch.cuda._initialized = False
++            cuda_ok = torch.cuda.is_available()
++            if cuda_ok:
++                logger.info("CUDA became available after retry")
++
++        if cuda_ok:
++            self.device = "cuda:0"
++            self.dtype = torch.bfloat16
++        else:
++            logger.warning(
++                "CUDA is not available — model will load on CPU with degraded "
++                "performance! Check GPU drivers, container runtime, and "
++                "CUDA_VISIBLE_DEVICES."
++            )
++            self.device = "cpu"
++            self.dtype = torch.float32
+ 
+         from qwen_tts import Qwen3TTSModel
+         torch.set_float32_matmul_precision("high")
+diff --git a/api/routers/openai_compatible.py b/api/routers/openai_compatible.py
+index 781f1f2..73aa099 100644
+--- a/api/routers/openai_compatible.py
++++ b/api/routers/openai_compatible.py
+@@ -654,6 +654,9 @@ async def create_speech(
+             )
+ 
+         # Encode audio to requested format (offloaded – pydub MP3 encoding is CPU-heavy)
++        # Pad 200ms silence at end to prevent Discord clipping
++        _pad_samples = int(sample_rate * 0.2)
++        audio = np.concatenate([audio, np.zeros(_pad_samples, dtype=audio.dtype)])
+         audio_bytes = await asyncio.to_thread(encode_audio, audio, request.response_format, sample_rate)
+ 
+         # Return audio response

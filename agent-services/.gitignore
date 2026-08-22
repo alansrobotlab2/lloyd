@@ -58,6 +58,13 @@ llm/flashinfer-k64/
 llm/vllm-mistral/
 
 # Wakeword / smart-turn / TTS reference assets (binary models + audio)
+#
+# NOTE: this pattern is UNANCHORED — it matches every `models/` dir at any
+# depth, including llm/models/ (~311 GB). Do not try to negate it with `!models/`;
+# that un-ignores the LLM weights too. The four custom-trained wake-word ONNX
+# files are instead force-added (`git add -f`) and stay tracked thereafter:
+#   models/wakeword/{Lloyd,Hey_Lloyd}.onnx
+#   models/openwakeword/{melspectrogram,embedding_model}.onnx
 models/
 services/tts/references/
 
