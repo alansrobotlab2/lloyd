@@ -53,3 +53,23 @@ __pycache__/
 .DS_Store
 ada.zip
 .backups/data/
+
+# ─── Stray writes / scratch ─────────────────────────
+# Raw yt-dlp subtitle dumps land in cwd when the transcript
+# fallback runs; the product is the vault note, not the .vtt.
+*.vtt
+
+# Timestamped backup copies left by in-place edit scripts.
+*.bak-*
+*.bak
+
+# Vault-bound writes that resolved against cwd (~/lloyd) instead of
+# ~/obsidian. Nothing in this repo reads these paths — every consumer
+# uses ~/obsidian/... — so a file appearing here is the bug, not content.
+/obsidian/
+/knowledge/
+
+# Ephemeral morning-brief / triage output.
+/composed_signal.txt
+/scripts/composed_signal.txt
+/morning-brief-*.md
