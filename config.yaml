@@ -181,7 +181,7 @@ livekit:
   tts:
     api_url: http://127.0.0.1:8090
     model: qwen3-tts
-    voice: clone:cullen
+    voice: Ryan            # built-in male voice; was clone:cullen (voice profile lost in rebuild)
     speed: 1.0
     sample_rate: 24000
     skip_empty: true

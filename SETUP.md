@@ -249,9 +249,13 @@ This is the one CLAUDE.md refers to as "the venv".
 cd ~/lloyd
 uv venv .venvs/lloyd --python 3.12
 .venvs/lloyd/bin/python -m ensurepip
-.venvs/lloyd/bin/pip install -r requirements.lock
+.venvs/lloyd/bin/python -m pip install -r requirements.lock
 .venvs/lloyd/bin/playwright install chromium
 ```
+
+> **`ensurepip` no longer creates a `bin/pip` shim** (uv 0.12.x / CPython 3.12.14)
+> — only `pip3`. Invoke pip as `python -m pip`, or `ln -sf pip3 .venvs/lloyd/bin/pip`
+> once if you want the bare `pip` path this document used to assume.
 
 Install from **`requirements.lock`**, not `requirements.txt`. The lock is the
 frozen 162-package snapshot; `requirements.txt` holds loose human-edited intent
@@ -297,23 +301,42 @@ The upstream repo ships a `pyproject.toml` (with an `api` extra), **not** a
 built against it — `config.yaml` in the TTS repo sets
 `optimization.attention: flash_attention_2`.
 
-Install from the frozen snapshot, which pins the exact nightly:
+> **The pins in `qwen3-tts.versions.txt` have expired** (verified 2026-08-22).
+> Three classes of entry no longer resolve, and pip aborts the whole batch on the
+> first one, so all three must be filtered out:
+>
+> | Pin | Why it fails |
+> |---|---|
+> | `torch==2.12.0.dev20260309+cu130`, `torchaudio==...` | PyTorch prunes its nightly index; nothing older than ~8 weeks survives. |
+> | `triton==3.6.0+git9844da95` | Local `+git` version, never on PyPI. |
+> | ~34 × `nvidia-*` / `cuda-*` | Torch's own transitive deps, pinned to the *old* torch's versions. They conflict with whatever nightly you install and produce `ResolutionImpossible`. |
+>
+> Filter them and let torch resolve its own CUDA stack:
 
 ```bash
 cd ~/lloyd
 uv venv .venvs/qwen3-tts --python 3.12
 .venvs/qwen3-tts/bin/python -m ensurepip
 
-# torch first, from the cu130 nightly index — the pinned .dev build
-.venvs/qwen3-tts/bin/pip install --pre torch torchaudio \
+# torch first, from the cu130 nightly index (current nightly, not the dead pin)
+.venvs/qwen3-tts/bin/python -m pip install --pre torch torchaudio \
   --index-url https://download.pytorch.org/whl/nightly/cu130
 
-.venvs/qwen3-tts/bin/pip install -r agent-services/setup/qwen3-tts.versions.txt
+# everything else, minus the four unresolvable pin classes
+grep -vE '^(torch|torchaudio|flash_attn|triton|nvidia-[a-z0-9_.-]*|cuda-[a-z0-9_.-]*)==' \
+  agent-services/setup/qwen3-tts.versions.txt > /tmp/tts-pins.txt
+.venvs/qwen3-tts/bin/python -m pip install -r /tmp/tts-pins.txt
 
 # the vendored repo itself, editable, last
-.venvs/qwen3-tts/bin/pip install -e \
+.venvs/qwen3-tts/bin/python -m pip install -e \
   'agent-services/services/tts/qwen3-tts[api]' --no-deps
 ```
+
+**`flash_attn` is dropped above on purpose, and the service is fine without it.**
+The backend falls back on its own — the log reads `Failed with flash_attention_2:
+... retrying with sdpa` then `Model loaded with sdpa attention`. No config edit is
+needed; leaving `attention: flash_attention_2` set is correct. Compile it later
+for throughput if you want, but it is not on the critical path.
 
 If `flash-attn` has to compile rather than fetch a wheel, it needs
 `NVCC_CCBIN=/usr/bin/g++-15` like everything else here, and it is slow.
@@ -348,9 +371,25 @@ the supervisord config invokes
 `/usr/bin/node .../@tobilu/qmd/dist/cli/qmd.js`, not the bun shim.
 
 ```bash
+npm install -g node-gyp            # better-sqlite3 builds against it; without it the install fails
+export BUN_INSTALL="$HOME/.bun"   # REQUIRED — see below
 bun install -g @tobilu/qmd
-~/.bun/bin/qmd --version    # expect 2.0.1
+bun pm -g trust node-llama-cpp    # runs the blocked postinstall; without it `qmd embed` has no backend
+/usr/bin/node ~/.bun/install/global/node_modules/@tobilu/qmd/dist/cli/qmd.js --version
 ```
+
+Three traps here, all verified on a clean 2026-08-22 rebuild:
+
+- **`BUN_INSTALL` must be exported.** Without it bun installs to
+  `~/.cache/.bun/install/global/...`, but `agent-qmd-daemon.conf` hardcodes
+  `~/.bun/install/global/node_modules/@tobilu/qmd/dist/cli/qmd.js`. The daemon
+  then fails with no obvious cause.
+- **`node-gyp` must be on PATH first**, or `better-sqlite3`'s install script
+  exits 127 and the whole `bun install` aborts.
+- **bun blocks postinstalls by default.** `node-llama-cpp` needs its one to run
+  (`bun pm -g trust`); the four `tree-sitter-*` ones can stay blocked.
+
+Current version is **2.8.3**, not 2.0.1.
 
 ### Collections
 
@@ -394,8 +433,9 @@ A healthy index looks like ~9.4k documents / ~32k vectors at ~840 MB.
   for `86-real;120a-real` into the default directory. The current daemon sidesteps
   this by running `QMD_VEC_BACKEND=bit`.
 
-`qmd status` also reports `AST Chunking: unavailable` because `web-tree-sitter`
-isn't installed. That is cosmetic — it falls back to regex chunking.
+`qmd status` reports `AST Chunking: active` as of 2.8.3, which bundles its own
+tree-sitter grammars (typescript, tsx, javascript, python, go, rust). Older notes
+here said `unavailable`; that applied to 2.0.1 and no longer does.
 
 ---
 
@@ -441,7 +481,7 @@ backup. Rebuild from scratch:
 cd ~/lloyd/agent-services/services/tts
 git clone https://github.com/groxaxo/Qwen3-TTS-Openai-Fastapi.git qwen3-tts
 cd qwen3-tts
-git checkout "$(cut -d' ' -f1 ../qwen3-tts-upstream-commit.txt)"   # 308fbd4
+git checkout "$(cut -d' ' -f1 ../qwen3-tts-upstream-commit.txt)"   # 783bf0e
 git apply ../qwen3-tts-local.patch
 hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base --local-dir models/Qwen3-TTS-12Hz-1.7B-Base
 ```
@@ -456,6 +496,27 @@ git -C qwen3-tts diff > qwen3-tts-local.patch
 `config.yaml` sets `livekit.tts.voice: clone:cullen`, which resolves against
 `voice_library/profiles/cullen/`. Without it, TTS starts but every synthesis
 request for that voice fails.
+
+**Falling back to a built-in voice — check `/v1/voices`, not the source.**
+`api/routers/openai_compatible.py` defines a `VOICE_MAPPING` of OpenAI aliases
+(`alloy echo fable nova onyx shimmer`) onto Qwen speakers, but **that table lists
+speakers the served model does not necessarily expose** — `onyx` maps to `Evan`,
+which is absent from the current 12Hz-1.7B-Base build, so setting either fails at
+synthesis time while looking valid. Ask the running service instead:
+
+```bash
+curl -s localhost:8090/v1/voices | jq -r '.voices[].id'
+# Vivian Serena Uncle_Fu Dylan Eric Ryan Aiden Ono_Anna Sohee alloy echo fable nova onyx shimmer
+```
+
+Male built-ins are `Uncle_Fu, Dylan, Eric, Ryan, Aiden`. Verify any change with a
+real round-trip rather than trusting the list — a bad voice still returns HTTP 200
+in some paths:
+
+```bash
+curl -s -X POST localhost:8090/v1/audio/speech -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-tts","voice":"Ryan","input":"test"}' -o /tmp/v.wav -w '%{http_code} %{size_download}\n'
+```
 
 First boot compiles with `max-autotune` and takes ~75 s before the port opens —
 `startsecs=10` in the supervisor config tolerates this because uvicorn binds
@@ -683,9 +744,20 @@ Speculative decode acceptance on the primary (expect ~70% at 3 tokens):
 curl -s localhost:8096/metrics | grep vllm:spec_decode
 ```
 
-Finally, exercise the whole path from the UI at `http://localhost:8080` — send a
-message that forces a tool call, and confirm vault search returns results
-(that proves qmd, the MCP aggregator, and the harness are all wired).
+Finally, exercise the whole path from the UI — send a message that forces a tool
+call, and confirm vault search returns results (that proves qmd, the MCP
+aggregator, and the harness are all wired).
+
+**The UI is served by Vite over HTTPS on `:5173`, not by the backend on `:8080`:**
+
+```
+https://<host>:5173          # the React app — this is the URL you want
+http://<host>:8080           # FastAPI only; `/` returns {"detail":"Not Found"}
+```
+
+`:8080` has no TLS and serves no HTML — Vite proxies `/api` back to it
+internally. `https://…:8080` and `http://…:5173` both fail by design, so
+reaching for either is the usual cause of "I can only connect over HTTP".
 
 ---
 

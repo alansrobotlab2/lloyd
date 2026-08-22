@@ -1,1 +1,4 @@
-308fbd4 perf: re-enable flash_attention_2 + torch.compile (2.7x throughput)
+783bf0e ci: run lightweight regressions on Python 3.10 and 3.12
+# NOTE 2026-08-22: upstream force-pushed; the previous pin (308fbd4 "perf: re-enable
+# flash_attention_2 + torch.compile") is no longer reachable in the remote. Re-pinned
+# to the current main HEAD, onto which qwen3-tts-local.patch applies cleanly.
