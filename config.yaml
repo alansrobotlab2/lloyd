@@ -262,7 +262,11 @@ workers:
       enabled: true
       interval_seconds: 60
       max_inflight: 2
-      max_duration_seconds: 1200
+      # Bumped 1200 -> 1800 on 2026-08-23: entity-resolution-sweep (#48)
+      # needs ~30 min (3x poisoned at the old 1200s cap). Task-level
+      # timeout_seconds in the .md frontmatter is NOT read by pool.py;
+      # this source-level value is the effective cap.
+      max_duration_seconds: 1800
     session-distill:
       enabled: true
       interval_seconds: 1800
