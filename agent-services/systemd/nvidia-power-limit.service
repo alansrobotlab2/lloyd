@@ -1,0 +1,18 @@
+[Unit]
+Description=Clamp all NVIDIA GPU board power limits (Xid 79 mitigation)
+Documentation=file:///home/alansrobotlab/lloyd/gpu-xid79-falloff-report.md
+After=multi-user.target
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 300 W: more conservative than the 400 W + <=2400 MHz clamp that was this
+# unit's only stable configuration. See the report above; RMA open.
+Environment=GPU_POWER_LIMIT_W=300
+# Root-executed, so it deliberately runs from a root-owned system path rather
+# than the repo checkout. Reinstall with the cp below after editing the source.
+ExecStart=/usr/local/sbin/set-gpu-power-limit.sh
+
+[Install]
+WantedBy=multi-user.target
