@@ -430,8 +430,41 @@ A healthy index looks like ~9.4k documents / ~32k vectors at ~840 MB.
 - **GPU arch mismatch.** If `vault_search` returns **0 results**, qmd's
   `node-llama-cpp` CUDA binary was built without the target GPU's arch and the
   vector leg crashes, zeroing the fused lex+vec query. Rebuild `node-llama-cpp`
-  for `86-real;120a-real` into the default directory. The current daemon sidesteps
-  this by running `QMD_VEC_BACKEND=bit`.
+  for `86-real;120a-real` into the default directory.
+
+  > **`QMD_VEC_BACKEND` no longer exists.** Earlier revisions of this document
+  > said the daemon sidesteps the arch problem by setting `QMD_VEC_BACKEND=bit`.
+  > qmd 2.8.3 never reads that variable — it is not in the package at all, so it
+  > was silently doing nothing. The real controls are `QMD_LLAMA_GPU`
+  > (`cuda` | `vulkan` | `metal` | `false`) and `QMD_FORCE_CPU`.
+
+### GPU selection — pin it, don't infer it
+
+Both qmd services set `QMD_LLAMA_GPU="cuda"` explicitly. Do not remove it and
+rely on the default `auto`: with all three heterogeneous GPUs visible,
+node-llama-cpp's auto-detect picks **Vulkan**, not CUDA. It only lands on CUDA
+because `CUDA_VISIBLE_DEVICES=0` narrows the field to the single 3090 — an
+accident of the device pin, not a decision. Setting it explicitly also makes a
+broken CUDA install fail loudly instead of quietly degrading to Vulkan.
+
+Verify what a service actually resolved:
+
+```bash
+QMD_DOCTOR_DEVICE_PROBE=1 qmd doctor | grep -E 'device mode|device probe'
+# expect: device mode: cuda
+#         device probe: GPU cuda; offloading enabled; devices: NVIDIA GeForce RTX 3090
+```
+
+Confirm it is genuinely on the GPU — the daemon holds ~4.4 GB of VRAM once the
+embed/expand/rerank models are loaded (they load lazily, on first query):
+
+```bash
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv | grep "$(pgrep -f 'qmd.js mcp')"
+```
+
+**Only model inference is GPU-accelerated.** Embedding, query expansion, and
+reranking run on the GPU; the BM25 lexical leg and the vector similarity scan are
+SQLite and stay on CPU. That is the design, not a misconfiguration.
 
 `qmd status` reports `AST Chunking: active` as of 2.8.3, which bundles its own
 tree-sitter grammars (typescript, tsx, javascript, python, go, rust). Older notes
