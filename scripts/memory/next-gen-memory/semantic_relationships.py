@@ -274,6 +274,15 @@ class SemanticRelationshipDiscoverer:
         sorted_rels = sorted(self.relationships, key=lambda x: -x["score"])
         
         lines = [
+            "---",
+            "segment: memory",
+            "tags:",
+            "- vault-maintenance",
+            "- knowledge-graph",
+            "type: report",
+            f"timestamp: '{datetime.now().isoformat()}'",
+            "---",
+            "",
             "# Semantic Relationship Discovery Report",
             "",
             f"**Generated:** {datetime.now().isoformat()}",
