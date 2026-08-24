@@ -8,20 +8,39 @@ interface FocusMessage {
   sessionKey: string | null
   url?: string
   title?: string
+  canCheck?: boolean
 }
 
 interface PanelState {
   sessionKey: string | null
   url: string | null
   title: string | null
+  canCheck: boolean
 }
 
-const INITIAL: PanelState = { sessionKey: null, url: null, title: null }
+const INITIAL: PanelState = {
+  sessionKey: null,
+  url: null,
+  title: null,
+  canCheck: false,
+}
+
+const CHECK_LABEL = "Check it out, Lloyd"
 
 export default function SidePanelApp() {
   const [state, setState] = useState<PanelState>(INITIAL)
+  const [pending, setPending] = useState(false)
   const windowIdRef = useRef<number | null>(null)
   const portRef = useRef<chrome.runtime.Port | null>(null)
+  const pendingTimerRef = useRef<number | null>(null)
+
+  function settlePending() {
+    setPending(false)
+    if (pendingTimerRef.current) {
+      window.clearTimeout(pendingTimerRef.current)
+      pendingTimerRef.current = null
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -47,7 +66,10 @@ export default function SidePanelApp() {
           sessionKey: msg.sessionKey,
           url: msg.url ?? null,
           title: msg.title ?? null,
+          canCheck: Boolean(msg.canCheck),
         })
+        // Any focus push from the SW settles a pending check request.
+        settlePending()
       })
 
       port.onDisconnect.addListener(() => {
@@ -68,33 +90,86 @@ export default function SidePanelApp() {
       cancelled = true
       portRef.current?.disconnect()
       portRef.current = null
+      if (pendingTimerRef.current) window.clearTimeout(pendingTimerRef.current)
     }
   }, [])
 
-  if (!state.sessionKey) {
-    return <EmptyState />
+  async function requestCheck() {
+    if (pending || !windowIdRef.current) return
+    setPending(true)
+    // Safety net: if the SW never answers (dead, port down), un-stick.
+    pendingTimerRef.current = window.setTimeout(() => setPending(false), 10000)
+    try {
+      const win = await chrome.windows.getCurrent()
+      const [tab] = await chrome.tabs.query({
+        active: true,
+        windowId: win.id,
+      })
+      portRef.current?.postMessage({
+        type: "request-session",
+        windowId: win.id,
+        tabId: tab?.id,
+      })
+    } catch {
+      settlePending()
+    }
   }
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
-      <PageHeader url={state.url} title={state.title} />
-      <div className="min-h-0 flex-1">
-        <ChatPanel
-          requestedSessionKey={state.sessionKey}
-          compact
+      <div className="border-b border-border bg-card/40 px-3 py-2">
+        <CheckButton
+          canCheck={state.canCheck}
+          pending={pending}
+          onRequest={requestCheck}
         />
       </div>
+      {state.sessionKey ? (
+        <>
+          <PageHeader url={state.url} title={state.title} />
+          <div className="min-h-0 flex-1">
+            <ChatPanel requestedSessionKey={state.sessionKey} compact />
+          </div>
+        </>
+      ) : (
+        <EmptyState canCheck={state.canCheck} />
+      )}
     </div>
   )
 }
 
-function EmptyState() {
+function CheckButton({
+  canCheck,
+  pending,
+  onRequest,
+}: {
+  canCheck: boolean
+  pending: boolean
+  onRequest: () => void
+}) {
   return (
-    <div className="flex h-screen items-center justify-center bg-background p-6 text-center text-foreground">
-      <div className="space-y-2">
-        <div className="text-lg font-medium">Lloyd is watching this tab</div>
+    <button
+      type="button"
+      onClick={onRequest}
+      disabled={pending || !canCheck}
+      className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {pending ? "Checking\u2026" : CHECK_LABEL}
+    </button>
+  )
+}
+
+function EmptyState({ canCheck }: { canCheck: boolean }) {
+  return (
+    <div className="flex flex-1 items-center justify-center p-6 text-center">
+      <div className="space-y-1">
+        <div className="text-lg font-medium">
+          {canCheck ? "Ready when you are" : "No checkable page here"}
+        </div>
         <div className="text-sm text-muted-foreground">
-          Open a webpage and I'll fetch it and give you the highlights.
+          {canCheck
+            ? "Lloyd hasn't looked at this page yet. Hit the button above to pull the contents and get the highlights."
+            : "Open a regular web page or YouTube video, then ask me to check it out."}
         </div>
       </div>
     </div>
@@ -116,10 +191,8 @@ function PageHeader({
     /* keep empty */
   }
   return (
-    <div className="border-b border-border bg-card/40 px-3 py-2">
-      <div className="truncate text-sm font-medium">
-        {title || host || url}
-      </div>
+    <div className="border-b border-border px-3 py-1.5">
+      <div className="truncate text-sm font-medium">{title || host || url}</div>
       {host && title ? (
         <div className="truncate text-xs text-muted-foreground">{host}</div>
       ) : null}

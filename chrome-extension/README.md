@@ -1,14 +1,14 @@
 # Lloyd Chrome Side Panel
 
-A Chrome extension that opens a side panel mirroring Lloyd's chat UI, with **one Lloyd session per browser tab and per webpage**.
+A Chrome extension that opens a side panel mirroring Lloyd's chat UI, with **one Lloyd session per browser tab and per webpage — created on demand**.
 
-When you navigate to a new page (or open a new tab), the extension:
+Sessions are manual: the **"Check it out, Lloyd"** button at the top of the panel is the only way to create one. Pressing it on a tab:
 
-1. Creates a Lloyd session tagged `platform: "browser"`.
+1. Creates a Lloyd session tagged `platform: "browser"` for the tab's current URL.
 2. Fires a kickoff message asking Lloyd to fetch the page and produce highlights — YouTube transcripts on `youtube.com`/`youtu.be`, regular webpage content elsewhere.
 3. Switches the side panel to that session.
 
-Switching tabs re-focuses the panel on the matching session. Closing a tab orphans the session (it stays in Lloyd's main session list).
+Nothing auto-spawns on navigation. Re-checking the same URL just re-focuses the existing session (no second kickoff); navigating away drops the tab's mapping so the next check spawns fresh. The button shows "Checking…" while the request is in flight and disables itself on non-checkable pages (`chrome://`, new-tab, etc.). Switching tabs re-focuses the panel on the matching session (or the not-checked state). Closing a tab orphans the session (it stays in Lloyd's main session list).
 
 ## Layout
 

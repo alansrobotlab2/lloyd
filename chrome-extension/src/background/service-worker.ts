@@ -1,10 +1,11 @@
 // Lloyd Chrome side-panel service worker.
 //
-// One Lloyd session per browser tab + per committed top-frame nav, but
-// **only when the side panel is actually open for that tab**. Background
-// tabs and tabs in windows where the panel is closed don't spawn
-// sessions. When the user later focuses such a tab (with the panel
-// open), we backfill from the URL that's currently visible.
+// One Lloyd session per (tab, URL). Sessions are **never auto-spawned** —
+// the "Check it out, Lloyd" button in the panel is the only trigger
+// (`request-session` message). Navigation tracking still runs so the
+// panel switches to the not-checked state when a tab moves to a new URL,
+// and so re-checking the same URL after a reload doesn't fire a second
+// kickoff (first guard in handleManualCheck).
 //
 // Mapping is held in chrome.storage.session so it survives SW restarts
 // within a browser session.
@@ -33,12 +34,27 @@ interface FocusMessage {
   sessionKey: string | null
   url?: string
   title?: string
+  canCheck?: boolean
 }
 
 interface PanelReadyMessage {
   type: "panel-ready"
   windowId: number
   tabId: number
+}
+
+interface RequestSessionMessage {
+  type: "request-session"
+  windowId: number
+  tabId: number
+}
+
+// Kickoff prompt for the "Check it out, Lloyd" check (YouTube variant
+// when the URL is a YouTube video).
+function buildKickoffMessage(url: string): string {
+  return isYouTube(url)
+    ? `pull the youtube transcript and give me the highlights\n${url}`
+    : `pull the webpage contents and give me the highlights\n${url}`
 }
 
 // ── Port management ────────────────────────────────────────────────────
@@ -56,57 +72,56 @@ function pushToPanel(windowId: number, msg: FocusMessage) {
   }
 }
 
+// Push the tab's current focus state (session mapping + whether the tab's
+// URL is checkable) to the panel in the given window. Replaces the
+// inline focus-session pushes so the "Check it out, Lloyd" button always
+// gets an up-to-date canCheck flag.
+async function pushFocus(windowId: number, tabId: number) {
+  await hydrate()
+  const entry = getMapping(tabId)
+  let canCheck = false
+  try {
+    const tab = await chrome.tabs.get(tabId)
+    canCheck = Boolean(
+      tab.url && /^https?:/i.test(tab.url) && shouldSpawnSession(tab.url),
+    )
+  } catch {
+    /* tab gone — push what we have */
+  }
+  pushToPanel(windowId, {
+    type: "focus-session",
+    windowId,
+    tabId,
+    sessionKey: entry?.sessionKey ?? null,
+    url: entry?.url,
+    title: entry?.title,
+    canCheck,
+  })
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "lloyd-sidepanel") return
   let myWindowId: number | null = null
 
   port.onMessage.addListener(async (raw: unknown) => {
     if (!raw || typeof raw !== "object") return
-    const msg = raw as PanelReadyMessage
+    const msg = raw as PanelReadyMessage | RequestSessionMessage
+    if (msg.type === "request-session") {
+      await handleManualCheck(
+        (msg as RequestSessionMessage).windowId,
+        (msg as RequestSessionMessage).tabId,
+      )
+      return
+    }
     if (msg.type !== "panel-ready") return
     await hydrate()
     myWindowId = msg.windowId
     panelPorts.set(msg.windowId, port)
 
-    // If the tab doesn't have a session yet (extension just installed,
-    // browser just relaunched, or the user opened the panel on a tab
-    // that hadn't navigated since), backfill one for the currently
-    // visible URL.
-    let entry = getMapping(msg.tabId)
-    if (!entry) {
-      try {
-        const tab = await chrome.tabs.get(msg.tabId)
-        if (
-          tab.url &&
-          /^https?:/i.test(tab.url) &&
-          shouldSpawnSession(tab.url)
-        ) {
-          await withTabLock(msg.tabId, async () => {
-            if (getMapping(msg.tabId)) return
-            const canonical = canonicalize(tab.url!)
-            if (getCanonical(msg.tabId) === canonical) return
-            await spawnSession(
-              msg.tabId,
-              tab.url!,
-              tab.title ?? "",
-              canonical,
-            )
-          })
-          entry = getMapping(msg.tabId)
-        }
-      } catch {
-        /* tab closed between query and get */
-      }
-    }
-
-    port.postMessage({
-      type: "focus-session",
-      windowId: msg.windowId,
-      tabId: msg.tabId,
-      sessionKey: entry?.sessionKey ?? null,
-      url: entry?.url,
-      title: entry?.title,
-    } satisfies FocusMessage)
+    // Sessions are only created on explicit "Check it out, Lloyd" — so
+    // opening the panel just reports the tab's current state (mapping,
+    // if any, plus whether the visible URL is checkable).
+    await pushFocus(msg.windowId, msg.tabId)
   })
 
   port.onDisconnect.addListener(() => {
@@ -139,7 +154,13 @@ chrome.runtime.onInstalled.addListener(() => {
     })
 })
 
-// ── Navigation = the only place sessions are spawned ───────────────────
+// ── Navigation = URL tracking only; sessions are never auto-spawned ────
+// The "Check it out, Lloyd" button is the only way to create a session.
+// Nav tracking still matters for two things:
+//   1. lastCommitted canonical URLs (reload dedupe for the check button),
+//   2. dropping the tab's session mapping when the URL changes, so the
+//      panel switches to the "not checked" state instead of showing the
+//      previous page's session for the new URL.
 async function handleNavigation(details: {
   tabId: number
   url: string
@@ -149,58 +170,21 @@ async function handleNavigation(details: {
   if (!/^https?:/i.test(details.url)) return
   await hydrate()
   const tabId = details.tabId
-  await withTabLock(tabId, async () => {
-      const canonical = canonicalize(details.url)
-      if (getCanonical(tabId) === canonical) return // reload, no-op
-      // Update lastCommitted unconditionally so the next nav comparison
-      // still works even when this URL is excluded.
-      await setCanonical(tabId, canonical)
-
-      if (!shouldSpawnSession(details.url)) {
-        // Excluded host — drop any existing mapping for this tab so the
-        // panel falls back to the empty state. lastCommitted stays so a
-        // later nav to a real page is correctly detected.
-        await clearMapping(tabId)
-        try {
-          const tab = await chrome.tabs.get(tabId)
-          if (typeof tab.windowId === "number") {
-            pushToPanel(tab.windowId, {
-              type: "focus-session",
-              windowId: tab.windowId,
-              tabId,
-              sessionKey: null,
-            })
-          }
-        } catch {
-          /* tab closed */
-        }
-        return
-      }
-
-      // Only spawn if the user is actively engaging with this tab via
-      // the side panel. Background tabs and tabs in windows with no
-      // open panel are deferred — the spawn happens later via
-      // tabs.onActivated or the panel-ready backfill.
-      let tab: chrome.tabs.Tab | undefined
-      try {
-        tab = await chrome.tabs.get(tabId)
-      } catch {
-        return
-      }
-      const winId = tab.windowId
-      if (
-        !tab.active ||
-        typeof winId !== "number" ||
-        !panelPorts.has(winId)
-      ) {
-        // Old mapping is now stale (different URL). Drop it so we don't
-        // serve the wrong session when the user does focus this tab.
-        await clearMapping(tabId)
-        return
-      }
-
-      await spawnSession(tabId, details.url, tab.title ?? "", canonical)
-    })
+  const changed = await withTabLock(tabId, async () => {
+    const canonical = canonicalize(details.url)
+    if (getCanonical(tabId) === canonical) return false // reload, no-op
+    await setCanonical(tabId, canonical)
+    // The old mapping (if any) now points at a stale URL — drop it so
+    // the next check against this tab's new URL spawns a fresh session.
+    await clearMapping(tabId)
+    return true
+  })
+  if (changed) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null)
+    if (tab && typeof tab.windowId === "number") {
+      await pushFocus(tab.windowId, tabId)
+    }
+  }
 }
 
 chrome.webNavigation.onCommitted.addListener(handleNavigation, {
@@ -225,6 +209,7 @@ async function spawnSession(
   url: string,
   title: string,
   canonical: string,
+  kickoff = false,
 ) {
   let sessionKey: string
   try {
@@ -242,63 +227,55 @@ async function spawnSession(
   // arrives.
   patchBrowserMetadata(sessionKey, { url, title }).catch(() => undefined)
 
-  const kickoff = isYouTube(url)
-    ? `pull the youtube transcript and give me the highlights\n${url}`
-    : `pull the webpage contents and give me the highlights\n${url}`
-
-  fireKickoff(sessionKey, kickoff, `ext_tab_${tabId}`).catch((err) =>
-    console.error("[lloyd-sw] fireKickoff failed:", err),
-  )
+  if (kickoff) {
+    fireKickoff(sessionKey, buildKickoffMessage(url), `ext_tab_${tabId}`).catch(
+      (err) => console.error("[lloyd-sw] fireKickoff failed:", err),
+    )
+  }
 
   // Notify the panel (if open in the tab's window).
-  try {
-    const tab = await chrome.tabs.get(tabId)
-    if (typeof tab.windowId === "number") {
-      pushToPanel(tab.windowId, {
-        type: "focus-session",
-        windowId: tab.windowId,
-        tabId,
-        sessionKey,
-        url,
-        title,
-      })
-    }
-  } catch {
-    /* tab gone */
+  const tab = await chrome.tabs.get(tabId).catch(() => null)
+  if (tab && typeof tab.windowId === "number") {
+    await pushFocus(tab.windowId, tabId)
   }
 }
 
-// ── Tab switch = re-focus panel on the new tab's session ───────────────
-// If the panel is open in this window and the newly focused tab doesn't
-// yet have a session for its current URL, spawn one now (this is when
-// the user is "actually engaging" with the tab through Lloyd).
-chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
-  await hydrate()
-  let entry = getMapping(tabId)
-
-  if (panelPorts.has(windowId)) {
-    try {
-      const tab = await chrome.tabs.get(tabId)
-      if (
-        tab.url &&
-        /^https?:/i.test(tab.url) &&
-        shouldSpawnSession(tab.url)
-      ) {
-        const canonical = canonicalize(tab.url)
-        if (!entry || canonicalize(entry.url) !== canonical) {
-          await withTabLock(tabId, async () => {
-            const cur = getMapping(tabId)
-            if (cur && canonicalize(cur.url) === canonical) return
-            await spawnSession(tabId, tab.url!, tab.title ?? "", canonical)
-          })
-          entry = getMapping(tabId)
-        }
-      }
-    } catch {
-      /* tab closed */
-    }
+// ── Manual check ("Check it out, Lloyd") ───────────────────────────────
+// The panel asks the SW to spawn a session for the tab's current URL and
+// kick it off. The canonical-URL dedupe still applies: if the tab already
+// has a session for this URL we focus it instead of re-spawning.
+async function handleManualCheck(windowId: number, tabId: number) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null)
+  if (!tab || !tab.url || !/^https?:/i.test(tab.url)) {
+    await pushFocus(windowId, tabId)
+    return
   }
 
+  const canonical = canonicalize(tab.url)
+
+  await withTabLock(tabId, async () => {
+    const cur = getMapping(tabId)
+    if (cur && canonicalize(cur.url) === canonical) {
+      // This tab's session is already for this exact URL — re-focus it
+      // instead of spawning a duplicate or re-firing the kickoff.
+      await pushFocus(windowId, tabId)
+      return
+    }
+    // No session for this URL (first check, or navigated away and back)
+    // — spawn + kickoff.
+    await spawnSession(tab.id, tab.url, tab.title ?? "", canonical, true)
+  })
+
+  await pushFocus(windowId, tabId)
+}
+
+// ── Tab switch = re-focus panel on the new tab's session ───────────────
+// Pure focus: no spawning. The button is the only way to create a
+// session; switching tabs just shows the (possibly empty) state of the
+// new tab and whether its current URL is checkable.
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  await hydrate()
+  const entry = getMapping(tabId)
   pushToPanel(windowId, {
     type: "focus-session",
     windowId,
