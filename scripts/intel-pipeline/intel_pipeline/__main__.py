@@ -58,11 +58,10 @@ def main():
         all_items = github_items + youtube_items
         print(f"\nTotal scanned items: {len(all_items)}")
         
-        # Save raw items
-        if all_items:
-            raw_path = state.get_raw_path(today)
-            state.save_raw_items(all_items, today)
-            print(f"Saved raw items to: {raw_path}")
+        # NOTE: each scanner saves its own items to the raw JSONL already
+        # (github_scanner / youtube_scanner call state.save_raw_items internally).
+        # Do NOT save the combined list here — that would double-write every item.
+        print(f"Scanners saved raw items to: {state.get_raw_path(today)}")
     
     # Run scoring
     if run_all or args.score:
