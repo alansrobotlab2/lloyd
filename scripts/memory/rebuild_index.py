@@ -102,7 +102,7 @@ def rebuild_relations_index() -> dict:
                 documents.append({
                     "path": rel_path,
                     "type": frontmatter.get("type", "unknown"),
-                    "tags": frontmatter.get("tags", []),
+                    "tags": frontmatter.get("tags") or [],
                     "wiki_links": wiki_links
                 })
             except:
