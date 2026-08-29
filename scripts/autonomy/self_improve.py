@@ -195,8 +195,10 @@ def get_recent_sessions(days: int = 7) -> list[str]:
             except ValueError:
                 continue
 
-    # Sort by date descending
-    sessions.sort(key=lambda x: x[1], reverse=True)
+    # Sort by file mtime descending so sessions[0] is the most recently active
+    # (date-only ordering left the oldest session of the day first, which broke
+    # the watermark check and caused false "no new sessions" skips)
+    sessions.sort(key=lambda x: os.path.getmtime(x[0]), reverse=True)
     return [s[0] for s in sessions]
 
 def get_sessions_for_date(date_str: str) -> list[str]:
