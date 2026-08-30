@@ -564,7 +564,30 @@ def backup_file(path: Path, timestamp: str) -> Path:
         return path
     bak = path.with_suffix(path.suffix + f".{timestamp}.bak")
     shutil.copy2(path, bak)
+    prune_old_backups(path)
     return bak
+
+
+def prune_old_backups(path: Path, keep: int = 3) -> int:
+    """Keep the newest `keep` .bak backups for `path`; delete older ones.
+
+    Pre-2026-08-30, backups accumulated unbounded (246 files / 314 MB in
+    ~8 days, mostly incident-doc runNNN-pre.bak snapshots). Safe no-op on
+    any glob/stat error — rotation must never break the sweep.
+    """
+    try:
+        baks = sorted(
+            path.parent.glob(path.name + "*.bak"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        pruned = 0
+        for old in baks[keep:]:
+            old.unlink(missing_ok=True)
+            pruned += 1
+        return pruned
+    except Exception:
+        return 0
 
 
 def apply_merges(
