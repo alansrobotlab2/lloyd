@@ -381,7 +381,15 @@ def trajectory_date_key(traj: dict) -> str:
 
 
 def append_trajectories(trajectories: list[dict]) -> None:
-    """Append trajectories to date-bucketed output files."""
+    """Append trajectories to date-bucketed output files.
+
+    Idempotent per session_key: entries whose session_key already exists
+    in the target file are skipped (dedup-on-write). Backfill re-covers
+    sessions a prior run already wrote (watermark/late-end timing) and a
+    plain append produced byte-identical duplicate pairs (08-28/08-29
+    defect, 6th cycle). session_key is unique per session, so dedup is
+    safe.
+    """
     # Group by date
     by_date: dict[str, list[dict]] = {}
     for traj in trajectories:
@@ -390,8 +398,24 @@ def append_trajectories(trajectories: list[dict]) -> None:
 
     for date_key, items in by_date.items():
         out_path = OUTPUT_DIR / f"{date_key}.jsonl"
+        existing_keys: set[str] = set()
+        if out_path.exists():
+            with open(out_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        existing_keys.add(json.loads(line).get("session_key", ""))
+                    except (ValueError, KeyError):
+                        pass
         with open(out_path, "a", encoding="utf-8") as fh:
             for item in items:
+                key = item.get("session_key", "")
+                if key and key in existing_keys:
+                    continue
+                if key:
+                    existing_keys.add(key)
                 fh.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
