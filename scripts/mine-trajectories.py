@@ -92,7 +92,6 @@ MCP_PREFIX_MAP = {
     "mcp____chat_": "mcp:chat",
     "mcp____calendar_": "mcp:calendar",
     "mcp____discord_": "mcp:discord",
-    "mcp____subliminal_": "mcp:subliminal",
 }
 
 BUILTIN_TOOLS = {

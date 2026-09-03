@@ -112,7 +112,7 @@ Threaded into every per-event prompt by `build_user_prompt_for_event`:
 
 - The original user request and the extracted goal card.
 - The **subliminal context block** the primary saw at turn start (prefetched
-  skills, vault hits, facts, ambient signals — see [[subliminal]]), capped at 4000
+  skills, vault hits, facts, ambient signals — see [[subliminal]]), capped at 4000 chars (head + tail; each `<skill>` block is trimmed to 1800 first so facts, vault hits and IDE state survive the cap)
   chars. Lets the observer recognize when the primary is following documented
   procedure rather than freelancing.
 - The live **todo list** (`session.todos`), refreshed mid-turn after each

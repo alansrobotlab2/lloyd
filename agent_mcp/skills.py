@@ -175,6 +175,34 @@ def _excerpt(body: str, query_tokens: set[str], max_len: int = 200) -> str:
 _BODY_HITS_CAP = 4
 
 
+def _skill_token_sets(skill: dict) -> tuple[set[str], set[str], set[str], set[str]]:
+    """Return (name, description, tag, body) token sets, memoized on the dict.
+
+    Tokenizing + stemming a 5-15KB skill body costs ~0.3ms; across ~280
+    skills that was ~83ms of GIL-held CPU on *every* prefetch turn, and it
+    starved the other prefetch workers (facts/backlog) of the interpreter.
+    The prefetch skill cache keeps the same dicts alive across turns, so
+    memoizing here turns scoring into ~280 set intersections (~1ms).
+
+    The memo lives under the private `_tok` key. Callers that serialize a
+    skill dict must pick fields explicitly (they all do) — sets aren't
+    JSON-encodable.
+    """
+    tok = skill.get("_tok")
+    if tok is None:
+        tags = skill.get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        tok = (
+            _tokenize((skill.get("name") or "").replace("-", " ")),
+            _tokenize(skill.get("description") or ""),
+            _tokenize(" ".join(str(t) for t in tags)),
+            _tokenize(skill.get("body") or ""),
+        )
+        skill["_tok"] = tok
+    return tok
+
+
 def _score_skill(skill: dict, query_tokens: set[str],
                  require_metadata_hit: bool = True) -> float:
     """Score a skill against query tokens. Higher = more relevant.
@@ -188,10 +216,7 @@ def _score_skill(skill: dict, query_tokens: set[str],
     Body hits are capped (see `_BODY_HITS_CAP`) and weighted to be a
     tiebreaker, not a qualifier.
     """
-    name_tokens = _tokenize(skill["name"].replace("-", " "))
-    desc_tokens = _tokenize(skill["description"])
-    tag_tokens = _tokenize(" ".join(skill["tags"]))
-    body_tokens = _tokenize(skill["body"])
+    name_tokens, desc_tokens, tag_tokens, body_tokens = _skill_token_sets(skill)
 
     name_hits = len(query_tokens & name_tokens)
     desc_hits = len(query_tokens & desc_tokens)

@@ -77,3 +77,6 @@ ada.zip
 /composed_signal.txt
 /scripts/composed_signal.txt
 /morning-brief-*.md
+
+# retrieval eval run outputs (summary numbers live in architecture/subliminal.md)
+eval/baselines/

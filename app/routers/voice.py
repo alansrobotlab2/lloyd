@@ -40,7 +40,7 @@ from app.sessions_io import (
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_tool_search_kwargs
 from prompt_builder import build_system_prompt
-from prefetch import prefetch_context
+from prefetch import prefetch_context_async
 
 
 router = APIRouter()
@@ -115,7 +115,9 @@ async def voice_inject(request: Request):
         except Exception:
             live = False
         return _get_disallowed_tools(plan_mode=live)
-    prefetched_text = prefetch_context(prompt_text, session_id=session_id)
+    prefetched_text = await prefetch_context_async(
+        prompt_text, session_id=session_id, plan_mode=voice_plan_mode,
+    )
 
     options = RunOptions(
         model=model,

@@ -19,7 +19,7 @@ from app.config import CONFIG
 _MCP_SERVER_META: dict[str, dict] = {
     "lloyd-mcp": {
         "label": "Lloyd MCP",
-        "description": "Unified aggregator: built-in tools (Bash/Read/Write/Edit/Grep/Glob/Task) + domain modules (autonomy, backlog, browser, facts, vault, mission control, subliminal, HTTP, Thunderbird, pipeline, ambient, autoresearch, skills, session)",
+        "description": "Unified aggregator: built-in tools (Bash/Read/Write/Edit/Grep/Glob/Task) + domain modules (autonomy, backlog, browser, facts, vault, mission control, HTTP, Thunderbird, pipeline, ambient, autoresearch, skills, session)",
     },
 }
 
@@ -56,7 +56,6 @@ _TOOL_PREFIX_CATEGORY: list[tuple[str, str]] = [
     ("discord_", "Discord"),
     ("chat_", "Mission Control"),
     ("skills_", "Skills"),
-    ("subliminal_", "Subliminal"),
     ("http_", "HTTP"),
     ("tb_", "Thunderbird"),
     ("email_", "Email"),

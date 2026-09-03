@@ -51,7 +51,7 @@ from app.sessions_io import (
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_tool_search_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
 from prompt_builder import build_system_prompt
-from prefetch import prefetch_context
+from prefetch import prefetch_context_async
 from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
 
@@ -1182,7 +1182,14 @@ async def post_message_stream(request: Request):
     )
     t_prompt = time.perf_counter()
 
-    prefetched_text = prefetch_context(text, session_id=session_id)
+    # Off the event loop: the search phase blocks for up to
+    # PREFETCH_BUDGET_MS, which used to stall every other coroutine (SSE
+    # streams for other sessions, Inner Voice, ambient producers) for the
+    # full budget on every user message. plan_mode is passed through so
+    # prefetch doesn't re-read the session JSON we just loaded.
+    prefetched_text = await prefetch_context_async(
+        text, session_id=session_id, plan_mode=plan_mode_active,
+    )
     t_prefetch = time.perf_counter()
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"
@@ -1190,7 +1197,12 @@ async def post_message_stream(request: Request):
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
-            session_turn_count = sum(1 for m in existing.get("messages", []) if m.get("role") == "user")
+            # Real user turns only — ambient producer rows and background-task
+            # notifications are also role="user" but carry a non-user source.
+            session_turn_count = sum(
+                1 for m in existing.get("messages", [])
+                if m.get("role") == "user" and (m.get("source") or "user") == "user"
+            )
         except Exception:
             pass
 
@@ -1201,7 +1213,7 @@ async def post_message_stream(request: Request):
             "If any important decisions, preferences, system changes, or facts from "
             "earlier in this conversation haven't been captured yet, consider calling "
             "memory_add or fact_add now before context compaction loses them."
-            "</system-reminder>\n"
+            "</system-reminder>\n\n"
         )
         prefetched_text = nudge + prefetched_text
 
@@ -1417,7 +1429,9 @@ async def post_message(request: Request):
     system_prompt = build_system_prompt(
         todos=_load_session_todos(session_id), plan=sync_session_plan,
     )
-    prefetched_text = prefetch_context(text, session_id=session_id)
+    prefetched_text = await prefetch_context_async(
+        text, session_id=session_id, plan_mode=sync_plan_mode_active,
+    )
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"
 

@@ -18,6 +18,8 @@ must agree.
 
 from __future__ import annotations
 
+import re
+
 import logging
 from pathlib import Path
 from typing import Any
@@ -302,7 +304,16 @@ def _format_goal_card(goal_card: dict[str, Any] | None) -> str:
 # Cap the subliminal context surfaced to the observer per event. The full
 # prefix can be 6-8 KB on skill-heavy turns; the observer doesn't need
 # every byte to judge "is the primary following documented procedure."
+#
+# The block is ordered skill(s) → backlog → facts → vault → sessions → ide,
+# and a skill body alone can be 6 KB, so a head-only cut used to discard
+# exactly the small sections (facts, vault hits, IDE state) that tell the
+# observer what the primary knew. Each <skill> block is trimmed first —
+# head + tail, so its purpose and closing criteria both survive — and only
+# then is the overall cap applied, also head + tail.
 _SUBLIMINAL_PROMPT_CHAR_CAP = 4000
+_SUBLIMINAL_SKILL_CHAR_CAP = 1800
+_SKILL_BLOCK_RE = re.compile(r"(<skill [^>]*>\n)(.*?)(\n</skill>)", re.DOTALL)
 
 
 def windowed_text(text: str, cap: int) -> str:
@@ -334,8 +345,11 @@ def _format_subliminal_context(subliminal: str | None) -> str:
     if not subliminal or not subliminal.strip():
         return ""
     body = subliminal.strip()
-    if len(body) > _SUBLIMINAL_PROMPT_CHAR_CAP:
-        body = body[:_SUBLIMINAL_PROMPT_CHAR_CAP] + "\n...(truncated)"
+    body = _SKILL_BLOCK_RE.sub(
+        lambda m: m.group(1) + windowed_text(m.group(2), _SUBLIMINAL_SKILL_CHAR_CAP) + m.group(3),
+        body,
+    )
+    body = windowed_text(body, _SUBLIMINAL_PROMPT_CHAR_CAP)
     return (
         "CONTEXT THE PRIMARY SAW (prefetched skills/vault/facts — same "
         "block was injected into the primary's user message):\n"

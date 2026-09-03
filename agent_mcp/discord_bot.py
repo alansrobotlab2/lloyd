@@ -61,8 +61,6 @@ NON_OWNER_DISALLOWED = [
     "backlog_tasks",
     "backlog_get_task",
     "backlog_write_task",
-    # Subliminal (all)
-    "subliminal_recall",
     # Browser (all)
     "browser_navigate",
     "browser_snapshot",

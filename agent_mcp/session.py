@@ -51,7 +51,7 @@ SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
 _SESSION_INDEX_TTL = 120       # cache session index for 2 min
 _SESSION_CORPUS_MAX = 5000     # max chars of searchable text per session
 
-_session_index_cache: Optional[tuple] = None  # (monotonic_ts, {filename: metadata})
+_session_index_cache: Optional[tuple] = None  # (monotonic_ts, max_days, {filename: metadata})
 
 app = Server("lloyd-session")
 
@@ -165,14 +165,22 @@ def _load_session_index(max_days: int = 14) -> dict:
     global _session_index_cache
     now = time.monotonic()
 
-    if _session_index_cache and (now - _session_index_cache[0]) < _SESSION_INDEX_TTL:
-        return _session_index_cache[1]
+    # The cache is only reusable when it was built with a window at least
+    # as wide as the one requested. prefetch asks for 3 days and
+    # session_recall for 14; before this check, whichever ran first
+    # served the other for the TTL — a 3-day index silently answering a
+    # 14-day recall. Callers filter by date themselves, so a wider cached
+    # window is always safe to hand back.
+    if (_session_index_cache
+            and (now - _session_index_cache[0]) < _SESSION_INDEX_TTL
+            and _session_index_cache[1] >= max_days):
+        return _session_index_cache[2]
 
     cutoff = (datetime.datetime.now() - datetime.timedelta(days=max_days)).strftime("%Y%m%d")
     index: dict[str, dict] = {}
 
     if not SESSIONS_DIR.exists():
-        _session_index_cache = (now, index)
+        _session_index_cache = (now, max_days, index)
         return index
 
     for f in SESSIONS_DIR.iterdir():
@@ -218,7 +226,7 @@ def _load_session_index(max_days: int = 14) -> dict:
         except Exception:
             continue
 
-    _session_index_cache = (now, index)
+    _session_index_cache = (now, max_days, index)
     return index
 
 

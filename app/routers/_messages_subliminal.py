@@ -37,6 +37,7 @@ _SUBLIMINAL_SOURCE_TAGS = (
     ("vault",    "<vault-context>"),
     ("sessions", "<recent-sessions>"),
     ("hint",     "<skill-hint>"),
+    ("ide",      "<ide_state>"),
 )
 
 
@@ -44,18 +45,22 @@ def _extract_subliminal_prefix(prefetched_text: str, text: str) -> str:
     """Return the injected-only portion of `prefetched_text`, or "" if none.
 
     Two shapes are handled:
-      - Prefetch/nudge path: `prefetched_text` ends with "\\n\\n" + text
-        (see prefetch.prefetch_context and the memory-nudge branch).
+      - Prefetch/nudge path: `prefetched_text` ends with a newline
+        separator + text (see prefetch.prefetch_context and the
+        memory-nudge branch). "\\n\\n" is the norm; a single "\\n" is
+        accepted too so a nudge that fired on a turn with no <context>
+        block doesn't get the user's own text swept into the entry.
       - Ambient envelope path: text is embedded inside an <ambient> wrapper
         (see build_ambient_turn). The whole prefetched_text is "injection".
     If `prefetched_text == text` no injection happened.
     """
     if prefetched_text == text:
         return ""
-    suffix = "\n\n" + text
-    if prefetched_text.endswith(suffix):
-        prefix = prefetched_text[: -len(suffix)]
-        return prefix if prefix.strip() else ""
+    for sep in ("\n\n", "\n"):
+        suffix = sep + text
+        if prefetched_text.endswith(suffix):
+            prefix = prefetched_text[: -len(suffix)]
+            return prefix if prefix.strip() else ""
     # Ambient envelope (or any other shape where text is not a clean suffix)
     return prefetched_text
 

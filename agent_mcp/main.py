@@ -38,7 +38,6 @@ from agent_mcp import (
     mission_control_ui,
     session,
     skills,
-    subliminal,
     thunderbird,
     vault,
 )
@@ -71,7 +70,6 @@ MODULES = [
     mission_control_ui,
     ide,
     skills,
-    subliminal,
     http_tools,
     thunderbird,
 ]

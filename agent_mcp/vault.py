@@ -267,13 +267,28 @@ def _qmd_post(payload: dict) -> list:
 
 
 def _qmd_daemon_search(query: str, limit: int, collections: list,
-                      skip_rerank: bool = True) -> Optional[list]:
-    """Send a hybrid lex+vec query to the qmd daemon.
+                      skip_rerank: bool = True,
+                      legs: tuple[str, ...] = ("lex", "vec"),
+                      lex_query: Optional[str] = None) -> Optional[list]:
+    """Send a lex and/or vec query to the qmd daemon.
 
-    DEFAULT: skip_rerank=True (~100ms warm end-to-end). The reranker rarely
-    changes top-1 and shuffles within top-5; 500ms tax not worth it for
-    LLM-context consumers. Pass skip_rerank=False explicitly only when
-    ordering within the top-5 matters for a human scanning results.
+    DEFAULT: skip_rerank=True. The reranker rarely changes top-1 and
+    shuffles within top-5; not worth the tax for LLM-context consumers.
+    Pass skip_rerank=False explicitly only when ordering within the top-5
+    matters for a human scanning results.
+
+    `legs` selects which search legs run. Measured 2026-09-03 on this host
+    (6 collections, skipRerank): lex-only 10-80ms; anything including the
+    vec leg 1.1-2.6s — the query embedding dominates and the daemon's
+    embedding cache only brings a *repeated* query down to ~1.1s. The
+    prefetch path runs `("lex",)` inside its latency budget and the full
+    hybrid as a straggler whose result carries over to the next turn.
+
+    `lex_query`, when given, replaces the lex leg's text. The lex leg is
+    FTS5 with implicit AND (every term must match), so it wants a short,
+    high-signal term list, while the vec leg benefits from the full
+    focus-enriched sentence. Without this both legs got the same string and
+    the hybrid's lex component returned nothing on enriched queries.
     """
     query = _qmd_sanitize(query)
     if not query:
@@ -284,11 +299,12 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     # do fundamentally different matching, so they still produce
     # complementary signal.
     stripped = _qmd_strip_stopwords(query)
+    lex_q = stripped
+    if lex_query:
+        lex_q = _qmd_strip_stopwords(_qmd_sanitize(lex_query)) or stripped
     payload = {
-        "searches": [
-            {"type": "lex", "query": stripped},
-            {"type": "vec", "query": stripped},
-        ],
+        "searches": [{"type": leg, "query": lex_q if leg == "lex" else stripped}
+                     for leg in legs],
         "limit": limit,
         "collections": collections,
     }

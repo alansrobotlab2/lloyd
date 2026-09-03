@@ -149,9 +149,16 @@ async def _maybe_extract_focus(session_id: str):
             None, _sync_secondary_focus_extraction, transcript
         )
 
+        # Record the attempt whether or not it produced topics. Before this,
+        # an empty/failed extraction left `topics_turn` untouched, so
+        # `needs_topic_extraction()` stayed true and the model call re-fired
+        # on every subsequent turn instead of every FOCUS_EXTRACT_INTERVAL.
+        focus.mark_topic_attempt()
         if topics:
             focus.set_topics(topics)
             logger.info(f"Focus extraction for {session_id}: {topics}")
+        else:
+            logger.info(f"Focus extraction for {session_id}: no topics returned")
 
     except Exception as e:
         logger.debug(f"Focus extraction failed for {session_id}: {e}")
