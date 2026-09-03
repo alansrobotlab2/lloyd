@@ -7,102 +7,86 @@ type: reference
 
 ---
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Nightly Reflection Architecture
 
-Recursive self-improvement for Lloyd,inspired by [Karpathy's auto-research pattern](../../knowledge/ai/karpathy-auto-research.md). The core loop -- modify,evaluate,keep/discard,repeat -- runs as the final sequence in the nightly automation pipeline.
+**Last updated:** 2026-09-03 (rewritten from audited reality — the previous
+version was truncated after Job 1, described five jobs at fixed clock times,
+budgeted "<$25/night" against Claude Opus, and listed handoff files that have
+never existed.)
 
-## Schedule
+The nightly chain turns the day's signals into durable changes: what Alan
+corrected, what the system learned, and what should therefore change in memory
+and config.
 
-Five sequential jobs in the reflection block:
+## The chain as it actually runs
 
-| Time (PST) | Job | Skill | Purpose |
-|------------|-----|-------|---------|
-| 4:00 AM | Signal Processing | [`nightly-reflection-signals/SKILL.md`](../../skills/nightly-reflection-signals/SKILL.md) | Signal detection & classification |
-| 4:20 AM | Knowledge Consolidation | [`nightly-reflection-knowledge/SKILL.md`](../../skills/nightly-reflection-knowledge/SKILL.md) | Mental models,MEMORY.md,vault propagation,pattern analysis |
-| 4:40 AM | Prompt Audit | [`nightly-prompt-audit/SKILL.md`](../../skills/nightly-prompt-audit/SKILL.md) | System prompt quality audit & drift detection |
-| 4:55 AM | Behavior Test | [`nightly-behavior-test/SKILL.md`](../../skills/nightly-behavior-test/SKILL.md) | Synthetic behavior tests & regression suite |
-| 5:15 AM | Config Application | [`nightly-reflection-config/SKILL.md`](../../skills/nightly-reflection-config/SKILL.md) | Apply fixes from signals + audit + test failures,git commits,summary |
+```
+#38 signals ──► #42 analysis ──► #39 knowledge write ──► #40 config
+     22-04         22-04            23-04                  23-04
 
-- **Agent:** `memory` (isolated session per job)
-- **Model:** Claude Opus 4.6
-- **Budget:** <$25 combined per night (reflection jobs only)
-- **Sequence:** Runs after [[morning-briefing|reflection-synthesis]] (1:30am),[[nightly-vault-maintenance|reflection-vault]] (2am),and [[nightly-skills-management|reflection-skills]] (3am)
-- **Handoff:** Signal report at `~/lloyd/_pipeline/reflection/signals-latest.md`,audit issues at `~/lloyd/_pipeline/reflection/prompt-audit-latest.md`,test failures at `~/lloyd/_pipeline/reflection/test-results-latest.md`
+#56 trajectory extraction (01-02, independent)
+     └─► #57 mining (23-04)      #51 relation linking (23-04)
+```
 
-### Why 5 Jobs?
+All four reflection jobs run on the **local** model (`primary`), not Opus. There
+is no dollar budget; the cost is GPU-hours.
 
-The original single-session reflection ran 7 phases in one agent turn. By phase 5,the agent was juggling corrections data,mental model updates,MEMORY.md diffs,and config change decisions simultaneously. Splitting into focused jobs gives each agent a clean context window dedicated to one job.
+| ID | Job | Reads | Writes |
+|----|-----|-------|--------|
+| #38 | Signals | `memory/corrections.md`, last 3 daily notes | `_pipeline/reflection/signals-latest.md` |
+| #42 | Knowledge analysis | signals-latest.md | `_pipeline/reflection/knowledge-handoff-<date>.md` (validated by `scripts/validate_handoff.py`) |
+| #39 | Knowledge write | the handoff | `memory/mental-models.md`, `people/alan/profile.md`, completion note |
+| #40 | Config | signals + handoff | `~/lloyd/config.yaml`, `memory/learnings/<date>.md`, commits on `main` |
 
-Cross-job dependencies are file-based: the signal report,audit issues,and test failures are written by earlier jobs and consumed by `reflection-config` which runs last.
+**Jobs 3 and 4 do not exist.** Earlier docs and #40's own data-load referenced a
+prompt audit and a behavior test writing `prompt-audit-issues.md`,
+`prompt-audit-latest.md`, `test-failures.md` and `test-results-latest.md`. No
+autonomy task has ever written any of them. #40 no longer reads them.
 
-## Design Principle
+## Scheduling
 
-Karpathy's system edits `train.py`,trains for 5 minutes,measures validation loss,keeps improvements. Lloyd's equivalent:
+Windows are `preferred_hours` in machine-local time (PDT), not fixed clock
+times, and each job also waits on `depends_on`. The chain takes roughly three
+hours end to end when healthy. Before 2026-09-03 only #38 and #42 had windows,
+so any upstream slip could push #39/#40 into the middle of the next day.
 
-| Karpathy | Lloyd |
-|----------|-------|
-| `program.md` (natural language instructions) | SOUL.md,AGENTS.md,TOOLS.md |
-| `train.py` (code being optimized) | `.openclaw` configs (agent defs,tool allowlists,extensions) |
-| Validation loss (evaluation metric) | Correction rate,task success,reinforcement signals |
-| 5-minute training window | 1 day of live interaction |
-| Git commits per experiment | Git snapshots per nightly run |
+## The output contract (why this chain kept producing nothing)
 
-## Tiered Signal Thresholds
+Every job in this chain **claims its output file in its first turns**, then
+enriches it in place, and flips a `status:` field to `complete` as its last act.
 
-Signals are classified into two tiers with different action thresholds:
+This is not stylistic. These jobs used to investigate exhaustively and write at
+the very end, so a run that hit `max_turns` produced *nothing* while still
+reporting success. On 2026-09-03 a 1429-second #38 run left `signals-latest.md`
+untouched from two days earlier, and #42, #39 and #40 all consumed that stale
+file believing it was current. #39 separately did its real writes and then died
+during bookkeeping, so `mental-models.md` was genuinely updated while the record
+said nothing had happened.
 
-| Tier | Threshold | What qualifies |
-|------|-----------|---------------|
-| **Explicit** | **1 occurrence** → act immediately | Direct corrections ("don't do X"),stated preferences,explicit praise tied to specific behavior |
-| **Inferred** | **2+ occurrences** → act | Implicit frustration,ambiguous signals,inferred patterns from daily notes |
+The recurring failure mode is looping on "one last verification pass" until the
+turn limit kills the run. #42 is the reference implementation: a machine-checkable
+output contract plus a validator it runs against itself.
 
-Explicit corrections are direct instructions — the user shouldn't have to repeat themselves. Inferred patterns need confirmation before acting.
+A related trap: `compaction.microcompact` clears older tool results mid-turn, so
+a job that re-reads what it already read can loop indefinitely. If a reflection
+job reports "my earlier reads were cleared from context", that is this.
 
-## Two Improvement Surfaces
+## Guardrails
 
-Self-improvement touches two separate repos with different risk profiles:
+- **Commit on `main`.** #40 commits config changes directly; it must start and
+  end on `main` and merges any leftover `nightly-improvement-*` branch first.
+  An earlier guardrail said the opposite and stranded 8+ commits on an unmerged
+  branch.
+- **Empty output is a failure**, recorded as one, with backoff. It used to be
+  recorded as success and unblock the rest of the chain.
+- **A failed upstream does not satisfy `depends_on`** — the gate reads
+  `last_run`, which only successes set.
+- `stale_bypass_hours` lets a downstream job run on stale input rather than
+  block the chain forever. #38 and #40 set it; it is honoured only when the
+  upstream is not currently running.
 
-### Surface 1: Obsidian Vault (`~/obsidian`)
+## Verification
 
-The "soul" -- personality,behavior,knowledge,skills.
-
-| File | What It Controls | Risk |
-|------|-----------------|------|
-| `agents/lloyd/SOUL.md` | Personality,tone,interaction style | Low |
-| `agents/lloyd/AGENTS.md` | Task routing,delegation rules,memory protocol | Medium |
-| `agents/lloyd/TOOLS.md` | Response format,on-demand skill references | Low |
-| `agents/lloyd/MEMORY.md` | Long-term factual memory | Low |
-| `skills/*/SKILL.md` | Procedural knowledge | Low |
-| `memory/mental-models.md` | Understanding of Alan's patterns | Low |
-
-### Surface 2: `.openclaw` Config (`~/.openclaw`)
-
-The "wiring" -- runtime configuration that affects tool access,model routing,and service behavior.
-
-| File | What It Controls | Risk |
-|------|-----------------|------|
-| `openclaw.json` | Agent config,tool allowlists,channel bindings,model routing | High |
-| `extensions/agent-orchestrator/agents/*.ts` | Subagent prompts,thinking/effort,maxTurns | Medium |
-| `extensions/voice-tools/index.ts` | Voice pipeline hooks | Medium |
-| `extensions/mission-control/index.ts` | MC backend behavior | Medium |
-
-## Job 1: Signal Processing
-
-**Skill:** `nightly-reflection-signals/SKILL.md`
-
-1. **Pre-Flight Snapshot
+Retrieval quality is measured, not assumed: task #82 runs the 20-query eval at
+06:00 and records the trend, after #81's index maintenance at 05:00. If a night's
+writes hurt recall, that is where it shows up.
