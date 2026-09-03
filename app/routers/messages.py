@@ -354,12 +354,23 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # for the deny-tool gate and an OnEvent hook to tap the primary's
     # NormalizedEvent stream. It mutates `harness_messages` directly when
     # it injects, so we hand it the same list the harness reads.
-    async def _iv_enqueue_ambient_cb(content: str, reason: str) -> None:
+    async def _iv_enqueue_ambient_cb(
+        content: str, reason: str, producer: str = "inner_voice",
+    ) -> None:
+        """Queue a follow-up turn on the observer's behalf.
+
+        `producer` lands in the turn payload as `producer_source` and is
+        what `_iv_should_fire_on_turn` reads to decide whether the
+        follow-up itself gets observed. A discretionary `inner_voice`
+        ambient must not be (the observer would re-judge its own work
+        without bound); an `inner_voice_goal` retry must be, or the /goal
+        completion loop stops after a single attempt.
+        """
         ambient_turn_obj = await build_ambient_turn(
             session_id=session_id,
             text=content,
             priority="notable",
-            source="inner_voice",
+            source=producer,
             summary=(reason or "")[:120],
         )
         await enqueue_ambient(session_id, ambient_turn_obj)

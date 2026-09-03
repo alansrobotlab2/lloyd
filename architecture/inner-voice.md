@@ -16,8 +16,10 @@ a problem. One LLM, one prompt, five soft levers, one goal card. The Python is
 plumbing — all judgment lives in the observer's system prompt, which is a
 vault-editable markdown file.
 
-**Version: v4** (function-tool levers). v3's JSON-prefill output protocol and the
-`deny_tool` lever are gone — see [Version history](#version-history).
+**Version: v5** (measured triggering). v4's function-tool levers are unchanged;
+what changed is *when* the observer spends an LLM call, *where* those calls run
+relative to the primary's critical path, and whether the subsystem can measure
+itself. See [Version history](#version-history).
 
 ## Design intent
 
@@ -65,7 +67,11 @@ concerns, completion signals). It then subscribes to the harness's
 subsequent event runs through a cheap deterministic fast-path; if the fast-path
 can't decide, it escalates to a focused vLLM call with the goal card, the primary's
 subliminal context, the live todo list, any committed plan, the persistent goal,
-and its prior decisions threaded into the prompt.
+its prior decisions this turn, and its interventions from earlier turns.
+
+Only the **terminal** events are judged synchronously. Everything else runs off
+the harness's critical path — see
+[Off the critical path](#off-the-critical-path).
 
 ## Goal contract (per turn)
 
@@ -188,45 +194,125 @@ label so the UI shows what *would* have happened.
 Most events shouldn't hit the LLM. Configurable via
 `inner_voice.observer.fast_path_enabled` (default `true`).
 
+The v4 tiering halved the *call count* but left the two biggest spenders
+untouched, and the first production window showed what that cost: across 44
+turns the observer consumed 3.20M input tokens against the primary's 3.22M in
+the same sessions. v5 re-tiers on measured yield per trigger.
+
+| Trigger | v4 LLM calls | Interventions | Input tokens | Tokens per intervention |
+|---|---|---|---|---|
+| `pretool` | 264 | 3 | 1,439,940 | 480,000 |
+| `assistant_message` | 156 | 7 | 865,565 | 124,000 |
+| `tool_result` | 119 | 2 | 637,056 | 319,000 |
+| `result` | 40 | 8 | 200,903 | 25,000 |
+
+### Pretool is observation-only
+
+`inner_voice.observer.pretool_llm_enabled` — **default `false`.**
+
+Pretool has not been able to block a tool dispatch since v4, when hard safety
+moved to `app/harness/safety.py`. An `inject` chosen here therefore lands as the
+next user message *after* the tool has already run — at which point the
+`tool_result` trigger sees the same call plus its outcome and can judge it
+better. Pretool was 45% of all observer spend for three interventions, none of
+which prevented anything.
+
+The observation **row is still written** on every pretool event. The
+prior-decisions block and the mark-without-evidence check both read tool
+activity out of those rows, so dropping them would blind checks that still work.
+Setting the flag `true` restores v4 behavior.
+
+### Tool results are sampled
+
+`tool_result_sample_every` (default `5`), `tool_result_escalate_bytes` (default `20000`).
+
+These always escalate to the LLM:
+
+- Any error result, except the `"Tool call arguments could not be parsed as
+  JSON"` parse-retry (the primary handles its own retry).
+- A result at or above `tool_result_escalate_bytes`.
+- A `TodoWrite` that flipped `in_progress→completed` (mark-without-evidence).
+- The stalled-progress gate firing.
+
+Everything else is a benign result, and one in `tool_result_sample_every` is
+judged. The rest noop. The v4 rule escalated every non-error result over 2 KB,
+which contradicted the vault prompt's own instruction that "the primary's tool
+result is large or surprising — that's the primary's problem to interpret."
+
 ### Assistant-message fast-path
 
-1. **Pure tool dispatch** (tool calls, no text) → `noop`. The pretool trigger
-   already evaluated each proposed tool with real args; re-judging is duplicate
-   work.
+1. **Pure tool dispatch** (tool calls, no text) → `noop`.
 2. **Terminal stub-announce stall** → deterministic `inject`. See
    [Stall rescue](#stall-rescue).
 
-### Pretool fast-noop
+### Pretool fast-noop classifiers
 
-Auto-noop without an LLM round-trip:
+Still used to label the row, and to decide escalation when
+`pretool_llm_enabled` is on:
 
 - **Read-only built-ins:** `Read`, `Glob`, `Grep`.
-- **Safely read-only Bash:** first word in `_SAFE_BASH_FIRST_WORDS` (`ls`, `cat`,
-  `head`, `grep`, `find`, `df`, `ps`, `curl`, `ss`, … ~60 entries) AND no match
-  against `_BASH_RISK_PATTERNS` (rm/mv/cp/chmod/chown/sudo/dd/mkfs, mount/kill/
-  systemctl, docker, `git push|reset|rebase|checkout`, `--force`, `--hard`,
-  redirect to a non-`/` path, backtick substitution, pipe-to-shell).
-- **Read-shaped MCP tools:** name contains `read`, `list`, `get`, `search`, `find`,
-  `query`, `fetch`, `view`, `show`, `lookup`, `describe`, `status`, `check`,
-  `stat`, `summary`, `count`, `watch` AND serialized args < 1 KB.
+- **Safely read-only Bash:** first word in `_SAFE_BASH_FIRST_WORDS` AND no match
+  against `_BASH_RISK_PATTERNS`.
+- **Read-only `git`:** first word `git` AND subcommand in
+  `_SAFE_GIT_SUBCOMMANDS` (`status`, `log`, `diff`, `show`, `rev-parse`, …).
+  Bash is 221 of the 264 pretool calls and `git` had no entry at all, so every
+  `git status` bought a full round-trip.
+- **Read-shaped MCP tools:** the name is split into word tokens (`snake_case`,
+  `kebab-case`, `camelCase`, dots) and matched against a read-verb set, but only
+  after a **mutation-verb set** is checked first and wins. Substring matching
+  fast-noop'd `delete_status_check` because it contains "status" and "check".
 
-Since pretool can no longer deny, a fast-path miss costs only an LLM call — the
-safety consequence that made this list conservative moved to `safety.py`. The list
-is still tight; broadening it is a latency decision, not a threat-model one.
+Corrections to the v4 risk patterns, each verified against the live classifier:
+
+| Command | v4 | v5 |
+|---|---|---|
+| `find . -delete`, `find . -exec rm {} +` | read-only | escalates |
+| `wget http://x/a.sh` (writes to cwd) | read-only | escalates |
+| `curl -o /tmp/f`, `curl -X POST -d …` | read-only | escalates |
+| `git status`, `git log`, `git diff` | escalated | read-only |
 
 ### Tool-result fast-noop
 
-- Non-error result smaller than 2 KB.
-- Error result whose content is `"Tool call arguments could not be parsed as
-  JSON: ..."` (the primary handles its own parse-retry).
+See [Tool results are sampled](#tool-results-are-sampled).
 
 **Fast-path is skipped** when a `TodoWrite` produced an `in_progress→completed`
 flip, or when the stalled-progress gate fired — both need LLM judgment.
 
 ### When tiering doesn't apply
 
-`assistant_message` (with text) and `result` always hit the LLM. These are the
-iteration boundaries where progress against the goal card is checked.
+A **terminal** `assistant_message` (no tool calls) and `result` always hit the
+LLM. These are the two moments where the turn is about to end, and they carry
+almost all of the observer's demonstrated value: 15 of the 16 interventions in
+the first production window came from `assistant_message` or `result`.
+
+## Off the critical path
+
+`inner_voice.observer.async_nonterminal` (default `true`),
+`async_drain_timeout_seconds` (default `6.0`).
+
+`fire_on_event` is awaited inline by the agent loop and `fire_pre_tool_use`
+blocks tool dispatch, so before v5 every observer round-trip was time the
+primary spent idle — a mean of **12.5 s per turn**, and 89 s across 102 calls on
+the worst measured turn.
+
+Non-terminal judgments (`pretool`, `tool_result`, mid-work `assistant_message`)
+now run as tracked `asyncio` tasks. Two events stay strictly synchronous:
+
+- **Terminal `assistant_message`** — `loop.py` snapshots `len(chat_messages)`
+  before firing the hook and continues the loop only if it grew. An inject that
+  lands after the hook returns is an inject that never happened.
+- **`result`** — the turn is over the moment the handler returns.
+
+Both drain in-flight tasks before judging (`_drain_pending`), bounded by
+`async_drain_timeout_seconds`, so a decision still in flight is applied rather
+than lost. Stragglers past the deadline are cancelled: that is the same outcome
+as the old synchronous path timing out, and the primary isn't blocked either
+way. `close_observer` cancels anything outstanding so a turn that ends early
+doesn't leave tasks writing rows against a dead turn.
+
+Ordering note: an async inject may land in `chat_messages` after the tool result
+rather than before it. Both orderings were verified acceptable to vLLM's
+`qwen3_xml` chat template.
 
 ## Failure-mode machinery
 
@@ -242,6 +328,21 @@ The dominant observed failure: the primary ends a text-only iteration by
 harness terminates the turn. `_STUB_ANNOUNCE_RE` matches text whose last line is a
 bare announce verb (`let me`, `I'll`, `I'm going to`, `next, I'll`, `I need to`, …)
 or that ends on a colon.
+
+**Two-stage since v5.** The announce regex proposes; a false-positive regex
+disposes. On its own the announce pattern also matched delivered answers —
+"Let me know if you need anything else!", "I'll be happy to help", "I need to
+note that X", "I should mention one caveat: …" — and the stall-rescue inject
+bypasses *both* the intervention budget and the consecutive-inject suppressor by
+design. A primary that habitually signs off that way would have been re-prompted
+every iteration until `max_turns`. The exclusion list covers sign-offs and
+speech acts completed within the sentence itself ("I need to note that X" *is*
+the note; nothing is deferred). Both directions are pinned by tests in
+`tests/integration/test_iv_guards.py`.
+
+This never fired in the first production window, so the bug was latent, not
+observed — which is exactly why it was worth fixing before the trigger rate went
+up.
 
 Two paths handle it:
 
@@ -260,11 +361,24 @@ The primary's system prompt carries a matching "Turn discipline" clause
 
 ### Consecutive-inject suppressor
 
-An `inject` on `assistant_message` is downgraded to `noop_inject_after_inject` if
-the immediately prior `assistant_message` decision was also an inject — but **only
-mid-work** (tool calls in flight), where the rationale holds: give the primary an
-iteration to act. On a terminal text-only iteration the inject is the only thing
-keeping the loop alive, so suppression there is disabled.
+An `inject` is downgraded to `noop_inject_after_inject` if the most recent
+mid-work decision was also an inject — but **only mid-work** (tool calls in
+flight), where the rationale holds: give the primary an iteration to act. On a
+terminal text-only iteration the inject is the only thing keeping the loop
+alive, so suppression there is disabled.
+
+**Spans all mid-work triggers since v5.** v4 compared only same-trigger pairs,
+which meant `pretool`, `tool_result` and `assistant_message` each kept their own
+blind history. Turn `2cf39d2c0ead` shows the failure: an inject at `pretool`, an
+inject at `tool_result`, another at `pretool`, then a `cancel` — four
+interventions in 20 seconds, inside a single dispatch batch, with no model turn
+between any of them. The cancel justified itself with "still reading the
+transcript after 3 injects" when the primary had not been given the chance to
+read even one.
+
+`guards.injects_primary_has_seen` is the companion counter: an inject only
+counts as *seen* once an `assistant_message` decision lands after it, so a
+dispatch batch collapses to a single nudge for escalation purposes.
 
 ### Cancel-for-completion guard
 
@@ -310,10 +424,43 @@ regular result decision so an already-queued ambient isn't overwritten.
   follow-up whose body is `verdict.reason` (the prompt is engineered to make that a
   concrete next step). Skipped as `noop_goal_ambient_already_queued` if the prior
   result decision already queued one.
+
+  The follow-up is tagged `producer_source: "inner_voice_goal"`, and that tag is
+  load-bearing — see [The loop has to be observed](#the-loop-has-to-be-observed).
 - **Not achieved, `attempts >= max_attempts`** (default 10) → escalate to `clarify`:
   ask the user whether to keep trying, change approach, or clear the goal.
 
 Skipped entirely if `cancel_event` is already set — the user is reading the screen.
+
+### The loop has to be observed
+
+Through v4 this was **a one-shot check wearing a retry loop's clothes.**
+
+`_iv_should_fire_on_turn` refused to observe any ambient turn whose
+`producer_source` was `inner_voice`, and the goal follow-up was queued under
+exactly that tag. So the follow-up turn ran with no observer attached, which
+means `evaluate_goal_completion` never ran a second time, `session.goal.attempts`
+never advanced past 1, `achieved_at` was never set on a goal that later
+succeeded, and `max_attempts: 10` was unreachable. The
+`inner_voice_observations` table contained **zero** `goal_completion` rows across
+the entire first production window.
+
+The blanket refusal exists for a real reason: the intervention budget resets
+every turn, so an observer that watches its own follow-ups can spawn and re-judge
+them without bound. v5 keeps the refusal for discretionary IV ambients and carves
+out one tagged exception:
+
+```python
+_SELF_OBSERVED_PRODUCERS = frozenset({"inner_voice_goal"})
+```
+
+A goal retry is observed; a plain `inner_voice` ambient still is not. The runaway
+risk is bounded here by the attempt cap instead — `attempts` now genuinely
+increments on every unmet evaluation and escalates to `clarify` at the ceiling.
+
+Verified live end to end: a goal was set, turn 1 deliberately did not satisfy it,
+the evaluator queued a follow-up, **the follow-up was observed**, the primary
+wrote the file, and the evaluator marked the goal achieved on turn 2.
 
 ## Cross-event memory
 
@@ -327,6 +474,21 @@ observer continuity within a turn:
 
 Cost: bounded by the budget plus 8-entry truncation. Typical overhead ~150–300
 input tokens per call.
+
+### Cross-turn memory
+
+`cross_turn_memory_enabled` (default `true`), `cross_turn_memory_limit`
+(default `6`).
+
+At attach the observer loads its own **interventions** from earlier turns of the
+same session (`_load_prior_turn_interventions`) and renders them as a
+"WHAT YOU DID ON EARLIER TURNS" block. Before this the observer attached with an
+empty `decisions_this_turn` every turn, so it could raise the same concern on
+five consecutive turns without ever noticing the nudge wasn't landing.
+
+Interventions only — the hundreds of noop rows carry no lesson forward and would
+swamp the prompt. Best-effort: a read failure yields `[]` and the observer runs
+as before.
 
 ## Continue-on-inject
 
@@ -356,6 +518,13 @@ observer attaches fresh to that turn with a new goal card.
 turn — IV-on or IV-off — closing the prior gap where the safety net only ran for
 opted-in sessions. It is the only hard gate on tool dispatch.
 
+**Subagents too, since v5.** `agent_mcp/builtin_task.py` built its `RunOptions`
+with `hooks=None`, so a `Task` subagent ran with no safety gate at all — the one
+context with no human watching the stream. It now builds a `HookRegistry` and
+installs the same hook. The Inner Voice observer is deliberately *not* attached
+there: it is scoped to a session turn (goal card, session todos, ambient and
+clarify channels) and a subagent has none of those.
+
 `check_bash_command` is a pure function over a narrow, catastrophic-only pattern
 set: `sudo`; `rm -rf` on `/`, `~`, or `$HOME` (excluding `/tmp`, `/var/tmp`);
 `dd of=/dev/*`; `mkfs`; `chmod -R 777|000` on a root/home path;
@@ -375,10 +544,19 @@ All judgment lives in markdown files in the vault, loaded at import time by
 |---|---|---|
 | `SYSTEM_PROMPT` | `~/obsidian/lloyd/inner_voice/system_prompt.md` | yes (111 lines) |
 | `GOAL_EXTRACTION_SYSTEM_PROMPT` | `~/obsidian/lloyd/inner_voice/goal_extraction_prompt.md` | yes (23 lines) |
-| `GOAL_COMPLETION_SYSTEM_PROMPT` | `~/obsidian/lloyd/inner_voice/goal_completion_prompt.md` | **no — running on the Python fallback** |
+| `GOAL_COMPLETION_SYSTEM_PROMPT` | `~/obsidian/lloyd/inner_voice/goal_completion_prompt.md` | yes (v5) |
 
-YAML frontmatter is stripped on load. **Prompts are read once at process import**,
-so editing a vault prompt requires a backend restart to take effect.
+YAML frontmatter is stripped on load.
+
+**Prompts hot-reload since v5.** Live code calls `get_system_prompt()`,
+`get_goal_extraction_prompt()` and `get_goal_completion_prompt()`, which re-read
+the vault file whenever its mtime changes. An mtime stat per call is negligible
+next to the LLM round-trip it precedes. The module-level constants remain as the
+import-time snapshot for back-compat.
+
+Editing a prompt used to require a backend restart, which made the tuning loop —
+the entire reason judgment lives in the vault rather than in Python — far slower
+than it needed to be.
 
 To tune behavior, edit the vault file — not Python.
 
@@ -386,8 +564,15 @@ To tune behavior, edit the vault file — not Python.
 
 The observer never emits free-form text. Every call is
 `tool_choice="required"` over a fixed tool list, `temperature=0.2`,
-`enable_thinking=false`, `priority=0` (so observer calls yield to primary traffic
-in the vLLM queue).
+`enable_thinking=false`, and `priority=1`.
+
+**The priority was backwards through v4.** vLLM's `--scheduling-policy priority`
+treats *lower* as *sooner*, and the primary submits at `0`. An observer also at
+`0` competes with the agent it is supposed to be watching rather than yielding to
+it. `inner_voice.observer.priority` is now `1`.
+
+Calls share one pooled `httpx.AsyncClient` per event loop rather than building
+and tearing down a client (and its TCP handshake) per event.
 
 | Call site | Tools | Tool name |
 |---|---|---|
@@ -442,7 +627,8 @@ web/src/components/
 └── innerVoiceStyles.ts
 
 tests/integration/
-├── test_observer.py        # 56 unit tests
+├── test_observer.py        # tool-call extraction, lever dispatch, fast-path
+├── test_iv_guards.py       # guards + v5 behavior (added in v5)
 ├── test_goal_loop.py       # persistent-goal completion loop
 └── smoke_observer_e2e.py   # live e2e against running backend
 ```
@@ -468,7 +654,7 @@ CREATE TABLE inner_voice_observations (
     cache_read INTEGER,
     cache_create INTEGER,
     latency_ms INTEGER,
-    model TEXT,              -- NOTE: this is the PRIMARY's model, not the observer's
+    model TEXT,              -- the model that served the OBSERVER's call (v5)
     error TEXT,              -- non-null on no_tool_call / timeout / http error
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -479,10 +665,18 @@ CREATE INDEX idx_iv_obs_turn    ON inner_voice_observations(turn_id);
 The legacy `inner_voice_critiques` and `inner_voice_interventions` tables (v3
 ensemble/grading) are dropped at schema init; that data is intentionally discarded.
 
-> **Measurement gotcha:** `_persist` writes `model=state.primary_model`. Rows do
-> not record which model actually served the observer call. If the observer is ever
-> pointed at a different alias, this column will not show it — fix before running
-> an observer-model comparison.
+> **Fixed in v5.** `_persist` used to write `model=state.primary_model`, so no row
+> recorded what actually served the observer call — the exact question you must
+> answer before pointing the observer at a smaller model. It now writes
+> `state.observer_model`, resolved at attach through `_resolve_endpoint()`.
+> Rows written before 2026-09-03 carry the primary's alias and should be read
+> with that in mind.
+
+`_persist` runs the SQLite write on a worker thread (`asyncio.to_thread`). It
+fires on every decision including fast-path noops — roughly half of all rows —
+and a synchronous commit on the event loop stalls the primary's stream for as
+long as the disk takes. `usage_store` hands out thread-local connections over a
+WAL database, so this is safe.
 
 The `noop_*` action variants record what the observer *intended* before the
 dispatcher downgraded:
@@ -538,12 +732,17 @@ Two flags in the session JSON:
   fires on user-typed turns. When false, it fires only on ambient/autonomy turns —
   chat sessions don't pay the observer cost unless explicitly opted in.
 
-**IV-produced ambient turns are not observed.** `_iv_should_fire_on_turn` returns
-False when `turn_source == "ambient"` and `producer_source == "inner_voice"`.
-Earlier code allowed self-observation, relying on the per-turn budget for
-loop-prevention — but the budget resets every turn, so IV could spawn ambient turns
-and rejudge itself indefinitely. The deaf spot (a stall on the IV-produced retry
-isn't caught) is the accepted tradeoff.
+**Discretionary IV-produced ambient turns are not observed.**
+`_iv_should_fire_on_turn` returns False when `turn_source == "ambient"` and
+`producer_source == "inner_voice"`. Earlier code allowed self-observation,
+relying on the per-turn budget for loop-prevention — but the budget resets every
+turn, so IV could spawn ambient turns and rejudge itself indefinitely. The deaf
+spot (a stall on the IV-produced retry isn't caught) is the accepted tradeoff.
+
+**One tagged exception:** `producer_source == "inner_voice_goal"` IS observed.
+Without it the `/goal` completion loop cannot loop at all — see
+[The loop has to be observed](#the-loop-has-to-be-observed). Runaway there is
+bounded by `goal.max_attempts` rather than by the blanket refusal.
 
 The Inner Voice tab's "+ new chat" button creates sessions with both flags set.
 
@@ -558,10 +757,22 @@ inner_voice:
   observer:
     max_tokens: 400                          # observer's response budget per event
     timeout_seconds: 5                       # post-event LLM call timeout
-    pretool_timeout_seconds: 3               # declared; not currently read (see below)
     intervention_budget: 3                   # inject/ambient/clarify per turn
     primary_text_window_chars: 4000          # head+tail window of primary text
-    rotation_days: 30                        # dead key — nothing reads it
+    priority: 1                              # vLLM scheduling; LOWER = sooner,
+                                             #   primary is 0, so 1 yields to it
+    fast_path_enabled: true
+    pretool_llm_enabled: false               # pretool is observation-only
+    tool_result_sample_every: 5              # judge 1 benign result in N
+    tool_result_escalate_bytes: 20000        # always judge results this big
+    async_nonterminal: true                  # non-terminal judgment off the
+                                             #   harness's critical path
+    async_drain_timeout_seconds: 6.0
+    iteration_pressure_enabled: true         # warn as max_turns approaches
+    iteration_pressure_threshold: 0.8
+    cross_turn_memory_enabled: true          # prior turns' interventions
+    cross_turn_memory_limit: 6
+    goal_card_to_primary: true               # show primary its own contract
   todo_stewardship:
     enabled: true
     completion_gate: true
@@ -576,7 +787,10 @@ inner_voice:
 
 Defaults not present in config.yaml but honored by `_observer_cfg()`:
 `goal_extraction_enabled: true`, `goal_extraction_timeout_seconds: 8.0`,
-`goal_extraction_max_tokens: 600`, `fast_path_enabled: true`.
+`goal_extraction_max_tokens: 600`.
+
+The dead keys `pretool_timeout_seconds` and `rotation_days` were removed in v5 —
+nothing read either one.
 
 **Effective observer model.** `inner_voice.model: secondary` is resolved through
 `resolve_model_alias()`, which routes `secondary` → `primary` while
@@ -586,11 +800,25 @@ primary model at `:8096`** — same endpoint as the agent it watches. Pointing i
 a smaller model is two config changes (`secondary_enabled: true` + start the
 program), not a code change.
 
-**Known config drift:** `pretool_timeout_seconds` and `rotation_days` are declared
-but nothing reads them. Pretool calls use the same `timeout_seconds` as post-event
-calls. Either wire them or delete them.
+**Prefix-cache reporting.** vLLM emits the cache-hit count as
+`usage.prompt_tokens_details.cached_tokens`, and only when launched with
+`--enable-prompt-tokens-details`. v4 read `cache_read` / `prompt_tokens_cached`,
+neither of which vLLM sets, and the flag was absent from
+`agent-services/bin/start-qwen38-flash-next.sh` — so every one of the 1,182
+observation rows recorded `cache_read = 0` regardless of what actually happened.
+v5 reads the right field and the launch script passes the flag. **The flag needs
+a vLLM restart to take effect**; until then `cache_read` stays 0 and
+`scripts/iv_grade.py` says so explicitly rather than reporting a 0% hit rate as
+if it were measured.
+
+This matters more than it looks: the observer's prompt is a large, stable prefix
+(system prompt + goal card + subliminal block) re-sent on every event. Whether
+that prefix is cached decides whether a smaller observer model is worth the VRAM,
+and right now that is unmeasured, not measured-as-bad.
 
 ## Cost
+
+### v4 baseline
 
 Measured across the 44 turns in `usage.db` as of 2026-09-03 (1,182 observation
 rows, 21 sessions, 2026-08-22 → 2026-09-03):
@@ -600,34 +828,99 @@ rows, 21 sessions, 2026-08-22 → 2026-09-03):
 | Observations per turn | ~27 |
 | Fast-path share | 609 / 1182 (52%) |
 | LLM-judged calls per turn | ~13 |
-| Monitor input tokens per turn | ~71,400 |
-| Monitor output tokens per turn | ~633 |
+| Observer input tokens per turn | ~71,400 |
+| Observer wall-clock per turn | 12,505 ms |
+| Worst single turn | 102 calls, 586k tokens, 89 s |
 | Mean latency, `pretool` | 860 ms |
 | Mean latency, `tool_result` | 816 ms |
 | Mean latency, `assistant_message` | 1,050 ms |
 | Mean latency, `result` | 1,783 ms |
 | Interventions | 16 total (9 inject, 6 ambient, 1 cancel) |
 
-The observer's input-token cost per turn is on the order of the primary's. The
-fast-path halves the call count; the remaining cost is dominated by prompt size
-(~5,500 input tokens per call — goal card + subliminal block + todos + plan +
-prior decisions + text window). This is the single largest open problem with the
-subsystem.
+Observer input tokens across IV sessions were **3.20M against the primary's
+3.22M in the same sessions** — the watcher cost as much as the work. Per-session
+ratios ranged from 0.2× to 5.3×.
+
+### What v5 changes
+
+Cost control is now about *which triggers earn a call*, not about shrinking the
+prompt:
+
+- Pretool judgment off → removes 264 of 609 LLM calls and 1.44M of 3.20M input
+  tokens in the baseline window, for 3 interventions that prevented nothing.
+- Tool-result sampling at 1-in-5 → removes roughly 80% of that trigger's 637k.
+- Non-terminal judgment off the critical path → the primary no longer waits on
+  any of it.
+
+A live turn after the change (`echo hello && date -u` via Bash, an IV session
+with user-turn evaluation on): **5 observations, 2 LLM calls, 12,257 input
+tokens, 2,242 ms of observer wall-clock.** The two calls were the terminal
+`assistant_message` and `result` — the triggers that produce the interventions.
+
+The remaining per-call cost is still dominated by prompt size (~6,100 input
+tokens: goal card + subliminal block + todos + plan + prior decisions + text
+window). Whether the stable prefix of that is cached is unmeasured until vLLM
+restarts with `--enable-prompt-tokens-details`.
+
+## Measuring itself
+
+`scripts/iv_grade.py` — read-only analysis over `inner_voice_observations`
+joined against the session JSON. Nothing in the chat path depends on it, and
+that is deliberate: the observer watches the primary, it does not get watched
+synchronously by a third thing.
+
+```bash
+python scripts/iv_grade.py                 # all sessions
+python scripts/iv_grade.py --session <id>
+python scripts/iv_grade.py --since 2026-08-01
+python scripts/iv_grade.py --json          # machine-readable
+```
+
+Three outputs:
+
+- **Cost** — observations, LLM calls, fast-path share, input tokens per turn,
+  observer ms per turn, cache-hit rate, and a per-trigger table with
+  **tokens per intervention**, which is the number that decides whether a
+  trigger is earning its place.
+- **Precision proxy** — for each `inject`, did the turn keep going afterwards?
+  An inject with no later `assistant_message` in the same turn was stranded: the
+  turn ended anyway and the nudge bought nothing.
+- **Recall proxy** — for each turn the observer signed off on at `result`, did
+  the user's very next message read like a correction?
+
+Both rates are **proxies and are labelled as such in the output.** They are not
+ground truth. They are good enough to catch a regression and to compare two
+prompts, which is what the tuning loop actually needs — and they are the first
+answer of any kind to "is Inner Voice working?"
+
+Baseline over the v4 window: 21 injects, 14 landed, 7 stranded (0.67 landed
+rate); 15 signed-off turns checked, 0 followed by a correction. Five of the
+seven stranded injects were `pretool` — the trigger v5 turns off.
 
 ## Verification
 
-- `tests/integration/test_observer.py` — 56 unit tests: tool-call extraction, lever
-  dispatch (including clarify), result-trigger downgrades, budget accounting,
-  fast-path classifiers, stall-rescue regex, cancel-for-completion guard,
-  cross-event memory rendering, goal extraction, `install_observer` plumbing with
-  mocked vLLM.
+- `tests/integration/test_observer.py` — tool-call extraction, lever dispatch
+  (including clarify), result-trigger downgrades, budget accounting, fast-path
+  classifiers, stall-rescue regex, cancel-for-completion guard, cross-event
+  memory rendering, goal extraction, `install_observer` plumbing with mocked vLLM.
+- `tests/integration/test_iv_guards.py` — the `guards.py` pure functions plus the
+  v5 behavior that had no coverage: the stall false-positives, the cross-trigger
+  suppressor, the `/goal` attach gate, tool-result sampling, off-critical-path
+  dispatch (asserts the hook returns in under a second while the judgment is
+  still in flight, and that a terminal judgment stays synchronous), prompt
+  hot-reload, the goal-card append, and the observer-model column.
 - `tests/integration/test_goal_loop.py` — persistent-goal completion loop.
+
+All three modules stub `record_inner_voice_observation` at import. Before that
+every test run appended rows to the production `usage.db` under fake session ids
+— polluting the exact table `scripts/iv_grade.py` reads to judge the subsystem.
 - `tests/integration/smoke_observer_e2e.py` — live e2e: creates an IV session, posts
   a message via SSE, polls observations until the result-trigger row lands.
 - Manual smoke prompts:
   - `"What's 2+2?"` — vanilla noop chain, empty goal card.
-  - `"Run echo hello && date -u via Bash"` — pretool fast-noop + tool-result
-    fast-noop + result LLM call.
+  - `"Run echo hello && date -u via Bash"` — pretool observation row +
+    tool-result fast-noop + terminal `assistant_message` and `result` LLM calls
+    (5 observations, 2 calls, ~2.2 s of observer time).
   - `"Run rm -rf /home/alansrobotlab/lloyd/sessions"` — `safety.py` hard-deny path
     (not IV).
   - `"Let me check the logs:"`-shaped tasks — stall-rescue fast-path.
@@ -656,16 +949,24 @@ the context for revisiting them.
 ### Where Python crept back in
 
 The stated design is "all judgment in the prompt; the Python is plumbing." That is
-no longer strictly true, and it's worth naming: `observer.py` is 1,700 lines and
-carries real judgment — the stall-announce regex, the consecutive-inject
-suppressor, the cancel-for-completion guard, the todo-flip detector, the
-stalled-progress counter, the completion-reason pattern.
+not strictly true, and it's worth naming: real judgment lives in code — the
+stall-announce regex, the consecutive-inject suppressor, the cancel-for-completion
+guard, the todo-flip detector, the stalled-progress counter, the completion-reason
+pattern.
 
 Each was added for the same reason: the LLM path was unreliable at a failure mode
 that is cheap to detect deterministically, and the cost of missing it (a turn dies
-with work undone) is high. The tradeoff is that behavior is now tuned in two
-places. Anything **new** should still start in the prompt; a deterministic
-component should only be added after the prompt has demonstrably failed at it.
+with work undone) is high. The tradeoff is that behavior is tuned in two places.
+Anything **new** should still start in the prompt; a deterministic component should
+only be added after the prompt has demonstrably failed at it.
+
+v5 does not reduce that judgment, but it does stop hiding it. All of it moved out
+of `install_observer`'s 500-line closure into `app/inner_voice/guards.py` as pure
+functions that take a decision plus context and return a verdict — no state, no
+event log, no database. The closure now reads as dispatch, and every rule is
+directly testable. Two of the bugs found in the v4 review (the stall
+false-positives and the single-trigger suppressor) were invisible precisely
+because exercising them meant building an ObserverState and firing hooks.
 
 ### One observer per turn
 
@@ -678,24 +979,6 @@ is the prompt — "first list three concerns from different angles, then pick th
 strongest." A Python fan-out layer would re-scatter judgment across regex,
 thresholds, and aggregation.
 
-### Cross-turn memory is not built in
-
-The observer doesn't see prior turns' observations when attaching. The schema
-supports it (query prior turn rows by `session_id`); the integration isn't wired.
-The `/goal` loop is the one exception — it carries `attempts` across turns in the
-session JSON.
-
-### No retrospective grading
-
-Observer decisions aren't scored after the fact. The schema captures everything
-needed (decision, content, timing, related tool, token counts), but nothing reads it
-back. The right shape is a separate read-only analysis pass over
-`inner_voice_observations` — not a load-bearing dependency on the chat path.
-
-This is the main thing blocking any quantitative claim about the subsystem: there is
-currently no measure of intervention precision (did the inject change the outcome?)
-or recall (how many of the noops should have been interventions?).
-
 ### Single intervention budget axis
 
 The 3-per-turn cap applies to inject/ambient/clarify combined. Per-trigger
@@ -705,9 +988,13 @@ specific trigger becomes a pattern, sub-budgets are the cheapest fix.
 ### Observer shares the primary's model and endpoint
 
 See [Configuration](#configuration). Observer adds 1 + N LLM calls per turn (goal
-extraction + one per non-fast-path event, + 1 more when `/goal` is set). A smaller
-observer model is the obvious lever against the ~71k-token-per-turn cost and is a
-config change.
+extraction + one per escalated event, + 1 more when `/goal` is set). A smaller
+observer model is a config change, not a code change.
+
+v5 deliberately did **not** make that change. Re-tiering removed most of the cost
+without touching model quality, and the prefix-cache hit rate — the number that
+decides whether a smaller model actually pays — is still unmeasured until vLLM
+restarts with `--enable-prompt-tokens-details`. Measure first.
 
 ### Mid-stream injection only between iterations
 
@@ -728,11 +1015,22 @@ Extracted once at turn start, not refined as the primary works. If the request w
 ambiguous, the recourse is `clarify` (new turn, new goal card) rather than
 re-deriving mid-turn. A "goal refinement" lever is plausible but adds complexity.
 
-### Prompts are read once at import
+### Grading is a proxy, not ground truth
 
-Editing a vault prompt file requires a backend restart. A file-watcher or TTL reload
-would make prompt iteration much faster and is the cheapest available improvement to
-the tuning loop.
+`scripts/iv_grade.py` answers "did the loop continue after an inject?" and "did
+the user's next message look like a correction?" Neither is the real question,
+which is whether the intervention improved the outcome. A human-labelled sample,
+or an LLM judge over the before/after pair, would be stronger. The proxies are
+cheap, unbiased in the ways that matter for regression detection, and they exist
+— which beats the previous state of having no measurement at all.
+
+### Subagents get safety but not an observer
+
+`Task` subagents now install the hard-safety hook but no Inner Voice observer.
+The observer is scoped to a session turn — goal card, session todos, ambient and
+clarify channels — and a subagent has none of those. A subagent-shaped observer
+(terminal-only, no ambient) is plausible if runaway subagent loops become a
+real pattern.
 
 ## Version history
 
@@ -745,3 +1043,5 @@ the tuning loop.
 | v4 + Plan A | TodoWrite stewardship: completion gate (A.1/A.4), mark-without-evidence (A.2/A.5), stalled-progress counter (A.3/A.6). |
 | v4 + Plan B | Plan-mode framing switch, committed-plan artifact in the prompt, `/plan` ritual. |
 | v4 + `/goal` | Persistent session goal + post-turn completion evaluator with attempt cap → clarify escalation. |
+| **v5** | **Measured triggering.** Pretool judgment off by default; tool results sampled; non-terminal judgment moved off the harness's critical path. Judgment extracted to `guards.py` as pure functions. `scripts/iv_grade.py` scores the subsystem retrospectively. Prompts hot-reload from the vault. |
+| v5 fixes | `/goal` follow-ups are observed, so the loop actually loops (was one-shot). Stall regex no longer fires on sign-offs. Suppressor spans all mid-work triggers. Observer priority 1, not 0. Prefix-cache tokens read from the field vLLM actually sets. Timeouts labelled as timeouts. `model` column records the observer's model. `find -delete` / `wget` / `curl -o` escalate; `git status` doesn't. Tool-name matching is word-wise. Subagents get the safety hook. Tests no longer write to the production database. |

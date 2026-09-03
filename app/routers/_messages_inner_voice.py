@@ -20,11 +20,14 @@ import json
 import logging
 from typing import Any, Awaitable, Callable
 
+import usage_store
 from app import event_log as _event_log
 from app.harness import HookRegistry
 from app.paths import SESSIONS_DIR
+from app.inner_voice import observer_prompt as _prompt
 from app.inner_voice.observer import (
     ObserverState,
+    _observer_cfg,
     close_observer,
     extract_goal_card,
     install_observer,
@@ -75,6 +78,21 @@ def _session_iv_evaluate_user_turns_enabled(session_id: str) -> bool:
         return False
 
 
+# Ambient turns the observer produced for itself. Plain `inner_voice`
+# ambients are discretionary follow-ups and must NOT be observed: the
+# intervention budget resets every turn, so an observer that watches its
+# own follow-ups can spawn and re-judge them indefinitely.
+#
+# `inner_voice_goal` is the exception, and it has to be. A /goal
+# follow-up exists precisely so the goal can be re-evaluated; refusing to
+# observe it means `evaluate_goal_completion` never runs a second time,
+# `session.goal.attempts` never advances past 1, and `max_attempts` is
+# unreachable. The runaway risk that justifies the blanket refusal is
+# handled here by the attempt cap instead — attempts increments on every
+# unmet evaluation and escalates to `clarify` at the ceiling.
+_SELF_OBSERVED_PRODUCERS = frozenset({"inner_voice_goal"})
+
+
 def _iv_should_fire_on_turn(
     session_id: str, turn_source: str, producer_source: str = "",
 ) -> bool:
@@ -83,21 +101,61 @@ def _iv_should_fire_on_turn(
     True iff the session opted into Inner Voice AND either the turn is
     ambient OR the session opted into user-turn evaluation.
 
-    IV-produced ambient turns are NOT observed. Earlier code allowed
-    self-observation, relying on the per-turn intervention budget for
-    loop-prevention — but the budget resets every turn, so IV could
-    keep spawning ambient turns and rejudging itself indefinitely.
-    The deaf-spot tradeoff (a stall on the IV-produced retry won't be
-    caught) is acceptable: the user has UI controls to drive
-    follow-up, and the next user turn re-opens IV observation.
+    Discretionary IV-produced ambient turns are not observed (see
+    `_SELF_OBSERVED_PRODUCERS` above for the one exception and why it is
+    bounded). The deaf spot on a plain IV ambient — a stall on the retry
+    isn't caught — is the accepted tradeoff: the user has UI controls to
+    drive follow-up, and the next user turn re-opens IV observation.
     """
     if not _session_inner_voice_enabled(session_id):
         return False
     if turn_source == "ambient":
-        if producer_source == "inner_voice":
-            return False
+        if producer_source.startswith("inner_voice"):
+            return producer_source in _SELF_OBSERVED_PRODUCERS
         return True
     return _session_iv_evaluate_user_turns_enabled(session_id)
+
+
+def _load_prior_turn_interventions(
+    session_id: str, *, current_turn_id: str, limit: int = 6,
+) -> list[dict[str, Any]]:
+    """Load interventions from EARLIER turns of this session.
+
+    Cross-turn memory. The observer attaches fresh every turn with
+    `decisions_this_turn` empty, so before this it could raise the same
+    concern on five consecutive turns without ever noticing the nudge
+    wasn't landing.
+
+    Interventions only — the hundreds of noop rows carry no lesson
+    forward and would swamp the prompt. Best-effort: any failure returns
+    [] and the observer runs as it did before.
+    """
+    if not session_id:
+        return []
+    try:
+        rows = usage_store.list_inner_voice_observations(
+            session_id=session_id, limit=200,
+        )
+    except Exception as e:  # noqa: BLE001 — non-fatal
+        logger.warning("[iv.observer] prior-intervention load failed: %s", e)
+        return []
+    keep = {"inject", "cancel", "ambient", "clarify"}
+    out: list[dict[str, Any]] = []
+    for r in rows:  # newest first
+        if r.get("turn_id") == current_turn_id:
+            continue
+        if (r.get("action") or "") not in keep:
+            continue
+        out.append({
+            "trigger": r.get("trigger"),
+            "action": r.get("action"),
+            "reason": r.get("reason"),
+            "turn_id": r.get("turn_id"),
+        })
+        if len(out) >= limit:
+            break
+    out.reverse()  # oldest first, so the prompt reads chronologically
+    return out
 
 
 def _recent_exchanges_for_goal_extraction(
@@ -226,6 +284,23 @@ async def attach_observer_for_turn(
     )
     goal_card = await extract_goal_card(user_request, recent_exchanges=recent)
 
+    # Show the primary the contract it is being judged against.
+    #
+    # The card is extracted on every IV turn regardless, and until now
+    # only the observer ever read it — so the primary could be nudged
+    # toward a success criterion nobody had told it about. Appending the
+    # block to the user message the harness is about to send costs no
+    # extra call. It goes on the LAST user message specifically because
+    # the system prompt has to stay byte-stable for vLLM's prefix cache
+    # (see architecture/subliminal.md).
+    cfg = _observer_cfg()
+    if cfg.get("goal_card_to_primary", True) and goal_card:
+        block = _prompt.build_goal_card_block_for_primary(goal_card)
+        if block and chat_messages_handle:
+            last = chat_messages_handle[-1]
+            if last.get("role") == "user" and isinstance(last.get("content"), str):
+                last["content"] = last["content"] + "\n\n" + block
+
     # Surface the goal card to the UI: log a structured event so the
     # /api/inner_voice/state endpoint can read back the most recent extraction
     # for the session (latest_goal_card + latest_user_request).
@@ -243,6 +318,16 @@ async def attach_observer_for_turn(
     except Exception as e:  # noqa: BLE001 — non-fatal
         logger.warning("[iv.observer] goal_card event log failed: %s", e)
 
+    prior_interventions = (
+        _load_prior_turn_interventions(
+            session_id,
+            current_turn_id=turn_id,
+            limit=int(cfg.get("cross_turn_memory_limit", 6)),
+        )
+        if cfg.get("cross_turn_memory_enabled", True)
+        else []
+    )
+
     state = install_observer(
         hooks=options.hooks,
         session_id=session_id,
@@ -259,6 +344,8 @@ async def attach_observer_for_turn(
         todos=todos,
         plan_artifact=plan_artifact,
         persistent_goal=persistent_goal,
+        prior_turn_interventions=prior_interventions,
+        max_turns=int(getattr(options, "max_turns", 0) or 0),
     )
     logger.info(
         "[iv.observer] attached session=%s turn=%s source=%s budget=%d "

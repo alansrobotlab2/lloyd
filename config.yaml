@@ -7,10 +7,31 @@ inner_voice:
   observer:
     max_tokens: 400
     timeout_seconds: 5
-    pretool_timeout_seconds: 3
     intervention_budget: 3
     primary_text_window_chars: 4000
-    rotation_days: 30
+    # vLLM scheduling priority. LOWER is higher priority and the primary
+    # submits at 0, so the observer must be >0 to actually yield to it.
+    priority: 1
+    fast_path_enabled: true
+    # Pretool cannot block dispatch (hard safety lives in
+    # app/harness/safety.py), so an LLM judgment there only produces a
+    # nudge that lands after the tool already ran. Observation-only.
+    pretool_llm_enabled: false
+    # Judge one benign tool result in N; errors, spilled payloads, todo
+    # flips and the stalled-progress gate always escalate.
+    tool_result_sample_every: 5
+    tool_result_escalate_bytes: 20000
+    # Run non-terminal judgments off the harness's critical path.
+    async_nonterminal: true
+    async_drain_timeout_seconds: 6.0
+    # Nudge the primary to converge as it approaches harness max_turns.
+    iteration_pressure_enabled: true
+    iteration_pressure_threshold: 0.8
+    # Carry prior turns' interventions into the observer's prompt.
+    cross_turn_memory_enabled: true
+    cross_turn_memory_limit: 6
+    # Show the primary the goal card it is being judged against.
+    goal_card_to_primary: true
   todo_stewardship:
     enabled: true
     completion_gate: true

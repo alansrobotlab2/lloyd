@@ -123,6 +123,66 @@ GOAL_COMPLETION_SYSTEM_PROMPT = _load_prompt_file(
 
 
 # ---------------------------------------------------------------------------
+# Hot reload
+# ---------------------------------------------------------------------------
+#
+# The prompts above are the import-time snapshot, kept as module constants
+# for back-compat. Live code should call the accessors below, which re-read
+# the vault file whenever its mtime changes.
+#
+# Editing a prompt used to require a backend restart, which made the tuning
+# loop — the whole reason judgment lives in the vault rather than in Python —
+# far slower than it needed to be. An mtime stat per observer call is
+# negligible next to the LLM round-trip it precedes.
+
+_PROMPT_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _load_cached(path: Path, fallback: str, *, label: str) -> str:
+    """Return the prompt body, re-reading only when the file's mtime moves.
+
+    A missing file stats as mtime 0.0 and serves the fallback; dropping the
+    file in later changes the mtime and picks it up without a restart.
+    """
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cached = _PROMPT_CACHE.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    body = _load_prompt_file(path, fallback, label=label)
+    _PROMPT_CACHE[key] = (mtime, body)
+    if cached is not None:
+        logger.info("[iv.observer.prompt] reloaded %s from %s", label, path)
+    return body
+
+
+def get_system_prompt() -> str:
+    """The per-event observer system prompt (vault, hot-reloaded)."""
+    return _load_cached(
+        _SYSTEM_PROMPT_PATH, _FALLBACK_SYSTEM_PROMPT, label="system_prompt",
+    )
+
+
+def get_goal_extraction_prompt() -> str:
+    """The turn-start goal-extraction system prompt (vault, hot-reloaded)."""
+    return _load_cached(
+        _GOAL_EXTRACTION_PATH, _FALLBACK_GOAL_EXTRACTION_PROMPT,
+        label="goal_extraction_prompt",
+    )
+
+
+def get_goal_completion_prompt() -> str:
+    """The `/goal` completion-evaluator system prompt (vault, hot-reloaded)."""
+    return _load_cached(
+        _GOAL_COMPLETION_PATH, _FALLBACK_GOAL_COMPLETION_PROMPT,
+        label="goal_completion_prompt",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Goal extraction user-prompt builder
 # ---------------------------------------------------------------------------
 
@@ -429,6 +489,102 @@ def _format_prior_decisions(decisions: list[dict[str, Any]] | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _format_prior_turn_interventions(
+    rows: list[dict[str, Any]] | None,
+) -> str:
+    """Render what the observer did on EARLIER turns of this session.
+
+    Cross-turn memory. Until now the observer attached with no knowledge
+    of its own history: it could nudge the primary about the same drift
+    on five consecutive turns and never notice the nudge wasn't working,
+    because `decisions_this_turn` resets at every attach.
+
+    Deliberately narrow — interventions only, not the hundreds of noops.
+    An intervention is the observer having spent something; a noop is
+    silence and carries no lesson forward.
+    """
+    if not rows:
+        return ""
+    lines = ["WHAT YOU DID ON EARLIER TURNS OF THIS SESSION:"]
+    for r in rows[-6:]:
+        action = r.get("action") or "?"
+        reason = (r.get("reason") or "").strip()[:100]
+        trig = r.get("trigger") or "?"
+        lines.append(f"  - [{trig}] {action} — {reason}")
+    lines.append(
+        "If you are about to intervene on a theme you already raised in an "
+        "earlier turn and the primary still hasn't changed, that's a sign the "
+        "nudge isn't landing — escalate or surface it to the user rather than "
+        "repeating yourself. If an earlier intervention clearly worked, don't "
+        "re-litigate it."
+    )
+    return "\n".join(lines)
+
+
+def build_iteration_pressure_note(
+    iteration: int, max_turns: int, elapsed_s: float = 0.0,
+) -> str:
+    """Warn the observer that the turn is running out of iterations.
+
+    A turn that hits `max_turns` is killed by the harness mid-work: there
+    is no terminal `assistant_message`, so the last-chance inject never
+    fires and the only repair left is an ambient after the fact. Telling
+    the observer while iterations remain converts an after-the-fact
+    apology into a mid-turn "wrap up and deliver what you have".
+    """
+    remaining = max(0, max_turns - iteration)
+    elapsed_note = f" ({elapsed_s:.0f}s elapsed)" if elapsed_s >= 1 else ""
+    return (
+        f"ITERATION PRESSURE: this turn is at iteration {iteration} of a "
+        f"{max_turns} maximum — {remaining} left{elapsed_note}. If the harness "
+        f"hits the cap the turn dies mid-work with no final answer and no "
+        f"chance for you to intervene. If the primary is still exploring "
+        f"rather than converging, inject now telling it to stop gathering, "
+        f"commit to what it has, and deliver the answer. If it is clearly on "
+        f"its final steps, noop."
+    )
+
+
+def build_goal_card_block_for_primary(goal_card: dict[str, Any] | None) -> str:
+    """Render the goal card as a block for the PRIMARY's user message.
+
+    The card is extracted every IV turn and, until now, only the observer
+    ever read it. Showing the primary the same contract it is being
+    judged against is close to free — the extraction call already
+    happened — and it removes a whole class of intervention where the
+    observer nudges the primary toward a criterion the primary was never
+    told about.
+
+    Returns "" when the card has no actionable content, so conversational
+    turns don't get a pointless block.
+    """
+    if not goal_card:
+        return ""
+    sc = goal_card.get("success_criteria") or []
+    cs = goal_card.get("completion_signals") or []
+    oos = goal_card.get("out_of_scope") or []
+    if not sc and not cs and not oos:
+        return ""
+    lines = [
+        "<goal_card>",
+        "Your inner voice extracted this contract from the request and will "
+        "check your work against it. Treat it as a reading of the ask, not a "
+        "replacement for it — if it misreads what the user wants, follow the "
+        "user and say so.",
+    ]
+    if sc:
+        lines.append("Success criteria:")
+        lines.extend(f"  - {s}" for s in sc)
+    if cs:
+        lines.append("Done when:")
+        lines.extend(f"  - {s}" for s in cs)
+    if oos:
+        lines.append("Out of scope:")
+        lines.extend(f"  - {s}" for s in oos)
+    lines.append("</goal_card>")
+    return "\n".join(lines)
+
+
 def build_user_prompt_for_event(
     *,
     user_request: str,
@@ -442,6 +598,8 @@ def build_user_prompt_for_event(
     todos: list[dict[str, Any]] | None = None,
     plan_artifact: dict[str, Any] | None = None,
     persistent_goal: dict[str, Any] | None = None,
+    prior_turn_interventions: list[dict[str, Any]] | None = None,
+    iteration_pressure_note: str = "",
 ) -> str:
     """Assemble the per-event user prompt the observer evaluates."""
     budget_line = (
@@ -449,12 +607,17 @@ def build_user_prompt_for_event(
     )
     if interventions_used >= interventions_budget:
         budget_line += (
-            " You have used your inject/ambient/clarify budget — only `noop`, `cancel`, or `allow` "
+            " You have used your inject/ambient/clarify budget — only `noop` or `cancel` "
             "will take effect from here on. If the primary is still off-track or looping, "
             "this is the moment to use `cancel` to end the turn."
         )
     prior_block = _format_prior_decisions(prior_decisions)
     prior_section = f"\n{prior_block}" if prior_block else ""
+    history_block = _format_prior_turn_interventions(prior_turn_interventions)
+    history_section = f"\n{history_block}\n" if history_block else ""
+    pressure_section = (
+        f"\n{iteration_pressure_note}\n" if iteration_pressure_note else ""
+    )
     subliminal_block = _format_subliminal_context(subliminal_context)
     subliminal_section = f"\n{subliminal_block}" if subliminal_block else ""
     plan_block = _format_plan_artifact(plan_artifact)
@@ -469,13 +632,15 @@ def build_user_prompt_for_event(
         f"{_format_goal_card(goal_card)}\n"
         f"{plan_section}"
         f"{todos_section}"
-        f"{subliminal_section}\n"
+        f"{subliminal_section}"
+        f"{history_section}\n"
         f"PRIMARY'S RESPONSE SO FAR (visible text):\n"
         f"{primary_text_so_far or '(none yet)'}\n"
-        f"{prior_section}\n"
+        f"{prior_section}"
+        f"{pressure_section}\n"
         f"EVENT UNDER REVIEW:\n{event_summary}\n\n"
         f"{budget_line}\n\n"
-        f"Decide: noop, inject, cancel, ambient, clarify, or (for pretool) allow / deny_tool."
+        f"Call exactly one lever tool: noop, inject, cancel, ambient, or clarify."
     )
 
 
@@ -518,13 +683,21 @@ def build_goal_completion_user_prompt(
 
 
 def build_pretool_event_summary(tool_name: str, tool_args: dict) -> str:
-    """One-line summary of a proposed tool call for the pretool gate."""
+    """One-line summary of a proposed tool call for the pretool trigger.
+
+    Pretool is observation-only since v4 — the observer cannot block
+    dispatch, and destructive Bash is hard-denied by
+    `app/harness/safety.py` without any LLM in the path. The only useful
+    levers here are `noop` and, on clear off-task work, `inject` (which
+    lands as the next user message AFTER the tool runs).
+    """
     args_preview = str(tool_args)
     if len(args_preview) > 400:
         args_preview = args_preview[:400] + "...(truncated)"
     return (
         f"PRETOOL: primary is about to call `{tool_name}` with args {args_preview}. "
-        f"Decide allow or deny_tool."
+        f"You cannot block this dispatch — the tool will run either way. "
+        f"`noop` unless the call is clearly off-task, in which case `inject`."
     )
 
 

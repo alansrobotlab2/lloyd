@@ -72,9 +72,11 @@ async def _task(args: dict[str, Any]) -> str:
     profile = _load_subagent_profile(subagent_type)
 
     # Import here to avoid circular import at module load time.
+    from app.harness.hooks import HookRegistry
     from app.harness.loop import run_query
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL
     from app.harness.options import RunOptions
+    from app.harness.safety import install_default_safety_hook
 
     # Resolve model and base_url — fall back to primary defaults.
     model = profile["model"] or "primary"
@@ -85,12 +87,25 @@ async def _task(args: dict[str, Any]) -> str:
     if "Task" not in disallowed:
         disallowed.append("Task")
 
+    # Subagents ran with `hooks=None`, which meant the harness's default
+    # destructive-Bash gate never installed inside a Task — the one place
+    # with no human watching the stream. `safety.py` is documented as
+    # running on every primary turn; a subagent is a harness run like any
+    # other and gets the same floor.
+    #
+    # The Inner Voice observer is deliberately NOT attached here: it is
+    # scoped to a session turn (goal card, session todos, ambient and
+    # clarify channels) and a subagent has none of those.
+    task_hooks = HookRegistry()
+    install_default_safety_hook(task_hooks)
+
     options = RunOptions(
         model=model,
         base_url=base_url,
         system_prompt=profile["system_prompt"],
         max_turns=profile["max_turns"],
         disallowed_tools=disallowed,
+        hooks=task_hooks,
         mcp_servers={"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}},
         # Per-invocation session id so each subagent run gets its own
         # tool_search LoadedToolSet — different disallowed_tools profiles

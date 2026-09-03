@@ -38,6 +38,26 @@ from app.inner_voice.observer import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Isolation: never write to the production usage.db.
+#
+# `_persist` calls `record_inner_voice_observation` for real, so before this
+# every test run appended rows to ~/lloyd/usage.db under the fake session ids
+# below — polluting exactly the table `scripts/iv_grade.py` reads to judge the
+# subsystem. Rows are captured in memory instead; assert on them if useful.
+# ---------------------------------------------------------------------------
+
+RECORDED: list = []
+
+
+def _no_db_record(**kwargs):
+    RECORDED.append(kwargs)
+    return len(RECORDED)
+
+
+obs_mod.record_inner_voice_observation = _no_db_record
+
+
 def run_async(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
@@ -202,7 +222,7 @@ def test_goal_handler_achieved_marks_session():
     enqueued_ambient = []
     clarify_calls = []
 
-    async def ambient_cb(content, reason):
+    async def ambient_cb(content, reason, producer="inner_voice"):
         enqueued_ambient.append((content, reason))
 
     async def clarify_cb(question, reason):
@@ -243,8 +263,8 @@ def test_goal_handler_unmet_queues_ambient():
     enqueued_ambient = []
     clarify_calls = []
 
-    async def ambient_cb(content, reason):
-        enqueued_ambient.append((content, reason))
+    async def ambient_cb(content, reason, producer="inner_voice"):
+        enqueued_ambient.append((content, reason, producer))
 
     async def clarify_cb(question, reason):
         clarify_calls.append((question, reason))
@@ -272,9 +292,14 @@ def test_goal_handler_unmet_queues_ambient():
     assert data["goal"]["attempts"] == 1, f"expected attempts=1, got {data['goal']}"
     assert data["goal"]["achieved_at"] is None
     assert len(enqueued_ambient) == 1, f"expected one ambient, got {enqueued_ambient}"
-    body, reason = enqueued_ambient[0]
+    body, reason, producer = enqueued_ambient[0]
     assert "no Write tool" in body, body
     assert "goal unmet" in reason
+    # The producer tag is what makes the loop a loop. Tagged plain
+    # `inner_voice`, the attach gate refuses to observe the follow-up, the
+    # evaluator never runs a second time, and `attempts` never reaches
+    # max_attempts — a one-shot check wearing a retry loop's clothes.
+    assert producer == "inner_voice_goal", producer
     assert not clarify_calls
     print("test_goal_handler_unmet_queues_ambient: OK")
 
@@ -286,7 +311,7 @@ def test_goal_handler_max_attempts_escalates_to_clarify():
     enqueued_ambient = []
     clarify_calls = []
 
-    async def ambient_cb(content, reason):
+    async def ambient_cb(content, reason, producer="inner_voice"):
         enqueued_ambient.append((content, reason))
 
     async def clarify_cb(question, reason):
@@ -326,7 +351,7 @@ def test_goal_handler_skips_when_prior_ambient_queued():
     sessions_dir, sid, spath = _with_temp_session(attempts=0)
     enqueued_ambient = []
 
-    async def ambient_cb(content, reason):
+    async def ambient_cb(content, reason, producer="inner_voice"):
         enqueued_ambient.append((content, reason))
 
     state = _make_state(
@@ -360,7 +385,7 @@ def test_goal_handler_skips_when_cancelled():
     enqueued_ambient = []
     eval_calls = []
 
-    async def ambient_cb(content, reason):
+    async def ambient_cb(content, reason, producer="inner_voice"):
         enqueued_ambient.append((content, reason))
 
     state = _make_state(

@@ -241,6 +241,7 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --max-num-seqs 8 \
   --gpu-memory-utilization 0.93 \
   --enable-prefix-caching \
+  --enable-prompt-tokens-details \
   --no-enable-flashinfer-autotune \
   --no-enable-log-requests \
   --scheduling-policy priority \

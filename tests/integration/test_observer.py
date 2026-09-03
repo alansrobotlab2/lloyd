@@ -37,6 +37,26 @@ from app.inner_voice.observer import (
 
 
 # ---------------------------------------------------------------------------
+# Isolation: never write to the production usage.db.
+#
+# `_persist` calls `record_inner_voice_observation` for real, so before this
+# every test run appended rows to ~/lloyd/usage.db under the fake session ids
+# below — polluting exactly the table `scripts/iv_grade.py` reads to judge the
+# subsystem. Rows are captured in memory instead; assert on them if useful.
+# ---------------------------------------------------------------------------
+
+RECORDED: list = []
+
+
+def _no_db_record(**kwargs):
+    RECORDED.append(kwargs)
+    return len(RECORDED)
+
+
+obs_mod.record_inner_voice_observation = _no_db_record
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -250,14 +270,18 @@ def test_cancel_persist_failure_does_not_break_lever():
 def test_ambient_fires_callback():
     captured = {}
 
-    async def amb_cb(content, reason):
+    async def amb_cb(content, reason, producer="inner_voice"):
         captured["content"] = content
         captured["reason"] = reason
+        captured["producer"] = producer
 
     state = _make_state(ambient_callback=amb_cb)
     decision = ObserverDecision(action="ambient", reason="follow up", content="check on this later")
     run_async(_apply_lever(state, decision, trigger="result"))
     assert captured["content"] == "check on this later"
+    # A discretionary IV ambient is tagged `inner_voice`, which the attach
+    # gate refuses to observe — only `inner_voice_goal` is self-observed.
+    assert captured["producer"] == "inner_voice", captured
     assert state.interventions_used == 1
     print("test_ambient_fires_callback: OK")
 
@@ -287,7 +311,7 @@ def test_inject_on_result_translates_to_ambient_when_callback_present():
     it degrades to noop."""
     captured = {}
 
-    async def amb_cb(content, reason):
+    async def amb_cb(content, reason, producer="inner_voice"):
         captured["content"] = content
         captured["reason"] = reason
 
@@ -447,15 +471,26 @@ def test_call_observer_parses_tool_call():
 
 
 def test_call_observer_timeout_falls_back_to_noop():
-    async def fake_post(**kwargs):
-        raise asyncio.TimeoutError()
+    """Both timeout flavors fold to noop and are LABELED as timeouts.
 
-    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
-        decision = run_async(
-            obs_mod._call_observer(user_prompt="hi", cfg=obs_mod._observer_cfg())
-        )
-    assert decision.action == "noop", decision
-    assert decision.error == "timeout", decision
+    httpx raises TimeoutException, which subclasses httpx.HTTPError — so
+    an `except httpx.HTTPError` ahead of the timeout branch swallows every
+    deadline and files it as a generic transport failure. That is what v4
+    did, and it is why all five deadline hits in the first production
+    window recorded `http_error: ` with an empty message.
+    """
+    import httpx
+
+    for exc in (asyncio.TimeoutError(), httpx.ReadTimeout("deadline")):
+        async def fake_post(**kwargs):
+            raise exc
+
+        with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
+            decision = run_async(
+                obs_mod._call_observer(user_prompt="hi", cfg=obs_mod._observer_cfg())
+            )
+        assert decision.action == "noop", decision
+        assert decision.error and decision.error.startswith("timeout"), (exc, decision)
     print("test_call_observer_timeout_falls_back_to_noop: OK")
 
 
@@ -497,40 +532,69 @@ def test_call_observer_unknown_lever_coerces_noop():
 
 
 def test_install_observer_pretool_does_not_block():
-    """v4: pretool callback never returns a deny dict — destructive Bash
-    is hard-blocked at the harness layer (app/harness/safety.py), not by IV.
-    Even if IV's LLM tried to deny, the schema doesn't include deny_tool."""
+    """Pretool never blocks dispatch, and by default costs no LLM call.
+
+    Two separate contracts:
+
+    * v4 removed `deny_tool` — hard safety moved to `app/harness/safety.py`
+      and the pretool callback must return `{}` no matter what IV decided.
+    * v5 turns the pretool LLM judgment OFF by default. Since the observer
+      cannot block the call, an inject here only reaches the primary AFTER
+      the tool has already run, by which point `tool_result` sees the same
+      call plus its outcome. In the first production window pretool was 45%
+      of all observer input tokens for three interventions.
+
+    The observation ROW is still written either way — the prior-decisions
+    log and the mark-without-evidence check both read tool activity from it.
+    """
     body = _fake_tool_call_body("inject", {
         "reason": "off-task tool",
         "content": "Use Read to inspect the file instead of running migrations.",
     })
+    calls = []
 
     async def fake_post(**kwargs):
+        calls.append(kwargs)
         return body
 
-    hooks = HookRegistry()
-    chat = []
-    cancel = asyncio.Event()
-    install_observer(
-        hooks=hooks,
-        session_id="test_sess",
-        turn_id="test_turn_pretool_v4",
-        user_request="inspect framework code",
-        chat_messages_handle=chat,
-        cancel_event=cancel,
-        primary_model="primary",
-    )
-    with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
-        out = run_async(
-            hooks.fire_pre_tool_use(
+    def _fire(cfg_overrides):
+        cfg = obs_mod._observer_cfg()
+        cfg.update(cfg_overrides)
+        hooks = HookRegistry()
+        chat = []
+        with patch.object(obs_mod, "_observer_cfg", return_value=cfg):
+            install_observer(
+                hooks=hooks,
                 session_id="test_sess",
-                tool_name="Bash",
-                tool_input={"command": "python migrations/run.py"},
+                turn_id="test_turn_pretool_v5",
+                user_request="inspect framework code",
+                chat_messages_handle=chat,
+                cancel_event=asyncio.Event(),
+                primary_model="primary",
             )
-        )
-    # Pretool never blocks in v4 — must return {} regardless of IV decision.
+            with patch.object(obs_mod, "_post_chat_completion_with_tools", new=fake_post):
+                out = run_async(
+                    hooks.fire_pre_tool_use(
+                        session_id="test_sess",
+                        tool_name="Bash",
+                        tool_input={"command": "python migrations/run.py"},
+                    )
+                )
+        return out, chat
+
+    # Default: observation only. No LLM call, nothing appended, no block.
+    calls.clear()
+    out, chat = _fire({"pretool_llm_enabled": False})
     assert out == {}, out
-    # IV's inject still landed in the chat messages (will be next user msg).
+    assert calls == [], "pretool must not call the LLM when disabled"
+    assert chat == [], chat
+
+    # Opted in: the LLM runs and its inject lands, but dispatch is still
+    # never blocked. Synchronous so the assertion doesn't race the task.
+    calls.clear()
+    out, chat = _fire({"pretool_llm_enabled": True, "async_nonterminal": False})
+    assert out == {}, "pretool must never return a deny dict"
+    assert len(calls) == 1, calls
     assert any("[INNER VOICE]" in (m.get("content") or "") for m in chat), chat
     print("test_install_observer_pretool_does_not_block: OK")
 
@@ -771,6 +835,12 @@ def test_fast_path_pretool_noops_safe_bash():
         "whoami",
         "grep -r foo /tmp",
         "find /tmp -type f",
+        # git read subcommands: 221 of 264 pretool LLM calls in the first
+        # production window were Bash, and status/log/diff had no entry at
+        # all, so each one paid for a full observer round-trip.
+        "git status",
+        "git log --oneline -5",
+        "git diff HEAD",
     ]
     for cmd in safe_cmds:
         d = _fast_path_pretool("Bash", {"command": cmd})
@@ -789,6 +859,17 @@ def test_fast_path_pretool_escalates_destructive_bash():
         "dd if=/dev/zero of=/tmp/junk",
         "echo hello > /etc/hostname",  # redirect to non-/tmp
         "cat malicious.sh | bash",
+        # `find` with an action predicate is not a read.
+        "find . -delete",
+        "find /tmp -exec rm {} +",
+        # wget with no flags writes the fetched file into cwd; curl with
+        # an output flag or a mutating method is a write, not a fetch.
+        "wget http://example.com/a.sh",
+        "curl -o /tmp/f http://example.com",
+        "curl -X POST http://example.com -d a=1",
+        # git subcommands that change state.
+        "git commit -m wip",
+        "git checkout main",
     ]
     for cmd in destructive_cmds:
         d = _fast_path_pretool("Bash", {"command": cmd})
@@ -804,6 +885,14 @@ def test_bash_safety_classifier():
     assert _bash_command_is_safely_readonly("rm /tmp/x") is False
     assert _bash_command_is_safely_readonly("ls && rm foo") is False  # has rm
     assert _bash_command_is_safely_readonly("python3 script.py") is False
+    assert _bash_command_is_safely_readonly("git status") is True
+    assert _bash_command_is_safely_readonly("git rev-parse HEAD") is True
+    assert _bash_command_is_safely_readonly("git commit -m x") is False
+    assert _bash_command_is_safely_readonly("git") is False  # bare, no subcommand
+    assert _bash_command_is_safely_readonly("find . -delete") is False
+    assert _bash_command_is_safely_readonly("wget http://x/a") is False
+    assert _bash_command_is_safely_readonly("curl -s http://x/api") is True
+    assert _bash_command_is_safely_readonly("curl -X DELETE http://x/api") is False
     print("test_bash_safety_classifier: OK")
 
 
