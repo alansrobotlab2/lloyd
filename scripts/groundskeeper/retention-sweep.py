@@ -24,6 +24,7 @@ import argparse
 import gzip
 import json
 import re
+from datetime import datetime, timezone
 import shutil
 import sys
 import time
@@ -123,17 +124,60 @@ def sweep_sessions(apply: bool, now: float) -> tuple[int, int]:
     return count, saved
 
 
+_RUN_TS_RE = re.compile(r"^(?:completed_at|started_at):\s*'?([0-9]{4}-[0-9]{2}-[0-9]{2}"
+                        r"[T ][0-9:.+-]*)", re.MULTILINE)
+
+
+def _run_record_age_seconds(path: Path, now: float) -> float | None:
+    """Age of a run record, from its frontmatter timestamp.
+
+    mtime is not usable here: a bulk operation on 2026-08-22 reset the mtime of
+    every run record, which made this sweep silently inert — `find autonomy-runs
+    -name 'run_*.md' -mtime +30` matched 0 of 3,350 files. The frontmatter
+    timestamp is what the record actually means. Falls back to mtime when the
+    frontmatter is unreadable.
+    """
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:600]
+        m = _RUN_TS_RE.search(head)
+        if m:
+            ts = m.group(1).strip().replace(" ", "T")
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return now - dt.timestamp()
+    except (OSError, ValueError):
+        pass
+    try:
+        return now - path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def sweep_autonomy_runs(apply: bool, now: float) -> tuple[int, int]:
-    """Delete autonomy-runs run records older than RUN_RECORD_MAX_AGE_DAYS.
-    Only run_*.md transcripts are touched — summary files like
-    wiki-sweep-latest.json are kept. Returns (count, bytes)."""
+    """Delete autonomy run records older than RUN_RECORD_MAX_AGE_DAYS.
+
+    Matches both the current `run_<task>_<ts>.md` names and the legacy
+    epoch-millisecond names (e.g. `1774837994780.md`) written by the
+    pre-2026-03 scheduler — 844 of those were permanently exempt from retention
+    because the old glob only matched `run_*.md`. Non-record files such as
+    wiki-sweep-latest.json are still left alone.
+    """
     count = freed = 0
     if not AUTONOMY_RUNS_DIR.exists():
         return 0, 0
-    cutoff = now - RUN_RECORD_MAX_AGE_DAYS * 86400
-    for path in AUTONOMY_RUNS_DIR.glob("*/run_*.md"):
+    max_age = RUN_RECORD_MAX_AGE_DAYS * 86400
+    for path in AUTONOMY_RUNS_DIR.glob("*/*.md"):
+        name = path.name
+        if not (name.startswith("run_") or name[:-3].isdigit()):
+            continue
         try:
-            if path.is_symlink() or path.stat().st_mtime >= cutoff:
+            if path.is_symlink():
+                continue
+            age = _run_record_age_seconds(path, now)
+            if age is None or age < max_age:
                 continue
             size = path.stat().st_size
             if apply:

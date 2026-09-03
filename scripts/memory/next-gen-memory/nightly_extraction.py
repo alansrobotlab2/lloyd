@@ -193,37 +193,72 @@ class NightlyExtraction:
             "checked_at": datetime.now().isoformat()
         }
     
+    # Files under FACTS_DIR that a clean must NEVER delete. On 2026-08-22 this
+    # method wiped the fact tree and took `_relationships.json` (12,131 edges /
+    # 7,260 active) and the `memory-graph/` working directory with it. Fact
+    # content is derivable from the vault; the EDGE GRAPH, merge history and
+    # hand-review state are not — they were built incrementally by the v4
+    # classifier and successive resolution sweeps. There was no backup: this
+    # tree is gitignored and nothing else copies it. Tasks #48, #67, #69 and
+    # #74 have been blocked ever since.
+    PROTECTED_NAMES = frozenset({
+        "entity-registry.json",
+        "_relationships.json",
+        "entity-aliases.json",
+    })
+    PROTECTED_DIRS = frozenset({"templates", "memory-graph"})
+
+    def _is_protected(self, item) -> bool:
+        if item.name in self.PROTECTED_NAMES or item.name in self.PROTECTED_DIRS:
+            return True
+        # Backups and snapshots of the above (…​.bak, .bak.json, .corrupt-*.bak,
+        # _relationships.<ts>.bak.json) are the only recovery path there is.
+        lowered = item.name.lower()
+        return ".bak" in lowered or lowered.startswith("_relationships")
+
+    def backup_graph_state(self):
+        """Timestamped copy of the irreplaceable files before a destructive pass."""
+        import shutil
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+        dest = Path.home() / "lloyd" / "_pipeline" / "backups" / f"pre-clean-{stamp}"
+        saved = []
+        for name in ("_relationships.json", "entity-aliases.json"):
+            src = FACTS_DIR / name
+            if src.is_file():
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest / name)
+                saved.append(name)
+        graph_dir = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
+        if graph_dir.is_dir() and any(graph_dir.iterdir()):
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(graph_dir, dest / "memory-graph", dirs_exist_ok=True)
+            saved.append("memory-graph/")
+        if saved:
+            print(f"  → Backed up {', '.join(saved)} to {dest}")
+        return dest if saved else None
+
     def clean_facts_directory(self):
-        """Wipe facts directory (preserve entity-registry.json)."""
+        """Wipe the entity tree, preserving the graph and its backups."""
         if not FACTS_DIR.exists():
             print("  → Facts directory does not exist, skipping clean")
             return
-        
-        preserved_file = FACTS_DIR / "entity-registry.json"
-        preserved_data = None
-        
-        # Save registry if it exists
-        if preserved_file.exists():
-            preserved_data = preserved_file.read_text()
-            print(f"  → Preserving entity-registry.json")
-        
-        # Remove all entity subdirectories
+
+        self.backup_graph_state()
+
+        removed = kept = 0
         for item in FACTS_DIR.iterdir():
-            if item.name == "templates":
+            if self._is_protected(item):
+                kept += 1
                 continue
             if item.is_dir():
                 import shutil
                 shutil.rmtree(item)
-                print(f"  → Removed {item.name}/")
-            elif item.name != "entity-registry.json":
+            else:
                 item.unlink()
-                print(f"  → Removed {item.name}")
-        
-        # Restore registry if it existed
-        if preserved_data:
-            preserved_file.write_text(preserved_data)
-        
-        print(f"  → Facts directory cleaned")
+            removed += 1
+
+        print(f"  → Facts directory cleaned ({removed} removed, "
+              f"{kept} protected entries kept)")
     
     def run_full_extraction(self, full_mode=False, workers=1, clean=False, limit=0, force=False):
         """Run complete nightly extraction pipeline."""

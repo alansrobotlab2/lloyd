@@ -322,6 +322,13 @@ def _call_llm(endpoint: str, model: str, prompt: str, timeout: int) -> dict | No
         "temperature": 0.1,
         "max_tokens": 256,
         "chat_template_kwargs": {"enable_thinking": False},
+        # vLLM runs with --scheduling-policy priority (lower = sooner). Interactive
+        # chat sends 0 and autonomy runs send 1; batch classification is the
+        # lowest-value traffic on the box and must yield to both. Without this it
+        # competed at the default and starved the fleet: a 3,787-edge batch at
+        # concurrency 4 pushed task #70 — normally a 21-44s run — past its 300s
+        # timeout on the first cycle after the rebuild started.
+        "priority": 2,
     }
     req = urllib.request.Request(
         endpoint,

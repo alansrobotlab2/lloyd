@@ -24,7 +24,11 @@ DEFAULT_PRIORITY = 70
 QUEUE_FILE = Path.home() / "obsidian" / "lloyd" / "research-queue.md"
 
 _MAX_ENQUEUE_PER_TICK = 3
-_ITEM_RE = re.compile(r"^\s*-\s+\[ \]\s+(.+?)\s*$", re.MULTILINE)
+# Accept both `- [ ]` and `- []`. The research-queue generator (autonomy task
+# #65) emits the second form and so does its consumer #52, while this source
+# only ever matched the first — so it found zero work and never ran a single
+# item in its lifetime while 118 generated topics sat unread.
+_ITEM_RE = re.compile(r"^\s*-\s+\[ ?\]\s+(.+?)\s*$", re.MULTILINE)
 
 
 def _scan_queue_file() -> list[str]:
@@ -102,7 +106,7 @@ def _mark_done_in_queue_file(topic: str) -> None:
         content = QUEUE_FILE.read_text(encoding="utf-8")
         escaped = re.escape(topic)
         new_content = re.sub(
-            rf"^(\s*-\s+)\[ \](\s+{escaped}\s*)$",
+            rf"^(\s*-\s+)\[ ?\](\s+{escaped}\s*)$",
             r"\1[x]\2",
             content,
             count=1,

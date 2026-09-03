@@ -26,7 +26,10 @@ from pathlib import Path
 import yaml
 
 DEFAULT_DIR = Path.home() / "obsidian" / "autonomy"
-RUNNABLE_STATUSES = {"up_next", "in_progress", "draft", "paused", "archived", "done"}
+RUNNABLE_STATUSES = {"up_next", "in_progress", "draft", "paused", "archived", "done",
+                     # `failed` = disabled after max_retries consecutive
+                     # failures; a human re-enables it by setting up_next.
+                     "failed", "archived"}
 
 
 def _parse(path: Path):

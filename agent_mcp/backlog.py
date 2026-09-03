@@ -130,7 +130,12 @@ async def list_tools():
                 "assigned": {"type": "boolean"},
                 "activity": {"type": "string", "description": "Activity log message"},
             },
-            "required": ["name", "description", "board"],
+            # NOT unconditionally required: these three are needed only when
+            # CREATING (no task_id), which _handle_write enforces with a clear
+            # error. Declaring them required here made every UPDATE fail schema
+            # validation before reaching the handler — "'board' is a required
+            # property" — which is what broke autonomy task #35's daily triage
+            # (a 904s run that promoted nothing and reported nothing).
         }),
     ]
 
