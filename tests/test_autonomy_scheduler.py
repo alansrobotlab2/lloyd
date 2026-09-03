@@ -482,3 +482,23 @@ async def test_pool_honours_in_band_failure_without_queue_retry(tmp_path, monkey
     item = q.get(qid)
     assert item.state == "completed"   # not requeued
     assert item.attempts == 1
+
+
+# ── secondary_enabled switch ─────────────────────────────────────────────────
+
+def test_secondary_routes_to_primary_when_disabled(monkeypatch):
+    """server.py stops the secondary process whenever secondary_enabled is
+    false, so a task pinned to `secondary` must fall back rather than aim at a
+    dead port. Everything else already used this helper; autonomy did not."""
+    from app.config import CONFIG, resolve_model_alias
+    from workers.sources.scheduled_task import _model_health_url
+
+    monkeypatch.setitem(CONFIG, "secondary_enabled", False)
+    assert resolve_model_alias("secondary") == "primary"
+    assert _model_health_url("secondary").endswith("8096/health")
+
+    monkeypatch.setitem(CONFIG, "secondary_enabled", True)
+    assert resolve_model_alias("secondary") == "secondary"
+    assert _model_health_url("secondary").endswith("8091/health")
+    # primary is unaffected either way
+    assert _model_health_url("primary").endswith("8096/health")

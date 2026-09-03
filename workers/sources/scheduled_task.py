@@ -42,6 +42,11 @@ def _model_health_url(model: str) -> str:
     into a ConnectError flood — the exact failure the primary gate prevents.
     """
     model = str(model or "").strip()
+    try:
+        from app.config import resolve_model_alias
+        model = resolve_model_alias(model)
+    except Exception:
+        pass
     if not model or model in ("primary", "null", "none"):
         return _VLLM_HEALTH_URL
     try:

@@ -1,7 +1,11 @@
 agent:
   max_turns: 60
   permission_mode: bypassPermissions
-secondary_enabled: false
+# Authoritative switch for the secondary vLLM slot (:8091, Qwen3.5-4B on an
+# RTX 3090). server.py reconciles the supervisord process against this on every
+# boot, so it overrides supervisord's own autostart — leaving it false silently
+# stopped the secondary 3 seconds after each backend restart.
+secondary_enabled: true
 inner_voice:
   model: secondary
   observer:

@@ -658,6 +658,20 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     if not task_model:
         task_model = ""
 
+    # Honour the `secondary_enabled` switch: when the secondary slot is off,
+    # route its tasks back to primary rather than at a dead port. Everything
+    # else in the codebase goes through this helper; the autonomy path did not,
+    # so a task pinned to `secondary` would fail instead of falling back.
+    try:
+        from app.config import resolve_model_alias
+        resolved = resolve_model_alias(task_model)
+        if resolved != task_model:
+            logger.info("Task #%s: model %s -> %s (secondary_enabled=false)",
+                        task_id, task_model, resolved)
+            task_model = resolved
+    except Exception as e:
+        logger.warning("Model alias resolution failed for #%s: %s", task_id, e)
+
     model_env = _get_model_env(task_model)
     declared_timeout = int(task.get("timeout_seconds") or 1800)
     timeout = declared_timeout
