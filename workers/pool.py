@@ -10,14 +10,12 @@ Each source provides:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
-
-import psutil
 
 from workers.queue import WorkQueue, QueueItem, get_queue, new_run_id
 
@@ -27,35 +25,15 @@ logger = logging.getLogger("lloyd-workers.pool")
 _DEFAULT_MAX_DURATION_SECONDS = 900
 
 
-def _kill_sdk_subproc_since(started_wall: float, worker_id: str) -> int:
-    """Kill any bundled-claude child of this backend created at/after
-    `started_wall`. Used on timeout: `source.execute` runs the SDK inside a
-    `run_in_executor` thread, so `asyncio.wait_for` can cancel the future
-    but cannot interrupt the blocking thread — we have to reach in and kill
-    the SDK CLI subprocess so the thread unblocks. Narrow window (start ±
-    0.5s grace) avoids killing a neighboring worker's live subprocess.
-    """
-    killed = 0
-    try:
-        me = psutil.Process(os.getpid())
-        children = me.children(recursive=False)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return 0
-    for child in children:
-        try:
-            if "claude" not in child.name():
-                continue
-            if child.create_time() < started_wall - 0.5:
-                continue
-            child.kill()
-            killed += 1
-            logger.warning(
-                "[%s] killed SDK subprocess pid=%d (created %.1fs after worker start)",
-                worker_id, child.pid, child.create_time() - started_wall,
-            )
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    return killed
+def _task_id_of(item: QueueItem, result: Any = None) -> Optional[str]:
+    """Task id for a run record: prefer the handler's result, fall back to the
+    queue payload. Timeout/exception branches have no result, and omitting the
+    id there is what left 237 runs / 73.6 GPU-hours unattributable in the runs
+    table — invisible to every per-task view."""
+    tid = result.get("task_id") if isinstance(result, dict) else None
+    if tid is None:
+        tid = item.payload.get("task_id")
+    return None if tid is None else str(tid)
 
 
 class WorkerPool:
@@ -204,7 +182,6 @@ class WorkerPool:
             self.queue.mark_running(item.id)
             started_at_iso = datetime.now(timezone.utc).isoformat()
             started_perf = time.monotonic()
-            started_wall = time.time()
             self._in_flight[item.id] = {
                 "source": item.source,
                 "kind": item.kind,
@@ -223,27 +200,38 @@ class WorkerPool:
                 result = await asyncio.wait_for(source.execute(item), timeout=max_duration)
                 duration = time.monotonic() - started_perf
                 completed_at = datetime.now(timezone.utc).isoformat()
+                # A handler may report a task-level failure in-band rather than
+                # raising. Raising would send the item back through the queue's
+                # retry path, and for autonomy tasks that means re-running a
+                # whole timed-out run up to max_attempts times before the
+                # scheduler's own cooldown is ever consulted.
+                run_status = result.get("status") if isinstance(result, dict) else None
+                if run_status not in ("success", "failed", "skipped"):
+                    run_status = "success"
                 self.queue.record_run(
                     run_id=run_id,
                     queue_id=item.id,
                     source=item.source,
-                    status="success",
+                    status=run_status,
                     started_at=started_at_iso,
                     completed_at=completed_at,
                     duration_seconds=duration,
                     summary=(result.get("summary") or "")[:500],
                     artifact_path=result.get("artifact_path") or "",
                     response_json=(result.get("response") or "")[:50000],
-                    task_id=str(result.get("task_id")) if result.get("task_id") is not None else None,
+                    task_id=_task_id_of(item, result),
+                    meta_json=json.dumps(result.get("meta") or {}, default=str),
                 )
                 self.queue.mark_completed(item.id)
-                logger.info("[%s] completed %s/%s in %.1fs",
-                            worker_id, item.source, item.kind, duration)
+                logger.log(
+                    logging.WARNING if run_status == "failed" else logging.INFO,
+                    "[%s] %s %s/%s in %.1fs", worker_id,
+                    "FAILED" if run_status == "failed" else "completed",
+                    item.source, item.kind, duration)
             except asyncio.TimeoutError:
                 duration = time.monotonic() - started_perf
                 completed_at = datetime.now(timezone.utc).isoformat()
                 error_msg = f"TimeoutError: exceeded max_duration_seconds={max_duration}"
-                killed = _kill_sdk_subproc_since(started_wall, worker_id)
                 self.queue.record_run(
                     run_id=run_id,
                     queue_id=item.id,
@@ -252,11 +240,14 @@ class WorkerPool:
                     started_at=started_at_iso,
                     completed_at=completed_at,
                     duration_seconds=duration,
-                    summary=f"{error_msg} (killed {killed} SDK subproc)"[:500],
+                    summary=error_msg[:500],
+                    task_id=_task_id_of(item),
+                    meta_json=json.dumps({"pool_timeout": True,
+                                          "max_duration_seconds": max_duration}),
                 )
                 new_state = self.queue.mark_failed(item.id, error_msg, self.max_attempts)
-                logger.error("[%s] timed out %s/%s after %.1fs (killed %d SDK subproc) → %s",
-                             worker_id, item.source, item.kind, duration, killed, new_state)
+                logger.error("[%s] timed out %s/%s after %.1fs → %s",
+                             worker_id, item.source, item.kind, duration, new_state)
             except Exception as e:
                 duration = time.monotonic() - started_perf
                 completed_at = datetime.now(timezone.utc).isoformat()
@@ -270,6 +261,8 @@ class WorkerPool:
                     completed_at=completed_at,
                     duration_seconds=duration,
                     summary=error_msg[:500],
+                    task_id=_task_id_of(item),
+                    meta_json=json.dumps({"exception": type(e).__name__}),
                 )
                 new_state = self.queue.mark_failed(item.id, error_msg, self.max_attempts)
                 logger.error("[%s] failed %s/%s: %s → %s",

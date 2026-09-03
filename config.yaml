@@ -283,14 +283,17 @@ workers:
       enabled: true
       interval_seconds: 60
       max_inflight: 2
-      # Bumped 1200 -> 1800 on 2026-08-23: entity-resolution-sweep (#48)
-      # needs ~30 min (3x poisoned at the old 1200s cap).
-      # CORRECTED 2026-09-03 (Job 5, from 09-01 explicit signal #2): the task-level
-      # timeout_seconds in the .md frontmatter IS read and enforced by the autonomy
-      # run path (autonomy.py, int(task.get("timeout_seconds") or 1800)); BOTH caps
-      # apply, min wins. pool.py enforces this source-level cap separately.
-      # See USER.md tool_reliability "Timeout caps" entry.
-      max_duration_seconds: 1800
+      # BOTH caps apply, min wins: the task-level timeout_seconds in the .md
+      # frontmatter is enforced by autonomy.run_task, this source-level cap by
+      # pool.py's asyncio.wait_for. See USER.md tool_reliability "Timeout caps".
+      # 1800 -> 3600 on 2026-09-03 (autonomy audit): when the two caps were equal
+      # the POOL timer won the race, cancelling run_task with CancelledError so its
+      # own handler never ran — no run record, no activity-log line, task file left
+      # in_progress (237 such runs / 73.6 GPU-h in workers.db had a NULL task_id).
+      # run_task now derives an effective timeout of (this cap - 30s), so the task
+      # handler always wins; this headroom also lets #39 (2400s) and #81 (5700s)
+      # actually finish instead of being deterministically killed.
+      max_duration_seconds: 3600
     session-distill:
       enabled: true
       interval_seconds: 1800

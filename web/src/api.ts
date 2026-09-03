@@ -441,6 +441,55 @@ export interface AutonomyTask {
   frequency: string | null;
   cron_id: string | null;
   last_run: string | null;
+  last_attempt: string | null;
+  failure_count: number | null;
+  stale_bypass_hours: number | null;
+  expected_error_patterns: string[] | null;
+  tags?: string[];
+}
+
+export interface AutonomyHealthTask {
+  task_id: string;
+  name: string | null;
+  status: string | null;
+  frequency?: string | null;
+  runs: number;
+  successes: number;
+  failures: number;
+  timeouts: number;
+  empty: number;
+  silent: number;
+  silent_indicator_runs?: number;
+  max_turns_runs?: number;
+  tool_error_runs?: number;
+  fail_rate: number;
+  silent_rate: number;
+  gpu_hours: number;
+  wasted_hours: number;
+  avg_seconds: number;
+  max_seconds: number;
+  consecutive_failures: number;
+  last_success: string | null;
+  failure_count?: number;
+}
+
+export interface AutonomyHealth {
+  days: number;
+  generated_at: string;
+  fleet: {
+    runs: number;
+    failures: number;
+    fail_rate: number;
+    gpu_hours: number;
+    wasted_hours: number;
+    empty_runs: number;
+    timeout_runs: number;
+    active_tasks: number;
+    failed_tasks: string[];
+    paused_tasks: string[];
+  };
+  tasks: AutonomyHealthTask[];
+  idle_tasks: AutonomyHealthTask[];
 }
 
 export interface TodoItem {
@@ -902,6 +951,8 @@ export const api = {
   // Autonomy
   autonomyTasks: (): Promise<{ tasks: AutonomyTask[] }> =>
     fetch(`${API_BASE}/autonomy/tasks`).then(r => r.json()),
+  autonomyHealth: (days = 7): Promise<AutonomyHealth> =>
+    fetch(`${API_BASE}/autonomy/health?days=${days}`).then(r => r.json()),
   autonomyWriteTask: async (data: Record<string, any>): Promise<any> => {
     const res = await fetch(`${API_BASE}/autonomy/task-write`, {
       method: 'POST',

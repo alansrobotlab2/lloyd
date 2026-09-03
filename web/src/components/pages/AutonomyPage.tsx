@@ -13,26 +13,126 @@ import {
   RefreshCw,
   FileText,
   Check,
+  AlertTriangle,
 } from "lucide-react";
-import { api, type AutonomyTask } from "../../api";
+import { api, type AutonomyTask, type AutonomyHealth } from "../../api";
 import { Button } from "@/components/ui/button";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 
-const STATUSES = ["draft", "up_next", "in_progress"] as const;
+// `paused` and `failed` tasks were invisible on this board — a task disabled
+// after repeated failures could not be seen, let alone dragged back.
+const STATUSES = ["draft", "up_next", "in_progress", "paused", "failed"] as const;
 
 const STATUS_LABELS: Record<string, string> = {
   draft: "Draft",
   up_next: "Up Next",
   in_progress: "In Progress",
+  paused: "Paused",
+  failed: "Failed",
 };
 
 const STATUS_COLORS: Record<string, string> = {
   draft: "bg-slate-500/20 text-muted-foreground border-slate-500/30",
   up_next: "bg-sky-500/20 text-sky-400 border-sky-500/30",
   in_progress: "bg-amber-500/20 text-amber-400 border-amber-500/30",
+  paused: "bg-slate-500/20 text-slate-400 border-slate-500/30",
+  failed: "bg-red-500/20 text-red-400 border-red-500/30",
 };
+
+function fmtHours(h: number): string {
+  return h >= 10 ? h.toFixed(0) : h.toFixed(1);
+}
+
+function HealthStrip({ health, showAll, onToggle }: {
+  health: AutonomyHealth;
+  showAll: boolean;
+  onToggle: () => void;
+}) {
+  const f = health.fleet;
+  const rows = showAll ? health.tasks : health.tasks.slice(0, 8);
+  const chip = "px-2 py-1 rounded bg-slate-500/10 text-[11px] whitespace-nowrap";
+  const wastePct = f.gpu_hours > 0 ? f.wasted_hours / f.gpu_hours : 0;
+
+  return (
+    <div className="mb-3 rounded border border-slate-500/30 bg-slate-500/5 p-2">
+      <div className="flex items-center gap-2 flex-wrap mb-2">
+        <span className="text-[11px] font-medium text-foreground/90">
+          Fleet health · {health.days}d
+        </span>
+        <span className={chip}>{f.runs} runs</span>
+        <span className={`${chip} ${f.fail_rate > 0.1 ? "text-red-400" : "text-emerald-400"}`}>
+          {(f.fail_rate * 100).toFixed(0)}% failed
+        </span>
+        <span className={chip}>{fmtHours(f.gpu_hours)} GPU-h</span>
+        <span className={`${chip} ${wastePct > 0.05 ? "text-red-400" : ""}`}>
+          {fmtHours(f.wasted_hours)} h wasted
+        </span>
+        {f.timeout_runs > 0 && <span className={chip}>{f.timeout_runs} timeouts</span>}
+        {f.empty_runs > 0 && <span className={chip}>{f.empty_runs} empty</span>}
+        {f.failed_tasks.length > 0 && (
+          <span className={`${chip} text-red-400`}>
+            {f.failed_tasks.length} disabled: #{f.failed_tasks.join(", #")}
+          </span>
+        )}
+        {f.paused_tasks.length > 0 && (
+          <span className={chip}>{f.paused_tasks.length} paused</span>
+        )}
+        {health.tasks.length > 8 && (
+          <button onClick={onToggle}
+                  className="ml-auto text-[11px] text-sky-400 hover:underline">
+            {showAll ? "show top 8" : `show all ${health.tasks.length}`}
+          </button>
+        )}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px]">
+          <thead className="text-muted-foreground">
+            <tr className="text-left">
+              <th className="font-normal pr-2">task</th>
+              <th className="font-normal pr-2 text-right">runs</th>
+              <th className="font-normal pr-2 text-right">fail</th>
+              <th className="font-normal pr-2 text-right">t/o</th>
+              <th className="font-normal pr-2 text-right">empty</th>
+              <th className="font-normal pr-2 text-right">silent</th>
+              <th className="font-normal pr-2 text-right">GPU-h</th>
+              <th className="font-normal pr-2 text-right">wasted</th>
+              <th className="font-normal pr-2 text-right">consec</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.task_id}
+                  className={t.consecutive_failures >= 2 ? "bg-red-500/10" : ""}>
+                <td className="pr-2 truncate max-w-[16rem]">
+                  <span className="text-muted-foreground">#{t.task_id}</span>{" "}
+                  {t.name}
+                </td>
+                <td className="pr-2 text-right tabular-nums">{t.runs}</td>
+                <td className={`pr-2 text-right tabular-nums ${t.fail_rate > 0.1 ? "text-red-400" : ""}`}>
+                  {(t.fail_rate * 100).toFixed(0)}%
+                </td>
+                <td className="pr-2 text-right tabular-nums">{t.timeouts || ""}</td>
+                <td className="pr-2 text-right tabular-nums">{t.empty || ""}</td>
+                <td className="pr-2 text-right tabular-nums">
+                  {t.silent ? `${(t.silent_rate * 100).toFixed(0)}%` : ""}
+                </td>
+                <td className="pr-2 text-right tabular-nums">{fmtHours(t.gpu_hours)}</td>
+                <td className={`pr-2 text-right tabular-nums ${t.wasted_hours > 1 ? "text-red-400" : ""}`}>
+                  {t.wasted_hours > 0 ? fmtHours(t.wasted_hours) : ""}
+                </td>
+                <td className={`pr-2 text-right tabular-nums ${t.consecutive_failures >= 2 ? "text-red-400 font-medium" : ""}`}>
+                  {t.consecutive_failures || ""}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 const PRIORITY_COLORS: Record<string, string> = {
   critical: "text-red-500 font-bold",
@@ -733,6 +833,15 @@ function TaskCard({
               running
             </span>
           )}
+          {(task.failure_count ?? 0) > 0 && (
+            <span
+              title={`${task.failure_count} consecutive failure(s); the task is in backoff`}
+              className="inline-flex items-center gap-0.5 text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded"
+            >
+              <AlertTriangle className="w-2.5 h-2.5" />
+              {task.failure_count} fail{(task.failure_count ?? 0) > 1 ? "s" : ""}
+            </span>
+          )}
           {task.last_run && (
             <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground bg-slate-500/10 px-1.5 py-0.5 rounded">
               <Clock className="w-2.5 h-2.5" />
@@ -862,6 +971,8 @@ function KanbanColumn({
 // ── Main Page ───────────────────────────────────────────────────────────
 
 export default function AutonomyPage() {
+  const [health, setHealth] = useState<AutonomyHealth | null>(null);
+  const [showAllHealth, setShowAllHealth] = useState(false);
   const [tasks, setTasks] = useState<AutonomyTask[]>([]);
   const [allTasks, setAllTasks] = useState<AutonomyTask[]>([]);
   const [loading, setLoading] = useState(true);
@@ -914,6 +1025,22 @@ export default function AutonomyPage() {
     const interval = setInterval(loadData, 5_000);
     return () => clearInterval(interval);
   }, [loadData]);
+
+  const loadHealth = useCallback(async () => {
+    try {
+      const h = await api.autonomyHealth(7);
+      if (h && (h as any).fleet) setHealth(h);
+    } catch (err) {
+      console.error("Autonomy health load failed:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadHealth();
+    // 7-day aggregate — nothing like the 5s cadence the task list needs.
+    const interval = setInterval(loadHealth, 60_000);
+    return () => clearInterval(interval);
+  }, [loadHealth]);
 
   const handleDrop = async (taskId: number, newStatus: string, insertIndex: number) => {
     const task = tasks.find((t) => t.id === taskId);
@@ -989,6 +1116,11 @@ export default function AutonomyPage() {
           {tasks.length} tasks — drag to move
         </span>
       </div>
+
+      {/* Fleet health — no aggregate view existed before: per-task failure rate,
+          GPU-hours and wasted hours were only in workers.db. */}
+      {health && <HealthStrip health={health} showAll={showAllHealth}
+                              onToggle={() => setShowAllHealth((v) => !v)} />}
 
       {/* Kanban board */}
       {loading ? (

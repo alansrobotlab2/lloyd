@@ -32,17 +32,39 @@ _SILENT_FAILURE_PATTERNS = [
 ]
 
 
-def _detect_silent_failures(text: str) -> list[str]:
-    """Return the failure-indicator snippets found in text, or []."""
+def _detect_silent_failures(text: str, expected: Optional[list] = None) -> list[str]:
+    """Return the failure-indicator snippets found in text, or [].
+
+    `expected` (task frontmatter `expected_error_patterns`) suppresses matches a
+    task deliberately provokes — #48's dry-run is REQUIRED to raise
+    FileNotFoundError while the graph is missing, which produced 33 false
+    positives in a week and taught everyone to ignore the indicator.
+    """
     if not text:
         return []
+    patterns = []
+    for pat in (expected or []):
+        try:
+            patterns.append(re.compile(str(pat), re.IGNORECASE))
+        except re.error:
+            patterns.append(None)  # fall back to substring below
     hits = []
     for pat in _SILENT_FAILURE_PATTERNS:
         m = pat.search(text)
-        if m:
-            start = max(0, m.start() - 30)
-            end = min(len(text), m.end() + 80)
-            hits.append(text[start:end].strip().replace("\n", " "))
+        if not m:
+            continue
+        start = max(0, m.start() - 30)
+        end = min(len(text), m.end() + 80)
+        snippet = text[start:end].strip().replace("\n", " ")
+        suppressed = False
+        for exp, compiled in zip(expected or [], patterns):
+            if compiled is not None:
+                if compiled.search(snippet):
+                    suppressed = True; break
+            elif str(exp).lower() in snippet.lower():
+                suppressed = True; break
+        if not suppressed:
+            hits.append(snippet)
     return hits
 
 import yaml
@@ -98,9 +120,11 @@ def _parse_task_file(path: Path) -> Optional[dict]:
             parts[1],
             fallback_fields=(
                 "id", "name", "description", "status", "priority", "frequency",
-                "scheduled_at", "next_run", "last_run", "agent_id", "skill_name",
-                "timeout_seconds", "preemptible", "auto_advance", "depends_on",
-                "max_retries", "failure_count", "runs_per_day", "preferred_hours",
+                "scheduled_at", "next_run", "last_run", "last_attempt", "agent_id",
+                "skill_name", "timeout_seconds", "preemptible", "auto_advance",
+                "depends_on", "max_retries", "failure_count", "runs_per_day",
+                "preferred_hours", "model", "stale_bypass_hours",
+                "expected_error_patterns",
             ),
             log_label=f"scheduler:{path.name}",
         )
@@ -130,10 +154,17 @@ def _update_task_field(task_id, **fields) -> None:
     parts = content.split("---\n", 2)
     if len(parts) < 3:
         return
-    fm = yaml.safe_load(parts[1])
+    # Use the graduated-recovery parser, not plain yaml.safe_load: a file whose
+    # frontmatter is degraded (orphaned tags, etc.) would otherwise be
+    # unwritable, and this function is called from the FAILURE handler — the
+    # exact moment a task most needs its status and failure_count recorded.
+    fm = parse_frontmatter_text(parts[1], log_label=f"update:{path.name}")
     if not isinstance(fm, dict):
         return
+    fm = {k: v for k, v in fm.items() if not str(k).startswith("_")}
     fm.update(fields)
+    # An explicit None clears the key rather than writing `key: null`.
+    fm = {k: v for k, v in fm.items() if v is not None}
     new_content = f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True)}---\n{parts[2]}"
     path.write_text(new_content, encoding="utf-8")
 
@@ -152,9 +183,58 @@ def _append_activity_log(task_id, note: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+# ── Failure backoff ───────────────────────────────────────────────────────────
+# A failed run used to leave `last_run` untouched, and `_is_task_due` gates only
+# on `last_run` — so a task that timed out was due again on the very next 60s
+# tick, forever. That produced 12 consecutive 600s timeouts on #36 in one night
+# and ~130 on #69 over two days (~21 GPU-hours on a task whose script was gone).
+# `failure_count` and `max_retries` were parsed, stored and displayed, but no
+# scheduling decision read either.
+_FAILURE_BACKOFF_BASE = 600          # 10 min, doubling per consecutive failure
+_FAILURE_BACKOFF_CAP_SECONDS = 21600  # 6h floor for the cap
+_DEFAULT_MAX_RETRIES = 5
+# An empty response this fast, with no tool call, is the model server hiccuping
+# (a thinking-only turn or a 200 with no content), not the task failing.
+_INFRA_EMPTY_MAX_SECONDS = 15
+# Keep the task-level timeout strictly under the pool's, so run_task's own
+# handler wins the race and the run is always recorded.
+_POOL_TIMEOUT_MARGIN = 30
+_INFRA_EXC_NAMES = frozenset({
+    "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout", "PoolTimeout",
+    "RemoteProtocolError", "ConnectionRefusedError", "ConnectionResetError",
+})
+
+
+def _failure_cooldown_seconds(task: dict) -> float:
+    """Exponential backoff keyed on consecutive failures: 10m, 20m, 40m, ...
+    capped at the task's own interval or 6h, whichever is larger."""
+    n = max(1, int(task.get("failure_count") or 0))
+    interval = _frequency_interval_seconds(task) or 86400.0
+    cap = max(interval, _FAILURE_BACKOFF_CAP_SECONDS)
+    return float(min(_FAILURE_BACKOFF_BASE * (2 ** (n - 1)), cap))
+
+
+def _in_failure_cooldown(task: dict, now: datetime.datetime) -> bool:
+    """True while a failed task is serving its cooldown.
+
+    The last attempt failed iff `last_attempt` is newer than `last_run`.
+    `last_run` deliberately keeps meaning "last SUCCESSFUL completion" — it
+    feeds the dependency freshness gate, so bumping it on failure would let a
+    broken upstream satisfy its downstream tasks.
+    """
+    last_attempt = _parse_iso(task.get("last_attempt"))
+    if not last_attempt:
+        return False
+    last_run = _parse_iso(task.get("last_run"))
+    if last_run and last_attempt <= last_run:
+        return False  # most recent attempt succeeded
+    return (now - last_attempt).total_seconds() < _failure_cooldown_seconds(task)
+
+
 def _write_run_record(task_id: int, run_id: str, status: str,
                       started_at: str, completed_at: str,
-                      duration_seconds: float, summary: str, body: str) -> Path:
+                      duration_seconds: float, summary: str, body: str,
+                      extra: Optional[dict] = None) -> Path:
     runs_dir = AUTONOMY_RUNS_DIR / str(task_id)
     runs_dir.mkdir(parents=True, exist_ok=True)
     fm = {
@@ -162,6 +242,11 @@ def _write_run_record(task_id: int, run_id: str, status: str,
         "started_at": started_at, "completed_at": completed_at,
         "duration_seconds": round(duration_seconds, 1), "summary": summary,
     }
+    # stop_reason / usage / num_turns were never recorded, so a run cut off at
+    # max_turns looked identical to one that finished its work.
+    for k, v in (extra or {}).items():
+        if v is not None:
+            fm[k] = v
     content = f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n{body}"
     path = runs_dir / f"{run_id}.md"
     path.write_text(content, encoding="utf-8")
@@ -181,7 +266,11 @@ def _all_runnable_tasks() -> list[dict]:
         if not task:
             continue
         status = str(task.get("status", "")).strip()
-        if status in ("up_next", "in_progress"):
+        # `failed` is included so a disabled upstream stays FINDABLE by
+        # _is_dependency_met — otherwise the dependency lookup misses it and
+        # returns True, letting dependents run off a broken upstream. It is
+        # excluded from dispatch by the status gate in _is_task_due.
+        if status in ("up_next", "in_progress", "failed"):
             tasks.append(task)
     return tasks
 
@@ -218,6 +307,29 @@ def _frequency_interval_seconds(task: dict) -> Optional[float]:
 _no_skill_warned: set[str] = set()
 
 
+def _dependency_bypassed(task: dict, dep_task: dict,
+                         dep_last_run: Optional[datetime.datetime],
+                         now: datetime.datetime) -> bool:
+    """Implement `stale_bypass_hours` — the documented "fail forward" rule.
+
+    The field was set on #38/#40 and described in the architecture doc as
+    letting a dependent run with stale input rather than blocking the chain,
+    but nothing ever read it. Bypass only when the upstream is not actively
+    running, so a merely-late upstream is still waited for.
+    """
+    try:
+        bypass_hours = float(task.get("stale_bypass_hours") or 0)
+    except (TypeError, ValueError):
+        return False
+    if bypass_hours <= 0:
+        return False
+    if str(dep_task.get("status", "")).strip() == "in_progress":
+        return False
+    if dep_last_run is None:
+        return True
+    return (now - dep_last_run).total_seconds() > bypass_hours * 3600
+
+
 def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
     dep_id = task.get("depends_on")
     if not dep_id or str(dep_id).strip().lower() in ("null", "none", ""):
@@ -232,7 +344,9 @@ def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
         return True
     dep_last_run = _parse_iso(dep_task.get("last_run"))
     if not dep_last_run:
-        return False
+        # Never succeeded — still eligible for a stale bypass.
+        return _dependency_bypassed(task, dep_task, None,
+                                    datetime.datetime.now(datetime.timezone.utc))
     # Freshness gate: the dependency must have completed within the current
     # scheduling cycle (half this task's interval), not just "since my last
     # run". Without this, yesterday's upstream run satisfies the gate and the
@@ -242,22 +356,46 @@ def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
     interval = _frequency_interval_seconds(task) or 86400.0
     now = datetime.datetime.now(datetime.timezone.utc)
     if (now - dep_last_run).total_seconds() > interval / 2:
-        return False
+        return _dependency_bypassed(task, dep_task, dep_last_run, now)
     my_last_run = _parse_iso(task.get("last_run"))
     if not my_last_run:
         return True
     return dep_last_run > my_last_run
 
 
-def _is_preferred_hour(task: dict) -> bool:
+_HHMM_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})")
+
+
+def _local_hour() -> int:
+    """Current machine-local hour. Indirection exists so tests can pin it."""
+    return datetime.datetime.now().hour
+
+
+def _effective_preferred_hours(task: dict) -> Optional[list]:
+    """preferred_hours, falling back to the hour in `scheduled_at`.
+
+    Several tasks documented a schedule in `scheduled_at` (#60 "04:30", #81
+    "05:00 is deliberate") while leaving `preferred_hours` null, so nothing
+    enforced it — #81 ran at 17:57 and took the qmd daemon offline mid-afternoon.
+    Hours are machine-local; a cron-expression scheduled_at yields no window.
+    """
     pref = task.get("preferred_hours")
-    if not pref or not isinstance(pref, list) or len(pref) == 0:
+    if isinstance(pref, list) and len(pref) > 0:
+        try:
+            return [int(h) for h in pref]
+        except (TypeError, ValueError):
+            return None
+    m = _HHMM_RE.match(str(task.get("scheduled_at") or ""))
+    if m and int(m.group(1)) < 24:
+        return [int(m.group(1))]
+    return None
+
+
+def _is_preferred_hour(task: dict) -> bool:
+    hours = _effective_preferred_hours(task)
+    if not hours:
         return True
-    current_hour = datetime.datetime.now().hour
-    try:
-        return current_hour in [int(h) for h in pref]
-    except (TypeError, ValueError):
-        return True
+    return _local_hour() in hours
 
 
 def _is_task_due(task: dict, all_tasks: list[dict]) -> bool:
@@ -275,6 +413,11 @@ def _is_task_due(task: dict, all_tasks: list[dict]) -> bool:
                 "Task #%s (%s) has no skill_name/skill_path — it will NEVER "
                 "run until one is set", task_id, task.get("name"))
         return False
+    # Only up_next dispatches. in_progress previously stayed "due", so the same
+    # task could be enqueued while a copy of it was still running; `failed` is in
+    # the runnable set purely so dependency lookups can see it.
+    if str(task.get("status", "")).strip() != "up_next":
+        return False
     interval = _frequency_interval_seconds(task)
     if interval is None:
         return False
@@ -282,8 +425,17 @@ def _is_task_due(task: dict, all_tasks: list[dict]) -> bool:
     now = datetime.datetime.now(datetime.timezone.utc)
     if last_run:
         elapsed = (now - last_run).total_seconds()
-        if elapsed < interval:
+        # last_run is a COMPLETION time, so due-time drifts later by the run's
+        # own duration every cycle. For a task pinned to a one-hour window that
+        # drift eventually steps past the window and skips a day, so allow a
+        # little slack when a window is in force.
+        slack = min(3600.0, interval * 0.25) if _effective_preferred_hours(task) else 0.0
+        if elapsed < interval - slack:
             return False
+    # A failed run keeps last_run untouched, so without this gate the task is
+    # due again on the next tick — the retry storm.
+    if _in_failure_cooldown(task, now):
+        return False
     if not _is_dependency_met(task, all_tasks):
         return False
     if not _is_preferred_hour(task):
@@ -380,7 +532,77 @@ def _get_model_env(model_name: str) -> dict:
     return {}
 
 
-async def run_task(task_id) -> dict:
+async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
+                          started_dt: datetime.datetime, *, summary: str, body: str,
+                          kind: str = "task", extra: Optional[dict] = None,
+                          alert: bool = True) -> dict:
+    """Single failure path for run_task: run record, backoff, activity log, alert.
+
+    `kind="task"` means the task itself failed (timeout, exception mid-run, an
+    empty response after real work) and increments `failure_count`, escalating
+    to `status: failed` at `max_retries`. `kind="infra"` means the model server
+    hiccuped (fast empty response, connection error); it gets a flat cooldown
+    and never counts toward the retry budget, so an outage can't disable the
+    whole fleet — on 2026-09-01 every task returned empty for 11 hours straight.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    completed_at = now.isoformat()
+    duration = (now - started_dt).total_seconds()
+
+    _write_run_record(
+        task_id=task_id, run_id=run_id, status="failed",
+        started_at=started_at, completed_at=completed_at,
+        duration_seconds=duration, summary=summary[:200], body=body,
+        extra={**(extra or {}), "failure_kind": kind},
+    )
+
+    failures = int(task.get("failure_count") or 0)
+    max_retries = int(task.get("max_retries") or _DEFAULT_MAX_RETRIES)
+    fields: dict = {"status": "up_next", "last_attempt": completed_at,
+                    "updated": completed_at}
+    disabled = False
+    if kind == "task":
+        failures += 1
+        fields["failure_count"] = failures
+        if failures >= max_retries:
+            fields["status"] = "failed"
+            disabled = True
+
+    if disabled:
+        fields["next_run"] = None
+    else:
+        cooldown = (_failure_cooldown_seconds({**task, **fields}) if kind == "task"
+                    else float(_FAILURE_BACKOFF_BASE))
+        fields["next_run"] = (now + datetime.timedelta(seconds=cooldown)).isoformat()
+    _update_task_field(task_id, **fields)
+
+    note = f"Run {run_id} — FAILED ({kind}): {summary[:280]} [full: autonomy-runs/{task_id}/{run_id}.md]"
+    if disabled:
+        note += (f" — DISABLED after {failures} consecutive failures; "
+                 f"set status back to up_next to re-enable")
+    _append_activity_log(task_id, note)
+
+    if disabled and alert:
+        try:
+            from app.discord_notify import discord_alert
+            await discord_alert(
+                f"Autonomy task #{task_id} ({task.get('name')}) disabled after "
+                f"{failures} consecutive failures. Last: {summary[:300]}"
+            )
+        except Exception as e:
+            logger.warning("Alert dispatch failed for task #%s: %s", task_id, e)
+
+    logger.error("Task #%s failed (%s, %d/%d): %s", task_id, kind, failures,
+                 max_retries, summary[:200])
+    return {
+        "success": False, "status": "failed", "task_id": task_id, "run_id": run_id,
+        "error": summary, "duration_seconds": round(duration, 1),
+        "failure_kind": kind, "disabled": disabled,
+        "meta": {**(extra or {}), "failure_kind": kind, "disabled": disabled},
+    }
+
+
+async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     """Execute a single autonomy task via Claude Agent SDK."""
     path = _find_task_file(task_id)
     if not path:
@@ -409,6 +631,19 @@ async def run_task(task_id) -> dict:
     now_iso = now.isoformat()
     run_id = f"run_{task_id}_{now.strftime('%Y%m%d_%H%M%S')}"
 
+    # Refuse to start a second copy of a run that is already going. `_is_task_due`
+    # never checked status and the manual/MCP entry points skip due-checks
+    # entirely, so two runs of #38 once started 9 seconds apart and interleaved.
+    if str(task.get("status", "")).strip() == "in_progress":
+        updated = _parse_iso(task.get("updated"))
+        stale_after = int(task.get("timeout_seconds") or 1800)
+        if updated and (now - updated).total_seconds() < stale_after:
+            msg = (f"Task #{task_id} is already in_progress (since "
+                   f"{updated.isoformat()}); not starting a second run")
+            logger.info("%s", msg)
+            return {"success": False, "skipped": True, "status": "skipped",
+                    "task_id": task_id, "error": msg}
+
     _update_task_field(task_id, status="in_progress", updated=now_iso)
     prompt = _build_task_prompt(task, skill_content)
 
@@ -424,9 +659,20 @@ async def run_task(task_id) -> dict:
         task_model = ""
 
     model_env = _get_model_env(task_model)
-    timeout = int(task.get("timeout_seconds") or 1800)
+    declared_timeout = int(task.get("timeout_seconds") or 1800)
+    timeout = declared_timeout
+    if max_duration:
+        # Stay strictly under the caller's cap. When the two were equal the POOL
+        # timer won, cancelling this coroutine before its own handler could run:
+        # no run record, no activity-log line, task left in_progress on disk.
+        timeout = max(60, min(declared_timeout, int(max_duration) - _POOL_TIMEOUT_MARGIN))
+        if declared_timeout > timeout:
+            logger.warning(
+                "Task #%s timeout_seconds=%ds exceeds the caller cap %ds; using %ds",
+                task_id, declared_timeout, max_duration, timeout)
 
-    logger.info("Running task #%s: %s (model=%s)", task_id, task.get("name"), task_model)
+    logger.info("Running task #%s: %s (model=%s, timeout=%ds)",
+                task_id, task.get("name"), task_model, timeout)
     started_at = now_iso
     # Capture tool/script failures that happen INSIDE the run (e.g. a Bash command
     # exiting non-zero). The harness returns these to the model as tool_results with
@@ -461,12 +707,22 @@ async def run_task(task_id) -> dict:
 
         messages = [{"role": "user", "content": prompt}]
         final_response = ""
+        stop_reason = None
+        usage = None
+        num_turns = None
+        saw_tool_call = False
 
         try:
             async with asyncio.timeout(timeout):
                 async for evt in run_query(messages, options):
                     if evt["type"] == "text_delta":
                         final_response += evt["text"]
+                    elif evt["type"] == "tool_call":
+                        saw_tool_call = True
+                    elif evt["type"] == "result":
+                        stop_reason = evt.get("stop_reason")
+                        usage = evt.get("usage")
+                        num_turns = evt.get("num_turns")
                     elif evt["type"] == "tool_result" and evt.get("is_error"):
                         content = evt.get("content")
                         if isinstance(content, list):
@@ -476,39 +732,72 @@ async def run_task(task_id) -> dict:
                             )
                         tool_errors.append(str(content)[:600])
         except asyncio.TimeoutError:
-            # Without this bookkeeping the task file stays in_progress on
-            # disk with no run record or activity-log line — the run just
-            # vanishes (recover_stuck_tasks was written for the fallout but
-            # was never wired up).
             logger.warning("Task #%s timed out after %ds", task_id, timeout)
-            completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            duration = (datetime.datetime.now(datetime.timezone.utc) - now).total_seconds()
-            partial = f"## Partial response before timeout\n\n{final_response}" \
-                if final_response else "(no output before timeout)"
-            _write_run_record(
-                task_id=task_id, run_id=run_id, status="failed",
-                started_at=started_at, completed_at=completed_at,
-                duration_seconds=duration,
+            partial = (f"## Partial response before timeout\n\n{final_response}"
+                       if final_response else "(no output before timeout)")
+            errs = ("\n\n## Tool/script errors before timeout\n\n"
+                    + "\n\n".join(f"```\n{e}\n```" for e in tool_errors[-5:])
+                    ) if tool_errors else ""
+            return await _record_failure(
+                task, task_id, run_id, started_at, now,
                 summary=f"timed out after {timeout}s",
-                body=f"## Prompt\n\n{prompt[:500]}...\n\n{partial}",
+                body=f"## Prompt\n\n{prompt[:500]}...\n\n{partial}{errs}",
+                kind="task",
+                extra={"timeout": True, "timeout_seconds": timeout,
+                       "stop_reason": stop_reason, "usage": usage,
+                       "num_turns": num_turns, "tool_errors": len(tool_errors)},
             )
-            current_failures = int(task.get("failure_count") or 0)
-            _update_task_field(task_id, status="up_next",
-                               failure_count=current_failures + 1,
-                               updated=completed_at)
-            _append_activity_log(
-                task_id, f"Run {run_id} — FAILED: timed out after {timeout}s")
-            return {
-                "success": False, "error": f"Task #{task_id} timed out after {timeout}s",
-            }
+        except asyncio.CancelledError:
+            # The worker pool cancels via asyncio.wait_for. CancelledError is a
+            # BaseException, so neither the timeout branch nor `except Exception`
+            # below used to catch it: the run vanished with no record at all and
+            # the task file was left in_progress until recover_stuck_tasks found
+            # it. Record it, then re-raise so cancellation still propagates.
+            duration = (datetime.datetime.now(datetime.timezone.utc) - now).total_seconds()
+            logger.warning("Task #%s cancelled after %.0fs", task_id, duration)
+            partial = (f"## Partial response before cancellation\n\n{final_response}"
+                       if final_response else "(no output before cancellation)")
+            await _record_failure(
+                task, task_id, run_id, started_at, now,
+                summary=f"cancelled by the worker pool after {duration:.0f}s",
+                body=f"## Prompt\n\n{prompt[:500]}...\n\n{partial}",
+                kind="task", alert=False,
+                extra={"cancelled": True, "stop_reason": stop_reason,
+                       "usage": usage, "num_turns": num_turns,
+                       "tool_errors": len(tool_errors)},
+            )
+            raise
 
-        if not final_response:
-            final_response = "(No response)"
-
-        completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         duration = (datetime.datetime.now(datetime.timezone.utc) - now).total_seconds()
 
-        silent_failures = _detect_silent_failures(final_response)
+        # An empty response used to be relabelled "(No response)" and recorded as
+        # a SUCCESS: last_run advanced, failure_count reset, dependents unblocked.
+        # That is how #79 (retention) went dark for a week on 0.6s "successes",
+        # and how ~180 phantom runs passed during the 2026-09-01 empty window.
+        if not final_response.strip():
+            infra = (not saw_tool_call) and duration < _INFRA_EMPTY_MAX_SECONDS
+            kind = "infra" if infra else "task"
+            summary = (f"empty response after {duration:.0f}s "
+                       f"(stop_reason={stop_reason}, turns={num_turns}, "
+                       f"tool_errors={len(tool_errors)})")
+            errs = ("\n\n## Tool/script errors\n\n"
+                    + "\n\n".join(f"```\n{e}\n```" for e in tool_errors[:10])
+                    ) if tool_errors else ""
+            return await _record_failure(
+                task, task_id, run_id, started_at, now,
+                summary=summary,
+                body=(f"## Prompt\n\n{prompt[:500]}...\n\n## Response\n\n"
+                      f"(empty — the model returned no text){errs}"),
+                kind=kind,
+                extra={"empty": True, "stop_reason": stop_reason, "usage": usage,
+                       "num_turns": num_turns, "tool_errors": len(tool_errors),
+                       "saw_tool_call": saw_tool_call},
+            )
+
+        completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        silent_failures = _detect_silent_failures(
+            final_response, task.get("expected_error_patterns"))
         body_parts = [f"## Prompt\n\n{prompt[:500]}...", f"## Response\n\n{final_response}"]
         if tool_errors:
             errs_md = "\n\n".join(f"```\n{e}\n```" for e in tool_errors[:10])
@@ -521,17 +810,26 @@ async def run_task(task_id) -> dict:
                 task_id, silent_failures[:3],
             )
 
+        is_silent = final_response.strip() == "[SILENT]"
+        meta = {"stop_reason": stop_reason, "usage": usage, "num_turns": num_turns,
+                "tool_errors": len(tool_errors), "silent": is_silent,
+                "silent_failure_indicators": len(silent_failures)}
+
         _write_run_record(
             task_id=task_id, run_id=run_id, status="success",
             started_at=started_at, completed_at=completed_at,
             duration_seconds=duration, summary=final_response[:200],
-            body="\n\n".join(body_parts),
+            body="\n\n".join(body_parts), extra=meta,
         )
 
         interval = _frequency_interval_seconds(task)
         completed_dt = datetime.datetime.fromisoformat(completed_at)
         next_run_iso = (completed_dt + datetime.timedelta(seconds=interval)).isoformat() if interval else None
+        # last_attempt tracks EVERY attempt; last_run only successes. The
+        # cooldown gate reads "last_attempt newer than last_run" as "the most
+        # recent attempt failed", so a success must set both.
         _update_task_field(task_id, status="up_next", last_run=completed_at,
+                           last_attempt=completed_at,
                            updated=completed_at, failure_count=0,
                            **({"next_run": next_run_iso} if next_run_iso else {}))
         if silent_failures:
@@ -549,41 +847,189 @@ async def run_task(task_id) -> dict:
         else:
             _append_activity_log(task_id, f"Run {run_id} — success ({duration:.0f}s)")
 
-        logger.info("Task #%s completed in %.1fs", task_id, duration)
+        logger.info("Task #%s completed in %.1fs (stop_reason=%s)",
+                    task_id, duration, stop_reason)
         return {
-            "success": True, "task_id": task_id, "run_id": run_id,
+            "success": True, "status": "success", "task_id": task_id, "run_id": run_id,
             "duration_seconds": round(duration, 1),
             "response_preview": final_response[:300],
+            "meta": meta,
         }
 
     except Exception as e:
-        completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        duration = (datetime.datetime.now(datetime.timezone.utc) - now).total_seconds()
         error_msg = f"{type(e).__name__}: {e}"
-
-        current_failures = int(task.get("failure_count") or 0)
-        _update_task_field(task_id, status="up_next",
-                           failure_count=current_failures + 1, updated=completed_at)
-
         tool_errs_md = ""
         if tool_errors:
-            joined = "\n\n".join(f"```\n{e}\n```" for e in tool_errors[-10:])
-            tool_errs_md = f"\n\n## Tool/script errors before failure ({len(tool_errors)})\n\n{joined}"
-
-        _write_run_record(
-            task_id=task_id, run_id=run_id, status="failed",
-            started_at=started_at, completed_at=completed_at,
-            duration_seconds=duration, summary=error_msg[:200],
+            joined = "\n\n".join(f"```\n{err}\n```" for err in tool_errors[-10:])
+            tool_errs_md = (f"\n\n## Tool/script errors before failure "
+                            f"({len(tool_errors)})\n\n{joined}")
+        # A model-server outage shouldn't burn the retry budget of every task.
+        kind = "infra" if type(e).__name__ in _INFRA_EXC_NAMES else "task"
+        return await _record_failure(
+            task, task_id, run_id, started_at, now,
+            summary=error_msg,
             body=f"## Error\n\n```\n{error_msg}\n\n{traceback.format_exc()}\n```{tool_errs_md}",
+            kind=kind,
+            extra={"exception": type(e).__name__, "tool_errors": len(tool_errors)},
         )
 
-        # Keep enough of the error to be diagnosable from the activity log itself,
-        # and point at the full run record for the traceback + tool stderr.
-        _append_activity_log(
-            task_id,
-            f"Run {run_id} — FAILED: {error_msg[:280]} "
-            f"[full: autonomy-runs/{task_id}/{run_id}.md]",
-        )
-        logger.error("Task #%s failed: %s", task_id, error_msg)
-        return {"success": False, "task_id": task_id, "run_id": run_id,
-                "error": error_msg, "duration_seconds": round(duration, 1)}
+
+# ── Fleet health ──────────────────────────────────────────────────────────────
+# Nothing aggregated run outcomes before this: /api/autonomy/runs required a
+# task_id, so the 237 pool-timeout rows with a NULL task_id (73.6 GPU-hours)
+# were unreachable by design, and no view existed for failure rate, GPU-hours,
+# [SILENT] rate or consecutive failures. A task that timed out on every single
+# run was indistinguishable from a healthy one.
+
+def _iter_task_files() -> list[dict]:
+    """Every NN-*.md task, whatever its status (including paused/failed)."""
+    out = []
+    if not AUTONOMY_DIR.exists():
+        return out
+    for path in AUTONOMY_DIR.glob("*.md"):
+        if not re.match(r"\d+-", path.name):
+            continue
+        task = _parse_task_file(path)
+        if task:
+            out.append(task)
+    return out
+
+
+def _row_task_id(row: dict) -> Optional[str]:
+    tid = row.get("task_id")
+    if tid:
+        return str(tid)
+    payload = row.get("queue_payload_json")
+    if payload:
+        try:
+            pid = json.loads(payload).get("task_id")
+            if pid is not None:
+                return str(pid)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
+    """Aggregate run rows into per-task and fleet health. Pure function."""
+    by_task: dict[str, dict] = {}
+    task_by_id = {str(t.get("id")): t for t in tasks}
+
+    for row in rows:
+        status = row.get("status")
+        if status == "skipped":
+            continue
+        tid = _row_task_id(row) or "unattributed"
+        try:
+            meta = json.loads(row.get("meta_json") or "{}")
+        except (ValueError, TypeError):
+            meta = {}
+        summary = str(row.get("summary") or "")
+        response = str(row.get("response_json") or "")
+        duration = float(row.get("duration_seconds") or 0.0)
+
+        # Historical rows predate meta_json, and empty responses were recorded
+        # as successes — reclassify them so the numbers reflect reality.
+        empty = bool(meta.get("empty")) or response.strip() == "(No response)" \
+            or summary.strip() == "(No response)"
+        timeout = bool(meta.get("timeout")) or bool(meta.get("pool_timeout")) \
+            or "timed out" in summary or summary.startswith("TimeoutError")
+        failed = status != "success" or empty
+        silent = "[SILENT]" in response or bool(meta.get("silent"))
+
+        e = by_task.setdefault(tid, {
+            "task_id": tid, "runs": 0, "successes": 0, "failures": 0,
+            "timeouts": 0, "empty": 0, "silent": 0, "silent_indicator_runs": 0,
+            "max_turns_runs": 0, "tool_error_runs": 0,
+            "gpu_hours": 0.0, "wasted_hours": 0.0, "total_seconds": 0.0,
+            "max_seconds": 0.0, "consecutive_failures": 0, "last_success": None,
+            "_streak_open": True,
+        })
+        e["runs"] += 1
+        e["total_seconds"] += duration
+        e["max_seconds"] = max(e["max_seconds"], duration)
+        e["gpu_hours"] += duration / 3600.0
+        if failed:
+            e["failures"] += 1
+            e["wasted_hours"] += duration / 3600.0
+            if e["_streak_open"]:
+                e["consecutive_failures"] += 1
+        else:
+            e["successes"] += 1
+            e["_streak_open"] = False
+            if not e["last_success"]:
+                e["last_success"] = row.get("completed_at")
+        if timeout:
+            e["timeouts"] += 1
+        if empty:
+            e["empty"] += 1
+        if silent:
+            e["silent"] += 1
+        if meta.get("stop_reason") == "max_turns":
+            e["max_turns_runs"] += 1
+        if int(meta.get("silent_failure_indicators") or 0) > 0:
+            e["silent_indicator_runs"] += 1
+        if int(meta.get("tool_errors") or 0) > 0:
+            e["tool_error_runs"] += 1
+
+    out_tasks = []
+    for tid, e in by_task.items():
+        e.pop("_streak_open", None)
+        runs = e["runs"] or 1
+        e["fail_rate"] = round(e["failures"] / runs, 3)
+        e["silent_rate"] = round(e["silent"] / runs, 3)
+        e["avg_seconds"] = round(e["total_seconds"] / runs, 1)
+        e["gpu_hours"] = round(e["gpu_hours"], 2)
+        e["wasted_hours"] = round(e["wasted_hours"], 2)
+        e["max_seconds"] = round(e["max_seconds"], 1)
+        e.pop("total_seconds", None)
+        t = task_by_id.get(tid)
+        if t:
+            e.update({
+                "name": t.get("name"), "status": t.get("status"),
+                "frequency": t.get("frequency"),
+                "failure_count": int(t.get("failure_count") or 0),
+                "timeout_seconds": t.get("timeout_seconds"),
+                "last_run": t.get("last_run"), "last_attempt": t.get("last_attempt"),
+            })
+        else:
+            e["name"] = "(unattributed)" if tid == "unattributed" else f"task {tid}"
+            e["status"] = "unknown"
+        out_tasks.append(e)
+
+    out_tasks.sort(key=lambda x: x["wasted_hours"], reverse=True)
+
+    # Tasks with a file but no runs in the window are worth seeing too.
+    seen = {t["task_id"] for t in out_tasks}
+    idle = [{"task_id": str(t.get("id")), "name": t.get("name"),
+             "status": t.get("status"), "frequency": t.get("frequency"),
+             "runs": 0, "successes": 0, "failures": 0, "timeouts": 0, "empty": 0,
+             "silent": 0, "fail_rate": 0.0, "silent_rate": 0.0, "gpu_hours": 0.0,
+             "wasted_hours": 0.0, "avg_seconds": 0.0, "max_seconds": 0.0,
+             "consecutive_failures": 0, "last_success": None,
+             "failure_count": int(t.get("failure_count") or 0),
+             "last_run": t.get("last_run")}
+            for t in tasks if str(t.get("id")) not in seen]
+
+    total_runs = sum(t["runs"] for t in out_tasks)
+    total_fail = sum(t["failures"] for t in out_tasks)
+    return {
+        "days": days,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "fleet": {
+            "runs": total_runs,
+            "failures": total_fail,
+            "fail_rate": round(total_fail / total_runs, 3) if total_runs else 0.0,
+            "gpu_hours": round(sum(t["gpu_hours"] for t in out_tasks), 2),
+            "wasted_hours": round(sum(t["wasted_hours"] for t in out_tasks), 2),
+            "empty_runs": sum(t["empty"] for t in out_tasks),
+            "timeout_runs": sum(t["timeouts"] for t in out_tasks),
+            "active_tasks": len([t for t in tasks if str(t.get("status")) == "up_next"]),
+            "failed_tasks": [str(t.get("id")) for t in tasks
+                             if str(t.get("status")) == "failed"],
+            "paused_tasks": [str(t.get("id")) for t in tasks
+                             if str(t.get("status")) == "paused"],
+        },
+        "tasks": out_tasks,
+        "idle_tasks": idle,
+    }

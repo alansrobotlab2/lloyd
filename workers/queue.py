@@ -83,6 +83,7 @@ class QueueItem:
     claimed_by: Optional[str]
     completed_at: Optional[str]
     error: Optional[str]
+    not_before: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "QueueItem":
@@ -100,6 +101,7 @@ class QueueItem:
             claimed_by=row["claimed_by"],
             completed_at=row["completed_at"],
             error=row["error"],
+            not_before=(row["not_before"] if "not_before" in row.keys() else None),
         )
 
     def to_dict(self) -> dict:
@@ -150,6 +152,12 @@ class WorkQueue:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(queue)").fetchall()}
             if "not_before" not in cols:
                 conn.execute("ALTER TABLE queue ADD COLUMN not_before TEXT")
+            # Additive migration: per-run structured metadata (stop_reason, usage,
+            # num_turns, timeout/empty flags). Without it a run's outcome could only
+            # be guessed from the free-text summary.
+            run_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+            if "meta_json" not in run_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN meta_json TEXT")
             conn.commit()
         logger.info("workers.db initialized at %s", self.db_path)
 
@@ -387,17 +395,19 @@ class WorkQueue:
         artifact_path: str = "",
         response_json: str = "",
         task_id: Optional[str] = None,
+        meta_json: str = "",
     ) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
                 """INSERT INTO runs (run_id, queue_id, source, task_id, status,
                                      started_at, completed_at, duration_seconds,
-                                     summary, artifact_path, response_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                                     summary, artifact_path, response_json, meta_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     run_id, queue_id, source, task_id, status,
                     started_at, completed_at, float(duration_seconds),
                     summary[:500], artifact_path, response_json[:50000],
+                    meta_json[:20000] if meta_json else None,
                 ),
             )
             conn.commit()
@@ -420,6 +430,21 @@ class WorkQueue:
         args.append(limit)
         with self._connect() as conn:
             return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+    def list_runs_joined(self, source: str, since_iso: str,
+                         limit: int = 20000) -> list[dict]:
+        """Runs since `since_iso`, joined to their queue row.
+
+        The join recovers the task_id for historical rows written before the
+        pool passed one through (237 such rows / 73.6 GPU-hours were otherwise
+        unattributable): the payload always carried it.
+        """
+        q = """SELECT r.*, q.payload_json AS queue_payload_json
+               FROM runs r LEFT JOIN queue q ON q.id = r.queue_id
+               WHERE r.source = ? AND r.completed_at >= ?
+               ORDER BY r.completed_at DESC LIMIT ?"""
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute(q, (source, since_iso, limit)).fetchall()]
 
     # ── Watermarks ────────────────────────────────────────────────────────
 

@@ -88,6 +88,9 @@ def _parse_task_file(path: Path) -> dict | None:
             "max_retries": frontmatter.get("max_retries", 3),
             "notify_on_complete": frontmatter.get("notify_on_complete", True),
             "preferred_hours": frontmatter.get("preferred_hours", []),
+            "last_attempt": _to_iso(frontmatter.get("last_attempt")),
+            "stale_bypass_hours": frontmatter.get("stale_bypass_hours"),
+            "expected_error_patterns": frontmatter.get("expected_error_patterns") or [],
             "cron_id": frontmatter.get("cron_id"),
             "type": frontmatter.get("type", "autonomy"),
             "body": parts[2] if len(parts) > 2 else "",
@@ -105,35 +108,59 @@ def _write_task_file(task_dict: dict) -> Path:
     existing = _find_task_file(task_id)
     path = existing if existing else AUTONOMY_DIR / f"{task_id}-{slug}.md"
 
-    frontmatter = {
-        "type": "autonomy",
+    # Start from the file's EXISTING frontmatter so keys this module doesn't
+    # model survive the write. The old code rebuilt frontmatter from the map
+    # below alone, which destroyed `tags`, `segment`, `stale_bypass_hours`,
+    # `expected_error_patterns`, `archived_reason` and anything else added
+    # later — and, worse, substituted a DEFAULT for keys the caller omitted
+    # (e.g. an update that didn't mention preferred_hours reset it to []).
+    frontmatter: dict = {}
+    if existing and existing.exists():
+        try:
+            from agent_mcp._shared import parse_frontmatter_text
+            prior_parts = existing.read_text(encoding="utf-8").split("---\n", 2)
+            if len(prior_parts) >= 3:
+                prior = parse_frontmatter_text(
+                    prior_parts[1], log_label=f"autonomy_write_task:{existing.name}")
+                if isinstance(prior, dict):
+                    frontmatter = {k: v for k, v in prior.items()
+                                   if not str(k).startswith("_")}
+        except Exception:
+            pass
+
+    updates = {
+        "type": task_dict.get("type") or "autonomy",
         "id": task_dict.get("id", 0),
-        "name": task_dict.get("name", ""),
-        "description": task_dict.get("description", ""),
-        "status": task_dict.get("status", "draft"),
-        "priority": task_dict.get("priority", "medium"),
-        "frequency": task_dict.get("frequency", ""),
-        "agent_id": task_dict.get("agent_id", "memory"),
-        "model": task_dict.get("model", ""),
-        "auto_advance": task_dict.get("auto_advance", False),
-        "preemptible": task_dict.get("preemptible", True),
-        "pipeline_mode": task_dict.get("pipeline_mode", False),
-        "timeout_seconds": task_dict.get("timeout_seconds", 1800),
-        "max_retries": task_dict.get("max_retries", 3),
-        "failure_count": task_dict.get("failure_count", 0),
-        "skill_name": task_dict.get("skill_name", task_dict.get("skill_path", "")),
+        "name": task_dict.get("name"),
+        "description": task_dict.get("description"),
+        "status": task_dict.get("status"),
+        "priority": task_dict.get("priority"),
+        "frequency": task_dict.get("frequency"),
+        "agent_id": task_dict.get("agent_id"),
+        "model": task_dict.get("model"),
+        "auto_advance": task_dict.get("auto_advance"),
+        "preemptible": task_dict.get("preemptible"),
+        "pipeline_mode": task_dict.get("pipeline_mode"),
+        "timeout_seconds": task_dict.get("timeout_seconds"),
+        "max_retries": task_dict.get("max_retries"),
+        "failure_count": task_dict.get("failure_count"),
+        "skill_name": task_dict.get("skill_name", task_dict.get("skill_path")),
         "cron_id": task_dict.get("cron_id"),
         "runs_per_day": task_dict.get("runs_per_day"),
-        "scheduled_at": task_dict.get("scheduled_at", ""),
+        "scheduled_at": task_dict.get("scheduled_at"),
         "last_run": task_dict.get("last_run"),
+        "last_attempt": task_dict.get("last_attempt"),
         "next_run": task_dict.get("next_run"),
         "depends_on": task_dict.get("depends_on"),
-        "preferred_hours": task_dict.get("preferred_hours", []),
-        "notify_on_complete": task_dict.get("notify_on_complete", True),
+        "preferred_hours": task_dict.get("preferred_hours"),
+        "notify_on_complete": task_dict.get("notify_on_complete"),
         "pipeline": task_dict.get("pipeline"),
-        "created": task_dict.get("created_at", task_dict.get("created", "")),
-        "updated": task_dict.get("updated_at", task_dict.get("updated", "")),
+        "stale_bypass_hours": task_dict.get("stale_bypass_hours"),
+        "expected_error_patterns": task_dict.get("expected_error_patterns"),
+        "created": task_dict.get("created_at", task_dict.get("created")),
+        "updated": task_dict.get("updated_at", task_dict.get("updated")),
     }
+    frontmatter.update({k: v for k, v in updates.items() if v is not None})
     frontmatter = {k: v for k, v in frontmatter.items() if v is not None}
     body = task_dict.get("body", "")
     content = f"---\n{yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)}---\n\n{body}"
@@ -267,6 +294,14 @@ async def list_tools():
             "properties": {"id": {"type": "integer", "description": "Task ID to run"}},
             "required": ["id"],
         }),
+        Tool(name="autonomy_health", description=(
+            "Fleet health over the last N days: per-task runs, failure rate, timeouts, "
+            "empty runs, [SILENT] rate, GPU-hours, wasted hours, consecutive failures, "
+            "plus fleet totals. Use this to find tasks that are burning GPU without "
+            "producing anything."), inputSchema={
+            "type": "object",
+            "properties": {"days": {"type": "integer", "description": "Window in days (default 7, max 90)"}},
+        }),
     ]
 
 
@@ -285,7 +320,31 @@ async def call_tool(name: str, arguments: dict):
     elif name == "autonomy_run_task":
         text = await _handle_run(arguments)
         return [TextContent(type="text", text=text)]
+    elif name == "autonomy_health":
+        text = await _handle_health(arguments)
+        return [TextContent(type="text", text=text)]
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+
+
+async def _handle_health(params: dict) -> str:
+    """Proxy to the backend's /api/autonomy/health.
+
+    agent_mcp runs in its own process, so the work queue singleton isn't
+    initialised here — the backend owns it.
+    """
+    days = int(params.get("days") or 7)
+    try:
+        from agent_mcp._shared import make_http_client
+        from app.config import service_url
+        base = service_url("backend", "http://127.0.0.1:8080")
+        async with make_http_client(timeout=30.0) as client:
+            r = await client.get(f"{base}/api/autonomy/health", params={"days": days})
+            if r.status_code >= 400:
+                return json.dumps({"error": f"backend returned {r.status_code}",
+                                   "body": r.text[:500]})
+            return r.text
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 
 def _handle_tasks(params: dict) -> str:

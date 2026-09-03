@@ -35,8 +35,13 @@ _VLLM_HEALTH_URL = "http://127.0.0.1:8096/health"
 # dependency met) should have run; if any are for N consecutive checks, alert once.
 _STALL_INTERVAL_MULT = 2.5
 _STALL_ALARM_TICKS = 5
+# The alarm fired 100 times in 6 days because it could not tell "dispatch is
+# broken" from "there is no capacity": #24/#48/#68/#75 are permanently overdue
+# when demand exceeds the 2 shared slots. Re-alerting at most this often keeps
+# a genuine stall visible instead of drowned.
+_STALL_ALERT_INTERVAL_SECONDS = 6 * 3600
 _state = {"vllm_down_logged": False, "startup_checked": False,
-          "stall_streak": 0, "stall_alerted": False}
+          "stall_streak": 0, "stall_alerted_at": None}
 
 
 def _vllm_healthy(timeout: float = 4.0) -> bool:
@@ -62,19 +67,36 @@ def _unparseable_task_files() -> list[str]:
     return bad
 
 
-def _grossly_overdue() -> list[int]:
-    """Tasks that are DUE RIGHT NOW (pass every gate incl. preferred-hours and
-    deps) yet are overdue by > _STALL_INTERVAL_MULT * interval. A task that is
-    due and this stale but still isn't being dispatched means the dispatch path
-    is broken (the 2026-05-28 silent stall). Nightly tasks merely waiting for
-    their window are NOT due now, so they don't false-positive here."""
+def _active_task_ids(queue: WorkQueue) -> set:
+    """Task ids with a live queue row (queued/claimed/running)."""
+    try:
+        items = queue.list_items(source=NAME, limit=500)
+    except Exception:
+        return set()
+    return {str(i.payload.get("task_id")) for i in items
+            if i.state in ("queued", "claimed", "running")
+            and i.payload.get("task_id") is not None}
+
+
+def _grossly_overdue(queue: WorkQueue) -> list:
+    """Tasks that are DUE RIGHT NOW yet overdue by > _STALL_INTERVAL_MULT *
+    interval AND have no queue row waiting for them.
+
+    The queue-row exclusion is the whole point: a task sitting in the queue
+    behind a saturated pool is starved for capacity, not stalled, and flagging
+    it forever is what turned this alarm into noise. A task that is due, this
+    stale, and NOT in the queue means the dispatch path itself is broken (the
+    2026-05-28 silent stall this was built for)."""
     import datetime as _dt
     import autonomy
     all_tasks = autonomy._all_runnable_tasks()
+    active = _active_task_ids(queue)
     now = _dt.datetime.now(_dt.timezone.utc)
     overdue = []
     for t in all_tasks:
         if not autonomy._is_task_due(t, all_tasks):
+            continue
+        if str(t.get("id")) in active:
             continue
         interval = autonomy._frequency_interval_seconds(t)
         last = autonomy._parse_iso(t.get("last_run"))
@@ -83,6 +105,35 @@ def _grossly_overdue() -> list[int]:
         if (now - last).total_seconds() > _STALL_INTERVAL_MULT * interval:
             overdue.append(t.get("id"))
     return overdue
+
+
+def _queue_starving(queue: WorkQueue, max_duration: int) -> float:
+    """Age in seconds of the oldest claimable queued item, if it is older than
+    3x max_duration. Catches the opposite failure: dispatch fine, workers dead."""
+    import datetime as _dt
+    try:
+        items = queue.list_items(source=NAME, limit=500)
+    except Exception:
+        return 0.0
+    now = _dt.datetime.now(_dt.timezone.utc)
+    oldest = 0.0
+    for i in items:
+        if i.state != "queued":
+            continue
+        if i.not_before:
+            nb = _parse_iso_safe(i.not_before)
+            if nb and nb > now:
+                continue
+        enq = _parse_iso_safe(i.enqueued_at)
+        if not enq:
+            continue
+        oldest = max(oldest, (now - enq).total_seconds())
+    return oldest if oldest > 3 * max_duration else 0.0
+
+
+def _parse_iso_safe(value):
+    import autonomy
+    return autonomy._parse_iso(value)
 
 
 async def _alert(message: str) -> None:
@@ -126,20 +177,31 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         logger.info("scheduled-task: vLLM healthy again — resuming enqueue")
         _state["vllm_down_logged"] = False
 
-    # Stall alarm — tasks grossly overdue with deps met should have run.
-    overdue = await loop.run_in_executor(None, _grossly_overdue)
-    if overdue:
+    # Stall alarm — due, grossly overdue, and NOT waiting in the queue.
+    import datetime as _dt
+    max_dur = int(src_cfg.get("max_duration_seconds", 1800))
+    overdue = await loop.run_in_executor(None, _grossly_overdue, queue)
+    starving = await loop.run_in_executor(None, _queue_starving, queue, max_dur)
+    if overdue or starving:
         _state["stall_streak"] += 1
-        if _state["stall_streak"] >= _STALL_ALARM_TICKS and not _state["stall_alerted"]:
-            _state["stall_alerted"] = True
-            msg = (f"autonomy scheduler may be stalled: {len(overdue)} task(s) overdue "
-                   f">{_STALL_INTERVAL_MULT}x their interval with deps met "
-                   f"(ids: {overdue[:15]})")
+        now = _dt.datetime.now(_dt.timezone.utc)
+        last_alert = _state.get("stall_alerted_at")
+        due_for_alert = (last_alert is None or
+                         (now - last_alert).total_seconds() >= _STALL_ALERT_INTERVAL_SECONDS)
+        if _state["stall_streak"] >= _STALL_ALARM_TICKS and due_for_alert:
+            _state["stall_alerted_at"] = now
+            parts = []
+            if overdue:
+                parts.append(f"{len(overdue)} task(s) due and overdue "
+                             f">{_STALL_INTERVAL_MULT}x their interval with no queue row "
+                             f"(ids: {overdue[:15]})")
+            if starving:
+                parts.append(f"oldest claimable queue item is {starving/60:.0f} min old")
+            msg = "autonomy scheduler may be stalled: " + "; ".join(parts)
             logger.error("%s", msg)
             await _alert(msg)
     else:
         _state["stall_streak"] = 0
-        _state["stall_alerted"] = False
 
     due = await loop.run_in_executor(None, get_due_tasks)
 
@@ -182,7 +244,15 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     else:
         raise RuntimeError("vLLM unhealthy — deferring task (backoff retry)")
 
-    result = await run_task(int(task_id))
+    # Pass the pool's cap so run_task can keep its own timeout strictly under it
+    # and always win the race (otherwise the pool cancels it and no run record
+    # is written at all).
+    try:
+        from workers.sources import get_sources_config
+        max_dur = int(get_sources_config().get(NAME, {}).get("max_duration_seconds", 1800))
+    except Exception:
+        max_dur = 1800
+    result = await run_task(int(task_id), max_duration=max_dur)
 
     preview = (result.get("response_preview") or "")
     if result.get("success") and preview and "[SILENT]" not in preview:
@@ -197,12 +267,18 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         except Exception as e:
             logger.warning("Discord notify error for task #%s: %s", task_id, e)
 
-    if not result.get("success"):
-        raise RuntimeError(result.get("error") or "task failed")
-
+    # Report task-level failures IN-BAND rather than raising. Raising sent the
+    # item back through the queue's retry path, so a single timeout became up to
+    # max_attempts full re-runs (3 x 600s on #36) before the scheduler's own
+    # cooldown was ever consulted. run_task has already written the run record,
+    # bumped failure_count and set the cooldown.
+    status = result.get("status") or ("success" if result.get("success") else "failed")
     return {
-        "summary": (result.get("response_preview") or "")[:500],
+        "status": status,
+        "summary": (result.get("response_preview") or result.get("error") or "")[:500],
         "task_id": str(task_id),
-        "artifact_path": f"autonomy-runs/{task_id}/{result.get('run_id')}.md",
+        "artifact_path": f"autonomy-runs/{task_id}/{result.get('run_id')}.md"
+                         if result.get("run_id") else "",
         "response": result.get("response_preview") or "",
+        "meta": result.get("meta") or {},
     }

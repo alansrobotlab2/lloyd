@@ -26,6 +26,7 @@ _AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
 
 @router.post("/api/autonomy/run")
 async def autonomy_run(request: Request):
+    """Run a task immediately. Bypasses due-checks, but not the in-progress guard."""
     try:
         from autonomy import run_task
         data = await request.json()
@@ -33,6 +34,9 @@ async def autonomy_run(request: Request):
         if not task_id:
             raise HTTPException(status_code=400, detail="task_id required")
         result = await run_task(int(task_id))
+        if result.get("skipped"):
+            # A run is already in flight for this task.
+            raise HTTPException(status_code=409, detail=result.get("error", "already running"))
         return JSONResponse(result)
     except ImportError:
         raise HTTPException(status_code=501, detail="Autonomy module not available")
@@ -89,6 +93,10 @@ def _autonomy_parse(path: Path) -> dict | None:
             "model": fm.get("model") or None,
             "timeout_seconds": fm.get("timeout_seconds", 1800),
             "max_retries": fm.get("max_retries", 3),
+            "failure_count": fm.get("failure_count") or 0,
+            "last_attempt": _to_iso(fm.get("last_attempt")),
+            "stale_bypass_hours": fm.get("stale_bypass_hours"),
+            "expected_error_patterns": fm.get("expected_error_patterns") or [],
             "preferred_hours": fm.get("preferred_hours") or None,
             "cron_id": fm.get("cron_id"),
             "body": parts[2] if len(parts) > 2 else "",
@@ -121,19 +129,47 @@ def _autonomy_slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50]
 
 
+# Frontmatter keys this endpoint is allowed to set. Anything else already in
+# the file is preserved verbatim (see _autonomy_write_file) — the old behaviour
+# rebuilt frontmatter from this list alone, so every key not named here was
+# silently destroyed by any UI edit or task-write call. `tags` was never in the
+# list at all, and neither were fields added later (stale_bypass_hours,
+# expected_error_patterns, last_attempt, archived_reason, segment).
+_WRITABLE_TASK_KEYS = (
+    "type", "id", "name", "description", "status", "priority", "frequency",
+    "agent_id", "model", "auto_advance", "preemptible", "pipeline_mode",
+    "timeout_seconds", "max_retries", "failure_count", "skill_name", "cron_id",
+    "runs_per_day", "scheduled_at", "last_run", "last_attempt", "next_run",
+    "depends_on", "preferred_hours", "notify_on_complete", "pipeline",
+    "created", "updated", "tags", "stale_bypass_hours", "expected_error_patterns",
+)
+
+
 def _autonomy_write_file(task_dict: dict) -> Path:
-    """Write a task dict back to its markdown file."""
+    """Write a task dict back to its markdown file.
+
+    Overlays the provided fields onto the file's EXISTING frontmatter rather
+    than rebuilding it, so keys this endpoint doesn't know about survive.
+    """
     task_id = task_dict.get("id", 0)
     name = task_dict.get("name", "unnamed")
     _AUTONOMY_DIR.mkdir(parents=True, exist_ok=True)
     existing = _autonomy_find_file(task_id)
     path = existing if existing else _AUTONOMY_DIR / f"{task_id}-{_autonomy_slugify(name)}.md"
-    fm = {}
-    for key in ("type", "id", "name", "description", "status", "priority", "frequency",
-                 "agent_id", "model", "auto_advance", "preemptible", "pipeline_mode",
-                 "timeout_seconds", "max_retries", "failure_count", "skill_name", "cron_id",
-                 "runs_per_day", "scheduled_at", "last_run", "next_run", "depends_on",
-                 "preferred_hours", "notify_on_complete", "pipeline", "created", "updated"):
+
+    fm: dict = {}
+    if existing and existing.exists():
+        try:
+            from agent_mcp._shared import parse_frontmatter_text
+            parts = existing.read_text(encoding="utf-8").split("---\n", 2)
+            if len(parts) >= 3:
+                prior = parse_frontmatter_text(parts[1], log_label=f"task-write:{existing.name}")
+                if isinstance(prior, dict):
+                    fm = {k: v for k, v in prior.items() if not str(k).startswith("_")}
+        except Exception as e:
+            logger.warning("task-write: could not read existing frontmatter for #%s: %s", task_id, e)
+
+    for key in _WRITABLE_TASK_KEYS:
         if key in task_dict and task_dict[key] is not None:
             fm[key] = task_dict[key]
     if "type" not in fm:
@@ -232,6 +268,38 @@ async def autonomy_task_delete(request: Request):
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     path.unlink()
     return JSONResponse({"success": True, "id": task_id})
+
+
+@router.get("/api/autonomy/health")
+async def autonomy_health(days: int = 7):
+    """Fleet health: per-task failure rate, GPU-hours, timeouts, empty runs.
+
+    Reads workers.db rather than the per-task run records, so pool-level
+    failures are included — those were previously written without a task_id and
+    were unreachable from any per-task view.
+    """
+    import asyncio as _asyncio
+    from datetime import timedelta, timezone
+
+    days = max(1, min(90, int(days)))
+    try:
+        from workers.queue import get_queue
+        queue = get_queue()
+    except Exception as e:
+        return JSONResponse(
+            {"error": f"work queue unavailable: {e}", "days": days}, status_code=503)
+
+    import autonomy as _autonomy
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    loop = _asyncio.get_event_loop()
+    try:
+        rows = await loop.run_in_executor(
+            None, queue.list_runs_joined, "scheduled-task", since)
+        tasks = await loop.run_in_executor(None, _autonomy._iter_task_files)
+        return JSONResponse(_autonomy.compute_health(rows, tasks, days))
+    except Exception as e:
+        logger.error("autonomy health failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e), "days": days}, status_code=500)
 
 
 @router.get("/api/autonomy/runs")
