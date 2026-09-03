@@ -287,12 +287,77 @@ Two other model-specific venvs exist and are only needed if you run those models
 | `vllm-experimental` | 0.23.1rc1.dev1218 | Qwen3.5/3.6 family, 35B, 122B |
 | `vllm-laguna` | 0.25.1 | Laguna S 2.1 + DFlash draft |
 | `vllm-qwen3.8` | nightly | **Qwen3.8-27B-NVFP4 (live primary)** |
+| `vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 (125B MoE, PLE offload) |
 
 `vllm-experimental` is built by `setup-vllm-experimental.sh`, pinned by
 `setup/vllm-experimental.versions.txt`. **`vllm-laguna` has no setup script** — it was built by hand. If you need Laguna S 2.1 back, adapt
 `setup-vllm-qwen3.8.sh` (pin vLLM 0.25.1) and see
 `setup/setup-qwen3.8-27b-nvfp4.sh`'s sibling `bin/start-laguna-s-2.1-nvfp4-dflash.sh`
 for the runtime flags.
+
+### `vllm-qwen38-flash-next` — Qwen3.8-Flash-Next with N-gram offload
+
+```bash
+bash agent-services/setup/setup-vllm-qwen38-flash-next.sh
+```
+
+This one is **not** a plain nightly install, and re-running
+`setup-vllm-qwen3.8.sh` will not produce it. Qwen3.8-Flash-Next is 180B total
+(125B main + 51B N-gram/"PLE" table + 4B MTP) and only fits on the 96 GiB
+Blackwell because the N-gram table can live in host RAM. That offload —
+`VLLM_PLE_CPU_OFFLOAD` — is **not on vLLM main**; it is open PR #53899.
+
+So the script installs the prebuilt **per-commit wheel for that PR's own base
+commit** (`45aed9b0c`), then overlays the branch's Python on top. All 19 files
+in the PR are pure Python, so nothing needs compiling and a source build is
+unnecessary. It then applies two more fixes:
+
+| Step | Source | Fixes |
+|---|---|---|
+| overlay | `peakcrosser7/vllm@ffc445f8b2e9` | PLE CPU offload (PR #53899) |
+| overlay | `davidtai/vllm@600a9fd411b0` | TP=1 startup rendezvous deadlock (PR #10) |
+| patch | local | `_metadata_launch_pdl()` → False on sm_120 |
+
+That last one matters here specifically: `is_arch_support_pdl()` is `major >= 9`,
+which is True on sm_120, but the QSA metadata kernel's dependent launch never
+fires on this card and any prompt over ~8k tokens hangs. See vLLM issue #53960.
+
+Pinned by `agent-services/setup/vllm-qwen38-flash-next.versions.txt`. The script
+verifies all three of the above actually took effect and fails loudly otherwise.
+
+**System prerequisite: `kernel.yama.ptrace_scope` must be 0.** This is not
+optional and it is not Docker-specific — it was confirmed failing on this bare
+metal host. The GPU worker hands the PLE offload process a CUDA IPC tensor
+handle, and torch rebuilds it with `pidfd_getfd`, which needs
+`PTRACE_MODE_ATTACH`. The tracer is the **child** (`PleOffloadWorker`) and the
+tracee is its **parent** (`VLLM::Worker`); Yama scope 1 permits tracing
+descendants only, and a parent is not a descendant of its child, so scope 1
+always fails:
+
+```
+accept_registrations -> pickle.loads -> rebuild_cuda_tensor -> _new_shared_cuda
+RuntimeError: pidfd_getfd: Operation not permitted
+```
+
+```bash
+echo 'kernel.yama.ptrace_scope = 0' | sudo tee /etc/sysctl.d/99-ptrace.conf
+sudo sysctl --system
+sysctl kernel.yama.ptrace_scope   # must print 0
+```
+
+The start script preflights this and refuses to boot otherwise — without that
+check the symptom is confusing: weights load fine (75.1 GiB),
+`PleOffload: registered` prints, and then `:8096` simply never binds. The
+narrower alternative, if you need scope 1 back machine-wide, is patching
+`prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)` into the GPU worker before it spawns
+the offload process.
+
+**When PR #53899 merges, most of this collapses to a normal nightly install.**
+Check before rebuilding:
+
+```bash
+curl -s https://api.github.com/repos/vllm-project/vllm/pulls/53899 | grep '"merged"'
+```
 
 ### `qwen3-tts` — TTS API server
 
@@ -585,6 +650,37 @@ Two things the start script checks for, and why:
   Qwen3.6 re-quant declared `mtp_num_hidden_layers=1` while shipping **zero**
   `mtp.*` tensors, which hung vLLM at load. Check the safetensors index, don't
   trust the config.
+
+### Qwen3.8-Flash-Next (optional, 170 GB)
+
+```bash
+bash agent-services/setup/setup-qwen38-flash-next.sh
+```
+
+Downloads `Inferact/Qwen3.8-Flash-Next-NVFP4` to
+`agent-services/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4` (170.3 GB), and
+needs the `vllm-qwen38-flash-next` venv (Part 4), not the `vllm-qwen3.8` one.
+
+**Why this specific re-quant.** Three builds of Qwen3.8-Flash-Next exist. With
+the N-gram (PLE) table offloaded to host RAM, what lands on the 96 GiB card is:
+
+| Checkpoint | On disk | PLE | On GPU | |
+|---|---|---|---|---|
+| `Qwen/…-FP8` | 172.8 GB | FP8 47.7 | ~125 GB | does not fit |
+| `RadixArk/…-NVFP4` | 126.0 GB | FP8 47.7 | ~76.6 GB | fits, but hits vLLM #54765 |
+| `Inferact/…-NVFP4` | 170.3 GB | **BF16 95.4** | ~74.1 GB | **chosen** |
+
+The BF16 PLE is the point: an FP8 PLE inside a ModelOpt NVFP4 checkpoint carries
+a `weight_scale` tensor that vLLM's loader has nowhere to put
+(`_get_ple_embedding_quant_method` only selects the FP8 path when the top-level
+config is `Fp8Config`), so RadixArk needs an extra out-of-tree load patch. A
+BF16 table has no scale tensor and cannot trip it. It costs 95.4 GB of host RAM
+instead of 47.7 — irrelevant on 251 GB. Reporters who needed a swapfile for this
+were on 121 GB *unified*-memory DGX Spark / GX10 boxes, not a discrete card.
+
+The setup script verifies the PLE shard is ~95 GB (an FP8-PLE build would be
+~48 GB and fail differently, later and more confusingly), that all 16 expert
+shards arrived, and that the MTP head is present.
 
 Other models under `agent-services/llm/models/` (Laguna S 2.1, the Qwen3.5/3.6
 family, Gemma 4) are optional — download only what you'll run. They share the
