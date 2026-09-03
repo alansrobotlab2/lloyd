@@ -31,6 +31,27 @@ _PRIORITY_MAP = {
 # vLLM health gate: skip enqueuing when the model server is unreachable so a wedge
 # doesn't turn every due task into a ConnectError flood.
 _VLLM_HEALTH_URL = "http://127.0.0.1:8096/health"
+
+
+def _model_health_url(model: str) -> str:
+    """Health endpoint for the model a task actually runs on.
+
+    Tasks can pin `model: secondary` in their frontmatter (autonomy.run_task
+    resolves it through config.models.<name>.env.ANTHROPIC_BASE_URL). Probing
+    only the primary would let a dead secondary turn every one of its tasks
+    into a ConnectError flood — the exact failure the primary gate prevents.
+    """
+    model = str(model or "").strip()
+    if not model or model in ("primary", "null", "none"):
+        return _VLLM_HEALTH_URL
+    try:
+        import autonomy
+        base = autonomy._get_model_env(model).get("ANTHROPIC_BASE_URL")
+        if base:
+            return base.rstrip("/") + "/health"
+    except Exception:
+        pass
+    return _VLLM_HEALTH_URL
 # Stall alarm: a task overdue by more than this multiple of its interval (with its
 # dependency met) should have run; if any are for N consecutive checks, alert once.
 _STALL_INTERVAL_MULT = 2.5
@@ -44,9 +65,9 @@ _state = {"vllm_down_logged": False, "startup_checked": False,
           "stall_streak": 0, "stall_alerted_at": None}
 
 
-def _vllm_healthy(timeout: float = 4.0) -> bool:
+def _vllm_healthy(timeout: float = 4.0, url: str | None = None) -> bool:
     try:
-        with urllib.request.urlopen(_VLLM_HEALTH_URL, timeout=timeout) as r:
+        with urllib.request.urlopen(url or _VLLM_HEALTH_URL, timeout=timeout) as r:
             return 200 <= r.status < 300
     except Exception:
         return False
@@ -205,9 +226,19 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
 
     due = await loop.run_in_executor(None, get_due_tasks)
 
+    healthy_urls: dict[str, bool] = {}
     for task in due:
         task_id = task.get("id")
         if task_id is None:
+            continue
+        # A task pinned to a model whose server is down should be skipped, not
+        # enqueued into a retry loop.
+        url = _model_health_url(task.get("model"))
+        if url not in healthy_urls:
+            healthy_urls[url] = await loop.run_in_executor(None, _vllm_healthy, 4.0, url)
+        if not healthy_urls[url]:
+            logger.warning("Skipping #%s (%s): model server %s is unhealthy",
+                           task_id, task.get("name"), url)
             continue
         dedup_key = f"scheduled-task:{task_id}"
         prio_str = str(task.get("priority", "medium")).lower()
@@ -237,12 +268,15 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # vLLM wedges — without this wait they burn all attempts in ~90s of
     # ConnectErrors. Poll briefly for recovery before spending an attempt.
     loop = asyncio.get_event_loop()
+    from autonomy import _find_task_file as _ftf, _parse_task_file as _ptf
+    _t = _ptf(_ftf(task_id)) if _ftf(task_id) else None
+    health_url = _model_health_url((_t or {}).get("model"))
     for _ in range(18):  # up to 90s
-        if await loop.run_in_executor(None, _vllm_healthy):
+        if await loop.run_in_executor(None, _vllm_healthy, 4.0, health_url):
             break
         await asyncio.sleep(5)
     else:
-        raise RuntimeError("vLLM unhealthy — deferring task (backoff retry)")
+        raise RuntimeError(f"model server {health_url} unhealthy — deferring task")
 
     # Pass the pool's cap so run_task can keep its own timeout strictly under it
     # and always win the race (otherwise the pool cancels it and no run record
