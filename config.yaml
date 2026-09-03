@@ -263,9 +263,12 @@ workers:
       interval_seconds: 60
       max_inflight: 2
       # Bumped 1200 -> 1800 on 2026-08-23: entity-resolution-sweep (#48)
-      # needs ~30 min (3x poisoned at the old 1200s cap). Task-level
-      # timeout_seconds in the .md frontmatter is NOT read by pool.py;
-      # this source-level value is the effective cap.
+      # needs ~30 min (3x poisoned at the old 1200s cap).
+      # CORRECTED 2026-09-03 (Job 5, from 09-01 explicit signal #2): the task-level
+      # timeout_seconds in the .md frontmatter IS read and enforced by the autonomy
+      # run path (autonomy.py, int(task.get("timeout_seconds") or 1800)); BOTH caps
+      # apply, min wins. pool.py enforces this source-level cap separately.
+      # See USER.md tool_reliability "Timeout caps" entry.
       max_duration_seconds: 1800
     session-distill:
       enabled: true
