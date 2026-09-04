@@ -222,6 +222,7 @@ PHANTOM_TOOLS = frozenset({
 # Skills whose job is to say these names are not real.
 PHANTOM_EXEMPT = frozenset({
     "web-search-and-fetch", "nightly-skills-management", "trajectory-skill-mining",
+    "nightly-skill-consolidation",
 })
 
 

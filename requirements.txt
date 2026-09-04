@@ -21,6 +21,9 @@ ddgs>=6.0.0
 # Readability extraction for http_fetch. Rides lxml; keeps headings, lists,
 # tables and link hrefs, which the hand-rolled HTMLParser extractor dropped.
 trafilatura>=2.2.0
+# PDF text extraction for http_fetch; a PDF URL used to come back as
+# decoded binary.
+pymupdf>=1.28.0
 
 # Data handling
 pyyaml>=6.0.0

@@ -307,3 +307,58 @@ def test_title_is_prepended_when_content_lacks_it(served):
     out = json.loads(http_tools._http_fetch("https://example.com/guide", "markdown"))
     if out["title"]:
         assert out["content"].lstrip().startswith("#")
+
+
+# ---------------------------------------------------------------------------
+# PDF extraction
+# ---------------------------------------------------------------------------
+
+def _one_page_pdf(text: str = "Hello from page one") -> bytes:
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), text)
+    raw = doc.tobytes()
+    doc.close()
+    return raw
+
+
+def test_pdf_is_extracted_not_dumped_as_bytes(served, monkeypatch):
+    """A PDF used to fall through to the non-HTML branch and come back as
+    response.text — the bytes decoded as if they were text."""
+    raw = _one_page_pdf()
+    resp = _FakeResponse(content=raw, content_type="application/pdf")
+    monkeypatch.setattr(http_tools, "make_sync_http_client", lambda **kw: _FakeClient(resp))
+    out = json.loads(http_tools._http_fetch("https://example.com/paper.pdf", "markdown"))
+    assert "error" not in out
+    assert out["content_type"] == "pdf"
+    assert "Hello from page one" in out["content"]
+
+
+def test_pdf_detected_by_magic_bytes_when_content_type_lies(monkeypatch):
+    """Plenty of servers send application/octet-stream for a PDF."""
+    raw = _one_page_pdf("Served as octet-stream")
+    resp = _FakeResponse(content=raw, content_type="application/octet-stream")
+    monkeypatch.setattr(http_tools, "make_sync_http_client", lambda **kw: _FakeClient(resp))
+    out = json.loads(http_tools._http_fetch("https://example.com/x", "markdown"))
+    assert out.get("content_type") == "pdf"
+    assert "Served as octet-stream" in out["content"]
+
+
+def test_pdf_page_markers_only_in_markdown_mode(monkeypatch):
+    raw = _one_page_pdf()
+    resp = _FakeResponse(content=raw, content_type="application/pdf")
+    monkeypatch.setattr(http_tools, "make_sync_http_client", lambda **kw: _FakeClient(resp))
+    md = json.loads(http_tools._http_fetch("https://example.com/p.pdf", "markdown"))
+    tx = json.loads(http_tools._http_fetch("https://example.com/p.pdf", "text"))
+    assert "[page 1]" in md["content"]
+    assert "[page 1]" not in tx["content"]
+    # No separator before the first page.
+    assert not md["content"].lstrip().startswith("---")
+
+
+def test_corrupt_pdf_reports_an_error_not_a_crash(monkeypatch):
+    resp = _FakeResponse(content=b"%PDF-1.4 not really a pdf", content_type="application/pdf")
+    monkeypatch.setattr(http_tools, "make_sync_http_client", lambda **kw: _FakeClient(resp))
+    out = json.loads(http_tools._http_fetch("https://example.com/broken.pdf"))
+    assert "error" in out and "PDF" in out["error"]

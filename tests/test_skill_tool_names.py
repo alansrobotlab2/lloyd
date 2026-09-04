@@ -65,6 +65,7 @@ ALLOWED_TO_MENTION = {
     "web-search-and-fetch",
     "nightly-skills-management",
     "trajectory-skill-mining",
+    "nightly-skill-consolidation",
 }
 
 

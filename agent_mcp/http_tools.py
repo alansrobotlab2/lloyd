@@ -189,6 +189,43 @@ def _extract_html(html_text: str, extract_mode: str) -> tuple[str, str]:
     return title, content
 
 
+def _extract_pdf(raw: bytes, extract_mode: str) -> tuple[str, str]:
+    """(title, text) for a PDF body.
+
+    Without this, a PDF hit the non-HTML branch and came back as
+    `response.text` — the bytes decoded as if they were text, i.e. binary
+    noise. The arXiv and ocr-and-documents skills both pointed http_fetch at
+    PDF URLs, so "read this paper" produced garbage and the fallback was to
+    shell out. Page breaks are kept as markers in markdown mode because a
+    citation usually needs the page number.
+    """
+    import pymupdf
+
+    # MuPDF writes recoverable structural complaints ("object is not a
+    # stream") to stderr even when extraction succeeds. In-process that lands
+    # in the aggregator's log as if something failed.
+    try:
+        pymupdf.TOOLS.mupdf_display_errors(False)
+    except Exception:
+        pass
+
+    with pymupdf.open(stream=raw, filetype="pdf") as doc:
+        title = (doc.metadata or {}).get("title") or ""
+        parts: list[str] = []
+        for i, page in enumerate(doc, 1):
+            text = page.get_text().strip()
+            if not text:
+                continue
+            if extract_mode == "markdown":
+                # Separator between pages, not before the first. A citation
+                # usually needs the page number, so keep the marker.
+                sep = "" if not parts else "---\n\n"
+                parts.append(f"{sep}**[page {i}]**\n\n{text}")
+            else:
+                parts.append(text)
+    return title.strip(), "\n\n".join(parts).strip()
+
+
 def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000) -> str:
     max_chars_ = min(max(max_chars, 1000), 200000)
     extract_mode_ = (extract_mode or "markdown").strip().lower()
@@ -216,12 +253,28 @@ def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000
     if response.status_code >= 400:
         return json.dumps({"error": f"HTTP {response.status_code}"})
     content_type = response.headers.get("content-type", "")
+    raw_bytes = response.content[:WEB_MAX_RESPONSE_BYTES]
+    is_pdf = "pdf" in content_type.lower() or raw_bytes[:5] == b"%PDF-"
+    if is_pdf:
+        try:
+            title, text = _extract_pdf(raw_bytes, extract_mode_)
+        except Exception as exc:
+            return json.dumps({"error": f"PDF extraction failed: {exc}"})
+        full = f"# {title}\n\n{text}" if title and extract_mode_ == "markdown" else text
+        truncated = full[:max_chars_]
+        return json.dumps({
+            "url": url,
+            "title": title,
+            "extract_mode": extract_mode_,
+            "content_type": "pdf",
+            "content": truncated,
+            "truncated": len(truncated) < len(full),
+        })
     if "html" not in content_type and "xml" not in content_type:
         text = response.text
         truncated = text[:max_chars_]
         return json.dumps({"url": url, "content": truncated, "truncated": len(truncated) < len(text)})
     try:
-        raw_bytes = response.content[:WEB_MAX_RESPONSE_BYTES]
         html_text = raw_bytes.decode("utf-8", errors="replace")
         title, content = _extract_html(html_text, extract_mode_)
         if extract_mode_ == "markdown":
@@ -310,7 +363,8 @@ async def list_tools():
             "[text](href), so you can fetch an index page and then follow it. Prefer this over running "
             "curl in Bash, which returns raw HTML you then have to strip yourself. Use http_request "
             "instead for non-GET verbs, custom headers, or a JSON/XML API whose raw body you want; use "
-            "Bash + curl for localhost, which this tool blocks by design. If a page comes back near-empty "
+            "Bash + curl for localhost, which this tool blocks by design. PDFs are extracted to text, "
+            "page by page. If a page comes back near-empty "
             "it is probably JavaScript-rendered — switch to browser_navigate + browser_snapshot rather "
             "than retrying."
         ), inputSchema={
