@@ -61,6 +61,7 @@ GATE = {
     "contamination_dirs": 0,
     "junk_entity_dirs": 0,
     "node_coverage_pct": 30.0,     # was 14% before the extractor emitted edges
+    "corpus_coverage_pct": 98.0,   # documents actually extracted, of the corpus
     "eval_mrr_slack": 0.0,         # may not fall below the frozen baseline
     "eval_ndcg_slack": 0.0,
     "eval_category_regression": 0.05,
@@ -168,6 +169,22 @@ def _set_write_enabled(enabled: bool) -> None:
             f"knowledge_graph:\n  write_enabled: {'true' if enabled else 'false'}\n")
     atomic_write_text(path, text)
     print(f"  config.yaml knowledge_graph.write_enabled = {enabled}")
+
+
+def _corpus_size() -> int:
+    """How many documents the allow-list selects. The denominator for
+    corpus coverage — read from the same code the extractor uses, so the
+    two cannot drift."""
+    import importlib.util
+    ngm = HERE / "next-gen-memory"
+    if str(ngm) not in sys.path:
+        sys.path.insert(0, str(ngm))     # nightly_extraction imports its siblings by name
+    spec = importlib.util.spec_from_file_location(
+        "ne_corpus", ngm / "nightly_extraction.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["ne_corpus"] = mod
+    spec.loader.exec_module(mod)
+    return len(mod.NightlyExtraction()._eligible_files(full_mode=True))
 
 
 def _run_eval(label: str, run_dir: Path) -> dict:
@@ -423,13 +440,31 @@ def cmd_gate(args) -> int:
     record("junk_entity_dirs", len(junk) <= GATE["junk_entity_dirs"], len(junk),
            f"<= {GATE['junk_entity_dirs']}", f"e.g. {junk[:3]}" if junk else "")
 
-    # 6. Node coverage
+    # 6. Corpus coverage. Without this the gate would pass a tree built from
+    #    80% of the vault: every structural check is a RATIO, and a rebuild
+    #    that stopped early looks just as clean as one that finished.
+    #    Documents that failed extraction are deliberately not content-hashed,
+    #    so the hash index is the count of documents actually extracted.
+    hashes = VAULT_DERIVED_ROOT / "rebuild-content-hashes.json"
+    try:
+        extracted = int(json.loads(hashes.read_text())["file_count"])
+    except Exception:
+        extracted = 0
+    corpus = _corpus_size()
+    cov = round(100.0 * extracted / corpus, 2) if corpus else 0.0
+    record("corpus_coverage_pct", cov >= GATE["corpus_coverage_pct"], cov,
+           f">= {GATE['corpus_coverage_pct']}",
+           f"{extracted:,} of {corpus:,} documents extracted")
+    results["corpus"] = {"extracted": extracted, "corpus": corpus,
+                         "failed_or_pending": max(0, corpus - extracted)}
+
+    # 7. Node coverage
     coverage = round(100.0 * len(st.edges.nodes()) / stats["entities"], 2) if stats["entities"] else 0.0
     record("node_coverage_pct", coverage >= GATE["node_coverage_pct"], coverage,
            f">= {GATE['node_coverage_pct']}", "share of entities in at least one edge")
     st.close()
 
-    # 7. Retrieval, against the tree we are about to swap in.
+    # 8. Retrieval, against the tree we are about to swap in.
     before = state.get("eval_before") or {}
     after = _run_eval("rebuild-after", run_dir) if not args.skip_eval else {}
     results["eval_before"], results["eval_after"] = before, after

@@ -132,3 +132,21 @@ def test_swap_refuses_when_a_fact_was_stated_after_the_export(tmp_path, monkeypa
         {"export": {"exported_at": "2031-01-01T00:00:00+00:00"}}) == []
     # No export recorded at all -> nothing to compare, no false alarm.
     assert m._facts_written_since_export({}) == []
+
+
+def test_gate_checks_corpus_coverage(tmp_path):
+    """Every other gate check is a RATIO, so a rebuild that stopped at 11% of
+    the corpus looked exactly as clean as one that finished — 100%
+    provenance, 0 duplicates, 0 contamination. Coverage is the check that
+    knows the difference."""
+    from app import kg_store
+    kg_store.configure(tmp_path / "kg.sqlite")
+    try:
+        m = _load(MEMORY / "kg_rebuild.py")
+        assert "corpus_coverage_pct" in m.GATE
+        assert m.GATE["corpus_coverage_pct"] >= 95.0
+        # The denominator comes from the extractor's own corpus selection, so
+        # the two cannot drift apart.
+        assert m._corpus_size() > 1000
+    finally:
+        kg_store.reset()
