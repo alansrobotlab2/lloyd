@@ -80,6 +80,12 @@ def _same(a: str, b: str) -> bool:
     return s.normalize_punct(a) == s.normalize_punct(b)
 
 
+def _belongs(fact: dict, top: str, variant: str) -> bool:
+    """A fact is the variant's if it is tagged with the variant, or was retagged
+    to the canonical by a merge that recorded `merged_from: <variant>`."""
+    return _same(str(fact.get("entity") or top), variant) or _same(str(fact.get("merged_from") or ""), variant)
+
+
 def _merge_facts(existing: list, incoming: list) -> list:
     seen = {(f.get("fact") or "").strip().lower() for f in existing if isinstance(f, dict)}
     out = list(existing)
@@ -114,10 +120,10 @@ def plan_revert(report: dict, tiers: set[str], root: Path) -> list[dict]:
                 if top and _same(top, variant):
                     entry["files"].append({"file": f.name, "action": "move_overview"})
                 continue
-            mine = [x for x in facts if _same(str(x.get("entity") or top), variant)]
+            mine = [x for x in facts if _belongs(x, top, variant)]
             if not mine:
                 continue
-            if len(mine) == len(facts) and (not top or _same(top, variant)):
+            if len(mine) == len(facts) and (not top or _same(top, variant) or all(x.get("merged_from") for x in mine)):
                 entry["files"].append({"file": f.name, "action": "move_whole", "facts": len(mine)})
             else:
                 entry["files"].append({"file": f.name, "action": "split",
@@ -161,6 +167,7 @@ def execute(ops: list[dict], root: Path, aliases_path: Path, apply: bool) -> dic
                 for x in (fm.get("facts") or []):
                     if isinstance(x, dict):
                         x["entity"] = variant
+                        x.pop("merged_from", None)
                 if dest.exists():
                     dfm, _ = _read(dest)
                     dfm["facts"] = _merge_facts(dfm.get("facts") or [], fm.get("facts") or [])
@@ -174,10 +181,11 @@ def execute(ops: list[dict], root: Path, aliases_path: Path, apply: bool) -> dic
             else:  # split
                 facts = [x for x in (fm.get("facts") or []) if isinstance(x, dict)]
                 top = str(fm.get("entity") or "")
-                mine = [x for x in facts if _same(str(x.get("entity") or top), variant)]
+                mine = [x for x in facts if _belongs(x, top, variant)]
                 rest = [x for x in facts if x not in mine]
                 for x in mine:
                     x["entity"] = variant
+                    x.pop("merged_from", None)
                 if dest.exists():
                     dfm, _ = _read(dest)
                     dfm["facts"] = _merge_facts(dfm.get("facts") or [], mine)

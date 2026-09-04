@@ -581,6 +581,40 @@ def _merge_facts_lists(a: list, b: list) -> list:
     return list(seen.values())
 
 
+def retag_fact_file(path: Path, variant: str, canonical: str) -> int:
+    """After a merge, facts must carry the canonical's name. Rewrites the
+    file-level `entity:` and every fact tagged with the variant, and stamps
+    `merged_from: <variant>` on each retagged fact so the merge stays
+    revertable (revert-suffix-merges.py matches on either field).
+
+    Without this, every legitimate merge reads as cross-entity contamination
+    to kg_hygiene.py and would be undone by a revert. Returns facts retagged.
+    """
+    try:
+        fm, body = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    except OSError:
+        return 0
+    if not fm:
+        return 0
+    changed = 0
+    if normalize_punct(str(fm.get("entity") or "")) == normalize_punct(variant):
+        fm["entity"] = canonical
+        changed += 1
+    for fact in fm.get("facts") or []:
+        if isinstance(fact, dict) and normalize_punct(str(fact.get("entity") or "")) == normalize_punct(variant):
+            fact["entity"] = canonical
+            fact.setdefault("merged_from", variant)
+            changed += 1
+    if not changed:
+        return 0
+    category = str(fm.get("category") or "")
+    if fm.get("type") != "overview" and category:
+        body = (f"\n# {canonical} - {category}\n\n**Entity:** {canonical}\n"
+                f"**Category:** {category}\n**Fact Count:** {len(fm.get('facts') or [])}\n")
+    path.write_text(_dump_frontmatter(fm, body), encoding="utf-8")
+    return changed
+
+
 def _merge_fact_file_into(src: Path, dst: Path) -> None:
     """Merge src fact-file content into existing dst.
 
@@ -764,6 +798,7 @@ def apply_merges(
                 f.unlink()
             else:
                 shutil.move(str(f), str(dest))
+            retag_fact_file(dest, variant, canonical)
             moved += 1
         # Move nested subdirs (writer pattern: <variant>/<variant>-experiment.md).
         # The file loop above skips non-files, so without this a non-empty

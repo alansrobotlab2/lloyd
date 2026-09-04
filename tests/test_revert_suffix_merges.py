@@ -128,3 +128,21 @@ def test_variant_filename_prefix_restoration():
     assert rv._variant_filename("Intel-goal.md", "Intel", "Intel Pipeline System") == "Intel Pipeline System-goal.md"
     assert rv._variant_filename("Intel Pipeline System-goal.md", "Intel", "Intel Pipeline System") == "Intel Pipeline System-goal.md"
     assert rv._variant_filename("notes.md", "Intel", "X") == "X-notes.md"
+
+
+def test_revert_recognises_facts_retagged_by_a_merge(world):
+    """A merge now rewrites facts to the canonical and stamps merged_from; the
+    revert must still find them by that stamp and drop it on the way back."""
+    root, aliases, rel, report, V, C = world
+    _write(root / C / "Intel-preference.md",
+           {"type": "facts", "entity": C, "category": "preference",
+            "facts": [{"entity": C, "fact": "prefers ArXiv first", "merged_from": V},
+                      {"entity": C, "fact": "Intel's own preference"}]})
+    ops = rv.plan_revert(report, {"SUFFIX_SAFE"}, root)
+    assert {f["file"]: f["action"] for f in ops[0]["files"]}["Intel-preference.md"] == "split"
+    rv.execute(ops, root, aliases, apply=True)
+    back = yaml.safe_load((root / V / f"{V}-preference.md").read_text().split("---")[1])
+    assert [f["fact"] for f in back["facts"]] == ["prefers ArXiv first"]
+    assert back["facts"][0]["entity"] == V and "merged_from" not in back["facts"][0]
+    kept = yaml.safe_load((root / C / "Intel-preference.md").read_text().split("---")[1])
+    assert [f["fact"] for f in kept["facts"]] == ["Intel's own preference"]

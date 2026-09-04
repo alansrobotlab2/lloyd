@@ -163,3 +163,31 @@ def test_apply_writes_aliases_and_stamps_the_ledger(tmp_path):
     plan_lines = [json.loads(l) for l in (out / list(out.glob("entity-merges-*.jsonl"))[0].name).read_text().splitlines() if l.strip()]
     amb = [c for c in plan_lines if c["status"] == "AMBIGUOUS"]
     assert amb and "semantic gate" in amb[0]["decision"]
+
+
+# ── merged facts carry the canonical's tag, and remember where they came from ─
+
+def test_retag_fact_file_rewrites_entity_and_stamps_origin(tmp_path):
+    f = tmp_path / "Inner Voice-state.md"
+    fm = {"type": "facts", "entity": "Inner Voice System", "category": "state",
+          "facts": [{"entity": "Inner Voice System", "fact": "two-brain critique"},
+                    {"entity": "Inner Voice", "fact": "already canonical"}]}
+    f.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# old body\n")
+    assert ers.retag_fact_file(f, "Inner Voice System", "Inner Voice") == 2
+    out = yaml.safe_load(f.read_text().split("---")[1])
+    assert out["entity"] == "Inner Voice"
+    assert out["facts"][0]["entity"] == "Inner Voice" and out["facts"][0]["merged_from"] == "Inner Voice System"
+    assert "merged_from" not in out["facts"][1]
+    assert "**Entity:** Inner Voice" in f.read_text()
+    assert ers.retag_fact_file(f, "Inner Voice System", "Inner Voice") == 0   # idempotent
+
+def test_apply_leaves_no_contamination_behind(tmp_path):
+    root, rel, al = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    r = _run(root, rel, al, out, "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    merged = yaml.safe_load((root / "vLLM" / "vLLM-state.md").read_text().split("---")[1])
+    tags = {f["entity"] for f in merged["facts"]}
+    assert tags == {"vLLM"}, tags
+    assert any(f.get("merged_from") == "vllm" for f in merged["facts"])
+    sys.path.insert(0, str(ROOT / "scripts" / "memory")); import kg_hygiene
+    assert kg_hygiene.contamination(root)["dirs"] == 0
