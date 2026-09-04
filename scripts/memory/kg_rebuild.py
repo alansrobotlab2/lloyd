@@ -278,35 +278,85 @@ def cmd_export(args) -> int:
 
 # ── extract ──────────────────────────────────────────────────────────────────
 
+def _hashed_count() -> int:
+    """Documents the rebuild has actually extracted.
+
+    A failed extraction is deliberately not hashed, so this is the count of
+    successes — which is exactly what the gate's corpus-coverage check reads.
+    """
+    try:
+        return int(json.loads(
+            (VAULT_DERIVED_ROOT / "rebuild-content-hashes.json").read_text())["file_count"])
+    except Exception:
+        return 0
+
+
 def cmd_extract(args) -> int:
-    """Extract the corpus into the rebuild tree. Resumable: the content-hash
-    index lives with the rebuild, so re-running continues where it stopped."""
+    """Extract the corpus into the rebuild tree.
+
+    Resumable: the content-hash index lives with the rebuild, so a re-run
+    continues where it stopped AND retries whatever failed — a failed
+    document is never hashed.
+
+    Runs up to `--passes` times, stopping early when a pass extracts nothing
+    new. Individual documents time out under concurrency (3 of the first 533
+    at 8 workers, all 120s LLM timeouts on long documents), and each of those
+    is a document the gate's 98% coverage floor would otherwise block the
+    swap on. Sweeping them up is mechanical, so it should not be manual.
+    """
     REBUILD_FACTS.mkdir(parents=True, exist_ok=True)
     env = _rebuild_env()
     # A hash index of its own, or the rebuild would skip every file the LIVE
     # tree has already extracted.
     env["LLOYD_CONTENT_HASHES"] = str(VAULT_DERIVED_ROOT / "rebuild-content-hashes.json")
 
-    cmd = [_venv_python(), "nightly_extraction.py", "--full",
-           "--workers", str(args.workers)]
-    if args.limit:
-        cmd += ["--limit", str(args.limit)]
-    print(f"$ {' '.join(cmd)}")
     print(f"  LLOYD_FACTS_ROOT={REBUILD_FACTS}")
     print(f"  LLOYD_KG_DB={REBUILD_DB}")
 
-    t0 = time.perf_counter()
-    proc = subprocess.run(cmd, cwd=str(HERE / "next-gen-memory"), env=env)
-    elapsed = time.perf_counter() - t0
+    rc = 0
+    t_all = time.perf_counter()
+    for attempt in range(1, max(1, args.passes) + 1):
+        before = _hashed_count()
+        cmd = [_venv_python(), "nightly_extraction.py", "--full",
+               "--workers", str(args.workers)]
+        if args.limit:
+            cmd += ["--limit", str(args.limit)]
+        print(f"\n== pass {attempt}/{args.passes} — {before:,} documents extracted so far ==")
+        print(f"$ {' '.join(cmd)}")
+        t0 = time.perf_counter()
+        proc = subprocess.run(cmd, cwd=str(HERE / "next-gen-memory"), env=env)
+        rc = proc.returncode
+        after = _hashed_count()
+        gained = after - before
+        print(f"   pass {attempt}: rc={rc}, +{gained:,} documents in {time.perf_counter() - t0:.0f}s")
+        if rc != 0:
+            print("   stopping: the extractor exited non-zero")
+            break
+        if gained == 0:
+            print("   stopping: nothing new extracted — retries are not making progress")
+            break
+        if args.limit:
+            break     # a bounded run is a bounded run
 
     st = KGStore(REBUILD_DB)
     stats = st.stats()
     st.close()
-    save_state(extract_last_rc=proc.returncode,
-               extract_last_elapsed_s=round(elapsed, 1),
+    extracted = _hashed_count()
+    corpus = _corpus_size()
+    save_state(extract_last_rc=rc,
+               extract_elapsed_s=round(time.perf_counter() - t_all, 1),
+               extracted=extracted, corpus=corpus,
                rebuild_stats=stats)
-    print(f"\nrc={proc.returncode} in {elapsed:.0f}s; rebuild store: {stats}")
-    return proc.returncode
+    pct = round(100.0 * extracted / corpus, 2) if corpus else 0.0
+    print(f"\nrc={rc} in {time.perf_counter() - t_all:.0f}s")
+    print(f"corpus coverage: {extracted:,}/{corpus:,} = {pct}% "
+          f"(gate wants >= {GATE['corpus_coverage_pct']}%)")
+    print(f"rebuild store: {stats}")
+    if pct < GATE["corpus_coverage_pct"]:
+        print(f"\n{corpus - extracted:,} documents still unextracted. Re-run `extract` "
+              "to retry them; if the count stops moving, the failures are not transient "
+              "and want looking at (check the log for `FAILED:`).")
+    return rc
 
 
 # ── import ───────────────────────────────────────────────────────────────────
@@ -632,6 +682,9 @@ def main() -> int:
     p = sub.add_parser("extract")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--passes", type=int, default=3,
+                   help="Re-run to sweep up documents that timed out (default 3). "
+                        "Stops early when a pass extracts nothing new.")
     p.set_defaults(fn=cmd_extract)
     sub.add_parser("import").set_defaults(fn=cmd_import)
     p = sub.add_parser("gate"); p.add_argument("--skip-eval", action="store_true")
