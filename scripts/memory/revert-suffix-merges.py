@@ -47,6 +47,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent.parent))
 from app.paths import VAULT_FACTS_ROOT, VAULT_FACTS_ALIASES  # noqa: E402
+from app.atomic_io import atomic_write_text  # noqa: E402
 from _invocation import invocation_ledger  # noqa: E402
 import kg_hygiene  # noqa: E402
 
@@ -218,7 +219,7 @@ def execute(ops: list[dict], root: Path, aliases_path: Path, apply: bool) -> dic
         if apply and alias_ops:
             bak = aliases_path.with_suffix(aliases_path.suffix + f".{dt.datetime.now():%Y%m%dT%H%M%SZ}.revert.bak")
             shutil.copy2(aliases_path, bak)
-            aliases_path.write_text(json.dumps(aliases, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8")
+            atomic_write_text(aliases_path, json.dumps(aliases, indent=2, sort_keys=True, ensure_ascii=False), fsync=True)
     return {"file_ops": done, "alias_ops": alias_ops, "touched_canonicals": sorted(touched_canonicals)}
 
 
@@ -260,7 +261,7 @@ def fix_edges(rel_path: Path, canonicals: list[str], root: Path, since: str, app
     if apply and expired:
         bak = rel_path.with_suffix(f".{dt.datetime.now():%Y%m%dT%H%M%SZ}.revert.bak.json")
         shutil.copy2(rel_path, bak)
-        rel_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_write_text(rel_path, json.dumps(data, indent=2, ensure_ascii=False), fsync=True)
     return {"expired": expired, "count": len(expired)}
 
 

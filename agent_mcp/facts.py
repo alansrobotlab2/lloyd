@@ -48,6 +48,7 @@ from agent_mcp._shared import (
 )
 from agent_mcp.retrieval import (  # noqa: F401  (re-exported compat names)
     EDGE_TYPE_WEIGHTS,
+    RelationshipsCorrupt,
     FACT_GODNODE_THRESHOLD,
     FACT_RANK_CAP_GRAPH,
     FACT_RANK_CAP_SEED,
@@ -300,7 +301,15 @@ def _fact_relate(params: dict) -> dict:
         # specified, not fuzzy-matched neighbours. (#340 PR 3.)
         src_resolved, _ = _resolve_entity(source, mode="write")
         tgt_resolved, _ = _resolve_entity(target, mode="write")
-        data = _load_relationships()
+        try:
+            data = _load_relationships()
+        except RelationshipsCorrupt as exc:
+            # Writing here would persist a one-edge graph over the real one.
+            # Refuse, leave the file untouched, and say why.
+            return _err(
+                f"relationships index is unreadable, refusing to write: {exc}",
+                ErrorCode.INTERNAL,
+            )
         for edge in data["edges"]:
             if (edge["source"] == src_resolved and edge["target"] == tgt_resolved
                     and edge["type"] == rel_type and not edge.get("expired_at")):

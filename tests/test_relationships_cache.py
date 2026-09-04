@@ -16,9 +16,13 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent_mcp import facts as facts_mod  # noqa: E402
 from agent_mcp import retrieval as memory  # noqa: E402  (cache lives in the shared retrieval core)
+from agent_mcp.retrieval import RelationshipsCorrupt  # noqa: E402
 
 
 def _reset_cache():
@@ -154,14 +158,20 @@ def test_save_then_load_returns_persisted_data():
 # Robustness
 # ---------------------------------------------------------------------------
 
-def test_corrupt_json_returns_empty_does_not_poison_cache():
+def test_corrupt_json_raises_and_does_not_poison_cache():
+    """A file that exists but will not parse is not an empty graph.
+
+    Returning the empty schema here is what let a truncated index look
+    identical to a graph with no edges; the next writer then saved its one
+    edge over everything else.
+    """
     with tempfile.TemporaryDirectory() as td:
         rel_path = Path(td) / "_relationships.json"
         rel_path.write_text("{not valid json", encoding="utf-8")
         with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
             _reset_cache()
-            data = memory.load_relationships()
-            assert data == {"edges": [], "schema_version": 1}
+            with pytest.raises(RelationshipsCorrupt):
+                memory.load_relationships()
             # Cache should NOT hold the empty placeholder — that would mask
             # the real file once it's repaired.
             assert memory._relationships_cache is None
@@ -170,6 +180,48 @@ def test_corrupt_json_returns_empty_does_not_poison_cache():
             _write_index(rel_path, [{"source": "A", "target": "B", "type": "uses"}])
             data2 = memory.load_relationships()
             assert len(data2["edges"]) == 1
+
+
+def test_payload_without_edges_list_raises():
+    with tempfile.TemporaryDirectory() as td:
+        rel_path = Path(td) / "_relationships.json"
+        rel_path.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+        with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
+            _reset_cache()
+            with pytest.raises(RelationshipsCorrupt):
+                memory.load_relationships()
+
+
+def test_edge_counts_raise_on_corrupt_but_ranking_degrades():
+    with tempfile.TemporaryDirectory() as td:
+        rel_path = Path(td) / "_relationships.json"
+        rel_path.write_text("truncated{", encoding="utf-8")
+        with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
+            _reset_cache()
+            memory.invalidate_edge_count_cache()
+            with pytest.raises(RelationshipsCorrupt):
+                memory.get_entity_edge_counts()
+            # The ranking-only wrapper degrades instead.
+            memory.invalidate_edge_count_cache()
+            assert memory._edge_counts_or_empty() == {}
+
+
+def test_fact_relate_refuses_to_write_over_a_corrupt_index():
+    """The whole point of the guard: a truncated index must survive a write."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        rel_path = root / "_relationships.json"
+        truncated = '{"edges": [{"source": "A", "target'
+        rel_path.write_text(truncated, encoding="utf-8")
+        before = rel_path.read_bytes()
+        with patch.object(memory, "RELATIONSHIPS_PATH", rel_path):
+            _reset_cache()
+            result = facts_mod._fact_relate(
+                {"source": "Lloyd", "target": "vLLM", "type": "uses"}
+            )
+        assert "error" in result
+        assert "unreadable" in result["error"]
+        assert rel_path.read_bytes() == before, "corrupt index must be left untouched"
 
 
 def test_invalidate_helper_clears_cache():
@@ -195,7 +247,10 @@ _TESTS = [
     test_load_reloads_when_mtime_changes,
     test_save_refreshes_cache_with_new_mtime,
     test_save_then_load_returns_persisted_data,
-    test_corrupt_json_returns_empty_does_not_poison_cache,
+    test_corrupt_json_raises_and_does_not_poison_cache,
+    test_payload_without_edges_list_raises,
+    test_edge_counts_raise_on_corrupt_but_ranking_degrades,
+    test_fact_relate_refuses_to_write_over_a_corrupt_index,
     test_invalidate_helper_clears_cache,
 ]
 

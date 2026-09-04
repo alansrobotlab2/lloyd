@@ -46,6 +46,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR  # noqa: E402
+from app.atomic_io import atomic_write_text  # noqa: E402
 
 RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
 SEED = 380
@@ -317,7 +318,7 @@ def main() -> int:
             f".json.{datetime.now().strftime('%Y%m%dT%H%M%SZ')}.bak")
         backup.write_text(RELATIONSHIPS_FILE.read_text())
         data.setdefault("edges", []).extend(proposed)
-        RELATIONSHIPS_FILE.write_text(json.dumps(data, indent=2) + "\n")
+        atomic_write_text(RELATIONSHIPS_FILE, json.dumps(data, indent=2) + "\n", fsync=True)
         print(f"\napplied {len(proposed):,} edges; backup → {backup.name}")
     else:
         print("\n(dry-run — pass --apply to write)")

@@ -45,6 +45,7 @@ from agent_mcp._shared import (
 )
 from agent_mcp.retrieval import (
     FACT_GODNODE_THRESHOLD,
+    RelationshipsCorrupt,
     FACT_RANK_CAP_SEED,
     FACT_RANK_CAP_GRAPH,
     extract_entities_from_query,
@@ -437,7 +438,12 @@ def _graph_rerank(
     # `extract_entities_from_query(doc_text)` call per doc — which
     # iterates ~2,700 entity dirs — into a tight regex scan over ~15
     # voter terms. Drops rerank latency by ~10x.
-    edge_counts = get_entity_edge_counts()
+    try:
+        edge_counts = get_entity_edge_counts()
+    except RelationshipsCorrupt:
+        # Degree is only a god-node penalty here. An unreadable graph costs
+        # rerank quality; it must not fail the recall.
+        edge_counts = {}
     voter_contribs: dict[str, float] = {}
     voter_patterns: dict[str, re.Pattern] = {}
     for vk, vw in voters.items():

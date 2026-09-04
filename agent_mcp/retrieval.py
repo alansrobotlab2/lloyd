@@ -38,6 +38,22 @@ from agent_mcp._shared import (
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
+class RelationshipsCorrupt(RuntimeError):
+    """The relationships index exists but could not be read.
+
+    Raised instead of returning the empty schema. The empty schema is a
+    legitimate value — a graph with no edges — so returning it for an
+    unreadable file made "I cannot read the graph" indistinguishable from
+    "the graph is empty". A writer that loaded, mutated and saved would
+    then persist a 3-edge graph over 6,539 real ones. That is exactly how
+    the 2026-08-22 wipe went unnoticed for hours.
+
+    Read paths may catch this and degrade to no-graph behaviour. Write
+    paths must not: they abort without saving.
+    """
+
+
+
 # Edge-type weights for weighted graph expansion in vault_recall.
 # Typed semantic edges dominate; cooccurrence-style edges are down-weighted so
 # they still contribute but don't drown out real relationships.
@@ -182,27 +198,49 @@ def get_facts_sync(entity: str, category: str = None, as_of: str = None,
 
 
 def get_entity_edge_counts() -> dict:
+    """Entity name → number of active edges touching it (its degree).
+
+    Goes through `load_relationships()` rather than re-reading the file, so
+    the parse is shared with every other reader and a corrupt index raises
+    `RelationshipsCorrupt` here too instead of silently reporting that
+    every entity has degree zero. Callers that only rank with this should
+    use `_edge_counts_or_empty()`.
+    """
     global _edge_count_cache
     now = time.monotonic()
     if _edge_count_cache is not None and (now - _edge_count_cache[0]) < _EDGE_COUNT_TTL:
         return _edge_count_cache[1]
     counts: dict[str, int] = {}
-    rel_path = FACTS_ROOT / "_relationships.json"
-    if rel_path.exists():
-        try:
-            data = json.loads(rel_path.read_text(encoding="utf-8"))
-            for edge in data.get("edges", []):
-                if edge.get("expired_at") or edge.get("invalid_at"):
-                    continue
-                s, t = edge.get("source"), edge.get("target")
-                if s:
-                    counts[s] = counts.get(s, 0) + 1
-                if t:
-                    counts[t] = counts.get(t, 0) + 1
-        except Exception:
-            pass
+    data = load_relationships()
+    for edge in data.get("edges", []):
+        if edge.get("expired_at") or edge.get("invalid_at"):
+            continue
+        s, t = edge.get("source"), edge.get("target")
+        if s:
+            counts[s] = counts.get(s, 0) + 1
+        if t:
+            counts[t] = counts.get(t, 0) + 1
     _edge_count_cache = (now, counts)
     return counts
+
+
+def _edge_counts_or_empty() -> dict:
+    """Degree map for ranking-only call sites, `{}` when the graph is unreadable.
+
+    Degree is a tie-break and a god-node penalty here, never a stored
+    value, so a corrupt index should cost ranking quality — not a failed
+    `vault_recall`.
+    """
+    try:
+        return get_entity_edge_counts()
+    except RelationshipsCorrupt:
+        return {}
+
+
+def invalidate_edge_count_cache() -> None:
+    """Drop the degree cache (used by writers and tests)."""
+    global _edge_count_cache
+    _edge_count_cache = None
 
 
 # ── Entity extraction ────────────────────────────────────────────────────────
@@ -353,7 +391,7 @@ def extract_entities_from_query(query: str) -> list:
     if not scores:
         return []
 
-    edge_counts = get_entity_edge_counts()
+    edge_counts = _edge_counts_or_empty()
     ranked = sorted(
         scores.items(),
         key=lambda kv: (
@@ -371,8 +409,13 @@ def extract_entities_from_query(query: str) -> list:
 def load_relationships() -> dict:
     """Load the relationships index, with mtime-based caching.
 
-    Returns the parsed dict. On missing file or parse error, returns the
-    empty schema and clears the cache.
+    A *missing* file is an empty graph — that is the state of a fresh
+    install, and returning the empty schema is correct.
+
+    A file that exists but cannot be read is NOT an empty graph. Every
+    such case raises `RelationshipsCorrupt`: an unreadable stat, a JSON
+    parse failure, or a payload whose `edges` is not a list. Callers on a
+    write path must let it propagate; read paths may catch it.
     """
     global _relationships_cache
     if not RELATIONSHIPS_PATH.exists():
@@ -380,14 +423,25 @@ def load_relationships() -> dict:
         return {"edges": [], "schema_version": 1}
     try:
         mtime_ns = RELATIONSHIPS_PATH.stat().st_mtime_ns
-    except OSError:
-        return {"edges": [], "schema_version": 1}
+    except OSError as exc:
+        _relationships_cache = None
+        raise RelationshipsCorrupt(
+            f"cannot stat {RELATIONSHIPS_PATH}: {exc}"
+        ) from exc
     if _relationships_cache is not None and _relationships_cache[0] == mtime_ns:
         return _relationships_cache[1]
     try:
         data = json.loads(RELATIONSHIPS_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {"edges": [], "schema_version": 1}
+    except Exception as exc:
+        _relationships_cache = None
+        raise RelationshipsCorrupt(
+            f"cannot parse {RELATIONSHIPS_PATH}: {exc}"
+        ) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("edges"), list):
+        _relationships_cache = None
+        raise RelationshipsCorrupt(
+            f"{RELATIONSHIPS_PATH} parsed but has no `edges` list"
+        )
     _relationships_cache = (mtime_ns, data)
     return data
 
@@ -498,7 +552,7 @@ def graph_weighted_neighbors(
     # God-node penalty: divide by log(degree+e) so high-degree entities
     # (e.g. "lloyd" with ~991 edges, log≈7) don't dominate over specific
     # entities (degree<10, log≈2.5). Without this, broad nodes saturated at 1.0.
-    edge_counts = get_entity_edge_counts()
+    edge_counts = _edge_counts_or_empty()
     for entity in list(scores.keys()):
         degree = max(edge_counts.get(entity, 1), 1)
         scores[entity] = scores[entity] / math.log(degree + math.e)

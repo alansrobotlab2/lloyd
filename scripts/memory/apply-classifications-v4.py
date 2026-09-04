@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
+from app.atomic_io import atomic_write_text
 
 RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
 CLASSIFIED_DIR = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "memory-graph"
@@ -286,8 +287,8 @@ def main() -> int:
         }
         edges.append(new_edge)
 
-    RELATIONSHIPS_FILE.write_text(
-        json.dumps(data, indent=2, sort_keys=False), encoding="utf-8"
+    atomic_write_text(
+        RELATIONSHIPS_FILE, json.dumps(data, indent=2, sort_keys=False), fsync=True
     )
     print(f"[info] wrote {RELATIONSHIPS_FILE} ({len(edges)} total edges)")
     return 0

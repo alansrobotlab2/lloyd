@@ -516,6 +516,10 @@ def _call_llm_v4(endpoint: str, model: str, system: str, prompt: str, timeout: i
         "temperature": 0.1,
         "max_tokens": 256,
         "chat_template_kwargs": {"enable_thinking": False},
+        # vLLM --scheduling-policy priority (lower = sooner): chat sends 0,
+        # autonomy runs 1. Batch classification is the lowest-value traffic on
+        # the box and must yield to both, or a long batch starves the fleet.
+        "priority": 2,
     }
     req = urllib.request.Request(
         endpoint,

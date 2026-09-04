@@ -48,6 +48,7 @@ import yaml
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_FACTS_ALIASES as ALIASES_PATH
+from app.atomic_io import atomic_write_text
 from app.entity_naming import looks_like_junk_entity
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1122,13 +1123,11 @@ def main() -> int:
     # 1. aliases first — the extractor consults them; a crash after this point
     #    still leaves new facts routed to the survivor.
     new_aliases = compute_aliases(plan, aliases, facts_root, args.rebuild_aliases, existing_dirs=existing_dirs)
-    with aliases_path.open("w") as f:
-        json.dump(new_aliases, f, indent=2, sort_keys=True, ensure_ascii=False)
+    atomic_write_text(aliases_path, json.dumps(new_aliases, indent=2, sort_keys=True, ensure_ascii=False), fsync=True)
     # 2. edges + file moves
     report = apply_merges(plan, rel_data, aliases, facts_root, args.rebuild_aliases, existing_dirs=existing_dirs, entities=plan.get("all_entities", []))
     report["aliases_final_count"] = len(new_aliases)
-    with rel_path.open("w") as f:
-        json.dump(rel_data, f, indent=2, ensure_ascii=False)
+    atomic_write_text(rel_path, json.dumps(rel_data, indent=2, ensure_ascii=False), fsync=True)
 
     # Report
     print(f"  Edges rewritten:   {report['rewritten_edges']}")

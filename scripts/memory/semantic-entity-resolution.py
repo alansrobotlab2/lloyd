@@ -360,6 +360,10 @@ def judge_pair(pair: dict, endpoint: str, model: str, timeout: int) -> dict | No
         "max_tokens": 300,
         "response_format": {"type": "json_object"},
         "chat_template_kwargs": {"enable_thinking": False},
+        # vLLM --scheduling-policy priority (lower = sooner): chat sends 0,
+        # autonomy runs 1. Batch classification is the lowest-value traffic on
+        # the box and must yield to both, or a long batch starves the fleet.
+        "priority": 2,
     }
     try:
         req = urllib.request.Request(
