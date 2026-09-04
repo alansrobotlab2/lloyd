@@ -129,7 +129,7 @@ a discovery round-trip, which is why `http_search`/`http_fetch` sat unused while
 
 `Bash` + `curl` stays correct for localhost (which `http_fetch` blocks) and for
 the structured-API pipelines individual skills document. For everything else on
-the public web, the `http_*` tools are the answer — see the `web-lookup` skill.
+the public web, the `http_*` tools are the answer — see the `web-search-and-fetch` skill.
 
 ## Enable / disable
 

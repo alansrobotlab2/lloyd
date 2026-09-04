@@ -102,6 +102,23 @@ def _merge_tool_overrides(config: dict) -> dict:
         if "enabled" in o:
             cfg["enabled"] = bool(o["enabled"])
         if "disabled_tools" in o:
+            # Override wins, deliberately: the Tools page is the live
+            # authority and must be able to re-enable a tool. But a silent
+            # win hides a real disagreement — browser_screenshot sat in
+            # config.yaml's disabled_tools for months while the override
+            # kept it advertised, so anyone reading the tracked config got
+            # the wrong answer about what was switched off (2026-09-04).
+            was = set(cfg.get("disabled_tools") or [])
+            now = set(o["disabled_tools"] or [])
+            resurrected = sorted(was - now)
+            if resurrected:
+                logger.warning(
+                    "tool_overrides.yaml re-enables %s, which config.yaml lists as "
+                    "disabled for server %r. The override wins. Reconcile the two "
+                    "files, or the tracked config keeps describing a state that is "
+                    "not being served.",
+                    ", ".join(resurrected), server,
+                )
             cfg["disabled_tools"] = list(o["disabled_tools"] or [])
     ts = (overrides.get("harness") or {}).get("tool_search")
     if isinstance(ts, dict):

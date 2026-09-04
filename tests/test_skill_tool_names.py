@@ -13,7 +13,7 @@ plausible tool name at any time, and nothing checked. This test is the check.
 Scope note: the vault carries older drift in the nightly-* skills
 (`mem_get`, `mem_write`, `delegate_task`, `execute_code`). Those are recorded
 in KNOWN_UNFIXED rather than silently allowed — they are real and should be
-cleaned up, but they are outside the web-lookup fix and holding the suite red
+cleaned up, but they are outside the web-search-and-fetch fix and holding the suite red
 on them would just get the test disabled. Anything NOT in that set fails
 immediately, which is what stops a regression.
 """
@@ -39,20 +39,30 @@ PHANTOM_TOOLS = {
     "web_search", "web_fetch", "web_extract",
     "WebSearch", "WebFetch", "HTTPFetch",
     "mcp____http_search", "mcp____http_fetch",
+    "mem_get", "mem_write", "mem_search",
+    "delegate_task", "execute_code", "sessions_spawn", "skills_get", "skills_list",
+    "write_file", "file_write", "file_edit", "file_read", "read_file",
+    "vault_get", "run_bash", "search_files", "add_fact",
+    "skill_view",
 }
 
-# Pre-existing drift outside this fix's scope. Shrink this set; never grow it.
-KNOWN_UNFIXED = {
-    "mem_get", "mem_write", "delegate_task", "execute_code",
-    "sessions_spawn", "skills_get", "write_file", "file_write", "file_edit",
-}
+# `terminal` was the OpenClaw name for Bash. It is also an ordinary English
+# word ("run it from the terminal"), so only tool-shaped usage counts:
+# a backticked name, or call syntax.
+_TERMINAL_AS_TOOL = re.compile(r"`terminal`|\bterminal\s*\(")
+
+# The debt ledger is empty: every name above is now banned outright, and the
+# 91 skills that carried one have been rewritten onto the real tool or
+# archived. Keep it that way — a new entry here means a regression, not a
+# grandfathering.
+KNOWN_UNFIXED: set[str] = set()
 
 # Skills allowed to write the phantom names down, because their job is to say
-# these names are not real: the web-lookup skill tells the model so directly,
+# these names are not real: the web-search-and-fetch skill tells the model so directly,
 # and the two mining skills cite them as the worked example of why a generated
 # skill must have its tool names validated before install.
 ALLOWED_TO_MENTION = {
-    "web-lookup",
+    "web-search-and-fetch",
     "nightly-skills-management",
     "trajectory-skill-mining",
 }
@@ -97,24 +107,16 @@ def test_no_active_skill_names_a_phantom_tool(skill_files):
     for path in skill_files:
         if path.parent.name in ALLOWED_TO_MENTION:
             continue
-        hits = sorted(set(pattern.findall(path.read_text(encoding="utf-8", errors="replace"))))
+        body = path.read_text(encoding="utf-8", errors="replace")
+        hits = sorted(set(pattern.findall(body)))
+        if _TERMINAL_AS_TOOL.search(body):
+            hits.append("terminal")
         if hits:
             offenders[path.parent.name] = hits
     assert offenders == {}, (
         "active skills name tools that do not exist: "
         f"{offenders}. The real tools are http_search / http_fetch / http_request."
     )
-
-
-def test_known_unfixed_set_is_not_growing(skill_files):
-    """KNOWN_UNFIXED is a debt ledger. A NEW made-up tool name must fail here
-    rather than being quietly absorbed."""
-    pattern = re.compile(r"\b(" + "|".join(map(re.escape, sorted(KNOWN_UNFIXED))) + r")\b")
-    found: set[str] = set()
-    for path in skill_files:
-        found.update(pattern.findall(path.read_text(encoding="utf-8", errors="replace")))
-    unexpected = found - KNOWN_UNFIXED
-    assert unexpected == set(), f"new phantom tool names appeared: {unexpected}"
 
 
 @pytest.mark.skipif(
@@ -138,12 +140,12 @@ def test_phantom_list_is_actually_phantom():
 def test_web_lookup_skill_exists_and_names_the_real_tools():
     """The replacement for the archived `websearch` skill must be present and
     correct, or the phantom-name fix has no positive half."""
-    candidates = [d / "web-lookup" / "SKILL.md" for d in SKILLS_DIRS]
+    candidates = [d / "web-search-and-fetch" / "SKILL.md" for d in SKILLS_DIRS]
     found = [p for p in candidates if p.exists()]
     if not found:
-        pytest.skip("web-lookup skill not installed on this machine")
+        pytest.skip("web-search-and-fetch skill not installed on this machine")
     body = found[0].read_text(encoding="utf-8", errors="replace")
     for tool in ("http_search", "http_fetch", "http_request"):
-        assert tool in body, f"web-lookup must document {tool}"
+        assert tool in body, f"web-search-and-fetch must document {tool}"
     # The localhost carve-out has to stay: Bash + curl is correct there.
     assert "localhost" in body

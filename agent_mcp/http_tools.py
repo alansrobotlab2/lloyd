@@ -51,6 +51,19 @@ def _is_private_host(hostname: str) -> bool:
     return any(p.match(hostname) for p in _PRIVATE_IP_PATTERNS)
 
 
+def _is_loopback_host(hostname: str) -> bool:
+    """The machine itself, by any of its names.
+
+    `http_request` deliberately allows loopback so the agent can drive local
+    services; `127.0.0.1` and `localhost` are the same host and must be
+    treated identically. Previously only `127.` was allowed, so
+    `http://localhost:8080/x` was blocked while `http://127.0.0.1:8080/x`
+    went through.
+    """
+    h = hostname.lower()
+    return h == "localhost" or h.startswith("127.") or h == "::1"
+
+
 class _TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -194,7 +207,7 @@ def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000
         return json.dumps({"error": f'Blocked — private/internal hostname "{hostname}"'})
     headers = {"User-Agent": WEB_USER_AGENT, "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
     try:
-        with make_sync_http_client(timeout=WEB_TIMEOUT_S, follow_redirects=True, verify=False) as client:
+        with make_sync_http_client(timeout=WEB_TIMEOUT_S, follow_redirects=True, verify=True) as client:
             response = client.get(url, headers=headers)
     except httpx.TimeoutException:
         return json.dumps({"error": f"Timed out after {WEB_TIMEOUT_S}s"})
@@ -259,10 +272,15 @@ def _http_request(method: str, url: str, headers: dict | None = None, body: str 
     if parsed.scheme not in ("http", "https"):
         return json.dumps({"error": f"Only http/https supported"})
     hostname = parsed.hostname or ""
-    if _is_private_host(hostname) and not hostname.startswith("127."):
+    loopback = _is_loopback_host(hostname)
+    if _is_private_host(hostname) and not loopback:
         return json.dumps({"error": f'Blocked — private/internal hostname "{hostname}"'})
+    # TLS verification is on for everything except the machine's own loopback,
+    # where local services legitimately serve self-signed certificates. It used
+    # to be off for every request, which meant no certificate was ever checked
+    # on any outbound call (added by an auto-generated commit, 2026-04-11).
     try:
-        with make_sync_http_client(timeout=timeout_, verify=False, follow_redirects=True) as client:
+        with make_sync_http_client(timeout=timeout_, verify=not loopback, follow_redirects=True) as client:
             resp = client.request(method_, url, headers=headers or {}, content=body.encode() if body else b"")
             return json.dumps({"status_code": resp.status_code, "headers": dict(resp.headers), "body": resp.text})
     except Exception as exc:

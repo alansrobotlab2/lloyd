@@ -67,7 +67,7 @@ Skills are on-demand procedures that Lloyd reads before executing. They are simp
 | git-filter-repo | `skills/git-filter-repo/SKILL.md` |
 | gpu-device-mismatch | `skills/gpu-device-mismatch/SKILL.md` |
 | heartbeat | `skills/heartbeat/SKILL.md` |
-| https-migration-gotchas | `skills/https-migration-gotchas/SKILL.md` |
+| tls-migration-gotchas | `skills/tls-migration-gotchas/SKILL.md` |
 | local-llm-gotchas | `skills/local-llm-gotchas/SKILL.md` |
 | mc-ui-change | `skills/mc-ui-change/SKILL.md` |
 | nightly-reflection | `skills/nightly-reflection/SKILL.md` |
@@ -86,7 +86,7 @@ Skills are on-demand procedures that Lloyd reads before executing. They are simp
 | upstream-bug-triage | `skills/upstream-bug-triage/SKILL.md` |
 | voice-clone-sample | `skills/voice-clone-sample/SKILL.md` |
 | voice-mode | `skills/voice-mode/SKILL.md` |
-| websearch | `skills/websearch/SKILL.md` |
+| web-search-and-fetch | `skills/web-search-and-fetch/SKILL.md` |
 | youtube-transcript | `skills/youtube-transcript/SKILL.md` |
 
 ## Skill Format

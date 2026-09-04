@@ -2,12 +2,13 @@
 """
 Skill-lint — advisory quality sweep over ~/obsidian/skills/*/SKILL.md.
 
-Writes `~/obsidian/autonomy/skill-lint-report.md` with five categories:
+Writes `~/obsidian/autonomy/skill-lint-report.md` with six categories:
   1. DEAD         — unparseable frontmatter or desc+tags both empty (never fires)
   2. MISSING_DESC — has tags but no description (fires via tag/name only)
   3. DRIFT        — description present but output-framed not trigger-framed
   4. DUPLICATE    — near-duplicate skill names (ranking noise)
   5. STALE        — mtime > 90 days and status != active (candidate for removal)
+  6. PHANTOM_TOOL — names a tool the aggregator does not advertise
 
 Advisory only. No automatic deletion or rewrites. Exit 0 always (so nightly
 pipeline doesn't fail on lint findings).
@@ -195,6 +196,53 @@ def check_dead(fm: dict, yaml_err: str | None) -> tuple[bool, list[str]]:
     return is_dead, reasons
 
 
+# ── Phantom tool names ────────────────────────────────────────────────────────
+#
+# A skill naming a tool that does not exist is worse than no skill: the model
+# calls it, gets an unknown-tool error, and takes whatever fallback the skill
+# documents. `websearch/SKILL.md` told the model to use `web_search` — a name
+# Lloyd has never had — and named Bash + curl as the recovery path, which is
+# where the curl habit for web lookups came from (2026-09-04).
+#
+# tests/test_skill_tool_names.py is the hard gate in CI; this is the scheduled
+# half, so drift shows up in the weekly report rather than only when someone
+# runs pytest.
+
+PHANTOM_TOOLS = frozenset({
+    "web_search", "web_fetch", "web_extract",
+    "WebSearch", "WebFetch", "HTTPFetch",
+    "mcp____http_search", "mcp____http_fetch",
+    "mem_get", "mem_write", "mem_search",
+    "delegate_task", "execute_code", "sessions_spawn", "skills_get", "skills_list",
+    "write_file", "file_write", "file_edit", "file_read", "read_file",
+    "vault_get", "run_bash", "search_files", "add_fact",
+    "skill_view",
+})
+
+# Skills whose job is to say these names are not real.
+PHANTOM_EXEMPT = frozenset({
+    "web-search-and-fetch", "nightly-skills-management", "trajectory-skill-mining",
+})
+
+
+# `terminal` was the OpenClaw name for Bash. It is also an ordinary English
+# word ("run it from the terminal"), so only tool-shaped usage counts:
+# a backticked name, or call syntax.
+_TERMINAL_AS_TOOL = re.compile(r"`terminal`|\bterminal\s*\(")
+
+_PHANTOM_RE = re.compile(r"\b(" + "|".join(sorted(map(re.escape, PHANTOM_TOOLS))) + r")\b")
+
+
+def check_phantom_tools(name: str, content: str) -> list[str]:
+    """Tool names mentioned by this skill that the aggregator does not serve."""
+    if name in PHANTOM_EXEMPT:
+        return []
+    found = set(_PHANTOM_RE.findall(content))
+    if _TERMINAL_AS_TOOL.search(content):
+        found.add("terminal")
+    return sorted(found)
+
+
 def find_duplicates(names: list[str]) -> list[tuple[str, str, float]]:
     """Return list of (name_a, name_b, similarity) for near-duplicate pairs.
 
@@ -242,6 +290,7 @@ def lint() -> dict:
     missing_desc: list[dict] = []
     drift: list[dict] = []
     stale: list[dict] = []
+    phantom: list[dict] = []
     names: list[str] = []
     total = 0
 
@@ -295,6 +344,14 @@ def lint() -> dict:
                     "reason": drift_reason,
                 })
 
+        bad_tools = check_phantom_tools(entry.name, content)
+        if bad_tools:
+            phantom.append({
+                "name": entry.name,
+                "path": str(skill_file),
+                "tools": bad_tools,
+            })
+
         is_stale, age = check_stale(skill_file, fm)
         if is_stale:
             stale.append({
@@ -314,6 +371,7 @@ def lint() -> dict:
         "drift": drift,
         "duplicates": duplicates,
         "stale": stale,
+        "phantom": phantom,
     }
 
 
@@ -328,6 +386,7 @@ def render_report(result: dict) -> str:
     n_drift = len(result["drift"])
     n_dup = len(result["duplicates"])
     n_stale = len(result["stale"])
+    n_phantom = len(result.get("phantom", []))
 
     lines.append(f"# Skill Lint Report — {ts}")
     lines.append("")
@@ -340,6 +399,7 @@ def render_report(result: dict) -> str:
     lines.append(f"| DRIFT (output-framed description) | **{n_drift}** | rewrite first sentence in trigger-condition form |")
     lines.append(f"| DUPLICATE (near-duplicate names) | **{n_dup}** | resolve ownership, merge, or rename |")
     lines.append(f"| STALE (>{STALE_DAYS}d mtime, status ≠ active) | **{n_stale}** | review for removal |")
+    lines.append(f"| PHANTOM_TOOL (names a tool that does not exist) | **{n_phantom}** | replace with the real tool name |")
     lines.append("")
     lines.append("This report is **advisory**. No automatic changes.")
     lines.append("")
@@ -379,6 +439,25 @@ def render_report(result: dict) -> str:
             if len(item["tags"]) > 5:
                 tag_str += f" (+{len(item['tags']) - 5} more)"
             lines.append(f"| `{item['name']}` | {tag_str} |")
+        lines.append("")
+
+    # PHANTOM_TOOL
+    if n_phantom:
+        lines.append(f"## PHANTOM_TOOL — {n_phantom} skills naming tools that do not exist")
+        lines.append("")
+        lines.append("These skills instruct the model to call a tool the aggregator does not")
+        lines.append("advertise. The call fails with an unknown-tool error and the model takes")
+        lines.append("whatever fallback the skill documents — which is how the archived")
+        lines.append("`websearch` skill (`web_search`, `web_fetch`) taught Lloyd to shell out to")
+        lines.append("`curl` for every web lookup. Replace with the real name:")
+        lines.append("`http_search` / `http_fetch` / `http_request` for the web, `Read` /")
+        lines.append("`Write` / `Edit` / `Grep` / `Glob` for files, `skills_read` for skills,")
+        lines.append("`Task` for subagents, `memory_read` / `memory_add` for memory.")
+        lines.append("")
+        lines.append("| name | phantom tools |")
+        lines.append("|---|---|")
+        for item in result["phantom"]:
+            lines.append(f"| `{item['name']}` | {', '.join(f'`{t}`' for t in item['tools'])} |")
         lines.append("")
 
     # DRIFT
