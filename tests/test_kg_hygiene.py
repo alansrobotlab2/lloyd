@@ -111,3 +111,32 @@ def test_missing_root_is_empty_not_an_error(tmp_path):
     s = kg_hygiene.snapshot(tmp_path / "nope", days=7)
     assert s["contamination"]["dirs"] == 0
     assert s["near_duplicates"]["clusters"] == 0
+
+
+def test_regrowth_dates_entities_by_fact_created_at_not_mtime(tree):
+    """A bulk revert/merge rewrites every file; mtime then says everything is new."""
+    now = time.time()
+    # every file was rewritten just now ...
+    for d in tree.iterdir():
+        if d.is_dir():
+            for f in d.glob("*.md"):
+                os.utime(f, (now, now))
+    # ... but the facts say when the entities really appeared
+    def stamp(dirname, when):
+        for p in (tree / dirname).glob("*.md"):
+            fm = yaml.safe_load(p.read_text().split("---")[1])
+            if not fm.get("facts"):          # overview files carry no facts
+                continue
+            for f in fm["facts"]:
+                f["created_at"] = when
+            p.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\nbody\n")
+            os.utime(p, (now, now))
+    import datetime as dt
+    old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=40)).isoformat()
+    fresh = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat()
+    stamp("vLLM V1 Engine", old)
+    stamp("vLLM V1 engine", fresh)
+    stamp("Intel", old); stamp("Alfie", old)
+    r = kg_hygiene.regrowth(tree, days=7, now=now)
+    assert r["new_dirs"] == 1                  # only the lowercase twin is genuinely new
+    assert r["samples"] == ["vLLM V1 engine"]

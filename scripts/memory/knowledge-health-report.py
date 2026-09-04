@@ -272,16 +272,29 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7) -> di
     clusters = [v for v in by_norm.values() if len(v) > 1]
     cluster_tiers = Counter(ers.cluster_tier(v) for v in clusters)
 
+    # Date an entity by its earliest fact `created_at` (mtime only as a fallback:
+    # a bulk revert/merge/retag rewrites every file and makes old entities look new).
     born: dict[str, float] = {}
     for name, files in entities.items():
-        ts = []
+        created = []
+        mtimes = []
         for entry in files:
             try:
-                ts.append(entry["file"].stat().st_mtime)
+                mtimes.append(entry["file"].stat().st_mtime)
             except OSError:
                 pass
-        if ts:
-            born[name] = min(ts)
+            for f in entry["facts"]:
+                if not isinstance(f, dict):
+                    continue
+                for k in ("created_at", "created", "first_seen", "timestamp"):
+                    t = parse_date(str(f.get(k))) if f.get(k) is not None else None
+                    if t is not None:
+                        created.append((t if t.tzinfo else t.replace(tzinfo=timezone.utc)).timestamp())
+                        break
+        if created:
+            born[name] = min(created)
+        elif mtimes:
+            born[name] = min(mtimes)
     cutoff = now.timestamp() - regrowth_days * 86400
     new_names = [n for n, t in born.items() if t >= cutoff]
     regrown = []

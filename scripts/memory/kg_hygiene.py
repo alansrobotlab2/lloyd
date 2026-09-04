@@ -141,9 +141,44 @@ def near_duplicates(root: Path = VAULT_FACTS_ROOT) -> dict[str, Any]:
             "samples": [[d.name for d in v] for v in list(cl.values())[:8]]}
 
 
+_TS_KEYS = ("created_at", "created", "first_seen", "timestamp")
+
+
+def _parse_ts(v) -> float | None:
+    if isinstance(v, dt.datetime):
+        return (v if v.tzinfo else v.replace(tzinfo=dt.timezone.utc)).timestamp()
+    if isinstance(v, dt.date):
+        return dt.datetime(v.year, v.month, v.day, tzinfo=dt.timezone.utc).timestamp()
+    try:
+        t = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 def _born(d: Path) -> float:
-    ts = [f.stat().st_mtime for f in d.glob("*.md")]
-    return min(ts) if ts else d.stat().st_mtime
+    """When this entity first existed: the earliest fact `created_at` in the
+    directory, falling back to file mtime. mtime alone is unreliable — a bulk
+    revert, merge or retag rewrites every file and makes a year-old entity look
+    born today (6,625 "new" dirs after the 2026-09-03 repairs)."""
+    best: float | None = None
+    mtimes = []
+    for f in d.glob("*.md"):
+        try:
+            mtimes.append(f.stat().st_mtime)
+        except OSError:
+            continue
+        fm = parse_frontmatter(f)
+        cands = [fm] + [x for x in (fm.get("facts") or []) if isinstance(x, dict)]
+        for x in cands:
+            for k in _TS_KEYS:
+                if x.get(k) is not None:
+                    t = _parse_ts(x[k])
+                    if t is not None and (best is None or t < best):
+                        best = t
+    if best is not None:
+        return best
+    return min(mtimes) if mtimes else d.stat().st_mtime
 
 
 def regrowth(root: Path = VAULT_FACTS_ROOT, days: int = 7,

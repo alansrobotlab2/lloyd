@@ -55,3 +55,21 @@ def test_hygiene_section_is_optional(tmp_path):
     now = datetime.now(timezone.utc)
     report = khr.generate_report({}, khr.compute_relationship_stats([], {}), [], [], now)
     assert "## Hygiene" not in report
+
+
+def test_hygiene_regrowth_uses_fact_created_at(tmp_path):
+    root = tmp_path / "facts"
+    now = datetime.now(timezone.utc)
+    old_iso = (now.replace(microsecond=0) - __import__("datetime").timedelta(days=40)).isoformat()
+    new_iso = (now.replace(microsecond=0) - __import__("datetime").timedelta(days=1)).isoformat()
+    a = _facts(root, "vLLM", "state", [("vLLM", "serves")])
+    b = _facts(root, "vllm", "state", [("vllm", "twin")])
+    for p, iso in ((a, old_iso), (b, new_iso)):
+        fm = yaml.safe_load(p.read_text().split("---")[1])
+        for f in fm["facts"]:
+            f["created_at"] = iso
+        p.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\nbody\n")
+    # both files were written just now — mtime would call both "new"
+    h = khr.compute_hygiene(khr.load_entities(root), now)
+    assert h["new_dirs"] == 1
+    assert [(n, o) for n, o, _ in h["regrown"]] == [("vllm", "vLLM")]
