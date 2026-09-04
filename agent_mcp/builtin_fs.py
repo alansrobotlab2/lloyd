@@ -19,12 +19,11 @@ import logging
 import os
 from pathlib import Path
 
-from mcp.server import Server
-from mcp.types import TextContent, Tool
+from mcp.types import Tool
+
+from agent_mcp._shared import text_result
 
 logger = logging.getLogger("lloyd-builtin-fs")
-
-app = Server("lloyd-builtin-fs")
 
 DEFAULT_READ_LINES = 2000
 LINE_PREFIX_FMT = "%6d\t%s"
@@ -270,7 +269,6 @@ def _glob(args: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(
@@ -314,9 +312,25 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
-                    "old_string": {"type": "string"},
-                    "new_string": {"type": "string"},
+                    "file_path": {
+                        "type": "string",
+                        "description": "Absolute path to the file to modify",
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": (
+                            "Exact text to find, including indentation and "
+                            "surrounding lines needed to make it unique in "
+                            "the file. Must match byte for byte."
+                        ),
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": (
+                            "Replacement text. Must differ from old_string; "
+                            "pass an empty string to delete the matched text."
+                        ),
+                    },
                     "replace_all": {"type": "boolean", "description": "Replace all occurrences (default false)"},
                 },
                 "required": ["file_path", "old_string", "new_string"],
@@ -340,13 +354,33 @@ async def list_tools():
                     "output_mode": {
                         "type": "string",
                         "enum": ["files_with_matches", "content", "count"],
+                        "description": (
+                            "files_with_matches (default) lists matching file "
+                            "paths, content shows matching lines, count shows "
+                            "per-file match counts."
+                        ),
                     },
-                    "-i": {"type": "boolean"},
-                    "-n": {"type": "boolean"},
-                    "-A": {"type": "integer"},
-                    "-B": {"type": "integer"},
-                    "-C": {"type": "integer"},
-                    "multiline": {"type": "boolean"},
+                    "-i": {"type": "boolean", "description": "Case-insensitive match"},
+                    "-n": {
+                        "type": "boolean",
+                        "description": "Prefix each match with its line number (content mode)",
+                    },
+                    "-A": {
+                        "type": "integer",
+                        "description": "Lines of trailing context after each match (content mode)",
+                    },
+                    "-B": {
+                        "type": "integer",
+                        "description": "Lines of leading context before each match (content mode)",
+                    },
+                    "-C": {
+                        "type": "integer",
+                        "description": "Lines of context on both sides of each match (content mode)",
+                    },
+                    "multiline": {
+                        "type": "boolean",
+                        "description": "Let the pattern match across line boundaries (. matches newline)",
+                    },
                     "head_limit": {"type": "integer", "description": "Max output lines"},
                 },
                 "required": ["pattern"],
@@ -370,7 +404,6 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     # Sync handlers run in a worker thread — this loop also serves SSE chat,
     # voice, and the inner-voice observer; a slow disk read must not stall it.
@@ -386,4 +419,4 @@ async def call_tool(name: str, arguments: dict):
         text = await asyncio.to_thread(_glob, arguments)
     else:
         text = json.dumps({"error": f"Unknown tool: {name}"})
-    return [TextContent(type="text", text=text)]
+    return text_result(text)

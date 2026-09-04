@@ -28,7 +28,7 @@ from typing import Optional
 
 import httpx
 
-from agent_mcp._shared import make_http_client
+from agent_mcp._shared import make_http_client, text_result
 from app.config import service_url
 import yaml
 
@@ -193,7 +193,7 @@ async def list_tools():
     return [
         Tool(
             name="discord_send",
-            description="Send a text message to a Discord channel.",
+            description="Send a plain text message to a Discord channel by id. The message is posted immediately and cannot be recalled.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -205,7 +205,7 @@ async def list_tools():
         ),
         Tool(
             name="discord_send_embed",
-            description="Send a rich embed message to a Discord channel.",
+            description="Send a rich embed (title, description, coloured sidebar, fields) to a Discord channel by id. Posted immediately and cannot be recalled.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -227,7 +227,7 @@ async def list_tools():
         ),
         Tool(
             name="discord_list_channels",
-            description="List text channels in a Discord guild.",
+            description="List the text channels in a Discord guild, with their ids and names. Use the id with discord_send.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -245,7 +245,6 @@ async def list_tools():
 
 
 async def call_tool(name: str, arguments: dict):
-    from mcp.types import TextContent
 
     try:
         if name == "discord_send":
@@ -253,7 +252,7 @@ async def call_tool(name: str, arguments: dict):
                 channel_id=str(arguments.get("channel_id", "")),
                 content=str(arguments.get("content", "")),
             )
-            return [TextContent(type="text", text=json.dumps(result))]
+            return text_result(json.dumps(result))
 
         elif name == "discord_send_embed":
             embed: dict = {
@@ -268,11 +267,11 @@ async def call_tool(name: str, arguments: dict):
                 channel_id=str(arguments.get("channel_id", "")),
                 embed=embed,
             )
-            return [TextContent(type="text", text=json.dumps(result))]
+            return text_result(json.dumps(result))
 
         elif name == "discord_list_channels":
             if not _bot:
-                return [TextContent(type="text", text=json.dumps({"error": "Bot not running"}))]
+                return text_result(json.dumps({"error": "Bot not running"}))
             channels = []
             gid = arguments.get("guild_id")
             guilds = [_bot.get_guild(int(gid))] if gid else list(_bot.guilds)
@@ -286,20 +285,19 @@ async def call_tool(name: str, arguments: dict):
                         "guild": guild.name,
                         "type": str(ch.type),
                     })
-            return [TextContent(type="text", text=json.dumps({"channels": channels}))]
+            return text_result(json.dumps({"channels": channels}))
 
         elif name == "discord_get_home_channel":
-            return [TextContent(type="text", text=json.dumps({
+            return text_result(json.dumps({
                 "home_channel": _bot_config.get("home_channel"),
-            }))]
+            }))
 
         else:
-            return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+            return text_result(json.dumps({"error": f"Unknown tool: {name}"}))
 
     except Exception as e:
-        from mcp.types import TextContent
         logger.error("discord_bot call_tool(%s) error: %s", name, e)
-        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+        return text_result(json.dumps({"error": str(e)}))
 
 
 # ── Discord bot (gateway) ─────────────────────────────────────────────────────

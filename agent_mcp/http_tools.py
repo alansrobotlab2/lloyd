@@ -12,10 +12,9 @@ from html.parser import HTMLParser
 
 import httpx
 
-from agent_mcp._shared import make_sync_http_client
+from agent_mcp._shared import make_sync_http_client, text_result
 from ddgs import DDGS
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
 
 WEB_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -36,8 +35,6 @@ _PRIVATE_IP_PATTERNS = [
     re.compile(r"^fd", re.IGNORECASE),
     re.compile(r"^fe80:", re.IGNORECASE),
 ]
-
-app = Server("lloyd-http-tools")
 
 
 def _is_private_host(hostname: str) -> bool:
@@ -167,7 +164,6 @@ def _http_request(method: str, url: str, headers: dict | None = None, body: str 
         return json.dumps({"error": f"Request failed: {exc}"})
 
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(name="http_search", description="Web search via DuckDuckGo. Returns titles, URLs, and snippets.", inputSchema={
@@ -178,7 +174,7 @@ async def list_tools():
             },
             "required": ["query"],
         }),
-        Tool(name="http_fetch", description="Fetch a URL and extract readable content.", inputSchema={
+        Tool(name="http_fetch", description="Fetch a URL over HTTP GET and extract its readable content as markdown or plain text, stripping navigation and boilerplate. For non-GET requests use http_request.", inputSchema={
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "URL to fetch"},
@@ -201,13 +197,12 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "http_search":
-        return [TextContent(type="text", text=_http_search(arguments.get("query", ""), arguments.get("count", 5)))]
+        return text_result(_http_search(arguments.get("query", ""), arguments.get("count", 5)))
     elif name == "http_fetch":
-        return [TextContent(type="text", text=_http_fetch(arguments.get("url", ""), arguments.get("extract_mode", "markdown"), arguments.get("max_chars", 50000)))]
+        return text_result(_http_fetch(arguments.get("url", ""), arguments.get("extract_mode", "markdown"), arguments.get("max_chars", 50000)))
     elif name == "http_request":
-        return [TextContent(type="text", text=_http_request(arguments.get("method", "GET"), arguments.get("url", ""), arguments.get("headers"), arguments.get("body", ""), arguments.get("timeout", 30)))]
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return text_result(_http_request(arguments.get("method", "GET"), arguments.get("url", ""), arguments.get("headers"), arguments.get("body", ""), arguments.get("timeout", 30)))
+    return text_result(json.dumps({"error": f"Unknown tool: {name}"}))
 

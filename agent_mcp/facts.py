@@ -23,7 +23,6 @@ keep this module's call sites and external consumers stable.
 
 import datetime
 
-from mcp.server import Server
 from mcp.types import Tool
 
 try:
@@ -74,8 +73,6 @@ _OPPOSING_PAIRS = [
     ("active", "inactive"), ("supported", "unsupported"),
     ("working", "broken"), ("success", "failure"),
 ]
-
-app = Server("lloyd-facts")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -647,38 +644,37 @@ def _fact_neighbors(params: dict) -> dict:
 
 # ── MCP registration ─────────────────────────────────────────────────────────
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(name="fact_get", description="Retrieve structured facts for a named entity. Supports temporal queries with as_of and include_expired.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "as_of": {"type": "string", "description": "ISO date — return facts valid at this point in time"}, "include_expired": {"type": "boolean", "description": "If true, include expired/invalidated facts"}}, "required": ["entity"]}),
-        Tool(name="fact_add", description="Add a structured fact for a named entity/category.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "fact": {"type": "string"}, "confidence": {"type": "number"}, "valid_at": {"type": "string"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string"}}, "required": ["entity", "category", "fact"]}),
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "as_of": {"type": "string", "description": "ISO date — return facts valid at this point in time"}, "include_expired": {"type": "boolean", "description": "If true, include expired/invalidated facts"}}, "required": ["entity"]}),
+        Tool(name="fact_add", description="Add a structured fact for a named entity and category. Writes a line to the entity's markdown fact file and indexes it; use one clear sentence per call rather than a paragraph.", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact": {"type": "string", "description": "The fact, as one self-contained sentence that will still make sense read on its own"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the fact (default 0.9); the weaker side loses a contradiction"}, "valid_at": {"type": "string", "description": "ISO date the fact started being true (default: today)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this fact came from, for provenance"}}, "required": ["entity", "category", "fact"]}),
         Tool(name="fact_profile", description=f"Synthesized profile for an entity: facts grouped by category, capped at {FACT_RANK_CAP_SEED} per category. Pass `query` to rank each category by relevance instead of recency.", inputSchema={
             "type": "object", "properties": {
-                "entity": {"type": "string"},
+                "entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"},
                 "query": {"type": "string", "description": "Rank facts by relevance to this text"},
                 "limit_per_category": {"type": "integer", "description": f"Facts kept per category (default {FACT_RANK_CAP_SEED})"},
             }, "required": ["entity"]}),
         Tool(name="fact_check", description=f"Detect contradictions in an entity's facts. Pairwise and O(n squared), so it is refused above {FACT_GODNODE_THRESHOLD} facts — pass `category` to scan a slice.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string", "description": "Scan one category instead of the whole entity"}}, "required": ["entity"]}),
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Scan one category instead of the whole entity"}}, "required": ["entity"]}),
         Tool(name="fact_resolve", description=f"Report contradictions between an entity's facts. Reports only unless auto_resolve=true, which marks the lower-confidence side invalid (never expired). Refused above {FACT_GODNODE_THRESHOLD} facts; pass `category` to scan a slice.", inputSchema={
             "type": "object", "properties": {
-                "entity": {"type": "string"},
+                "entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"},
                 "category": {"type": "string", "description": "Scan one category instead of the whole entity"},
                 "auto_resolve": {"type": "boolean", "description": "Mark the weaker side invalid (default false)"},
             }, "required": ["entity"]}),
         Tool(name="fact_invalidate", description="Expire facts that are no longer current. Sets expired_at on matching facts.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "fact_substring": {"type": "string", "description": "Match facts containing this text"}, "ended": {"type": "string", "description": "ISO date when fact stopped being true"}, "reason": {"type": "string", "description": "Why the fact was expired"}}, "required": ["entity", "ended"]}),
-        Tool(name="fact_relate", description="Add a typed relationship edge between two entities.", inputSchema={
-            "type": "object", "properties": {"source": {"type": "string"}, "target": {"type": "string"}, "type": {"type": "string", "description": "Relationship type (e.g. built_on, uses, part_of, related_to)"}, "confidence": {"type": "number"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"]}, "source_doc": {"type": "string"}}, "required": ["source", "target", "type"]}),
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact_substring": {"type": "string", "description": "Match facts containing this text"}, "ended": {"type": "string", "description": "ISO date when fact stopped being true"}, "reason": {"type": "string", "description": "Why the fact was expired"}}, "required": ["entity", "ended"]}),
+        Tool(name="fact_relate", description="Add a typed relationship edge between two entities in the knowledge graph. Edges are expired rather than deleted, so a wrong edge is recoverable.", inputSchema={
+            "type": "object", "properties": {"source": {"type": "string", "description": "Entity the edge points from (alias-resolved)"}, "target": {"type": "string", "description": "Entity the edge points to (alias-resolved)"}, "type": {"type": "string", "description": "Relationship type (e.g. built_on, uses, part_of, related_to)"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the edge (default 0.9)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the edge was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this edge came from, for provenance"}}, "required": ["source", "target", "type"]}),
         Tool(name="fact_relationships", description="Get all relationships for an entity (inbound + outbound edges).", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "direction": {"type": "string", "enum": ["in", "out", "both"]}, "type": {"type": "string"}}, "required": ["entity"]}),
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "direction": {"type": "string", "enum": ["in", "out", "both"], "description": "Edge direction to return (default both)"}, "type": {"type": "string", "description": "Only return edges of this relationship type"}}, "required": ["entity"]}),
         Tool(name="fact_path", description="Find shortest path between two entities via relationship graph.", inputSchema={
-            "type": "object", "properties": {"source": {"type": "string"}, "target": {"type": "string"}, "max_hops": {"type": "integer"}}, "required": ["source", "target"]}),
+            "type": "object", "properties": {"source": {"type": "string", "description": "Entity to start from (alias-resolved)"}, "target": {"type": "string", "description": "Entity to reach (alias-resolved)"}, "max_hops": {"type": "integer", "description": "Give up beyond this many hops (default 4)"}}, "required": ["source", "target"]}),
         Tool(name="fact_neighbors", description=f"Neighborhood subgraph around an entity within N hops. Truncates at {_FACT_NEIGHBORS_MAX_NODES} nodes / {_FACT_NEIGHBORS_MAX_EDGES} edges; hub entities at hops=2 will truncate — narrow with hops=1 or a higher min_confidence.", inputSchema={
             "type": "object", "properties": {
-                "entity": {"type": "string"},
+                "entity": {"type": "string", "description": "Entity at the centre of the subgraph (alias-resolved)"},
                 "hops": {"type": "integer", "description": "Traversal depth (default 1)"},
                 "min_confidence": {"type": "number", "description": "Drop edges below this confidence (default 0.5)"},
                 "max_nodes": {"type": "integer", "description": f"Cap on returned nodes (default {_FACT_NEIGHBORS_MAX_NODES})"},
@@ -687,7 +683,6 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     handlers = {
         "fact_get": _fact_get, "fact_add": _fact_add, "fact_profile": _fact_profile,

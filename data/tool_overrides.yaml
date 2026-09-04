@@ -7,7 +7,7 @@ mcp_servers:
     - discord_send_embed
 harness:
   tool_search:
-    enabled: false
+    enabled: true
     threshold_tools: 30
     baseline_tools:
     - Read

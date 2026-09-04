@@ -23,16 +23,13 @@ import json
 import logging
 from typing import Any
 
-from mcp.server import Server
-from mcp.types import TextContent, Tool
+from mcp.types import Tool
 
-from agent_mcp._shared import get_bound_session
+from agent_mcp._shared import get_bound_session, text_result
 from agent_mcp._todo_validation import VALID_STATUSES, validate_todos
 from app.sessions_io import mutate_session
 
 logger = logging.getLogger("lloyd-builtin-todo")
-
-app = Server("lloyd-builtin-todo")
 
 
 # Backwards-compatible aliases — code outside this module imported these
@@ -166,7 +163,6 @@ Assistant: The git status command shows the current state of your working direct
 When the entire list is marked completed, it is automatically cleared on the next call. Make sure that at least one task is in_progress at all times while work is ongoing. Always provide both content (imperative) and activeForm (present continuous) for each task."""
 
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(
@@ -210,10 +206,9 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "TodoWrite":
         text = await _todo_write(arguments)
     else:
         text = json.dumps({"error": f"Unknown tool: {name}"})
-    return [TextContent(type="text", text=text)]
+    return text_result(text)

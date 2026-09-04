@@ -17,14 +17,11 @@ import sys
 from pathlib import Path
 
 import yaml
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
 
-from agent_mcp._shared import parse_frontmatter_text
+from agent_mcp._shared import parse_frontmatter_text, text_result
 
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
-
-app = Server("lloyd-autonomy")
 
 
 def _slugify(name: str) -> str:
@@ -237,10 +234,9 @@ def _write_config(config: dict) -> None:
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
 
-@app.list_tools()
 async def list_tools():
     return [
-        Tool(name="autonomy_tasks", description="List/filter autonomy tasks. Returns array of task objects.", inputSchema={
+        Tool(name="autonomy_tasks", description="List the scheduled autonomy tasks, optionally filtered by status, frequency or agent. Returns task objects with their schedule and last-run state, not their full history.", inputSchema={
             "type": "object",
             "properties": {
                 "status": {"type": "string", "description": "Filter by status (draft, up_next, in_progress)"},
@@ -261,20 +257,20 @@ async def list_tools():
                 "agent_id": {"type": "string", "description": "Agent ID to run the task"},
                 "model": {"type": "string", "description": "Model to use"},
                 "timeout_seconds": {"type": "integer", "description": "Timeout in seconds"},
-                "auto_advance": {"type": "boolean"},
-                "preemptible": {"type": "boolean"},
-                "scheduled_at": {"type": "string"},
-                "depends_on": {"type": "integer"},
-                "pipeline": {"type": "string"},
+                "auto_advance": {"type": "boolean", "description": "Move the task to the next status automatically when a run succeeds"},
+                "preemptible": {"type": "boolean", "description": "Allow the scheduler to interrupt this run for a higher-priority task"},
+                "scheduled_at": {"type": "string", "description": "ISO timestamp for the next run; overrides the frequency for one cycle"},
+                "depends_on": {"type": "integer", "description": "Task ID that must complete successfully before this one runs"},
+                "pipeline": {"type": "string", "description": "Named pipeline this task belongs to; tasks in one pipeline run in order"},
                 "activity_note": {"type": "string", "description": "Note to append to activity log"},
             },
         }),
-        Tool(name="autonomy_get_task", description="Get full task detail + recent runs.", inputSchema={
+        Tool(name="autonomy_get_task", description="Get one autonomy task in full: its definition, schedule, dependencies and its most recent run records with exit status.", inputSchema={
             "type": "object",
             "properties": {"id": {"type": "integer", "description": "Task ID to retrieve"}},
             "required": ["id"],
         }),
-        Tool(name="autonomy_delete_task", description="Delete or archive a task.", inputSchema={
+        Tool(name="autonomy_delete_task", description="Delete an autonomy task, or archive it by setting status back to draft. Archiving is reversible; deletion is not.", inputSchema={
             "type": "object",
             "properties": {
                 "id": {"type": "integer", "description": "Task ID to delete"},
@@ -282,14 +278,14 @@ async def list_tools():
             },
             "required": ["id"],
         }),
-        Tool(name="autonomy_config", description="Get or set autonomy system config.", inputSchema={
+        Tool(name="autonomy_config", description="Read or change autonomy scheduler configuration. Called with no key it returns the whole config; with a key and no value it reads one setting.", inputSchema={
             "type": "object",
             "properties": {
                 "key": {"type": "string", "description": "Config key to get/set (empty to get all)"},
                 "value": {"type": "string", "description": "Value to set (None to get key)"},
             },
         }),
-        Tool(name="autonomy_run_task", description="Trigger immediate execution of an autonomy task.", inputSchema={
+        Tool(name="autonomy_run_task", description="Run an autonomy task immediately, outside its schedule. The run happens in the background; use autonomy_get_task to see the result.", inputSchema={
             "type": "object",
             "properties": {"id": {"type": "integer", "description": "Task ID to run"}},
             "required": ["id"],
@@ -305,25 +301,24 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "autonomy_tasks":
-        return [TextContent(type="text", text=_handle_tasks(arguments))]
+        return text_result(_handle_tasks(arguments))
     elif name == "autonomy_write_task":
-        return [TextContent(type="text", text=_handle_write(arguments))]
+        return text_result(_handle_write(arguments))
     elif name == "autonomy_get_task":
-        return [TextContent(type="text", text=_handle_get(arguments))]
+        return text_result(_handle_get(arguments))
     elif name == "autonomy_delete_task":
-        return [TextContent(type="text", text=_handle_delete(arguments))]
+        return text_result(_handle_delete(arguments))
     elif name == "autonomy_config":
-        return [TextContent(type="text", text=_handle_config(arguments))]
+        return text_result(_handle_config(arguments))
     elif name == "autonomy_run_task":
         text = await _handle_run(arguments)
-        return [TextContent(type="text", text=text)]
+        return text_result(text)
     elif name == "autonomy_health":
         text = await _handle_health(arguments)
-        return [TextContent(type="text", text=text)]
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return text_result(text)
+    return text_result(json.dumps({"error": f"Unknown tool: {name}"}))
 
 
 async def _handle_health(params: dict) -> str:

@@ -122,6 +122,18 @@ async def run_query(
     # pools at FastAPI shutdown.
     try:
         catalog = build_tool_list(list(pool.discovered), set(options.disallowed_tools))
+        # Record the tool universe so plan mode can derive its gate from
+        # tool annotations rather than a hardcoded name list. Uses the
+        # unfiltered discovery, not `catalog` — a tool disabled in config
+        # still exists and must stay gated if it is ever re-enabled.
+        try:
+            from app.mcp_discovery import record_tool_universe
+
+            record_tool_universe(
+                t["name"] for _srv, tools in pool.discovered for t in tools
+            )
+        except Exception as exc:  # never let bookkeeping break a turn
+            logger.debug("loop: record_tool_universe skipped: %s", exc)
         loaded_set = await _resolve_loaded_tool_set(options, catalog)
         if loaded_set.enabled:
             _inject_catalog_reminder(chat_messages, loaded_set)
@@ -735,13 +747,11 @@ async def _dispatch_one_tool_call(
                 content=f"Tool call denied: {reason}", is_error=True,
             )
 
-    # Dispatch. Inject session correlation as `_session_id` on a copy of
-    # the args — the per-tool handler in agent_mcp/main.py pops it before
-    # schema validation. Don't mutate args_dict itself: it's also the
-    # source for the persisted tool_call event and any next-turn replay.
+    # Dispatch. Session correlation rides in the request's `_meta` (see
+    # MCPPool.call_tool), not in the arguments — the MCP server validates
+    # arguments against the tool's inputSchema before its handler runs, so
+    # an injected argument is validated as if it were a real parameter.
     dispatch_args = dict(args_dict)
-    if session_id:
-        dispatch_args["_session_id"] = session_id
     try:
         # Race the MCP call against options.cancel_event so an in-flight
         # tool (long-running Bash, slow MCP server) doesn't block the
@@ -752,9 +762,11 @@ async def _dispatch_one_tool_call(
         # processes in their own finally clauses.
         cancel_event = getattr(options, "cancel_event", None)
         if cancel_event is None:
-            result = await pool.call_tool(name, dispatch_args)
+            result = await pool.call_tool(name, dispatch_args, session_id=session_id)
         else:
-            tool_task = asyncio.create_task(pool.call_tool(name, dispatch_args))
+            tool_task = asyncio.create_task(
+                pool.call_tool(name, dispatch_args, session_id=session_id)
+            )
             cancel_task = asyncio.create_task(cancel_event.wait())
             try:
                 done, _pending = await asyncio.wait(

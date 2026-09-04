@@ -346,3 +346,54 @@ def test_cache_refreshes_baseline_and_enabled_on_reuse():
     assert a is b
     assert b.baseline == {"Bash", "Read"}
     assert b.enabled is False
+
+
+# ── Catalog reminder gist (context cost) ────────────────────────────────────
+
+def test_gist_trims_to_first_sentence():
+    from app.harness.tool_search import _gist
+
+    assert _gist("Read a file from the local filesystem. Returns content with "
+                 "1-indexed line prefixes.") == "Read a file from the local filesystem."
+
+
+def test_gist_keeps_short_single_sentence_whole():
+    from app.harness.tool_search import _gist
+
+    assert _gist("List kanban boards.") == "List kanban boards."
+
+
+def test_gist_hard_caps_a_long_unpunctuated_line():
+    from app.harness.tool_search import CATALOG_GIST_CHARS, _gist
+
+    out = _gist("x" * 400)
+    assert len(out) <= CATALOG_GIST_CHARS + 1  # +1 for the ellipsis
+    assert out.endswith("…")
+
+
+def test_gist_does_not_split_on_a_tiny_leading_clause():
+    from app.harness.tool_search import _gist
+
+    # "Delete a task." is under the 28-char floor, so splitting there would
+    # throw away the half that says what the tool actually does.
+    out = _gist("Delete a task. Archiving is reversible; deletion is not.")
+    assert "Archiving" in out
+
+
+def test_catalog_reminder_stays_far_below_the_full_catalog():
+    """The reminder is a recognition aid, not a second copy of the schemas."""
+    import json
+
+    from app.harness.tool_search import format_catalog_reminder
+
+    catalog = [
+        {"type": "function", "function": {
+            "name": f"tool_{i}",
+            "description": "A tool that does a thing. " + "Detail sentence. " * 20,
+            "parameters": {"type": "object", "properties": {
+                "a": {"type": "string", "description": "x" * 200}}},
+        }}
+        for i in range(100)
+    ]
+    reminder = format_catalog_reminder(catalog, loaded=set())
+    assert len(reminder) < len(json.dumps(catalog)) / 4

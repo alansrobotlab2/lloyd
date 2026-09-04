@@ -20,8 +20,7 @@ from typing import Any
 
 import httpx
 from app.config import service_url
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
 
 from agent_mcp._shared import _err, _wrap, ErrorCode, make_http_client
 
@@ -32,8 +31,6 @@ _VALID_TABS = [
     "memory", "architecture", "skills", "tools", "services",
     "settings", "graph", "ide",
 ]
-
-app = Server("lloyd-mission-control-ui")
 
 
 async def _mc_get_state(_params: dict) -> dict:
@@ -130,7 +127,6 @@ _handlers = {
 }
 
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(
@@ -231,7 +227,6 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     handler = _handlers.get(name)
     if not handler:

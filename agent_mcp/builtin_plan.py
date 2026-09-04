@@ -36,16 +36,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from mcp.server import Server
-from mcp.types import TextContent, Tool
+from mcp.types import Tool
 
-from agent_mcp._shared import get_bound_session
+from agent_mcp._shared import get_bound_session, text_result
 from agent_mcp._todo_validation import validate_todos
 from app.sessions_io import mutate_session
 
 logger = logging.getLogger("lloyd-builtin-plan")
-
-app = Server("lloyd-builtin-plan")
 
 
 # Vault location for plan markdown files. Resolved relative to the
@@ -257,7 +254,6 @@ Cancel does NOT modify the prior committed plan (if one exists) — it only back
 Each todo: `{content: str, status: "pending"|"in_progress"|"completed", activeForm: str}`. Optional `stage: int` to associate with a stage from `stages`. Default first-stage todo to `in_progress` if you want to start work immediately on the next turn."""
 
 
-@app.list_tools()
 async def list_tools():
     # Note on `additionalProperties`: the top-level object schema does NOT
     # set additionalProperties=false, because the harness injects a
@@ -338,7 +334,6 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "EnterPlanMode":
         text = await _enter_plan_mode(arguments)
@@ -346,4 +341,4 @@ async def call_tool(name: str, arguments: dict):
         text = await _exit_plan_mode(arguments)
     else:
         text = json.dumps({"error": f"Unknown tool: {name}"})
-    return [TextContent(type="text", text=text)]
+    return text_result(text)

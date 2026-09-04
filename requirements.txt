@@ -8,8 +8,13 @@
 fastapi>=0.115.0
 uvicorn>=0.34.0
 
-# MCP server framework
-mcp>=1.0.0
+# MCP server framework.
+# Upper-bounded deliberately: mcp 2.x implements the 2026-07-28 spec and
+# removes the low-level Server decorator API (@server.list_tools() /
+# @server.call_tool()) that agent_mcp/main.py registers its handlers with.
+# It also swaps httpx for httpx2. The v2 migration is tracked separately;
+# until it lands, an unpinned upgrade breaks tool discovery at import time.
+mcp>=1.27.0,<2
 
 # HTTP tools
 httpx>=0.27.0
