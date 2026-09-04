@@ -6,10 +6,10 @@ existing domain modules. The harness `loop.py` reuses one process-wide
 pool keyed by mcp_servers config (see `get_or_open_pool`); cleanup is
 handled at FastAPI shutdown via `lifecycle.shutdown_cleanup`.
 
-Only SSE / HTTP transports are implemented today — stdio is not wired
-because every active config uses the consolidated aggregator. Adding
-stdio means importing `mcp.client.stdio.stdio_client` and branching in
-`_open_session`; nobody needs it yet, so it raises NotImplementedError.
+SSE/HTTP and stdio transports are both wired. stdio is what the
+Thunderbird bridge runs on (`agent_mcp.thunderbird`) — it speaks MCP over
+a pipe, so it gets an SDK client rather than the hand-rolled JSON-RPC
+exchange it used to have.
 """
 
 from __future__ import annotations
@@ -42,6 +42,38 @@ META_SESSION_ID = "lloyd/session_id"
 # this only fires when something is genuinely wedged. Without it a hung tool
 # blocks the harness indefinitely — there is no default in the MCP client.
 CALL_TIMEOUT_SECONDS = 660.0
+
+
+# ---------------------------------------------------------------------------
+# SDK field-name compatibility
+# ---------------------------------------------------------------------------
+#
+# mcp 2.x renames every model field to snake_case in Python (the wire format
+# stays camelCase). Construction is unaffected — the models set
+# populate_by_name, so `CallToolResult(isError=...)` still works — but
+# ATTRIBUTE READS are not aliased, and that asymmetry is dangerous here:
+#
+#     getattr(result, "isError", False)
+#
+# returns False on a 2.x CallToolResult rather than raising, which would
+# silently mark every failed tool call a success and quietly undo the
+# is_error plumbing. Read through these helpers instead.
+
+
+def _is_error(result: Any) -> bool:
+    """`isError` (mcp 1.x) / `is_error` (mcp 2.x) from a CallToolResult."""
+    value = getattr(result, "is_error", None)
+    if value is None:
+        value = getattr(result, "isError", None)
+    return bool(value)
+
+
+def _input_schema(tool: Any) -> dict[str, Any]:
+    """`inputSchema` (mcp 1.x) / `input_schema` (mcp 2.x) from a Tool."""
+    schema = getattr(tool, "input_schema", None)
+    if schema is None:
+        schema = getattr(tool, "inputSchema", None)
+    return schema or {"type": "object", "properties": {}}
 
 
 class MCPPool:
@@ -264,8 +296,7 @@ class MCPPool:
                 text_parts.append(text)
             else:
                 text_parts.append(json.dumps({"type": getattr(item, "type", "?")}))
-        is_error = bool(getattr(result, "isError", False))
-        return {"content": "".join(text_parts), "is_error": is_error}
+        return {"content": "".join(text_parts), "is_error": _is_error(result)}
 
     # ------------------------------------------------------------------
     # Internals
@@ -318,7 +349,7 @@ class MCPPool:
             {
                 "name": t.name,
                 "description": t.description or "",
-                "inputSchema": t.inputSchema,
+                "inputSchema": _input_schema(t),
             }
             for t in result.tools
         ]

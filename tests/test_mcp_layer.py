@@ -269,3 +269,48 @@ def test_plan_mode_gate_uses_annotations_after_discovery(monkeypatch, names):
     blocked = set(D._get_disallowed_tools(plan_mode=True))
     assert "email_send" in blocked and "vault_write" in blocked
     assert "ExitPlanMode" not in blocked
+
+
+# ── SDK version compatibility ────────────────────────────────────────────────
+
+def test_field_accessors_handle_both_sdk_naming_conventions():
+    """mcp 2.x renames model fields to snake_case in Python.
+
+    Construction stays compatible (the models set `populate_by_name`), but
+    attribute reads do not — and `getattr(result, "isError", False)`
+    returns False rather than raising on a 2.x result, which would
+    silently mark every failed tool call a success. These accessors are
+    what stands between that rename and a repeat of P1-2.
+    """
+    from app.harness.mcp_pool import _input_schema, _is_error
+
+    class V2Result:            # snake_case, as mcp 2.x exposes it
+        is_error = True
+
+    class V1Result:            # camelCase, as mcp 1.x exposes it
+        isError = True
+
+    class NoFlag:
+        pass
+
+    assert _is_error(V2Result()) is True
+    assert _is_error(V1Result()) is True
+    assert _is_error(NoFlag()) is False
+
+    class V2Tool:
+        input_schema = {"type": "object", "properties": {"a": {}}}
+
+    class V1Tool:
+        inputSchema = {"type": "object", "properties": {"b": {}}}
+
+    assert _input_schema(V2Tool())["properties"] == {"a": {}}
+    assert _input_schema(V1Tool())["properties"] == {"b": {}}
+    assert _input_schema(NoFlag()) == {"type": "object", "properties": {}}
+
+
+def test_mcp_is_pinned_below_2():
+    """The decorator API agent_mcp/main.py registers handlers with is gone
+    in mcp 2.x. Until that migration lands, an unpinned upgrade breaks
+    tool discovery at import time."""
+    req = (ROOT / "requirements.txt").read_text()
+    assert "mcp>=1.27.0,<2" in req
