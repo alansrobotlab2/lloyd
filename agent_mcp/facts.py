@@ -124,7 +124,29 @@ def _fact_get(params: dict) -> dict:
         return _err(str(exc), ErrorCode.INTERNAL, facts=[])
 
 
+def _writes_enabled() -> bool:
+    """`knowledge_graph.write_enabled` in config.yaml.
+
+    The rebuild sets this false while it extracts into a parallel tree: a
+    fact added in a chat turn during that window would land in a directory
+    about to be renamed to `facts-quarantine-<ts>`.
+    """
+    try:
+        from app.config import CONFIG
+        return bool(CONFIG.get("knowledge_graph", {}).get("write_enabled", True))
+    except Exception:
+        return True
+
+
 def _fact_add(params: dict) -> dict:
+    if not _writes_enabled():
+        return _err(
+            "fact writes are disabled (config.yaml knowledge_graph.write_enabled "
+            "= false). A knowledge-graph rebuild is in progress; a fact added now "
+            "would land in a tree about to be replaced. Say the fact in the "
+            "conversation and it can be added when the rebuild lands.",
+            ErrorCode.INTERNAL,
+        )
     raw_entity = params.get("entity", "").strip()
     category = params.get("category", "").strip()
     fact_text = params.get("fact", "").strip()
@@ -405,6 +427,12 @@ def _fact_invalidate(params: dict) -> dict:
 
 def _fact_relate(params: dict) -> dict:
     """Add a typed relationship edge between two entities."""
+    if not _writes_enabled():
+        return _err(
+            "edge writes are disabled (config.yaml knowledge_graph.write_enabled "
+            "= false) while a knowledge-graph rebuild is in progress.",
+            ErrorCode.INTERNAL,
+        )
     source = params.get("source", "").strip()
     target = params.get("target", "").strip()
     rel_type = params.get("type", "").strip()

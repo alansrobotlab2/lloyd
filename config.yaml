@@ -304,3 +304,8 @@ workers:
       max_inflight: 1
       max_duration_seconds: 600
   staging_root: ~/lloyd/_pipeline/vault-derived/pending-research
+
+# Fact writes through the fact_add MCP tool. The rebuild sets this
+# false so a chat turn cannot add a fact to a tree about to be renamed.
+knowledge_graph:
+  write_enabled: false

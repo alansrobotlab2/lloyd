@@ -334,3 +334,32 @@ def test_empty_sources_is_an_error_not_a_whole_vault_walk(tmp_path, monkeypatch)
     with pytest.raises(RuntimeError, match="no usable sources.paths"):
         ne.NightlyExtraction()._eligible_files(full_mode=True)
     kg_store.reset()
+
+
+# ── the rebuild's write flag ─────────────────────────────────────────────────
+
+def test_fact_writes_can_be_disabled_for_a_rebuild(extractor, monkeypatch):
+    """A fact added during the rebuild would land in a tree about to be
+    renamed to facts-quarantine-<ts>."""
+    from agent_mcp import facts as facts_mod
+    monkeypatch.setattr(facts_mod, "_writes_enabled", lambda: False)
+    add = facts_mod._fact_add({"entity": "Lloyd", "category": "state", "fact": "x"})
+    assert "error" in add and "rebuild" in add["error"]
+    relate = facts_mod._fact_relate({"source": "A", "target": "B", "type": "uses"})
+    assert "error" in relate and "rebuild" in relate["error"]
+
+
+def test_content_hasher_honours_the_env_override(tmp_path, monkeypatch):
+    """Without its own index the rebuild would skip every file the live tree
+    had already extracted and produce an empty tree."""
+    idx = tmp_path / "rebuild-hashes.json"
+    monkeypatch.setenv("LLOYD_CONTENT_HASHES", str(idx))
+    ch = _load("content_hasher_env", "scripts/memory/content_hasher.py")
+    h = ch.ContentHasher()
+    assert h.index_path == idx
+    doc = tmp_path / "a.md"
+    doc.write_text("hello")
+    assert h.has_changed(doc)
+    h.update_hashes([doc]); h.save()
+    assert not ch.ContentHasher().has_changed(doc)
+    assert idx.exists()

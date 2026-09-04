@@ -18,12 +18,21 @@ Usage:
 
 import hashlib
 import json
+import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-DEFAULT_INDEX_PATH = Path.home() / "lloyd" / "_pipeline" / "content-hashes.json"
+
+# LLOYD_CONTENT_HASHES lets a rebuild keep its own index. Without it the
+# rebuild would skip every file the LIVE tree had already extracted and
+# produce an empty tree.
+DEFAULT_INDEX_PATH = Path(os.environ["LLOYD_CONTENT_HASHES"]) \
+    if os.environ.get("LLOYD_CONTENT_HASHES") \
+    else Path.home() / "lloyd" / "_pipeline" / "content-hashes.json"
 
 
 class ContentHasher:
@@ -47,7 +56,10 @@ class ContentHasher:
             "file_count": len(self._hashes),
             "hashes": self._hashes,
         }
-        self.index_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # Atomic: this is the resume point for a multi-hour extraction, and a
+        # truncated index reads as "nothing has been extracted".
+        from app.atomic_io import atomic_write_text
+        atomic_write_text(self.index_path, json.dumps(data, indent=2))
 
     @staticmethod
     def _hash_file(path: Path) -> str:
