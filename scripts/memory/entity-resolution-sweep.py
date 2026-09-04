@@ -54,6 +54,7 @@ import yaml
 from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_KG_DB
 from app.entity_naming import looks_like_junk_entity
 from app.kg_store import KGStore
+from app.atomic_io import atomic_write_text
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _invocation import invocation_ledger  # noqa: E402
@@ -620,7 +621,7 @@ def retag_fact_file(path: Path, variant: str, canonical: str) -> int:
     if fm.get("type") != "overview" and category:
         body = (f"\n# {canonical} - {category}\n\n**Entity:** {canonical}\n"
                 f"**Category:** {category}\n**Fact Count:** {len(fm.get('facts') or [])}\n")
-    path.write_text(_dump_frontmatter(fm, body), encoding="utf-8")
+    atomic_write_text(path, _dump_frontmatter(fm, body))
     return changed
 
 
@@ -652,7 +653,7 @@ def _merge_fact_file_into(src: Path, dst: Path) -> None:
         )
     else:
         body = dst_body
-    dst.write_text(_dump_frontmatter(dst_fm, body), encoding="utf-8")
+    atomic_write_text(dst, _dump_frontmatter(dst_fm, body))
 
 
 def load_semantic_proposals(out_dir: Path) -> list[dict]:

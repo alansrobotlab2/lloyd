@@ -70,17 +70,44 @@ _CODE_CALL_CONTENT_RE = re.compile(r"[a-z=,'\"]")
 _MD_RE = re.compile(r"\.md(?![a-z])", re.IGNORECASE)
 
 
-def looks_like_junk_entity(name: str) -> bool:
-    """True if `name` is a leaked filename / code fragment / template, not a
-    real entity.
+# ── Pipeline-exhaust names ───────────────────────────────────────────────────
+# 921 entity directories on 2026-09-03 were named after this pipeline's own
+# runs: `Sweep Run 313`, `Task #67 Semantic Entity Resolution`, `run105
+# forensics`, `Entity Resolution Sweep Report`. They are events in the
+# pipeline's life, not knowledge. A note UNDER projects/ may legitimately
+# discuss a task, so the caller passes `source_doc` and the pattern is only
+# enforced outside `projects/`.
+_EXHAUST_RE = re.compile(
+    r"(?:\brun\s*\d+|\btask\s*#\s*\d+|\bsweep\b|\bforensics\b|"
+    r"\b(?:apply|merge|revert|extraction|classification|reflection)\s+report\b|"
+    r"\breport\s+\d|\bbatch\s*\d+)",
+    re.IGNORECASE,
+)
+# An identifier, not a name: `_fact_add`, `run_query`, `handle_tool_use`.
+_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+\(?\)?$")
+# A date-prefixed stem: `2026-09-03 sweep`, `2026-09-03-incident`.
+_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}")
+# Any data/artefact extension at the end, whatever its case (`Config.YAML`).
+_ANY_EXT_RE = re.compile(r"\.(?:json|jsonl|bak|txt|log|ya?ml|csv|tsv|out)$", re.IGNORECASE)
+
+
+def looks_like_junk_entity(name: str, source_doc: str | None = None) -> bool:
+    """True if `name` is a leaked filename / code fragment / template / this
+    pipeline's own exhaust, rather than a real entity.
 
     High precision by design (see module note). Legit entities pass: plain
     names, and single-token doc slugs ending in `.md` with no interior space.
+
+    `source_doc` (a vault-relative path) relaxes the pipeline-exhaust rule:
+    a note under `projects/` may legitimately be about a task or a run.
     """
     if not name:
         return True
     s = name.strip()
     if not s or s == ".md":
+        return True
+    # Bookkeeping prefixes: `_relationships`, `.DS_Store`.
+    if s[0] in "_.":
         return True
     # Template / placeholder markers.
     if "{" in s or "}" in s or "<" in s or "YYYY-MM-DD" in s or "YYYY-MM" in s:
@@ -88,6 +115,12 @@ def looks_like_junk_entity(name: str) -> bool:
     # Function/method-call fragment: `query()`, `models.load_lora_adapter()`.
     m = _CODE_CALL_RE.search(s)
     if m and (m.group(1) == "" or _CODE_CALL_CONTENT_RE.search(m.group(1))):
+        return True
+    # A snake_case identifier is code, not a concept.
+    if _IDENTIFIER_RE.match(s):
+        return True
+    # A date-prefixed stem names an occurrence, not a thing.
+    if _DATE_PREFIX_RE.match(s):
         return True
     # `.md` handling: a real doc-slug entity is a single token ending in `.md`.
     low = s.lower()
@@ -97,6 +130,9 @@ def looks_like_junk_entity(name: str) -> bool:
         if not low.endswith(".md"):   # `.md` mid-string → fragment
             return True
         return False            # clean single-token doc slug → keep
+    # Any data/artefact extension at the end, regardless of case.
+    if _ANY_EXT_RE.search(s):
+        return True
     # Whole name is a lowercase code/config filename.
     if _CODE_FILE_RE.match(s):
         return True
@@ -106,12 +142,18 @@ def looks_like_junk_entity(name: str) -> bool:
     # Code-ext token embedded in a longer string → fragment.
     if _CODE_FRAG_RE.search(s):
         return True
+    # A name this long is a sentence the extractor mistook for a subject.
+    if len(s.split()) >= 8:
+        return True
+    # This pipeline's own exhaust, unless the source document is a project note.
+    if _EXHAUST_RE.search(s) and not (source_doc or "").startswith("projects/"):
+        return True
     return False
 
 
-def is_valid_entity_name(name: str) -> bool:
+def is_valid_entity_name(name: str, source_doc: str | None = None) -> bool:
     """Convenience inverse of :func:`looks_like_junk_entity`."""
-    return not looks_like_junk_entity(name)
+    return not looks_like_junk_entity(name, source_doc)
 
 def _load_alias_map() -> dict[str, str]:
     """Case-insensitive surface→canonical map, entities included.
@@ -178,6 +220,83 @@ def normalize_and_register(name: str) -> str:
         # registered for next time.
         return register_canonical(name)
     return resolved
+
+
+# ── The resolver ─────────────────────────────────────────────────────────────
+# One implementation. Before this, three existed: `_shared._resolve_entity`
+# (dir → alias → unbounded fuzzy), `entity_naming.normalize` (alias only) and
+# the v4 classifier's `resolve_canonical` (alias only), so the same name could
+# resolve three ways depending on which module asked.
+#
+# Fuzzy is read-only and bounded to names sharing a first token. The unbounded
+# version compared the query against all 23,560 registry names on every miss:
+# `fact_path` to an unknown entity cost 746 ms, all of it Levenshtein.
+
+_FUZZY_THRESHOLD = 0.85
+
+
+def _first_token_index() -> dict[str, list[str]]:
+    """lowercased first token → canonical names starting with it."""
+    def build():
+        idx: dict[str, list[str]] = {}
+        for name in _store().entities.all():
+            toks = _TOKEN_RE.findall(name.lower())
+            if toks:
+                idx.setdefault(toks[0], []).append(name)
+        return idx
+    try:
+        return _store().cached("first_token_index", build)
+    except StoreUnavailable:
+        return {}
+
+
+def fuzzy_candidates(name: str) -> list[str]:
+    """Registry names worth a Levenshtein comparison against `name`.
+
+    A fuzzy match at threshold 0.85 cannot survive a different first token —
+    the edit distance alone would sink it — so restricting to that bucket
+    loses no match the full scan would have found.
+    """
+    toks = _TOKEN_RE.findall((name or "").lower())
+    if not toks:
+        return []
+    return _first_token_index().get(toks[0], [])
+
+
+def resolve(name: str, *, mode: str) -> tuple[str, bool]:
+    """Resolve an entity name to its canonical form.
+
+    Returns `(canonical, is_new)`; `is_new` is True when nothing resolved and
+    the caller's input comes back verbatim.
+
+    Order, both modes:
+        1. Alias table (case-insensitive, exact case preferred)
+        2. Entity registry (case-insensitive, exact case preferred)
+
+    Read mode adds:
+        3. Fuzzy match against names sharing a first token, in memory only.
+
+    Write mode stops at 2 on purpose. Fuzzy matching on a write is how
+    `fact_add(entity="Lloyd")` once landed on `lloyd-mc` (#340 PR 3).
+    """
+    if mode not in ("read", "write"):
+        raise ValueError(f"mode must be 'read' or 'write', got {mode!r}")
+    name = (name or "").strip()
+    if not name:
+        return name, True
+    try:
+        st = _store()
+    except StoreUnavailable:
+        return name, True
+    hit = st.aliases.resolve(name) or st.entities.lookup(name)
+    if hit:
+        return hit, False
+    if mode == "read":
+        from agent_mcp._shared import _fuzzy_entity_match
+        match = _fuzzy_entity_match(name, fuzzy_candidates(name), _FUZZY_THRESHOLD)
+        if match:
+            return match, False
+    return name, True
 
 
 def set_alias(surface: str, canonical: str, *, kind: str | None = None,

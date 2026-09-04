@@ -26,6 +26,8 @@ from pathlib import Path
 
 import yaml
 
+from app.atomic_io import atomic_write_text
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 # Direct path — avoid importing app.* (triggers full FastAPI router chain → uvloop dep)
 from pathlib import Path as _P
@@ -332,7 +334,7 @@ class ProfileGenerator:
         path = self.profile_path(entity)
         yaml_text = yaml.dump(profile, default_flow_style=False, sort_keys=False, allow_unicode=True)
         body = f"# Summary\n\n{summary.strip()}\n"
-        path.write_text(f"---\n{yaml_text}---\n\n{body}", encoding="utf-8")
+        atomic_write_text(path, f"---\n{yaml_text}---\n\n{body}")
         return path
 
     # ── Batch driver ────────────────────────────────────────────────────

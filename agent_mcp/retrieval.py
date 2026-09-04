@@ -23,6 +23,7 @@ import math
 import re
 from typing import Optional
 
+from app.entity_naming import _GENERIC_SINGLE
 from app.kg_store import StoreUnavailable, store
 
 from agent_mcp._shared import (
@@ -325,9 +326,16 @@ def extract_entities_from_query(query: str) -> list:
     q_tokens_all = set(re.findall(r"\b\w+\b", q_lower))
 
     # 2. Full-name match at word boundaries.
+    #
+    # A single generic word is not a full-name match worth 5.0. `memory`,
+    # `graph`, `session` and `state` are all real entity directories, so any
+    # query containing one of those words seeded on it at maximum score and
+    # pushed the query's actual subject out of FACT_MAX_ENTITIES.
     for tok in q_tokens_all:
         for e_lower in first_tok.get(tok, ()):
             if len(e_lower) < 3:
+                continue
+            if " " not in e_lower and e_lower in _GENERIC_SINGLE:
                 continue
             if _entity_pattern(e_lower).search(q_lower):
                 _bump(entity_lookup[e_lower], 5.0 + min(len(e_lower) / 20.0, 2.0))

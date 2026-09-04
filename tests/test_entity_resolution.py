@@ -153,21 +153,28 @@ def test_alias_lookup_both_modes():
                 assert is_new is False
 
 
-def test_alias_pointing_to_missing_dir_falls_through():
-    """Alias maps to a directory that no longer exists — both modes must
-    NOT return the stale canonical."""
+def test_alias_is_followed_even_when_the_canonical_has_no_dir_yet():
+    """An alias whose canonical has no directory is still authoritative.
+
+    It used to fall through to the caller's input, which meant a merged
+    variant was recreated by the next writer: the sweep moved the files,
+    the alias said `variant -> canonical`, and fact_add ignored it and made
+    `variant/` again. An entity can also legitimately live only in the edge
+    graph. Alias rows are now written by a named origin, so they are trusted.
+    """
     with tempfile.TemporaryDirectory() as td:
         facts_root, aliases_path = _isolate_facts_root(Path(td))
-        # Lloyd dir exists but alias points at "Ghost" (doesn't exist)
         (facts_root / "Lloyd").mkdir()
         _seed_aliases({"foo": "Ghost"})
         with patch.object(_shared, "FACTS_ROOT", facts_root), \
              patch.object(_shared, "ALIASES_PATH", aliases_path), \
              patch.object(_shared, "_entity_dirs_cache", None):
-            # In write mode: returns input verbatim (no fuzzy)
-            resolved, is_new = _shared._resolve_entity("foo", mode="write")
-            assert resolved == "foo"
-            assert is_new is True
+            for mode in ("read", "write"):
+                resolved, is_new = _shared._resolve_entity("foo", mode=mode)
+                assert resolved == "Ghost", mode
+                assert is_new is False, mode
+            # A name with no alias and no directory still comes back verbatim.
+            assert _shared._resolve_entity("bar", mode="write") == ("bar", True)
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +302,7 @@ _TESTS = [
     test_case_insensitive_match_both_modes,
     # alias
     test_alias_lookup_both_modes,
-    test_alias_pointing_to_missing_dir_falls_through,
+    test_alias_is_followed_even_when_the_canonical_has_no_dir_yet,
     # fuzzy
     test_read_mode_fuzzy_match_works,
     test_read_mode_fuzzy_does_not_persist_alias,

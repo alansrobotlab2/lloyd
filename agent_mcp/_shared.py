@@ -595,70 +595,69 @@ def _save_aliases(aliases: dict) -> None:
                                origin="legacy")
 
 
+_DIR_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _dir_fuzzy_candidates(name: str) -> list[str]:
+    """Entity-dir names sharing a first token with `name`.
+
+    Same bound as `entity_naming.fuzzy_candidates`: a 0.85 match cannot
+    survive a different first token, and comparing against all 23,560 names
+    cost 746 ms on every miss.
+    """
+    toks = _DIR_TOKEN_RE.findall((name or "").lower())
+    if not toks:
+        return []
+    first = toks[0]
+    return [d for d in _get_entity_dirs_cached()
+            if (m := _DIR_TOKEN_RE.search(d)) and m.group(0).lower() == first]
+
+
 def _resolve_entity(name: str, *, mode: Literal["read", "write"]) -> tuple[str, bool]:
     """Resolve an entity name to its canonical form.
 
     Returns (canonical_name, is_new). `is_new` is True when no resolution
     happened (the caller's input is returned verbatim).
 
-    Resolution order depends on mode:
-
-    Read mode (mode="read"):
-        1. Exact case-insensitive directory match
-        2. Alias table lookup (original case or lowercase)
-        3. Fuzzy match against known entities (in-memory only)
-        Returns the caller's input verbatim if nothing resolves.
-        NO DISK WRITES — pure read-side resolution.
-
-    Write mode (mode="write"):
-        1. Exact case-insensitive directory match
-        2. Alias table lookup (original case or lowercase)
-        Returns the caller's input verbatim if nothing resolves.
-        FUZZY MATCHING IS DISABLED. The caller writes to the exact name
-        they specified — this is the fix for the silent fuzzy-merge bug.
+    A thin wrapper over `app.entity_naming.resolve`, which owns the
+    precedence (alias → registry → bounded fuzzy on reads). The one thing
+    added here is the directory probe first: the markdown tree is the fact
+    layer, and a directory can exist before the store has indexed it, so an
+    on-disk name must win over anything the store might guess.
 
     Why mode is required (and kw-only):
-        Task #340 PR 3 introduces this parameter to fix a silent data-
+        Task #340 PR 3 introduced this parameter to fix a silent data-
         corruption bug: previously fuzzy match ran regardless of
         auto_create, so fact_add(entity="Lloyd", ...) could silently
         land on "lloyd-mc" if the fuzzy threshold passed. Reads also
         wrote to the alias table as a side effect.
 
-        Forcing mode= keyword-only and required makes every callsite
-        explicit about whether it expects existing data (read) or is
-        creating something new (write). No silent default.
-
-    Mode="write" no longer creates the entity directory — that's still
-    the caller's responsibility (see _fact_add). It also no longer
-    pre-registers an alias mapping, because the caller's input IS the
-    canonical name.
+        Write mode still refuses fuzzy matching, and neither mode writes.
     """
     name = name.strip()
     if not name:
         return name, True
 
-    # 1. Exact directory match (both modes).
+    # 1. Exact directory match (both modes) — the fact tree wins.
     entity_dir = _find_entity_dir(name)
     if entity_dir:
         return entity_dir.name, False
 
-    # 2. Alias table lookup (both modes). One indexed query against the
-    #    store, case-insensitive with exact case preferred — the JSON era
-    #    materialised a 19,914-entry dict on every miss to do the same thing.
-    from app.kg_store import StoreUnavailable, store
-    try:
-        canonical = store().aliases.resolve(name)
-    except StoreUnavailable:
-        canonical = None
-    if canonical and _find_entity_dir(canonical):
+    # 2/3. Alias → registry → (read only) bounded fuzzy.
+    from app.entity_naming import resolve as _resolve
+    canonical, is_new = _resolve(name, mode=mode)
+    if is_new:
+        # The store's registry mirrors the fact tree but can lag it: a
+        # directory written moments ago is not indexed yet. On reads, give
+        # fuzzy a second bounded pass over the directory names themselves.
+        if mode == "read":
+            hit = _fuzzy_entity_match(name, _dir_fuzzy_candidates(name))
+            if hit:
+                return hit, False
+        return name, True
+    # A store hit that has no directory is still a real canonical: the entity
+    # may live only in the edge graph. But for read paths that go on to open
+    # `<canonical>/`, prefer a name that exists on disk when there is one.
+    if mode == "read" and not _find_entity_dir(canonical):
         return canonical, False
-
-    # 3. Fuzzy match — read mode ONLY, in-memory, no persistence.
-    if mode == "read":
-        known_entities = _get_entity_dirs_cached()
-        fuzzy_match = _fuzzy_entity_match(name, known_entities)
-        if fuzzy_match:
-            return fuzzy_match, False
-
-    # Nothing resolved — return verbatim, mark as new.
-    return name, True
+    return canonical, False

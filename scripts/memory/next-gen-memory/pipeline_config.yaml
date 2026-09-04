@@ -10,14 +10,30 @@ extraction:
   max_files: 5000
 
 sources:
-  # Directories to scan for content
+  # The corpus, as an ALLOW-LIST. nightly_extraction reads this (it did not
+  # until 2026-09-04: it walked the whole vault minus a deny-list, so every
+  # new directory was ingested by default and roughly half of the 205k facts
+  # in the pre-rebuild tree came from re-extracting the pipeline's own
+  # output). A directory is ingested because it is named here.
+  #
+  # Deliberately absent:
+  #   skills/     - the agent's own instructions, not knowledge about the world
+  #   autonomy/   - task frontmatter the scheduler rewrites every ~15 min
+  #   agents/, facts/, sessions/, templates/, images/ - pipeline plumbing
+  #   architecture/, backlog/, lloyd/ - written by the agent about itself
+  #   youtube/    - raw transcript dumps; the knowledge/ notes distil them
   paths:
-    - "~/obsidian/projects"
     - "~/obsidian/knowledge"
+    - "~/obsidian/projects"
+    - "~/obsidian/people"
+    - "~/obsidian/personal"
+    - "~/obsidian/work"
+    # Daily notes, but only once they have settled — today's is appended to
+    # all day, so nightly_extraction skips anything dated today or later.
     - "~/obsidian/memory"
-    - "~/obsidian/skills"
 
-  # Patterns to exclude
+  # Belt and braces. The allow-list above already excludes these; the walk
+  # applies them again so a mistaken path entry cannot drag them in.
   exclude_patterns:
     - ".git/"
     - "__pycache__/"
@@ -25,6 +41,12 @@ sources:
     - "*.bak"
     - "*.tmp"
     - ".DS_Store"
+    - "/facts/"
+    - "/_pipeline/"
+    - "/skills/"
+    - "/agents/"
+    - "/autonomy/"
+    - "/memory/vault-maintenance/"
 
   # Patterns to include (Markdown)
   include_patterns:

@@ -10,7 +10,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,82 +20,21 @@ from typing import Any
 _LLOYD_ROOT = Path(__file__).resolve().parents[3]
 if str(_LLOYD_ROOT) not in sys.path:
     sys.path.insert(0, str(_LLOYD_ROOT))
-try:
-    from app.entity_naming import normalize_and_register as _entity_normalize
-    from app.entity_naming import known_entities_in_text as _known_entities
-    from app.entity_naming import looks_like_junk_entity as _is_junk_entity
-except Exception:
-    def _known_entities(text: str, limit: int = 60) -> list:  # fallback: none known
-        return []
+from app.entity_naming import normalize_and_register as _entity_normalize
+from app.entity_naming import known_entities_in_text as _known_entities
+from app.entity_naming import looks_like_junk_entity as _is_junk_entity
+from app.atomic_io import atomic_write_text, locked_file
+from app.fact_ids import assign_ids as _assign_fact_ids
+from app.kg_store import StoreUnavailable, store as _kg_store
 
-    def _entity_normalize(name: str) -> str:  # fallback: pass-through
-        return name
+# The seven fallback classes that used to sit here (a hand-rolled YAML parser,
+# a pass-through entity normaliser, a never-junk predicate) each turned a
+# missing dependency into silently wrong output: unparseable frontmatter read
+# as an empty fact list, which `write_fact_file` then wrote back as truth.
+# An ImportError is the correct outcome — the extractor cannot do its job
+# without these.
 
-    def _is_junk_entity(name: str) -> bool:  # fallback: never junk
-        return False
-
-# Try to import yaml, provide fallback if not available
-try:
-    import yaml
-except ImportError:
-    # Simple YAML parser for frontmatter
-    class yaml:
-        @staticmethod
-        def safe_load(text):
-            """Minimal YAML parser for frontmatter."""
-            result = {}
-            current_key = None
-            current_list = False
-            for line in text.strip().split('\n'):
-                line = line.rstrip()
-                if not line or line.startswith('#'):
-                    continue
-                if line.startswith('- '):
-                    if current_key and current_list:
-                        item = line[2:].strip().strip('"').strip("'")
-                        result[current_key].append(item)
-                elif ':' in line:
-                    key, _, value = line.partition(':')
-                    key = key.strip()
-                    value = value.strip()
-                    if value == '':
-                        result[key] = []
-                        current_key = key
-                        current_list = True
-                    elif value.startswith('[') and value.endswith(']'):
-                        # Inline list
-                        items = value[1:-1].split(',')
-                        result[key] = [item.strip().strip('"').strip("'") for item in items if item.strip()]
-                        current_key = None
-                        current_list = False
-                    else:
-                        result[key] = value.strip('"').strip("'")
-                        current_key = None
-                        current_list = False
-            return result
-
-        @staticmethod
-        def dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True):
-            """Simple YAML dumper for frontmatter."""
-            lines = []
-            for key, value in data.items():
-                if isinstance(value, list):
-                    lines.append(f"{key}:")
-                    for item in value:
-                        if isinstance(item, dict):
-                            lines.append(f"- id: {item.get('id', '')}")
-                            for k, v in item.items():
-                                if k != 'id':
-                                    lines.append(f"  {k}: {v}")
-                        else:
-                            lines.append(f"- {item}")
-                elif isinstance(value, dict):
-                    lines.append(f"{key}:")
-                    for k, v in value.items():
-                        lines.append(f"  {k}: {v}")
-                else:
-                    lines.append(f"{key}: {value}")
-            return '\n'.join(lines) + '\n'
+import yaml
 
 # Constants
 HOME = Path.home()
@@ -111,6 +50,63 @@ from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 CHUNK_SIZE = 8000          # chars per chunk (~2000 tokens); 90% of docs fit in one
 CHUNK_OVERLAP = 200        # carry a little context across the cut so facts aren't split
 MAX_CHUNKS = 6             # bound cost on huge docs (sessions can be 100KB+)
+
+# The category vocabulary. 287 distinct category spellings existed on
+# 2026-09-03 — `state`, `States`, `current state`, `state/config` and so on —
+# because the model's free-text answer was written through verbatim. Each
+# spelling makes its own fact file, so `fact_get(entity, category="state")`
+# missed most of the entity's state facts. Unknown answers map to the nearest
+# by token overlap, else `general`.
+CATEGORY_VOCAB = (
+    "state", "event", "decision", "preference", "goal", "skill",
+    "relationship", "capability", "constraint", "configuration",
+    "hardware", "research", "general",
+)
+_CATEGORY_TOKENS = {c: set(re.findall(r"[a-z]+", c)) for c in CATEGORY_VOCAB}
+# Spellings seen in the tree that map cleanly onto the vocabulary.
+_CATEGORY_ALIASES = {
+    "status": "state", "current state": "state", "states": "state",
+    "config": "configuration", "settings": "configuration",
+    "preferences": "preference", "prefs": "preference",
+    "relationships": "relationship", "relations": "relationship",
+    "events": "event", "history": "event", "timeline": "event",
+    "goals": "goal", "objectives": "goal", "skills": "skill",
+    "capabilities": "capability", "constraints": "constraint",
+    "decisions": "decision", "temporary": "state", "fact": "general",
+    "facts": "general", "info": "general", "notes": "general",
+}
+
+
+class ExtractionFailed(RuntimeError):
+    """The model call failed or returned nothing usable.
+
+    Raised rather than returning an empty fact list. An empty list was
+    indistinguishable from `this document genuinely has no facts`, so a
+    transient vLLM error marked the document extracted and its content hash
+    was saved — the document was then never revisited.
+    """
+
+
+def normalize_category(raw: str | None) -> str:
+    """Map a model-supplied category onto CATEGORY_VOCAB."""
+    c = (raw or "").strip().lower()
+    c = re.sub(r"[^a-z ]+", " ", c).strip()
+    if not c:
+        return "general"
+    if c in _CATEGORY_TOKENS:
+        return c
+    if c in _CATEGORY_ALIASES:
+        return _CATEGORY_ALIASES[c]
+    toks = set(c.split())
+    best, best_score = "general", 0.0
+    for cat, cat_toks in _CATEGORY_TOKENS.items():
+        overlap = len(toks & cat_toks)
+        if not overlap:
+            continue
+        score = overlap / len(toks | cat_toks)
+        if score > best_score:
+            best, best_score = cat, score
+    return best if best_score >= 0.3 else "general"
 
 EXTRACTION_PROMPT = """You are a fact extraction engine. Analyze the following content and extract
 atomic facts about entities mentioned.
@@ -241,7 +237,10 @@ class FactExtractor:
 
             if primary_entity is None and parsed.get("entity"):
                 primary_entity = self._sanitize_entity(parsed["entity"])
-                primary_category = self._sanitize_entity(parsed.get("category") or "general")
+                # A category is a vocabulary term, not an entity. Running it
+                # through _sanitize_entity registered every distinct spelling
+                # as a canonical entity in the alias table.
+                primary_category = normalize_category(parsed.get("category"))
 
             for f in parsed.get("facts", []):
                 if not isinstance(f, dict):
@@ -254,8 +253,7 @@ class FactExtractor:
                 # at write time when absent).
                 if f.get("entity"):
                     f["entity"] = self._sanitize_entity(f["entity"])
-                if f.get("category"):
-                    f["category"] = self._sanitize_entity(f["category"])
+                f["category"] = normalize_category(f.get("category"))
                 all_facts.append(f)
 
         return {
@@ -265,7 +263,8 @@ class FactExtractor:
         }
     
     def _call_llm(self, prompt: str) -> str:
-        """Call the local 2B model."""
+        """Call the local model. Raises ExtractionFailed rather than faking
+        an empty extraction — see the class docstring."""
         import urllib.request
 
         url = f"http://localhost:{self.model_port}/v1/chat/completions"
@@ -283,7 +282,6 @@ class FactExtractor:
             "priority": 2,
         }
 
-        response_text = None
         try:
             req = urllib.request.Request(
                 url,
@@ -293,31 +291,20 @@ class FactExtractor:
             )
             with urllib.request.urlopen(req, timeout=120) as response:
                 data = json.loads(response.read().decode('utf-8'))
-                response_text = data["choices"][0]["message"]["content"]
-                return response_text
+                text = data["choices"][0]["message"]["content"]
         except Exception as e:
-            print(f"LLM call failed: {e}")
-            # Fallback: try to extract first complete JSON object from truncated response
-            if response_text:
-                match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text)
-                if match:
-                    try:
-                        return match.group()
-                    except Exception:
-                        pass
+            raise ExtractionFailed(f"LLM call failed: {e}") from e
+        if not text or not text.strip():
+            raise ExtractionFailed("LLM returned empty content")
+        return text
 
-            # Return empty extraction
-            return json.dumps({
-                "entity": "unknown",
-                "category": "general",
-                "facts": []
-            })
-    
     def get_existing_facts(self, entity: str, category: str) -> str:
         """Load existing facts for an entity/category."""
         # Sanitize entity and category to prevent nested path creation
         entity = self._sanitize_entity(entity)
-        category = self._sanitize_entity(category)
+        category = normalize_category(category)
+        if not entity:
+            return ""
         fact_file = self.facts_dir / entity / f"{entity}-{category}.md"
         if not fact_file.exists():
             return ""
@@ -330,91 +317,191 @@ class FactExtractor:
                 return parts[1].strip()
         return ""
     
-    def _sanitize_entity(self, entity: str) -> str:
-        """Sanitize entity name and resolve to canonical form.
+    def _sanitize_entity(self, entity: str, source_doc: str | None = None) -> str:
+        """Sanitize an entity name and resolve it to its canonical form.
 
-        Sanitization strips path characters; after that we run it through
-        the alias map so casing/punct variants collapse to the existing
-        canonical (gr00t → GR00T). Unknown names are registered as
-        self-identity so the next writer sees the same canonical.
+        Sanitization strips path characters; the junk predicate runs BEFORE
+        registration, so a leaked filename or a pipeline run name never
+        enters the alias table. (It used to be registered first and rejected
+        at write time, which is why 921 run-named canonicals existed.)
+        Returns "" for a rejected name; callers drop the fact.
         """
         if not entity:
-            return "general"
+            return ""
         # Take last path component if slashes present
         entity = entity.strip().split("/")[-1].split("\\")[-1]
         # Remove any remaining path-unsafe characters
         entity = re.sub(r'[<>:"|?*]', '', entity)
         # Collapse whitespace
         entity = re.sub(r'\s+', ' ', entity).strip()
-        if not entity:
-            return "general"
+        if not entity or _is_junk_entity(entity, source_doc):
+            return ""
         # Alias-resolve + self-register. Safe on unknowns (pass-through).
         return _entity_normalize(entity)
-    
-    def write_fact_file(self, entity: str, category: str, facts_data: dict) -> Path | None:
+
+    def write_fact_file(self, entity: str, category: str, facts_data: dict,
+                        *, source_doc: str | None = None,
+                        source_hash: str | None = None) -> Path | None:
         """Write or update a fact file.
 
-        Returns the written path, or ``None`` when the entity is rejected as
-        junk (a leaked filename / code fragment — see
-        ``app.entity_naming.looks_like_junk_entity``).
-        """
-        # Sanitize entity and category to prevent nested path creation
-        entity = self._sanitize_entity(entity)
-        category = self._sanitize_entity(category)
+        Every fact written here carries `created_at`, `source_doc`,
+        `source_hash` and `provenance`, so it can be dated, attributed and
+        selectively reverted. 99.7% of the 205k facts in the pre-2026-09 tree
+        had none of those, which is why nothing could tell a fact extracted
+        from a real vault note from one extracted out of the pipeline's own
+        exhaust.
 
-        # Skip leaked filenames / code fragments so they never become entity dirs.
-        if _is_junk_entity(entity):
-            print(f"  ⤫ skipped junk entity '{entity}' ({len(facts_data.get('facts', []))} facts dropped)")
+        Returns the written path, `None` when the entity is rejected as junk.
+        """
+        entity = self._sanitize_entity(entity, source_doc)
+        category = normalize_category(category)
+
+        if not entity:
+            print(f"  ⤫ skipped junk entity ({len(facts_data.get('facts', []))} facts dropped)")
             return None
 
         entity_dir = self.facts_dir / entity
         entity_dir.mkdir(parents=True, exist_ok=True)
-        
         fact_file = entity_dir / f"{entity}-{category}.md"
-        
-        # Load existing facts if file exists
-        existing_facts = []
-        if fact_file.exists():
-            content = fact_file.read_text()
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) >= 2:
-                    try:
-                        frontmatter = yaml.safe_load(parts[1])
-                        existing_facts = frontmatter.get("facts", [])
-                    except:
-                        pass
-        
-        # Merge new facts with existing — tag provenance on new LLM-extracted facts
+
+        now_iso = datetime.now(timezone.utc).isoformat()
         new_facts = facts_data.get("facts", [])
         for nf in new_facts:
-            if "provenance" not in nf:
-                nf["provenance"] = "EXTRACTED"
-        merged_facts = self._merge_facts(existing_facts, new_facts)
-        
-        # Generate sequential IDs
-        merged_facts = self._assign_ids(merged_facts, category)
-        
-        # Build frontmatter
-        frontmatter = {
-            "type": "facts",
-            "entity": entity,
-            "category": category,
-            "facts": merged_facts,
-            "last_extracted": datetime.now().isoformat(),
-            "last_updated": datetime.now().isoformat(),
-            "relationships": []
-        }
-        
-        # Write file
-        yaml_content = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
-        markdown_body = self._generate_markdown_body(entity, category, merged_facts)
-        
-        full_content = f"---\n{yaml_content}---\n\n{markdown_body}"
-        fact_file.write_text(full_content)
-        
+            if not isinstance(nf, dict):
+                continue
+            nf.setdefault("provenance", "EXTRACTED")
+            nf.setdefault("created_at", now_iso)
+            if source_doc:
+                nf.setdefault("source_doc", source_doc)
+            if source_hash:
+                nf.setdefault("source_hash", source_hash)
+            # An event the fact itself dates is when it was true, not when we
+            # read it. `created_at` stays the extraction time either way.
+            if nf.get("event_date") and not nf.get("valid_at"):
+                nf["valid_at"] = str(nf["event_date"])
+            nf.setdefault("expired_at", None)
+            nf.setdefault("invalid_at", None)
+
+        # The lock covers the whole read-modify-write. Four extractor threads
+        # and `fact_add` from a chat turn all target the same file; without it
+        # the later writer silently drops the earlier one's facts.
+        with locked_file(fact_file):
+            existing_facts = self._read_existing_facts(fact_file)
+            if existing_facts is None:
+                return None            # quarantined; do not write over it
+
+            merged_facts = self._merge_facts(existing_facts, new_facts)
+            merged_facts = _assign_fact_ids(merged_facts, category)
+
+            frontmatter = {
+                "type": "facts",
+                "entity": entity,
+                "category": category,
+                "facts": merged_facts,
+                "last_extracted": now_iso,
+                "last_updated": now_iso,
+            }
+            if source_doc:
+                frontmatter["source_doc"] = source_doc
+
+            yaml_content = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
+            markdown_body = self._generate_markdown_body(entity, category, merged_facts)
+            atomic_write_text(fact_file, f"---\n{yaml_content}---\n\n{markdown_body}")
+
+        self._index_and_link(entity, category, fact_file, new_facts, source_doc)
         return fact_file
-    
+
+    def _read_existing_facts(self, fact_file: Path) -> list | None:
+        """Existing facts, or None when the file is corrupt and was quarantined.
+
+        A YAML error used to fall through to `existing_facts = []`, and the
+        very next statement wrote the file back with only the new facts in it.
+        One unparseable character therefore deleted an entity's whole history.
+        The file is renamed instead, and this extraction is skipped.
+        """
+        if not fact_file.exists():
+            return []
+        try:
+            content = fact_file.read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"  ⤫ cannot read {fact_file.name}: {e}")
+            return None
+        if not content.strip():
+            return []
+        if not content.startswith("---"):
+            return self._quarantine(fact_file, "no frontmatter fence")
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return self._quarantine(fact_file, "unterminated frontmatter")
+        try:
+            frontmatter = yaml.safe_load(parts[1])
+        except Exception as e:
+            return self._quarantine(fact_file, f"YAML error: {e}")
+        if not isinstance(frontmatter, dict):
+            return self._quarantine(fact_file, "frontmatter is not a mapping")
+        facts = frontmatter.get("facts")
+        if facts is None:
+            return []
+        if not isinstance(facts, list):
+            return self._quarantine(fact_file, "`facts` is not a list")
+        return [f for f in facts if isinstance(f, dict)]
+
+    @staticmethod
+    def _quarantine(fact_file: Path, why: str) -> None:
+        """Rename a corrupt fact file aside and return None."""
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+        dest = fact_file.with_name(f"{fact_file.name}.corrupt-{stamp}")
+        try:
+            fact_file.rename(dest)
+            print(f"  ⚠ quarantined {fact_file.name} ({why}) → {dest.name}")
+        except OSError as e:
+            print(f"  ⚠ {fact_file.name} is corrupt ({why}) and could not be moved: {e}")
+        return None
+
+    def _index_and_link(self, entity: str, category: str, fact_file: Path,
+                        new_facts: list, source_doc: str | None) -> None:
+        """Index the file and emit the edges its facts imply.
+
+        This is the graph's growth path. Before it, edges only appeared when
+        someone ran `seed_relationship_edges.py` by hand, which is why node
+        coverage sat at 13.7% and the nightly chain added no edges at all.
+
+        A `mentions` edge is emitted for every OTHER known entity a fact names
+        — `relationship`-category facts included, which is where the densest
+        signal is. The v4 classifier upgrades them to typed relations.
+        """
+        try:
+            st = _kg_store()
+        except StoreUnavailable as e:
+            print(f"  ⚠ store unavailable, not indexing {fact_file.name}: {e}")
+            return
+        try:
+            st.entities.register(entity)
+            st.facts_idx.update_file(fact_file, root=self.facts_dir)
+            with st.transaction():
+                for f in new_facts:
+                    if not isinstance(f, dict):
+                        continue
+                    text = (f.get("fact") or "").strip()
+                    if not text:
+                        continue
+                    subject = f.get("entity") or entity
+                    for target in _known_entities(text, 12):
+                        if target == subject:
+                            continue
+                        try:
+                            st.edges.add({
+                                "source": subject, "target": target, "type": "mentions",
+                                "confidence": float(f.get("confidence", 0.8) or 0.8),
+                                "provenance": "EXTRACTED",
+                                "source_doc": source_doc,
+                                "evidence": text[:500],
+                            }, origin="extractor")
+                        except ValueError:
+                            continue   # self-loop or blank endpoint
+        except Exception as e:  # the markdown is written; the index is derived
+            print(f"  ⚠ index/link failed for {fact_file.name}: {e}")
+
     def _merge_facts(self, existing: list, new: list) -> list:
         """Merge new facts with existing, avoiding duplicates."""
         # Simple dedup by fact text similarity
@@ -431,34 +518,9 @@ class FactExtractor:
         return merged
     
     def _assign_ids(self, facts: list, category: str) -> list:
-        """Assign sequential IDs to facts."""
-        # Get next ID based on existing facts
-        prefix_map = {
-            "preferences": "pref",
-            "configuration": "conf", 
-            "hardware": "hard",
-            "status": "status",
-            "relationships": "rel",
-            "events": "event",
-            "skills": "skill",
-            "goals": "goal",
-            "general": "fact"
-        }
-        prefix = prefix_map.get(category, "fact")
-        
-        # Sort by ID if exists
-        facts_with_id = []
-        next_id = 1
-        for fact in facts:
-            if "id" in fact:
-                facts_with_id.append(fact)
-            else:
-                fact["id"] = f"{prefix}-{next_id:03d}"
-                next_id += 1
-                facts_with_id.append(fact)
-        
-        return facts_with_id
-    
+        """Kept as a method for callers; the scheme lives in app.fact_ids."""
+        return _assign_fact_ids(facts, category)
+
     def _generate_markdown_body(self, entity: str, category: str, 
                                 facts: list) -> str:
         """Generate human-readable markdown body for fact file."""
@@ -491,47 +553,8 @@ class FactExtractor:
         return "\n".join(lines)
 
 
-def extract_from_daily_notes():
-    """Extract facts from recent daily notes."""
-    extractor = FactExtractor()
-    
-    # Get recent daily notes
-    memory_dir = VAULT / "memory"
-    daily_notes = sorted(memory_dir.glob("2026-*.md"))[-7:]  # Last 7 days
-    
-    for note in daily_notes:
-        print(f"Processing: {note.name}")
-        content = note.read_text()
-        
-        # Extract date from filename
-        date_match = re.match(r"(\d{4}-\d{2}-\d{2})", note.name)
-        doc_date = date_match.group(1) if date_match else None
-        
-        # Extract facts
-        result = extractor.extract_from_document(
-            note, 
-            content,
-            existing_facts=""
-        )
-        
-        if result.get("facts"):
-            # Write to appropriate fact file
-            entity = result.get("entity", "general")
-            category = result.get("category", "events")
-            
-            fact_file = extractor.write_fact_file(
-                entity, category, result
-            )
-            if fact_file:
-                print(f"  → Wrote {len(result['facts'])} facts to {fact_file.name}")
-
-
 if __name__ == "__main__":
-    print("Fact Extraction Pipeline - Next-Gen Memory")
-    print("=" * 50)
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "--daily-notes":
-        extract_from_daily_notes()
-    else:
-        print("Usage: fact_extractor.py [--daily-notes]")
-        print("\nExtracts facts from documents using the 2B LLM.")
+    print("Fact Extraction Pipeline — imported by nightly_extraction.py.")
+    print("There is no standalone entry point: run the nightly extraction, "
+          "which owns the corpus selection, the content-hash gate and the "
+          "failure accounting this module deliberately does not.")

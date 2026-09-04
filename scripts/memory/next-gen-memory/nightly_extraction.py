@@ -16,51 +16,17 @@ from pathlib import Path
 
 # Content hashing for incremental processing
 sys.path.insert(0, str(Path.home() / "lloyd" / "scripts" / "memory"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
+from app.atomic_io import hash_bytes  # noqa: E402
+from fact_extractor import ExtractionFailed  # noqa: E402
+
 try:
     from content_hasher import ContentHasher
     _HAS_HASHER = True
 except ImportError:
     _HAS_HASHER = False
 
-# Try to import yaml, provide fallback if not available
-try:
-    import yaml
-except ImportError:
-    # Simple YAML parser for frontmatter
-    class yaml:
-        @staticmethod
-        def safe_load(text):
-            """Minimal YAML parser for frontmatter."""
-            result = {}
-            current_key = None
-            current_list = False
-            for line in text.strip().split('\n'):
-                line = line.rstrip()
-                if not line or line.startswith('#'):
-                    continue
-                if line.startswith('- '):
-                    if current_key and current_list:
-                        item = line[2:].strip().strip('"').strip("'")
-                        result[current_key].append(item)
-                elif ':' in line:
-                    key, _, value = line.partition(':')
-                    key = key.strip()
-                    value = value.strip()
-                    if value == '':
-                        result[key] = []
-                        current_key = key
-                        current_list = True
-                    elif value.startswith('[') and value.endswith(']'):
-                        # Inline list
-                        items = value[1:-1].split(',')
-                        result[key] = [item.strip().strip('"').strip("'") for item in items if item.strip()]
-                        current_key = None
-                        current_list = False
-                    else:
-                        result[key] = value.strip('"').strip("'")
-                        current_key = None
-                        current_list = False
-            return result
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
@@ -82,6 +48,22 @@ _SELF_WRITTEN_MEMORY_NOTES = frozenset({
     "relationship-proposals.md",
     "skills-index.md",
 })
+
+
+CONFIG_PATH = Path(__file__).resolve().parent / "pipeline_config.yaml"
+
+
+def _load_pipeline_config() -> dict:
+    """Read pipeline_config.yaml. It existed since 2026-07 and nothing read it."""
+    try:
+        data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        raise RuntimeError(f"pipeline_config.yaml not found at {CONFIG_PATH}")
+    except Exception as e:
+        raise RuntimeError(f"pipeline_config.yaml is unreadable: {e}") from e
+    if not isinstance(data, dict):
+        raise RuntimeError("pipeline_config.yaml did not parse to a mapping")
+    return data
 
 
 def _TODAY_STR() -> str:
@@ -106,104 +88,6 @@ class NightlyExtraction:
             if entity not in self.entity_locks:
                 self.entity_locks[entity] = threading.Lock()
             return self.entity_locks[entity]
-    
-    def normalize_entity_name(self, entity: str) -> str:
-        """Normalize entity name using alias registry.
-        
-        Loads entity-registry.json and checks if the entity is an alias.
-        If it is an alias, returns the canonical_name; otherwise returns
-        the entity as-is. Handles missing registry gracefully.
-        
-        Args:
-            entity: Entity name to normalize
-            
-        Returns:
-            Canonical entity name or original if not in registry
-        """
-        registry_path = FACTS_DIR / "entity-registry.json"
-        
-        if not registry_path.exists():
-            # Fallback to no normalization if registry missing
-            return entity
-        
-        try:
-            import json
-            registry = json.loads(registry_path.read_text())
-            canonical_mapping = registry.get("canonical_mapping", {})
-            
-            # Check if entity is an alias
-            if entity in canonical_mapping:
-                return canonical_mapping[entity].get("canonical_name", entity)
-            
-            # Check if entity matches any alias in the registry
-            for canonical, data in canonical_mapping.items():
-                if entity in data.get("aliases", []):
-                    return canonical
-            
-            # Entity not found in registry, return as-is
-            return entity
-            
-        except Exception as e:
-            print(f"Warning: Failed to load entity registry: {e}")
-            return entity
-
-    def check_preflight_dedup(self) -> dict:
-        """Pre-flight check for duplicate fact groups before extraction.
-        
-        Scans facts/ directory for duplicate groups using entity normalization.
-        This is a prevention mechanism to detect any new duplicates that may
-        have been created since the last cleanup.
-        
-        Returns:
-            Dictionary with duplicate_groups count and list of affected entities
-        """
-        import json
-        from collections import defaultdict
-        
-        # Load entity registry
-        registry_path = FACTS_DIR / "entity-registry.json"
-        canonical_mapping = {}
-        
-        if registry_path.exists():
-            try:
-                registry = json.loads(registry_path.read_text())
-                canonical_mapping = registry.get("canonical_mapping", {})
-            except Exception as e:
-                print(f"Warning: Failed to load entity registry: {e}")
-        
-        # Build reverse mapping: alias -> canonical
-        alias_to_canonical = {}
-        for canonical, data in canonical_mapping.items():
-            for alias in data.get("aliases", []):
-                alias_to_canonical[alias] = canonical
-        
-        # Scan facts directory and group by canonical entity
-        entity_groups = defaultdict(list)
-        
-        if FACTS_DIR.exists():
-            for entity_dir in FACTS_DIR.iterdir():
-                if not entity_dir.is_dir() or entity_dir.name == "templates":
-                    continue
-                
-                # Normalize the entity name
-                canonical = self.normalize_entity_name(entity_dir.name)
-                entity_groups[canonical].append(entity_dir.name)
-        
-        # Identify groups with multiple entities (potential duplicates)
-        duplicate_groups = []
-        for canonical, entities in entity_groups.items():
-            if len(entities) > 1:
-                duplicate_groups.append({
-                    "canonical": canonical,
-                    "entities": entities,
-                    "count": len(entities)
-                })
-        
-        return {
-            "duplicate_groups": len(duplicate_groups),
-            "groups": duplicate_groups,
-            "checked_at": datetime.now().isoformat()
-        }
     
     # Files under FACTS_DIR that a clean must NEVER delete. On 2026-08-22 this
     # method wiped the fact tree and took `_relationships.json` (12,131 edges /
@@ -290,24 +174,19 @@ class NightlyExtraction:
                 log_lines.append("\n[Pre-Flight] Cleaning Facts Directory")
                 self.clean_facts_directory()
             
-            # Pre-flight check: scan for duplicate groups
-            log_lines.append("\n[Pre-Flight] Duplicate Group Detection")
-            preflight = self.check_preflight_dedup()
-            dup_count = preflight["duplicate_groups"]
-            if dup_count > 0:
-                log_lines.append(f"  ⚠️ WARNING: Found {dup_count} duplicate group(s)!")
-                for group in preflight["groups"]:
-                    log_lines.append(f"    - {group['canonical']}: {group['entities']}")
-                log_lines.append("  → These should be merged before proceeding")
-            else:
-                log_lines.append(f"  ✓ No duplicate groups detected (prevention working)")
-            
-            # Step 1: Full vault fact extraction
+            # Step 1: Full vault fact extraction. Duplicate detection moved to
+            # kg_hygiene.near_duplicates, which measures the same thing without
+            # a per-run 23k-directory scan whose only output was a log line.
             log_lines.append("\n[Step 1] Full Vault Fact Extraction")
             self.last_files_processed = 0
+            self.last_failed_files = 0
             facts_extracted = self._extract_all_facts(full_mode=full_mode, workers=workers, limit=limit)
             files_processed = getattr(self, "last_files_processed", 0)
+            failed_files = getattr(self, "last_failed_files", 0)
             log_lines.append(f"  → Processed {files_processed} files, extracted {facts_extracted} new facts")
+            if failed_files:
+                log_lines.append(f"  ⚠ {failed_files} file(s) failed extraction and were NOT hashed; "
+                                 f"they will be retried next run")
 
             # Gate: Steps 2-5 (derives, relation discovery, index rebuild, overview
             # generation) only have new material to chew on when extraction touched
@@ -326,30 +205,24 @@ class NightlyExtraction:
                     "noop": True,
                     "files_processed": 0,
                     "facts_extracted": 0,
-                    "derives_created": 0,
-                    "relations_found": 0,
+                    "failed_files": failed_files,
                     "total_relationships": None,
                     "overviews_generated": 0,
                     "duration_seconds": duration,
                 }
 
-            # Step 2: Derives relationship inference
-            log_lines.append("\n[Step 2] Derives Relationship Inference")
-            derives_created = self._infer_derives_relationships()
-            log_lines.append(f"  → Created {derives_created} derives relationships")
-            
-            # Step 3: Automated relation discovery
-            log_lines.append("\n[Step 3] Automated Relation Discovery")
-            relations_found = self._discover_relations()
-            log_lines.append(f"  → Found {relations_found} new relations")
-            
-            # Step 4: Index rebuild
-            log_lines.append("\n[Step 4] Index Rebuild")
+            # Step 2: Index rebuild. `_infer_derives_relationships` and
+            # `_discover_relations` used to sit here; both wrote into
+            # relations-index.json (document-level co-occurrence), not the
+            # entity graph, and `_discover_relations` compared only the first
+            # 50 documents of 3,265 — an O(50²) sample presented as vault-wide
+            # discovery. Edges now come from the extractor as it writes facts.
+            log_lines.append("\n[Step 2] Index Rebuild")
             index = self.rel_generator.rebuild()
             log_lines.append(f"  → Rebuilt index with {index['total_relationships']} relationships")
 
-            # Step 5: Entity overview generation (change-triggered)
-            log_lines.append("\n[Step 5] Entity Overview Generation")
+            # Step 3: Entity overview generation (change-triggered)
+            log_lines.append("\n[Step 3] Entity Overview Generation")
             overviews_generated = self._regenerate_entity_overviews()
             log_lines.append(f"  → Generated/updated {overviews_generated} entity overviews")
 
@@ -370,10 +243,9 @@ class NightlyExtraction:
                 "success": True,
                 "noop": False,
                 "files_processed": files_processed,
+                "failed_files": failed_files,
                 "duration_seconds": duration,
                 "facts_extracted": facts_extracted,
-                "derives_created": derives_created,
-                "relations_found": relations_found,
                 "total_relationships": index['total_relationships'],
                 "overviews_generated": overviews_generated,
             }
@@ -384,24 +256,43 @@ class NightlyExtraction:
             raise
     
     def _process_single_file(self, md_file, full_mode, index, total):
-        """Process a single file for fact extraction. Thread-safe."""
+        """Extract one file. Returns (processed, facts, ok).
+
+        `ok=False` means the extraction failed and the caller must NOT save
+        this file's content hash — otherwise a transient vLLM error marks the
+        document done and it is never revisited.
+        """
         processed = 0
         facts_count = 0
-        
+
         try:
-            mtime = datetime.fromtimestamp(md_file.stat().st_mtime)
-            # Skip if not modified in 24h and not full mode
-            if not full_mode and (datetime.now() - mtime).total_seconds() > 86400:
-                return 0, 0
-            
-            content = md_file.read_text()
+            raw = md_file.read_bytes()
+        except OSError as e:
+            print(f"Cannot read {md_file}: {e}")
+            return 0, 0, False
+
+        # Hash the bytes we actually extracted from. Re-hashing the file
+        # afterwards records whatever it looks like then, so a note appended
+        # to mid-run is marked extracted at content nobody read.
+        source_hash = hash_bytes(raw)
+        try:
+            content = raw.decode("utf-8", errors="replace")
             doc_path = str(md_file.relative_to(VAULT))
-            
-            # Extract facts
+        except ValueError:
+            doc_path = str(md_file)
+
+        try:
             result = self.extractor.extract_from_document(
                 md_file, content, existing_facts=""
             )
-            
+        except ExtractionFailed as e:
+            print(f"[{index}/{total}] FAILED: {doc_path}: {e}")
+            return 0, 0, False
+        except Exception as e:
+            print(f"[{index}/{total}] ERROR: {doc_path}: {e}")
+            return 0, 0, False
+
+        try:
             if result.get("facts"):
                 default_entity = result.get("entity") or "general"
                 default_category = result.get("category") or "general"
@@ -416,86 +307,108 @@ class NightlyExtraction:
                     groups.setdefault(key, []).append(f)
 
                 for (entity, category), gfacts in groups.items():
-                    lock = self._get_entity_lock(entity)
-                    with lock:
-                        self.extractor.write_fact_file(
-                            entity, category,
-                            {"entity": entity, "category": category, "facts": gfacts},
-                        )
+                    self.extractor.write_fact_file(
+                        entity, category,
+                        {"entity": entity, "category": category, "facts": gfacts},
+                        source_doc=doc_path,
+                        source_hash=source_hash,
+                    )
                     facts_count += len(gfacts)
 
                 processed = 1
                 print(f"[{index}/{total}] Processing: {doc_path} "
                       f"→ {len(groups)} entities, {facts_count} facts")
-        
+            else:
+                # A genuinely factless document IS extracted; hashing it is
+                # correct and stops it being re-read every night.
+                processed = 1
         except Exception as e:
-            print(f"Error processing {md_file}: {e}")
-        
-        return processed, facts_count
-    
+            print(f"Error writing facts for {md_file}: {e}")
+            return 0, 0, False
+
+        return processed, facts_count, True
+
+    def _eligible_files(self, full_mode: bool) -> list:
+        """The corpus, from `pipeline_config.yaml` `sources.paths`.
+
+        This used to be `VAULT.rglob("*.md")` minus a list of deny-substrings,
+        which is why the config file existed but was never read and why every
+        new vault directory was ingested by default. Roughly half the 205k
+        facts in the pre-2026-09 tree came from re-extracting the pipeline's
+        own output. An allow-list inverts that: a directory is ingested
+        because someone named it.
+
+        The explicit excludes stay as belt-and-braces, and daily notes are
+        only eligible once they are more than a day old — today's is appended
+        to all day, so it never settles.
+        """
+        cfg = _load_pipeline_config()
+        roots = []
+        for raw in (cfg.get("sources", {}).get("paths") or []):
+            path = Path(str(raw)).expanduser()
+            if not path.is_absolute():
+                path = VAULT / path
+            try:
+                path = path.resolve()
+            except OSError:
+                continue
+            # Never leave the vault, whatever the config says.
+            if path == VAULT or VAULT in path.parents:
+                roots.append(path)
+            else:
+                print(f"  ⚠ sources.paths entry outside the vault, ignored: {raw}")
+        if not roots:
+            raise RuntimeError(
+                "pipeline_config.yaml lists no usable sources.paths; refusing to "
+                "fall back to the whole vault (that fallback is what fed the "
+                "extractor its own output)"
+            )
+        excludes = tuple(cfg.get("sources", {}).get("exclude_patterns") or ())
+        today = _TODAY_STR()
+        cutoff_ok = lambda p: full_mode or (  # noqa: E731
+            (datetime.now() - datetime.fromtimestamp(p.stat().st_mtime)).total_seconds() < 86400
+        )
+
+        eligible: list = []
+        seen: set = set()
+        for root in roots:
+            if not root.exists():
+                print(f"  ⚠ sources.paths entry does not exist: {root}")
+                continue
+            for md_file in root.rglob("*.md"):
+                if not md_file.is_file() or md_file in seen:
+                    continue
+                path_str = str(md_file)
+                if any(part in path_str for part in
+                       ("node_modules", "/.venv", "/.cache", "/.git/", "__pycache__")):
+                    continue
+                if any(pat.strip("*/") and pat.strip("*/") in path_str for pat in excludes):
+                    continue
+                # Belt and braces: these never belong in the corpus even if a
+                # sources.paths entry would otherwise reach them.
+                if any(skip in path_str for skip in
+                       ("/facts/", "/_pipeline/", "/skills/", "/agents/", "/autonomy/",
+                        "/memory/vault-maintenance/")):
+                    continue
+                if md_file.name in _SELF_WRITTEN_MEMORY_NOTES:
+                    continue
+                # A daily note is appended to all day; it settles tomorrow.
+                if md_file.parent.name == "memory" and md_file.stem >= today:
+                    continue
+                if not cutoff_ok(md_file):
+                    continue
+                seen.add(md_file)
+                eligible.append(md_file)
+        return eligible
+
     def _extract_all_facts(self, full_mode=False, workers=1, limit=0) -> int:
         """Extract facts from all documents."""
         total_facts = 0
         processed = 0
-        
-        # Collect eligible files
-        eligible_files = []
-        for md_file in VAULT.rglob("*.md"):
-            # Skip directories (e.g. facts/ entities stored as .md directories)
-            if not md_file.is_file():
-                continue
+        failed = 0
 
-            # Strict vault path validation
-            path_str = str(md_file)
-            if not path_str.startswith(str(VAULT) + "/"):
-                continue
-            
-            # Skip system directories that might be symlinked into vault
-            if any(sys_dir in path_str for sys_dir in [
-                "/proc/", "/sys/", "/run/", "/etc/", "/bin/", "/sbin/", 
-                "/lib/", "/lib64/", "/usr/", "/dev/", "/var/"
-            ]):
-                continue
-            
-            # Skip other excluded dirs
-            if any(part in path_str for part in ["node_modules", ".venv", ".cache"]):
-                continue
-            
-            # Skip fact files, pipeline artifacts, skills, and agent workspace files.
-            # /autonomy/ is excluded too: the scheduler rewrites task frontmatter
-            # (last_run/next_run) every ~15 min, so those files always look "changed"
-            # — they'd keep the content-hash gate from ever going noop and produce
-            # junk entities like "Autonomy Task #32". Task defs are not knowledge.
-            if any(skip in path_str for skip in ["/facts/", "/_pipeline/", "/skills/", "/agents/", "/autonomy/"]):
-                continue
+        eligible_files = self._eligible_files(full_mode)
 
-            # Skip this pipeline's OWN output. These files are written by the
-            # data-pipeline task (#24) and by the derived-index writers, then
-            # re-ingested on the next cycle as if they were new knowledge —
-            # a closed loop that fed on itself. Measured on 2026-09-03: 52% of
-            # extracted facts came from re-extraction of pipeline exhaust, and
-            # one note had been reprocessed 10 times in a single day. The
-            # content-hash gate cannot stop it, because the loop genuinely
-            # changes the bytes each pass.
-            if "/memory/vault-maintenance/" in path_str:
-                continue
-            if md_file.name in _SELF_WRITTEN_MEMORY_NOTES:
-                continue
-
-            # Skip TODAY's daily note: it is appended to all day by session
-            # capture, so it never settles and every cycle sees a changed file.
-            # It becomes eligible tomorrow, when it is stable.
-            if md_file.parent.name == "memory" and md_file.stem == _TODAY_STR():
-                continue
-            
-            # Check modification time (unless full mode)
-            if not full_mode:
-                mtime = datetime.fromtimestamp(md_file.stat().st_mtime)
-                if (datetime.now() - mtime).total_seconds() >= 86400:
-                    continue
-            
-            eligible_files.append(md_file)
-        
         total_files = len(eligible_files)
         print(f"Found {total_files} eligible files")
 
@@ -533,10 +446,15 @@ class NightlyExtraction:
         if workers == 1:
             # Sequential processing (default)
             for index, md_file in enumerate(eligible_files, 1):
-                p, f = self._process_single_file(md_file, full_mode, index, total_files)
+                p, f, ok = self._process_single_file(md_file, full_mode, index, total_files)
                 processed += p
                 total_facts += f
-                pending.append(md_file)
+                if ok:
+                    # Only a file we actually extracted gets its hash saved.
+                    # Hashing a failed file marks it done forever.
+                    pending.append(md_file)
+                else:
+                    failed += 1
                 if len(pending) >= CHECKPOINT_EVERY:
                     _flush_checkpoint()
         else:
@@ -553,16 +471,21 @@ class NightlyExtraction:
                 for future in as_completed(futures):
                     index, md_file = futures[future]
                     try:
-                        p, f = future.result()
+                        p, f, ok = future.result()
                         processed += p
                         total_facts += f
-                        pending.append(md_file)
+                        if ok:
+                            pending.append(md_file)
+                        else:
+                            failed += 1
                         if len(pending) >= CHECKPOINT_EVERY:
                             _flush_checkpoint()
                     except Exception as e:
+                        failed += 1
                         print(f"Error processing {md_file}: {e}")
 
-        print(f"Processed {processed} documents, extracted {total_facts} facts")
+        print(f"Processed {processed} documents, extracted {total_facts} facts, {failed} failed")
+        self.last_failed_files = failed
 
         # Final checkpoint for any remaining processed files
         _flush_checkpoint()
@@ -574,107 +497,9 @@ class NightlyExtraction:
         self.last_files_processed = processed
         return total_facts
     
-    def _infer_derives_relationships(self) -> int:
-        """Infer derives relationships between facts."""
-        # Load all facts
-        facts_by_entity = {}
-        
-        for entity_dir in FACTS_DIR.iterdir():
-            if not entity_dir.is_dir() or entity_dir.name == "templates":
-                continue
-            
-            entity = entity_dir.name
-            facts_by_entity[entity] = []
-            
-            for fact_file in entity_dir.glob("*.md"):
-                if not fact_file.is_file():
-                    continue
-                content = fact_file.read_text()
-                if content.startswith("---"):
-                    parts = content.split("---", 2)
-                    if len(parts) >= 2:
-                        try:
-                            frontmatter = yaml.safe_load(parts[1])
-                            for fact in frontmatter.get("facts", []):
-                                facts_by_entity[entity].append({
-                                    "file": fact_file.name,
-                                    **fact
-                                })
-                        except:
-                            pass
-        
-        # Simple derives inference
-        derives_count = 0
-        
-        for entity, facts in facts_by_entity.items():
-            for i, f1 in enumerate(facts):
-                if not isinstance(f1, dict):
-                    continue
-                for f2 in facts[i+1:]:
-                    if not isinstance(f2, dict):
-                        continue
-                    if "fact" not in f1 or "fact" not in f2:
-                        continue
-                    # Check if f2 derives from f1
-                    if self._check_derives(f1, f2):
-                        # Add relation
-                        source = f"memory/facts/{entity}/{f1['file']}"
-                        target = f"memory/facts/{entity}/{f2['file']}"
-                        
-                        # Skip if file doesn't exist or is a directory
-                        if not os.path.isfile(source) or not os.path.isfile(target):
-                            continue
-                        
-                        if self.rel_generator.add_relation(source, target, "derived-from"):
-                            derives_count += 1
-        
-        return derives_count
-    
-    def _check_derives(self, fact1: dict, fact2: dict) -> bool:
-        """Check if fact2 derives from fact1."""
-        # Guard against None/empty inputs from corrupt fact data
-        if not fact1 or not fact2:
-            return False
-        fact1_text = fact1.get("fact", "")
-        fact2_text = fact2.get("fact", "")
-        if not fact1_text or not fact2_text:
-            return False
-        # Simple heuristic: check if fact2 references fact1's content
-        text1 = fact1_text.lower()
-        text2 = fact2_text.lower()
-        
-        # Check for shared key terms
-        words1 = set(text1.split())
-        words2 = set(text2.split())
-        shared = words1 & words2
-        
-        return len(shared) >= 2 and len(text2) > len(text1)
-    
     def _regenerate_entity_overviews(self) -> int:
         """Regenerate entity overview files whose source facts have changed."""
         return self.profile_generator.regenerate_all(workers=8)
-
-    def _discover_relations(self) -> int:
-        """Discover new document relationships."""
-        # Scan documents for potential relations
-        documents = self.rel_generator.scan_documents()
-        
-        # Similarity-based discovery using relations_index implementation
-        new_relations = 0
-        
-        for i, doc1 in enumerate(documents[:50]):  # Limit for performance
-            for doc2 in documents[i+1:50]:
-                # Check similarity using relations_index implementation
-                similarity = self.rel_generator._calculate_similarity(doc1, doc2)
-                
-                if similarity > 0.5:
-                    # Add relation
-                    if self.rel_generator.add_relation(
-                        doc1["path"], doc2["path"], "related-to"
-                    ):
-                        new_relations += 1
-        
-        return new_relations
 
 
 def main():
@@ -702,9 +527,9 @@ def main():
         help="Wipe facts directory before extraction"
     )
     parser.add_argument(
-        "--quick",
+        "--rebuild-index-only",
         action="store_true",
-        help="Just rebuild index (existing behavior)"
+        help="Rebuild the document relations index and stop (no extraction)"
     )
     parser.add_argument(
         "--force",
@@ -725,8 +550,8 @@ def main():
     
     extraction = NightlyExtraction()
     
-    if args.quick:
-        # Quick mode: just rebuild index
+    if args.rebuild_index_only:
+        # Index only: no extraction
         print("Quick mode: rebuilding index...")
         index = extraction.rel_generator.rebuild()
         print(f"Total relationships: {index['total_relationships']}")
@@ -745,7 +570,7 @@ def main():
         print(
             f"PIPELINE_RESULT files_processed={result.get('files_processed', 0)} "
             f"facts={result.get('facts_extracted', 0)} "
-            f"relations={result.get('relations_found', 0)} "
+            f"failed={result.get('failed_files', 0)} "
             f"status={'noop' if result.get('noop') else 'ran'}"
         )
 

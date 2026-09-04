@@ -22,7 +22,6 @@ keep this module's call sites and external consumers stable.
 """
 
 import datetime
-import uuid
 
 from mcp.server import Server
 from mcp.types import Tool
@@ -46,6 +45,8 @@ from agent_mcp._shared import (
     _wrap,
     _write_fact_frontmatter,
 )
+from app.atomic_io import locked_file
+from app.fact_ids import assign_ids as _assign_fact_ids, category_prefix, next_fact_id
 from app.kg_store import StoreUnavailable, store as _store
 from agent_mcp.retrieval import (  # noqa: F401  (re-exported compat names)
     EDGE_TYPE_WEIGHTS,
@@ -79,8 +80,14 @@ app = Server("lloyd-facts")
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _generate_fact_id(category: str) -> str:
-    return f"{category[:4]}-{uuid.uuid4().hex[:4]}"
+def _generate_fact_id(category: str, existing_ids=()) -> str:
+    """The next `<prefix>-NNN` for this file.
+
+    Was `f"{category[:4]}-{uuid4().hex[:4]}"`, which produced a second,
+    incompatible ID scheme in the same files the extractor numbered
+    sequentially. One scheme now — see app.fact_ids.
+    """
+    return next_fact_id(existing_ids, category_prefix(category))
 
 
 def _detect_contradictions_sync(entity: str, category: str = None) -> dict:
@@ -123,10 +130,11 @@ def _fact_add(params: dict) -> dict:
     fact_text = params.get("fact", "").strip()
     if not raw_entity or not category or not fact_text:
         return _err("entity, category, and fact are required", ErrorCode.MISSING_PARAM)
-    if _is_junk_entity(raw_entity):
+    source_doc = params.get("source_doc")
+    if _is_junk_entity(raw_entity, source_doc):
         return _err(
-            f"'{raw_entity}' looks like a filename or code fragment, not an entity; "
-            "use a concept/project/person name",
+            f"'{raw_entity}' looks like a filename, a code fragment or a pipeline "
+            "run, not an entity; use a concept/project/person name",
             ErrorCode.INVALID_PARAM,
         )
     confidence = float(params.get("confidence", 0.9))
@@ -141,23 +149,51 @@ def _fact_add(params: dict) -> dict:
             entity_dir = FACTS_ROOT / entity
             entity_dir.mkdir(parents=True, exist_ok=True)
         fact_file = entity_dir / f"{entity}-{category}.md"
-        if fact_file.exists():
-            frontmatter = _parse_fact_frontmatter(fact_file.read_text(encoding="utf-8"))
-        else:
-            frontmatter = {"type": "facts", "entity": entity, "category": category, "facts": []}
-        fact_id = _generate_fact_id(category)
         provenance = params.get("provenance", "STATED")
         if provenance not in ("STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"):
             provenance = "STATED"
-        new_fact = {"fact": fact_text, "confidence": confidence, "category": category, "id": fact_id, "created_at": now_iso, "valid_at": params.get("valid_at"), "invalid_at": None, "expired_at": None, "provenance": provenance, "source_doc": params.get("source_doc")}
-        frontmatter.setdefault("facts", []).append(new_fact)
-        frontmatter["last_updated"] = now_iso
-        body = f"\n# {entity} - {category}\n\n**Entity:** {entity}\n**Category:** {category}\n**Fact Count:** {len(frontmatter['facts'])}\n"
-        atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
+
+        # The lock covers read-modify-write. Four extractor threads write
+        # these same files; without it whichever finishes last wins and the
+        # other's facts are gone.
+        with locked_file(fact_file):
+            if fact_file.exists():
+                raw = fact_file.read_text(encoding="utf-8")
+                frontmatter = _parse_fact_frontmatter(raw)
+                if not frontmatter and raw.strip():
+                    # A file that exists, is non-empty, and will not parse is
+                    # corrupt. Writing here would replace an entity's whole
+                    # history with this one fact.
+                    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+                    quarantine = fact_file.with_name(f"{fact_file.name}.corrupt-{stamp}")
+                    fact_file.rename(quarantine)
+                    return _err(
+                        f"{fact_file.name} is corrupt and was quarantined as "
+                        f"{quarantine.name}; nothing was overwritten. Retry to "
+                        "start a fresh file.",
+                        ErrorCode.INTERNAL,
+                    )
+            else:
+                frontmatter = {}
+            if not frontmatter:
+                frontmatter = {"type": "facts", "entity": entity, "category": category, "facts": []}
+            existing = frontmatter.setdefault("facts", [])
+            fact_id = _generate_fact_id(category, [f.get("id") for f in existing if isinstance(f, dict)])
+            new_fact = {"fact": fact_text, "confidence": confidence, "category": category,
+                        "id": fact_id, "created_at": now_iso, "valid_at": params.get("valid_at"),
+                        "invalid_at": None, "expired_at": None, "provenance": provenance,
+                        "source_doc": source_doc}
+            existing.append(new_fact)
+            _assign_fact_ids(existing, category)
+            frontmatter["last_updated"] = now_iso
+            body = (f"\n# {entity} - {category}\n\n**Entity:** {entity}\n"
+                    f"**Category:** {category}\n**Fact Count:** {len(existing)}\n")
+            atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
         _invalidate_entity_dirs_cache()
         # The store learns about the entity and the new fact here rather than
         # waiting for the nightly reindex, so a fact added in chat is visible
         # to the router and to `facts_idx` immediately.
+        result: dict = {"success": True, "fact_id": fact_id, "entity": entity, "category": category}
         try:
             st = _store()
             st.entities.register(entity)
@@ -165,12 +201,7 @@ def _fact_add(params: dict) -> dict:
         except StoreUnavailable as exc:
             # The markdown write already succeeded and is the fact layer; the
             # index is derived and `kg reindex` rebuilds it. Say so, don't fail.
-            result_note = f"fact written; store index not updated ({exc})"
-        else:
-            result_note = None
-        result: dict = {"success": True, "fact_id": fact_id, "entity": entity, "category": category}
-        if result_note:
-            result["warning"] = result_note
+            result["warning"] = f"fact written; store index not updated ({exc})"
         if entity != raw_entity:
             result["resolved_from"] = raw_entity
         return result
