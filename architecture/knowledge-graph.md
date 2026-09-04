@@ -210,11 +210,43 @@ Strong-typed edge share dropped ~60% → ~40% — the graph is now more honest a
 - `fact_relationships` — all edges for an entity (inbound,outbound,or both)
 - `vault_recall(expand_graph=true)` — 1-hop graph expansion on search results
 
-### Entity resolution
+### Entity resolution (rewritten 2026-09-03)
 
-Semantic entity resolution merged 81 entities at confidence ≥ 0.90 (2026-04-21). Full sweep across all 7 tiers reduced 679 → 653 entities (Tier 1-3). Task normalization produced 45 canonical `Task #N` directories with zero legacy references.
+Two layers, in this order:
 
-Current: 1,392 entity dirs,23 aliases,2,406 active edges.
+**At extraction.** `app.entity_naming.known_entities_in_text` finds the known
+canonical names present in a chunk (proper-noun shapes only) and the extractor
+lists them in its prompt with an instruction to reuse them verbatim. Until
+2026-09-03 the extractor never saw a known name — every caller passed an empty
+context — so it coined `Intel Pipeline System` beside an existing
+`Intel Pipeline`; 303 of 442 near-duplicate clusters were born a day or more
+after their canonical. Live test after the change: 18 of 18 entities reused a
+known name.
+
+**The sweep** (`scripts/memory/entity-resolution-sweep.py`, task #48 daily
+dry-run). Name shape *clusters* candidates; only CASE and PUNCT variants merge
+on shape. SUFFIX clusters (`X` vs `X System/Agent/SDK/Service/Pipeline/App`)
+pass through `entity_semantic_gate.py`: both entities' definitions go to every
+judge model (primary + secondary) and the pair merges only on unanimous SAME.
+A missing definition is refused, not judged. Verdicts are cached by definition
+hash. `--apply` refuses below 50% of the largest active-edge count ever
+recorded, writes aliases before moving files, aliases every approved merge,
+retags moved facts to the canonical with `merged_from`, and stamps an
+invocation ledger into its report. `revert-suffix-merges.py` inverts any
+apply report by tier.
+
+Why: on 2026-09-03 an unattributed apply against the empty post-incident
+graph merged 151 suffix pairs on shape alone — a news scanner into Intel, a
+fact store into a robotics tokenizer, a robot's training pipeline into the
+robot. All were reverted; the rules above are what stop the next one.
+
+**Hygiene** is measured, not assumed: `scripts/memory/kg_hygiene.py` and the
+daily knowledge-health report track cross-entity contamination (must be 0),
+near-duplicate clusters, and duplicate regrowth dated by fact `created_at`.
+
+State at 2026-09-03 close: 3,865 active edges, node coverage 13.7%, alias
+coverage 84.4%, contamination 0, 301 near-duplicate clusters awaiting
+definitions or review.
 
 ---
 
