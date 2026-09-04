@@ -1,180 +1,120 @@
 ---
 segment: architecture
-tags: [architecture,lloyd]
+tags:
+- architecture
+- lloyd
 status: active
 type: reference
-
+timestamp: '2026-07-06T14:36:37'
 ---
-
 # Autonomy System Architecture
 
 **Created:** 2026-03-22
-**Last updated:** 2026-09-03 (full rewrite from audited reality — the previous
-version was truncated mid-table, described 19 tasks and a four-agent model that
-no longer exists, and pointed at a run-record path that was never used.)
+**Last updated:** 2026-04-02
+**Status:** Active (GPU-gated dispatch implemented,nightly chain + dream consolidation operational)
 
 ## Overview
 
-Scheduled markdown tasks, each running one skill through the in-process agent
-harness against a local vLLM server. There are no "agent types" — that model is
-gone. A task is a file; the scheduler decides when it is due; the worker pool
-runs it.
+The autonomy system enables multi-agent collaboration through a shared backlog with GPU-aware task dispatch. Four specialized agent types pull from a single backlog,with LLM dispatch gated by GPU utilization to avoid interfering with foreground tasks.
 
-## Storage
+**Storage:** Vault markdown files (migrated from SQLite 2026-03-29). Task files at `~/obsidian/autonomy/{id}-{slug}.md`,run files at `~/obsidian/autonomy-runs/{task-id}/{run-id}.md`,config at `~/obsidian/autonomy/_config.md`. Three consumers (MCP tools,MC extension,idler daemon) read/write markdown directly. QMD indexes both `autonomy` and `autonomy-runs` collections for searchability.
 
-| What | Where |
-|---|---|
-| Task files | `~/obsidian/autonomy/{id}-{slug}.md` |
-| Archived tasks | `~/obsidian/autonomy/_archived/` |
-| Run records | `~/lloyd/autonomy-runs/{task-id}/run_{id}_{ts}.md` |
-| Queue + run history | `~/lloyd/workers.db` (`queue`, `runs`, `watermarks`) |
-| Skills | `~/obsidian/skills/{skill_name}/SKILL.md` |
+## Design Principles
 
-Run records live under `~/lloyd`, **not** in the vault, and are not indexed by
-qmd. A task whose findings need to be searchable must write them into an indexed
-vault segment (task #78 does this correctly, via `memory/vault-maintenance/`).
+1. **Sense -> Analyze -> Act** — ingest raw data,reflect on it,then improve from it
+2. **One job per task** — each task has a single clear responsibility with no overlap
+3. **Fail forward** — `stale_bypass_hours` lets dependent tasks run with stale input rather than blocking the whole chain when one step fails
+4. **Preemptible by default** — low-priority maintenance yields to high-priority work
+5. **Closed-loop learning** — trajectories feed skill mining,reflection feeds dream,dream feeds skills management. Nothing is write-only.
 
-## Dispatch path
+## Agent Types
 
-```
-workers/pool.py  _scheduler_loop     every 60s
-  └─ workers/sources/scheduled_task.py  enqueue_if_due
-       ├─ recover_stuck_tasks()           reset in_progress past its timeout
-       ├─ per-model vLLM /health gate     skip tasks whose server is down
-       ├─ stall alarm                     due + overdue + NOT queued
-       └─ autonomy.get_due_tasks()  ──►  queue.enqueue(dedup_key=task:<id>)
+### Memory Agent (Periodic Jobs)
+- **Role:** Scheduled automation tasks
+- **Tasks:** Nightly fact extraction,index rebuild,periodic memory capture,relationship discovery
+- **Model:** `local-llm-120b/Qwen3.5-122B-A10B` (GPU 1)
+- **Schedule:** Cron-based (15m periodic,nightly 2:00-5:15 AM PST)
+- **Delivery:** Silent (`delivery.mode: "none"`) unless errors occur
 
-workers/pool.py  _worker_loop  x2 slots
-  └─ scheduled_task.execute
-       └─ autonomy.run_task(task_id, max_duration=<source cap>)
-            └─ app.harness.run_query  ──►  vLLM
-```
+### Operator Agent (Backlog Review)
+- **Role:** Analysis,code changes,config updates
+- **Tasks:** Implementation work,bug fixes,system maintenance
+- **Model:** `anthropic/claude-opus-4-6` (main agent) or `local-llm-120b` for subagents
+- **Trigger:** Manual assignment or backlog tagging (`tag="implementation"`)
 
-`workers.slots: 2` is shared across **all** sources (scheduled-task,
-autoresearch, session-distill, gap-fill, domain-research, bench-mine), so
-autonomy competes with knowledge acquisition for the same two slots.
+### Idler Agent (Deep Maintenance)
+- **Role:** Continuous background work when GPU idle
+- **Tasks:** Memory audit,relationship discovery,skill harvest,backlog triage,research synthesis
+- **Model:** `local-llm-120b/Qwen3.5-122B-A10B` (GPU 1)
+- **Dispatch:** GPU-gated (polls every 250ms,dispatches when GPU < 30%)
+- **Pattern:** GPU idle -> pull next task; GPU busy -> wait,doesn't compete
 
-## When is a task due?
+### Researcher Agent (Content Ingestion)
+- **Role:** External content collection and synthesis
+- **Tasks:** GitHub monitoring,RSS feeds,documentation,research papers
+- **Model:** `local-llm-120b/Qwen3.5-122B-A10B` (GPU 1)
+- **Trigger:** Scheduled or manual assignment
 
-`autonomy._is_task_due` — every gate must pass:
+## Task Inventory (19 active tasks)
 
-1. `status == "up_next"`. `in_progress` is excluded (it used to be dispatchable,
-   so a running task could be started again).
-2. Has a `skill_name` or `skill_path` that resolves.
-3. Interval elapsed since `last_run`. Interval comes from `runs_per_day` if set,
-   else `frequency` (`hourly`/`every-15min`/`daily`/`weekly`). A task with an
-   active hour-window gets `min(1h, 25% of interval)` of slack, because
-   `last_run` is a *completion* time and drifts later every cycle.
-4. **Not in failure cooldown** — see below.
-5. `depends_on` satisfied: the dependency succeeded within half this task's
-   interval AND more recently than this task's own last success. A failed
-   upstream does not satisfy it. `stale_bypass_hours` overrides the freshness
-   requirement once the dependency is that stale and not currently running.
-6. `preferred_hours` contains the current **machine-local** hour. If unset, the
-   hour is derived from `scheduled_at` when it parses as `HH:MM`.
+### High-Frequency (hourly or more)
 
-## Failure handling
+| ID | Name | Freq | Priority | Role |
+|----|------|------|----------|------|
+| #25 | Memory Capture | hourly | high | Raw session transcript extraction to daily notes |
+| #33 | Groundskeeper Loop | 15min | low | Fix broken links,stale facts,orphans (5/run) |
+| #34 | Groundskeeper Research | hourly | low | Deep web research for thin profiles/stubs |
+| #41 | Email+Calendar Monitor | 15min | medium | Poll email/calendar,surface relevant items |
 
-A run ends in exactly one of three states, and each is recorded:
+### Multi-Daily
 
-| Outcome | `failure_count` | Status | Notes |
-|---|---|---|---|
-| success | reset to 0 | `up_next` | sets `last_run` **and** `last_attempt` |
-| `task` failure | +1 | `up_next`, or `failed` at `max_retries` | timeout, exception, or an empty response after real work |
-| `infra` failure | unchanged | `up_next` | fast empty response, connection error — a model-server hiccup must not disable the fleet |
+| ID | Name | Freq | Priority | Role |
+|----|------|------|----------|------|
+| #24 | Data Pipeline | 6x/day | high | Fact extraction (emits graph edges) -> index rebuild -> kg_health |
+| #36 | Groundskeeper Survey | 4x/day | low | Scan vault,rebuild issue queue for #33/#34 |
 
-**Cooldown:** `min(600 · 2^(n-1), max(interval, 6h))` — 10m, 20m, 40m, 80m…
-The gate is "`last_attempt` is newer than `last_run`", which is what "the last
-attempt failed" means. `last_run` deliberately tracks only successes, because
-the dependency freshness gate reads it.
+### Daily (Daytime)
 
-**Terminal state:** at `max_retries` consecutive task-failures the status becomes
-`failed`, one Discord alert fires, and the task stops consuming GPU until a
-human drags it back to Up Next. Keep `max_retries` at 3 or more: with a real
-terminal state, 1 or 2 means a single transient timeout disables a healthy task.
+| ID | Name | Freq | Priority | Depends | Role |
+|----|------|------|----------|---------|------|
+| #35 | Backlog Triage | daily | medium | -- | Evaluate inbox items,promote/close |
+| #45 | Trajectory Extraction | daily | low | -- | Capture worker session tool calls to JSONL |
+| #46 | Trajectory Skill Mining | daily | medium | #45 | Mine error patterns,dispatch Opus to author skills |
+| #30 | Intelligence Pipeline | daily | medium | -- | GitHub + YouTube scan,score,vault write |
+| #29 | Self-Improvement Loop | daily | medium | -- | System metrics and meta-optimization |
 
-**Empty responses are failures.** They were once recorded as successes, which
-advanced `last_run`, reset `failure_count` and unblocked dependents — a run that
-did nothing was indistinguishable from one that worked.
+### Nightly Chain (2-5am PST)
 
-**Timeouts:** the effective timeout is `min(timeout_seconds, source cap − 30s)`,
-so `run_task`'s own handler always wins the race and writes a record. When the
-two caps were equal the pool's `wait_for` cancelled the coroutine first and the
-run vanished with no record at all.
+| ID | Name | Priority | Depends | Bypass | Role |
+|----|------|----------|---------|--------|------|
+| #38 | Reflection: Signals | high | -- | 36h | Detect correction signals from daily notes |
+| #39a | Reflection: Knowledge Analysis | high | #38 | 36h | Derive updates,write JSON handoff |
+| #39 | Reflection: Knowle
+| #39 | Reflection: Knowledge Write | high | #39a | 36h | Apply the handoff to the vault |
+| #40 | Reflection: Config | medium | #39 | 36h | Propose and commit config changes |
+| #47 | Dream Consolidation | low | #39 | -- | Cross-link the night's writes |
 
-## Models
+### Knowledge-Graph Chain
 
-| Alias | Port | GPU | Used by |
-|---|---|---|---|
-| `primary` | 8096 | RTX PRO 6000 (96 GB) | analysis, the nightly chain, anything context-heavy |
-| `secondary` | 8091 | RTX 3090 #2 (24 GB) | thin script wrappers and mechanical reports |
+Ordered because each step's input is the previous step's output. #24 produces
+entities and `mentions` edges; #48 settles canonical names; #74 types the
+edges; #60 measures the result; #82 measures whether retrieval improved.
 
-Set `model: secondary` in a task's frontmatter to route it; `run_task` resolves
-the base URL through `config.models.<alias>.env.ANTHROPIC_BASE_URL`. vLLM runs
-with `--scheduling-policy priority`: interactive chat sends 0, autonomy sends 1,
-batch jobs (e.g. graph classification) should send 2.
+| ID | Name | Freq | Depends | Applies? | Role |
+|----|------|------|---------|----------|------|
+| #24 | Data Pipeline | 6x/day | -- | yes | Extract facts from the `sources.paths` corpus; emit `mentions` edges with source_doc + evidence |
+| #51 | Conversation Relation Linking | daily | #56 | yes | Co-access pairs from trajectories -> `co_accessed` edges (provenance INFERRED) |
+| #48 | Entity Resolution Sweep | daily | #24 | **no** | Cluster near-duplicates, run the semantic gate, print the plan and #67's proposals. A merge is a human action |
+| #67 | Semantic Entity Resolution | weekly | -- | **no** | LLM-judge the pairs string rules cannot; write `semantic-proposals-latest.jsonl` for #48's review list |
+| #74 | KG Mention Classifier | daily | #48 | yes | Re-type `mentions` into typed relations via `edges.retype`, one transaction |
+| #60 | Knowledge Health Report | daily | -- | no | God/thin/orphan entities, contamination, provenance. **Exits 2 and alerts** on store-unreadable, below-baseline, contamination, or duplicate fact IDs |
+| #82 | Nightly Retrieval Eval | daily | -- | no | 20-query eval with production's recall defaults; records the trend |
 
-## Observability
+Only #48 and #74 write to the edge store outside extraction, and only #48
+moves fact files. Everything else in this chain reports. That split is
+deliberate: the 2026-08-22 wipe and the 2026-09-03 151-merge incident were
+both unattended applies.
 
-- `GET /api/autonomy/health?days=N` — per-task runs, failure rate, timeouts,
-  empty runs, `[SILENT]` rate, GPU-hours, wasted hours, consecutive failures,
-  plus fleet totals. Joins `runs` to `queue` to recover the task id for rows
-  written before the pool passed one through.
-- MCP tool `autonomy_health` returns the same JSON (it proxies the endpoint,
-  because agent_mcp is a separate process and does not hold the queue singleton).
-- The Autonomy page shows this as a strip above the kanban board.
-- Task #76 consumes it daily and can pause a chronically failing task.
-
-## Task inventory
-
-| ID | Task | Freq | Model | Dep | Hours | Timeout | Status |
-|----|------|------|-------|-----|-------|---------|--------|
-| #24 | Data Pipeline | 24/day | primary | — | — | 1800s | up_next |
-| #30 | Intelligence Pipeline Scan & Score | 3/day | primary | — | — | 1800s | up_next |
-| #35 | Daily Backlog Triage | daily | primary | — | — | 1800s | up_next |
-| #36 | Groundskeeper Survey | daily | primary | — | — | 180s | up_next |
-| #38 | Nightly Reflection — Signals | daily | primary | — | 22,23,0,1,2,3,4 | 1800s | up_next |
-| #39 | Nightly Reflection — Knowledge Write | daily | primary | #42 | 23,0,1,2,3,4 | 2400s | up_next |
-| #40 | Nightly Reflection — Config | daily | primary | #39 | 23,0,1,2,3,4 | 1800s | up_next |
-| #42 | Nightly Reflection — Knowledge Analysis | daily | primary | #38 | 22,23,0,1,2,3,4 | 1800s | up_next |
-| #47 | Dream Consolidation | 0.14/day | primary | #40 | — | 1800s | up_next |
-| #48 | Entity Resolution Sweep | daily | primary | — | — | 1800s | up_next |
-| #51 | Conversation Relation Linking | daily | secondary | #56 | 23,0,1,2,3,4 | 1800s | up_next |
-| #52 | Deep Dive Research | daily | primary | #65 | — | 1800s | up_next |
-| #53 | Documentation Digester | daily | primary | — | — | 900s | up_next |
-| #54 | Cross-Domain Synthesis | 0.14/day | primary | — | — | 1800s | up_next |
-| #56 | Nightly Trajectory Extraction | daily | primary | — | 1,2 | 300s | up_next |
-| #57 | Nightly Trajectory Mining | daily | primary | #56 | 23,0,1,2,3,4 | 300s | up_next |
-| #58 | Nightly Skill Consolidation | daily | primary | #57 | — | 600s | paused |
-| #60 | Knowledge Health Report | daily | primary | — | 4 | 600s | up_next |
-| #65 | Research Queue Generator | daily | primary | — | — | 900s | up_next |
-| #67 | Semantic Entity Resolution | 0.14/day | primary | — | — | 3000s | up_next |
-| #68 | Email & Calendar Triage | every-15min | primary | — | — | 300s | up_next |
-| #70 | Skill Lint Sweep | weekly | secondary | — | — | 300s | up_next |
-| #74 | KG Mention Classifier | daily | primary | #48 | — | 3000s | up_next |
-| #75 | AI Engineer YouTube Monitor | 96/day | secondary | — | — | 600s | up_next |
-| #76 | Queue Health Check | daily | primary | — | 6 | 600s | up_next |
-| #77 | Weekly Backlog Hygiene | weekly | secondary | — | — | 600s | up_next |
-| #78 | Orphaned Reference Cleanup | weekly | secondary | — | — | 600s | up_next |
-| #79 | Retention Sweep | weekly | secondary | — | 22,23,0,1,2 | 600s | up_next |
-| #80 | OKF Conformance Check | weekly | secondary | — | — | 300s | up_next |
-| #81 | QMD Index Maintenance | daily | primary | — | 5 | 3000s | up_next |
-| #82 | Nightly Retrieval Eval | daily | primary | — | 6 | 900s | up_next |
-
-Paused/archived tasks keep their files; `_archived/` holds retired ones with an
-`archived_reason`.
-
-## Design principles
-
-1. **One job per task.** Overlap produced eight duplicate tasks by June 2026.
-2. **Fail loudly, then back off.** Silence is the dangerous failure mode: a
-   parse error once removed 34 of 40 tasks from the schedule with no signal.
-3. **Claim your output early.** A job that investigates exhaustively and writes
-   at the end produces nothing when it runs out of turns. Write a skeleton
-   first and enrich it in place (task #42 is the reference).
-4. **Scripts belong in timers, not in agent turns.** A 40-minute scan cannot
-   survive a tool-call timeout; run it from systemd and let the task read the
-   result (task #36).
-5. **Nothing is write-only.** A task whose output has no consumer is waste.
-6. **Measure, do not assume.** #82 evaluates retrieval nightly so the nightly
-   writes are checked rather than believed.
+**One store.** Edges, aliases, the entity registry and the fact index live in
+`_pipeline/vault-derived/kg.sqlite`, behind `app.kg_store`. Nothing else opens
+it. See `architecture/knowledge-graph.md`.

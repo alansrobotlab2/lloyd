@@ -28,6 +28,11 @@ from app.kg_store import StoreUnavailable, store as _kg_store
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "reflection"
 
+# Rows rendered per long section. The report is read by a human and by the
+# morning briefing; a 23,564-row table is neither. The count is always given
+# in full, only the listing is capped.
+SECTION_ROW_CAP = 50
+
 GOD_ENTITY_THRESHOLD = 20
 THIN_ENTITY_MAX_FACTS = 2
 STALE_DAYS_THRESHOLD = 60
@@ -230,79 +235,60 @@ def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list
 
 
 def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7) -> dict:
-    """Cross-entity contamination, near-duplicate clusters and duplicate regrowth,
-    from the facts already loaded — no second pass over the tree.
+    """Contamination, near-duplicate clusters and regrowth.
 
-    Added 2026-09-03: 63 directories were found holding facts tagged with a
-    DIFFERENT entity (all from suffix merges) and nothing had ever measured it.
-    Contamination must stay at 0; any rise means a merge went wrong.
+    Delegates to `kg_hygiene.snapshot`, which is the measured definition of
+    all three. This module had its own re-implementation of each — same
+    intent, different code — so the report and `kg_health --json` could
+    disagree about the same tree and there was no way to tell which was
+    right. The shapes the report renders are kept.
     """
     import importlib.util
-    sweep_path = Path(__file__).resolve().parent / "entity-resolution-sweep.py"
-    spec = importlib.util.spec_from_file_location("ers_health", sweep_path)
-    ers = importlib.util.module_from_spec(spec); spec.loader.exec_module(ers)
+    here = Path(__file__).resolve().parent
+    sys.path.insert(0, str(here))
+    import kg_hygiene  # noqa: E402
 
-    contaminated: list[tuple[str, str, int]] = []
-    for name, files in entities.items():
-        foreign: dict[str, int] = defaultdict(int)
-        for entry in files:
-            for f in entry["facts"]:
-                if not isinstance(f, dict):
-                    continue
-                tag = str(f.get("entity") or "").strip()
-                if tag and ers.normalize_punct(tag) != ers.normalize_punct(name):
-                    foreign[tag] += 1
-        for tag, n in foreign.items():
-            contaminated.append((name, tag, n))
+    root = _facts_root_for(entities)
+    # Each of these walks the tree parsing YAML. Call contamination ONCE and
+    # derive both the counts and the detail from it — `snapshot` would run it
+    # again internally, and at 60,622 files that is a minute of pure re-read.
+    detail = kg_hygiene.contamination(root)
+    c = {k: v for k, v in detail.items() if k != "items"}
+    n = kg_hygiene.near_duplicates(root)
+    r = kg_hygiene.regrowth(root, regrowth_days)
+    contaminated = [(item["dir"], tag, slot["facts"])
+                    for item in detail["items"]
+                    for tag, slot in item["foreign"].items()]
 
-    by_norm: dict[str, list[str]] = defaultdict(list)
-    for name in entities:
-        by_norm[ers.normalize_full(name)].append(name)
-    clusters = [v for v in by_norm.values() if len(v) > 1]
-    cluster_tiers = Counter(ers.cluster_tier(v) for v in clusters)
-
-    # Date an entity by its earliest fact `created_at` (mtime only as a fallback:
-    # a bulk revert/merge/retag rewrites every file and makes old entities look new).
-    born: dict[str, float] = {}
-    for name, files in entities.items():
-        created = []
-        mtimes = []
-        for entry in files:
-            try:
-                mtimes.append(entry["file"].stat().st_mtime)
-            except OSError:
-                pass
-            for f in entry["facts"]:
-                if not isinstance(f, dict):
-                    continue
-                for k in ("created_at", "created", "first_seen", "timestamp"):
-                    t = parse_date(str(f.get(k))) if f.get(k) is not None else None
-                    if t is not None:
-                        created.append((t if t.tzinfo else t.replace(tzinfo=timezone.utc)).timestamp())
-                        break
-        if created:
-            born[name] = min(created)
-        elif mtimes:
-            born[name] = min(mtimes)
-    cutoff = now.timestamp() - regrowth_days * 86400
-    new_names = [n for n, t in born.items() if t >= cutoff]
-    regrown = []
-    for n in new_names:
-        older = [o for o in by_norm[ers.normalize_full(n)] if o != n and born.get(o, 0) < born[n] - 3600]
+    sweep = kg_hygiene.sweep()
+    regrown: list[tuple[str, str, str]] = []
+    for name in r.get("samples", []):
+        older = [o for o in entities
+                 if o != name
+                 and sweep.normalize_full(o) == sweep.normalize_full(name)]
         if older:
-            regrown.append((n, older[0], ers.classify_pair(n, older[0])[0]))
+            regrown.append((name, older[0], sweep.classify_pair(name, older[0])[0]))
 
     return {
         "contaminated": contaminated,
-        "contaminated_dirs": len({c[0] for c in contaminated}),
-        "foreign_facts": sum(c[2] for c in contaminated),
-        "near_dup_clusters": len(clusters),
-        "near_dup_dirs": sum(len(v) for v in clusters),
-        "near_dup_tiers": dict(cluster_tiers),
-        "regrowth_days": regrowth_days,
-        "new_dirs": len(new_names),
+        "contaminated_dirs": c["dirs"],
+        "foreign_facts": c["foreign_facts"],
+        "near_dup_clusters": n["clusters"],
+        "near_dup_dirs": n["dirs"],
+        "near_dup_tiers": n["by_tier"],
         "regrown": regrown,
+        "new_dirs": r["new_dirs"],
+        "regrowth_days": r["days"],
+        "provenance": kg_hygiene.provenance_coverage(root),
     }
+
+
+def _facts_root_for(entities: dict) -> Path:
+    """The tree the loaded entities came from."""
+    for files in entities.values():
+        for entry in files:
+            return Path(entry["file"]).parent.parent
+    return FACTS_DIR
 
 
 def generate_report(
@@ -356,11 +342,13 @@ def generate_report(
     lines.append("")
 
     if god_entities:
-        lines.append("| Entity | Fact Count | Categories |")
+        lines.append(f"| Entity | Fact Count | Categories |  <!-- top {SECTION_ROW_CAP} -->")
         lines.append("|--------|-----------|------------|")
-        for name, s in god_entities:
+        for name, s in god_entities[:SECTION_ROW_CAP]:
             cats = ", ".join(s["categories"])
             lines.append(f"| {name} | {s['total_facts']} | {cats} |")
+        if len(god_entities) > SECTION_ROW_CAP:
+            lines.append(f"| … | *{len(god_entities) - SECTION_ROW_CAP} more* | |")
     else:
         lines.append("*No god entities found.*")
     lines.append("")
@@ -381,10 +369,14 @@ def generate_report(
     lines.append("")
 
     if thin_entities:
+        lines.append(f"**{len(thin_entities):,}** in total; the {min(SECTION_ROW_CAP, len(thin_entities))} thinnest:")
+        lines.append("")
         lines.append("| Entity | Active Facts |")
         lines.append("|--------|-------------|")
-        for name, s in thin_entities:
+        for name, s in thin_entities[:SECTION_ROW_CAP]:
             lines.append(f"| {name} | {s['active_facts']} |")
+        if len(thin_entities) > SECTION_ROW_CAP:
+            lines.append(f"| … | *{len(thin_entities) - SECTION_ROW_CAP:,} more* |")
     else:
         lines.append("*No thin entities found.*")
     lines.append("")
@@ -405,10 +397,14 @@ def generate_report(
     lines.append("")
 
     if orphan_entities:
+        lines.append(f"**{len(orphan_entities):,}** in total; the {min(SECTION_ROW_CAP, len(orphan_entities))} largest:")
+        lines.append("")
         lines.append("| Entity | Fact Count |")
         lines.append("|--------|-----------|")
-        for name, s in orphan_entities:
+        for name, s in orphan_entities[:SECTION_ROW_CAP]:
             lines.append(f"| {name} | {s['total_facts']} |")
+        if len(orphan_entities) > SECTION_ROW_CAP:
+            lines.append(f"| … | *{len(orphan_entities) - SECTION_ROW_CAP:,} more* |")
     else:
         lines.append("*No orphan entities found.*")
     lines.append("")
@@ -436,12 +432,16 @@ def generate_report(
 
     if stale_facts:
         stale_sorted = sorted(stale_facts, key=lambda x: x["age_days"], reverse=True)
+        lines.append(f"**{len(stale_sorted):,}** in total; the {min(SECTION_ROW_CAP, len(stale_sorted))} oldest:")
+        lines.append("")
         lines.append("| Entity | Category | Fact Preview | Age (days) |")
         lines.append("|--------|----------|-------------|-----------|")
-        for sf in stale_sorted:
+        for sf in stale_sorted[:SECTION_ROW_CAP]:
             # Escape pipe characters in preview text
             preview = sf["preview"].replace("|", "\\|")
             lines.append(f"| {sf['entity']} | {sf['category']} | {preview} | {sf['age_days']} |")
+        if len(stale_sorted) > SECTION_ROW_CAP:
+            lines.append(f"| … | | *{len(stale_sorted) - SECTION_ROW_CAP:,} more* | |")
     else:
         lines.append("*No stale facts found.*")
     lines.append("")
@@ -476,7 +476,7 @@ def generate_report(
     lines.append("")
 
     if thin_entities:
-        for name, s in thin_entities[:20]:  # Cap at 20 to keep report manageable
+        for name, s in thin_entities[:20]:  # questions, not a listing — 20 is plenty
             lines.append(f"- What does **{name}** relate to?")
             lines.append(f"- Is **{name}** still relevant?")
     else:
@@ -489,6 +489,46 @@ def generate_report(
     lines.append("")
 
     return "\n".join(lines)
+
+
+# A monitor that reports success when it cannot see the thing it monitors is
+# worse than no monitor. These are the states that mean "stop and look".
+EXIT_OK = 0
+EXIT_ALARM = 2
+
+
+def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
+            baseline: int) -> list[str]:
+    """Conditions that make this run an alarm rather than a report."""
+    out = []
+    if store_stats is None:
+        out.append("the knowledge-graph store could not be read")
+        return out
+    active = store_stats.get("edges_active", 0)
+    if baseline > 0 and active < baseline * 0.5:
+        out.append(f"active edges {active:,} is below 50% of the baseline {baseline:,}")
+    if hygiene.get("contaminated_dirs"):
+        out.append(f"{hygiene['contaminated_dirs']} directories hold facts about another entity "
+                   f"({hygiene['foreign_facts']} facts) — a merge went wrong")
+    if duplicate_id_files:
+        out.append(f"{duplicate_id_files} fact files carry duplicate fact IDs")
+    return out
+
+
+def _duplicate_id_files(entities: dict) -> int:
+    """Fact files where one ID names two facts.
+
+    43% of files were in this state on 2026-09-03 because the extractor
+    restarted its numbering each run. Anything that addresses a fact by ID
+    then acts on whichever it finds first.
+    """
+    bad = 0
+    for files in entities.values():
+        for entry in files:
+            ids = [f.get("id") for f in entry["facts"] if isinstance(f, dict) and f.get("id")]
+            if len(ids) != len(set(ids)):
+                bad += 1
+    return bad
 
 
 def main():
@@ -508,10 +548,8 @@ def main():
         help=f"Facts directory (default: {FACTS_DIR})",
     )
     parser.add_argument(
-        "--relationships-file",
-        type=Path,
-        default=RELATIONSHIPS_FILE,
-        help=f"Relationships JSON file (default: {RELATIONSHIPS_FILE})",
+        "--no-alarm-exit", action="store_true",
+        help="Always exit 0, even on an alarm condition (for ad-hoc runs)",
     )
 
     args = parser.parse_args()
@@ -524,8 +562,14 @@ def main():
     entities = load_entities(args.facts_dir)
     print(f"  Found {len(entities)} entities")
 
-    print(f"Loading relationships from {args.relationships_file} ...")
-    edges = load_relationships(args.relationships_file)
+    store_stats = None
+    try:
+        edges = load_relationships()
+        store_stats = _kg_store().stats()
+        print(f"  Store: {store_stats}")
+    except StoreUnavailable as exc:
+        edges = []
+        print(f"  STORE UNAVAILABLE: {exc}", file=sys.stderr)
     print(f"  Found {len(edges)} edges")
 
     # Compute stats
@@ -534,6 +578,7 @@ def main():
     stale_facts = find_stale_facts(entities, now, STALE_DAYS_THRESHOLD)
 
     hygiene = compute_hygiene(entities, now)
+    dup_id_files = _duplicate_id_files(entities)
 
     # Generate report
     report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene)
@@ -552,7 +597,43 @@ def main():
     print(f"  Stale facts: {len(stale_facts)}")
     print(f"  Contaminated dirs: {hygiene['contaminated_dirs']} ({hygiene['foreign_facts']} foreign facts)")
     print(f"  Near-dup clusters: {hygiene['near_dup_clusters']}; regrown in {hygiene['regrowth_days']}d: {len(hygiene['regrown'])}")
+    print(f"  Files with duplicate fact IDs: {dup_id_files}")
+    pv = hygiene.get("provenance") or {}
+    if "both_pct" in pv:
+        print(f"  Provenance coverage: {pv['both_pct']}% of {pv['facts']:,} facts")
+
+    baseline = 0
+    try:
+        baseline_path = Path.home() / "lloyd" / "_pipeline" / "memory-graph" / "graph-baseline.json"
+        baseline = int(json.loads(baseline_path.read_text())["active_edges"])
+    except Exception:
+        pass
+
+    alarms = _alarms(store_stats, hygiene, dup_id_files, baseline)
+    if alarms:
+        print("\nALARM:", file=sys.stderr)
+        for a in alarms:
+            print(f"  - {a}", file=sys.stderr)
+        _alert(alarms, output_file)
+        if not args.no_alarm_exit:
+            return EXIT_ALARM
+    return EXIT_OK
+
+
+def _alert(alarms: list[str], report_path: Path) -> None:
+    """Post the alarm to Discord. Best effort — a failed notification must not
+    change the exit code, which is the signal the scheduler reads."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+        import asyncio
+        from app.discord_notify import _discord_notify_task_complete
+        body = ("Knowledge-graph health alarm:\n"
+                + "\n".join(f"• {a}" for a in alarms)
+                + f"\n\nReport: {report_path}")
+        asyncio.run(_discord_notify_task_complete(60, "Knowledge Health Report", body))
+    except Exception as exc:
+        print(f"[alert] could not notify: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
