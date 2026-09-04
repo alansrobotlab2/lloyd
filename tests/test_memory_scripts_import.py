@@ -279,3 +279,120 @@ def test_import_worker_refuses_to_run_against_the_live_tree(tmp_path):
                    cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=300)
     assert proc.returncode == 2
     assert "not the rebuild tree" in proc.stderr
+
+
+# ── swap and rollback ────────────────────────────────────────────────────────
+#
+# swap renames the live fact tree. A half-completed one is a broken system at
+# whatever hour it happens, so both directions are exercised here rather than
+# discovered in production.
+
+def _swap_world(tmp_path, m, monkeypatch, *, gate_passed=True):
+    """A fake live tree + store and a fake rebuild tree + store, with the
+    module's path constants pointed at them."""
+    from app.kg_store import KGStore
+    derived = tmp_path / "vault-derived"
+    live, rebuild = derived / "facts", derived / "facts-rebuild"
+    (live / "Old").mkdir(parents=True)
+    (live / "Old" / "Old-state.md").write_text(
+        "---\ntype: facts\nentity: Old\ncategory: state\nfacts:\n"
+        "- id: stat-001\n  fact: the old tree\n  confidence: 0.9\n---\n\n# Old\n")
+    (rebuild / "New").mkdir(parents=True)
+    (rebuild / "New" / "New-state.md").write_text(
+        "---\ntype: facts\nentity: New\ncategory: state\nfacts:\n"
+        "- id: stat-001\n  fact: the rebuilt tree\n  confidence: 0.9\n"
+        "  created_at: '2026-09-04T00:00:00+00:00'\n  source_doc: knowledge/x.md\n"
+        "---\n\n# New\n")
+
+    live_db, rebuild_db = derived / "kg.sqlite", derived / "kg-rebuild.sqlite"
+    a = KGStore(live_db); a.entities.register("Old"); a.close()
+    b = KGStore(rebuild_db); b.entities.register("New")
+    b.edges.add({"source": "New", "target": "Other", "type": "uses"}, origin="test"); b.close()
+
+    monkeypatch.setattr(m, "VAULT_DERIVED_ROOT", derived)
+    monkeypatch.setattr(m, "VAULT_FACTS_ROOT", live)
+    monkeypatch.setattr(m, "REBUILD_FACTS", rebuild)
+    monkeypatch.setattr(m, "VAULT_KG_DB", live_db)
+    monkeypatch.setattr(m, "REBUILD_DB", rebuild_db)
+    monkeypatch.setattr(m, "STATE_PATH", derived / "rebuild-state.json")
+    monkeypatch.setattr(m, "_set_write_enabled", lambda enabled: None)
+    m.save_state(gate=gate_passed, export={"exported_at": "2030-01-01T00:00:00+00:00"})
+    return live, rebuild, live_db, rebuild_db
+
+
+class _Args:
+    def __init__(self, **kw):
+        self.dry_run = False
+        self.force = False
+        self.__dict__.update(kw)
+
+
+def test_swap_replaces_the_tree_and_the_store(tmp_path, monkeypatch):
+    from app.kg_store import KGStore
+    m = _load(KG_REBUILD)
+    live, rebuild, live_db, _ = _swap_world(tmp_path, m, monkeypatch)
+
+    assert m.cmd_swap(_Args()) == 0
+    # the rebuilt tree is now the live one, the old one is quarantined
+    assert (live / "New" / "New-state.md").exists()
+    assert not (live / "Old").exists()
+    assert not rebuild.exists()
+    quarantine = list(tmp_path.glob("vault-derived/facts-quarantine-*"))
+    assert len(quarantine) == 1 and (quarantine[0] / "Old" / "Old-state.md").exists()
+
+    st = KGStore(live_db)
+    try:
+        assert st.entities.exists("New") and not st.entities.exists("Old")
+        assert st.edges.count() == 1
+        # swap reindexes, so the new tree's facts are queryable immediately
+        assert [f["fact"] for f in st.facts_idx.for_entity("New")] == ["the rebuilt tree"]
+        assert st.integrity_check() == "ok"
+    finally:
+        st.close()
+
+
+def test_rollback_puts_the_old_tree_back(tmp_path, monkeypatch):
+    from app.kg_store import KGStore
+    m = _load(KG_REBUILD)
+    live, _, live_db, _ = _swap_world(tmp_path, m, monkeypatch)
+    assert m.cmd_swap(_Args()) == 0
+    assert m.cmd_rollback(_Args()) == 0
+
+    assert (live / "Old" / "Old-state.md").exists()
+    assert not (live / "New").exists()
+    st = KGStore(live_db)
+    try:
+        assert st.entities.exists("Old") and not st.entities.exists("New")
+    finally:
+        st.close()
+
+
+def test_swap_refuses_without_a_passing_gate(tmp_path, monkeypatch):
+    m = _load(KG_REBUILD)
+    live, rebuild, _, _ = _swap_world(tmp_path, m, monkeypatch, gate_passed=False)
+    assert m.cmd_swap(_Args()) == 2
+    assert (live / "Old").exists() and rebuild.exists()
+
+
+def test_swap_refuses_when_a_fact_was_stated_after_the_export(tmp_path, monkeypatch):
+    from app.kg_store import KGStore
+    m = _load(KG_REBUILD)
+    live, rebuild, live_db, _ = _swap_world(tmp_path, m, monkeypatch)
+    m.save_state(export={"exported_at": "2020-01-01T00:00:00+00:00"})
+    st = KGStore(live_db)
+    with st.transaction() as c:
+        c.execute("INSERT INTO facts_idx(entity, category, fact_id, text_hash, fact, "
+                  "created_at, provenance, file_path) VALUES (?,?,?,?,?,?,?,?)",
+                  ("Old", "state", "stat-009", "h", "stated during the rebuild",
+                   "2026-09-04T01:00:00+00:00", "STATED", "Old/Old-state.md"))
+    st.close()
+
+    assert m.cmd_swap(_Args()) == 3
+    assert (live / "Old").exists() and rebuild.exists(), "nothing moved"
+
+
+def test_swap_dry_run_moves_nothing(tmp_path, monkeypatch):
+    m = _load(KG_REBUILD)
+    live, rebuild, _, _ = _swap_world(tmp_path, m, monkeypatch)
+    assert m.cmd_swap(_Args(dry_run=True)) == 0
+    assert (live / "Old").exists() and rebuild.exists()
