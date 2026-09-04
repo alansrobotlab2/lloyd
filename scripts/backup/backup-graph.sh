@@ -5,7 +5,7 @@
 # memory-graph working directory and the merge history, and there was no backup
 # of any kind: _pipeline/ is gitignored and nothing else copied it. Fact content
 # can be re-extracted from the vault; edges, merge history and hand-review state
-# cannot. Keeps 14 daily snapshots.
+# cannot. Keeps 14 daily snapshots, each including the fact tree itself.
 set -euo pipefail
 
 PIPELINE="$HOME/lloyd/_pipeline"
@@ -22,6 +22,10 @@ for f in _relationships.json entity-aliases.json; do
   [[ -f "$FACTS/$f" ]] && FILES+=("vault-derived/facts/$f")
 done
 [[ -d "$PIPELINE/memory-graph" ]] && FILES+=("memory-graph")
+# The fact files themselves: a wrong entity merge rewrites and moves them, and
+# on 2026-09-03 the only copy that let a 151-merge mistake be measured was a
+# tarball taken by hand minutes earlier. ~23 MB compressed.
+[[ -d "$FACTS" ]] && FILES+=("vault-derived/facts")
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
   echo "backup-graph: nothing to back up (no graph files found)" >&2
