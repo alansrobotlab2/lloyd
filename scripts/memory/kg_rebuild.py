@@ -171,6 +171,19 @@ def _set_write_enabled(enabled: bool) -> None:
     print(f"  config.yaml knowledge_graph.write_enabled = {enabled}")
 
 
+def _text_hash(text: str) -> str:
+    """Same hash facts_idx stores, so a carried-over fact can be looked up."""
+    import hashlib
+    return hashlib.sha256((text or "").strip().lower().encode("utf-8")).hexdigest()[:16]
+
+
+def _junk_named(facts: list) -> int:
+    """Carry-over facts whose entity the junk predicate legitimately refuses."""
+    from app.entity_naming import looks_like_junk_entity
+    return sum(1 for f in facts
+               if looks_like_junk_entity(f.get("entity", ""), f.get("source_doc")))
+
+
 def _corpus_size() -> int:
     """How many documents the allow-list selects. The denominator for
     corpus coverage — read from the same code the extractor uses, so the
@@ -362,7 +375,15 @@ def cmd_extract(args) -> int:
 # ── import ───────────────────────────────────────────────────────────────────
 
 def cmd_import(args) -> int:
-    """Apply the carry-over to the rebuilt tree."""
+    """Apply the carry-over to the rebuilt tree.
+
+    Runs as a SUBPROCESS under LLOYD_FACTS_ROOT / LLOYD_KG_DB rather than
+    reloading modules in place. `app.paths` reads those at import time and a
+    dozen modules capture its constants into their own globals, so
+    importlib.reload leaves some of them still pointed at the live tree —
+    which for this step would mean writing the carried-over facts into the
+    tree that is about to be quarantined.
+    """
     state = load_state()
     carry = Path(state.get("carryover") or "")
     if not carry.is_dir():
@@ -372,24 +393,52 @@ def cmd_import(args) -> int:
         print(f"no rebuild tree at {REBUILD_FACTS}; run `extract` first", file=sys.stderr)
         return 2
 
-    os.environ["LLOYD_FACTS_ROOT"] = str(REBUILD_FACTS)
-    os.environ["LLOYD_KG_DB"] = str(REBUILD_DB)
-    import importlib
-    import app.paths
-    importlib.reload(app.paths)
-    import app.kg_store
-    importlib.reload(app.kg_store)
-    from app.kg_store import store as rebuild_store
-    import agent_mcp._shared as shared
-    importlib.reload(shared)
+    proc = subprocess.run(
+        [_venv_python(), str(Path(__file__).resolve()), "_import_worker", "--carryover", str(carry)],
+        cwd=str(LLOYD), env=_rebuild_env(), capture_output=True, text=True)
+    sys.stdout.write(proc.stdout)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        return proc.returncode
+
+    try:
+        stats = json.loads(proc.stdout.strip().splitlines()[-1])
+    except Exception:
+        stats = {"parsed": False}
+    st = KGStore(REBUILD_DB)
+    save_state(import_stats=stats, rebuild_stats=st.stats())
+    st.close()
+    return 0
+
+
+def cmd_import_worker(args) -> int:
+    """The body of `import`, running with the rebuild env already applied.
+
+    Every path this touches resolves through app.paths, which read the env
+    at import — so `fact_add` here writes into the rebuild tree and the
+    rebuild store, with no reloading and no globals left behind.
+    """
+    from app.kg_store import store
+    from app.paths import VAULT_FACTS_ROOT as ROOT
     import agent_mcp.facts as facts_mod
-    importlib.reload(facts_mod)
 
-    st = rebuild_store()
-    stats = {"facts": 0, "facts_skipped": 0, "aliases": 0, "edges": 0, "experiments": 0}
+    carry = Path(args.carryover)
+    if ROOT.name != "facts-rebuild":
+        print(f"refusing: LLOYD_FACTS_ROOT is {ROOT}, not the rebuild tree", file=sys.stderr)
+        return 2
 
-    # Facts go back through fact_add, so they get the new ID scheme and land
-    # in the new tree's files rather than being copied as raw markdown.
+    st = store()
+    stats = {"facts": 0, "rejected_junk": 0, "dropped": 0, "aliases": 0,
+             "edges": 0, "experiments": 0}
+    dropped: list = []
+
+    # Facts go back through fact_add so they get the new ID scheme and land in
+    # the new tree's files, rather than being copied in as raw markdown.
+    #
+    # These are the facts re-extraction CANNOT reproduce — they came from a
+    # conversation. A junk entity name is a legitimate refusal; anything else
+    # is a fact about to be lost, and fails the import rather than becoming a
+    # line in a stats dict.
     for f in json.loads((carry / "facts.json").read_text()):
         res = facts_mod._fact_add({
             "entity": f["entity"], "category": f["category"], "fact": f["fact"],
@@ -399,15 +448,20 @@ def cmd_import(args) -> int:
         })
         if res.get("success"):
             stats["facts"] += 1
+        elif res.get("code") == "INVALID_PARAM":
+            stats["rejected_junk"] += 1
+            print(f"  rejected junk entity {f['entity']!r}")
         else:
-            stats["facts_skipped"] += 1
+            stats["dropped"] += 1
+            dropped.append({**f, "error": res.get("error", "")})
+            print(f"  DROPPED {f['entity']}/{f['category']}: {res.get('error', '')[:110]}")
 
     exp = carry / "Experiments"
     if exp.is_dir():
-        shutil.copytree(exp, REBUILD_FACTS / "Experiments", dirs_exist_ok=True)
-        stats["experiments"] = sum(1 for _ in (REBUILD_FACTS / "Experiments").rglob("*.md"))
-        st.facts_idx.reindex(list((REBUILD_FACTS / "Experiments").rglob("*.md")),
-                             root=REBUILD_FACTS)
+        shutil.copytree(exp, ROOT / "Experiments", dirs_exist_ok=True)
+        files = list((ROOT / "Experiments").rglob("*.md"))
+        stats["experiments"] = len(files)
+        st.facts_idx.reindex(files, root=ROOT)
 
     with st.transaction():
         for a in json.loads((carry / "aliases.json").read_text()):
@@ -429,8 +483,17 @@ def cmd_import(args) -> int:
                 shutil.copy2(p, MEMORY_GRAPH / p.name)
 
     st.entities.backfill_kinds()
-    save_state(import_stats=stats, rebuild_stats=st.stats())
-    print(json.dumps(stats, indent=2))
+    print(f"carried over: {stats}")
+    if dropped:
+        report = carry / "dropped-facts.json"
+        report.write_text(json.dumps(dropped, indent=2, default=str))
+        print(f"\n{len(dropped)} carried-over fact(s) did not land. They came from a "
+              f"conversation and re-extraction cannot reproduce them.", file=sys.stderr)
+        print(f"Written to {report}. Fix the cause and re-run `import`; it is "
+              f"idempotent on facts already present.", file=sys.stderr)
+        print(json.dumps(stats))
+        return 4
+    print(json.dumps(stats))     # last line, parsed by the parent
     return 0
 
 
@@ -512,9 +575,27 @@ def cmd_gate(args) -> int:
     coverage = round(100.0 * len(st.edges.nodes()) / stats["entities"], 2) if stats["entities"] else 0.0
     record("node_coverage_pct", coverage >= GATE["node_coverage_pct"], coverage,
            f">= {GATE['node_coverage_pct']}", "share of entities in at least one edge")
+
+    # 8. The carry-over landed. `import` fails loudly on a dropped fact, but
+    #    the gate is what stands between a bad rebuild and the swap, and a
+    #    carry-over that was never run at all would otherwise pass silently.
+    carry = Path(state.get("carryover") or "")
+    if (carry / "facts.json").is_file():
+        want = json.loads((carry / "facts.json").read_text())
+        have = 0
+        for f in want:
+            rows = st._query(
+                "SELECT 1 FROM facts_idx WHERE entity=? AND text_hash=? LIMIT 1",
+                (f["entity"], _text_hash(f["fact"] or "")))
+            if rows:
+                have += 1
+        junk = len(want) - have
+        record("carryover_facts", have + _junk_named(want) >= len(want),
+               f"{have}/{len(want)}", "all present",
+               f"{junk} missing" if junk else "hand-stated facts re-added")
     st.close()
 
-    # 8. Retrieval, against the tree we are about to swap in.
+    # 9. Retrieval, against the tree we are about to swap in.
     before = state.get("eval_before") or {}
     after = _run_eval("rebuild-after", run_dir) if not args.skip_eval else {}
     results["eval_before"], results["eval_after"] = before, after
@@ -687,6 +768,9 @@ def main() -> int:
                         "Stops early when a pass extracts nothing new.")
     p.set_defaults(fn=cmd_extract)
     sub.add_parser("import").set_defaults(fn=cmd_import)
+    p = sub.add_parser("_import_worker", help=argparse.SUPPRESS)
+    p.add_argument("--carryover", required=True)
+    p.set_defaults(fn=cmd_import_worker)
     p = sub.add_parser("gate"); p.add_argument("--skip-eval", action="store_true")
     p.set_defaults(fn=cmd_gate)
     p = sub.add_parser("swap")

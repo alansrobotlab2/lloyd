@@ -150,3 +150,132 @@ def test_gate_checks_corpus_coverage(tmp_path):
         assert m._corpus_size() > 1000
     finally:
         kg_store.reset()
+
+
+# ── the rebuild's carry-over import ──────────────────────────────────────────
+#
+# These 444 facts came from conversations. Re-extraction cannot reproduce
+# them, and the tree they currently live in is the one `swap` renames to
+# facts-quarantine-<ts>. Everything below exists so a silent drop is
+# impossible.
+
+import json as _json
+import os as _os
+import subprocess as _sp
+import sys as _sys
+
+KG_REBUILD = MEMORY / "kg_rebuild.py"
+
+
+def _carryover(tmp_path, facts, *, aliases=None, edges=None, experiments=True):
+    carry = tmp_path / "carryover"
+    (carry / "review").mkdir(parents=True)
+    (carry / "facts.json").write_text(_json.dumps(facts))
+    (carry / "aliases.json").write_text(_json.dumps(aliases or []))
+    (carry / "edges.json").write_text(_json.dumps(edges or []))
+    if experiments:
+        d = carry / "Experiments" / "Exp1"
+        d.mkdir(parents=True)
+        (d / "Exp1-state.md").write_text(
+            "---\ntype: facts\nentity: Exp1\ncategory: state\nfacts:\n"
+            "- id: stat-001\n  fact: an autoresearch experiment record\n"
+            "  confidence: 1.0\n  provenance: STATED\n"
+            "  created_at: '2026-08-01T00:00:00+00:00'\n---\n\n# Exp1 - state\n")
+    return carry
+
+
+def _run_import(tmp_path, carry):
+    rebuild = tmp_path / "facts-rebuild"
+    rebuild.mkdir(exist_ok=True)
+    env = dict(_os.environ,
+               LLOYD_FACTS_ROOT=str(rebuild),
+               LLOYD_KG_DB=str(tmp_path / "kg-rebuild.sqlite"))
+    proc = _sp.run([_sys.executable, str(KG_REBUILD), "_import_worker",
+                    "--carryover", str(carry)],
+                   cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=300)
+    return proc, rebuild
+
+
+def test_import_carries_facts_aliases_edges_and_experiments(tmp_path):
+    carry = _carryover(
+        tmp_path,
+        [{"entity": "Alan", "category": "preference", "fact": "prefers terse reports",
+          "confidence": 0.95, "provenance": "STATED", "source_doc": "sessions/abc.json",
+          "valid_at": None}],
+        aliases=[{"surface": "alan robotlab", "canonical": "Alan", "kind": "semantic",
+                  "origin": "manual", "report_path": None}],
+        edges=[{"source": "Alan", "target": "Lloyd", "type": "uses", "confidence": 1.0,
+                "provenance": "STATED", "origin": "fact_relate"}])
+    proc, rebuild = _run_import(tmp_path, carry)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    stats = _json.loads(proc.stdout.strip().splitlines()[-1])
+    assert stats == {"facts": 1, "rejected_junk": 0, "dropped": 0,
+                     "aliases": 1, "edges": 1, "experiments": 1}
+
+    from app.kg_store import KGStore
+    st = KGStore(tmp_path / "kg-rebuild.sqlite")
+    try:
+        # the fact landed in the REBUILD tree, with the new ID scheme
+        assert (rebuild / "Alan" / "Alan-preference.md").exists()
+        row = st.facts_idx.for_entity("Alan")[0]
+        assert row["fact"] == "prefers terse reports"
+        assert row["fact_id"] == "pref-001"
+        assert row["provenance"] == "STATED"
+        assert st.aliases.resolve("Alan Robotlab") == "Alan"
+        assert st.edges.find_active("Alan", "Lloyd", "uses")
+        assert (rebuild / "Experiments" / "Exp1" / "Exp1-state.md").exists()
+        assert st.facts_idx.for_entity("Exp1")
+    finally:
+        st.close()
+
+
+def test_import_refuses_junk_entities_without_failing(tmp_path):
+    """A pipeline-run name is a legitimate refusal, not a lost fact."""
+    carry = _carryover(tmp_path, [
+        {"entity": "Sweep Run 313", "category": "state", "fact": "junk", "confidence": 0.9,
+         "provenance": "STATED", "source_doc": None, "valid_at": None},
+        {"entity": "Alan", "category": "state", "fact": "a real one", "confidence": 0.9,
+         "provenance": "STATED", "source_doc": None, "valid_at": None},
+    ], experiments=False)
+    proc, _ = _run_import(tmp_path, carry)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    stats = _json.loads(proc.stdout.strip().splitlines()[-1])
+    assert stats["facts"] == 1 and stats["rejected_junk"] == 1 and stats["dropped"] == 0
+
+
+def test_import_fails_when_a_carried_fact_cannot_land(tmp_path):
+    """The whole point. A dropped fact used to be a number in a stats dict and
+    the import still exited 0."""
+    carry = _carryover(tmp_path, [
+        {"entity": "Broken", "category": "state", "fact": "must not vanish",
+         "confidence": 0.9, "provenance": "STATED", "source_doc": None, "valid_at": None},
+    ], experiments=False)
+    rebuild = tmp_path / "facts-rebuild"
+    (rebuild / "Broken").mkdir(parents=True)
+    # a target file that will not parse -> fact_add quarantines and refuses
+    (rebuild / "Broken" / "Broken-state.md").write_text("---\nfacts: [unclosed\nentity: Broken\n")
+
+    proc, _ = _run_import(tmp_path, carry)
+    assert proc.returncode == 4, proc.stdout + proc.stderr
+    assert "DROPPED" in proc.stdout
+    dropped = _json.loads((carry / "dropped-facts.json").read_text())
+    assert len(dropped) == 1 and dropped[0]["fact"] == "must not vanish"
+    # and re-running after the cause is fixed lands it
+    assert list((rebuild / "Broken").glob("*.corrupt-*"))
+    proc2, _ = _run_import(tmp_path, carry)
+    assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+
+
+def test_import_worker_refuses_to_run_against_the_live_tree(tmp_path):
+    """The guard that stops this writing carried-over facts into the tree
+    that is about to be quarantined."""
+    carry = _carryover(tmp_path, [], experiments=False)
+    live = tmp_path / "facts"
+    live.mkdir()
+    env = dict(_os.environ, LLOYD_FACTS_ROOT=str(live),
+               LLOYD_KG_DB=str(tmp_path / "kg.sqlite"))
+    proc = _sp.run([_sys.executable, str(KG_REBUILD), "_import_worker",
+                    "--carryover", str(carry)],
+                   cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 2
+    assert "not the rebuild tree" in proc.stderr
