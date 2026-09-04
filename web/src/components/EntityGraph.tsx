@@ -6,6 +6,7 @@ import { forceCollide } from "d3-force";
 import { api, type EntityGraphNode, type EntityGraphData } from "../api";
 import { RotateCcw, Maximize } from "lucide-react";
 import { categoryOf, CATEGORY_COLOR } from "../lib/edgeCategories";
+import { KIND_COLOR, KIND_ORDER } from "../lib/entityKinds";
 
 // -- Types --
 
@@ -74,17 +75,11 @@ function escapeHtml(s: string): string {
 // with a fallback that hashed the node id into a hue — so every node that
 // was not literally typed "entity" got an arbitrary colour and the legend
 // described nothing.
-export const KIND_COLOR: Record<string, string> = {
-  person:  "#F472B6",
-  project: "#A78BFA",
-  system:  "#F59E0B",
-  concept: "#38BDF8",
-  skill:   "#34D399",
-  task:    "#FB923C",
-  doc:     "#94A3B8",
-  entity:  "#64748B",
-};
-export const KIND_ORDER = ["system", "project", "concept", "person", "skill", "task", "doc", "entity"] as const;
+//
+// The palette itself lives in lib/entityKinds so MemoryPage can read it
+// without importing this module (and with it three.js). Re-exported here for
+// anything already importing it from the component.
+export { KIND_COLOR, KIND_ORDER };
 
 function nodeColor(node: GNode): string {
   return KIND_COLOR[node.type] || KIND_COLOR.entity;
@@ -117,6 +112,129 @@ function edgeColor(type: string, highlighted: boolean, dimmed: boolean): string 
   return `rgba(${rgb},${alpha})`;
 }
 
+// -- Shared node geometry --
+//
+// One geometry per node SHAPE, scaled per node, instead of a fresh
+// SphereGeometry(r, 20, 16) for each of ~2,500 nodes — that cost ~215ms of
+// every mount, and at the 3-4px a node occupies on screen the extra segments
+// are detail nobody can see.
+//
+// three-forcegraph deallocates a node's object when the node leaves the graph
+// (toggling an edge filter does exactly that), and _deallocate recursively
+// calls geometry.dispose(). On a shared geometry that would free the buffer
+// out from under every other node still using it, so these two — which live
+// for the lifetime of the module — refuse to be disposed.
+const SHARED_SPHERE = new THREE.SphereGeometry(1, 8, 6);
+const SHARED_OCTAHEDRON = new THREE.OctahedronGeometry(1, 0);
+SHARED_SPHERE.dispose = () => {};
+SHARED_OCTAHEDRON.dispose = () => {};
+
+/** Build a node's label sprite the first time it actually has to be shown.
+ *
+ *  SpriteText rasterises its text into a private canvas and uploads it as a
+ *  texture. Doing that eagerly for every node cost ~1.3s of the mount plus
+ *  ~2,500 texture uploads on the first frame — for labels that stay hidden
+ *  until the node is highlighted or the camera comes close, which in practice
+ *  is a few dozen of them. */
+function ensureLabel(group: THREE.Object3D): THREE.Sprite {
+  const cached = (group as any).__nodeLabel as THREE.Sprite | undefined;
+  if (cached) return cached;
+
+  const sprite = new SpriteText((group as any).__labelText ?? "");
+  sprite.textHeight = 2.2;
+  sprite.color = (group as any).__labelColor ?? KIND_COLOR.entity;
+  sprite.backgroundColor = "rgba(15,23,42,0.65)";
+  sprite.padding = 1.5;
+  sprite.borderRadius = 2;
+  sprite.position.set(0, (group as any).__labelOffset ?? 3, 0);
+  // Don't intercept pointer events targeting the node behind the label.
+  (sprite as any).raycast = () => {};
+
+  group.add(sprite);
+  (group as any).__nodeLabel = sprite;
+  return sprite;
+}
+
+// -- Layout cache --
+//
+// A settled layout is worth keeping: recomputing it costs ~1.4s of blocking
+// simulation on a graph this size, and the result is deterministic enough
+// that reusing it is strictly better than watching the graph re-settle.
+//
+// Two tiers. The module-level cache survives a MemoryPage unmount (Layout
+// renders one page at a time, so leaving the tab and coming back remounts
+// this component from scratch); localStorage survives a reload.
+
+const LAYOUT_STORAGE_KEY = "lloyd.entityGraph.layout.v1";
+/** Refetch the graph if the module cache is older than this. */
+const GRAPH_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface GraphCache {
+  fetchedAt: number;
+  data: EntityGraphData;
+  nodes: GNode[];
+  links: GLink[];
+}
+
+/** Survives unmount, not reload. Holds the *same* node objects the simulation
+ *  ran on, so their x/y/z and fx/fy/fz pins come back with them. */
+let graphCache: GraphCache | null = null;
+
+/** Order-independent digest of the node set, so a stored layout is only ever
+ *  reapplied to the graph it was computed from. */
+function layoutSignature(nodes: { id: string }[]): string {
+  let sum = 0;
+  for (const n of nodes) {
+    let h = 0;
+    for (let i = 0; i < n.id.length; i++) h = (h * 31 + n.id.charCodeAt(i)) | 0;
+    sum = (sum + h) | 0;
+  }
+  return `${nodes.length}:${sum}`;
+}
+
+type StoredPositions = Record<string, [number, number, number]>;
+
+function readStoredLayout(sig: string): StoredPositions | null {
+  try {
+    const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { sig?: string; pos?: StoredPositions };
+    return parsed.sig === sig && parsed.pos ? parsed.pos : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredLayout(sig: string, nodes: GNode[]): void {
+  try {
+    const pos: StoredPositions = {};
+    const r1 = (v: number) => Math.round(v * 10) / 10;
+    for (const n of nodes) {
+      if (typeof n.x !== "number" || typeof n.y !== "number") continue;
+      pos[n.id] = [r1(n.x), r1(n.y), r1(n.z ?? 0)];
+    }
+    localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({ sig, pos }));
+  } catch {
+    // Quota exceeded, or storage unavailable (private mode). The layout just
+    // gets recomputed next reload — not worth failing the render over.
+  }
+}
+
+/** Pin nodes at their stored positions. Returns true if the whole node set was
+ *  covered, which is the condition for skipping warmup/cooldown entirely. */
+function applyStoredLayout(nodes: GNode[], pos: StoredPositions): boolean {
+  let applied = 0;
+  for (const n of nodes) {
+    const p = pos[n.id];
+    if (!p) continue;
+    n.x = n.fx = p[0];
+    n.y = n.fy = p[1];
+    n.z = n.fz = p[2];
+    applied++;
+  }
+  return applied === nodes.length;
+}
+
 // -- Component --
 
 export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick, onNodeDoubleClick, onNodeHover, onGraphLoaded }: EntityGraphProps) {
@@ -128,9 +246,15 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rawGraphData, setRawGraphData] = useState<GData>({ nodes: [], links: [] });
+  /** True once every node has a position to start from (module cache or
+   *  localStorage), which lets the sim skip warmup and cooldown outright. */
+  const [layoutPresettled, setLayoutPresettled] = useState(false);
+  const layoutSigRef = useRef<string>("");
   const [activeNode, setActiveNode] = useState<GNode | null>(null);
   const [hoverNode, setHoverNode] = useState<GNode | null>(null);
   const [dimensions, setDimensions] = useState({ w: 800, h: 600 });
+  /** The page is mounted but hidden (Layout keeps it around across tabs). */
+  const [offscreen, setOffscreen] = useState(false);
   const [edgeFilters, setEdgeFilters] = useState<EdgeFilters>({
     structural: true,
     lineage: true,
@@ -146,7 +270,20 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
 
   // -- Load data --
 
-  const loadGraph = useCallback(async () => {
+  const loadGraph = useCallback(async (force = false) => {
+    // Remounting the page shouldn't re-pay for the fetch, the degree pass, or
+    // the layout. The cached node objects are the ones d3 already positioned
+    // and pinned, so handing them straight back gives a settled graph on the
+    // first frame.
+    if (!force && graphCache && Date.now() - graphCache.fetchedAt < GRAPH_CACHE_TTL_MS) {
+      layoutSigRef.current = layoutSignature(graphCache.nodes);
+      setLayoutPresettled(graphCache.nodes.every((n) => typeof n.fx === "number"));
+      setRawGraphData({ nodes: graphCache.nodes, links: graphCache.links });
+      onGraphLoaded?.(graphCache.data);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -163,10 +300,15 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
         ...n,
         degree: degreeMap.get(n.id) || 0,
       }));
-      setRawGraphData({
-        nodes,
-        links: data.edges as GLink[],
-      });
+      const links = data.edges as GLink[];
+
+      const sig = layoutSignature(nodes);
+      layoutSigRef.current = sig;
+      const stored = readStoredLayout(sig);
+      setLayoutPresettled(stored ? applyStoredLayout(nodes, stored) : false);
+
+      graphCache = { fetchedAt: Date.now(), data, nodes, links };
+      setRawGraphData({ nodes, links });
       onGraphLoaded?.(data);
     } catch (err: any) {
       setError(err.message || "Failed to load entity graph");
@@ -239,19 +381,42 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
   );
 
   // -- Resize tracking --
+  //
+  // Layout keeps the memory page mounted and hides it with `display:none`, so
+  // a zero-sized observation means "the tab is in the background", not "the
+  // graph shrank". Hold the last real size (resizing the canvas to 0 and back
+  // costs a full WebGL context resize) and use it to park the render loop.
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    const apply = (w: number, h: number) => {
+      if (w > 0 && h > 0) {
+        setDimensions({ w, h });
+        setOffscreen(false);
+      } else {
+        setOffscreen(true);
+      }
+    };
     const ro = new ResizeObserver((entries) => {
       const rect = entries[0].contentRect;
-      setDimensions({ w: rect.width, h: rect.height });
+      apply(rect.width, rect.height);
     });
     ro.observe(container);
     const rect = container.getBoundingClientRect();
-    setDimensions({ w: rect.width, h: rect.height });
+    apply(rect.width, rect.height);
     return () => ro.disconnect();
   }, []);
+
+  // Stop rendering (and stop the label rAF loop below) while the tab is in the
+  // background. Without this a hidden graph keeps drawing ~2,500 objects at
+  // 60fps for as long as MC is open.
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg) return;
+    if (offscreen) fg.pauseAnimation?.();
+    else fg.resumeAnimation?.();
+  }, [offscreen, loading]);
 
   // -- Fit to view once after first data load --
 
@@ -272,8 +437,11 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     const fg = fgRef.current;
     if (!fg) return;
     try {
+      // iterations(1) rather than 2: collide is the most expensive force in
+      // the set, and the second relaxation pass cost ~250ms per 60 ticks for
+      // a separation nobody can see at this zoom.
       fg.d3Force("collide",
-        forceCollide().radius(() => 8).strength(0.6).iterations(2)
+        forceCollide().radius(() => 8).strength(0.6).iterations(1)
       );
       fg.d3Force("charge")?.strength(-90).distanceMax(400);
       fg.d3Force("link")?.distance(() => 45).strength(0.3);
@@ -331,10 +499,9 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     const r = nodeRadius(n);
     const color = nodeColor(n);
     // People and projects render as octahedra so they stand out from the
-    // systems and concepts that make up most of the graph.
-    const geometry = (n.type === "person" || n.type === "project")
-      ? new THREE.OctahedronGeometry(r * 1.6, 0)
-      : new THREE.SphereGeometry(r, 20, 16);
+    // systems and concepts that make up most of the graph. Both shapes come
+    // from a unit geometry shared across every node and scaled to size.
+    const faceted = n.type === "person" || n.type === "project";
     const material = new THREE.MeshPhongMaterial({
       color,
       specular: 0x222222,
@@ -342,24 +509,17 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       transparent: true,
       opacity: 1,
     });
-    const mesh = new THREE.Mesh(geometry, material);
+    const mesh = new THREE.Mesh(faceted ? SHARED_OCTAHEDRON : SHARED_SPHERE, material);
+    mesh.scale.setScalar(faceted ? r * 1.6 : r);
 
-    const sprite = new SpriteText(n.label);
-    sprite.textHeight = 2.2;
-    sprite.color = nodeColor(n);
-    sprite.backgroundColor = "rgba(15,23,42,0.65)";
-    sprite.padding = 1.5;
-    sprite.borderRadius = 2;
-    sprite.position.set(0, r + 2.2, 0);
-    sprite.visible = false;
-    // Don't intercept pointer events targeting the node behind the label.
-    (sprite as any).raycast = () => {};
-
+    // No label sprite here — ensureLabel() builds one on the frame it first
+    // needs to be visible. See the comment on ensureLabel.
     const group = new THREE.Group();
     group.add(mesh);
-    group.add(sprite);
     (group as any).__nodeMesh = mesh;
-    (group as any).__nodeLabel = sprite;
+    (group as any).__labelText = n.label;
+    (group as any).__labelColor = color;
+    (group as any).__labelOffset = r + 2.2;
     return group;
   }, []);
 
@@ -388,7 +548,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     // Iterate the RENDERED nodes. This walked every loaded node on every
     // animation frame — with isolated entities included that was 23,565
     // getWorldPosition calls per frame for the ~2,500 actually drawn.
-    if (!graphData.nodes.length) return;
+    if (!graphData.nodes.length || offscreen) return;
     const PROXIMITY_THRESHOLD = 90;
     const tmp = new THREE.Vector3();
     let raf = 0;
@@ -402,19 +562,26 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       const anyLit = lit.size > 0;
       for (const n of graphData.nodes as any[]) {
         const group = n.__threeObj as THREE.Object3D | undefined;
-        const sprite = (group as any)?.__nodeLabel as THREE.Sprite | undefined;
-        if (!sprite || !group) continue;
+        if (!group) continue;
+        const sprite = (group as any).__nodeLabel as THREE.Sprite | undefined;
+
+        let show: boolean;
         if (anyLit) {
-          sprite.visible = lit.has(n.id);
-          continue;
+          show = lit.has(n.id);
+        } else {
+          group.getWorldPosition(tmp);
+          show = tmp.distanceTo(camera.position) < PROXIMITY_THRESHOLD;
         }
-        group.getWorldPosition(tmp);
-        sprite.visible = tmp.distanceTo(camera.position) < PROXIMITY_THRESHOLD;
+
+        // Build the sprite only when it first has to be shown; a node that
+        // never gets close or highlighted never pays for one.
+        if (show) ensureLabel(group).visible = true;
+        else if (sprite) sprite.visible = false;
       }
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [graphData]);
+  }, [graphData, offscreen]);
 
   // -- Link styling --
 
@@ -533,7 +700,14 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       if (typeof n.y === "number") n.fy = n.y;
       if (typeof n.z === "number") n.fz = n.z;
     }
-  }, [rawGraphData]);
+    // Persist the settled layout so the next reload starts from it instead of
+    // re-running ~1.4s of simulation. Skipped when we started from a cached
+    // layout — nothing moved, so there is nothing new to write.
+    if (!layoutPresettled && layoutSigRef.current && rawGraphData.nodes.length) {
+      writeStoredLayout(layoutSigRef.current, rawGraphData.nodes);
+      setLayoutPresettled(true);
+    }
+  }, [rawGraphData, layoutPresettled]);
 
   // Remap middle-click-drag to PAN (default is DOLLY/zoom, redundant with scroll).
   // TrackballControls.mouseButtons = { LEFT: ROTATE, MIDDLE: DOLLY, RIGHT: PAN }
@@ -586,9 +760,14 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
             onNodeClick={handleNodeClick}
             onBackgroundClick={handleBackgroundClick}
             onEngineStop={handleEngineStop}
-            cooldownTicks={100}
+            // A restored layout is already settled and fully pinned, so both
+            // phases are pure waste. Otherwise: warmupTicks is synchronous and
+            // blocks the first paint, so keep it to the handful of ticks that
+            // stop the graph from appearing as a ball at the origin (~120ms)
+            // and let the visible cooldown do the rest of the settling.
+            cooldownTicks={layoutPresettled ? 0 : 150}
             cooldownTime={8000}
-            warmupTicks={60}
+            warmupTicks={layoutPresettled ? 0 : 10}
             d3AlphaDecay={0.04}
             d3VelocityDecay={0.4}
             enableNodeDrag={false}
@@ -656,7 +835,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       {error && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-red-400 text-xs">
           <p>{error}</p>
-          <button onClick={loadGraph} className="underline text-muted-foreground hover:text-foreground">Retry</button>
+          <button onClick={() => loadGraph(true)} className="underline text-muted-foreground hover:text-foreground">Retry</button>
         </div>
       )}
 

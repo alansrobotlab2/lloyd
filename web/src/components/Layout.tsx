@@ -7,11 +7,16 @@ import MemoryPage from './pages/MemoryPage'
 import ServicesPage from './pages/ServicesPage'
 import SkillsPage from './pages/SkillsPage'
 import ToolsPage from './pages/ToolsPage'
-import ArchitecturePageFull from './pages/ArchitecturePage'
 import AutonomyPage from './pages/AutonomyPage'
 import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
 import SettingsPage from './pages/SettingsPage'
+
+// Architecture renders its own force graph, so it's the other page holding
+// three.js + react-force-graph-3d in the entry bundle. Lazy here too —
+// otherwise splitting the memory graph out buys nothing, since the entry
+// chunk still has to carry the renderer for this page.
+const ArchitecturePageFull = lazy(() => import('./pages/ArchitecturePage'))
 
 // IDE pulls in Monaco (+ language client + AI providers) — heavy. Lazy-load
 // it so the rest of MC isn't waiting on that bundle. After first visit,
@@ -69,7 +74,7 @@ const GraphPage = () => (
 const PAGES: Record<string, React.FC> = {
   services: ServicesPage,
   backlog: BacklogPage,
-  memory: MemoryPage,
+  // memory is rendered separately below — sticky, like the IDE.
   graph: GraphPage,
   skills: SkillsPage,
   tools: ToolsPage,
@@ -164,6 +169,14 @@ export default function Layout() {
   const [ideEverActive, setIdeEverActive] = useState(false)
   useEffect(() => {
     if (page === 'ide') setIdeEverActive(true)
+  }, [page])
+
+  // Memory is heavy for the same reason (three.js + a 2,500-node force
+  // layout), and gets the same treatment: mount on first visit, then keep it
+  // mounted so returning to the tab doesn't rebuild the whole graph.
+  const [memoryEverActive, setMemoryEverActive] = useState(false)
+  useEffect(() => {
+    if (page === 'memory') setMemoryEverActive(true)
   }, [page])
 
   // Preload the IDE chunk in the background once the rest of MC has had
@@ -501,8 +514,31 @@ export default function Layout() {
             </div>
           )}
 
+          {/* Memory — sticky, for the same reason as the IDE above. The graph
+              costs a fetch, ~2,500 three.js objects and a force layout to
+              build, so unmounting it on every tab switch made returning to
+              the tab as expensive as the first visit. */}
+          {memoryEverActive && (
+            <div
+              className={cn(
+                'flex-1 flex flex-col min-h-0 overflow-hidden',
+                page === 'memory' ? '' : 'hidden',
+              )}
+            >
+              <MemoryPage />
+            </div>
+          )}
+
           {/* Other pages */}
-          {PageComponent && <PageComponent />}
+          {PageComponent && (
+            <Suspense fallback={
+              <div className="flex items-center justify-center h-full text-sm text-muted-foreground italic">
+                Loading…
+              </div>
+            }>
+              <PageComponent />
+            </Suspense>
+          )}
         </main>
 
         {/* Right chat sidebar — voice-driven dual-brain conversation. Always

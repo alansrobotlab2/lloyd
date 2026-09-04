@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo, lazy, Suspense } from "react";
 import { useReportMcFocus, usePendingFocusFor, useMcUi } from "../../contexts/McUiContext";
 import {
   Search,
@@ -26,8 +26,26 @@ import {
   type EntityGraphData,
 } from "../../api";
 import { Streamdown } from "streamdown";
-import EntityGraph, { KIND_COLOR } from "../EntityGraph";
 import { categoryOf, CATEGORY_CHIP_CLASS } from "../../lib/edgeCategories";
+import { KIND_COLOR } from "../../lib/entityKinds";
+
+// three.js + react-force-graph-3d is ~1MB and only this page needs it. Split
+// out so it loads alongside the page instead of inside the app's entry bundle
+// — the palette it used to export now lives in lib/entityKinds, so importing
+// it here no longer drags the whole renderer in.
+const EntityGraph = lazy(() => import("../EntityGraph"));
+
+// Stands in for the graph while its chunk loads and before it is mounted.
+// Mirrors EntityGraph's own container so nothing shifts when it swaps in.
+function GraphPlaceholder() {
+  return (
+    <div className="w-full h-full relative overflow-hidden bg-background rounded-lg border border-border/30">
+      <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-xs">
+        Loading knowledge graph...
+      </div>
+    </div>
+  );
+}
 
 // -- Types --
 
@@ -400,7 +418,13 @@ function EntityDetailPanel({
                 const retired = !!(f.expired_at || f.invalid_at);
                 return (
                   <div
-                    key={f.id || i}
+                    // Fact ids are only unique within a fact file, so an
+                    // entity with many files repeats them — Lloyd returns
+                    // 5,489 facts across 65 distinct ids, "fact-001" 1,955
+                    // times. React warned once per collision (tens of
+                    // thousands of console.error calls while the panel
+                    // rendered), so pair the id with its position.
+                    key={`${f.id ?? "fact"}-${i}`}
                     title={f.source_doc ? `from ${f.source_doc}` : undefined}
                     className={`text-[11px] leading-relaxed rounded px-2 py-1 ${
                       retired
@@ -861,6 +885,26 @@ export default function MemoryPage() {
     api.memoryStats().then(setStats).catch(console.error);
   }, []);
 
+  // Mount the graph a beat after the page. It used to mount in the same commit
+  // as everything else, so the sidebar, entity list and search box all waited
+  // behind the graph's build + layout before anything was interactive.
+  const [graphMounted, setGraphMounted] = useState(false);
+  useEffect(() => {
+    const idle = (window as any).requestIdleCallback as
+      | ((cb: () => void, opts?: { timeout: number }) => number)
+      | undefined;
+    if (idle) {
+      const h = idle(() => setGraphMounted(true), { timeout: 300 });
+      return () => (window as any).cancelIdleCallback?.(h);
+    }
+    // Safari has no requestIdleCallback — two rAFs puts us after first paint.
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => setGraphMounted(true));
+    });
+    return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner); };
+  }, []);
+
   // The entity list is paged and filtered server-side. It used to fetch all
   // 23,564 entities (2.2 MB) on every mount to render a sidebar, and the
   // `limit` in the URL was ignored by the handler.
@@ -1212,13 +1256,19 @@ export default function MemoryPage() {
 
         {/* Center: Entity/Knowledge graph (right panel floats over it) */}
         <div className="flex-1 min-w-0 min-h-0 relative">
-          <EntityGraph
-            selectedNode={selectedGraphNode}
-            onNodeClick={handleGraphNodeClick}
-            onNodeDoubleClick={handleGraphNodeDoubleClick}
-            onNodeHover={handleGraphNodeHover}
-            onGraphLoaded={handleGraphLoaded}
-          />
+          {graphMounted ? (
+            <Suspense fallback={<GraphPlaceholder />}>
+              <EntityGraph
+                selectedNode={selectedGraphNode}
+                onNodeClick={handleGraphNodeClick}
+                onNodeDoubleClick={handleGraphNodeDoubleClick}
+                onNodeHover={handleGraphNodeHover}
+                onGraphLoaded={handleGraphLoaded}
+              />
+            </Suspense>
+          ) : (
+            <GraphPlaceholder />
+          )}
 
           {/* Right: dynamic panel — overlays the top-right of the graph so
               the graph keeps its full width when something is selected. */}
