@@ -239,13 +239,29 @@ def test_fact_resolve_leaves_equal_confidence_alone(world):
     assert facts_mod._fact_resolve({"entity": "Lloyd", "auto_resolve": True})["resolved"] == 0
 
 
-def test_fact_resolve_refuses_a_god_node(world):
+def test_the_contradiction_scan_is_refused_on_a_god_node(world):
+    """O(n squared) over 5,489 facts is 15 million comparisons — measured at
+    113 seconds through MCP, and it reported 32,857 `contradictions` that
+    were almost all the overlap heuristic firing on similar phrasing.
+    Refused in BOTH modes: the report path ran the scan too."""
     root, _ = world
     _write_facts(root, "Lloyd", "state",
-                 [{"id": f"stat-{i:03d}", "fact": f"fact {i} is enabled", "confidence": 0.9}
+                 [{"id": f"stat-{i:03d}", "fact": f"fact {i} is enabled",
+                   "confidence": 0.9, "category": "state"}
                   for i in range(1, retrieval.FACT_GODNODE_THRESHOLD + 5)])
-    out = facts_mod._fact_resolve({"entity": "Lloyd", "auto_resolve": True})
-    assert "error" in out and "refused" in out["error"]
+    for params in ({"entity": "Lloyd", "auto_resolve": True}, {"entity": "Lloyd"}):
+        out = facts_mod._fact_resolve(params)
+        assert "error" in out and "refused" in out["error"], params
+    check = facts_mod._fact_check({"entity": "Lloyd"})
+    assert "error" in check and "refused" in check["error"]
+    # a narrower slice is still scannable
+    _write_facts(root, "Lloyd", "goal", [
+        {"id": "goal-001", "fact": "the goal is enabled", "confidence": 0.9, "category": "goal"},
+        {"id": "goal-002", "fact": "the goal is disabled", "confidence": 0.5, "category": "goal"},
+    ])
+    retrieval.invalidate_fact_file_cache()
+    narrow = facts_mod._fact_check({"entity": "Lloyd", "category": "goal"})
+    assert "error" not in narrow and narrow["checked"] == 2
 
 
 # ── entity kind ──────────────────────────────────────────────────────────────

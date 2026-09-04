@@ -91,7 +91,24 @@ def _generate_fact_id(category: str, existing_ids=()) -> str:
 
 
 def _detect_contradictions_sync(entity: str, category: str = None) -> dict:
+    """Pairwise contradiction scan. O(n²) in the entity's fact count.
+
+    Refused above FACT_GODNODE_THRESHOLD facts. `Lloyd` has 5,489, which is
+    15 million `_token_overlap` comparisons — measured at 113 seconds
+    through MCP, and it produced 32,857 "contradictions", almost all of them
+    the high-overlap heuristic firing on two facts that are merely phrased
+    alike. Narrow with `category` to scan a slice.
+    """
     facts = _get_facts_sync(entity, category).get("facts", [])
+    if len(facts) > FACT_GODNODE_THRESHOLD:
+        return {"entity": entity, "category": category, "contradictions": [],
+                "checked": len(facts), "refused": True,
+                "hint": (f"{entity} has {len(facts)} facts"
+                         + (f" in category {category}" if category else "")
+                         + f"; the pairwise scan is refused above "
+                         f"{FACT_GODNODE_THRESHOLD} because it is O(n²) and the "
+                         "overlap heuristic yields mostly false positives at that "
+                         "size. Pass a narrower `category`.")}
     contradictions = []
     for i, f1 in enumerate(facts):
         for f2 in facts[i + 1:]:
@@ -290,7 +307,11 @@ def _fact_check(params: dict) -> dict:
     if not entity:
         return _err("entity is required", ErrorCode.MISSING_PARAM, contradictions=[], checked=0)
     try:
-        return _detect_contradictions_sync(entity, params.get("category"))
+        result = _detect_contradictions_sync(entity, params.get("category"))
+        if result.get("refused"):
+            return _err(result["hint"], ErrorCode.INVALID_PARAM,
+                        contradictions=[], checked=result["checked"])
+        return result
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, contradictions=[], checked=0)
 
@@ -318,7 +339,10 @@ def _fact_resolve(params: dict) -> dict:
     auto_resolve = bool(params.get("auto_resolve", False))
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
-        detection = _detect_contradictions_sync(entity)
+        detection = _detect_contradictions_sync(entity, params.get("category"))
+        if detection.get("refused"):
+            return _err(detection["hint"], ErrorCode.INVALID_PARAM,
+                        resolved=0, remaining=0)
         contradictions = detection.get("contradictions", [])
         if not auto_resolve:
             return {"entity": entity, "resolved": 0,
@@ -327,12 +351,6 @@ def _fact_resolve(params: dict) -> dict:
                     "hint": ("Reporting only. Pass auto_resolve=true to mark the "
                              "lower-confidence side invalid, or use fact_invalidate "
                              "to expire a specific fact.")}
-        if detection.get("checked", 0) > FACT_GODNODE_THRESHOLD:
-            return _err(
-                f"{entity} has {detection['checked']} facts; auto_resolve is refused "
-                f"above {FACT_GODNODE_THRESHOLD} because the overlap heuristic yields "
-                "mostly false positives at that size. Use fact_invalidate on specific facts.",
-                ErrorCode.INVALID_PARAM, resolved=0, remaining=len(contradictions))
 
         entity_dir = _find_entity_dir(entity)
         resolved = 0
@@ -623,11 +641,12 @@ async def list_tools():
                 "query": {"type": "string", "description": "Rank facts by relevance to this text"},
                 "limit_per_category": {"type": "integer", "description": f"Facts kept per category (default {FACT_RANK_CAP_SEED})"},
             }, "required": ["entity"]}),
-        Tool(name="fact_check", description="Detect contradictions in stored facts for an entity.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}}, "required": ["entity"]}),
-        Tool(name="fact_resolve", description="Report contradictions between an entity's facts. Reports only unless auto_resolve=true, which marks the lower-confidence side invalid (never expired).", inputSchema={
+        Tool(name="fact_check", description=f"Detect contradictions in an entity's facts. Pairwise and O(n squared), so it is refused above {FACT_GODNODE_THRESHOLD} facts — pass `category` to scan a slice.", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string", "description": "Scan one category instead of the whole entity"}}, "required": ["entity"]}),
+        Tool(name="fact_resolve", description=f"Report contradictions between an entity's facts. Reports only unless auto_resolve=true, which marks the lower-confidence side invalid (never expired). Refused above {FACT_GODNODE_THRESHOLD} facts; pass `category` to scan a slice.", inputSchema={
             "type": "object", "properties": {
                 "entity": {"type": "string"},
+                "category": {"type": "string", "description": "Scan one category instead of the whole entity"},
                 "auto_resolve": {"type": "boolean", "description": "Mark the weaker side invalid (default false)"},
             }, "required": ["entity"]}),
         Tool(name="fact_invalidate", description="Expire facts that are no longer current. Sets expired_at on matching facts.", inputSchema={
