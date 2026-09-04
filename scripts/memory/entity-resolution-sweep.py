@@ -48,15 +48,31 @@ import yaml
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_FACTS_ALIASES as ALIASES_PATH
+from app.entity_naming import looks_like_junk_entity
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _invocation import invocation_ledger  # noqa: E402
 
 REL_PATH = FACTS_ROOT / "_relationships.json"
 OUT_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
+BASELINE_PATH = OUT_DIR / "graph-baseline.json"
+# --apply refuses when the graph holds less than this fraction of the largest
+# active-edge count ever recorded here, unless --allow-degraded. On 2026-09-03
+# an apply ran against a 2-edge graph (baseline 7,260): every entity had degree
+# 0, so every suffix pair passed the "a variant has 0 degree" shortcut, and 151
+# semantic conflations were merged with no check at all.
+DEGRADED_FRACTION = 0.5
+ALL_TIERS = ("CASE", "PUNCT", "SUFFIX_SAFE")
 
 # ── Normalization ────────────────────────────────────────────────────────────
 
 STOP_SUFFIX_TOKENS_SAFE = {
-    # These suffixes are safe to strip for merge: X vs "X System" is basically
-    # always the same thing.
+    # Stripping these suffixes CLUSTERS candidates; it does not decide identity.
+    # `Intel Pipeline` vs `Intel`, `Fact System` vs `FACT` (a robotics action
+    # tokenizer), `Alfie pipeline` vs `Alfie` (the robot) all cluster here and are
+    # all different things. A SUFFIX_SAFE cluster merges only when the semantic
+    # gate (entity_semantic_gate.py) says every judge agrees the definitions
+    # describe the same thing.
     "system",
     "agent",
     "sdk",
@@ -168,25 +184,35 @@ def _has_safe_suffix(name: str) -> bool:
     return bool(toks and toks[-1] in STOP_SUFFIX_TOKENS_SAFE)
 
 
+_SLUG_RE = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)+$")
+
+
+def _is_slug(name: str) -> bool:
+    """`nightly-reflection`, `worker_queue`: all-lowercase, joined by - or _."""
+    return bool(_SLUG_RE.fullmatch(name))
+
+
 def pick_canonical(variants: list[str], degrees: dict[str, int], existing_dirs: set[str]) -> str:
     """
     Pick the canonical name for a cluster.
 
     Priority:
-      1. Prefer variant without a SAFE suffix (bare noun beats "X System", "X Agent").
-         This matches the task's stated pattern (Idler Agent → idler,
-         Data Pipeline System → Data Pipeline).
-      2. Highest degree.
-      3. Prefer variant whose directory already exists.
+      1. Highest degree — the name the graph already uses most.
+      2. Prefer variant whose directory already exists.
+      3. Prefer a readable title over a slug (`Nightly Reflection` over
+         `nightly-reflection`); the survivor is what people and the extractor
+         see. The previous first rule preferred the BARE NOUN over any suffixed
+         form, which is how `Alfie pipeline` was absorbed into `Alfie` and
+         `Intel Pipeline System` into `Intel`.
       4. Shorter name.
       5. Alphabetical (stable).
     """
 
     def key(v: str) -> tuple:
         return (
-            1 if _has_safe_suffix(v) else 0,
             -degrees.get(v, 0),
             0 if v in existing_dirs else 1,
+            1 if _is_slug(v) else 0,
             len(v),
             v,
         )
@@ -244,14 +270,10 @@ def decide_merge(
         return (True, f"{tier} merge, total degree {total} (smallest={smallest_deg})")
 
     if tier == "SUFFIX_SAFE":
-        if smallest_deg == 0:
-            return (True, "SUFFIX_SAFE, a variant has 0 degree")
-        if second_deg <= SUFFIX_SAFE_SMALL_VARIANT:
-            return (True, f"SUFFIX_SAFE, second-largest variant is small ({second_deg})")
-        ratio = top_deg / second_deg if second_deg else float("inf")
-        if ratio >= SUFFIX_SAFE_RATIO:
-            return (True, f"SUFFIX_SAFE, imbalance {ratio:.1f}× >= {SUFFIX_SAFE_RATIO}")
-        return (False, f"SUFFIX_SAFE but imbalance {ratio:.1f}× < {SUFFIX_SAFE_RATIO}")
+        # Never on name shape alone. The old "a variant has 0 degree" shortcut
+        # is what fired 151 times against the empty graph on 2026-09-03. The
+        # semantic gate in build_plan is the only path to an auto-merge here.
+        return (False, "SUFFIX_SAFE — requires the semantic gate (definitions must agree)")
 
     if tier == "SUFFIX_AMBIGUOUS":
         # Suffix-ambiguous clusters (match only after stripping Loop/Research/Tool/…)
@@ -277,8 +299,16 @@ def decide_merge(
 # ── Plan generation ──────────────────────────────────────────────────────────
 
 
-def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
-    """Compute clusters and classify into a merge plan."""
+def build_plan(edges: list[dict], existing_dirs: set[str],
+               gate=None, allowed_tiers=None) -> dict:
+    """Compute clusters and classify into a merge plan.
+
+    `gate` is an entity_semantic_gate.SemanticGate (or any object with a
+    `verdict(a, b) -> {"decision": ...}`); without one, SUFFIX_SAFE clusters go
+    to review. `allowed_tiers` restricts which tiers may auto-merge.
+    """
+    allowed_tiers = set(allowed_tiers or ALL_TIERS)
+    gate_stats = {"asked": 0, "same": 0, "review": 0}
     # degree = appearances as source or target in active edges
     degrees: dict[str, int] = collections.Counter()
     for e in edges:
@@ -288,7 +318,7 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
     # Include existing directory names so entities with zero active-edge degree
     # (e.g. "OpenClaw SDK", "Voice Mode System") are still discovered and can be
     # merged into their canonical partners.
-    entities = list(set(degrees.keys()) | existing_dirs)
+    entities = [e for e in (set(degrees.keys()) | existing_dirs) if not looks_like_junk_entity(e)]
 
     # Five-stage clustering:
     #   Stage A: cluster by normalize_case (case-only) — these are always SAFE_CASE.
@@ -441,6 +471,26 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
         )
         auto_ok, decide_reason = decide_merge(cluster_worst, canonical, variants, degrees)
 
+        gate_info = None
+        if cluster_worst == "SUFFIX_SAFE" and gate is not None:
+            gate_info = {}
+            for v in variants:
+                if v == canonical:
+                    continue
+                verdict = gate.verdict(v, canonical)
+                gate_stats["asked"] += 1
+                gate_info[v] = {"decision": verdict.get("decision"),
+                                "judges": verdict.get("judges", {})}
+            if gate_info and all(g["decision"] == "SAME" for g in gate_info.values()):
+                auto_ok, decide_reason = True, "SUFFIX_JUDGED — every judge: SAME"
+                gate_stats["same"] += 1
+            else:
+                auto_ok, decide_reason = False, "SUFFIX_SAFE — semantic gate: review"
+                gate_stats["review"] += 1
+
+        if auto_ok and cluster_worst not in allowed_tiers:
+            auto_ok, decide_reason = False, f"tier {cluster_worst} excluded by --tiers"
+
         norm_key = normalize_punct(canonical)
         base = {
             "norm_key": norm_key,
@@ -449,6 +499,8 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
             "tier": cluster_worst,
             "decision": decide_reason,
         }
+        if gate_info is not None:
+            base["gate"] = gate_info
 
         if auto_ok:
             merges = []
@@ -477,6 +529,7 @@ def build_plan(edges: list[dict], existing_dirs: set[str]) -> dict:
         "skipped": skipped,
         "existing_dirs_count": len(existing_dirs),
         "all_entities": sorted(entities),
+        "gate_stats": gate_stats,
     }
 
 
@@ -756,7 +809,31 @@ def apply_merges(
             }
         )
 
-    # ── Update alias table
+    return {
+        "rewritten_edges": rewrite_count,
+        "active_dedupe_count": active_dedupe_count,
+        "dir_operations": dir_ops,
+        "variant_to_canonical": variant_to_canonical,
+    }
+
+
+def compute_aliases(
+    plan: dict,
+    aliases: dict[str, str],
+    facts_root: Path,
+    rebuild_aliases: bool,
+    existing_dirs: set[str] | None = None,
+) -> dict[str, str]:
+    """The alias table this plan implies. Pure; main() writes it BEFORE any file
+    moves so a crash mid-apply leaves the extractor routing correctly rather
+    than recreating half-moved variants (which the 2026-09-03 apply did: files
+    moved, aliases absent, variants regrown by the next extraction).
+    """
+    variant_to_canonical: dict[str, str] = {}
+    for cluster in plan["safe_merges"]:
+        for m in cluster["merges"]:
+            variant_to_canonical[m["variant"]] = cluster["canonical"]
+
     # Noise filter: per skill guardrail, any entry where normalize_full(alias)
     # == normalize_full(canonical) is pipeline noise and must be filtered out.
     # normalize_full lowercases and strips stop suffixes, so it catches
@@ -811,29 +888,18 @@ def apply_merges(
             if v in existing_dirs and not _is_noise(k, v)
         }
 
-    # Add new aliases from this sweep's merges.
-    # Guardrail: filter out noise entries where normalize_full(variant) ==
-    # normalize_full(canonical) — these are pipeline noise per the skill spec.
+    # Every merge THIS plan approved gets its alias, whatever its tier. The
+    # noise filter above only prunes the inherited table. Previously suffix
+    # aliases were dropped as "noise" even for merges the sweep had just
+    # performed, so the extractor recreated the variant on its next pass and
+    # the merge undid itself.
     for variant, canonical in variant_to_canonical.items():
-        if not _is_noise(variant, canonical):
-            new_aliases[variant.lower()] = canonical
-            # Also ensure exact case variants resolve
-            new_aliases[variant] = canonical
-    # Canonicals should self-resolve (identity) — these are useful for the
-    # lookup path (alias_lower -> canonical) so we keep them, but only for
-    # entities actually involved in this sweep's merges.
+        new_aliases[variant.lower()] = canonical
+        new_aliases[variant] = canonical
     for canonical in set(variant_to_canonical.values()):
-        if not _is_noise(canonical, canonical):
-            new_aliases[canonical.lower()] = canonical
-
-    return {
-        "rewritten_edges": rewrite_count,
-        "active_dedupe_count": active_dedupe_count,
-        "dir_operations": dir_ops,
-        "variant_to_canonical": variant_to_canonical,
-        "aliases_final_count": len(new_aliases),
-        "aliases": new_aliases,
-    }
+        new_aliases[canonical.lower()] = canonical
+        new_aliases[canonical] = canonical
+    return new_aliases
 
 
 # ── Output formatters ────────────────────────────────────────────────────────
@@ -890,9 +956,47 @@ def write_plan_jsonl(plan: dict, out_path: Path) -> None:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
+def load_baseline(path: Path | None = None) -> int:
+    path = path or BASELINE_PATH
+    try:
+        return int(json.loads(path.read_text()).get("active_edges", 0))
+    except Exception:
+        return 0
+
+
+def update_baseline(active: int, path: Path | None = None) -> int:
+    """Record the largest active-edge count seen; returns the baseline in force."""
+    path = path or BASELINE_PATH
+    current = load_baseline(path)
+    if active > current:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"active_edges": active,
+                                    "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat()}, indent=2))
+        return active
+    return current
+
+
+def degraded_reason(active: int, baseline: int, fraction: float = DEGRADED_FRACTION) -> str | None:
+    """Why --apply must refuse, or None."""
+    if baseline <= 0:
+        return None
+    if active < baseline * fraction:
+        return (f"graph is degraded: {active:,} active edges is below {fraction:.0%} of the "
+                f"recorded baseline {baseline:,}. Every entity looks disconnected on a broken "
+                f"graph and the merge heuristics stop meaning anything. Restore the graph, or "
+                f"pass --allow-degraded if you have reviewed the plan by hand.")
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="Apply SAFE merges")
+    ap.add_argument("--tiers", default=",".join(ALL_TIERS),
+                    help="Tiers allowed to auto-merge (default: all; SUFFIX_SAFE still needs the gate)")
+    ap.add_argument("--no-gate", action="store_true",
+                    help="Skip the semantic gate: every SUFFIX_SAFE cluster goes to review")
+    ap.add_argument("--allow-degraded", action="store_true",
+                    help="Apply even when active edges are far below the recorded baseline")
     ap.add_argument(
         "--rebuild-aliases",
         action="store_true",
@@ -924,7 +1028,23 @@ def main() -> int:
         with aliases_path.open() as f:
             aliases = json.load(f)
 
-    plan = build_plan(active_edges, existing_dirs)
+    allowed_tiers = {t.strip() for t in args.tiers.split(",") if t.strip()}
+    gate = None
+    if not args.no_gate:
+        try:
+            from entity_semantic_gate import SemanticGate
+            gate = SemanticGate(facts_root)
+        except Exception as e:  # no judge reachable → suffix clusters go to review
+            print(f"  [gate] unavailable ({type(e).__name__}: {e}); SUFFIX_SAFE → review")
+    plan = build_plan(active_edges, existing_dirs, gate=gate, allowed_tiers=allowed_tiers)
+    plan["tiers_allowed"] = sorted(allowed_tiers)
+
+    baseline_path = out_dir / "graph-baseline.json"   # lives with the plans/reports it guards
+    baseline = update_baseline(len(active_edges), baseline_path)
+    print(f"  Baseline:        {baseline:,} active edges (now {len(active_edges):,})")
+    gs = plan.get("gate_stats") or {}
+    if gs.get("asked"):
+        print(f"  Semantic gate:   {gs['asked']} suffix pairs judged — {gs['same']} clusters SAME, {gs['review']} to review")
 
     # Emit plan
     print_plan(plan)
@@ -937,6 +1057,11 @@ def main() -> int:
         print(f"(dry-run — pass --apply to execute {plan['safe_clusters']} SAFE merges)")
         return 0
 
+    reason = degraded_reason(len(active_edges), baseline)
+    if reason and not args.allow_degraded:
+        print(f"\nREFUSING --apply: {reason}")
+        return 3
+
     # Apply
     ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
     print()
@@ -948,13 +1073,16 @@ def main() -> int:
     if alias_bak:
         print(f"  Backed up: {alias_bak}")
 
+    # 1. aliases first — the extractor consults them; a crash after this point
+    #    still leaves new facts routed to the survivor.
+    new_aliases = compute_aliases(plan, aliases, facts_root, args.rebuild_aliases, existing_dirs=existing_dirs)
+    with aliases_path.open("w") as f:
+        json.dump(new_aliases, f, indent=2, sort_keys=True, ensure_ascii=False)
+    # 2. edges + file moves
     report = apply_merges(plan, rel_data, aliases, facts_root, args.rebuild_aliases, existing_dirs=existing_dirs, entities=plan.get("all_entities", []))
-
-    # Persist
+    report["aliases_final_count"] = len(new_aliases)
     with rel_path.open("w") as f:
         json.dump(rel_data, f, indent=2, ensure_ascii=False)
-    with aliases_path.open("w") as f:
-        json.dump(report["aliases"], f, indent=2, sort_keys=True, ensure_ascii=False)
 
     # Report
     print(f"  Edges rewritten:   {report['rewritten_edges']}")
@@ -974,8 +1102,11 @@ def main() -> int:
     # Save an apply report
     apply_out = out_dir / f"entity-merges-applied-{args.date}-{ts}.json"
     apply_out.parent.mkdir(parents=True, exist_ok=True)
-    # Strip the giant aliases dict from the written report, keep just what changed
     report_to_save = {k: v for k, v in report.items() if k != "aliases"}
+    report_to_save["tiers_allowed"] = sorted(allowed_tiers)
+    report_to_save["gate_stats"] = plan.get("gate_stats")
+    report_to_save["baseline_active_edges"] = baseline
+    report_to_save["ledger"] = invocation_ledger()   # who ran this — see _invocation.py
     with apply_out.open("w") as f:
         json.dump(report_to_save, f, indent=2, ensure_ascii=False)
     print(f"  Report: {apply_out}")

@@ -80,3 +80,6 @@ ada.zip
 
 # retrieval eval run outputs (summary numbers live in architecture/subliminal.md)
 eval/baselines/
+
+# scratch output some tools drop in the repo root
+/tmp/

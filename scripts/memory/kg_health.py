@@ -211,10 +211,24 @@ def build_snapshot() -> dict[str, Any]:
         },
         # Phase 2 work queue: relationship prose extracted but never promoted.
         "latent_relationship_entities": max(0, rel_files - len(graph_nodes)),
+        # Cross-entity contamination, near-duplicate clusters, duplicate regrowth
+        # (kg_hygiene.py). Added 2026-09-03 after 63 directories were found holding
+        # facts about a different entity and nothing had measured it.
+        "hygiene": _hygiene_section(),
         "fact_categories": dict(
             collections.Counter(categories).most_common()
         ),
     }
+
+
+def _hygiene_section() -> dict[str, Any]:
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import kg_hygiene
+        snap = kg_hygiene.snapshot(VAULT_FACTS_ROOT, days=7)
+        return {k: v for k, v in snap.items() if k in ("contamination", "near_duplicates", "regrowth")}
+    except Exception as e:  # never let hygiene break the health snapshot
+        return {"error": f"{type(e).__name__}: {e}"}
 
 
 def _pct(n: int, total: int) -> float:
@@ -242,6 +256,13 @@ def print_summary(s: dict[str, Any]) -> None:
     print()
     print(f"  PHASE 2 QUEUE — entities with relationship prose")
     print(f"  not yet promoted to edges {s['latent_relationship_entities']:>8,}")
+    h = s.get("hygiene") or {}
+    if "contamination" in h:
+        c, n, r = h["contamination"], h["near_duplicates"], h["regrowth"]
+        print("hygiene")
+        print(f"  contaminated dirs         {c['dirs']:>8,}   ({c['foreign_facts']} facts about another entity)")
+        print(f"  near-duplicate clusters   {n['clusters']:>8,}   {n['by_tier']}")
+        print(f"  near-dup regrowth {r['days']}d      {r['near_dup_new']:>8,}   of {r['new_dirs']} new dirs")
     print()
     print(f"  names >=5 words          {ent['names_5plus_words']:>8,}"
           f"   ({ent['names_5plus_words_pct']}%)  <- Phase 1 target")

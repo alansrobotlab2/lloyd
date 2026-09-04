@@ -22,8 +22,12 @@ if str(_LLOYD_ROOT) not in sys.path:
     sys.path.insert(0, str(_LLOYD_ROOT))
 try:
     from app.entity_naming import normalize_and_register as _entity_normalize
+    from app.entity_naming import known_entities_in_text as _known_entities
     from app.entity_naming import looks_like_junk_entity as _is_junk_entity
 except Exception:
+    def _known_entities(text: str, limit: int = 60) -> list:  # fallback: none known
+        return []
+
     def _entity_normalize(name: str) -> str:  # fallback: pass-through
         return name
 
@@ -136,6 +140,13 @@ CRITICAL GUARDRAILS:
 Content:
 {content}
 
+Known entities already in the knowledge graph that appear in this content.
+When a fact is about one of these, put this EXACT name in its "entity" field —
+do not add or drop words like "System", "Pipeline", "Agent", "SDK", "App", and
+do not re-spell or re-case it. Only coin a new entity name when none of these
+is the thing the fact is about:
+{known_entities}
+
 Known facts about relevant entities:
 {existing_facts}
 
@@ -222,7 +233,10 @@ class FactExtractor:
         seen_fact_text = set()
 
         for chunk in self._chunk_content(content):
-            prompt = EXTRACTION_PROMPT.format(content=chunk, existing_facts=existing)
+            known = _known_entities(chunk, 60)
+            known_block = "\n".join(f"- {k}" for k in known) if known else "(none recognised)"
+            prompt = EXTRACTION_PROMPT.format(content=chunk, existing_facts=existing,
+                                              known_entities=known_block)
             parsed = self._parse_response(self._call_llm(prompt))
 
             if primary_entity is None and parsed.get("entity"):
@@ -263,7 +277,10 @@ class FactExtractor:
             ],
             "temperature": 0.3,
             "max_tokens": 6000,
-            "chat_template_kwargs": {"enable_thinking": False}
+            "chat_template_kwargs": {"enable_thinking": False},
+            # vLLM --scheduling-policy priority: chat sends 0, autonomy 1. This
+            # ran at the default and competed with both.
+            "priority": 2,
         }
 
         response_text = None

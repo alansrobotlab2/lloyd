@@ -16,7 +16,7 @@ Output:
 import argparse
 import json
 import sys
-from collections import defaultdict
+from collections import defaultdict, Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -240,12 +240,76 @@ def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list
     return stale
 
 
+def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7) -> dict:
+    """Cross-entity contamination, near-duplicate clusters and duplicate regrowth,
+    from the facts already loaded — no second pass over the tree.
+
+    Added 2026-09-03: 63 directories were found holding facts tagged with a
+    DIFFERENT entity (all from suffix merges) and nothing had ever measured it.
+    Contamination must stay at 0; any rise means a merge went wrong.
+    """
+    import importlib.util
+    sweep_path = Path(__file__).resolve().parent / "entity-resolution-sweep.py"
+    spec = importlib.util.spec_from_file_location("ers_health", sweep_path)
+    ers = importlib.util.module_from_spec(spec); spec.loader.exec_module(ers)
+
+    contaminated: list[tuple[str, str, int]] = []
+    for name, files in entities.items():
+        foreign: dict[str, int] = defaultdict(int)
+        for entry in files:
+            for f in entry["facts"]:
+                if not isinstance(f, dict):
+                    continue
+                tag = str(f.get("entity") or "").strip()
+                if tag and ers.normalize_punct(tag) != ers.normalize_punct(name):
+                    foreign[tag] += 1
+        for tag, n in foreign.items():
+            contaminated.append((name, tag, n))
+
+    by_norm: dict[str, list[str]] = defaultdict(list)
+    for name in entities:
+        by_norm[ers.normalize_full(name)].append(name)
+    clusters = [v for v in by_norm.values() if len(v) > 1]
+    cluster_tiers = Counter(ers.cluster_tier(v) for v in clusters)
+
+    born: dict[str, float] = {}
+    for name, files in entities.items():
+        ts = []
+        for entry in files:
+            try:
+                ts.append(entry["file"].stat().st_mtime)
+            except OSError:
+                pass
+        if ts:
+            born[name] = min(ts)
+    cutoff = now.timestamp() - regrowth_days * 86400
+    new_names = [n for n, t in born.items() if t >= cutoff]
+    regrown = []
+    for n in new_names:
+        older = [o for o in by_norm[ers.normalize_full(n)] if o != n and born.get(o, 0) < born[n] - 3600]
+        if older:
+            regrown.append((n, older[0], ers.classify_pair(n, older[0])[0]))
+
+    return {
+        "contaminated": contaminated,
+        "contaminated_dirs": len({c[0] for c in contaminated}),
+        "foreign_facts": sum(c[2] for c in contaminated),
+        "near_dup_clusters": len(clusters),
+        "near_dup_dirs": sum(len(v) for v in clusters),
+        "near_dup_tiers": dict(cluster_tiers),
+        "regrowth_days": regrowth_days,
+        "new_dirs": len(new_names),
+        "regrown": regrown,
+    }
+
+
 def generate_report(
     entity_stats: dict,
     rel_stats: dict,
     edges: list[dict],
     stale_facts: list[dict],
     now: datetime,
+    hygiene: dict | None = None,
 ) -> str:
     """Generate the markdown health report."""
     lines: list[str] = []
@@ -381,6 +445,31 @@ def generate_report(
     lines.append("")
 
     # --- Section 7: Suggested Research Questions ---
+    # --- Hygiene ---
+    if hygiene:
+        lines.append("## Hygiene")
+        lines.append("")
+        lines.append("| Metric | Count |")
+        lines.append("|--------|-------|")
+        lines.append(f"| Contaminated entity dirs (facts tagged with another entity) | {hygiene['contaminated_dirs']} |")
+        lines.append(f"| Foreign facts | {hygiene['foreign_facts']} |")
+        lines.append(f"| Near-duplicate name clusters | {hygiene['near_dup_clusters']} ({hygiene['near_dup_dirs']} dirs; {hygiene['near_dup_tiers']}) |")
+        lines.append(f"| Near-duplicates born in the last {hygiene['regrowth_days']} days | {len(hygiene['regrown'])} of {hygiene['new_dirs']} new dirs |")
+        lines.append("")
+        if hygiene["contaminated"]:
+            lines.append("**Contamination must be 0.** A rise means an entity merge fused two different things; "
+                         "revert it with `scripts/memory/revert-suffix-merges.py`. Worst offenders:")
+            lines.append("")
+            for name, tag, n in sorted(hygiene["contaminated"], key=lambda x: -x[2])[:10]:
+                lines.append(f"- `{name}` holds {n} fact(s) tagged `{tag}`")
+            lines.append("")
+        if hygiene["regrown"]:
+            lines.append("Recent near-duplicates (extraction coined a name next to an existing one):")
+            lines.append("")
+            for n, o, tier in hygiene["regrown"][:10]:
+                lines.append(f"- `{n}` next to `{o}` ({tier})")
+            lines.append("")
+
     lines.append("## Suggested Research Questions")
     lines.append("")
 
@@ -442,8 +531,10 @@ def main():
     rel_stats = compute_relationship_stats(edges, entities)
     stale_facts = find_stale_facts(entities, now, STALE_DAYS_THRESHOLD)
 
+    hygiene = compute_hygiene(entities, now)
+
     # Generate report
-    report = generate_report(entity_stats, rel_stats, edges, stale_facts, now)
+    report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene)
 
     # Write output
     output_dir = args.output_dir
@@ -457,6 +548,8 @@ def main():
     print(f"  Thin entities: {sum(1 for name, s in entity_stats.items() if s['active_facts'] < THIN_ENTITY_MAX_FACTS and rel_stats['entity_edge_counts'].get(name, 0) == 0)}")
     print(f"  Orphan entities: {sum(1 for name in entity_stats if name not in rel_stats['entities_in_graph'] and entity_stats[name]['total_facts'] > 0)}")
     print(f"  Stale facts: {len(stale_facts)}")
+    print(f"  Contaminated dirs: {hygiene['contaminated_dirs']} ({hygiene['foreign_facts']} foreign facts)")
+    print(f"  Near-dup clusters: {hygiene['near_dup_clusters']}; regrown in {hygiene['regrowth_days']}d: {len(hygiene['regrown'])}")
 
 
 if __name__ == "__main__":

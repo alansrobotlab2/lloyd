@@ -219,3 +219,102 @@ def normalize_and_register(name: str) -> str:
         # registered for next time.
         return register_canonical(name)
     return resolved
+
+
+# ── Extraction-time entity linking ───────────────────────────────────────────
+# The fact extractor never saw a known entity name: every caller passed an
+# empty "known facts" context, so the model coined `Intel Pipeline System` while
+# `Intel Pipeline` already existed. Measured 2026-09-03: in 303 of 442
+# near-duplicate clusters the later variant was created a day or more after an
+# existing one (median gap 6 days) — a lookup would have hit 69% of the time.
+# This gives the extractor the known names that actually appear in a chunk, at
+# a median cost of ~114 tokens.
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+_KNOWN_INDEX: dict = {"mtime": 0.0, "index": {}, "max_n": 1}
+_GENERIC_SINGLE = frozenset({
+    "test", "agent", "agents", "memory", "system", "state", "config", "update",
+    "status", "event", "error", "general", "model", "tools", "tool", "skill",
+    "skills", "plan", "plans", "notes", "note", "data", "pipeline", "server",
+    "service", "client", "task", "tasks", "build", "setup", "review", "research",
+    "project", "debug", "audit", "queue", "cache", "user", "users", "session",
+    "knowledge", "quality", "policy", "developer", "render", "intelligence",
+    "retrieval", "worker", "workers", "graph", "vault", "fact", "facts",
+})
+
+
+def _known_index() -> tuple[dict, int]:
+    """{(token, ...): canonical} over every canonical in the alias map."""
+    try:
+        mtime = _ALIASES_PATH.stat().st_mtime
+    except FileNotFoundError:
+        return {}, 1
+    if mtime == _KNOWN_INDEX["mtime"] and _KNOWN_INDEX["index"]:
+        return _KNOWN_INDEX["index"], _KNOWN_INDEX["max_n"]
+    try:
+        raw = json.loads(_ALIASES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return _KNOWN_INDEX["index"], _KNOWN_INDEX["max_n"]
+    index: dict[tuple, str] = {}
+    max_n = 1
+    for canon in set(raw.values()):
+        if not canon or looks_like_junk_entity(canon):
+            continue
+        toks = tuple(t.lower() for t in _TOKEN_RE.findall(canon))
+        if not toks or len(toks) > 8:
+            continue
+        # Proper-noun shape only: a canonical with no capital letter and no digit
+        # is a slug or a common word (`segment`, `active`, `stack-updates` are
+        # all registered "entities" — frontmatter leaked into the alias map).
+        # Hints must be high-precision; a missed hint costs nothing, a wrong one
+        # steers the extractor into filing facts under a bogus entity.
+        if not any(ch.isupper() or ch.isdigit() for ch in canon):
+            continue
+        if len(toks) == 1 and (len(toks[0]) < 3 or toks[0] in _GENERIC_SINGLE):
+            continue
+        # keep the first canonical for a token shape; case/punct siblings are aliases anyway
+        index.setdefault(toks, canon)
+        max_n = max(max_n, len(toks))
+    _KNOWN_INDEX.update(mtime=mtime, index=index, max_n=max_n)
+    return index, max_n
+
+
+def known_entities_in_text(text: str, limit: int = 60) -> list[str]:
+    """Canonical entity names that appear verbatim (word-bounded) in `text`.
+
+    Multi-token names match case-insensitively. Single-token names must appear
+    with the canonical's own capitalisation (or be an all-caps acronym), so a
+    lowercase common word in prose does not summon an entity that merely shares
+    its spelling. Ordered by first occurrence, longest match first at a
+    position, capped at `limit`.
+    """
+    if not text:
+        return []
+    index, max_n = _known_index()
+    if not index:
+        return []
+    words = [(m.group(0), m.start()) for m in _TOKEN_RE.finditer(text)]
+    lower = [w.lower() for w, _ in words]
+    found: dict[str, int] = {}
+    i = 0
+    while i < len(lower):
+        hit = None
+        for n in range(min(max_n, len(lower) - i), 0, -1):
+            key = tuple(lower[i:i + n])
+            canon = index.get(key)
+            if canon is None:
+                continue
+            if n == 1:
+                surface = words[i][0]
+                if surface != canon and not (surface.isupper() and len(surface) >= 3):
+                    continue
+            hit = (canon, n)
+            break
+        if hit:
+            canon, n = hit
+            found.setdefault(canon, words[i][1])
+            i += n
+        else:
+            i += 1
+    ordered = sorted(found.items(), key=lambda kv: kv[1])
+    return [c for c, _ in ordered[:limit]]
