@@ -11,12 +11,17 @@ Tools (Phase 3): browser_select, browser_drag, browser_cookies
 import asyncio
 import base64
 import json
+import logging
 import re
 import time
 import urllib.parse
 from pathlib import Path
 
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
+
+from agent_mcp._shared import text_result
+
+logger = logging.getLogger("lloyd-browser")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -536,7 +541,7 @@ async def list_tools():
             },
             "required": ["ref", "text"],
         }),
-        Tool(name="browser_scroll", description="Scroll the current page.", inputSchema={
+        Tool(name="browser_scroll", description="Scroll the current page by a pixel amount in one direction. Use browser_snapshot afterwards to see what came into view.", inputSchema={
             "type": "object",
             "properties": {
                 "direction": {
@@ -740,6 +745,28 @@ async def call_tool(name: str, arguments: dict):
     }
     handler = handlers.get(name)
     if not handler:
-        return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return text_result(json.dumps({"error": f"Unknown tool: {name}"}))
     result = await handler()
-    return [TextContent(type="text", text=result)]
+    return text_result(result)
+
+
+async def shutdown() -> None:
+    """Close the browser context, browser and Playwright driver.
+
+    Called from the aggregator's lifespan (see agent_mcp/main.py). Without
+    it, every `supervisorctl restart lloyd-mcp` orphaned a Chromium and its
+    Playwright node driver — the process tree grew one of each per restart.
+    """
+    global _pw, _browser, _context
+    for label, obj, closer in (
+        ("context", _context, "close"),
+        ("browser", _browser, "close"),
+        ("playwright", _pw, "stop"),
+    ):
+        if obj is None:
+            continue
+        try:
+            await getattr(obj, closer)()
+        except Exception as exc:
+            logger.warning("browser: %s %s() failed during shutdown: %s", label, closer, exc)
+    _context = _browser = _pw = None

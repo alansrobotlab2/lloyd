@@ -1,198 +1,326 @@
 #!/usr/bin/env python3
 """
-Lloyd MCP Server: Thunderbird — email and calendar tools.
+Lloyd MCP Server: Thunderbird — email, calendar, tasks and contacts.
 
-Spawns the Thunderbird MCP bridge (mcp-bridge.cjs) as a subprocess,
-discovers tools via tools/list, and re-exports them as Lloyd MCP tools.
+The Thunderbird MCP bridge (`mcp-bridge.cjs`) is itself an MCP server
+speaking JSON-RPC over stdio. This module runs it as one, through the
+SDK's stdio client, and re-exports its tools under Lloyd's naming.
 
 Requires Thunderbird running with the MCP extension (localhost:8765).
+If the bridge can't start, discovery returns an empty tool list and the
+aggregator carries on without these tools — see `list_tools`.
+
+History
+-------
+This module used to hand-roll the JSON-RPC client: `subprocess.Popen`
+plus `select.select` and blocking `readline()` called straight from the
+async handlers. That carried six defects, all of them live:
+
+  1. Blocking I/O on the aggregator's only event loop — a slow mail
+     search froze all ~124 tools, every session, the Discord bot and the
+     background-task drain for up to 30 seconds.
+  2. No mutex: concurrent calls wrote to one stdin and read one stdout.
+  3. Request ids were `int(time.time()*1000) % 1000000`, so two calls in
+     the same millisecond collided and each accepted the other's result.
+  4. Non-matching replies were discarded, consuming the *other* caller's
+     response and leaving it to time out.
+  5. `_bridge_receive` ignored ids entirely and returned the first
+     parseable line, so discovery could return a tool call's result.
+  6. `stderr=PIPE` was never drained — the bridge wedged forever once
+     Node filled the 64 KB pipe buffer.
+
+All six are gone by construction now: `MCPPool` owns an SDK
+`ClientSession`, which does id correlation, framing and concurrency, and
+`stdio_client` drains stderr to the log.
 """
 
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
-import subprocess
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import CallToolResult, Tool
+
+from agent_mcp._shared import text_result
+
+logger = logging.getLogger("lloyd-thunderbird")
 
 BRIDGE_PATH = Path.home() / "lloyd" / "agent-services" / "services" / "thunderbird-mcp" / "mcp-bridge.cjs"
 
+# Bridge tool name -> Lloyd tool name.
+#
+# Everything the bridge exports is mapped. Anything unmapped would fall
+# through to a `tb_<rawName>` passthrough, which is how 19 tools ended up
+# in a second, camelCase namespace beside the snake_case one; `list_tools`
+# now logs when that happens so the gap is visible instead of shipping.
 TOOL_NAME_MAP = {
+    # Mail
     "listAccounts": "email_accounts",
+    "getAccountAccess": "email_account_access",
     "listFolders": "email_folders",
+    "createFolder": "email_create_folder",
+    "renameFolder": "email_rename_folder",
+    "deleteFolder": "email_delete_folder",
+    "moveFolder": "email_move_folder",
+    "emptyTrash": "email_empty_trash",
+    "emptyJunk": "email_empty_junk",
     "searchMessages": "email_search",
     "getMessage": "email_read",
+    "getMessages": "email_messages",
     "getRecentMessages": "email_recent",
     "updateMessage": "email_update",
     "deleteMessages": "email_delete",
-    "createFolder": "email_create_folder",
+    "displayMessage": "email_display",
     "sendMail": "email_send",
+    "saveDraft": "email_save_draft",
     "replyToMessage": "email_reply",
     "forwardMessage": "email_forward",
+    # Filters
     "listFilters": "email_list_filters",
     "createFilter": "email_create_filter",
     "updateFilter": "email_update_filter",
     "deleteFilter": "email_delete_filter",
     "reorderFilters": "email_reorder_filters",
     "applyFilters": "email_apply_filters",
-    "searchContacts": "contacts_search",
-    "getContact": "contacts_get",
+    # Calendar
     "listCalendars": "calendar_list",
     "createEvent": "calendar_create",
-    "getEvents": "calendar_events",
+    "listEvents": "calendar_events",
+    "updateEvent": "calendar_update_event",
+    "deleteEvent": "calendar_delete_event",
+    "listCategories": "calendar_categories",
+    # Tasks
+    "listTasks": "tasks_list",
+    "createTask": "tasks_create",
+    "updateTask": "tasks_update",
+    # Contacts
+    "searchContacts": "contacts_search",
+    "getContact": "contacts_get",
+    "createContact": "contacts_create",
+    "updateContact": "contacts_update",
+    "deleteContact": "contacts_delete",
 }
 
-# Reverse map: hermes_name -> mcp_name
 REVERSE_MAP = {v: k for k, v in TOOL_NAME_MAP.items()}
 
-logger = logging.getLogger(__name__)
+# The bridge writes its own tool descriptions, and several are terse enough
+# ("Read a contact by UID", 21 chars) that the model can't tell them apart
+# from their neighbours in a 124-tool list. These replace the bridge text
+# where it is too thin to disambiguate; everything else passes through, so
+# an improved bridge description still wins by default.
+DESCRIPTION_OVERRIDES = {
+    "email_accounts": (
+        "List the configured email accounts with their identities and "
+        "addresses. Start here when you need an account id for another "
+        "mail tool."
+    ),
+    "email_folders": (
+        "List the mail folders for an account, with each folder's URI and "
+        "message count. The URI is what email_search and email_messages "
+        "take to scope a query."
+    ),
+    "email_read": (
+        "Read one email message in full by id: headers, body and "
+        "attachment list. Use email_search or email_recent to find the id."
+    ),
+    "email_create_filter": (
+        "Create a mail filter rule on an account — matching conditions and "
+        "the actions to apply. Filters run on new mail; use "
+        "email_apply_filters to run them over existing messages."
+    ),
+    "email_delete_filter": (
+        "Delete a mail filter by its index within the account's filter "
+        "list. Indexes shift after a delete, so re-read email_list_filters "
+        "before deleting another."
+    ),
+    "calendar_list": (
+        "List the user's calendars with their ids and names. Use an id to "
+        "scope calendar_events or to create an event on the right calendar."
+    ),
+    "calendar_events": (
+        "List calendar events between two dates, across all calendars or "
+        "one. Returns event ids, times, titles and locations."
+    ),
+    "calendar_delete_event": (
+        "Delete a calendar event by id. Permanent — there is no undo and "
+        "no trash for calendar items."
+    ),
+    "contacts_get": (
+        "Read one contact in full by UID: name, email addresses, phone "
+        "numbers and the other stored fields. Use contacts_search to find "
+        "the UID."
+    ),
+    "contacts_create": (
+        "Create a contact in an address book. Takes the address book id "
+        "plus the contact's fields; returns the new contact's UID."
+    ),
+    "contacts_update": (
+        "Update an existing contact's fields by UID. Only the properties "
+        "you pass are changed; the rest are left as they are."
+    ),
+    "contacts_delete": (
+        "Delete a contact from its address book by UID. Permanent — the "
+        "contact is not recoverable from Thunderbird afterwards."
+    ),
+}
 
-app = Server("lloyd-thunderbird")
+# Discovery cache. The bridge was previously re-queried on every
+# tools/list — a blocking round trip on each new MCP client connection.
+# The tool list only changes when the bridge restarts, so a TTL is ample.
+DISCOVERY_TTL_SECONDS = 300.0
 
-# Bridge process state
-_bridge_proc: Optional[subprocess.Popen] = None
-_discovered_tools: list[dict] = []
+_pool: Any = None                       # MCPPool | None
+_pool_lock = asyncio.Lock()
+_cached_tools: list[Tool] = []
+_cached_at = 0.0
 
 
-def _ensure_bridge() -> subprocess.Popen:
-    global _bridge_proc
-    if _bridge_proc and _bridge_proc.poll() is None:
-        return _bridge_proc
+def _lloyd_name(bridge_name: str) -> str:
+    return TOOL_NAME_MAP.get(bridge_name, f"tb_{bridge_name}")
 
-    if not BRIDGE_PATH.exists():
-        raise FileNotFoundError(f"MCP bridge not found at {BRIDGE_PATH}")
 
-    _bridge_proc = subprocess.Popen(
-        ["node", str(BRIDGE_PATH)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
+def _document_params(schema: dict) -> dict:
+    """Ensure every advertised parameter carries a description.
+
+    These schemas come from the bridge, which is outside this repo and can
+    regress independently. Rather than let an undocumented parameter reach
+    the model — or fail the schema-hygiene test over something we don't
+    own — fill a minimal description from the parameter name and log it, so
+    the gap is visible and fixable upstream.
+    """
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return schema
+    missing = [
+        k for k, v in props.items()
+        if isinstance(v, dict) and not (v.get("description") or "").strip()
+    ]
+    if not missing:
+        return schema
+    patched = dict(schema)
+    patched["properties"] = {
+        k: ({**v, "description": k.replace("_", " ")}
+            if k in missing and isinstance(v, dict) else v)
+        for k, v in props.items()
+    }
+    logger.info(
+        "thunderbird: bridge schema omits descriptions for %s — filled from "
+        "parameter names", ", ".join(sorted(missing)),
     )
+    return patched
 
-    # Initialize
-    init_msg = {
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "lloyd-thunderbird", "version": "1.0.0"},
-        },
-    }
-    _bridge_send(init_msg)
-    # Consume the init response so it doesn't pollute subsequent _bridge_receive() calls
+
+async def _get_pool():
+    """Open (once) an MCP stdio session to the bridge.
+
+    Reuses `MCPPool` rather than a bespoke client: it already implements
+    the owner-task pattern that keeps anyio cancel scopes consistent, and
+    it is the same code path the harness uses for every other server.
+    """
+    global _pool
+    async with _pool_lock:
+        if _pool is not None and not _pool._poisoned:
+            return _pool
+        if not BRIDGE_PATH.exists():
+            raise FileNotFoundError(f"MCP bridge not found at {BRIDGE_PATH}")
+        from app.harness.mcp_pool import MCPPool
+
+        pool = MCPPool({
+            "thunderbird": {
+                "type": "stdio",
+                "command": "node",
+                "args": [str(BRIDGE_PATH)],
+            }
+        })
+        await pool.open()
+        _pool = pool
+        return _pool
+
+
+async def list_tools() -> list[Tool]:
+    """Discover the bridge's tools, renamed into Lloyd's namespace.
+
+    Degrades to an empty list when Thunderbird isn't running: these tools
+    simply don't appear, and the other modules are unaffected. Cached for
+    DISCOVERY_TTL_SECONDS so each new client connection doesn't pay for a
+    round trip to Node.
+    """
+    global _cached_tools, _cached_at
+    if _cached_tools and (time.monotonic() - _cached_at) < DISCOVERY_TTL_SECONDS:
+        return _cached_tools
+
     try:
-        _bridge_receive(timeout=5.0)
-    except Exception:
-        pass
-    return _bridge_proc
-
-
-def _bridge_send(msg: dict) -> None:
-    if _bridge_proc and _bridge_proc.stdin:
-        _bridge_proc.stdin.write(json.dumps(msg) + "\n")
-        _bridge_proc.stdin.flush()
-
-
-def _bridge_receive(timeout: float = 30.0) -> dict:
-    import select
-    if not _bridge_proc or not _bridge_proc.stdout:
-        raise RuntimeError("Bridge not running")
-    start = time.time()
-    while time.time() - start < timeout:
-        if _bridge_proc.poll() is not None:
-            raise RuntimeError("Bridge subprocess exited")
-        if select.select([_bridge_proc.stdout], [], [], 0.5)[0]:
-            line = _bridge_proc.stdout.readline().strip()
-            if not line:
-                continue
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
-    raise TimeoutError("Timeout waiting for bridge response")
-
-
-def _call_bridge_tool(mcp_name: str, args: dict, timeout: float = 30.0) -> str:
-    _ensure_bridge()
-    request_id = int(time.time() * 1000) % 1000000
-    request = {
-        "jsonrpc": "2.0", "id": request_id,
-        "method": "tools/call",
-        "params": {"name": mcp_name, "arguments": args},
-    }
-    _bridge_send(request)
-
-    import select
-    start = time.time()
-    while time.time() - start < timeout:
-        if _bridge_proc.poll() is not None:
-            raise RuntimeError("Bridge subprocess exited")
-        if select.select([_bridge_proc.stdout], [], [], 0.5)[0]:
-            line = _bridge_proc.stdout.readline().strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-                if msg.get("id") == request_id:
-                    if "error" in msg:
-                        raise RuntimeError(f"Bridge error: {msg['error'].get('message', 'unknown')}")
-                    content = msg.get("result", {}).get("content", [])
-                    if content:
-                        return "".join(c.get("text", "") for c in content)
-                    return "(no result)"
-            except json.JSONDecodeError:
-                continue
-    raise TimeoutError(f"Timeout calling tool {mcp_name}")
-
-
-def _discover_tools() -> list[dict]:
-    global _discovered_tools
-    try:
-        _ensure_bridge()
-        request_id = int(time.time() * 1000) % 1000000
-        _bridge_send({"jsonrpc": "2.0", "id": request_id, "method": "tools/list", "params": {}})
-        response = _bridge_receive(timeout=10.0)
-        if "error" in response:
-            return []
-        _discovered_tools = response.get("result", {}).get("tools", [])
-        return _discovered_tools
-    except Exception as e:
-        logger.warning(f"Failed to discover Thunderbird tools: {e}")
+        pool = await _get_pool()
+    except Exception as exc:
+        logger.warning("thunderbird: bridge unavailable (%s); exporting no tools", exc)
+        _cached_tools, _cached_at = [], time.monotonic()
         return []
 
+    tools: list[Tool] = []
+    unmapped: list[str] = []
+    for _server, discovered in pool.discovered:
+        for t in discovered:
+            bridge_name = t["name"]
+            name = _lloyd_name(bridge_name)
+            if name.startswith("tb_"):
+                unmapped.append(bridge_name)
+            description = DESCRIPTION_OVERRIDES.get(name) or (
+                t.get("description") or f"Thunderbird: {bridge_name}"
+            )
+            tools.append(Tool(
+                name=name,
+                description=description,
+                inputSchema=_document_params(
+                    t.get("inputSchema") or {"type": "object", "properties": {}}
+                ),
+            ))
+    if unmapped:
+        logger.warning(
+            "thunderbird: %d bridge tool(s) have no name mapping and ship as "
+            "tb_*: %s — add them to TOOL_NAME_MAP",
+            len(unmapped), ", ".join(sorted(unmapped)),
+        )
 
-@app.list_tools()
-async def list_tools():
-    tools = _discover_tools()
-    result = []
-    for tool in tools:
-        mcp_name = tool["name"]
-        lloyd_name = TOOL_NAME_MAP.get(mcp_name, f"tb_{mcp_name}")
-        description = tool.get("description", f"Thunderbird: {mcp_name}")
-        schema = tool.get("inputSchema", {"type": "object", "properties": {}})
-        result.append(Tool(name=lloyd_name, description=description, inputSchema=schema))
-    return result
+    _cached_tools, _cached_at = tools, time.monotonic()
+    return tools
 
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict):
-    # Resolve lloyd name -> MCP name
-    mcp_name = REVERSE_MAP.get(name)
-    if not mcp_name:
-        # Try stripping tb_ prefix
+async def call_tool(name: str, arguments: dict) -> CallToolResult:
+    bridge_name = REVERSE_MAP.get(name)
+    if bridge_name is None:
         if name.startswith("tb_"):
-            mcp_name = name[3:]
+            bridge_name = name[3:]
         else:
-            return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+            return text_result(json.dumps({"error": f"Unknown tool: {name}"}), is_error=True)
 
     try:
-        result = _call_bridge_tool(mcp_name, arguments or {})
-        return [TextContent(type="text", text=result)]
-    except Exception as e:
-        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+        pool = await _get_pool()
+        result = await pool.call_tool(bridge_name, arguments or {})
+    except Exception as exc:
+        logger.warning("thunderbird: %s failed: %s", bridge_name, exc)
+        return text_result(json.dumps({"error": str(exc)}), is_error=True)
 
+    return text_result(
+        result["content"] or "(no result)",
+        is_error=result["is_error"],
+    )
+
+
+async def shutdown() -> None:
+    """Close the bridge session and reap the Node subprocess.
+
+    Called from the aggregator's lifespan. Without it every restart left
+    an orphaned `node mcp-bridge.cjs` behind.
+    """
+    global _pool, _cached_tools, _cached_at
+    pool, _pool = _pool, None
+    _cached_tools, _cached_at = [], 0.0
+    if pool is not None:
+        try:
+            await pool.aclose()
+        except Exception as exc:
+            logger.warning("thunderbird: shutdown failed: %s", exc)

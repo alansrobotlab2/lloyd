@@ -15,13 +15,12 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
 
 # Skill-side query stopwords moved to agent_mcp._shared (#340 P3 cleanup).
 # Local alias preserves the existing internal name `_QUERY_STOPWORDS` so
 # the rest of skills.py doesn't change.
-from agent_mcp._shared import _SKILLS_QUERY_STOPWORDS as _QUERY_STOPWORDS
+from agent_mcp._shared import _SKILLS_QUERY_STOPWORDS as _QUERY_STOPWORDS, text_result
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -37,8 +36,6 @@ SKILLS_DIRS = [
 # instead of acting on). The norm is `status: active`; anything in this set
 # is skipped. Comparison is case-insensitive on the stripped value.
 _QUARANTINE_STATUSES = {"inactive", "archived", "disabled", "retired", "quarantined"}
-
-app = Server("lloyd-skills")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -274,7 +271,6 @@ def _skills_read(params: dict) -> str:
 
 # ── MCP registration ──────────────────────────────────────────────────────────
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(
@@ -310,7 +306,6 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     handlers = {
         "skills_search": _skills_search,
@@ -318,5 +313,5 @@ async def call_tool(name: str, arguments: dict):
     }
     handler = handlers.get(name)
     if handler:
-        return [TextContent(type="text", text=handler(arguments))]
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return text_result(handler(arguments))
+    return text_result(json.dumps({"error": f"Unknown tool: {name}"}))

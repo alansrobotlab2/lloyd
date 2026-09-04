@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional, TypedDict
 
 import yaml
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 
 # ── Path constants ───────────────────────────────────────────────────────────
 
@@ -121,14 +121,60 @@ def _err(message: str, code: str = ErrorCode.INTERNAL, **extra: Any) -> dict:
     return {"error": message, "code": code, **extra}
 
 
-def _wrap(result: dict) -> list[TextContent]:
-    """Serialize a handler return to a TextContent envelope.
+def _wrap(result: dict) -> CallToolResult:
+    """Serialize a handler return to an MCP result.
 
     Exactly one json.dumps per tool call. default=str handles datetimes
     and other non-JSON-native types that may slip through (e.g. event_date
     values from YAML-parsed fact frontmatter).
+
+    `isError` is set from the presence of an "error" key — the shape every
+    handler already uses via `_err()`. Before this, no tool in the tree
+    ever set `isError`, so every failure arrived at the harness as a
+    *successful* result whose text happened to contain `{"error": ...}`.
+    That made `tool_result.is_error` dead across the entire surface: the
+    empty-result fallback and disk-spill logic ran on error payloads, and
+    `fire_post_tool_use` fired where `fire_post_tool_use_failure` should
+    have.
     """
-    return [TextContent(type="text", text=json.dumps(result, default=str))]
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(result, default=str))],
+        isError="error" in result,
+    )
+
+
+def text_result(text: str, *, is_error: bool | None = None) -> CallToolResult:
+    """Wrap an already-serialized string return from a handler.
+
+    For the modules whose handlers return `str` rather than a Result dict
+    (builtin_fs, builtin_bash, browser, thunderbird). When `is_error` is
+    None the text is sniffed: a top-level JSON object carrying an "error"
+    key is an error, anything else is not. Pass `is_error` explicitly
+    wherever the handler knows better — a non-zero exit code, say, which
+    is not JSON at all.
+    """
+    if is_error is None:
+        is_error = _looks_like_error_json(text)
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        isError=is_error,
+    )
+
+
+def _looks_like_error_json(text: str) -> bool:
+    """True if `text` is a JSON object with a top-level "error" key."""
+    if not text:
+        return False
+    s = text.lstrip()
+    # Cheap gate before paying for a parse: every error payload in the
+    # tree is a JSON object, and tool output is frequently large.
+    if not s.startswith("{") or '"error"' not in s:
+        return False
+    try:
+        parsed = json.loads(s)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(parsed, dict) and "error" in parsed
 
 
 # ── Session binding & HTTP clients ───────────────────────────────────────────

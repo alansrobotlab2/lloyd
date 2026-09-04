@@ -6,10 +6,10 @@ existing domain modules. The harness `loop.py` reuses one process-wide
 pool keyed by mcp_servers config (see `get_or_open_pool`); cleanup is
 handled at FastAPI shutdown via `lifecycle.shutdown_cleanup`.
 
-Only SSE / HTTP transports are implemented today — stdio is not wired
-because every active config uses the consolidated aggregator. Adding
-stdio means importing `mcp.client.stdio.stdio_client` and branching in
-`_open_session`; nobody needs it yet, so it raises NotImplementedError.
+SSE/HTTP and stdio transports are both wired. stdio is what the
+Thunderbird bridge runs on (`agent_mcp.thunderbird`) — it speaks MCP over
+a pipe, so it gets an SDK client rather than the hand-rolled JSON-RPC
+exchange it used to have.
 """
 
 from __future__ import annotations
@@ -18,10 +18,12 @@ import asyncio
 import json
 import logging
 from contextlib import AsyncExitStack
+from datetime import timedelta
 from typing import Any
 
-from mcp import ClientSession
+from mcp import ClientSession, McpError
 from mcp.client.sse import sse_client
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from app.config import service_url
 from app.harness.errors import ToolDispatchError
@@ -30,6 +32,48 @@ logger = logging.getLogger("lloyd-harness-mcp-pool")
 
 # Default URL for the unified lloyd-mcp aggregator (agent_mcp/main.py).
 DEFAULT_LLOYD_MCP_URL = service_url("lloyd_mcp", "http://127.0.0.1:8500/sse")
+
+# `_meta` key carrying the harness session id. Must match
+# agent_mcp.main.META_SESSION_ID.
+META_SESSION_ID = "lloyd/session_id"
+
+# Ceiling on a single tools/call round trip. Sits above the Bash tool's own
+# 600s hard cap so a legitimately long command finishes on its own terms and
+# this only fires when something is genuinely wedged. Without it a hung tool
+# blocks the harness indefinitely — there is no default in the MCP client.
+CALL_TIMEOUT_SECONDS = 660.0
+
+
+# ---------------------------------------------------------------------------
+# SDK field-name compatibility
+# ---------------------------------------------------------------------------
+#
+# mcp 2.x renames every model field to snake_case in Python (the wire format
+# stays camelCase). Construction is unaffected — the models set
+# populate_by_name, so `CallToolResult(isError=...)` still works — but
+# ATTRIBUTE READS are not aliased, and that asymmetry is dangerous here:
+#
+#     getattr(result, "isError", False)
+#
+# returns False on a 2.x CallToolResult rather than raising, which would
+# silently mark every failed tool call a success and quietly undo the
+# is_error plumbing. Read through these helpers instead.
+
+
+def _is_error(result: Any) -> bool:
+    """`isError` (mcp 1.x) / `is_error` (mcp 2.x) from a CallToolResult."""
+    value = getattr(result, "is_error", None)
+    if value is None:
+        value = getattr(result, "isError", None)
+    return bool(value)
+
+
+def _input_schema(tool: Any) -> dict[str, Any]:
+    """`inputSchema` (mcp 1.x) / `input_schema` (mcp 2.x) from a Tool."""
+    schema = getattr(tool, "input_schema", None)
+    if schema is None:
+        schema = getattr(tool, "inputSchema", None)
+    return schema or {"type": "object", "properties": {}}
 
 
 class MCPPool:
@@ -158,7 +202,14 @@ class MCPPool:
         """
         return self._discovered
 
-    async def call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    async def call_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        session_id: str = "",
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         """Dispatch a tool call to the right server.
 
         `name` is normally a bare tool name (`"Bash"`, `"email_recent"`).
@@ -167,6 +218,12 @@ class MCPPool:
         ``{"content": str, "is_error": bool}``. Raises ToolDispatchError
         when routing or transport fails — caller maps to a tool_result
         with ``is_error=True``.
+
+        `session_id` travels in the request's ``_meta``, not in ``args``.
+        The MCP server validates ``args`` against the tool's inputSchema
+        before its handler runs, so anything injected there is validated
+        as a real parameter; ``_meta`` is the field the spec reserves for
+        exactly this kind of implementation metadata.
         """
         if not self._opened:
             await self.open()
@@ -193,13 +250,33 @@ class MCPPool:
             raise ToolDispatchError(name, f"server {server_name!r} not open")
 
         coerced = _coerce_args(args, self._schemas.get(bare))
+        meta = {META_SESSION_ID: session_id} if session_id else None
+        budget = timeout_seconds if timeout_seconds is not None else CALL_TIMEOUT_SECONDS
         try:
-            result = await session.call_tool(bare, coerced)
+            result = await session.call_tool(
+                bare,
+                coerced,
+                read_timeout_seconds=timedelta(seconds=budget),
+                meta=meta,
+            )
+        except McpError as exc:
+            # A protocol-level error from a live session: the server was
+            # reachable and answered. That is a failed *call*, not a failed
+            # transport — surfacing it as a tool error keeps the session
+            # (shared with every other in-flight turn) intact.
+            logger.info("mcp_pool: %s on %s returned an MCP error: %s", bare, server_name, exc)
+            return {"content": f"MCP error calling {bare}: {exc}", "is_error": True}
         except Exception as exc:
             # Transport-shaped failure. Mark poisoned, evict from cache,
             # and signal the owner task to tear the pool down in its own
             # context. The owner task closes the AsyncExitStack — that's
             # the task that entered the cancel scopes, so anyio is happy.
+            #
+            # This is deliberately blunt: the session is shared, so a dead
+            # transport has to take it down for everyone. The 2026-07-28
+            # stateless protocol removes the shared session and with it
+            # this whole failure mode; until then, a timeout is what stops
+            # one wedged tool from hanging every concurrent turn forever.
             self._poisoned = True
             _evict_pool(self)
             self._shutdown_event.set()
@@ -219,8 +296,7 @@ class MCPPool:
                 text_parts.append(text)
             else:
                 text_parts.append(json.dumps({"type": getattr(item, "type", "?")}))
-        is_error = bool(getattr(result, "isError", False))
-        return {"content": "".join(text_parts), "is_error": is_error}
+        return {"content": "".join(text_parts), "is_error": _is_error(result)}
 
     # ------------------------------------------------------------------
     # Internals
@@ -240,17 +316,30 @@ class MCPPool:
         if server_type in ("sse", "http"):
             url = cfg["url"]
             ctx = sse_client(url)
-            read_stream, write_stream = await stack.enter_async_context(ctx)
-            session = await stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
+        elif server_type == "stdio":
+            command = cfg.get("command")
+            if not command:
+                raise ValueError(f"stdio server {server_name!r} has no 'command'")
+            env = cfg.get("env")
+            ctx = stdio_client(
+                StdioServerParameters(
+                    command=command,
+                    args=list(cfg.get("args") or []),
+                    env=dict(env) if env else None,
+                    cwd=cfg.get("cwd") or None,
+                )
             )
-            await session.initialize()
-            return session
-        # stdio fallback would land here; we don't currently need it,
-        # so fail loudly so it gets implemented when we do.
-        raise NotImplementedError(
-            f"mcp_pool: stdio transport not yet wired ({server_name})"
+        else:
+            raise ValueError(
+                f"mcp_pool: unknown transport {server_type!r} for {server_name!r}"
+            )
+
+        read_stream, write_stream = await stack.enter_async_context(ctx)
+        session = await stack.enter_async_context(
+            ClientSession(read_stream, write_stream)
         )
+        await session.initialize()
+        return session
 
     async def _list_tools(
         self, server_name: str, session: ClientSession
@@ -260,7 +349,7 @@ class MCPPool:
             {
                 "name": t.name,
                 "description": t.description or "",
-                "inputSchema": t.inputSchema,
+                "inputSchema": _input_schema(t),
             }
             for t in result.tools
         ]

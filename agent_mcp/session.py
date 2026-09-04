@@ -23,7 +23,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from mcp.server import Server
 from mcp.types import Tool
 
 from agent_mcp._shared import (
@@ -52,8 +51,6 @@ _SESSION_INDEX_TTL = 120       # cache session index for 2 min
 _SESSION_CORPUS_MAX = 5000     # max chars of searchable text per session
 
 _session_index_cache: Optional[tuple] = None  # (monotonic_ts, max_days, {filename: metadata})
-
-app = Server("lloyd-session")
 
 
 # ── Session memory tools ─────────────────────────────────────────────────────
@@ -303,23 +300,21 @@ def _session_recall(params: dict) -> dict:
 
 # ── MCP registration ─────────────────────────────────────────────────────────
 
-@app.list_tools()
 async def list_tools():
     return [
-        Tool(name="memory_read", description="Read MEMORY.md or USER.md session memory files.", inputSchema={
+        Tool(name="memory_read", description="Read the cross-session memory files. MEMORY.md holds durable working notes; USER.md holds standing facts about the user. Returns the whole file.", inputSchema={
             "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "Which file to read"}}, "required": []}),
-        Tool(name="memory_add", description="Append an entry to MEMORY.md or USER.md.", inputSchema={
-            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"]}, "entry": {"type": "string", "description": "Text to append"}}, "required": ["entry"]}),
-        Tool(name="memory_replace", description="Replace text in MEMORY.md or USER.md (substring match).", inputSchema={
-            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"]}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["old_text", "new_text"]}),
+        Tool(name="memory_add", description="Append one entry to a cross-session memory file. Appends only — use memory_replace to change an existing line and memory_remove to drop one.", inputSchema={
+            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "MEMORY.md for durable working notes, USER.md for facts about the user (default MEMORY.md)"}, "entry": {"type": "string", "description": "Text to append"}}, "required": ["entry"]}),
+        Tool(name="memory_replace", description="Replace text in a cross-session memory file by substring match. Fails if old_text is absent, so a stale edit is reported rather than silently skipped.", inputSchema={
+            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "MEMORY.md for durable working notes, USER.md for facts about the user (default MEMORY.md)"}, "old_text": {"type": "string", "description": "Existing text to find (substring, must appear exactly once)"}, "new_text": {"type": "string", "description": "Replacement text"}}, "required": ["old_text", "new_text"]}),
         Tool(name="memory_remove", description="Remove an entry from MEMORY.md or USER.md (substring match).", inputSchema={
-            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"]}, "entry": {"type": "string", "description": "Text to remove"}}, "required": ["entry"]}),
+            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "MEMORY.md for durable working notes, USER.md for facts about the user (default MEMORY.md)"}, "entry": {"type": "string", "description": "Text to remove"}}, "required": ["entry"]}),
         Tool(name="session_recall", description="Search recent session transcripts for topics, decisions, or discussions from past sessions. Use for cross-session context like 'what did we work on today?' or 'what was decided about X?'", inputSchema={
             "type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "days": {"type": "integer", "description": "Days back to search (default: 7)"}, "limit": {"type": "integer", "description": "Max results (default: 5)"}}, "required": ["query"]}),
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     handlers = {
         "memory_read": _memory_read, "memory_add": _memory_add,

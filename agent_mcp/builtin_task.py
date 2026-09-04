@@ -18,33 +18,31 @@ import asyncio
 import contextvars
 import json
 import logging
-import os
 import uuid
 from typing import Any
 
-import yaml
 from app.config import default_model_base_url
-from mcp.server import Server
-from mcp.types import TextContent, Tool
+from mcp.types import Tool
+
+from agent_mcp._shared import text_result
 
 logger = logging.getLogger("lloyd-builtin-task")
-
-app = Server("lloyd-builtin-task")
 
 # Recursion guard — depth of nested Task calls on the current call stack.
 _task_depth: contextvars.ContextVar[int] = contextvars.ContextVar("_task_depth", default=0)
 MAX_TASK_DEPTH = 1
 
-_CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.yaml")
-
-
 def _load_subagent_profile(subagent_type: str) -> dict[str, Any]:
-    try:
-        with open(_CONFIG_PATH, "r") as f:
-            cfg = yaml.safe_load(f) or {}
-    except Exception:
-        cfg = {}
-    profiles = cfg.get("subagents") or {}
+    """Read one `subagents:` profile from the live config.
+
+    Goes through `app.config.CONFIG` rather than opening config.yaml
+    directly. The direct read bypassed both `${VAR}` expansion and the
+    merge of `data/tool_overrides.yaml`, so a subagent saw a different
+    configuration than every other caller.
+    """
+    from app.config import CONFIG
+
+    profiles = CONFIG.get("subagents") or {}
     profile = profiles.get(subagent_type) or {}
     return {
         "system_prompt": profile.get("system_prompt", ""),
@@ -82,8 +80,19 @@ async def _task(args: dict[str, Any]) -> str:
     model = profile["model"] or "primary"
     base_url = profile["base_url"] or default_model_base_url()
 
+    # Config-level tool disables apply to subagents too. They did not
+    # before: `disallowed` came from the profile alone, so any tool
+    # switched off in the Tools page or listed in
+    # `mcp_servers.<server>.disabled_tools` stayed fully callable inside
+    # a Task — the one execution context with no human watching the
+    # stream. Same reasoning that puts the safety hook here.
+    from app.mcp_discovery import _get_disallowed_tools
+
+    disallowed = list(_get_disallowed_tools())
+    for name in profile["disallowed_tools"]:
+        if name not in disallowed:
+            disallowed.append(name)
     # Subagent always disallows Task to prevent infinite recursion.
-    disallowed = list(profile["disallowed_tools"])
     if "Task" not in disallowed:
         disallowed.append("Task")
 
@@ -143,7 +152,6 @@ async def _task(args: dict[str, Any]) -> str:
     return json.dumps(result)
 
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(
@@ -177,10 +185,9 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "Task":
         text = await _task(arguments)
     else:
         text = json.dumps({"error": f"Unknown tool: {name}"})
-    return [TextContent(type="text", text=text)]
+    return text_result(text)

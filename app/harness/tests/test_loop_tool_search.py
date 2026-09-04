@@ -36,12 +36,16 @@ class _FakePool:
     def __init__(self, server_name: str, tools: list[dict]):
         self._discovered = [(server_name, tools)]
         self.call_log: list[tuple[str, dict]] = []
+        self.session_log: list[tuple[str, str]] = []
 
     @property
     def discovered(self):
         return self._discovered
 
-    async def call_tool(self, name: str, args: dict):
+    async def call_tool(self, name: str, args: dict, *, session_id: str = "", **_kw):
+        # session_id travels in the request's _meta now, not in args — the
+        # log records it alongside rather than inside the argument dict.
+        self.session_log.append((name, session_id))
         self.call_log.append((name, args))
         return {"content": f"FAKE_RESULT[{name}]", "is_error": False}
 
@@ -255,9 +259,10 @@ def test_toolsearch_call_loads_matched_tools_for_next_turn(monkeypatch):
     # not by the MCP pool.
     assert all(name != TOOLSEARCH_TOOL_NAME for name, _ in pool.call_log)
     # The MCP pool DID get the second tool call. Args carry the harness's
-    # injected `_session_id` correlation key — domain handlers pop it
+    # session correlation now rides in _meta, not the argument dict
     # before schema validation.
-    assert ("domain_tool_007", {"_session_id": "test-toolsearch-load"}) in pool.call_log
+    assert ("domain_tool_007", {}) in pool.call_log
+    assert ("domain_tool_007", "test-toolsearch-load") in pool.session_log
 
     # The synthesized ToolSearch result is a tool_result event with a
     # <functions> block in its content.
@@ -336,7 +341,8 @@ def test_unloaded_tool_call_auto_loads_and_dispatches(monkeypatch):
     events = asyncio.run(_drain([{"role": "user", "content": "hi"}], opts))
 
     # MCP was called — auto-load lets the dispatch through.
-    assert pool.call_log == [("domain_tool_005", {"_session_id": "test-unloaded-autoload"})]
+    assert pool.call_log == [("domain_tool_005", {})]
+    assert pool.session_log == [("domain_tool_005", "test-unloaded-autoload")]
     # A successful tool_result was emitted (no schema-loading error).
     results = [e for e in events if e["type"] == "tool_result"]
     assert results
@@ -376,7 +382,7 @@ def test_unknown_tool_name_still_falls_through_to_mcp(monkeypatch):
     # The fake pool happily logs anything, but the real signal is that
     # the call reached MCP (no schema-loading rejection in the harness).
     assert pool.call_log == [
-        ("this_tool_does_not_exist", {"_session_id": "test-unknown-tool"})
+        ("this_tool_does_not_exist", {})
     ]
 
 

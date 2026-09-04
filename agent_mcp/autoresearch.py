@@ -21,18 +21,16 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
+
+from agent_mcp._shared import text_result
 
 logger = logging.getLogger("lloyd-autoresearch-mcp")
 
 # Keep imports lazy inside handlers — the round orchestrator pulls in claude_agent_sdk,
 # requests, etc., which we'd rather not load until the tool is actually called.
 
-app = Server("lloyd-autoresearch")
 
-
-@app.list_tools()
 async def list_tools():
     return [
         Tool(
@@ -56,7 +54,10 @@ async def list_tools():
         ),
         Tool(
             name="autoresearch_status",
-            description="List recent autoresearch rounds or inspect one by round_id.",
+            description=(
+                "List recent autoresearch rounds with their status and outcome, or "
+                "pass round_id to inspect one round's variants and scores."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -67,7 +68,11 @@ async def list_tools():
         ),
         Tool(
             name="autoresearch_bench_list",
-            description="List bench task ids, categories, and safety flags.",
+            description=(
+                "List the autoresearch bench: every task id with its category and "
+                "whether it is safety-critical. Use this before adding a task to "
+                "avoid duplicating an existing one."
+            ),
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
@@ -92,8 +97,8 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "round_id": {"type": "string"},
-                    "variant_id": {"type": "string"},
+                    "round_id": {"type": "string", "description": "Only rows from this round (from autoresearch_status)"},
+                    "variant_id": {"type": "string", "description": "Only rows for this prompt variant"},
                     "event": {"type": "string", "description": "e.g. 'decision' for promotion decisions only"},
                     "limit": {"type": "integer", "description": "Max rows (default 100, max 1000)."},
                 },
@@ -105,7 +110,7 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "variant_id": {"type": "string"},
+                    "variant_id": {"type": "string", "description": "Variant to promote, as reported by autoresearch_status or the ledger"},
                     "dry_run": {"type": "boolean", "description": "Default true; set false to actually promote."},
                 },
                 "required": ["variant_id"],
@@ -123,23 +128,22 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "autoresearch_round":
-        return [TextContent(type="text", text=_handle_round(arguments))]
+        return text_result(_handle_round(arguments))
     if name == "autoresearch_status":
-        return [TextContent(type="text", text=_handle_status(arguments))]
+        return text_result(_handle_status(arguments))
     if name == "autoresearch_bench_list":
-        return [TextContent(type="text", text=_handle_bench_list(arguments))]
+        return text_result(_handle_bench_list(arguments))
     if name == "autoresearch_bench_add":
-        return [TextContent(type="text", text=_handle_bench_add(arguments))]
+        return text_result(_handle_bench_add(arguments))
     if name == "autoresearch_ledger_query":
-        return [TextContent(type="text", text=_handle_ledger_query(arguments))]
+        return text_result(_handle_ledger_query(arguments))
     if name == "autoresearch_promote":
-        return [TextContent(type="text", text=_handle_promote(arguments))]
+        return text_result(_handle_promote(arguments))
     if name == "autoresearch_rollback":
-        return [TextContent(type="text", text=_handle_rollback(arguments))]
-    return [TextContent(type="text", text=json.dumps({"error": f"unknown tool: {name}"}))]
+        return text_result(_handle_rollback(arguments))
+    return text_result(json.dumps({"error": f"unknown tool: {name}"}))
 
 
 def _load_cfg():

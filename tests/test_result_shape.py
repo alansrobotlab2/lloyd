@@ -10,7 +10,8 @@ These tests pin:
 1. Handlers return Python dicts, not JSON strings.
 2. Error responses always have `error` (str) and `code` (str) keys.
 3. ErrorCode constants are stable string values.
-4. _wrap() produces a list[TextContent] with valid JSON.
+4. _wrap() produces a CallToolResult with valid JSON and an
+   isError flag derived from the presence of an "error" key.
 5. The unknown-tool path on each module's call_tool returns a properly
    coded error.
 
@@ -29,6 +30,8 @@ sys.path.insert(0, str(ROOT))
 import asyncio  # noqa: E402
 
 from agent_mcp import facts, session, vault  # noqa: E402
+from mcp.types import CallToolResult  # noqa: E402
+
 from agent_mcp._shared import ErrorCode, _err, _wrap  # noqa: E402
 
 
@@ -67,21 +70,31 @@ def test_error_codes_are_strings_and_stable():
 
 # ── _wrap() dispatch helper ──────────────────────────────────────────────────
 
-def test_wrap_produces_textcontent_list():
+def test_wrap_produces_call_tool_result():
     wrapped = _wrap({"foo": "bar"})
-    assert isinstance(wrapped, list)
-    assert len(wrapped) == 1
-    item = wrapped[0]
+    assert isinstance(wrapped, CallToolResult)
+    assert len(wrapped.content) == 1
+    item = wrapped.content[0]
     assert item.type == "text"
     parsed = json.loads(item.text)
     assert parsed == {"foo": "bar"}
+    # No "error" key -> a successful result.
+    assert wrapped.isError is False
+
+
+def test_wrap_sets_is_error_from_error_key():
+    # The whole point of returning CallToolResult: a handler error has to
+    # reach the harness as is_error=True, not as a successful result whose
+    # text happens to contain {"error": ...}.
+    wrapped = _wrap(_err("entity is required", ErrorCode.MISSING_PARAM))
+    assert wrapped.isError is True
 
 
 def test_wrap_handles_datetime_via_default_str():
     import datetime
     payload = {"event_date": datetime.date(2026, 4, 30)}
     wrapped = _wrap(payload)
-    parsed = json.loads(wrapped[0].text)
+    parsed = json.loads(wrapped.content[0].text)
     # default=str fallback turns date into its ISO string.
     assert parsed == {"event_date": "2026-04-30"}
 
@@ -210,8 +223,9 @@ def test_unknown_tool_wrap_err_composition():
     # ErrorCode.UNKNOWN_TOOL)). Verify that composition lands the expected
     # JSON envelope on the wire.
     wrapped = _wrap(_err("Unknown tool: bogus", ErrorCode.UNKNOWN_TOOL))
-    assert isinstance(wrapped, list) and len(wrapped) == 1
-    parsed = json.loads(wrapped[0].text)
+    assert isinstance(wrapped, CallToolResult) and len(wrapped.content) == 1
+    assert wrapped.isError is True
+    parsed = json.loads(wrapped.content[0].text)
     assert parsed == {
         "error": "Unknown tool: bogus",
         "code": "UNKNOWN_TOOL",

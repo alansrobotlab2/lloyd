@@ -13,15 +13,12 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
 
-from agent_mcp._shared import parse_frontmatter_text
+from agent_mcp._shared import parse_frontmatter_text, text_result
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 VALID_STATUSES = {"draft", "up_next", "in_progress", "done"}
-
-app = Server("lloyd-backlog")
 
 
 def parse_frontmatter(content: str) -> tuple:
@@ -88,10 +85,9 @@ def _serialize_datetime(val):
     return val
 
 
-@app.list_tools()
 async def list_tools():
     return [
-        Tool(name="backlog_boards", description="List kanban boards with task counts", inputSchema={
+        Tool(name="backlog_boards", description="List the kanban boards in the backlog with a task count for each. Use this to find a board name before filtering tasks with backlog_tasks.", inputSchema={
             "type": "object", "properties": {},
         }),
         Tool(name="backlog_tasks", description="List tasks with filters (status, board, tag, blocked, assigned)", inputSchema={
@@ -104,7 +100,7 @@ async def list_tools():
                 "assigned": {"type": "boolean", "description": "Filter by assigned state"},
             },
         }),
-        Tool(name="backlog_get_task", description="Get task details by ID", inputSchema={
+        Tool(name="backlog_get_task", description="Get one backlog task in full: its frontmatter fields, tags, board, blocked/assigned state, and its markdown body.", inputSchema={
             "type": "object",
             "properties": {"task_id": {"type": "integer", "description": "Task ID to retrieve"}},
             "required": ["task_id"],
@@ -125,9 +121,9 @@ async def list_tools():
                 "status": {"type": "string", "description": "Task status"},
                 "priority": {"type": "string", "description": "Task priority"},
                 "board": {"type": "string", "description": "Board name (required for new tasks)"},
-                "tags": {"type": "array", "items": {"type": "string"}},
-                "blocked": {"type": "boolean"},
-                "assigned": {"type": "boolean"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Replaces the task's tag list wholesale"},
+                "blocked": {"type": "boolean", "description": "Mark the task as blocked on something external"},
+                "assigned": {"type": "boolean", "description": "Mark the task as claimed by an agent or person"},
                 "activity": {"type": "string", "description": "Activity log message"},
             },
             # NOT unconditionally required: these three are needed only when
@@ -140,17 +136,16 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "backlog_boards":
-        return [TextContent(type="text", text=_handle_boards(arguments))]
+        return text_result(_handle_boards(arguments))
     elif name == "backlog_tasks":
-        return [TextContent(type="text", text=_handle_tasks(arguments))]
+        return text_result(_handle_tasks(arguments))
     elif name == "backlog_get_task":
-        return [TextContent(type="text", text=_handle_get(arguments))]
+        return text_result(_handle_get(arguments))
     elif name == "backlog_write_task":
-        return [TextContent(type="text", text=_handle_write(arguments))]
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return text_result(_handle_write(arguments))
+    return text_result(json.dumps({"error": f"Unknown tool: {name}"}))
 
 
 def _handle_boards(args: dict) -> str:

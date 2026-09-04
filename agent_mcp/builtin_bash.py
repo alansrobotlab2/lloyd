@@ -25,21 +25,27 @@ hook in ``app/harness/loop.py``.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
 import signal
 from typing import Any
 
-from mcp.server import Server
-from mcp.types import TextContent, Tool
+from mcp.types import Tool
 
 from agent_mcp import _task_registry
-from agent_mcp._shared import get_bound_session
+from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-bash")
 
-app = Server("lloyd-builtin-bash")
+# Set by _bash when the command exits non-zero or times out, read by
+# call_tool to mark the CallToolResult as an error. A contextvar rather
+# than a return-type change: _bash has six return points and the string
+# return is what the harness's spill/truncation path expects.
+_bash_failed: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_bash_failed", default=False
+)
 
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
@@ -82,6 +88,25 @@ def _kill_proc_tree(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
+def _resolve_cwd(raw: Any) -> tuple[str | None, str | None]:
+    """Validate an optional `cwd` argument. Returns (cwd, error_json).
+
+    Without this the command always ran from the aggregator's own working
+    directory (~/lloyd, set by supervisord), and the model compensated
+    with a leading `cd` in compound commands.
+    """
+    if not raw:
+        return None, None
+    if not isinstance(raw, str):
+        return None, json.dumps({"error": "cwd must be a string"})
+    path = os.path.expanduser(os.path.expandvars(raw))
+    if not os.path.isabs(path):
+        return None, json.dumps({"error": f"cwd must be absolute, got {raw!r}"})
+    if not os.path.isdir(path):
+        return None, json.dumps({"error": f"cwd is not a directory: {path}"})
+    return path, None
+
+
 async def _bash(args: dict[str, Any]) -> str:
     command = args.get("command", "")
     if not command or not isinstance(command, str):
@@ -93,8 +118,12 @@ async def _bash(args: dict[str, Any]) -> str:
     timeout_ms = min(timeout_ms, MAX_TIMEOUT_MS)
     timeout_s = timeout_ms / 1000.0
 
+    cwd, err = _resolve_cwd(args.get("cwd"))
+    if err:
+        return err
+
     if args.get("run_in_background"):
-        return await _spawn_background(command, args.get("description", ""))
+        return await _spawn_background(command, args.get("description", ""), cwd)
 
     try:
         # start_new_session=True puts the shell (and everything it
@@ -106,7 +135,7 @@ async def _bash(args: dict[str, Any]) -> str:
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            cwd=os.getcwd(),
+            cwd=cwd,
             start_new_session=True,
         )
     except Exception as exc:
@@ -120,6 +149,7 @@ async def _bash(args: dict[str, Any]) -> str:
             await asyncio.wait_for(proc.wait(), timeout=2.0)
         except asyncio.TimeoutError:
             pass
+        _bash_failed.set(True)
         return json.dumps({
             "error": f"command timed out after {timeout_ms}ms",
             "command": command,
@@ -146,10 +176,13 @@ async def _bash(args: dict[str, Any]) -> str:
     if rc != 0:
         # Surface non-zero exit + output. Don't wrap in JSON — the SDK
         # Bash returned the raw mixed stream so the model can read
-        # error messages directly.
+        # error messages directly. Flagged as an error result explicitly:
+        # the payload is raw output, so the JSON sniffer in `text_result`
+        # has nothing to go on.
         suffix = f"\n[exit code: {rc}]"
         if truncated:
             suffix = f"\n[truncated]" + suffix
+        _bash_failed.set(True)
         return (output or "(no output)") + suffix
 
     if truncated:
@@ -157,7 +190,7 @@ async def _bash(args: dict[str, Any]) -> str:
     return output if output else "(no output)"
 
 
-async def _spawn_background(command: str, description: str) -> str:
+async def _spawn_background(command: str, description: str, cwd: str | None = None) -> str:
     """Spawn the command detached, log to disk, return task descriptor.
 
     The subprocess inherits its own stdout/stderr (the open file fd we
@@ -175,7 +208,7 @@ async def _spawn_background(command: str, description: str) -> str:
             "bash", "-c", command,
             stdout=log_fd,
             stderr=asyncio.subprocess.STDOUT,
-            cwd=os.getcwd(),
+            cwd=cwd or os.getcwd(),
             close_fds=True,
         )
     except Exception as exc:
@@ -225,7 +258,6 @@ async def _bg_task_drain(args: dict[str, Any]) -> str:
     })
 
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(
@@ -246,6 +278,14 @@ async def list_tools():
                     "timeout": {
                         "type": "integer",
                         "description": "Max ms before kill (default 120000, max 600000)",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": (
+                            "Absolute working directory for the command. "
+                            "Defaults to the MCP server's own directory "
+                            "(~/lloyd). Use this instead of a leading `cd`."
+                        ),
                     },
                     "run_in_background": {
                         "type": "boolean",
@@ -273,12 +313,20 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "Bash":
-        text = await _bash(arguments)
+        token = _bash_failed.set(False)
+        try:
+            text = await _bash(arguments)
+            # `None` lets text_result sniff the payload — that catches the
+            # early-return JSON errors (bad cwd, missing command, spawn
+            # failure). The flag only has to cover what sniffing can't see:
+            # a non-zero exit, whose payload is raw command output.
+            return text_result(text, is_error=True if _bash_failed.get() else None)
+        finally:
+            _bash_failed.reset(token)
     elif name == "_BackgroundTaskDrain":
         text = await _bg_task_drain(arguments)
     else:
         text = json.dumps({"error": f"Unknown tool: {name}"})
-    return [TextContent(type="text", text=text)]
+    return text_result(text)

@@ -36,15 +36,12 @@ import json
 import logging
 from typing import Any
 
-from mcp.server import Server
-from mcp.types import TextContent, Tool
+from mcp.types import Tool
 
-from agent_mcp._shared import get_bound_session
+from agent_mcp._shared import get_bound_session, text_result
 from app.sessions_io import mutate_session
 
 logger = logging.getLogger("lloyd-builtin-goal")
-
-app = Server("lloyd-builtin-goal")
 
 
 def _now_iso() -> str:
@@ -129,7 +126,6 @@ _CLEAR_DESC = """Clear the session's persistent goal (the /clear-goal slash comm
 Drops `session.goal` entirely. Used to abandon a goal that's stalled or no longer relevant. Inner voice opt-in is left as-is so the user retains explicit control of whether IV runs."""
 
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(
@@ -160,7 +156,6 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "SetGoal":
         text = await _set_goal(arguments)
@@ -168,4 +163,4 @@ async def call_tool(name: str, arguments: dict):
         text = await _clear_goal(arguments)
     else:
         text = json.dumps({"error": f"Unknown tool: {name}"})
-    return [TextContent(type="text", text=text)]
+    return text_result(text)

@@ -26,14 +26,11 @@ import json
 
 import httpx
 
-from agent_mcp._shared import make_http_client
+from agent_mcp._shared import make_http_client, text_result
 from app.config import service_url
-from mcp.server import Server
 from mcp.types import Tool, TextContent
 
 LLOYD_BACKEND = service_url("backend", "http://127.0.0.1:8080")
-
-app = Server("lloyd-ambient")
 
 
 async def _post_json(path: str, body: dict, timeout: float = 10.0) -> tuple[int, dict]:
@@ -56,7 +53,6 @@ async def _get_json(path: str, timeout: float = 5.0) -> tuple[int, dict]:
             return r.status_code, {"raw": r.text}
 
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(
@@ -183,9 +179,9 @@ async def _tool_session_inject_context(args: dict) -> list[TextContent]:
     source = (args.get("source") or "").strip()
     summary = (args.get("summary") or "").strip()
     if not source or not summary:
-        return [TextContent(type="text", text=json.dumps({
+        return text_result(json.dumps({
             "error": "source and summary are required",
-        }))]
+        }))
 
     priority = (args.get("priority") or "ambient").strip().lower()
     if priority not in ("ambient", "notable", "urgent"):
@@ -193,10 +189,10 @@ async def _tool_session_inject_context(args: dict) -> list[TextContent]:
 
     session_id = await _resolve_session_id(args.get("session_id") or "")
     if not session_id:
-        return [TextContent(type="text", text=json.dumps({
+        return text_result(json.dumps({
             "skipped": True,
             "reason": "no active user session",
-        }))]
+        }))
 
     content = (args.get("content") or "").strip()
     dedup_key = (args.get("dedup_key") or source).strip()
@@ -240,20 +236,20 @@ async def _tool_session_inject_context(args: dict) -> list[TextContent]:
         "mechanism": "prefetch" if priority == "ambient" else "turn",
         "server_response": body,
     }
-    return [TextContent(type="text", text=json.dumps(result))]
+    return text_result(json.dumps(result))
 
 
 async def _tool_ambient_decide(args: dict) -> list[TextContent]:
     session_id = (args.get("session_id") or "").strip()
     if not session_id:
-        return [TextContent(type="text", text=json.dumps({
+        return text_result(json.dumps({
             "error": "session_id is required — copy it from the <ambient session_id='...'> envelope",
-        }))]
+        }))
 
     if "surface" not in args:
-        return [TextContent(type="text", text=json.dumps({
+        return text_result(json.dumps({
             "error": "surface (bool) is required",
-        }))]
+        }))
 
     body = {
         "surface": bool(args.get("surface")),
@@ -265,17 +261,16 @@ async def _tool_ambient_decide(args: dict) -> list[TextContent]:
         body,
     )
 
-    return [TextContent(type="text", text=json.dumps({
+    return text_result(json.dumps({
         "ok": 200 <= status < 300,
         "status": status,
         "server_response": resp,
-    }))]
+    }))
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "session_inject_context":
         return await _tool_session_inject_context(arguments)
     if name == "ambient_decide":
         return await _tool_ambient_decide(arguments)
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+    return text_result(json.dumps({"error": f"Unknown tool: {name}"}))

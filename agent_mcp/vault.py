@@ -33,7 +33,6 @@ from pathlib import Path
 from typing import Optional
 
 from app.config import service_url
-from mcp.server import Server
 from mcp.types import Tool
 
 from agent_mcp._shared import (
@@ -234,8 +233,6 @@ _INTENT_TEMPORAL_RE = re.compile(
     r"(?:last\s+week|yesterday|today|when\s+did|recent(?:ly)?|latest|last\s+month|last\s+time|\d{4}-\d{2}-\d{2})", re.I)
 _INTENT_CONCEPTUAL_RE = re.compile(
     r"(?:approaches?\s+to|how\s+does\s+\w+\s+compare|explain\s|overview\s+of|strategy\s+for|principles?\s+of)", re.I)
-
-app = Server("lloyd-vault")
 
 
 # ── QMD helpers ──────────────────────────────────────────────────────────────
@@ -972,20 +969,19 @@ def _vault_recall(params: dict) -> dict:
 
 # ── MCP registration ─────────────────────────────────────────────────────────
 
-@app.list_tools()
 async def list_tools():
     return [
         Tool(name="vault_read", description="Read a file from the obsidian vault. Path is vault-relative (e.g. 'memory/learnings/DAILY_NOTES.md'); a leading '~/obsidian/' is stripped automatically.", inputSchema={
-            "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "start_line": {"type": "integer"}, "num_lines": {"type": "integer"}}, "required": ["path"]}),
+            "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "start_line": {"type": "integer", "description": "1-based first line to return; omit to read from the top"}, "num_lines": {"type": "integer", "description": "How many lines to return from start_line; omit to read to the end"}}, "required": ["path"]}),
         Tool(name="vault_write", description="Write content to a vault file. Audit-logged. Path is vault-relative (e.g. 'memory/learnings/DAILY_NOTES.md'); a leading '~/obsidian/' is stripped automatically.", inputSchema={
-            "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "content": {"type": "string"}}, "required": ["path", "content"]}),
-        Tool(name="vault_overview", description="Get vault statistics: file counts per segment.", inputSchema={
-            "type": "object", "properties": {"detail": {"type": "string", "enum": ["summary", "hubs"]}}}),
-        Tool(name="vault_search", description="Hybrid BM25+vector search across the obsidian vault.", inputSchema={
-            "type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}, "min_score": {"type": "number"}, "scope": {"type": "string"}, "consolidate": {"type": "boolean"}}, "required": ["query"]}),
+            "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "content": {"type": "string", "description": "Full file contents. This replaces the file wholesale — read it first if you mean to amend rather than overwrite."}}, "required": ["path", "content"]}),
+        Tool(name="vault_overview", description="Summarize the obsidian vault: file counts per top-level segment, or the most-linked notes. Use this to orient before searching when you do not know what the vault holds.", inputSchema={
+            "type": "object", "properties": {"detail": {"type": "string", "enum": ["summary", "hubs"], "description": "summary (default) counts files per segment; hubs lists the most-linked notes"}}}),
+        Tool(name="vault_search", description="Search the obsidian vault, combining BM25 keyword matching with vector similarity. Returns ranked excerpts with their vault paths; use vault_read to pull a full file.", inputSchema={
+            "type": "object", "properties": {"query": {"type": "string", "description": "Natural-language or keyword query"}, "max_results": {"type": "integer", "description": "Maximum excerpts to return (default 10)"}, "min_score": {"type": "number", "description": "Drop results scoring below this threshold"}, "scope": {"type": "string", "description": "Restrict to a vault segment, e.g. 'knowledge' or 'memory/learnings'"}, "consolidate": {"type": "boolean", "description": "Summarize the hits into one synthesized answer instead of returning raw excerpts"}}, "required": ["query"]}),
         Tool(name="vault_recall", description="Combined recall: vault search + entity fact retrieval in parallel. Use expand_graph=true to include facts from related entities.", inputSchema={
             "type": "object", "properties": {
-                "query": {"type": "string"},
+                "query": {"type": "string", "description": "Natural-language query; entities mentioned in it are resolved and their facts returned alongside documents"},
                 "limit": {"type": "integer", "description": "Documents returned (default 20)"},
                 "include_facts": {"type": "boolean", "description": "Include entity facts (default true)"},
                 "expand_graph": {"type": "boolean", "description": "Also return facts from graph neighbours (default false)"},
@@ -998,7 +994,6 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     handlers = {
         "vault_read": _vault_read, "vault_write": _vault_write, "vault_overview": _vault_overview,

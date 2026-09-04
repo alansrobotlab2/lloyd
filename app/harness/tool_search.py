@@ -179,6 +179,25 @@ def catalog_signature(catalog: list[dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# The reminder exists so the model knows a tool EXISTS and roughly what it
+# does; the full description arrives with the schema on ToolSearch. Emitting
+# the whole description here defeats the point — with 119 tools it cost ~5k
+# tokens per request, a third of what deferring the schemas saved.
+CATALOG_GIST_CHARS = 110
+
+
+def _gist(desc: str) -> str:
+    """First sentence of `desc`, hard-capped at CATALOG_GIST_CHARS."""
+    first_line = desc.splitlines()[0].strip()
+    # Sentence boundary, but only if it leaves something substantial.
+    head, sep, _rest = first_line.partition(". ")
+    if sep and len(head) >= 28:
+        first_line = head + "."
+    if len(first_line) > CATALOG_GIST_CHARS:
+        first_line = first_line[:CATALOG_GIST_CHARS].rstrip(" ,;:") + "…"
+    return first_line
+
+
 def format_catalog_reminder(
     catalog: list[dict[str, Any]],
     *,
@@ -205,8 +224,7 @@ def format_catalog_reminder(
     for t in catalog:
         name = t["function"]["name"]
         desc = (t["function"].get("description") or "").strip()
-        first_line = desc.splitlines()[0] if desc else ""
-        line = f"- {name} — {first_line}" if first_line else f"- {name}"
+        line = f"- {name} — {_gist(desc)}" if desc else f"- {name}"
         if name in loaded_set:
             loaded_lines.append(line)
         else:

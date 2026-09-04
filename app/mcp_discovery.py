@@ -12,7 +12,6 @@ bare MCP name. To disable any tool, add its bare name to
 """
 
 import asyncio
-import json
 
 from app.config import CONFIG
 
@@ -95,7 +94,45 @@ def _get_mcp_servers() -> dict[str, dict]:
 # ritual is research-only: read tools, ToolSearch, TodoWrite, and the
 # plan-mode tools themselves stay allowed; the actuator tools are
 # blocked until ExitPlanMode commits or cancel flips plan_mode off.
+#
+# This tuple is now only the FLOOR. The real list is derived from the
+# `readOnlyHint` annotations in `agent_mcp.annotations` (see
+# `_plan_mode_blocked`), which covers every actuator rather than the three
+# that happened to be listed here — `email_send`, `vault_write`,
+# `discord_send`, `fact_add` and ~55 others used to sail straight through
+# a "read-only" plan-mode turn.
 PLAN_MODE_BLOCKED_TOOLS = ("Write", "Edit", "Bash")
+
+# Tool-name universe, recorded by the harness after MCP discovery. Plan
+# mode needs to know which tools exist in order to block the mutating
+# ones; discovery is the only place that knows, and it happens after the
+# routers have already constructed their RunOptions.
+_TOOL_UNIVERSE: set[str] = set()
+
+
+def record_tool_universe(names) -> None:
+    """Record the discovered tool names for annotation-derived gating.
+
+    Called by the harness once per pool open. Idempotent and cheap; a
+    superset across servers is fine because the gate only ever removes
+    names that are actually advertised.
+    """
+    if names:
+        _TOOL_UNIVERSE.update(names)
+
+
+def _plan_mode_blocked() -> list[str]:
+    """Actuator tools to block while plan mode is active.
+
+    Falls back to the three-tool floor until discovery has run — better a
+    narrow gate than an empty one, and the very next turn has the full
+    universe recorded.
+    """
+    if not _TOOL_UNIVERSE:
+        return list(PLAN_MODE_BLOCKED_TOOLS)
+    from agent_mcp.annotations import plan_mode_blocked_tools
+
+    return plan_mode_blocked_tools(_TOOL_UNIVERSE)
 
 
 def _get_disallowed_tools(plan_mode: bool = False) -> list[str]:
@@ -117,8 +154,13 @@ def _get_disallowed_tools(plan_mode: bool = False) -> list[str]:
         for tool_name in cfg.get("disabled_tools", []):
             disallowed.append(tool_name)
     if plan_mode:
-        disallowed.extend(PLAN_MODE_BLOCKED_TOOLS)
+        for name in _plan_mode_blocked():
+            if name not in disallowed:
+                disallowed.append(name)
     return disallowed
+
+
+DISCOVERY_TIMEOUT_SECONDS = 30.0
 
 
 def _get_tool_search_kwargs() -> dict:
@@ -143,71 +185,63 @@ def _get_tool_search_kwargs() -> dict:
     return out
 
 
+def _root_cause(exc: BaseException) -> str:
+    """Innermost message from a (possibly nested) ExceptionGroup.
+
+    anyio task groups repackage a failure as an ExceptionGroup whose str()
+    is "unhandled errors in a TaskGroup (1 sub-exception)" — true, and
+    useless in a UI. Unwrap to the part a human can act on.
+    """
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return str(exc) or exc.__class__.__name__
+
+
 async def _discover_mcp_tools(server_name: str, cfg: dict) -> tuple[list[dict], str | None]:
-    """Discover tools from an MCP server. Supports SSE and stdio transports."""
+    """Discover tools from an MCP server. Supports SSE/HTTP and stdio.
+
+    Both transports go through the SDK client. The stdio path used to be a
+    hand-rolled JSON-RPC exchange — write a framed initialize, read one
+    line, write tools/list, read one line — which pinned the protocol
+    version at 2024-11-05, never drained stderr, and matched no request
+    ids. It was the same shape of code as the Thunderbird bridge client,
+    with the same defects; there is no reason to keep a second copy.
+
+    Returns (tools, error). Never raises: a server that is down should
+    render as an empty, explained row in the Tools page, not a 500.
+    """
+    from mcp import ClientSession
+    from mcp.client.sse import sse_client
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
     server_type = cfg.get("type", "stdio")
 
-    if server_type in ("sse", "http"):
-        from mcp.client.sse import sse_client
-        from mcp import ClientSession
-        url = cfg.get("url", "")
-        try:
-            async with sse_client(url) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    result = await session.list_tools()
-                    return [{"name": t.name, "description": t.description or ""} for t in result.tools], None
-        except Exception as e:
-            return [], str(e)
+    async def _query() -> list[dict]:
+        if server_type in ("sse", "http"):
+            ctx = sse_client(cfg.get("url", ""))
+        else:
+            ctx = stdio_client(StdioServerParameters(
+                command=cfg.get("command", "python"),
+                args=list(cfg.get("args") or []),
+                env=dict(cfg["env"]) if cfg.get("env") else None,
+                cwd=cfg.get("cwd") or None,
+            ))
+        async with ctx as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                result = await session.list_tools()
+                return [
+                    {"name": t.name, "description": t.description or ""}
+                    for t in result.tools
+                ]
 
-    # stdio fallback
-    command = cfg.get("command", "python")
-    args = cfg.get("args", [])
-    proc = None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            command, *args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        init_msg = (json.dumps({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "lloyd-inspector", "version": "1.0"},
-            },
-        }) + "\n").encode()
-        proc.stdin.write(init_msg)
-        await proc.stdin.drain()
-
-        await asyncio.wait_for(proc.stdout.readline(), timeout=15.0)
-
-        tools_msg = (json.dumps({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
-        }) + "\n").encode()
-        proc.stdin.write(tools_msg)
-        await proc.stdin.drain()
-
-        tools_line = await asyncio.wait_for(proc.stdout.readline(), timeout=30.0)
-        resp = json.loads(tools_line)
-
-        if "error" in resp:
-            return [], resp["error"].get("message", "Unknown server error")
-
-        raw = resp.get("result", {}).get("tools", [])
-        return [{"name": t["name"], "description": t.get("description", "")} for t in raw], None
-
+        # Bound the whole exchange rather than the read: ClientSession only
+        # accepts a per-request timeout on call_tool, and a server that
+        # accepts the connection then never speaks would hang discovery —
+        # which the Tools page blocks on.
+        return await asyncio.wait_for(_query(), timeout=DISCOVERY_TIMEOUT_SECONDS), None
     except asyncio.TimeoutError:
         return [], f"Timeout querying {server_name}"
-    except Exception as e:
-        return [], str(e)
-    finally:
-        if proc:
-            proc.stdin.close()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                proc.kill()
+    except Exception as exc:
+        return [], _root_cause(exc)

@@ -11,13 +11,12 @@ Tools: chat_list_sessions, chat_get_session
 import json
 from pathlib import Path
 
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool
+
+from agent_mcp._shared import text_result
 
 LLOYD_HOME = Path.home() / "lloyd"
 SESSIONS_DIR = LLOYD_HOME / "sessions"
-
-app = Server("lloyd-mission-control")
 
 
 def _list_sessions() -> str:
@@ -59,13 +58,12 @@ def _get_session(session_id: str) -> str:
         return json.dumps({"success": False, "error": str(e)})
 
 
-@app.list_tools()
 async def list_tools():
     return [
-        Tool(name="chat_list_sessions", description="List all active Lloyd chat sessions.", inputSchema={
+        Tool(name="chat_list_sessions", description="List the Lloyd chat sessions with their ids, titles and last-activity times. Use chat_get_session to read one, or session_recall to search their content.", inputSchema={
             "type": "object", "properties": {},
         }),
-        Tool(name="chat_get_session", description="Get session metadata by session ID.", inputSchema={
+        Tool(name="chat_get_session", description="Get one chat session's metadata: title, model, message count and timestamps. Returns metadata only — use session_recall to search what was actually said.", inputSchema={
             "type": "object",
             "properties": {"session_id": {"type": "string", "description": "Session ID to retrieve"}},
             "required": ["session_id"],
@@ -73,11 +71,10 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "chat_list_sessions":
-        return [TextContent(type="text", text=_list_sessions())]
+        return text_result(_list_sessions())
     elif name == "chat_get_session":
-        return [TextContent(type="text", text=_get_session(arguments.get("session_id", "")))]
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return text_result(_get_session(arguments.get("session_id", "")))
+    return text_result(json.dumps({"error": f"Unknown tool: {name}"}))
 
