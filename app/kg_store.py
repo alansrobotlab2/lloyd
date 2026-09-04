@@ -841,6 +841,52 @@ class _Entities:
     def all(self) -> list[str]:
         return [r["name"] for r in self._s._query("SELECT name FROM entities ORDER BY name")]
 
+    def kinds(self) -> dict[str, str]:
+        """name → kind, for every entity that has one. Cached on store version."""
+        def build():
+            return {r["name"]: r["kind"] for r in
+                    self._s._query("SELECT name, kind FROM entities WHERE kind IS NOT NULL")}
+        return self._s.cached("entity_kinds", build)
+
+    def backfill_kinds(self, *, overwrite: bool = False) -> dict[str, int]:
+        """Set `kind` from app.entity_kind, using each entity's own source
+        document when the fact index knows one.
+
+        The UI legend and the classifier's verb gate both read this, so it
+        has to be derived once and stored rather than guessed per request.
+        """
+        from app.entity_kind import derive_kind
+        source_docs = {
+            r["entity"]: r["source_doc"] for r in self._s._query(
+                "SELECT entity, MIN(source_doc) AS source_doc FROM facts_idx "
+                "WHERE source_doc IS NOT NULL GROUP BY entity")
+        }
+        stats = {"set": 0, "unchanged": 0}
+        with self._s.transaction() as c:
+            rows = self._s._query(
+                "SELECT name, kind FROM entities" if overwrite
+                else "SELECT name, kind FROM entities WHERE kind IS NULL")
+            for r in rows:
+                kind = derive_kind(r["name"], source_docs.get(r["name"]))
+                if kind == r["kind"]:
+                    stats["unchanged"] += 1
+                    continue
+                c.execute("UPDATE entities SET kind=?, updated_at=? WHERE name=?",
+                          (kind, _now(), r["name"]))
+                stats["set"] += 1
+        return stats
+
+    def search(self, q: str, limit: int = 50) -> list[str]:
+        """Entity names containing `q`, case-insensitive, shortest first.
+
+        Shortest-first because a search for `lloyd` should surface `Lloyd`
+        before `Lloyd Voice Pipeline Integration Notes`.
+        """
+        like = f"%{(q or '').lower()}%"
+        return [r["name"] for r in self._s._query(
+            "SELECT name FROM entities WHERE name_lc LIKE ? "
+            "ORDER BY LENGTH(name), name LIMIT ?", (like, int(limit)))]
+
     def rows(self) -> list[dict]:
         return [dict(r) for r in self._s._query("SELECT * FROM entities ORDER BY name")]
 

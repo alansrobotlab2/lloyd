@@ -119,54 +119,18 @@ FILE_EXTENSIONS = (".md", ".py", ".ts", ".tsx", ".js", ".json", ".yaml", ".yml",
                    ".cfg", ".ini", ".log", ".jsonl", ".csv")
 
 
-def derive_entity_type(name: str) -> str:
-    """Heuristic entity type classifier.
+def derive_entity_type(name: str, source_doc: str | None = None) -> str:
+    """Type hint for an entity name: FILE, TASK, PERSON, ROLE, CONCEPT,
+    SKILL, SYSTEM or ENTITY. No LLM call — pure string rules.
 
-    Returns one of: FILE, TASK, PERSON, ROLE, CONCEPT, SKILL, SYSTEM, ENTITY.
-    No LLM call — pure string rules.
+    Delegates to app.entity_kind, which runs the SYSTEM tests BEFORE the
+    PERSON test. This module's own version had them the other way round, so
+    `Knowledge Graph`, `Claude Code` and `Isaac Lab` all matched the
+    `First Last` shape and were typed PERSON — and the type gates
+    ROLE_BLOCKED_VERBS, so `created_by` between two systems was allowed.
     """
-    n = name.strip()
-    low = n.lower()
-
-    # TASK: "Autonomy Task #33", "backlog_item_235", "run_39a_..."
-    if re.search(r"(task|item|run)[ _#-]?\d", low):
-        return "TASK"
-    if re.match(r"^\d{8}[_-]\d{6}", n):  # timestamp-like ids
-        return "TASK"
-
-    # FILE: has extension or path separator
-    if any(low.endswith(ext) for ext in FILE_EXTENSIONS):
-        return "FILE"
-    if "/" in n and not n.startswith("http"):
-        return "FILE"
-
-    # SKILL: kebab-case all-lowercase short name
-    if re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)+", n):
-        return "SKILL"
-
-    # PERSON: "First Last" or "First M. Last" — capitalized tokens, 2-4 words,
-    # no punctuation beyond periods, no digits
-    if re.fullmatch(r"[A-Z][a-z]+(\s+[A-Z]\.?)?(\s+[A-Z][a-z]+){1,2}", n) and not any(c.isdigit() for c in n):
-        return "PERSON"
-
-    # ROLE: lowercase noun in role token list
-    if low in ROLE_TOKENS:
-        return "ROLE"
-
-    # CONCEPT: common concept token
-    if low in CONCEPT_TOKENS:
-        return "CONCEPT"
-
-    # SYSTEM: CamelCase multiword, or ends in "System"/"Agent"/"SDK"/"Service"
-    if low.endswith(("system", "agent", "sdk", "service", "engine",
-                     "pipeline", "loop", "orchestrator", "controller")):
-        return "SYSTEM"
-    if re.search(r"[A-Z][a-z]+[A-Z]", n):  # CamelCase
-        return "SYSTEM"
-    if " " in n and n[0].isupper():
-        return "SYSTEM"
-
-    return "ENTITY"
+    from app.entity_kind import derive_entity_type as _derive
+    return _derive(name, source_doc)
 
 
 # ---------------------------------------------------------------------------

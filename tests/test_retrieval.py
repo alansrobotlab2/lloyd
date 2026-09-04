@@ -246,3 +246,40 @@ def test_fact_resolve_refuses_a_god_node(world):
                   for i in range(1, retrieval.FACT_GODNODE_THRESHOLD + 5)])
     out = facts_mod._fact_resolve({"entity": "Lloyd", "auto_resolve": True})
     assert "error" in out and "refused" in out["error"]
+
+
+# ── entity kind ──────────────────────────────────────────────────────────────
+
+def test_system_names_are_not_typed_as_people():
+    """`Knowledge Graph`, `Claude Code` and `Isaac Lab` all satisfy the
+    `First Last` shape. The v4 classifier's PERSON test ran before its SYSTEM
+    test, so all three were typed PERSON — and the type gates
+    ROLE_BLOCKED_VERBS, which is how `created_by` between two systems passed.
+    """
+    from app.entity_kind import derive_entity_type, derive_kind
+    for name in ("Knowledge Graph", "Claude Code", "Isaac Lab", "Intel Pipeline",
+                 "QMD Daemon", "Morning Briefing System"):
+        assert derive_kind(name) == "system", name
+        assert derive_entity_type(name) == "SYSTEM", name
+
+
+def test_person_needs_corroboration(monkeypatch):
+    from app import entity_kind
+    monkeypatch.setattr(entity_kind, "_people_cache", {"jane doe"})
+    assert entity_kind.derive_kind("Jane Doe") == "person"
+    # same shape, no note and no people/ source -> not a person
+    assert entity_kind.derive_kind("Isaac Lab") == "system"
+    # the source document settles it either way
+    assert entity_kind.derive_kind("Someone New", "people/someone-new.md") == "person"
+    assert entity_kind.derive_kind("Jane Doe", "projects/x.md") == "project"
+
+
+def test_kind_recognises_tasks_docs_and_skills():
+    from app.entity_kind import derive_kind
+    assert derive_kind("Task #67") == "task"
+    assert derive_kind("Autonomy Task #33") == "task"
+    assert derive_kind("backlog_item_235") == "task"
+    assert derive_kind("server.py") == "doc"
+    assert derive_kind("knowledge/ai/note.md") == "doc"
+    assert derive_kind("nightly-reflection") == "skill"
+    assert derive_kind("vLLM") == "system"

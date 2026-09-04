@@ -26,7 +26,7 @@ import {
   type EntityGraphData,
 } from "../../api";
 import { Streamdown } from "streamdown";
-import EntityGraph, { type EntityGraphProps } from "../EntityGraph";
+import EntityGraph, { KIND_COLOR } from "../EntityGraph";
 import { categoryOf, CATEGORY_CHIP_CLASS } from "../../lib/edgeCategories";
 
 // -- Types --
@@ -250,10 +250,18 @@ function DocNodeDetail({
 
 function EntitySidebar({
   entities,
+  total,
+  hasMore,
+  loadingMore,
+  onLoadMore,
   activeEntity,
   onSelectEntity,
 }: {
   entities: EntitySummary[];
+  total: number;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
   activeEntity: string | null;
   onSelectEntity: (name: string | null) => void;
 }) {
@@ -277,7 +285,7 @@ function EntitySidebar({
           </button>
         </div>
       )}
-      {entities.map(({ name, factCount }) => (
+      {entities.map(({ name, factCount, kind }) => (
         <button
           key={name}
           ref={activeEntity === name ? activeRef : undefined}
@@ -287,19 +295,43 @@ function EntitySidebar({
               ? "bg-primary/15 text-primary"
               : "text-muted-foreground hover:text-foreground hover:bg-secondary"
           }`}
+          title={`${name} — ${kind}`}
         >
-          <User className="w-2.5 h-2.5 flex-shrink-0 opacity-50" />
+          <span className="inline-block w-2 h-2 rounded-full flex-shrink-0"
+                style={{ background: KIND_COLOR[kind] || KIND_COLOR.entity }} />
           <span className="flex-1 text-left truncate">{name}</span>
           <span className="text-[10px] text-muted-foreground flex-shrink-0">{factCount}</span>
         </button>
       ))}
+      {hasMore && (
+        <button
+          onClick={onLoadMore}
+          disabled={loadingMore}
+          className="w-full px-2 py-1.5 mt-1 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-50"
+        >
+          {loadingMore ? "Loading…" : `Show more (${entities.length} of ${total})`}
+        </button>
+      )}
+      {!hasMore && total > 0 && (
+        <div className="px-2 py-1.5 text-[10px] text-muted-foreground/60 text-center">
+          {entities.length} of {total}
+        </div>
+      )}
     </div>
   );
 }
 
 // -- Entity Detail Panel --
 
-function EntityDetailPanel({ detail }: { detail: EntityDetailData }) {
+function EntityDetailPanel({
+  detail,
+  showExpired,
+  onToggleExpired,
+}: {
+  detail: EntityDetailData;
+  showExpired: boolean;
+  onToggleExpired: (v: boolean) => void;
+}) {
   // Group facts by category
   const byCategory = useMemo(() => {
     const map = new Map<string, EntityFact[]>();
@@ -316,10 +348,32 @@ function EntityDetailPanel({ detail }: { detail: EntityDetailData }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 border-b border-border/30 pb-2">
-        <User className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+        <span className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0"
+              style={{ background: KIND_COLOR[detail.kind] || KIND_COLOR.entity }} />
         <span className="text-xs font-semibold text-foreground">{detail.name}</span>
+        <span className="text-[10px] text-muted-foreground">{detail.kind}</span>
         <span className="ml-auto text-[10px] text-muted-foreground">{detail.facts.length} facts</span>
       </div>
+
+      <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={showExpired}
+          onChange={(e) => onToggleExpired(e.target.checked)}
+          className="w-2.5 h-2.5 accent-primary cursor-pointer"
+        />
+        Show expired and invalidated facts
+      </label>
+
+      {detail.aliases.length > 0 && (
+        <div className="text-[10px] text-muted-foreground">
+          also known as{" "}
+          {detail.aliases.map((a) => (
+            <span key={a.surface} title={`${a.kind} alias, from ${a.origin}`}
+                  className="px-1 py-0.5 mr-1 rounded bg-secondary/60">{a.surface}</span>
+          ))}
+        </div>
+      )}
 
       {detail.definition && (
         <div className="text-[11px] text-muted-foreground italic leading-snug">
@@ -342,41 +396,63 @@ function EntityDetailPanel({ detail }: { detail: EntityDetailData }) {
               {cat}
             </div>
             <div className="space-y-1">
-              {facts.map((f, i) => (
-                <div
-                  key={f.id || i}
-                  className="text-[11px] text-foreground/90 leading-relaxed bg-secondary/40 rounded px-2 py-1"
-                >
-                  {f.fact}
-                  {f.confidence < 0.8 && (
-                    <span className="ml-1 text-[9px] text-muted-foreground opacity-70">
-                      ({Math.round(f.confidence * 100)}%)
-                    </span>
-                  )}
+              {facts.map((f, i) => {
+                const retired = !!(f.expired_at || f.invalid_at);
+                return (
+                  <div
+                    key={f.id || i}
+                    title={f.source_doc ? `from ${f.source_doc}` : undefined}
+                    className={`text-[11px] leading-relaxed rounded px-2 py-1 ${
+                      retired
+                        ? "text-muted-foreground/60 line-through bg-secondary/20"
+                        : "text-foreground/90 bg-secondary/40"
+                    }`}
+                  >
+                    {f.fact}
+                    {f.confidence < 0.8 && (
+                      <span className="ml-1 text-[9px] text-muted-foreground opacity-70">
+                        ({Math.round(f.confidence * 100)}%)
+                      </span>
+                    )}
+                    {retired && (
+                      <span className="ml-1 text-[9px] text-amber-500/80 no-underline">
+                        {f.invalid_at ? "invalidated" : "expired"}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+
+      {(["outbound", "inbound"] as const).map((dir) => {
+        const rels = detail[dir];
+        if (!rels.length) return null;
+        return (
+          <div key={dir}>
+            <div className="text-[10px] font-semibold uppercase tracking-wider mb-1 text-muted-foreground">
+              {dir === "outbound" ? `${detail.name} →` : `→ ${detail.name}`}
+              <span className="ml-1 opacity-60">({rels.length})</span>
+            </div>
+            <div className="space-y-0.5">
+              {rels.slice(0, 12).map((r, i) => (
+                <div key={i} title={r.evidence || undefined}
+                     className="text-[10px] text-muted-foreground truncate flex items-center gap-1">
+                  <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${CATEGORY_CHIP_CLASS[categoryOf(r.type)]}`}>
+                    {r.type}
+                  </span>
+                  {/* The OTHER endpoint. This printed `r.target` for both
+                      directions, so every inbound edge showed the entity's
+                      own name. */}
+                  <span className="truncate">{r.other}</span>
                 </div>
               ))}
             </div>
           </div>
         );
       })}
-
-      {detail.relationships.length > 0 && (
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider mb-1 text-muted-foreground">
-            Related docs
-          </div>
-          <div className="space-y-0.5">
-            {detail.relationships.slice(0, 10).map((r, i) => (
-              <div key={i} className="text-[10px] text-muted-foreground truncate flex items-center gap-1">
-                <span className={`flex-shrink-0 text-[9px] px-1 py-0.5 rounded ${CATEGORY_CHIP_CLASS[categoryOf(r.type)]}`}>
-                  {r.type}
-                </span>
-                <span className="truncate">{r.target.split("/").pop()?.replace(/\.md$/, "")}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -746,6 +822,9 @@ export default function MemoryPage() {
   const [stats, setStats] = useState<MemoryStats | null>(null);
   const [entities, setEntities] = useState<EntitySummary[]>([]);
   const [entityTotal, setEntityTotal] = useState(0);
+  const [entityFilter, setEntityFilter] = useState("");
+  const [entitiesLoading, setEntitiesLoading] = useState(true);
+  const [showExpiredFacts, setShowExpiredFacts] = useState(false);
   const [entityConnectionCount, setEntityConnectionCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [doc, setDoc] = useState<MemoryReadResult | null>(null);
@@ -780,11 +859,35 @@ export default function MemoryPage() {
   // pay for a second 1.1MB round-trip + parse.
   useEffect(() => {
     api.memoryStats().then(setStats).catch(console.error);
-    api.entityList(500).then((d) => {
-      setEntities(d.entities);
-      setEntityTotal(d.total);
-    }).catch(console.error);
   }, []);
+
+  // The entity list is paged and filtered server-side. It used to fetch all
+  // 23,564 entities (2.2 MB) on every mount to render a sidebar, and the
+  // `limit` in the URL was ignored by the handler.
+  const ENTITY_PAGE = 200;
+  useEffect(() => {
+    let cancelled = false;
+    setEntitiesLoading(true);
+    const t = setTimeout(() => {
+      api.entityList(ENTITY_PAGE, { q: entityFilter })
+        .then((d) => {
+          if (cancelled) return;
+          setEntities(d.entities);
+          setEntityTotal(d.total);
+        })
+        .catch(console.error)
+        .finally(() => { if (!cancelled) setEntitiesLoading(false); });
+    }, entityFilter ? 200 : 0);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [entityFilter]);
+
+  const loadMoreEntities = useCallback(() => {
+    setEntitiesLoading(true);
+    api.entityList(ENTITY_PAGE, { q: entityFilter, offset: entities.length })
+      .then((d) => setEntities((prev) => [...prev, ...d.entities]))
+      .catch(console.error)
+      .finally(() => setEntitiesLoading(false));
+  }, [entityFilter, entities.length]);
 
   const handleGraphLoaded = useCallback((g: EntityGraphData) => {
     setEntityConnectionCount(g.edges.length);
@@ -833,10 +936,18 @@ export default function MemoryPage() {
     }
 
     setRightPanel({ kind: "loading-entity" });
-    api.entityDetail(name).then((d) => {
+    api.entityDetail(name, { includeExpired: showExpiredFacts }).then((d) => {
       setRightPanel({ kind: "entity-detail", detail: d });
     }).catch(console.error);
-  }, []);
+  }, [showExpiredFacts]);
+
+  // Re-fetch the open entity when the expired-facts toggle flips.
+  useEffect(() => {
+    if (!activeEntity) return;
+    api.entityDetail(activeEntity, { includeExpired: showExpiredFacts })
+      .then((d) => setRightPanel({ kind: "entity-detail", detail: d }))
+      .catch(console.error);
+  }, [showExpiredFacts]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // Graph node single-click handler
   const handleOpenFile = useCallback(async (path: string) => {
@@ -886,15 +997,19 @@ export default function MemoryPage() {
       return;
     }
 
-    // Entity node → show entity detail
-    // Support both "entity::Name" prefix and plain entity names (no "/" means not a file path)
-    const isEntity = nodeId.startsWith("entity::") || !nodeId.includes("/");
+    // Every /api/entity-graph node is an entity now. A "/" in the id does
+    // NOT make it a document path: `agents/memory`, `qmd/daemon` and
+    // `openclaw/sdk` are all real entity names, and treating them as paths
+    // opened a file modal that could never load.
+    const graphNode = graphEdges?.nodes.find((n) => n.id === nodeId);
+    const isEntity = nodeId.startsWith("entity::")
+      || (graphNode ? graphNode.type !== "doc" : !nodeId.includes("/"));
     if (isEntity) {
       const entityName = nodeId.startsWith("entity::") ? nodeId.slice("entity::".length) : nodeId;
       setActiveEntity(entityName);
       setSidebarTab("entities");
       setRightPanel({ kind: "loading-entity" });
-      api.entityDetail(entityName).then((d) => {
+      api.entityDetail(entityName, { includeExpired: showExpiredFacts }).then((d) => {
         setRightPanel({ kind: "entity-detail", detail: d });
       }).catch(console.error);
       return;
@@ -903,15 +1018,16 @@ export default function MemoryPage() {
     // Document node → open document modal directly
     setActiveEntity(null);
     handleOpenFile(nodeId);
-  }, [handleOpenFile]);
+  }, [handleOpenFile, graphEdges, showExpiredFacts]);
 
   // Graph node double-click handler
   const handleGraphNodeDoubleClick = useCallback((nodeId: string) => {
-    if (nodeId.startsWith("entity::") || !nodeId.includes("/")) {
-      return;
-    }
+    const graphNode = graphEdges?.nodes.find((n) => n.id === nodeId);
+    const isEntity = nodeId.startsWith("entity::")
+      || (graphNode ? graphNode.type !== "doc" : !nodeId.includes("/"));
+    if (isEntity) return;
     handleOpenFile(nodeId);
-  }, [handleOpenFile]);
+  }, [handleOpenFile, graphEdges]);
 
   // Graph hover handler (debounced at EntityGraph level, but extra guard here)
   const handleGraphNodeHover = useCallback((node: GNode | null) => {
@@ -951,7 +1067,13 @@ export default function MemoryPage() {
           />
         );
       case "entity-detail":
-        return <EntityDetailPanel detail={rightPanel.detail} />;
+        return (
+          <EntityDetailPanel
+            detail={rightPanel.detail}
+            showExpired={showExpiredFacts}
+            onToggleExpired={setShowExpiredFacts}
+          />
+        );
       case "loading-entity":
         return <div className="text-[11px] text-muted-foreground py-4">Loading facts...</div>;
       case "doc-detail":
@@ -1054,15 +1176,33 @@ export default function MemoryPage() {
           </div>
 
           <div className="flex-1 overflow-y-auto pr-1">
-            {sidebarTab === "entities" && entities.length > 0 && (
-              <EntitySidebar
-                entities={entities}
-                activeEntity={activeEntity}
-                onSelectEntity={handleEntitySelect}
-              />
-            )}
-            {sidebarTab === "entities" && entities.length === 0 && (
-              <div className="text-[11px] text-muted-foreground px-2 py-4">Loading entities...</div>
+            {sidebarTab === "entities" && (
+              <>
+                <div className="px-1 pb-1">
+                  <input
+                    value={entityFilter}
+                    onChange={(e) => setEntityFilter(e.target.value)}
+                    placeholder="Filter entities…"
+                    className="w-full px-2 py-1 rounded bg-secondary/60 text-[11px] text-foreground
+                               placeholder:text-muted-foreground/60 outline-none focus:bg-secondary"
+                  />
+                </div>
+                {entities.length > 0 ? (
+                  <EntitySidebar
+                    entities={entities}
+                    total={entityTotal}
+                    hasMore={entities.length < entityTotal}
+                    loadingMore={entitiesLoading}
+                    onLoadMore={loadMoreEntities}
+                    activeEntity={activeEntity}
+                    onSelectEntity={handleEntitySelect}
+                  />
+                ) : (
+                  <div className="text-[11px] text-muted-foreground px-2 py-4">
+                    {entitiesLoading ? "Loading entities…" : "No entities match."}
+                  </div>
+                )}
+              </>
             )}
             {sidebarTab === "explorer" && (
               <VaultExplorer onOpenFile={handleOpenFile} />

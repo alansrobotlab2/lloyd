@@ -357,15 +357,25 @@ export interface MemoryReadResult {
   lineCount: number;
 }
 
+/** One of app/entity_kind.py KINDS. Drives node colour and the legend. */
+export type EntityKind =
+  | "person" | "project" | "system" | "concept" | "skill" | "task" | "doc" | "entity";
+
 export interface EntitySummary {
   name: string;
   factCount: number;
+  kind: EntityKind;
   categories: string[];
 }
 
 export interface EntitiesListData {
   entities: EntitySummary[];
+  /** Matches for the current query, not the page length. */
   total: number;
+  offset: number;
+  limit: number;
+  returned: number;
+  query: string | null;
 }
 
 export interface EntityFact {
@@ -374,27 +384,56 @@ export interface EntityFact {
   category: string;
   event_date?: string | null;
   id?: string;
+  created_at?: string | null;
+  source_doc?: string | null;
+  provenance?: string | null;
+  expired_at?: string | null;
+  invalid_at?: string | null;
 }
 
 export interface EntityRelationship {
+  source: string;
   target: string;
   type: string;
   score: number;
+  /** The endpoint that is NOT the entity being viewed. */
+  other: string;
+  provenance?: string | null;
+  created_at?: string | null;
+  source_doc?: string | null;
+  evidence?: string | null;
+}
+
+export interface EntityAlias {
+  surface: string;
+  kind: string;
+  origin: string;
+  created_at: string;
+  report_path?: string | null;
 }
 
 export interface EntityDetailData {
   name: string;
+  kind: EntityKind;
   facts: EntityFact[];
+  factCount: number;
   relationships: EntityRelationship[];
+  outbound: EntityRelationship[];
+  inbound: EntityRelationship[];
+  aliases: EntityAlias[];
   definition?: string | null;
   summary?: string | null;
+  includeExpired: boolean;
 }
 
 export interface EntityGraphNode {
   id: string;
   label: string;
-  type: string;
+  /** EntityKind. Was the entity's first fact category, which made a legend
+   *  out of `state` and `goal` and called it a node type. */
+  type: EntityKind;
   factCount?: number;
+  /** Always null from /api/entity-graph — fetch via entityDetail on select. */
   definition?: string | null;
 }
 
@@ -404,11 +443,17 @@ export interface EntityGraphEdge {
   type: string;
   weight: number;
   bidirectional?: boolean;
+  provenance?: string | null;
+  created_at?: string | null;
 }
 
 export interface EntityGraphData {
   nodes: EntityGraphNode[];
   edges: EntityGraphEdge[];
+  nodeCount: number;
+  edgeCount: number;
+  includeIsolated: boolean;
+  minConfidence: number;
 }
 
 // ── Autonomy types ──────────────────────────────────────────────────────
@@ -941,12 +986,24 @@ export const api = {
   },
 
   // Entity / knowledge graph
-  entityList: (limit = 500): Promise<EntitiesListData> =>
-    fetch(`${API_BASE}/entities?limit=${limit}`).then(r => r.json()),
-  entityDetail: (name: string): Promise<EntityDetailData> =>
-    fetch(`${API_BASE}/entity?name=${encodeURIComponent(name)}`).then(r => r.json()),
-  entityGraph: (): Promise<EntityGraphData> =>
-    fetch(`${API_BASE}/entity-graph`).then(r => r.json()),
+  entityList: (limit = 200, opts: { q?: string; offset?: number } = {}): Promise<EntitiesListData> => {
+    const p = new URLSearchParams({ limit: String(limit), offset: String(opts.offset ?? 0) });
+    if (opts.q) p.set("q", opts.q);
+    return fetch(`${API_BASE}/entities?${p}`).then(r => r.json());
+  },
+  entityDetail: (name: string, opts: { includeExpired?: boolean } = {}): Promise<EntityDetailData> => {
+    const p = new URLSearchParams({ name });
+    if (opts.includeExpired) p.set("include_expired", "1");
+    return fetch(`${API_BASE}/entity?${p}`).then(r => r.json());
+  },
+  entityGraph: (opts: { includeIsolated?: boolean; limit?: number; minConfidence?: number } = {}): Promise<EntityGraphData> => {
+    const p = new URLSearchParams();
+    if (opts.includeIsolated) p.set("include_isolated", "1");
+    if (opts.limit) p.set("limit", String(opts.limit));
+    if (opts.minConfidence) p.set("min_confidence", String(opts.minConfidence));
+    const qs = p.toString();
+    return fetch(`${API_BASE}/entity-graph${qs ? "?" + qs : ""}`).then(r => r.json());
+  },
 
   // Autonomy
   autonomyTasks: (): Promise<{ tasks: AutonomyTask[] }> =>

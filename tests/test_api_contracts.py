@@ -121,3 +121,141 @@ async def test_autonomy_tasks_shape(client):
     for task in body["tasks"][:3]:
         # api.ts AutonomyTask essentials — AutonomyPage table columns
         assert set(task) >= {"id", "name", "status"}
+
+
+# ── Memory page: entities, entity detail, entity graph ───────────────────────
+
+@pytest.fixture
+def entity_world(tmp_path, monkeypatch):
+    """A temp facts tree + store behind the entity endpoints."""
+    import yaml
+    from app import kg_store
+    from app.routers import entities as entities_router
+
+    facts_root = tmp_path / "facts"
+    for name in ("Lloyd", "vLLM"):
+        d = facts_root / name
+        d.mkdir(parents=True)
+        (d / f"{name}-overview.md").write_text(
+            f"---\ntype: overview\nentity: {name}\ndefinition: {name} is a thing.\n---\n\n# Summary\n\nProse about {name}.\n")
+    fm = {"type": "facts", "entity": "Lloyd", "category": "state", "facts": [
+        {"id": "stat-001", "fact": "Lloyd runs on vLLM", "confidence": 0.9,
+         "created_at": "2026-01-01T00:00:00+00:00", "source_doc": "knowledge/lloyd.md",
+         "provenance": "EXTRACTED"},
+        {"id": "stat-002", "fact": "Lloyd used Ollama", "confidence": 0.8,
+         "created_at": "2025-06-01T00:00:00+00:00", "expired_at": "2026-02-01T00:00:00+00:00",
+         "provenance": "EXTRACTED"},
+    ]}
+    (facts_root / "Lloyd" / "Lloyd-state.md").write_text(
+        f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# Lloyd - state\n")
+
+    monkeypatch.setattr(entities_router, "_FACTS_ROOT", facts_root)
+    st = kg_store.configure(tmp_path / "kg.sqlite")
+    st.facts_idx.reindex(root=facts_root)
+    st.entities.register("vLLM")
+    st.entities.register("Orphan Concept")     # registered, no edges, no facts
+    st.entities.backfill_kinds(overwrite=True)
+    st.aliases.set("lloyd-mc", "Lloyd", kind="punct", origin="test")
+    st.edges.add({"source": "Lloyd", "target": "vLLM", "type": "uses",
+                  "confidence": 0.95, "provenance": "STATED",
+                  "evidence": "Lloyd runs on vLLM"}, origin="test")
+    st.edges.add({"source": "vLLM", "target": "Lloyd", "type": "part_of",
+                  "confidence": 0.7, "provenance": "STATED"}, origin="test")
+    st.edges.add({"source": "Lloyd", "target": "Noise", "type": "mentions",
+                  "confidence": 0.8}, origin="test")
+    entities_router._ENTITIES_CACHE.clear()
+    entities_router._GRAPH_CACHE.clear()
+    yield st
+    kg_store.reset()
+    entities_router._ENTITIES_CACHE.clear()
+    entities_router._GRAPH_CACHE.clear()
+
+
+async def test_entities_list_shape_and_limit(client, entity_world):
+    r = await client.get("/api/entities?limit=1")
+    assert r.status_code == 200
+    body = r.json()
+    # api.ts EntitiesListData
+    assert set(body) >= {"entities", "total", "offset", "limit", "returned", "query"}
+    assert body["returned"] == 1 and body["total"] == 3
+    e = body["entities"][0]
+    assert set(e) >= {"name", "factCount", "kind", "categories"}
+    # Most-populated first: an alphabetical list put `#160` at the top of a
+    # 23,564-row sidebar.
+    assert e["name"] == "Lloyd" and e["factCount"] == 1
+
+
+async def test_entities_list_query_filter(client, entity_world):
+    r = await client.get("/api/entities?q=vll")
+    assert r.status_code == 200
+    assert [e["name"] for e in r.json()["entities"]] == ["vLLM"]
+    assert (await client.get("/api/entities?q=nothingmatches")).json()["total"] == 0
+
+
+async def test_entity_detail_filters_expired_by_default(client, entity_world):
+    r = await client.get("/api/entity?name=Lloyd")
+    body = r.json()
+    assert set(body) >= {"name", "kind", "facts", "factCount", "relationships",
+                         "outbound", "inbound", "aliases", "definition", "summary",
+                         "includeExpired"}
+    assert [f["id"] for f in body["facts"]] == ["stat-001"]
+    assert body["includeExpired"] is False
+
+    r2 = await client.get("/api/entity?name=Lloyd&include_expired=1")
+    body2 = r2.json()
+    assert sorted(f["id"] for f in body2["facts"]) == ["stat-001", "stat-002"]
+    assert body2["includeExpired"] is True
+
+
+async def test_entity_detail_splits_direction_and_names_the_other_end(client, entity_world):
+    body = (await client.get("/api/entity?name=Lloyd")).json()
+    assert [r["type"] for r in body["outbound"]] == ["uses"]
+    assert [r["type"] for r in body["inbound"]] == ["part_of"]
+    # `other` is the endpoint that is not the viewed entity — the UI printed
+    # `target` for both directions, so inbound edges showed Lloyd's own name.
+    assert body["outbound"][0]["other"] == "vLLM"
+    assert body["inbound"][0]["other"] == "vLLM"
+    assert body["outbound"][0]["evidence"] == "Lloyd runs on vLLM"
+    # mentions edges are co-occurrence noise, not a stated relationship
+    assert all(r["type"] != "mentions" for r in body["relationships"])
+
+
+async def test_entity_detail_carries_aliases_and_a_resolved_name(client, entity_world):
+    body = (await client.get("/api/entity?name=lloyd-mc")).json()
+    assert body["name"] == "Lloyd"
+    assert [a["surface"] for a in body["aliases"]] == ["lloyd-mc"]
+
+
+async def test_entity_graph_excludes_isolated_nodes_by_default(client, entity_world):
+    body = (await client.get("/api/entity-graph")).json()
+    assert set(body) >= {"nodes", "edges", "nodeCount", "edgeCount",
+                         "includeIsolated", "minConfidence"}
+    # `Noise` only has a mentions edge, which the graph drops.
+    assert sorted(n["id"] for n in body["nodes"]) == ["Lloyd", "vLLM"]
+    node = next(n for n in body["nodes"] if n["id"] == "Lloyd")
+    # api.ts EntityGraphNode. `type` is the registry kind, not a fact category.
+    assert set(node) >= {"id", "label", "type", "factCount", "definition"}
+    assert node["type"] in ("system", "project", "concept", "person", "skill",
+                            "task", "doc", "entity")
+    assert node["definition"] is None, "definitions are lazy; 23,565 file opens per build"
+
+
+async def test_entity_graph_collapses_a_pair_and_marks_it_bidirectional(client, entity_world):
+    body = (await client.get("/api/entity-graph")).json()
+    assert body["edgeCount"] == 1
+    edge = body["edges"][0]
+    assert edge["bidirectional"] is True, "both directions genuinely exist"
+    assert edge["type"] == "uses" and edge["weight"] == 0.95   # dominant direction
+    assert set(edge) >= {"source", "target", "type", "weight", "bidirectional",
+                         "provenance", "created_at"}
+
+
+async def test_entity_graph_include_isolated_and_min_confidence(client, entity_world):
+    """Isolated entities are off by default: including the 20,000 that have no
+    edges made a 5.7 MB payload the browser then had to lay out."""
+    default = (await client.get("/api/entity-graph")).json()
+    assert "Orphan Concept" not in {n["id"] for n in default["nodes"]}
+    body = (await client.get("/api/entity-graph?include_isolated=1")).json()
+    assert "Orphan Concept" in {n["id"] for n in body["nodes"]}
+    strict = (await client.get("/api/entity-graph?min_confidence=0.99")).json()
+    assert strict["edgeCount"] == 0 and strict["nodeCount"] == 0

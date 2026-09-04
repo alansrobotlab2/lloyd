@@ -69,19 +69,25 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+// Node colour is keyed on the entity's KIND (app/entity_kind.py), which is
+// what the legend below names. It used to be keyed on `type === "entity"`
+// with a fallback that hashed the node id into a hue — so every node that
+// was not literally typed "entity" got an arbitrary colour and the legend
+// described nothing.
+export const KIND_COLOR: Record<string, string> = {
+  person:  "#F472B6",
+  project: "#A78BFA",
+  system:  "#F59E0B",
+  concept: "#38BDF8",
+  skill:   "#34D399",
+  task:    "#FB923C",
+  doc:     "#94A3B8",
+  entity:  "#64748B",
+};
+export const KIND_ORDER = ["system", "project", "concept", "person", "skill", "task", "doc", "entity"] as const;
+
 function nodeColor(node: GNode): string {
-  if (node.type === "entity") return "#F59E0B"; // gold/amber for entity nodes
-  const id = node.id;
-  if (id.startsWith("facts/")) return "hsl(200, 50%, 55%)";
-  if (id.startsWith("memory/")) return "hsl(160, 35%, 50%)";
-  if (id.startsWith("projects/")) return "hsl(270, 35%, 55%)";
-  if (id.startsWith("knowledge/")) return "hsl(45, 45%, 55%)";
-  if (id.startsWith("agents/")) return "hsl(340, 35%, 55%)";
-  // Hash-based fallback
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
-  const hue = ((hash % 360) + 360) % 360;
-  return `hsl(${hue}, 30%, 50%)`;
+  return KIND_COLOR[node.type] || KIND_COLOR.entity;
 }
 
 function nodeRadius(node: GNode): number {
@@ -225,6 +231,13 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
 
   const hasDimming = !!(activeNode || hoverNode);
 
+  // Which kinds are actually on screen, so the legend lists those and not
+  // all eight.
+  const kindsPresent = useMemo(
+    () => new Set(graphData.nodes.map((n) => n.type)),
+    [graphData],
+  );
+
   // -- Resize tracking --
 
   useEffect(() => {
@@ -317,7 +330,9 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     const n = node as GNode;
     const r = nodeRadius(n);
     const color = nodeColor(n);
-    const geometry = n.type === "entity"
+    // People and projects render as octahedra so they stand out from the
+    // systems and concepts that make up most of the graph.
+    const geometry = (n.type === "person" || n.type === "project")
       ? new THREE.OctahedronGeometry(r * 1.6, 0)
       : new THREE.SphereGeometry(r, 20, 16);
     const material = new THREE.MeshPhongMaterial({
@@ -331,7 +346,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
 
     const sprite = new SpriteText(n.label);
     sprite.textHeight = 2.2;
-    sprite.color = n.type === "entity" ? "#FCD34D" : "#e2e8f0";
+    sprite.color = nodeColor(n);
     sprite.backgroundColor = "rgba(15,23,42,0.65)";
     sprite.padding = 1.5;
     sprite.borderRadius = 2;
@@ -370,7 +385,10 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
   useEffect(() => { highlightNodesRef.current = highlightNodes; }, [highlightNodes]);
 
   useEffect(() => {
-    if (!rawGraphData.nodes.length) return;
+    // Iterate the RENDERED nodes. This walked every loaded node on every
+    // animation frame — with isolated entities included that was 23,565
+    // getWorldPosition calls per frame for the ~2,500 actually drawn.
+    if (!graphData.nodes.length) return;
     const PROXIMITY_THRESHOLD = 90;
     const tmp = new THREE.Vector3();
     let raf = 0;
@@ -382,7 +400,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       if (!camera) return;
       const lit = highlightNodesRef.current;
       const anyLit = lit.size > 0;
-      for (const n of rawGraphData.nodes as any[]) {
+      for (const n of graphData.nodes as any[]) {
         const group = n.__threeObj as THREE.Object3D | undefined;
         const sprite = (group as any)?.__nodeLabel as THREE.Sprite | undefined;
         if (!sprite || !group) continue;
@@ -396,7 +414,7 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [rawGraphData]);
+  }, [graphData]);
 
   // -- Link styling --
 
@@ -453,10 +471,10 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
     const defLine = n.definition
       ? `<br/><span style="color:#cbd5e1;font-size:11px;display:inline-block;max-width:260px;white-space:normal">${escapeHtml(n.definition)}</span>`
       : "";
-    if (n.type === "entity") {
-      return `<b>⬥ ${label}</b> (entity)<br/><span style="color:#94a3b8;font-size:10px">${n.factCount || 0} facts</span>${defLine}`;
-    }
-    return `<b>${label}</b><br/><span style="color:#94a3b8;font-size:10px">${escapeHtml(n.id)}</span>${defLine}`;
+    const kind = escapeHtml(n.type || "entity");
+    const color = KIND_COLOR[n.type] || KIND_COLOR.entity;
+    return `<b style="color:${color}">${label}</b> <span style="color:#94a3b8;font-size:10px">(${kind})</span>`
+      + `<br/><span style="color:#94a3b8;font-size:10px">${n.factCount || 0} facts</span>${defLine}`;
   }, []);
 
   // -- Hover handler (debounced 150ms) --
@@ -645,6 +663,19 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
       {/* Controls: filter toggles + reset/fit */}
       {!loading && !error && (
         <div className="absolute bottom-2 right-2 z-10 flex items-center gap-1">
+          {/* Node-kind legend. Keyed to app/entity_kind.py, so it names what
+              the colours actually mean — the previous legend described edge
+              categories only, while node colour came from a hash of the id. */}
+          <div className="flex items-center gap-2 mr-2 bg-card/80 backdrop-blur-sm px-2 py-1 rounded text-[10px]">
+            {KIND_ORDER.filter((k) => kindsPresent.has(k)).map((k) => (
+              <span key={k} className="flex items-center gap-1 text-muted-foreground">
+                <span className="inline-block w-2 h-2 rounded-full flex-shrink-0"
+                      style={{ background: KIND_COLOR[k] }} />
+                {k}
+              </span>
+            ))}
+          </div>
+
           {/* Edge type filter toggles */}
           <div className="flex items-center gap-2 mr-2 bg-card/80 backdrop-blur-sm px-2 py-1 rounded text-[10px]">
             {(["structural", "lineage", "comparison", "reference"] as const).map((cat) => (
