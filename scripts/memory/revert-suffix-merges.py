@@ -18,11 +18,16 @@ What it inverts, per (variant → canonical) in the report:
     variant re-registered as itself, so the extractor stops filing new facts
     under the wrong name.
 
-`--fix-edges` handles the follow-on damage: edges seeded from the canonical
-directory while it still held the variant's prose. For every touched
-canonical, any active seeded edge whose target is no longer named anywhere in
-the canonical's OWN fact text is expired. Re-run the seeder afterwards to
-attach those relationships to the restored variant.
+`--fix-edges` is exact when the apply report carries `edge_rewrites` (every
+report written since the store landed): each (old_id, new_id) pair is undone
+by expiring the rewritten edge and reactivating the original, so the edge
+graph returns to precisely its pre-merge state.
+
+For older reports there is no id trail, so it falls back to the heuristic it
+was born with: for every touched canonical, any active seeded edge whose
+target is no longer named anywhere in the canonical's OWN fact text is
+expired. Re-run the seeder afterwards to attach those relationships to the
+restored variant.
 
 Usage:
   revert-suffix-merges.py --applied <report.json>                 # dry-run
@@ -46,8 +51,9 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent.parent))
-from app.paths import VAULT_FACTS_ROOT, VAULT_FACTS_ALIASES  # noqa: E402
+from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB  # noqa: E402
 from app.atomic_io import atomic_write_text  # noqa: E402
+from app.kg_store import KGStore  # noqa: E402
 from _invocation import invocation_ledger  # noqa: E402
 import kg_hygiene  # noqa: E402
 
@@ -145,7 +151,7 @@ def _variant_filename(name: str, canonical: str, variant: str) -> str:
     return f"{variant}-{name}"
 
 
-def execute(ops: list[dict], root: Path, aliases_path: Path, apply: bool) -> dict:
+def execute(ops: list[dict], root: Path, st, apply: bool) -> dict:
     done: list[dict] = []
     touched_canonicals: set[str] = set()
     for entry in ops:
@@ -173,11 +179,11 @@ def execute(ops: list[dict], root: Path, aliases_path: Path, apply: bool) -> dic
                     dfm, _ = _read(dest)
                     dfm["facts"] = _merge_facts(dfm.get("facts") or [], fm.get("facts") or [])
                     dfm["entity"] = variant
-                    dest.write_text(_dump(dfm, _body(variant, category, len(dfm["facts"]))), encoding="utf-8")
+                    atomic_write_text(dest, _dump(dfm, _body(variant, category, len(dfm["facts"]))))
                     src.unlink()
                 else:
                     new_body = body if fm.get("type") == "overview" else _body(variant, category, len(fm.get("facts") or []))
-                    dest.write_text(_dump(fm, new_body), encoding="utf-8")
+                    atomic_write_text(dest, _dump(fm, new_body))
                     src.unlink()
             else:  # split
                 facts = [x for x in (fm.get("facts") or []) if isinstance(x, dict)]
@@ -194,11 +200,11 @@ def execute(ops: list[dict], root: Path, aliases_path: Path, apply: bool) -> dic
                     dfm = {"type": "facts", "entity": variant, "category": category, "facts": mine}
                 dfm["entity"] = variant
                 dfm["last_updated"] = dt.datetime.now().isoformat()
-                dest.write_text(_dump(dfm, _body(variant, category, len(dfm["facts"]))), encoding="utf-8")
+                atomic_write_text(dest, _dump(dfm, _body(variant, category, len(dfm["facts"]))))
                 if rest:
                     fm["facts"] = rest
                     fm["last_updated"] = dt.datetime.now().isoformat()
-                    src.write_text(_dump(fm, _body(canonical, category, len(rest))), encoding="utf-8")
+                    atomic_write_text(src, _dump(fm, _body(canonical, category, len(rest))))
                 else:
                     src.unlink()
                     rec["removed_emptied_canonical_file"] = True
@@ -207,19 +213,17 @@ def execute(ops: list[dict], root: Path, aliases_path: Path, apply: bool) -> dic
 
     # aliases: stop routing the variant to the canonical; make the variant itself again
     alias_ops = []
-    if aliases_path.exists():
-        aliases = json.loads(aliases_path.read_text(encoding="utf-8"))
-        for entry in ops:
-            v, c = entry["variant"], entry["canonical"]
-            for k in list(aliases):
-                if aliases[k] == c and _same(k, v):
-                    alias_ops.append({"remove": k, "was": c}); del aliases[k]
-            if v not in aliases:
-                alias_ops.append({"add": v}); aliases[v] = v
-        if apply and alias_ops:
-            bak = aliases_path.with_suffix(aliases_path.suffix + f".{dt.datetime.now():%Y%m%dT%H%M%SZ}.revert.bak")
-            shutil.copy2(aliases_path, bak)
-            atomic_write_text(aliases_path, json.dumps(aliases, indent=2, sort_keys=True, ensure_ascii=False), fsync=True)
+    for entry in ops:
+        v, c = entry["variant"], entry["canonical"]
+        for row in st.aliases.for_canonical(c):
+            if _same(row["surface"], v):
+                alias_ops.append({"remove": row["surface"], "was": c})
+                if apply:
+                    st.aliases.remove(row["surface"])
+        if not st.entities.exists(v):
+            alias_ops.append({"add": v})
+            if apply:
+                st.entities.register(v)
     return {"file_ops": done, "alias_ops": alias_ops, "touched_canonicals": sorted(touched_canonicals)}
 
 
@@ -236,16 +240,41 @@ def _own_prose(d: Path) -> str:
     return "\n".join(out).lower()
 
 
-def fix_edges(rel_path: Path, canonicals: list[str], root: Path, since: str, apply: bool) -> dict:
-    """Expire seeded edges from a canonical that its own remaining text no longer supports."""
-    data = json.loads(rel_path.read_text(encoding="utf-8"))
+def revert_edges_exact(st, report: dict, variants: set[str] | None = None,
+                       apply: bool = False) -> dict:
+    """Undo the apply's edge rewrites by id.
+
+    `entity_merges_applied` reports written since the store landed carry
+    `edge_rewrites: {variant: [[old_id, new_id], ...]}`. Expiring each new_id
+    and reactivating each old_id restores the graph exactly — no guessing
+    from prose, no edges left behind on the canonical, none wrongly expired.
+    """
+    rewrites = report.get("edge_rewrites") or {}
+    pairs: list[tuple[int, int]] = []
+    for variant, plist in rewrites.items():
+        if variants is not None and variant not in variants:
+            continue
+        for pair in plist:
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                pairs.append((int(pair[0]), int(pair[1])))
+    if not apply:
+        return {"mode": "exact", "pairs": len(pairs), "reverted": 0}
+    n = st.edges.revert_rewrites(pairs, reason="revert-suffix-merges: undo merge rewrite")
+    return {"mode": "exact", "pairs": len(pairs), "reverted": n}
+
+
+def _own_prose_edges(st, canonicals: list[str], root: Path, since: str, apply: bool) -> dict:
+    """Pre-store fallback: expire seeded edges from a canonical that its own
+    remaining text no longer supports. Only for apply reports that predate
+    `edge_rewrites` — it over- and under-expires, which is why the id trail
+    exists."""
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     expired = []
     prose_cache: dict[str, str] = {}
-    for e in data["edges"]:
-        if e.get("expired_at") or e.get("source") not in canonicals:
+    for e in st.edges.active():
+        if e["source"] not in canonicals:
             continue
-        if e.get("provenance") not in ("EXTRACTED", "EXTRACTED_CLASSIFIER_V4"):
+        if (e.get("provenance") or "") not in ("EXTRACTED", "EXTRACTED_CLASSIFIER_V4"):
             continue
         if str(e.get("created_at") or "") < since:
             continue
@@ -254,15 +283,18 @@ def fix_edges(rel_path: Path, canonicals: list[str], root: Path, since: str, app
         tl = str(e.get("target") or "").lower()
         if tl and re.search(r"(?<![a-z0-9])" + re.escape(tl) + r"(?![a-z0-9])", prose):
             continue
-        expired.append({"source": src, "target": e.get("target"), "type": e.get("type")})
+        expired.append({"id": e["id"], "source": src, "target": e.get("target"), "type": e.get("type")})
         if apply:
-            e["expired_at"] = now
-            e["expired_reason"] = "revert-suffix-merges: target no longer named in source's own facts"
-    if apply and expired:
-        bak = rel_path.with_suffix(f".{dt.datetime.now():%Y%m%dT%H%M%SZ}.revert.bak.json")
-        shutil.copy2(rel_path, bak)
-        atomic_write_text(rel_path, json.dumps(data, indent=2, ensure_ascii=False), fsync=True)
-    return {"expired": expired, "count": len(expired)}
+            st.edges.expire(e["id"], "revert-suffix-merges: target no longer named in source's own facts", at=now)
+    return {"mode": "heuristic", "expired": expired, "count": len(expired)}
+
+
+def fix_edges(st, report: dict, canonicals: list[str], root: Path, since: str,
+              apply: bool, variants: set[str] | None = None) -> dict:
+    """Exact revert when the report has an id trail, heuristic otherwise."""
+    if report.get("edge_rewrites"):
+        return revert_edges_exact(st, report, variants=variants, apply=apply)
+    return _own_prose_edges(st, canonicals, root, since, apply)
 
 
 def main() -> int:
@@ -272,15 +304,14 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--fix-edges", action="store_true")
     ap.add_argument("--facts-dir", type=Path, default=VAULT_FACTS_ROOT)
-    ap.add_argument("--aliases", type=Path, default=VAULT_FACTS_ALIASES)
-    ap.add_argument("--relationships", type=Path, default=None)
+    ap.add_argument("--db", type=Path, default=VAULT_KG_DB)
     ap.add_argument("--out-dir", type=Path, default=Path.home() / "lloyd" / "_pipeline" / "memory-graph")
     args = ap.parse_args()
 
     report = json.loads(args.applied.read_text(encoding="utf-8"))
     tiers = {t.strip() for t in args.tiers.split(",") if t.strip()}
     root = args.facts_dir
-    rel_path = args.relationships or (root / "_relationships.json")
+    st = KGStore(args.db)
 
     ops = plan_revert(report, tiers, root)
     n_files = sum(len(o["files"]) for o in ops)
@@ -292,24 +323,48 @@ def main() -> int:
             print(f"  {o['canonical']!r}/{f['file']}  -{f['action']}->  {o['variant']!r}"
                   + (f"  ({f.get('facts')} facts)" if f.get("facts") else ""))
     if not args.apply:
+        if args.fix_edges:
+            preview = fix_edges(st, report, [o["canonical"] for o in ops], root,
+                                "0000", apply=False, variants={o["variant"] for o in ops})
+            print(f"  edges: {preview}")
         print("\n(dry-run — pass --apply to execute)")
+        st.close()
         return 0
 
-    result = execute(ops, root, args.aliases, apply=True)
+    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = args.out_dir / "store-backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    store_bak = st.backup(backup_dir / f"kg-revert-{ts}.sqlite")
+    print(f"Backed up store: {store_bak}")
+
+    result = execute(ops, root, st, apply=True)
     print(f"\nApplied {len(result['file_ops'])} file ops, {len(result['alias_ops'])} alias ops")
     edges = None
-    if args.fix_edges and rel_path.exists():
+    if args.fix_edges:
         since = report.get("ledger", {}).get("timestamp") or "2026-09-03T00:00:00"
-        edges = fix_edges(rel_path, result["touched_canonicals"], root, since, apply=True)
-        print(f"Expired {edges['count']} seeded edge(s) no longer supported by their source's own facts")
+        edges = fix_edges(st, report, result["touched_canonicals"], root, since,
+                          apply=True, variants={o["variant"] for o in ops})
+        if edges["mode"] == "exact":
+            print(f"Reverted {edges['reverted']} of {edges['pairs']} edge rewrites by id")
+        else:
+            print(f"Expired {edges['count']} seeded edge(s) no longer supported by their source's own facts")
 
-    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    # The moved files must be re-indexed or the store still points at the
+    # canonical's old paths.
+    try:
+        touched = [root / o["variant"] for o in ops] + [root / o["canonical"] for o in ops]
+        st.facts_idx.reindex([p for d in touched if d.is_dir() for p in d.glob("*.md")], root=root)
+    except Exception as exc:
+        print(f"[warn] index update failed: {exc}")
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
     out = args.out_dir / f"entity-merges-reverted-{ts}.json"
     out.write_text(json.dumps({"applied_report": str(args.applied), "tiers": sorted(tiers),
                                "plan": ops, "result": result, "edges": edges,
+                               "store_backup": str(store_bak),
                                "ledger": invocation_ledger()}, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Record: {out}")
+    st.close()
     return 0
 
 

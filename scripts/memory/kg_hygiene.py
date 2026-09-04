@@ -32,6 +32,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT  # noqa: E402
+from app.kg_store import StoreUnavailable, store  # noqa: E402
 
 _SWEEP_PATH = Path(__file__).resolve().parent / "entity-resolution-sweep.py"
 _sweep_mod = None
@@ -202,13 +203,37 @@ def regrowth(root: Path = VAULT_FACTS_ROOT, days: int = 7,
 
 def snapshot(root: Path = VAULT_FACTS_ROOT, days: int = 7) -> dict[str, Any]:
     c = contamination(root)
-    return {
+    out = {
         "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "facts_root": str(root),
         "contamination": {k: v for k, v in c.items() if k != "items"},
         "near_duplicates": near_duplicates(root),
         "regrowth": regrowth(root, days),
     }
+    out["provenance"] = provenance_coverage()
+    return out
+
+
+def provenance_coverage(root: Path = VAULT_FACTS_ROOT) -> dict[str, Any]:
+    """Share of indexed facts that say where they came from and when.
+
+    99.7% of the 205k facts in the pre-rebuild tree had neither `created_at`
+    nor `source_doc`, so nothing could be dated, attributed or selectively
+    reverted. The rebuild gate requires 100%.
+    """
+    try:
+        st = store()
+        total = st.facts_idx.count()
+        if not total:
+            return {"facts": 0, "created_at_pct": 0.0, "source_doc_pct": 0.0, "both_pct": 0.0}
+        rows = st._query(
+            "SELECT SUM(created_at IS NOT NULL) AS c, SUM(source_doc IS NOT NULL) AS s, "
+            "SUM(created_at IS NOT NULL AND source_doc IS NOT NULL) AS b FROM facts_idx")[0]
+        pct = lambda n: round(100.0 * (n or 0) / total, 2)  # noqa: E731
+        return {"facts": total, "created_at_pct": pct(rows["c"]),
+                "source_doc_pct": pct(rows["s"]), "both_pct": pct(rows["b"])}
+    except StoreUnavailable as e:
+        return {"error": f"{type(e).__name__}: {e}"}
 
 
 def main() -> None:
@@ -233,6 +258,9 @@ def main() -> None:
     print(f"  contamination   {c['dirs']:>6} dirs hold {c['foreign_facts']} facts about another entity  {c['by_tier']}")
     print(f"  near-duplicates {n['clusters']:>6} clusters over {n['dirs']} dirs  {n['by_tier']}")
     print(f"  regrowth {r['days']}d     {r['near_dup_new']:>6} of {r['new_dirs']} new dirs are near-dups of an older one  {r['by_tier']}")
+    pv = s.get("provenance") or {}
+    if "facts" in pv:
+        print(f"  provenance      {pv['both_pct']:>6}% of {pv['facts']:,} facts carry both created_at and source_doc")
 
 
 if __name__ == "__main__":

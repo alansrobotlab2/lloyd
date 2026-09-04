@@ -10,7 +10,9 @@ Contents:
     - Pure helpers (_token_overlap, _levenshtein, _fuzzy_entity_match)
     - Fact frontmatter helpers (_parse_fact_frontmatter, _write_fact_frontmatter)
     - Entity resolution (_find_entity_dir, _load_aliases, _save_aliases,
-      _get_entity_dirs_cached, _resolve_entity)
+      _get_entity_dirs_cached, _resolve_entity) — aliases live in
+      app.kg_store since the 2026-09 migration; the two helpers are
+      store-backed shims kept for their callers' shape.
     - Cache invalidation (_invalidate_entity_dirs_cache)
 
 Anything that touches the relationships index, qmd daemon, vault audit log,
@@ -555,21 +557,42 @@ def _find_entity_dir(entity: str) -> Optional[Path]:
 
 
 def _load_aliases() -> dict:
-    """Load the entity alias map from disk. Returns {} on missing/corrupt."""
-    if not ALIASES_PATH.exists():
-        return {}
+    """The alias map as `{surface: canonical}`, self-identities included.
+
+    Reads app.kg_store. Kept in the flat shape its callers expect; the
+    authoritative lookup is `_resolve_entity`, which asks the store directly
+    rather than materialising this dict.
+    """
+    from app.kg_store import StoreUnavailable, store
     try:
-        return json.loads(ALIASES_PATH.read_text(encoding="utf-8"))
-    except Exception:
+        st = store()
+        out = st.aliases.all()
+        for name in st.entities.all():
+            out.setdefault(name, name)
+        return out
+    except StoreUnavailable:
         return {}
 
 
 def _save_aliases(aliases: dict) -> None:
-    """Persist the entity alias map. Creates parent dirs as needed."""
-    ALIASES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ALIASES_PATH.write_text(
-        json.dumps(aliases, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    """Write a `{surface: canonical}` map into the store.
+
+    Additive: entries not in `aliases` are left alone. Nothing in Lloyd
+    rewrites the whole table any more — the sweep and the extractor set one
+    alias at a time, which is what made the whole-file rewrite races
+    (2026-08-22, 2026-09-03) possible in the first place.
+    """
+    from app.kg_store import alias_kind, store
+    st = store()
+    with st.transaction():
+        for surface, canonical in (aliases or {}).items():
+            if not surface or not canonical:
+                continue
+            if surface == canonical:
+                st.entities.register(canonical)
+            else:
+                st.aliases.set(surface, canonical, kind=alias_kind(surface, canonical),
+                               origin="legacy")
 
 
 def _resolve_entity(name: str, *, mode: Literal["read", "write"]) -> tuple[str, bool]:
@@ -619,10 +642,14 @@ def _resolve_entity(name: str, *, mode: Literal["read", "write"]) -> tuple[str, 
     if entity_dir:
         return entity_dir.name, False
 
-    # 2. Alias table lookup (both modes).
-    aliases = _load_aliases()
-    # Check both original-case and lowercase keys — Tier 1 sweep writes both.
-    canonical = aliases.get(name) or aliases.get(name.lower())
+    # 2. Alias table lookup (both modes). One indexed query against the
+    #    store, case-insensitive with exact case preferred — the JSON era
+    #    materialised a 19,914-entry dict on every miss to do the same thing.
+    from app.kg_store import StoreUnavailable, store
+    try:
+        canonical = store().aliases.resolve(name)
+    except StoreUnavailable:
+        canonical = None
     if canonical and _find_entity_dir(canonical):
         return canonical, False
 

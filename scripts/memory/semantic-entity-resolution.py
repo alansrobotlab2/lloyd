@@ -56,13 +56,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT
 
-REL_PATH = FACTS_ROOT / "_relationships.json"
-ALIASES_PATH = FACTS_ROOT / "entity-aliases.json"
+from app.kg_store import store as _kg_store  # noqa: E402
 
 PIPELINE_ROOT = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
 CANDIDATE_LOG = PIPELINE_ROOT / f"semantic-entity-candidates-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
 JUDGMENT_LOG = PIPELINE_ROOT / f"semantic-entity-judgments-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
-APPLY_LOG = PIPELINE_ROOT / f"semantic-entity-applied-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+PROPOSAL_LOG = PIPELINE_ROOT / f"semantic-proposals-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+PROPOSAL_LATEST = PIPELINE_ROOT / "semantic-proposals-latest.jsonl"
+# Verdicts keyed on the pair plus a hash of both definitions, the same shape
+# `entity_semantic_gate.SemanticGate._key` uses. A weekly run over a 65k-pair
+# pool re-judged pairs it had already settled; with this it only pays for
+# pairs whose definitions actually changed.
+VERDICT_CACHE = PIPELINE_ROOT / "semantic-verdicts-pairs.jsonl"
 
 CLASSIFIER_V2 = Path.home() / "lloyd" / "scripts" / "memory" / "classify-relationships.py"
 _spec = importlib.util.spec_from_file_location("classifier_v2", str(CLASSIFIER_V2))
@@ -148,17 +153,13 @@ def list_entities() -> list[str]:
 
 
 def load_aliases() -> dict[str, str]:
-    if not ALIASES_PATH.exists():
-        return {}
-    return json.loads(ALIASES_PATH.read_text("utf-8"))
-
-
-def save_aliases(aliases: dict[str, str]) -> None:
-    ALIASES_PATH.write_text(json.dumps(aliases, indent=2, sort_keys=True))
+    """Lowercased surface → canonical, from the store. Read-only: this pass
+    proposes, the sweep merges (see the skill; `--apply` retired 2026-09-04)."""
+    return _kg_store().aliases.all_lower()
 
 
 def load_graph() -> dict:
-    return json.loads(REL_PATH.read_text("utf-8"))
+    return {"edges": _kg_store().edges.all()}
 
 
 def build_neighbors(graph: dict) -> dict[str, set[str]]:
@@ -336,6 +337,46 @@ Respond with strict JSON:
 """
 
 
+def _definition(entity: str) -> str:
+    """The entity's own definition line, or its first facts as a stand-in."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import entity_semantic_gate
+        return entity_semantic_gate.entity_definition(entity, FACTS_ROOT) or ""
+    except Exception:
+        return load_fact_snippets(entity, 300)
+
+
+def _cache_key(a: str, b: str, da: str, db: str) -> str:
+    """Pair + definition hash. Re-judged only when a definition changes."""
+    lo, hi = sorted((a, b))
+    da, db = (da, db) if lo == a else (db, da)
+    return hashlib.sha256(f"{lo}\x00{hi}\x00{da}\x00{db}".encode("utf-8")).hexdigest()[:32]
+
+
+def load_verdict_cache(path: Path = VERDICT_CACHE) -> dict[str, dict]:
+    cache: dict[str, dict] = {}
+    if not path.exists():
+        return cache
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            if rec.get("key"):
+                cache[rec["key"]] = rec
+        except json.JSONDecodeError:
+            continue
+    return cache
+
+
+def append_verdict(rec: dict, path: Path = VERDICT_CACHE) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
 def judge_pair(pair: dict, endpoint: str, model: str, timeout: int) -> dict | None:
     facts_a = load_fact_snippets(pair["a"], 500) or "(no facts)"
     facts_b = load_fact_snippets(pair["b"], 500) or "(no facts)"
@@ -450,99 +491,6 @@ def pick_canonical(a: str, b: str, neighbors: dict[str, set[str]]) -> tuple[str,
     return (a, b) if a < b else (b, a)
 
 
-def apply_merge(
-    canonical: str,
-    variant: str,
-    graph: dict,
-    aliases: dict[str, str],
-    apply: bool,
-) -> dict:
-    """Move facts + rewrite edges + add alias. Returns stats."""
-    stats = {
-        "canonical": canonical,
-        "variant": variant,
-        "files_moved": 0,
-        "edges_rewritten": 0,
-        "edges_deduped": 0,
-        "alias_added": False,
-    }
-
-    # Step 1: move variant/ fact files into canonical/
-    v_dir = FACTS_ROOT / variant
-    c_dir = FACTS_ROOT / canonical
-    if v_dir.exists():
-        if apply:
-            c_dir.mkdir(parents=True, exist_ok=True)
-        for f in v_dir.glob("*.md"):
-            new_name = f.name.replace(variant, canonical, 1)
-            target = c_dir / new_name
-            if target.exists():
-                # Keep existing (canonical wins on dedupe); expire variant file
-                if apply:
-                    f.unlink()
-            else:
-                if apply:
-                    shutil.move(str(f), str(target))
-            stats["files_moved"] += 1
-        # Remove empty variant dir
-        if apply and not any(v_dir.iterdir()):
-            v_dir.rmdir()
-
-    # Step 2: rewrite edges
-    active_seen = set()
-    for e in graph["edges"]:
-        if e.get("expired_at"):
-            continue
-        rewrite = False
-        if e.get("source") == variant:
-            if apply:
-                e["source"] = canonical
-            rewrite = True
-        if e.get("target") == variant:
-            if apply:
-                e["target"] = canonical
-            rewrite = True
-        if rewrite:
-            stats["edges_rewritten"] += 1
-
-    # Step 3: dedupe resulting active edges
-    if apply:
-        now = datetime.now(timezone.utc).isoformat()
-        for e in graph["edges"]:
-            if e.get("expired_at"):
-                continue
-            key = (e.get("source"), e.get("target"), e.get("type"))
-            if key in active_seen:
-                e["expired_at"] = now
-                stats["edges_deduped"] += 1
-            else:
-                active_seen.add(key)
-
-    # Step 4: alias
-    if aliases.get(variant) != canonical:
-        if apply:
-            aliases[variant] = canonical
-            aliases[variant.lower()] = canonical
-        stats["alias_added"] = True
-
-    return stats
-
-
-def apply_alias_only(
-    canonical: str,
-    variant: str,
-    aliases: dict[str, str],
-    apply: bool,
-) -> dict:
-    stats = {"canonical": canonical, "variant": variant, "alias_added": False}
-    if aliases.get(variant) != canonical:
-        if apply:
-            aliases[variant] = canonical
-            aliases[variant.lower()] = canonical
-        stats["alias_added"] = True
-    return stats
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -550,7 +498,6 @@ def apply_alias_only(
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--apply", action="store_true")
     p.add_argument("--limit", type=int, default=None,
                    help="Cap number of candidate pairs judged (dev).")
     p.add_argument("--merge-threshold", type=float, default=0.85,
@@ -629,14 +576,28 @@ def main() -> int:
     if not args.replay:
         judgments = []
         verdict_counts = Counter()
+        cache = load_verdict_cache()
+        cache_hits = 0
         for i, pair in enumerate(candidates, 1):
             t0 = time.perf_counter()
+            da, db = _definition(pair["a"]), _definition(pair["b"])
+            key = _cache_key(pair["a"], pair["b"], da, db)
+            cached = cache.get(key)
+            if cached is not None:
+                cache_hits += 1
+                judgments.append({**pair, **{k: v for k, v in cached.items() if k != "key"},
+                                  "cached": True})
+                verdict_counts[cached.get("verdict", "?")] += 1
+                continue
             j = judge_pair(pair, args.endpoint, args.model, args.timeout)
             dt_ms = (time.perf_counter() - t0) * 1000
             if j is None or "error" in j:
                 verdict_counts["error"] += 1
                 print(f"  [{i}/{len(candidates)}] ERROR  {pair['a']!r} vs {pair['b']!r}: {j}")
                 continue
+            append_verdict({"key": key, "a": pair["a"], "b": pair["b"],
+                            "judged_at": datetime.now(timezone.utc).isoformat(), **j})
+            cache[key] = j
             verdict = j["verdict"]
             conf = j["confidence"]
             verdict_counts[verdict] += 1
@@ -657,7 +618,7 @@ def main() -> int:
                 f.write(json.dumps(r) + "\n")
         print(f"\n[info] judgments → {JUDGMENT_LOG}")
         print(f"[info] elapsed: {time.perf_counter() - t_start:.1f}s")
-        print(f"[info] verdicts: {dict(verdict_counts)}")
+        print(f"[info] verdicts: {dict(verdict_counts)}  ({cache_hits} from cache)")
 
     # Apply plan — split by confidence AND guard rails.
     # A merge-threshold pair is only truly merged if merge_allowed() passes;
@@ -682,58 +643,43 @@ def main() -> int:
             guard_downgrades[guard_reason] += 1
             to_alias.append(r)
 
-    print(f"\nApply plan:")
-    print(f"  merges (dir + edges + alias): {len(to_merge)}")
-    print(f"  alias-only:                   {len(to_alias)}")
+    print("\nProposal summary:")
+    print(f"  merge candidates:  {len(to_merge)}")
+    print(f"  alias-only:        {len(to_alias)}")
     if guard_downgrades:
-        print(f"  merge→alias downgrades by guard:")
+        print("  merge→alias downgrades by guard:")
         for k, n in guard_downgrades.most_common():
             print(f"    {k:<30} {n}")
 
-    if not args.apply:
-        print("\n[info] dry run (pass --apply to mutate)")
-        # Still write a plan log for inspection
-        return 0
-
-    # Backup
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    rel_backup = REL_PATH.with_name(f"_relationships.{ts}.pre-semantic.bak.json")
-    al_backup = ALIASES_PATH.with_name(f"entity-aliases.{ts}.pre-semantic.bak")
-    shutil.copy2(REL_PATH, rel_backup)
-    shutil.copy2(ALIASES_PATH, al_backup)
-    print(f"[info] backups: {rel_backup.name}, {al_backup.name}")
-
-    apply_records = []
-    for r in to_merge:
+    # This pass proposes; `entity-resolution-sweep.py --apply` merges. Its
+    # own apply path was retired on 2026-09-04 because it bypassed the
+    # sweep's degraded-graph gate, its invocation ledger, its fact retagging
+    # and its revert path — the four things that made the 2026-09-03
+    # 151-merge mistake recoverable.
+    proposals = []
+    for r, action in [(x, "merge") for x in to_merge] + [(x, "alias_only") for x in to_alias]:
         canonical, variant = pick_canonical(r["a"], r["b"], neighbors)
-        stats = apply_merge(canonical, variant, graph, aliases, apply=True)
-        stats["verdict"] = r["verdict"]
-        stats["confidence"] = r["confidence"]
-        stats["reason"] = r["reason"]
-        stats["action"] = "merge"
-        apply_records.append(stats)
-
-    for r in to_alias:
-        canonical, variant = pick_canonical(r["a"], r["b"], neighbors)
-        stats = apply_alias_only(canonical, variant, aliases, apply=True)
-        stats["verdict"] = r["verdict"]
-        stats["confidence"] = r["confidence"]
-        stats["reason"] = r["reason"]
-        stats["action"] = "alias_only"
-        apply_records.append(stats)
-
-    REL_PATH.write_text(json.dumps(graph, indent=2, sort_keys=False))
-    save_aliases(aliases)
-
-    with APPLY_LOG.open("w") as f:
-        for rec in apply_records:
+        proposals.append({
+            "canonical": canonical, "variant": variant, "action": action,
+            "verdict": r["verdict"], "confidence": r["confidence"],
+            "reason": r.get("reason", ""), "guard_reason": r.get("guard_reason"),
+            "cached": r.get("cached", False),
+            "proposed_at": datetime.now(timezone.utc).isoformat(),
+        })
+    proposals.sort(key=lambda p: -p["confidence"])
+    PROPOSAL_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with PROPOSAL_LOG.open("w") as f:
+        for rec in proposals:
             f.write(json.dumps(rec) + "\n")
-    print(f"[info] applied {len(apply_records)} actions → {APPLY_LOG}")
-
-    # Final state
-    active_after = sum(1 for e in graph["edges"] if not e.get("expired_at"))
-    print(f"[info] active edges: {active_count} -> {active_after}")
-    print(f"[info] aliases: {len(aliases)} entries")
+    try:
+        if PROPOSAL_LATEST.is_symlink() or PROPOSAL_LATEST.exists():
+            PROPOSAL_LATEST.unlink()
+        PROPOSAL_LATEST.symlink_to(PROPOSAL_LOG.name)
+    except OSError:
+        pass
+    print(f"[info] {len(proposals)} proposals → {PROPOSAL_LOG}")
+    print("[info] no changes made. The sweep reads these as review input; "
+          "run `entity-resolution-sweep.py` to see them in its plan.")
     return 0
 
 

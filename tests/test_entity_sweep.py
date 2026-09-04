@@ -11,6 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "scripts" / "memory"))
+from app.kg_store import KGStore  # noqa: E402
 SWEEP = ROOT / "scripts" / "memory" / "entity-resolution-sweep.py"
 _spec = importlib.util.spec_from_file_location("ers_test", SWEEP)
 ers = importlib.util.module_from_spec(_spec); sys.modules["ers_test"] = ers; _spec.loader.exec_module(ers)
@@ -87,17 +88,36 @@ def test_junk_entities_never_enter_a_cluster():
 
 # ── aliases: an approved suffix merge must be routable ───────────────────────
 
-def test_compute_aliases_keeps_the_approved_suffix_alias():
-    plan = {"safe_merges": [{"canonical": "Morning Briefing",
-                             "merges": [{"variant": "Morning Briefing System"}]}]}
-    al = ers.compute_aliases(plan, {"legacy noise system": "legacy noise", "Kept": "Kept"},
-                             Path("/nonexistent"), rebuild_aliases=False,
-                             existing_dirs={"Morning Briefing", "Kept"})
-    assert al["morning briefing system"] == "Morning Briefing"
-    assert al["Morning Briefing System"] == "Morning Briefing"
-    assert al["Morning Briefing"] == "Morning Briefing"
-    assert "legacy noise system" not in al        # inherited suffix noise is still pruned
-    assert al["Kept"] == "Kept"
+def test_apply_writes_the_approved_suffix_alias(tmp_path):
+    """A merge this plan approved gets its alias whatever its tier. Suffix
+    aliases used to be dropped as `noise` even for merges the sweep had just
+    performed, so the extractor recreated the variant on its next pass."""
+    st = KGStore(tmp_path / "kg.sqlite")
+    plan = {"safe_merges": [{"canonical": "Morning Briefing", "tier": "SUFFIX_SAFE",
+                             "merges": [{"variant": "Morning Briefing System", "subtier": "SUFFIX_SAFE"}]}]}
+    ers.apply_merges(plan, st, tmp_path / "facts", rebuild_aliases=False, existing_dirs=set())
+    assert st.aliases.resolve("morning briefing system") == "Morning Briefing"
+    assert st.aliases.resolve("Morning Briefing System") == "Morning Briefing"
+    assert st.aliases.for_canonical("Morning Briefing")[0]["kind"] == "suffix"
+    st.close()
+
+
+def test_rebuild_aliases_prunes_inherited_suffix_noise(tmp_path):
+    st = KGStore(tmp_path / "kg.sqlite")
+    st.entities.register("legacy noise"); st.entities.register("Kept"); st.entities.register("KEPT")
+    st.aliases.set("legacy noise system", "legacy noise", kind="suffix", origin="legacy")
+    st.aliases.set("KEPT", "Kept", kind="case", origin="legacy")
+    ers.apply_merges({"safe_merges": []}, st, tmp_path / "facts", rebuild_aliases=True,
+                     existing_dirs={"legacy noise", "Kept"})
+    assert st.aliases.resolve("legacy noise system") is None   # suffix-only difference → noise
+    assert st.aliases.resolve("KEPT") == "Kept"                # case-only variants are legitimate
+    st.close()
+
+
+def test_is_alias_noise_rule():
+    assert ers._is_alias_noise("legacy noise system", "legacy noise")
+    assert not ers._is_alias_noise("VLLM", "vLLM")
+    assert not ers._is_alias_noise("swe-bench", "SWE Bench")
 
 
 # ── baseline guard ───────────────────────────────────────────────────────────
@@ -123,41 +143,50 @@ def _tree(tmp_path):
         fm = {"type": "facts", "entity": name, "category": "state",
               "facts": [{"entity": name, "fact": f"{name} exists.", "confidence": 0.9, "category": "state"}]}
         (d / f"{name}-state.md").write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {name} - state\n")
-    rel = root / "_relationships.json"
-    rel.write_text(json.dumps({"edges": [{"source": "vLLM", "target": "Ray", "type": "mentions", "expired_at": None},
-                                         {"source": "vllm", "target": "Ray", "type": "mentions", "expired_at": None}]}))
-    al = root / "entity-aliases.json"; al.write_text(json.dumps({n: n for n in ("vLLM", "vllm", "Intel", "Intel Pipeline")}))
-    return root, rel, al
+    db = tmp_path / "kg.sqlite"
+    st = KGStore(db)
+    for n in ("vLLM", "vllm", "Intel", "Intel Pipeline"):
+        st.entities.register(n)
+    st.edges.add({"source": "vLLM", "target": "Ray", "type": "mentions"}, origin="test")
+    st.edges.add({"source": "vllm", "target": "Ray", "type": "mentions"}, origin="test")
+    st.close()
+    return root, db
 
-def _run(root, rel, al, out, *extra):
-    cmd = [sys.executable, str(SWEEP), "--facts-dir", str(root), "--relationships", str(rel),
-           "--aliases", str(al), "--out-dir", str(out), "--no-gate", *extra]
+def _run(root, db, out, *extra):
+    cmd = [sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+           "--out-dir", str(out), "--no-gate", *extra]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
 def test_apply_refuses_on_a_degraded_graph(tmp_path):
-    root, rel, al = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
     (out / "graph-baseline.json").write_text(json.dumps({"active_edges": 10000}))
-    r = _run(root, rel, al, out, "--apply")
+    r = _run(root, db, out, "--apply")
     assert r.returncode == 3, r.stdout + r.stderr
     assert "REFUSING --apply" in r.stdout
     assert (root / "vllm").exists()                       # nothing moved
-    assert json.loads(al.read_text())["vllm"] == "vllm"   # nothing rewritten
+    st = KGStore(db)
+    assert st.aliases.resolve("vllm") is None             # nothing rewritten
+    st.close()
     # the override is explicit
-    r2 = _run(root, rel, al, out, "--apply", "--allow-degraded")
+    r2 = _run(root, db, out, "--apply", "--allow-degraded")
     assert r2.returncode == 0, r2.stdout + r2.stderr
     assert not (root / "vllm").exists()
 
 def test_apply_writes_aliases_and_stamps_the_ledger(tmp_path):
-    root, rel, al = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
-    r = _run(root, rel, al, out, "--apply")
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    r = _run(root, db, out, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
     assert not (root / "vllm").exists() and (root / "vLLM" / "vLLM-state.md").exists()
     assert (root / "Intel Pipeline").exists()                          # suffix cluster untouched
-    aliases = json.loads(al.read_text()); assert aliases["vllm"] == "vLLM"
+    st = KGStore(db)
+    assert st.aliases.resolve("vllm") == "vLLM"
+    assert st.aliases.for_canonical("vLLM")[0]["kind"] == "case"
+    st.close()
     reports = list(out.glob("entity-merges-applied-*.json")); assert len(reports) == 1
     rep = json.loads(reports[0].read_text())
     assert rep["ledger"]["argv"] and rep["ledger"]["pid"] and "cwd" in rep["ledger"]
     assert rep["tiers_allowed"] == ["CASE", "PUNCT", "SUFFIX_SAFE"]
+    assert Path(rep["store_backup"]).exists()
     assert json.loads((out / "graph-baseline.json").read_text())["active_edges"] == 2
     # the plan carries the suffix cluster as review, with the reason
     plans = [q for q in out.glob("entity-merges-*.jsonl") if not q.is_symlink()]
@@ -166,6 +195,46 @@ def test_apply_writes_aliases_and_stamps_the_ledger(tmp_path):
     plan_lines = [json.loads(l) for l in plans[0].read_text().splitlines() if l.strip()]
     amb = [c for c in plan_lines if c["status"] == "AMBIGUOUS"]
     assert amb and "semantic gate" in amb[0]["decision"]
+
+
+def test_apply_rewrites_edges_and_records_revertable_pairs(tmp_path):
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    r = _run(root, db, out, "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    rep = json.loads(next(out.glob("entity-merges-applied-*.json")).read_text())
+    pairs = rep["edge_rewrites"]["vllm"]
+    assert len(pairs) == 1
+    st = KGStore(db)
+    # the variant's edge is expired and folded onto the canonical's existing one
+    assert st.edges.active(either="vllm") == []
+    assert len(st.edges.active(either="vLLM")) == 1
+    old_id, new_id = pairs[0]
+    assert st.edges.by_id(old_id)["expired_at"] and "merge" in st.edges.by_id(old_id)["expired_reason"]
+    # history survives: the pre-merge edge is still readable
+    assert st.edges.by_id(old_id)["source"] == "vllm"
+    st.close()
+
+
+def test_apply_is_one_transaction(tmp_path, monkeypatch):
+    """A failure partway through the merge leaves the store untouched."""
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("ers_txn", SWEEP)
+    mod = _iu.module_from_spec(spec); sys.modules["ers_txn"] = mod; spec.loader.exec_module(mod)
+    root, db = _tree(tmp_path)
+    st = KGStore(db)
+    plan = mod.build_plan(st.edges.active(), {d.name for d in root.iterdir()}, allowed_tiers=["CASE"])
+    boom = [0]
+    def explode(*a, **k):
+        boom[0] += 1
+        raise RuntimeError("kill -9 equivalent")
+    monkeypatch.setattr(st.edges, "rewrite_endpoint", explode)
+    with pytest.raises(RuntimeError):
+        mod.apply_merges(plan, st, root, False, existing_dirs={d.name for d in root.iterdir()})
+    assert boom[0] == 1
+    assert st.aliases.resolve("vllm") is None       # the alias write rolled back too
+    assert len(st.edges.active(either="vllm")) == 1
+    assert (root / "vllm").exists()                 # files never moved
+    st.close()
 
 
 # ── merged facts carry the canonical's tag, and remember where they came from ─
@@ -185,8 +254,8 @@ def test_retag_fact_file_rewrites_entity_and_stamps_origin(tmp_path):
     assert ers.retag_fact_file(f, "Inner Voice System", "Inner Voice") == 0   # idempotent
 
 def test_apply_leaves_no_contamination_behind(tmp_path):
-    root, rel, al = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
-    r = _run(root, rel, al, out, "--apply")
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    r = _run(root, db, out, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
     merged = yaml.safe_load((root / "vLLM" / "vLLM-state.md").read_text().split("---")[1])
     tags = {f["entity"] for f in merged["facts"]}
@@ -197,9 +266,9 @@ def test_apply_leaves_no_contamination_behind(tmp_path):
 
 
 def test_two_dry_runs_on_one_day_keep_both_plans(tmp_path):
-    root, rel, al = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
-    assert _run(root, rel, al, out).returncode == 0
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    assert _run(root, db, out).returncode == 0
     import time; time.sleep(1.1)
-    assert _run(root, rel, al, out).returncode == 0
+    assert _run(root, db, out).returncode == 0
     plans = [q for q in out.glob("entity-merges-*.jsonl") if not q.is_symlink()]
     assert len(plans) == 2, "a second dry-run must not overwrite the first plan"

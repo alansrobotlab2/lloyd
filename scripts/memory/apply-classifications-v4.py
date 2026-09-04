@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Promote v4 classifier output into `_relationships.json`.
+"""Promote v4 classifier output into the edge store.
 
 Reads every `classified-v4*.jsonl` under `_pipeline/memory-graph/`,
 deduplicates by (source, target) keeping the most recent `classified_at`,
-and lands upgrades onto active `mentions` edges in the live relationships
-index (resolved via `app.paths.VAULT_FACTS_ROOT`).
+and lands upgrades onto active `mentions` edges via `edges.retype`.
 
 For each record where `new_type != "mentions"` and `confidence ≥ --min-confidence`:
-- Mark the matching active `(source, target, mentions)` edge expired
-- Append a new edge with the typed relation + provenance=EXTRACTED_CLASSIFIER_V4
+- Expire the matching active `(source, target, mentions)` edge
+- Add a typed edge with provenance=EXTRACTED_CLASSIFIER_V4 and
+  `superseded_edge_id` pointing back at the mentions edge
 
-Always writes a timestamped backup before mutating. Idempotent: re-runs
-that find no new upgrades make no writes (apart from the backup, which is
-suppressed when there are zero changes).
+`retype` also expires any OTHER active edge on the same (source, target)
+pair, so one pair carries one typed relation. The JSON version could leave
+two active rows for a pair when the classifier had seen it twice — nine such
+pairs were live on 2026-09-03.
+
+The whole run is ONE transaction: a crash halfway through leaves the graph
+untouched rather than half-upgraded. A backup is taken first anyway.
 
 Usage:
   .venvs/lloyd/bin/python scripts/memory/apply-classifications-v4.py            # dry-run
@@ -30,10 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
-from app.atomic_io import atomic_write_text
+from app.paths import VAULT_KG_DB
+from app.kg_store import KGStore
 
-RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
 CLASSIFIED_DIR = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "memory-graph"
 DEFAULT_GLOB = "classified-v4*.jsonl"
 DEFAULT_MIN_CONF = 0.6
@@ -86,7 +89,7 @@ def _classified_at(rec: dict) -> str:
 
 
 def _build_active_mentions_index(edges: list[dict]) -> dict[tuple[str, str], int]:
-    """(source, target) → edge index for active `mentions` edges with an
+    """(source, target) → edge id for active `mentions` edges with an
     eligible provenance (extractor-generated only).
 
     Only `mentions` is indexed because v4 only re-types from there. If a
@@ -95,22 +98,13 @@ def _build_active_mentions_index(edges: list[dict]) -> dict[tuple[str, str], int
     — that's the idempotence guard. Provenance gate ensures we don't
     overwrite human-stated, inferred, or prior-classifier-judged edges."""
     idx: dict[tuple[str, str], int] = {}
-    for i, e in enumerate(edges):
-        if e.get("expired_at"):
-            continue
+    for e in edges:
         if e.get("type") != "mentions":
             continue
         if (e.get("provenance") or "") not in ELIGIBLE_PROVENANCES:
             continue
-        idx[(e.get("source", ""), e.get("target", ""))] = i
+        idx[(e.get("source", ""), e.get("target", ""))] = e["id"]
     return idx
-
-
-def _backup_relationships() -> Path:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup = RELATIONSHIPS_FILE.with_name(f"_relationships.{ts}.v4.bak.json")
-    shutil.copy2(RELATIONSHIPS_FILE, backup)
-    return backup
 
 
 def main() -> int:
@@ -121,6 +115,7 @@ def main() -> int:
     p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONF)
     p.add_argument("--apply", action="store_true", help="Actually write changes")
     p.add_argument("--dry-run", action="store_true", help="Preview only (default)")
+    p.add_argument("--db", type=Path, default=VAULT_KG_DB)
     args = p.parse_args()
 
     if not args.apply and not args.dry_run:
@@ -129,10 +124,10 @@ def main() -> int:
 
     records = _load_v4_records(args.classified_dir, args.pattern)
 
-    data = json.loads(RELATIONSHIPS_FILE.read_text(encoding="utf-8"))
-    edges = data.get("edges", [])
-    active_mentions = _build_active_mentions_index(edges)
-    print(f"[info] {len(edges)} total edges, "
+    st = KGStore(args.db)
+    active = st.edges.active()
+    active_mentions = _build_active_mentions_index(active)
+    print(f"[info] {st.edges.count(active_only=False)} total edges, {len(active)} active, "
           f"{len(active_mentions)} eligible active mentions edges "
           f"(type=mentions, provenance in {sorted(ELIGIBLE_PROVENANCES)})")
 
@@ -142,8 +137,10 @@ def main() -> int:
         "below_threshold": 0,
         "still_mentions": 0,
         "no_eligible_edge": 0,
+        "duplicate_pair": 0,
         "upgrades": 0,
     }
+    seen_pairs: set[tuple[str, str]] = set()
     transitions: Counter = Counter()
     new_type_counts: Counter = Counter()
     changes: list[dict] = []
@@ -209,11 +206,18 @@ def main() -> int:
                 stats["no_eligible_edge"] += 1
                 continue
 
+        if key in seen_pairs:
+            # Two records for one pair after the reversed-key fold. The first
+            # already consumed the edge; a second retype would expire the
+            # relation it just created.
+            stats["duplicate_pair"] += 1
+            continue
+        seen_pairs.add(key)
         stats["upgrades"] += 1
         transitions[("mentions", new_type)] += 1
         new_type_counts[new_type] += 1
         changes.append({
-            "idx": active_mentions[key],
+            "edge_id": active_mentions[key],
             "source": source,
             "target": target,
             "new_type": new_type,
@@ -251,46 +255,45 @@ def main() -> int:
 
     if not changes:
         print("\n[info] no changes to apply")
+        st.close()
         return 0
 
-    backup = _backup_relationships()
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = args.db.parent / "store-backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = st.backup(backup_dir / f"kg-v4-{ts}.sqlite")
     print(f"\n[info] backup written → {backup}")
 
-    for ch in changes:
-        old = edges[ch["idx"]]
-        old["expired_at"] = now
-        new_edge = {
-            "source": ch["source"],
-            "target": ch["target"],
-            "type": ch["new_type"],
-            "confidence": ch["confidence"],
-            "provenance": "EXTRACTED_CLASSIFIER_V4",
-            "created_at": ch["classified_at"] or now,
-            "expired_at": None,
-            "source_doc": old.get("source_doc"),
-            "reason": ch["reason"],
-            "superseded_edge": {
-                "type": "mentions",
-                "confidence": old.get("confidence"),
-                "created_at": old.get("created_at"),
-            },
-            "classifier_model": ch["model"],
-            "classifier_meta": {
-                "prompt_version": ch["prompt_version"],
-                "verdict_adjustment": ch["verdict_adjustment"],
-                "direction_check": ch["direction_check"],
-                "quote_verified": ch["quote_verified"],
-                "reason_quote": ch["reason_quote"],
-                "src_type_hint": ch["src_type_hint"],
-                "tgt_type_hint": ch["tgt_type_hint"],
-            },
-        }
-        edges.append(new_edge)
-
-    atomic_write_text(
-        RELATIONSHIPS_FILE, json.dumps(data, indent=2, sort_keys=False), fsync=True
-    )
-    print(f"[info] wrote {RELATIONSHIPS_FILE} ({len(edges)} total edges)")
+    # One transaction for the whole run: 3,902 retypes either all land or
+    # none do.
+    with st.transaction():
+        for ch in changes:
+            st.edges.retype(
+                ch["edge_id"],
+                {
+                    "type": ch["new_type"],
+                    "confidence": ch["confidence"],
+                    "provenance": "EXTRACTED_CLASSIFIER_V4",
+                    "created_at": ch["classified_at"] or now,
+                    "evidence": ch.get("reason_quote"),
+                    "reason": ch["reason"],
+                    "classifier_model": ch["model"],
+                    "classifier_meta": {
+                        "prompt_version": ch["prompt_version"],
+                        "verdict_adjustment": ch["verdict_adjustment"],
+                        "direction_check": ch["direction_check"],
+                        "quote_verified": ch["quote_verified"],
+                        "reason_quote": ch["reason_quote"],
+                        "src_type_hint": ch["src_type_hint"],
+                        "tgt_type_hint": ch["tgt_type_hint"],
+                    },
+                },
+                origin="classifier",
+                reason=f"v4 reclassified mentions → {ch['new_type']}",
+            )
+    after = st.stats()
+    print(f"[info] applied {len(changes)} retypes; store now {after}")
+    st.close()
     return 0
 
 

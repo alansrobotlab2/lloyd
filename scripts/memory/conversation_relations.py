@@ -490,7 +490,13 @@ def save_proposals(data: dict) -> None:
 
 
 def deduplicate_against_index(proposals: list[dict]) -> list[dict]:
-    """Remove proposals that duplicate existing relations-index entries."""
+    """Remove proposals that duplicate existing relations-index entries.
+
+    The index writes its rows under `relationships`; this read `edges`, so
+    it matched nothing and the dedupe was a no-op against 486,961 existing
+    relations (2026-09-03 review). Both keys are accepted now so an older
+    index file still dedupes.
+    """
     if not RELATIONS_INDEX.exists():
         return proposals
 
@@ -499,11 +505,12 @@ def deduplicate_against_index(proposals: list[dict]) -> list[dict]:
     except (json.JSONDecodeError, OSError):
         return proposals
 
+    rows = index.get("relationships") or index.get("edges") or []
     existing = set()
-    for edge in index.get("edges", []):
-        key = (edge.get("source", ""), edge.get("target", ""))
-        existing.add(key)
-        existing.add((key[1], key[0]))  # bidirectional check
+    for edge in rows:
+        src, tgt = edge.get("source", ""), edge.get("target", "")
+        existing.add((src, tgt))
+        existing.add((tgt, src))  # bidirectional check
 
     return [
         p for p in proposals
@@ -531,6 +538,45 @@ def auto_approve_strong(proposals: list[dict], threshold: float = 0.85) -> int:
         p["status"] = "approved"
         approved += 1
     return approved
+
+
+def land_approved_edges(proposals: list[dict]) -> int:
+    """Write approved co-access links into the edge store.
+
+    Approving a proposal used to change a status field in a JSON file that
+    nothing downstream read, so this task produced no graph. Each approved
+    pair now becomes a `co_accessed` edge with provenance INFERRED and the
+    trajectory that evidenced it as `source_doc`, which is what makes it
+    visible to retrieval and auditable afterwards.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from app.kg_store import StoreUnavailable, store
+
+    landed = 0
+    try:
+        st = store()
+    except StoreUnavailable as exc:
+        print(f"  [edges] store unavailable ({exc}); nothing landed")
+        return 0
+    with st.transaction():
+        for p in proposals:
+            if p.get("status") != "approved" or p.get("edge_id"):
+                continue
+            src, tgt = p.get("source"), p.get("target")
+            if not src or not tgt or src == tgt:
+                continue
+            edge_id = st.edges.add({
+                "source": src, "target": tgt,
+                "type": p.get("relation_type") or "co_accessed",
+                "confidence": float(p.get("confidence", 0.85)),
+                "provenance": "INFERRED",
+                "source_doc": p.get("evidence_trajectory") or p.get("source_doc"),
+                "evidence": (p.get("reason") or "")[:500] or None,
+            }, origin="conversation")
+            p["edge_id"] = edge_id
+            landed += 1
+    return landed
 
 
 # ── CLI Commands ─────────────────────────────────────────────────────────────
@@ -745,13 +791,17 @@ def cmd_stats():
 
 
 def cmd_approve():
-    """Auto-approve strong proposals older than 48h."""
+    """Auto-approve strong proposals older than 48h, and land them as edges."""
     data = load_proposals()
     # Also deduplicate against index
+    before = len(data["proposals"])
     data["proposals"] = deduplicate_against_index(data["proposals"])
+    print(f"Deduplicated against relations-index: {before - len(data['proposals'])} dropped")
     count = auto_approve_strong(data["proposals"])
+    landed = land_approved_edges(data["proposals"])
     save_proposals(data)
     print(f"Auto-approved: {count}")
+    print(f"Edges landed in the store: {landed}")
 
 
 def main():

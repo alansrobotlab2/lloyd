@@ -7,12 +7,13 @@ normalize through this module.
 
 Key facts about the data layout:
 
-- `entity-aliases.json` is a flat `{surface_form: canonical_name}` map.
-  Keys are case-sensitive surface forms; multiple casings/punctuations
-  can map to the same canonical.
-- `entity-registry.json` is metadata only — it does NOT carry any
-  canonical_mapping field, despite what older docs claimed.
-- One dir per canonical entity under `<facts_root>/<Name>/`.
+- Aliases and the entity registry live in `app.kg_store` (SQLite). Until the
+  2026-09 migration they were `entity-aliases.json`, a flat map that six
+  programs rewrote whole with no lock; `register_canonical` read it, added a
+  key and wrote the entire file back, which is how concurrent writers lost
+  each other's entries.
+- One dir per canonical entity under `<facts_root>/<Name>/`. The store's
+  entity table mirrors that set.
 
 The facts root lives at `app.paths.VAULT_FACTS_ROOT` (currently
 `~/lloyd/_pipeline/vault-derived/facts/`).
@@ -20,10 +21,9 @@ The facts root lives at `app.paths.VAULT_FACTS_ROOT` (currently
 
 from __future__ import annotations
 
-import json
 import re
 
-from app.paths import VAULT_FACTS_ALIASES as _ALIASES_PATH
+from app.kg_store import StoreUnavailable, alias_kind as _alias_kind, store as _store
 
 # ── Junk-entity guard ────────────────────────────────────────────────────────
 # The LLM extractor occasionally emits a *filename* or a code/description
@@ -113,40 +113,16 @@ def is_valid_entity_name(name: str) -> bool:
     """Convenience inverse of :func:`looks_like_junk_entity`."""
     return not looks_like_junk_entity(name)
 
-_ALIAS_CACHE: dict = {"mtime": 0.0, "map": {}}
-
-
 def _load_alias_map() -> dict[str, str]:
-    """Return case-insensitive surface→canonical map. Lazily refreshed on mtime.
+    """Case-insensitive surface→canonical map, entities included.
 
-    On lowercase-key collision (multiple surface forms differing only in case
-    or punctuation that would map to different canonicals — see the historic
-    `Task #21` / `Task #215` bug), prefer the self-identity entry
-    (surface == canon). This avoids a dubious cross-map clobbering the
-    authoritative self-identity.
+    Memoised in the store on `PRAGMA data_version`, so it refreshes when any
+    process commits and costs one pragma otherwise.
     """
     try:
-        mtime = _ALIASES_PATH.stat().st_mtime
-    except FileNotFoundError:
+        return _store().aliases.all_lower()
+    except StoreUnavailable:
         return {}
-    if mtime == _ALIAS_CACHE["mtime"] and _ALIAS_CACHE["map"]:
-        return _ALIAS_CACHE["map"]
-    try:
-        raw = json.loads(_ALIASES_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return _ALIAS_CACHE["map"]
-    lowered: dict[str, str] = {}
-    for surface, canon in raw.items():
-        key = surface.lower()
-        if key in lowered:
-            if surface == canon:
-                lowered[key] = canon
-            # else keep existing — don't let a cross-map overwrite self-identity
-            continue
-        lowered[key] = canon
-    _ALIAS_CACHE["mtime"] = mtime
-    _ALIAS_CACHE["map"] = lowered
-    return lowered
 
 
 def normalize(name: str) -> str:
@@ -158,58 +134,41 @@ def normalize(name: str) -> str:
     """
     if not name:
         return name
-    return _load_alias_map().get(name.lower(), name)
+    try:
+        return _store().resolve(name) or name
+    except StoreUnavailable:
+        return name
 
 
 def register_canonical(name: str) -> str:
-    """Ensure `name` is present in `entity-aliases.json` as a self-identity entry.
+    """Ensure `name` is known to the store as an entity of its own.
 
     If `name` already resolves (case-insensitive) to a canonical, returns
-    that canonical. Otherwise writes `{name: name}` into `entity-aliases.json`
-    and returns `name`.
+    that canonical. Otherwise registers it and returns it.
 
     This is the right thing to call at entity-dir creation time in writers:
     it guarantees that next time someone looks the name up (even in a
-    different case) they'll hit the same canonical. Idempotent and safe to
-    call frequently; only writes when something actually changes.
+    different case) they'll hit the same canonical. Idempotent, and now a
+    single INSERT rather than a whole-file rewrite.
     """
     if not name:
         return name
-    alias_map = _load_alias_map()
-    existing = alias_map.get(name.lower())
+    try:
+        st = _store()
+    except StoreUnavailable:
+        return name
+    existing = st.resolve(name)
     if existing is not None:
         return existing
-
-    # Read raw file (we need to preserve the case-sensitive structure on disk).
-    try:
-        raw = json.loads(_ALIASES_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raw = {}
-    except Exception:
-        # Corrupt file — do not clobber. Just return the name.
-        return name
-
-    if name in raw:
-        return raw[name]
-    raw[name] = name
-    try:
-        _ALIASES_PATH.write_text(
-            json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8"
-        )
-    except Exception:
-        return name
-    # Invalidate cache so next call picks up the new entry.
-    _ALIAS_CACHE["mtime"] = 0.0
-    _ALIAS_CACHE["map"] = {}
+    st.entities.register(name)
     return name
 
 
 def normalize_and_register(name: str) -> str:
-    """Combined helper: resolve if known, else register as self-identity.
+    """Combined helper: resolve if known, else register as a new entity.
 
     This is the most useful call for writers: pass whatever surface form
-    you have, get back the canonical, and guarantee the alias map knows
-    about it.
+    you have, get back the canonical, and guarantee the store knows about it.
     """
     if not name:
         return name
@@ -219,6 +178,18 @@ def normalize_and_register(name: str) -> str:
         # registered for next time.
         return register_canonical(name)
     return resolved
+
+
+def set_alias(surface: str, canonical: str, *, kind: str | None = None,
+              origin: str = "manual", report_path: str | None = None) -> None:
+    """Route `surface` to `canonical` in the store."""
+    if not surface or not canonical:
+        return
+    try:
+        _store().aliases.set(surface, canonical, kind=kind or _alias_kind(surface, canonical),
+                             origin=origin, report_path=report_path)
+    except StoreUnavailable:
+        pass
 
 
 # ── Extraction-time entity linking ───────────────────────────────────────────
@@ -231,7 +202,6 @@ def normalize_and_register(name: str) -> str:
 # a median cost of ~114 tokens.
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
-_KNOWN_INDEX: dict = {"mtime": 0.0, "index": {}, "max_n": 1}
 _GENERIC_SINGLE = frozenset({
     "test", "agent", "agents", "memory", "system", "state", "config", "update",
     "status", "event", "error", "general", "model", "tools", "tool", "skill",
@@ -244,39 +214,39 @@ _GENERIC_SINGLE = frozenset({
 
 
 def _known_index() -> tuple[dict, int]:
-    """{(token, ...): canonical} over every canonical in the alias map."""
+    """{(token, ...): canonical} over every canonical the store knows.
+
+    Cached in the store on `PRAGMA data_version` — the JSON version rebuilt
+    this from a 939 KB file whenever its mtime moved.
+    """
+    def build():
+        st = _store()
+        index: dict[tuple, str] = {}
+        max_n = 1
+        canonicals = set(st.entities.all()) | set(st.aliases.all().values())
+        for canon in sorted(canonicals):
+            if not canon or looks_like_junk_entity(canon):
+                continue
+            toks = tuple(t.lower() for t in _TOKEN_RE.findall(canon))
+            if not toks or len(toks) > 8:
+                continue
+            # Proper-noun shape only: a canonical with no capital letter and no digit
+            # is a slug or a common word (`segment`, `active`, `stack-updates` are
+            # all registered "entities" — frontmatter leaked into the alias map).
+            # Hints must be high-precision; a missed hint costs nothing, a wrong one
+            # steers the extractor into filing facts under a bogus entity.
+            if not any(ch.isupper() or ch.isdigit() for ch in canon):
+                continue
+            if len(toks) == 1 and (len(toks[0]) < 3 or toks[0] in _GENERIC_SINGLE):
+                continue
+            # keep the first canonical for a token shape; case/punct siblings are aliases anyway
+            index.setdefault(toks, canon)
+            max_n = max(max_n, len(toks))
+        return index, max_n
     try:
-        mtime = _ALIASES_PATH.stat().st_mtime
-    except FileNotFoundError:
+        return _store().cached("known_entity_index", build)
+    except StoreUnavailable:
         return {}, 1
-    if mtime == _KNOWN_INDEX["mtime"] and _KNOWN_INDEX["index"]:
-        return _KNOWN_INDEX["index"], _KNOWN_INDEX["max_n"]
-    try:
-        raw = json.loads(_ALIASES_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return _KNOWN_INDEX["index"], _KNOWN_INDEX["max_n"]
-    index: dict[tuple, str] = {}
-    max_n = 1
-    for canon in set(raw.values()):
-        if not canon or looks_like_junk_entity(canon):
-            continue
-        toks = tuple(t.lower() for t in _TOKEN_RE.findall(canon))
-        if not toks or len(toks) > 8:
-            continue
-        # Proper-noun shape only: a canonical with no capital letter and no digit
-        # is a slug or a common word (`segment`, `active`, `stack-updates` are
-        # all registered "entities" — frontmatter leaked into the alias map).
-        # Hints must be high-precision; a missed hint costs nothing, a wrong one
-        # steers the extractor into filing facts under a bogus entity.
-        if not any(ch.isupper() or ch.isdigit() for ch in canon):
-            continue
-        if len(toks) == 1 and (len(toks[0]) < 3 or toks[0] in _GENERIC_SINGLE):
-            continue
-        # keep the first canonical for a token shape; case/punct siblings are aliases anyway
-        index.setdefault(toks, canon)
-        max_n = max(max_n, len(toks))
-    _KNOWN_INDEX.update(mtime=mtime, index=index, max_n=max_n)
-    return index, max_n
 
 
 def known_entities_in_text(text: str, limit: int = 60) -> list[str]:

@@ -24,6 +24,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent_mcp import _shared  # noqa: E402
+from app import kg_store  # noqa: E402
 
 
 def _isolate_facts_root(tmp_path: Path) -> tuple[Path, Path]:
@@ -35,12 +36,27 @@ def _isolate_facts_root(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _patch_paths(facts_root: Path, aliases_path: Path):
-    """Patch all path/cache module attributes for an isolated test."""
+    """Patch all path/cache module attributes for an isolated test.
+
+    `aliases_path` is now only where a test's seed JSON lives; the alias
+    lookup itself goes through app.kg_store, pointed at a sibling file.
+    """
+    kg_store.configure(facts_root.parent / "kg.sqlite")
     return [
         patch.object(_shared, "FACTS_ROOT", facts_root),
         patch.object(_shared, "ALIASES_PATH", aliases_path),
         patch.object(_shared, "_entity_dirs_cache", None),
     ]
+
+
+def _seed_aliases(mapping: dict) -> None:
+    """Put a `{surface: canonical}` map into the configured store."""
+    st = kg_store.store()
+    for surface, canonical in mapping.items():
+        if surface == canonical:
+            st.entities.register(canonical)
+        else:
+            st.aliases.set(surface, canonical, kind="semantic", origin="test")
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +143,7 @@ def test_alias_lookup_both_modes():
     with tempfile.TemporaryDirectory() as td:
         facts_root, aliases_path = _isolate_facts_root(Path(td))
         (facts_root / "Lloyd").mkdir()
-        aliases_path.write_text(json.dumps({"llloyd": "Lloyd"}))
+        _seed_aliases({"llloyd": "Lloyd"})
         with patch.object(_shared, "FACTS_ROOT", facts_root), \
              patch.object(_shared, "ALIASES_PATH", aliases_path), \
              patch.object(_shared, "_entity_dirs_cache", None):
@@ -144,7 +160,7 @@ def test_alias_pointing_to_missing_dir_falls_through():
         facts_root, aliases_path = _isolate_facts_root(Path(td))
         # Lloyd dir exists but alias points at "Ghost" (doesn't exist)
         (facts_root / "Lloyd").mkdir()
-        aliases_path.write_text(json.dumps({"foo": "Ghost"}))
+        _seed_aliases({"foo": "Ghost"})
         with patch.object(_shared, "FACTS_ROOT", facts_root), \
              patch.object(_shared, "ALIASES_PATH", aliases_path), \
              patch.object(_shared, "_entity_dirs_cache", None):

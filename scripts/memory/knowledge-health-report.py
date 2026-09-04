@@ -23,9 +23,9 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB
+from app.kg_store import StoreUnavailable, store as _kg_store
 
-RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "reflection"
 
 GOD_ENTITY_THRESHOLD = 20
@@ -104,25 +104,14 @@ def load_entities(facts_dir: Path) -> dict:
     return entities
 
 
-def load_relationships(rel_path: Path) -> list[dict]:
-    """Load relationship edges from _relationships.json.
+def load_relationships(_unused: Path | None = None) -> list[dict]:
+    """Every edge in the store, expired ones included (the report counts both).
 
-    Returns an empty list if the file doesn't exist or is invalid.
+    Raises `StoreUnavailable` if the store cannot be read — this report is a
+    monitor, and a monitor that silently reports zero edges when it cannot
+    see the graph is worse than one that fails.
     """
-    if not rel_path.is_file():
-        return []
-
-    try:
-        data = json.loads(rel_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return []
-
-    if isinstance(data, dict):
-        edges = data.get("edges", [])
-        if isinstance(edges, list):
-            return edges
-
-    return []
+    return _kg_store().edges.all()
 
 
 def is_edge_active(edge: dict) -> bool:

@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from app.entity_naming import normalize as _normalize_entity
+from app.kg_store import StoreUnavailable, store as _store
 from app.paths import VAULT_FACTS_ROOT
 
 # Prefer the C-based YAML loader when available (~10x faster than safe_load).
@@ -36,10 +37,9 @@ def _jsonable(v):
 router = APIRouter()
 
 _FACTS_ROOT = VAULT_FACTS_ROOT
-# Authoritative typed knowledge graph maintained by the nightly v4 classifier.
-# Contains semantic edge types (uses, part_of, implements, depends_on, etc.)
-# with confidence, provenance, and temporal bookkeeping (expired_at).
-_RELATIONSHIPS_GRAPH = _FACTS_ROOT / "_relationships.json"
+# The typed knowledge graph lives in app.kg_store (SQLite). Semantic edge
+# types (uses, part_of, implements, depends_on, …) with confidence,
+# provenance and temporal bookkeeping.
 
 # Graph cache. Key: mtime-signature of the facts root. Invalidated automatically
 # when any entity dir is touched. Computing the graph over ~1k entities / ~3.5k
@@ -53,33 +53,29 @@ _ENTITIES_CACHE: dict = {"sig": None, "payload": None}
 
 
 def _facts_signature() -> tuple:
-    """Cheap signature of the facts tree plus the typed-graph file. If either
-    the set of entity dirs changes OR the relationships graph is rewritten
-    (nightly classifier pass), the cache is invalidated."""
+    """Cheap cache key: the store's version plus its last reindex. Any commit
+    from any process (a nightly classifier run, a fact added in chat) moves
+    `PRAGMA data_version`, so the UI never serves a graph the store has
+    already replaced. Falls back to the facts-tree mtimes when the store is
+    unavailable, so the page still renders."""
     try:
-        mtimes = [d.stat().st_mtime for d in _FACTS_ROOT.iterdir() if d.is_dir()]
-    except FileNotFoundError:
-        return (0, 0.0, 0.0)
-    if not mtimes:
-        return (0, 0.0, 0.0)
-    try:
-        graph_mtime = _RELATIONSHIPS_GRAPH.stat().st_mtime
-    except FileNotFoundError:
-        graph_mtime = 0.0
-    return (len(mtimes), max(mtimes), graph_mtime)
+        st = _store()
+        return ("store", st.version(), st.facts_idx.last_reindex())
+    except StoreUnavailable:
+        try:
+            mtimes = [d.stat().st_mtime for d in _FACTS_ROOT.iterdir() if d.is_dir()]
+        except FileNotFoundError:
+            return ("fs", 0, 0.0)
+        return ("fs", len(mtimes), max(mtimes) if mtimes else 0.0)
 
 
 def _load_active_edges() -> list[dict]:
-    """Read the typed relationship graph, returning only currently-active edges
-    (no expired_at). Returns [] if the file is missing or malformed."""
-    if not _RELATIONSHIPS_GRAPH.exists():
-        return []
+    """Every currently-active edge. `[]` when the store cannot be read — the
+    Memory page degrades to facts-only rather than 500ing."""
     try:
-        data = json.loads(_RELATIONSHIPS_GRAPH.read_text(encoding="utf-8"))
-    except Exception:
+        return _store().edges.active()
+    except StoreUnavailable:
         return []
-    edges = data.get("edges", [])
-    return [e for e in edges if not e.get("expired_at")]
 
 
 # Entity name normalization lives in app.entity_naming (shared across writers

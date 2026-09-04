@@ -121,9 +121,14 @@ CONTEXT:
 
 
 def _load_relationships() -> dict:
-    if not RELATIONSHIPS_FILE.exists():
-        return {"edges": []}
-    return json.loads(RELATIONSHIPS_FILE.read_text(encoding="utf-8"))
+    """Read view of the edge graph, kept for v4's imports of this module.
+
+    The v1 driver is retired; v4 reads the store directly. This shim exists
+    so an old call site cannot silently read a stale JSON file.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from app.kg_store import store
+    return {"edges": store().edges.all()}
 
 
 _DIR_CACHE: dict[str, str | None] = {}

@@ -11,8 +11,10 @@ that appear in at least one live edge. At the #380 baseline that was 0.46%
 (294 of 63,860), which is why multi-hop traversal has nothing to walk.
 
 `latent_relationship_entities` is the actionable gap: entities carrying a
-`-relationship.md` fact file whose relations were never promoted into
-_relationships.json. That difference is the Phase 2 work queue.
+`-relationship.md` fact file whose relations were never promoted into the
+edge store. Counted as relationship-category facts whose `source_doc` no
+edge cites — the old `rel_files - nodes_with_edges` subtraction compared two
+unrelated populations and could read negative.
 
 NOTE ON METRIC USE (#380 anti-Goodhart guard): edge_count and node_coverage_pct
 are diagnostics, NOT success criteria. Success for #380 is eval MRR — multi-hop
@@ -36,9 +38,8 @@ from typing import Any
 # Ensure app/ is importable when running this script standalone
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from app.paths import VAULT_FACTS_ROOT, VAULT_FACTS_ALIASES  # noqa: E402
-
-RELATIONSHIPS_PATH = VAULT_FACTS_ROOT / "_relationships.json"
+from app.paths import VAULT_FACTS_ROOT  # noqa: E402
+from app.kg_store import StoreUnavailable, store  # noqa: E402
 
 
 # ── Collection ───────────────────────────────────────────────────────────────
@@ -72,15 +73,9 @@ def scan_entities(root: Path) -> tuple[list[str], dict[str, int], int]:
     return entities, dict(categories), stray_files
 
 
-def load_edges(path: Path) -> list[dict[str, Any]]:
-    """Load live (non-expired) edges from the relationships index."""
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return []
-    return [e for e in data.get("edges", []) if not e.get("expired_at")]
+def load_edges() -> list[dict[str, Any]]:
+    """Live (non-expired) edges from the store."""
+    return store().edges.active()
 
 
 # ── Graph structure ──────────────────────────────────────────────────────────
@@ -155,7 +150,7 @@ def build_snapshot() -> dict[str, Any]:
         raise SystemExit(f"facts root not found: {root}")
 
     entities, categories, stray_files = scan_entities(root)
-    edges = load_edges(RELATIONSHIPS_PATH)
+    edges = load_edges()
 
     graph_nodes = {
         n
@@ -165,11 +160,8 @@ def build_snapshot() -> dict[str, Any]:
     }
     components = connected_components(edges)
 
-    try:
-        aliases = json.loads(VAULT_FACTS_ALIASES.read_text())
-        alias_count = len(aliases)
-    except (json.JSONDecodeError, OSError, FileNotFoundError):
-        alias_count = 0
+    st = store()
+    alias_count = st.aliases.count()
 
     entity_count = len(entities)
     rel_files = categories.get("relationship", 0)
@@ -209,8 +201,11 @@ def build_snapshot() -> dict[str, Any]:
             "count": alias_count,
             "coverage_pct": _pct(alias_count, entity_count),
         },
-        # Phase 2 work queue: relationship prose extracted but never promoted.
-        "latent_relationship_entities": max(0, rel_files - len(graph_nodes)),
+        # Work queue: relationship prose extracted but never promoted to an
+        # edge. Measured against the fact index, so it counts the documents
+        # the seeder still has to read rather than a difference of two
+        # unrelated totals.
+        "latent_relationship_entities": _latent_relationship_entities(st),
         # Cross-entity contamination, near-duplicate clusters, duplicate regrowth
         # (kg_hygiene.py). Added 2026-09-03 after 63 directories were found holding
         # facts about a different entity and nothing had measured it.
@@ -219,6 +214,20 @@ def build_snapshot() -> dict[str, Any]:
             collections.Counter(categories).most_common()
         ),
     }
+
+
+def _latent_relationship_entities(st) -> int:
+    """Entities whose `relationship`-category facts have produced no edge.
+
+    An entity counts as promoted once any active edge names it as a source;
+    the rest are what `seed_relationship_edges.py` (or, since the extractor
+    emits edges itself, the next extraction) still owes the graph.
+    """
+    with_prose = st.facts_idx.entities_with_category("relationship")
+    if not with_prose:
+        return 0
+    sourced = {e["source"] for e in st.edges.active()}
+    return len(with_prose - sourced)
 
 
 def _hygiene_section() -> dict[str, Any]:

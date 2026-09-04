@@ -22,6 +22,15 @@ Edges are emitted as `mentions` with provenance EXTRACTED — the same raw form
 typed relations. Seed → classify → apply is the full Phase 2 pipeline; this is
 step one and is intentionally dumb about semantics.
 
+Each edge records the `-relationship.md` file it came from (`source_doc`) and
+the fact sentence that produced it (`evidence`), so any edge can be traced to
+the prose that justified it — the JSON-era seeder wrote `source_doc: null` on
+all 3,889 of them.
+
+Since the extractor emits its own edges as it writes facts, this is now a
+BACKFILL tool for trees extracted before that change, not part of the nightly
+chain.
+
 NOTE: `mentions` is the edge type that was bulk-expired on 2026-06-27 (313 of
 323 expirations) because daily-note filenames were being linked to entities.
 This script never sources from note filenames — only from curated relationship
@@ -45,10 +54,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from app.paths import VAULT_FACTS_ROOT as FACTS_DIR  # noqa: E402
-from app.atomic_io import atomic_write_text  # noqa: E402
+from app.paths import VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB  # noqa: E402
+from app.kg_store import KGStore  # noqa: E402
 
-RELATIONSHIPS_FILE = FACTS_DIR / "_relationships.json"
 SEED = 380
 
 # Mirrored from seed-relationships.py so behaviour stays consistent.
@@ -136,17 +144,19 @@ def eligible(name: str) -> bool:
     )
 
 
-def load_relationship_prose(entity_dir: Path) -> str:
-    """Return concatenated relationship-category fact text for one entity."""
+def load_relationship_prose(entity_dir: Path) -> tuple[str, list[str]]:
+    """(concatenated text, individual fact sentences) for one entity's
+    relationship-category facts. The sentences become each edge's `evidence`."""
     f = entity_dir / f"{entity_dir.name}-relationship.md"
     if not f.is_file():
-        return ""
+        return "", []
     try:
         text = f.read_text(errors="ignore")
     except OSError:
-        return ""
+        return "", []
     head = text.split("---")[1] if text.startswith("---") else text
-    return " ".join(m.group(1).strip() for m in FACT_LINE_RE.finditer(head))
+    sentences = [m.group(1).strip() for m in FACT_LINE_RE.finditer(head)]
+    return " ".join(sentences), sentences
 
 
 def build_first_token_index(names: list[str]) -> dict[str, list[str]]:
@@ -182,6 +192,7 @@ def main() -> int:
     ap.add_argument("--max-per-source", type=int, default=40,
                     help="cap edges emitted from a single source entity "
                          "(hub guard; 0 disables)")
+    ap.add_argument("--db", type=Path, default=VAULT_KG_DB)
     args = ap.parse_args()
 
     all_names = [d.name for d in FACTS_DIR.iterdir() if d.is_dir()]
@@ -194,12 +205,8 @@ def main() -> int:
         if d.is_dir() and (d / f"{d.name}-relationship.md").is_file()
     ]
 
-    data = json.loads(RELATIONSHIPS_FILE.read_text()) if RELATIONSHIPS_FILE.exists() \
-        else {"edges": [], "schema_version": 1}
-    existing = {
-        (e.get("source"), e.get("target"), e.get("type"))
-        for e in data.get("edges", [])
-    }
+    st = KGStore(args.db)
+    existing = {(e["source"], e["target"], e["type"]) for e in st.edges.active()}
 
     def shape_ok(name: str) -> bool:
         """Reject single generic words; keep acronyms and multi-token names.
@@ -224,14 +231,17 @@ def main() -> int:
     target_df: collections.Counter[str] = collections.Counter()
     scanned = 0
 
+    evidence_by_pair: dict[tuple[str, str], str] = {}
+    source_doc: dict[str, str] = {}
     for d in sources:
-        prose = load_relationship_prose(d)
+        prose, sentences = load_relationship_prose(d)
         if not prose:
             continue
         scanned += 1
         src = d.name
         src_lower = src.lower()
         prose_lower = prose.lower()
+        source_doc[src] = f"{d.name}/{d.name}-relationship.md"
         # Candidate targets: entities whose leading token occurs in this text.
         cand: set[str] = set()
         for tok in set(TOKEN_RE.findall(prose_lower)):
@@ -246,6 +256,11 @@ def main() -> int:
                 continue
             raw.append((src, tgt))
             target_df[tgt] += 1
+            # The sentence that named the target IS the evidence for the edge.
+            for sent in sentences:
+                if re.search(r"\b" + re.escape(tl) + r"\b", sent.lower()):
+                    evidence_by_pair.setdefault((src, tgt), sent[:500])
+                    break
 
     # ── Pass 2: drop generic targets, cap hubs, emit ────────────────────────
     generic = {t for t, n in target_df.items()
@@ -277,12 +292,12 @@ def main() -> int:
             "confidence": CONFIDENCE_MENTIONS,
             "provenance": "EXTRACTED",
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "expired_at": None,
-            "source_doc": None,
+            "source_doc": source_doc.get(src),
+            "evidence": evidence_by_pair.get((src, tgt)),
         })
 
     nodes = {e["source"] for e in proposed} | {e["target"] for e in proposed}
-    live_before = sum(1 for e in data.get("edges", []) if not e.get("expired_at"))
+    live_before = st.edges.count(active_only=True)
 
     print("Seed relationship edges — #380 Phase 2 (dry-run)" if not args.apply
           else "Seed relationship edges — #380 Phase 2 (APPLYING)")
@@ -314,15 +329,18 @@ def main() -> int:
         print(f"\nwrote proposals → {args.out}", file=sys.stderr)
 
     if args.apply:
-        backup = RELATIONSHIPS_FILE.with_suffix(
-            f".json.{datetime.now().strftime('%Y%m%dT%H%M%SZ')}.bak")
-        backup.write_text(RELATIONSHIPS_FILE.read_text())
-        data.setdefault("edges", []).extend(proposed)
-        atomic_write_text(RELATIONSHIPS_FILE, json.dumps(data, indent=2) + "\n", fsync=True)
-        print(f"\napplied {len(proposed):,} edges; backup → {backup.name}")
+        ts = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+        backup_dir = args.db.parent / "store-backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = st.backup(backup_dir / f"kg-seed-{ts}.sqlite")
+        with st.transaction():
+            for e in proposed:
+                st.edges.add(e, origin="seed")
+        print(f"\napplied {len(proposed):,} edges; backup → {backup}")
     else:
         print("\n(dry-run — pass --apply to write)")
 
+    st.close()
     return 0
 
 

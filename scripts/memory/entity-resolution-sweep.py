@@ -8,13 +8,17 @@ SUFFIX) or ambiguous (LOOP / RESEARCH / OTHER), and either prints a plan
 (dry-run) or applies the merges.
 
 Apply mode:
-  1. Backs up  _relationships.json  and  entity-aliases.json  with timestamp.
-  2. For each SAFE merge:
-       a. Moves fact files from variant dir into canonical dir (rename prefix).
-       b. Rewrites edges: source/target variant → canonical; dedupes.
-       c. Adds  {variant_lower: canonical}  to entity-aliases.json.
-       d. Removes empty variant dir.
-  3. Writes updated files.
+  1. Backs up the store (SQLite backup API — consistent under writers).
+  2. In ONE transaction, for each SAFE merge:
+       a. Adds  {variant: canonical}  to the alias table.
+       b. Rewrites edges through `edges.rewrite_endpoint`: every active edge
+          touching the variant is expired and re-added on the canonical, and
+          the (old_id, new_id) pairs are recorded so a revert is exact.
+     Either every merge in the run lands or none does — the JSON era wrote
+     aliases and edges as two separate whole-file rewrites, and a crash
+     between them left the tree half-merged (2026-09-03).
+  3. Moves fact files from variant dir into canonical dir (rename prefix),
+     retags them, removes the empty variant dir.
 
 Ambiguous clusters are dumped to a review JSONL for Tier 2 hand-review.
 
@@ -25,7 +29,7 @@ Usage:
   # apply Tier 1:
   python entity-resolution-sweep.py --apply
 
-  # also rewrite entity-aliases.json from scratch (drops fuzzy-match poison):
+  # also drop inherited alias entries that are pipeline noise:
   python entity-resolution-sweep.py --apply --rebuild-aliases
 """
 from __future__ import annotations
@@ -47,14 +51,13 @@ import yaml
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_FACTS_ALIASES as ALIASES_PATH
-from app.atomic_io import atomic_write_text
+from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_KG_DB
 from app.entity_naming import looks_like_junk_entity
+from app.kg_store import KGStore
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _invocation import invocation_ledger  # noqa: E402
 
-REL_PATH = FACTS_ROOT / "_relationships.json"
 OUT_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
 BASELINE_PATH = OUT_DIR / "graph-baseline.json"
 # --apply refuses when the graph holds less than this fraction of the largest
@@ -64,6 +67,11 @@ BASELINE_PATH = OUT_DIR / "graph-baseline.json"
 # semantic conflations were merged with no check at all.
 DEGRADED_FRACTION = 0.5
 ALL_TIERS = ("CASE", "PUNCT", "SUFFIX_SAFE")
+
+# Tier → the alias `kind` the store records, so a later reader can tell a
+# safe case-fold from a judged semantic merge without re-deriving it.
+TIER_ALIAS_KIND = {"CASE": "case", "PUNCT": "punct", "SUFFIX_SAFE": "suffix",
+                   "SUFFIX_AMBIGUOUS": "suffix", "IDENTICAL": "case", "OTHER": "semantic"}
 
 # ── Normalization ────────────────────────────────────────────────────────────
 
@@ -647,17 +655,30 @@ def _merge_fact_file_into(src: Path, dst: Path) -> None:
     dst.write_text(_dump_frontmatter(dst_fm, body), encoding="utf-8")
 
 
-def backup_file(path: Path, timestamp: str) -> Path:
+def load_semantic_proposals(out_dir: Path) -> list[dict]:
+    """#67's latest judged pairs, as review input for this plan.
+
+    Task #67 writes `semantic-proposals-latest.jsonl` and stops; it has no
+    apply path any more. Missing or unreadable is normal (it runs weekly).
+    """
+    path = out_dir / "semantic-proposals-latest.jsonl"
     if not path.exists():
-        return path
-    bak = path.with_suffix(path.suffix + f".{timestamp}.bak")
-    shutil.copy2(path, bak)
-    prune_old_backups(path)
-    return bak
+        return []
+    out = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    except Exception as exc:
+        print(f"  [proposals] unreadable ({exc}); ignoring")
+        return []
+    out.sort(key=lambda r: -float(r.get("confidence") or 0))
+    return out
 
 
-def prune_old_backups(path: Path, keep: int = 3) -> int:
-    """Keep the newest `keep` .bak backups for `path`; delete older ones.
+def prune_old_backups(path: Path, keep: int = 3, pattern: str | None = None) -> int:
+    """Keep the newest `keep` backups beside `path`; delete older ones.
 
     Pre-2026-08-30, backups accumulated unbounded (246 files / 314 MB in
     ~8 days, mostly incident-doc runNNN-pre.bak snapshots). Safe no-op on
@@ -665,7 +686,7 @@ def prune_old_backups(path: Path, keep: int = 3) -> int:
     """
     try:
         baks = sorted(
-            path.parent.glob(path.name + "*.bak"),
+            path.parent.glob(pattern or (path.name + "*.bak")),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -680,81 +701,53 @@ def prune_old_backups(path: Path, keep: int = 3) -> int:
 
 def apply_merges(
     plan: dict,
-    rel_data: dict,
-    aliases: dict[str, str],
+    st,
     facts_root: Path,
     rebuild_aliases: bool,
     existing_dirs: set[str] | None = None,
     entities: list[str] | None = None,
 ) -> dict:
-    """
-    Execute all SAFE merges in the plan. Mutates rel_data and aliases in place.
+    """Execute all SAFE merges in the plan against the store and the fact tree.
 
-    Returns a report dict.
-    """
-    edges = rel_data["edges"]
+    The alias writes and every edge rewrite happen in ONE store transaction:
+    a crash or a kill in the middle leaves the graph exactly as it was, not
+    half-merged. The fact-file moves follow, after the transaction commits,
+    because the filesystem cannot join it — and that is the safe order: the
+    alias table already routes new facts to the survivor, so a crash between
+    the two costs a re-run, not a corrupted tree.
 
-    # Build a fast mapping: variant → canonical for this session's merges
+    Returns a report dict. `edge_rewrites` maps each variant to the list of
+    (old_edge_id, new_edge_id) pairs, which `revert-suffix-merges.py
+    --fix-edges` inverts exactly.
+    """
     variant_to_canonical: dict[str, str] = {}
-    dir_moves: list[tuple[Path, Path]] = []
+    variant_tier: dict[str, str] = {}
     for cluster in plan["safe_merges"]:
         canonical = cluster["canonical"]
         for m in cluster["merges"]:
             variant_to_canonical[m["variant"]] = canonical
+            variant_tier[m["variant"]] = m.get("subtier") or cluster.get("tier") or "OTHER"
 
-    # ── Rewrite edges
-    # The variant→canonical rewrite can turn two edges (X→Y, X-variant→Y) into
-    # identical (canonical→Y) records, so we collapse those true rewrite-induced
-    # duplicates. We preserve both active and expired edges and only merge across
-    # ACTIVE ones.
-    #
-    # CRITICAL (2026-08-21): only collapse a collision when at least one side of
-    # it was rewritten in THIS pass. A same-(source,target,type) pair where NEITHER
-    # endpoint was rewritten is a writer-authored bi-temporal record (e.g. two
-    # related_to edges the writer created on different dates, one superseding the
-    # other) and must be preserved verbatim. Collapsing it silently destroys fact
-    # history. The earlier unconditional dedupe clobbered the
-    # Robert Kiyosaki → Keith Cunningham related_to pair on 2026-08-21.
-    seen_active: dict[tuple, dict] = {}
-    seen_active_rewritten: dict[tuple, bool] = {}
-    new_edges = []
-    rewrite_count = 0
-    active_dedupe_count = 0
+    edge_rewrites: dict[str, list[tuple[int, int]]] = {}
+    alias_writes = 0
+    with st.transaction():
+        # 1. Aliases first, inside the same transaction — the extractor
+        #    consults them, and they must never survive a rolled-back merge.
+        for variant, canonical in variant_to_canonical.items():
+            kind = TIER_ALIAS_KIND.get(variant_tier.get(variant, ""), "semantic")
+            st.aliases.set(variant, canonical, kind=kind, origin="sweep")
+            st.entities.register(canonical)
+            alias_writes += 1
+        if rebuild_aliases:
+            alias_writes += _prune_noise_aliases(st, existing_dirs)
+        # 2. Edges. rewrite_endpoint expires each active edge and re-adds it
+        #    on the canonical, so the pre-merge graph stays readable.
+        for variant, canonical in variant_to_canonical.items():
+            pairs = st.edges.rewrite_endpoint(variant, canonical, origin="sweep")
+            if pairs:
+                edge_rewrites[variant] = pairs
 
-    for e in edges:
-        src = variant_to_canonical.get(e["source"], e["source"])
-        tgt = variant_to_canonical.get(e["target"], e["target"])
-        rewritten = (src != e["source"]) or (tgt != e["target"])
-        if rewritten:
-            rewrite_count += 1
-        e_new = dict(e)
-        e_new["source"] = src
-        e_new["target"] = tgt
-
-        active = e_new.get("expired_at") is None
-        if active:
-            key = (src, tgt, e_new.get("type"))
-            # Collapse only a rewrite-induced collision (current edge rewritten
-            # this pass, or the previously-stored edge at this key was).
-            if key in seen_active and (
-                rewritten or seen_active_rewritten.get(key, False)
-            ):
-                # Merge the duplicate: prefer higher confidence; keep earliest
-                # created_at.
-                prev = seen_active[key]
-                prev["confidence"] = max(
-                    prev.get("confidence", 0.0), e_new.get("confidence", 0.0)
-                )
-                if e_new.get("created_at", "") < prev.get("created_at", ""):
-                    prev["created_at"] = e_new["created_at"]
-                active_dedupe_count += 1
-                continue
-            if key not in seen_active:
-                seen_active[key] = e_new
-                seen_active_rewritten[key] = rewritten
-        new_edges.append(e_new)
-
-    rel_data["edges"] = new_edges
+    rewrite_count = sum(len(v) for v in edge_rewrites.values())
 
     # ── Move fact files
     dir_ops: list[dict] = []
@@ -782,6 +775,7 @@ def apply_merges(
         possible_prefixes = [p for p in possible_prefixes if not (p in seen_pfx or seen_pfx.add(p))]
 
         new_prefix = canonical + "-"
+        touched: list[Path] = []
         for f in list(vdir.iterdir()):
             if not f.is_file():
                 continue
@@ -800,6 +794,7 @@ def apply_merges(
             else:
                 shutil.move(str(f), str(dest))
             retag_fact_file(dest, variant, canonical)
+            touched.append(dest)
             moved += 1
         # Move nested subdirs (writer pattern: <variant>/<variant>-experiment.md).
         # The file loop above skips non-files, so without this a non-empty
@@ -821,6 +816,7 @@ def apply_merges(
                         inner.unlink()
                     else:
                         shutil.move(str(inner), str(dest_file))
+                    touched.append(dest_file)
                 try:
                     d.rmdir()
                 except OSError:
@@ -828,6 +824,7 @@ def apply_merges(
                 moved += 1
             else:
                 shutil.move(str(d), str(dest))
+                touched.extend(dest.glob("*.md"))
                 moved += 1
         # Remove variant dir if empty
         removed = False
@@ -836,6 +833,13 @@ def apply_merges(
             removed = True
         except OSError:
             pass
+        # The index follows the files: without this the merged facts would
+        # still be indexed under the variant until the next full reindex.
+        try:
+            st.facts_idx.reindex(touched, root=facts_root)
+            st.entities.remove(variant) if removed else None
+        except Exception as exc:  # index is derived; never fail a merge on it
+            print(f"    [warn] index update for {variant!r} failed: {exc}")
         dir_ops.append(
             {
                 "variant": variant,
@@ -847,95 +851,42 @@ def apply_merges(
 
     return {
         "rewritten_edges": rewrite_count,
-        "active_dedupe_count": active_dedupe_count,
+        "edge_rewrites": {k: [list(p) for p in v] for k, v in edge_rewrites.items()},
+        "alias_writes": alias_writes,
         "dir_operations": dir_ops,
         "variant_to_canonical": variant_to_canonical,
     }
 
 
-def compute_aliases(
-    plan: dict,
-    aliases: dict[str, str],
-    facts_root: Path,
-    rebuild_aliases: bool,
-    existing_dirs: set[str] | None = None,
-) -> dict[str, str]:
-    """The alias table this plan implies. Pure; main() writes it BEFORE any file
-    moves so a crash mid-apply leaves the extractor routing correctly rather
-    than recreating half-moved variants (which the 2026-09-03 apply did: files
-    moved, aliases absent, variants regrown by the next extraction).
+def _prune_noise_aliases(st, existing_dirs: set[str] | None) -> int:
+    """Drop inherited alias rows that are pipeline noise (--rebuild-aliases).
+
+    Noise is an entry whose surface and canonical collapse to the same
+    `normalize_full` by suffix stripping alone. Case-only and punct-only
+    variants are legitimate and stay. Entries whose canonical has no fact
+    directory are dropped too, unless the canonical is still an edge endpoint.
     """
-    variant_to_canonical: dict[str, str] = {}
-    for cluster in plan["safe_merges"]:
-        for m in cluster["merges"]:
-            variant_to_canonical[m["variant"]] = cluster["canonical"]
+    if existing_dirs is None:
+        existing_dirs = set()
+    live = existing_dirs | st.edges.nodes()
+    removed = 0
+    for row in st.aliases.rows():
+        k, v = row["surface"], row["canonical"]
+        if _is_alias_noise(k, v) or (live and v not in live):
+            st.aliases.remove(k)
+            removed += 1
+    return removed
 
-    # Noise filter: per skill guardrail, any entry where normalize_full(alias)
-    # == normalize_full(canonical) is pipeline noise and must be filtered out.
-    # normalize_full lowercases and strips stop suffixes, so it catches
-    # suffix-stripped variants that collapse to the same form.
-    # However, case-only (SAFE_CASE) and punctuation-only (SAFE_PUNCT) variants
-    # are legitimate aliases that MUST be preserved — the v4 classifier's
-    # resolve_canonical() does exact-match first, then lowercased match.
-    # So we only filter as noise when the variant and canonical differ ONLY
-    # by suffix stripping (i.e., they have the same tokens after case/punct
-    # normalization but differ in suffix).
-    def _is_noise(k: str, v: str) -> bool:
-        # Noise if normalize_full(k) == normalize_full(v) AND the difference
-        # is only suffix-based (not case or punctuation).
-        # Case-only and punctuation-only variants are NOT noise.
-        nk = normalize_full(k)
-        nv = normalize_full(v)
-        if nk != nv:
-            return False
-        # Same normalized form — check if the difference is only case/punct
-        # (legitimate) or only suffix (noise).
-        # If tokens differ only in case or punctuation, it's legitimate.
-        tk = tokens(k)
-        tv = tokens(v)
-        # If token counts differ, the difference is suffix-based → noise
-        if len(tk) != len(tv):
-            return True
-        # Same token count — check if they differ only by case
-        # (punctuation-only variants are caught by token equality since
-        # tokens() strips punctuation)
-        if all(a.lower() == b.lower() for a, b in zip(tk, tv)):
-            return False  # Case-only variant — legitimate
-        return True  # Different tokens but same normalize_full → noise
 
-    if rebuild_aliases:
-        # Rebuild alias table from scratch: keep all existing aliases that
-        # are not noise (normalize_full(k) != normalize_full(v)), regardless
-        # of whether the canonical has a fact directory. This preserves
-        # legitimate alias mappings for entities without fact directories
-        # (e.g., entities that exist only in the relationship graph).
-        new_aliases = {
-            k: v for k, v in aliases.items()
-            if not _is_noise(k, v)
-        }
-    else:
-        # Filter existing aliases: keep only entries where the canonical has a
-        # fact directory (avoids stale entries for deleted entities).
-        # Also filter noise: normalize_full(k) == normalize_full(v) is noise.
-        if existing_dirs is None:
-            existing_dirs = {d.name for d in facts_root.iterdir() if d.is_dir()} if facts_root.exists() else set()
-        new_aliases = {
-            k: v for k, v in aliases.items()
-            if v in existing_dirs and not _is_noise(k, v)
-        }
-
-    # Every merge THIS plan approved gets its alias, whatever its tier. The
-    # noise filter above only prunes the inherited table. Previously suffix
-    # aliases were dropped as "noise" even for merges the sweep had just
-    # performed, so the extractor recreated the variant on its next pass and
-    # the merge undid itself.
-    for variant, canonical in variant_to_canonical.items():
-        new_aliases[variant.lower()] = canonical
-        new_aliases[variant] = canonical
-    for canonical in set(variant_to_canonical.values()):
-        new_aliases[canonical.lower()] = canonical
-        new_aliases[canonical] = canonical
-    return new_aliases
+def _is_alias_noise(k: str, v: str) -> bool:
+    """Same rule the JSON-era `compute_aliases` applied to the inherited table:
+    identical after suffix stripping AND differing by more than case."""
+    if normalize_full(k) != normalize_full(v):
+        return False
+    tk, tv = tokens(k), tokens(v)
+    if len(tk) != len(tv):
+        return True
+    return not all(a.lower() == b.lower() for a, b in zip(tk, tv))
 
 
 # ── Output formatters ────────────────────────────────────────────────────────
@@ -1036,33 +987,23 @@ def main() -> int:
     ap.add_argument(
         "--rebuild-aliases",
         action="store_true",
-        help="Rewrite entity-aliases.json from scratch (drop existing entries). Requires --apply.",
+        help="Also drop inherited alias rows that are pipeline noise. Requires --apply.",
     )
-    ap.add_argument("--relationships", default=str(REL_PATH))
+    ap.add_argument("--db", default=str(VAULT_KG_DB), help="knowledge-graph store")
     ap.add_argument("--facts-dir", default=str(FACTS_ROOT))
-    ap.add_argument("--aliases", default=str(ALIASES_PATH))
     ap.add_argument("--out-dir", default=str(OUT_DIR))
     ap.add_argument("--date", default=dt.date.today().isoformat())
     args = ap.parse_args()
 
-    rel_path = Path(args.relationships)
     facts_root = Path(args.facts_dir)
-    aliases_path = Path(args.aliases)
     out_dir = Path(args.out_dir)
 
-    # Load data
-    with rel_path.open() as f:
-        rel_data = json.load(f)
-    active_edges = [e for e in rel_data["edges"] if e.get("expired_at") is None]
+    st = KGStore(Path(args.db))
+    active_edges = st.edges.active()
 
     existing_dirs = (
         {d.name for d in facts_root.iterdir() if d.is_dir()} if facts_root.exists() else set()
     )
-
-    aliases: dict[str, str] = {}
-    if aliases_path.exists():
-        with aliases_path.open() as f:
-            aliases = json.load(f)
 
     allowed_tiers = {t.strip() for t in args.tiers.split(",") if t.strip()}
     gate = None
@@ -1077,10 +1018,18 @@ def main() -> int:
 
     baseline_path = out_dir / "graph-baseline.json"   # lives with the plans/reports it guards
     baseline = update_baseline(len(active_edges), baseline_path)
+    print(f"  Store:           {args.db}")
     print(f"  Baseline:        {baseline:,} active edges (now {len(active_edges):,})")
     gs = plan.get("gate_stats") or {}
     if gs.get("asked"):
         print(f"  Semantic gate:   {gs['asked']} suffix pairs judged — {gs['same']} clusters SAME, {gs['review']} to review")
+
+    # Proposals from #67's weekly judge, if it has run. They are review input,
+    # never an auto-merge: #67 lost its apply path on 2026-09-04.
+    proposals = load_semantic_proposals(out_dir)
+    if proposals:
+        plan["semantic_proposals"] = proposals[:200]
+        print(f"  #67 proposals:   {len(proposals)} pairs awaiting review")
 
     # Emit plan. Timestamped: the old `entity-merges-<date>.jsonl` was opened in
     # write mode by every dry-run, so a second run on the same day overwrote the
@@ -1114,24 +1063,20 @@ def main() -> int:
     print()
     print(f"== Applying merges (timestamp: {ts}) ==")
 
-    rel_bak = backup_file(rel_path, ts)
-    alias_bak = backup_file(aliases_path, ts) if aliases_path.exists() else None
-    print(f"  Backed up: {rel_bak}")
-    if alias_bak:
-        print(f"  Backed up: {alias_bak}")
+    backup_dir = out_dir / "store-backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    store_bak = st.backup(backup_dir / f"kg-sweep-{ts}.sqlite")
+    prune_old_backups(store_bak, keep=5, pattern="kg-sweep-*.sqlite")
+    print(f"  Backed up: {store_bak}")
 
-    # 1. aliases first — the extractor consults them; a crash after this point
-    #    still leaves new facts routed to the survivor.
-    new_aliases = compute_aliases(plan, aliases, facts_root, args.rebuild_aliases, existing_dirs=existing_dirs)
-    atomic_write_text(aliases_path, json.dumps(new_aliases, indent=2, sort_keys=True, ensure_ascii=False), fsync=True)
-    # 2. edges + file moves
-    report = apply_merges(plan, rel_data, aliases, facts_root, args.rebuild_aliases, existing_dirs=existing_dirs, entities=plan.get("all_entities", []))
-    report["aliases_final_count"] = len(new_aliases)
-    atomic_write_text(rel_path, json.dumps(rel_data, indent=2, ensure_ascii=False), fsync=True)
+    before = st.stats()
+    report = apply_merges(plan, st, facts_root, args.rebuild_aliases,
+                          existing_dirs=existing_dirs, entities=plan.get("all_entities", []))
+    after = st.stats()
 
     # Report
     print(f"  Edges rewritten:   {report['rewritten_edges']}")
-    print(f"  Active dedupes:    {report['active_dedupe_count']}")
+    print(f"  Alias writes:      {report['alias_writes']}")
     print(f"  Dir operations:    {len(report['dir_operations'])}")
     for op in report["dir_operations"]:
         if op.get("action") == "skip_no_variant_dir":
@@ -1141,7 +1086,7 @@ def main() -> int:
                 f"    {op['variant']!r} → {op['canonical']!r}: "
                 f"moved {op['files_moved']} files, removed_dir={op['removed_dir']}"
             )
-    print(f"  Alias table size:  {report['aliases_final_count']}")
+    print(f"  Store: {before} → {after}")
     print()
 
     # Save an apply report
@@ -1152,11 +1097,14 @@ def main() -> int:
     report_to_save["tiers_allowed"] = sorted(allowed_tiers)
     report_to_save["gate_stats"] = plan.get("gate_stats")
     report_to_save["baseline_active_edges"] = baseline
+    report_to_save["store_backup"] = str(store_bak)
+    report_to_save["store_before"], report_to_save["store_after"] = before, after
     report_to_save["ledger"] = invocation_ledger()   # who ran this — see _invocation.py
     with apply_out.open("w") as f:
         json.dump(report_to_save, f, indent=2, ensure_ascii=False)
     print(f"  Report: {apply_out}")
 
+    st.close()
     return 0
 
 

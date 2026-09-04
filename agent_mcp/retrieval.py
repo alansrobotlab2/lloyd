@@ -5,8 +5,8 @@ Owns the pieces both `agent_mcp.facts` (the fact tools) and
 `agent_mcp.vault` (vault_recall) need:
 
     - Entity extraction from a query (extract_entities_from_query)
-    - The relationships index with mtime-based caching
-      (load_relationships / save_relationships / invalidate_relationships_cache)
+    - A read view of the edge graph (load_relationships), which since the
+      2026-09 migration lives in app.kg_store, not a JSON file
     - Entity-to-entity graph traversal + weighted expansion
       (graph_expand_entities / graph_weighted_neighbors)
     - Query-aware fact reading and ranking
@@ -19,15 +19,14 @@ vault_recall breakage. These names are the public API; treat changes to
 their signatures as cross-module breaking changes.
 """
 
-import json
 import math
 import re
-import time
 from typing import Optional
+
+from app.kg_store import StoreUnavailable, store
 
 from agent_mcp._shared import (
     FACTS_ROOT,
-    atomic_write_text,
     _FACT_QUERY_STOPWORDS,
     _SCORING_STOPWORDS,
     _find_entity_dir,
@@ -38,20 +37,10 @@ from agent_mcp._shared import (
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-class RelationshipsCorrupt(RuntimeError):
-    """The relationships index exists but could not be read.
-
-    Raised instead of returning the empty schema. The empty schema is a
-    legitimate value — a graph with no edges — so returning it for an
-    unreadable file made "I cannot read the graph" indistinguishable from
-    "the graph is empty". A writer that loaded, mutated and saved would
-    then persist a 3-edge graph over 6,539 real ones. That is exactly how
-    the 2026-08-22 wipe went unnoticed for hours.
-
-    Read paths may catch this and degrade to no-graph behaviour. Write
-    paths must not: they abort without saving.
-    """
-
+# The edge graph is unreadable. Kept as an alias so the guards written for the
+# JSON era read the same: a store that will not open is not an empty graph, and
+# a writer that treats it as one persists a 3-edge graph over 6,539 real ones.
+RelationshipsCorrupt = StoreUnavailable
 
 
 # Edge-type weights for weighted graph expansion in vault_recall.
@@ -85,32 +74,11 @@ _TASK_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Cache for entity degree (non-expired edge count) — used as a deterministic
-# tie-break signal in extract_entities_from_query. 60s TTL keeps the hot
-# prefetch path fast without going fully stale.
-_edge_count_cache: Optional[tuple] = None
-_EDGE_COUNT_TTL = 60
-
-RELATIONSHIPS_PATH = FACTS_ROOT / "_relationships.json"
-
-# In-memory cache for the relationships index (#340 PR 2).
-#
-# Layout: (mtime_ns, parsed_data) | None
-#
-# Invalidation strategy:
-#   - Reads stat() the file and compare mtime_ns. Mismatch → reload.
-#   - save_relationships() refreshes the cache with the new mtime.
-#   - This handles both in-process mutation (load → mutate → save) and
-#     cross-process writes (autonomy classifier writes file, MCP server
-#     picks up via stat-check on next read).
-#
-# Mutation contract: callers that mutate the returned dict MUST follow
-# with save_relationships(). Between load and save, the cache and the
-# caller share the same object — there's no defensive deep-copy because
-# the MCP server is single-threaded and the file is small enough to
-# parse but large enough (2.3 MB / 4.6k edges) that copying defeats
-# the cache.
-_relationships_cache: Optional[tuple[int, dict]] = None
+# Degree and adjacency are memoised inside app.kg_store, keyed on the store's
+# `PRAGMA data_version` — so a commit from the classifier process invalidates
+# this process's cache on the next read. That replaces the 60s TTL and the
+# mtime checks the JSON readers used, both of which could serve a stale graph
+# for up to a minute after a nightly run rewrote it.
 
 # Fact ranking config (Fix A+C for #322).
 # God-node threshold: entities with more than this many facts are treated as
@@ -200,47 +168,43 @@ def get_facts_sync(entity: str, category: str = None, as_of: str = None,
 def get_entity_edge_counts() -> dict:
     """Entity name → number of active edges touching it (its degree).
 
-    Goes through `load_relationships()` rather than re-reading the file, so
-    the parse is shared with every other reader and a corrupt index raises
-    `RelationshipsCorrupt` here too instead of silently reporting that
-    every entity has degree zero. Callers that only rank with this should
-    use `_edge_counts_or_empty()`.
+    Memoised in the store on `PRAGMA data_version`. Raises
+    `StoreUnavailable` when the graph cannot be read — callers that only rank
+    with this should use `_edge_counts_or_empty()`.
     """
-    global _edge_count_cache
-    now = time.monotonic()
-    if _edge_count_cache is not None and (now - _edge_count_cache[0]) < _EDGE_COUNT_TTL:
-        return _edge_count_cache[1]
-    counts: dict[str, int] = {}
-    data = load_relationships()
-    for edge in data.get("edges", []):
-        if edge.get("expired_at") or edge.get("invalid_at"):
-            continue
-        s, t = edge.get("source"), edge.get("target")
-        if s:
-            counts[s] = counts.get(s, 0) + 1
-        if t:
-            counts[t] = counts.get(t, 0) + 1
-    _edge_count_cache = (now, counts)
-    return counts
+    return store().edges.degree()
 
 
-def _edge_counts_or_empty() -> dict:
+def get_entity_edge_counts_ci() -> dict:
+    """Lowercased entity name → summed degree.
+
+    `vault._graph_rerank` keys its voters on the lowercased name, so against
+    the cased map every lookup missed, every degree read as 1, and the
+    god-node penalty divided every voter by the same constant — a no-op
+    dressed as a penalty (2026-09-03 review).
+    """
+    return store().edges.degree_ci()
+
+
+def _edge_counts_or_empty(ci: bool = False) -> dict:
     """Degree map for ranking-only call sites, `{}` when the graph is unreadable.
 
-    Degree is a tie-break and a god-node penalty here, never a stored
-    value, so a corrupt index should cost ranking quality — not a failed
+    Degree is a tie-break and a god-node penalty here, never a stored value,
+    so a corrupt store should cost ranking quality — not a failed
     `vault_recall`.
     """
     try:
-        return get_entity_edge_counts()
-    except RelationshipsCorrupt:
+        return get_entity_edge_counts_ci() if ci else get_entity_edge_counts()
+    except StoreUnavailable:
         return {}
 
 
 def invalidate_edge_count_cache() -> None:
-    """Drop the degree cache (used by writers and tests)."""
-    global _edge_count_cache
-    _edge_count_cache = None
+    """Drop the store's derived caches (used by writers and tests)."""
+    try:
+        store().invalidate_caches()
+    except StoreUnavailable:
+        pass
 
 
 # ── Entity extraction ────────────────────────────────────────────────────────
@@ -404,97 +368,48 @@ def extract_entities_from_query(query: str) -> list:
     return ranked
 
 
-# ── Relationship store ───────────────────────────────────────────────────────
+# ── Edge graph ───────────────────────────────────────────────────────────────
 
 def load_relationships() -> dict:
-    """Load the relationships index, with mtime-based caching.
+    """Read view of the whole edge graph in the legacy JSON shape.
 
-    A *missing* file is an empty graph — that is the state of a fresh
-    install, and returning the empty schema is correct.
-
-    A file that exists but cannot be read is NOT an empty graph. Every
-    such case raises `RelationshipsCorrupt`: an unreadable stat, a JSON
-    parse failure, or a payload whose `edges` is not a list. Callers on a
-    write path must let it propagate; read paths may catch it.
+    Kept for readers that still want `{"edges": [...]}`; the store is the
+    source of truth and there is no matching save. Mutating this dict changes
+    nothing — that load-mutate-save contract, spread across six programs with
+    no lock between them, is what the store replaces. Writers call
+    `store().edges.add/expire/retype/rewrite_endpoint`.
     """
-    global _relationships_cache
-    if not RELATIONSHIPS_PATH.exists():
-        _relationships_cache = None
-        return {"edges": [], "schema_version": 1}
-    try:
-        mtime_ns = RELATIONSHIPS_PATH.stat().st_mtime_ns
-    except OSError as exc:
-        _relationships_cache = None
-        raise RelationshipsCorrupt(
-            f"cannot stat {RELATIONSHIPS_PATH}: {exc}"
-        ) from exc
-    if _relationships_cache is not None and _relationships_cache[0] == mtime_ns:
-        return _relationships_cache[1]
-    try:
-        data = json.loads(RELATIONSHIPS_PATH.read_text(encoding="utf-8"))
-    except Exception as exc:
-        _relationships_cache = None
-        raise RelationshipsCorrupt(
-            f"cannot parse {RELATIONSHIPS_PATH}: {exc}"
-        ) from exc
-    if not isinstance(data, dict) or not isinstance(data.get("edges"), list):
-        _relationships_cache = None
-        raise RelationshipsCorrupt(
-            f"{RELATIONSHIPS_PATH} parsed but has no `edges` list"
-        )
-    _relationships_cache = (mtime_ns, data)
-    return data
-
-
-def save_relationships(data: dict) -> None:
-    """Persist the relationships index and refresh the cache."""
-    global _relationships_cache
-    RELATIONSHIPS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(
-        RELATIONSHIPS_PATH,
-        json.dumps(data, indent=2, sort_keys=False),
-        fsync=True,
-    )
-    try:
-        new_mtime = RELATIONSHIPS_PATH.stat().st_mtime_ns
-        _relationships_cache = (new_mtime, data)
-    except OSError:
-        _relationships_cache = None
+    return {"edges": store().edges.all(), "schema_version": 1}
 
 
 def invalidate_relationships_cache() -> None:
-    """Clear the relationships cache. Used by tests and forced reloads."""
-    global _relationships_cache
-    _relationships_cache = None
+    """Clear the store's derived caches. Used by tests and forced reloads."""
+    invalidate_edge_count_cache()
 
 
 # ── Graph expansion ──────────────────────────────────────────────────────────
 
 def graph_expand_entities(seed_entities: list[str], hops: int = 1) -> list[str]:
     """Expand a set of seed entities via relationship graph traversal."""
-    if not RELATIONSHIPS_PATH.exists():
+    if not seed_entities:
         return []
     try:
-        data = load_relationships()
-        adj: dict[str, set[str]] = {}
-        for edge in data["edges"]:
-            if edge.get("expired_at"):
-                continue
-            adj.setdefault(edge["source"], set()).add(edge["target"])
-            adj.setdefault(edge["target"], set()).add(edge["source"])
-        expanded = set()
-        current = set(seed_entities)
-        for _ in range(hops):
-            next_layer = set()
-            for entity in current:
-                for neighbor in adj.get(entity, set()):
-                    if neighbor not in seed_entities and neighbor not in expanded:
-                        next_layer.add(neighbor)
-            expanded.update(next_layer)
-            current = next_layer
-        return list(expanded)
-    except Exception:
+        adj = store().edges.adjacency()
+    except StoreUnavailable:
         return []
+    seed_set = set(seed_entities)
+    expanded: set[str] = set()
+    current = set(seed_entities)
+    for _ in range(hops):
+        next_layer = set()
+        for entity in current:
+            for edge in adj.get(entity, ()):
+                neighbor = edge["target"] if edge["source"] == entity else edge["source"]
+                if neighbor not in seed_set and neighbor not in expanded:
+                    next_layer.add(neighbor)
+        expanded.update(next_layer)
+        current = next_layer
+    return list(expanded)
 
 
 def graph_weighted_neighbors(
@@ -509,23 +424,12 @@ def graph_weighted_neighbors(
 
     Returns [(entity, weight)] sorted by weight desc.
     """
-    if not RELATIONSHIPS_PATH.exists() or not seed_entities:
+    if not seed_entities:
         return []
     try:
-        data = load_relationships()
-    except Exception:
+        adj = store().edges.adjacency()
+    except StoreUnavailable:
         return []
-
-    adj: dict[str, list[tuple[str, str, float]]] = {}
-    for edge in data.get("edges", []):
-        if edge.get("expired_at"):
-            continue
-        src, tgt, etype = edge.get("source"), edge.get("target"), edge.get("type", "")
-        conf = float(edge.get("confidence", 0.5))
-        if not src or not tgt:
-            continue
-        adj.setdefault(src, []).append((tgt, etype, conf))
-        adj.setdefault(tgt, []).append((src, etype, conf))
 
     seed_set = set(seed_entities)
     scores: dict[str, float] = {}
@@ -536,10 +440,12 @@ def graph_weighted_neighbors(
         hop_decay = 1.0 if hop == 0 else 0.5 ** hop
         next_layer = set()
         for entity in current:
-            for neighbor, etype, conf in adj.get(entity, []):
+            for edge in adj.get(entity, ()):
+                neighbor = edge["target"] if edge["source"] == entity else edge["source"]
                 if neighbor in seed_set:
                     continue
-                w = EDGE_TYPE_WEIGHTS.get(etype, _DEFAULT_EDGE_WEIGHT) * conf * hop_decay
+                w = (EDGE_TYPE_WEIGHTS.get(edge["type"], _DEFAULT_EDGE_WEIGHT)
+                     * edge["confidence"] * hop_decay)
                 # No cap here — accumulate raw evidence weight first so multiple
                 # typed edges to the same neighbor compound. God-node penalty
                 # applied below.

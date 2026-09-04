@@ -9,7 +9,7 @@ Tools:
 
 Data root: app.paths.VAULT_FACTS_ROOT
     (currently ~/lloyd/_pipeline/vault-derived/facts/)
-Relationships index: <FACTS_ROOT>/_relationships.json
+Edge graph, aliases, entity registry, fact index: app.kg_store
 
 Split out of agent_mcp/memory.py as part of Task #340 PR 5. Owns the
 fact tool handlers and the entity-keyed fact files
@@ -46,13 +46,13 @@ from agent_mcp._shared import (
     _wrap,
     _write_fact_frontmatter,
 )
+from app.kg_store import StoreUnavailable, store as _store
 from agent_mcp.retrieval import (  # noqa: F401  (re-exported compat names)
     EDGE_TYPE_WEIGHTS,
     RelationshipsCorrupt,
     FACT_GODNODE_THRESHOLD,
     FACT_RANK_CAP_GRAPH,
     FACT_RANK_CAP_SEED,
-    RELATIONSHIPS_PATH,
     extract_entities_from_query as _extract_entities_from_query,
     fact_matches_tokens as _fact_matches_tokens,
     fact_query_tokens as _fact_query_tokens,
@@ -63,7 +63,6 @@ from agent_mcp.retrieval import (  # noqa: F401  (re-exported compat names)
     graph_weighted_neighbors as _graph_weighted_neighbors,
     invalidate_relationships_cache as _invalidate_relationships_cache,
     load_relationships as _load_relationships,
-    save_relationships as _save_relationships,
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -156,7 +155,22 @@ def _fact_add(params: dict) -> dict:
         body = f"\n# {entity} - {category}\n\n**Entity:** {entity}\n**Category:** {category}\n**Fact Count:** {len(frontmatter['facts'])}\n"
         atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
         _invalidate_entity_dirs_cache()
+        # The store learns about the entity and the new fact here rather than
+        # waiting for the nightly reindex, so a fact added in chat is visible
+        # to the router and to `facts_idx` immediately.
+        try:
+            st = _store()
+            st.entities.register(entity)
+            st.facts_idx.update_file(fact_file, root=FACTS_ROOT)
+        except StoreUnavailable as exc:
+            # The markdown write already succeeded and is the fact layer; the
+            # index is derived and `kg reindex` rebuilds it. Say so, don't fail.
+            result_note = f"fact written; store index not updated ({exc})"
+        else:
+            result_note = None
         result: dict = {"success": True, "fact_id": fact_id, "entity": entity, "category": category}
+        if result_note:
+            result["warning"] = result_note
         if entity != raw_entity:
             result["resolved_from"] = raw_entity
         return result
@@ -295,36 +309,32 @@ def _fact_relate(params: dict) -> dict:
     provenance = params.get("provenance", "STATED")
     if provenance not in ("STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"):
         provenance = "STATED"
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
         # mode="write" so edges land on the literal names the caller
         # specified, not fuzzy-matched neighbours. (#340 PR 3.)
         src_resolved, _ = _resolve_entity(source, mode="write")
         tgt_resolved, _ = _resolve_entity(target, mode="write")
-        try:
-            data = _load_relationships()
-        except RelationshipsCorrupt as exc:
-            # Writing here would persist a one-edge graph over the real one.
-            # Refuse, leave the file untouched, and say why.
+        if src_resolved == tgt_resolved:
             return _err(
-                f"relationships index is unreadable, refusing to write: {exc}",
-                ErrorCode.INTERNAL,
+                f"source and target both resolve to {src_resolved!r}",
+                ErrorCode.INVALID_PARAM,
             )
-        for edge in data["edges"]:
-            if (edge["source"] == src_resolved and edge["target"] == tgt_resolved
-                    and edge["type"] == rel_type and not edge.get("expired_at")):
-                return {"success": True, "action": "already_exists",
-                        "source": src_resolved, "target": tgt_resolved, "type": rel_type}
-        new_edge = {
+        st = _store()
+        existing = st.edges.find_active(src_resolved, tgt_resolved, rel_type)
+        if existing is not None:
+            return {"success": True, "action": "already_exists", "edge_id": existing["id"],
+                    "source": src_resolved, "target": tgt_resolved, "type": rel_type}
+        edge_id = st.edges.add({
             "source": src_resolved, "target": tgt_resolved, "type": rel_type,
             "confidence": confidence, "provenance": provenance,
-            "created_at": now_iso, "expired_at": None,
             "source_doc": params.get("source_doc"),
-        }
-        data["edges"].append(new_edge)
-        _save_relationships(data)
-        return {"success": True, "action": "created",
+            "evidence": params.get("evidence"),
+        }, origin="fact_relate")
+        return {"success": True, "action": "created", "edge_id": edge_id,
                 "source": src_resolved, "target": tgt_resolved, "type": rel_type}
+    except StoreUnavailable as exc:
+        # Writing over an unreadable graph is how 6,539 edges become 1.
+        return _err(f"edge store is unreadable, refusing to write: {exc}", ErrorCode.INTERNAL)
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
 
@@ -338,20 +348,14 @@ def _fact_relationships(params: dict) -> dict:
     rel_type = params.get("type") or None
     try:
         resolved, _ = _resolve_entity(entity, mode="read")
-        data = _load_relationships()
-        edges = []
-        for edge in data["edges"]:
-            if edge.get("expired_at"):
-                continue
-            match = False
-            if direction in ("out", "both") and edge["source"] == resolved:
-                match = True
-            if direction in ("in", "both") and edge["target"] == resolved:
-                match = True
-            if match and rel_type and edge["type"] != rel_type:
-                match = False
-            if match:
-                edges.append(edge)
+        st = _store()
+        types = [rel_type] if rel_type else None
+        if direction == "out":
+            edges = st.edges.active(source=resolved, types=types)
+        elif direction == "in":
+            edges = st.edges.active(target=resolved, types=types)
+        else:
+            edges = st.edges.active(either=resolved, types=types)
         return {"entity": resolved, "edges": edges, "count": len(edges)}
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, edges=[])
@@ -367,14 +371,7 @@ def _fact_path(params: dict) -> dict:
     try:
         src_resolved, _ = _resolve_entity(source, mode="read")
         tgt_resolved, _ = _resolve_entity(target, mode="read")
-        data = _load_relationships()
-        adj: dict[str, list[tuple[str, dict]]] = {}
-        for edge in data["edges"]:
-            if edge.get("expired_at"):
-                continue
-            s, t = edge["source"], edge["target"]
-            adj.setdefault(s, []).append((t, edge))
-            adj.setdefault(t, []).append((s, edge))
+        adj = _store().edges.adjacency()
         from collections import deque
         queue = deque([(src_resolved, [src_resolved], [])])
         visited = {src_resolved}
@@ -384,11 +381,13 @@ def _fact_path(params: dict) -> dict:
                 return {"found": True, "path": path, "edges": edges_path, "hops": len(edges_path)}
             if len(path) > max_hops:
                 continue
-            for neighbor, edge in adj.get(node, []):
+            for edge in adj.get(node, ()):
+                neighbor = edge["target"] if edge["source"] == node else edge["source"]
                 if neighbor not in visited:
                     visited.add(neighbor)
                     queue.append((neighbor, path + [neighbor],
-                                  edges_path + [{"source": edge["source"], "target": edge["target"], "type": edge["type"]}]))
+                                  edges_path + [{"source": edge["source"], "target": edge["target"],
+                                                 "type": edge["type"]}]))
         return {"found": False, "path": [], "edges": [], "hops": -1}
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
@@ -421,14 +420,7 @@ def _fact_neighbors(params: dict) -> dict:
     max_edges = int(params.get("max_edges", _FACT_NEIGHBORS_MAX_EDGES))
     try:
         resolved, _ = _resolve_entity(entity, mode="read")
-        data = _load_relationships()
-        adj: dict[str, list[tuple[str, dict]]] = {}
-        for edge in data["edges"]:
-            if edge.get("expired_at") or edge.get("confidence", 1.0) < min_confidence:
-                continue
-            s, t = edge["source"], edge["target"]
-            adj.setdefault(s, []).append((t, edge))
-            adj.setdefault(t, []).append((s, edge))
+        adj = _store().edges.adjacency(min_confidence=min_confidence)
         visited = {resolved}
         current_layer = [resolved]
         all_edges: list[dict] = []
@@ -436,12 +428,13 @@ def _fact_neighbors(params: dict) -> dict:
         for _ in range(hops):
             next_layer = []
             for node in current_layer:
-                for neighbor, edge in adj.get(node, []):
+                for edge in adj.get(node, ()):
                     if len(all_edges) >= max_edges:
                         truncated = True
                         break
                     all_edges.append({"source": edge["source"], "target": edge["target"],
-                                      "type": edge["type"], "confidence": edge.get("confidence", 1.0)})
+                                      "type": edge["type"], "confidence": edge["confidence"]})
+                    neighbor = edge["target"] if edge["source"] == node else edge["source"]
                     if neighbor not in visited:
                         if len(visited) >= max_nodes:
                             truncated = True

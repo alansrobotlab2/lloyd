@@ -62,17 +62,15 @@ ROLE_BLOCKED_VERBS = {"created_by", "implements", "supersedes", "part_of", "depe
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as _FACTS_ROOT
-ALIASES_PATH = _FACTS_ROOT / "entity-aliases.json"
+from app.kg_store import StoreUnavailable, store as _kg_store
 
 
 def _load_aliases() -> dict[str, str]:
-    """Load alias → canonical mapping from entity-aliases.json."""
-    if not ALIASES_PATH.exists():
-        return {}
+    """Lowercased surface → canonical, from the store."""
     try:
-        return json.loads(ALIASES_PATH.read_text("utf-8"))
-    except Exception as exc:
-        print(f"[alias] failed to load {ALIASES_PATH}: {exc}", file=sys.stderr)
+        return _kg_store().aliases.all_lower()
+    except StoreUnavailable as exc:
+        print(f"[alias] store unavailable: {exc}", file=sys.stderr)
         return {}
 
 
@@ -80,19 +78,10 @@ _ALIASES: dict[str, str] = _load_aliases()
 
 
 def resolve_canonical(name: str) -> str:
-    """Return canonical name via alias table; fall back to `name` unchanged.
-
-    Tries exact match first, then lowercased match. If no mapping exists,
-    returns the input unchanged.
-    """
+    """Return canonical name via the alias table; fall back to `name`."""
     if not _ALIASES:
         return name
-    if name in _ALIASES:
-        return _ALIASES[name]
-    low = name.lower()
-    if low in _ALIASES:
-        return _ALIASES[low]
-    return name
+    return _ALIASES.get(name.lower(), name)
 
 
 # Patch v2's directory resolver so `_load_fact_snippets` picks up aliases
@@ -570,8 +559,7 @@ def main() -> int:
         print("[error] --all-types and --only-types are mutually exclusive", file=sys.stderr)
         return 2
 
-    data = _v2._load_relationships()
-    all_edges = data.get("edges", [])
+    all_edges = _kg_store().edges.all()
     if args.only_types:
         only_set = {t.strip() for t in args.only_types.split(",") if t.strip()}
         candidates = [e for e in all_edges if not e.get("expired_at") and e.get("type") in only_set]

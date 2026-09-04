@@ -10,6 +10,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts" / "memory"))
+from app.kg_store import KGStore  # noqa: E402
 _spec = importlib.util.spec_from_file_location("revert_suffix_merges", ROOT / "scripts/memory/revert-suffix-merges.py")
 rv = importlib.util.module_from_spec(_spec); sys.modules["revert_suffix_merges"] = rv; _spec.loader.exec_module(rv)
 
@@ -39,25 +40,26 @@ def world(tmp_path):
                                            "definition": "Intel is a semiconductor company."}, "# Summary\n")
     # an unrelated CASE merge in the same report must be untouched
     _write(root / "PolaRiS" / "PolaRiS-state.md", _facts("PolaRiS", "state", [("PolaRiS", "A benchmark.")]))
-    aliases = root / "entity-aliases.json"
-    aliases.write_text(json.dumps({"intel pipeline system": C, "Intel Pipeline System": C, "Intel": C,
-                                   "polaris": "PolaRiS", "PolaRiS": "PolaRiS"}))
-    rel = root / "_relationships.json"
-    rel.write_text(json.dumps({"edges": [
-        {"source": C, "target": "ArXiv", "type": "mentions", "provenance": "EXTRACTED",
-         "created_at": "2026-09-03T22:41:09+00:00", "expired_at": None},
-        {"source": C, "target": "Nvidia", "type": "competes_with", "provenance": "EXTRACTED_CLASSIFIER_V4",
-         "created_at": "2026-09-03T22:41:20+00:00", "expired_at": None},
-        {"source": C, "target": "Old Thing", "type": "mentions", "provenance": "EXTRACTED",
-         "created_at": "2026-05-01T00:00:00+00:00", "expired_at": None},
-    ]}))
+    st = KGStore(tmp_path / "kg.sqlite")
+    st.entities.register(C); st.entities.register("PolaRiS")
+    st.aliases.set("intel pipeline system", C, kind="suffix", origin="sweep")
+    st.aliases.set("Intel Pipeline System", C, kind="suffix", origin="sweep")
+    st.aliases.set("polaris", "PolaRiS", kind="case", origin="sweep")
+    st.edges.add({"source": C, "target": "ArXiv", "type": "mentions", "provenance": "EXTRACTED",
+                  "created_at": "2026-09-03T22:41:09+00:00"}, origin="seed")
+    st.edges.add({"source": C, "target": "Nvidia", "type": "competes_with",
+                  "provenance": "EXTRACTED_CLASSIFIER_V4",
+                  "created_at": "2026-09-03T22:41:20+00:00"}, origin="classifier")
+    st.edges.add({"source": C, "target": "Old Thing", "type": "mentions", "provenance": "EXTRACTED",
+                  "created_at": "2026-05-01T00:00:00+00:00"}, origin="seed")
     report = {"variant_to_canonical": {V: C, "Polaris": "PolaRiS"},
               "ledger": {"timestamp": "2026-09-03T12:33:14+00:00"}}
-    return root, aliases, rel, report, V, C
+    yield root, st, report, V, C
+    st.close()
 
 
 def test_plan_selects_only_the_suffix_tier_and_classifies_files(world):
-    root, aliases, rel, report, V, C = world
+    root, st, report, V, C = world
     ops = rv.plan_revert(report, {"SUFFIX_SAFE"}, root)
     assert [o["variant"] for o in ops] == [V]
     actions = {f["file"]: f["action"] for f in ops[0]["files"]}
@@ -66,19 +68,19 @@ def test_plan_selects_only_the_suffix_tier_and_classifies_files(world):
 
 
 def test_dry_run_changes_nothing(world):
-    root, aliases, rel, report, V, C = world
+    root, st, report, V, C = world
     ops = rv.plan_revert(report, {"SUFFIX_SAFE"}, root)
     before = sorted(str(p.relative_to(root)) for p in root.rglob("*.md"))
-    res = rv.execute(ops, root, aliases, apply=False)
+    res = rv.execute(ops, root, st, apply=False)
     assert len(res["file_ops"]) == 2
     assert sorted(str(p.relative_to(root)) for p in root.rglob("*.md")) == before
-    assert json.loads(aliases.read_text())["intel pipeline system"] == C
+    assert st.aliases.resolve("intel pipeline system") == C
 
 
 def test_apply_restores_the_variant_and_cleans_aliases(world):
-    root, aliases, rel, report, V, C = world
+    root, st, report, V, C = world
     ops = rv.plan_revert(report, {"SUFFIX_SAFE"}, root)
-    res = rv.execute(ops, root, aliases, apply=True)
+    res = rv.execute(ops, root, st, apply=True)
 
     goal = root / V / f"{V}-goal.md"
     assert goal.exists() and not (root / C / "Intel-goal.md").exists()
@@ -94,34 +96,52 @@ def test_apply_restores_the_variant_and_cleans_aliases(world):
     assert (root / C / "Intel-overview.md").exists()            # canonical keeps its own
     assert (root / "PolaRiS" / "PolaRiS-state.md").exists()      # CASE merge untouched
 
-    al = json.loads(aliases.read_text())
-    assert "intel pipeline system" not in al and al.get(V) == V and al["Intel"] == C
+    assert st.aliases.resolve("intel pipeline system") is None
+    assert st.entities.exists(V)                                 # variant is itself again
+    assert st.aliases.resolve("polaris") == "PolaRiS"             # the CASE merge is untouched
     assert res["touched_canonicals"] == [C]
-    assert (root / "entity-aliases.json.").parent == root  # backup lives next to it
-    assert any(p.name.endswith(".revert.bak") for p in root.iterdir())
 
 
 def test_split_merges_into_an_already_recreated_variant_dir(world):
-    root, aliases, rel, report, V, C = world
+    root, st, report, V, C = world
     _write(root / V / f"{V}-state.md", _facts(V, "state", [(V, "Recreated by the extractor yesterday.")]))
     ops = rv.plan_revert(report, {"SUFFIX_SAFE"}, root)
-    rv.execute(ops, root, aliases, apply=True)
+    rv.execute(ops, root, st, apply=True)
     fm = yaml.safe_load((root / V / f"{V}-state.md").read_text().split("---")[1])
     assert sorted(f["fact"] for f in fm["facts"]) == ["Recreated by the extractor yesterday.",
                                                       "Runs at 03:00 on the primary model."]
 
 
-def test_fix_edges_expires_only_unsupported_recent_seeded_edges(world):
-    root, aliases, rel, report, V, C = world
+def test_fix_edges_falls_back_to_prose_for_a_report_with_no_id_trail(world):
+    """Apply reports written before the store carry no `edge_rewrites`."""
+    root, st, report, V, C = world
     ops = rv.plan_revert(report, {"SUFFIX_SAFE"}, root)
-    rv.execute(ops, root, aliases, apply=True)
-    out = rv.fix_edges(rel, [C], root, since="2026-09-03T00:00:00", apply=True)
-    assert [(e["target"]) for e in out["expired"]] == ["ArXiv"]     # named only in the moved pipeline facts
-    edges = {e["target"]: e for e in json.loads(rel.read_text())["edges"]}
+    rv.execute(ops, root, st, apply=True)
+    out = rv.fix_edges(st, report, [C], root, since="2026-09-03T00:00:00", apply=True)
+    assert out["mode"] == "heuristic"
+    assert [e["target"] for e in out["expired"]] == ["ArXiv"]     # named only in the moved pipeline facts
+    edges = {e["target"]: e for e in st.edges.all()}
     assert edges["ArXiv"]["expired_at"] and "revert-suffix-merges" in edges["ArXiv"]["expired_reason"]
     assert edges["Nvidia"]["expired_at"] is None                    # still named in Intel's own facts
     assert edges["Old Thing"]["expired_at"] is None                 # predates the apply window
-    assert any(p.name.endswith(".revert.bak.json") for p in root.iterdir())
+
+
+def test_fix_edges_is_exact_when_the_report_carries_rewrite_ids(world):
+    """The id trail restores the pre-merge graph precisely — no prose guessing."""
+    root, st, report, V, C = world
+    st.entities.register(V)
+    keep = st.edges.add({"source": V, "target": "ArXiv", "type": "mentions",
+                         "provenance": "EXTRACTED"}, origin="seed")
+    pairs = st.edges.rewrite_endpoint(V, C, origin="sweep")
+    assert pairs and st.edges.by_id(keep)["expired_at"]
+    report["edge_rewrites"] = {V: [list(p) for p in pairs]}
+
+    out = rv.fix_edges(st, report, [C], root, since="2026-09-03T00:00:00", apply=True)
+    assert out["mode"] == "exact" and out["reverted"] == len(pairs)
+    assert st.edges.by_id(keep)["expired_at"] is None            # the original is live again
+    assert {(e["source"], e["target"]) for e in st.edges.active(either=V)} == {(V, "ArXiv")}
+    # everything the merge did not touch is untouched
+    assert st.edges.find_active(C, "Nvidia", "competes_with")
 
 
 def test_variant_filename_prefix_restoration():
@@ -133,14 +153,14 @@ def test_variant_filename_prefix_restoration():
 def test_revert_recognises_facts_retagged_by_a_merge(world):
     """A merge now rewrites facts to the canonical and stamps merged_from; the
     revert must still find them by that stamp and drop it on the way back."""
-    root, aliases, rel, report, V, C = world
+    root, st, report, V, C = world
     _write(root / C / "Intel-preference.md",
            {"type": "facts", "entity": C, "category": "preference",
             "facts": [{"entity": C, "fact": "prefers ArXiv first", "merged_from": V},
                       {"entity": C, "fact": "Intel's own preference"}]})
     ops = rv.plan_revert(report, {"SUFFIX_SAFE"}, root)
     assert {f["file"]: f["action"] for f in ops[0]["files"]}["Intel-preference.md"] == "split"
-    rv.execute(ops, root, aliases, apply=True)
+    rv.execute(ops, root, st, apply=True)
     back = yaml.safe_load((root / V / f"{V}-preference.md").read_text().split("---")[1])
     assert [f["fact"] for f in back["facts"]] == ["prefers ArXiv first"]
     assert back["facts"][0]["entity"] == V and "merged_from" not in back["facts"][0]

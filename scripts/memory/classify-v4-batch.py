@@ -200,8 +200,7 @@ def main() -> int:
     print(f"[info] endpoint={args.endpoint} model={args.model} "
           f"concurrency={args.concurrency}")
 
-    data = _v2._load_relationships()
-    all_edges = data.get("edges", [])
+    all_edges = _v4._kg_store().edges.all()
 
     # Filter by type. Provenance gate (mentions only) applies in default
     # mode but not for explicit --all-types/--only-types power-user runs.
