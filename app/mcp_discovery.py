@@ -242,19 +242,28 @@ async def _discover_mcp_tools(server_name: str, cfg: dict) -> tuple[list[dict], 
     from mcp import ClientSession
     from mcp.client.sse import sse_client
     from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp.client.streamable_http import streamable_http_client
 
     server_type = cfg.get("type", "stdio")
 
     async def _query() -> list[dict]:
-        if server_type in ("sse", "http"):
-            ctx = sse_client(cfg.get("url", ""))
-        else:
+        # Dispatch off the same HTTP_TRANSPORTS list `_get_mcp_servers`
+        # validates against. This branch used to carry its own hardcoded
+        # ("sse", "http"), so `streamable-http` fell through to stdio and
+        # tried to spawn a bare `python` — the Tools page then sat on
+        # "Discovering tools..." until the timeout, with nothing logged.
+        if server_type in HTTP_TRANSPORTS:
+            url = cfg.get("url", "")
+            ctx = sse_client(url) if server_type == "sse" else streamable_http_client(url)
+        elif server_type in STDIO_TRANSPORTS:
             ctx = stdio_client(StdioServerParameters(
                 command=cfg.get("command", "python"),
                 args=list(cfg.get("args") or []),
                 env=dict(cfg["env"]) if cfg.get("env") else None,
                 cwd=cfg.get("cwd") or None,
             ))
+        else:
+            raise ValueError(f"unknown transport type {server_type!r}")
         async with ctx as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()

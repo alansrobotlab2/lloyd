@@ -56,7 +56,7 @@ def write_staging_note(
 async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
     """Dispatch a prompt to the primary model at low vLLM priority."""
     from app.harness import run_query, RunOptions
-    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL
+    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from prompt_builder import build_system_prompt
     from autonomy import _get_model_env
 
@@ -76,7 +76,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
         system_prompt=system_prompt,
         max_turns=max_turns,
         permission_mode="bypassPermissions",
-        mcp_servers={"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}},
+        mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         disallowed_tools=disallowed,
         env=model_env,
         priority=1,

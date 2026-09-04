@@ -696,7 +696,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
 
     try:
         from app.harness import run_query, RunOptions
-        from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL
+        from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
         from prompt_builder import build_system_prompt
 
         system_prompt = build_system_prompt()
@@ -713,7 +713,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             system_prompt=system_prompt,
             max_turns=config.get("agent", {}).get("max_turns", 60),
             permission_mode="bypassPermissions",
-            mcp_servers={"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}},
+            mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
             disallowed_tools=disallowed_tools,
             env=model_env,
             priority=1,

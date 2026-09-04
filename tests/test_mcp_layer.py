@@ -382,14 +382,82 @@ def test_http_transport_without_url_raises():
         D.CONFIG["mcp_servers"] = original
 
 
-def test_pool_open_session_accepts_every_advertised_transport():
-    """The transports config may name and the ones the pool can open must
-    be the same set — the mismatch above is what caused the outage."""
+def test_every_transport_dispatcher_handles_every_transport():
+    """Every place that branches on a transport must know all of them.
+
+    Three separate functions dispatch on `cfg["type"]`, and each one that
+    grew its own literal list has broken in turn: `_get_mcp_servers`
+    emitted a stdio config for `streamable-http` and hung the pool, and
+    `_discover_mcp_tools` did the same thing one function later and left
+    the Tools page stuck on "Discovering tools..." forever. They share
+    HTTP_TRANSPORTS/STDIO_TRANSPORTS now; this keeps them sharing it.
+    """
     import inspect
 
     from app.harness import mcp_pool
+    from app import mcp_discovery
     from app.mcp_discovery import HTTP_TRANSPORTS, STDIO_TRANSPORTS
 
-    src = inspect.getsource(mcp_pool.MCPPool._open_session)
-    for transport in HTTP_TRANSPORTS + STDIO_TRANSPORTS:
-        assert f'"{transport}"' in src, f"MCPPool cannot open transport {transport!r}"
+    dispatchers = {
+        "MCPPool._open_session": inspect.getsource(mcp_pool.MCPPool._open_session),
+        "_get_mcp_servers": inspect.getsource(mcp_discovery._get_mcp_servers),
+        "_discover_mcp_tools": inspect.getsource(mcp_discovery._discover_mcp_tools),
+    }
+    for name, src in dispatchers.items():
+        uses_shared_list = "HTTP_TRANSPORTS" in src
+        for transport in HTTP_TRANSPORTS + STDIO_TRANSPORTS:
+            assert uses_shared_list or f'"{transport}"' in src, (
+                f"{name} does not handle transport {transport!r} — it should "
+                f"branch on HTTP_TRANSPORTS/STDIO_TRANSPORTS, not its own list"
+            )
+
+
+async def test_discovery_resolves_the_configured_transport():
+    """`_discover_mcp_tools` must work against the transport config
+    actually names — this is what the Tools page calls."""
+    from app.mcp_discovery import _discover_mcp_tools, _get_mcp_servers
+
+    for name, cfg in _get_mcp_servers().items():
+        found, err = await _discover_mcp_tools(name, cfg)
+        assert err is None, f"{name} ({cfg.get('type')}): {err}"
+        assert len(found) > 100, f"{name} returned only {len(found)} tools"
+
+
+def test_no_inline_mcp_server_config_anywhere_in_the_repo():
+    """Nobody may write an MCP server-config dict inline.
+
+    This is the bug that keeps recurring. `DEFAULT_LLOYD_MCP_URL` moved
+    from /sse to /mcp and the `"type": "sse"` literals beside it did not,
+    so an SSE client GET'd the Streamable HTTP endpoint and hung. It was
+    five callsites, in five different directories, found three separate
+    times — because each grep was scoped to wherever the last one was
+    found. This walks the whole tree instead.
+
+    Use `DEFAULT_LLOYD_MCP_SERVERS` (or `_get_mcp_servers()`), never a
+    literal.
+    """
+    import re
+
+    pattern = re.compile(r'\{\s*["\']type["\']\s*:\s*["\'](?:sse|http|streamable[-_]http)["\']')
+    skip_dirs = {".git", ".venvs", "node_modules", "__pycache__", "_pipeline",
+                 "web", "logs", "sessions", "agent-services"}
+    # The modules that legitimately define or validate the transports.
+    allowed = {"app/harness/mcp_pool.py", "app/mcp_discovery.py",
+               "tests/test_mcp_layer.py", "tests/test_mcp_transport.py"}
+
+    offenders = []
+    for path in ROOT.rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        if any(part in skip_dirs for part in path.relative_to(ROOT).parts):
+            continue
+        if rel in allowed:
+            continue
+        for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if pattern.search(line):
+                offenders.append(f"{rel}:{i}")
+    assert offenders == [], (
+        "inline MCP server config found — use DEFAULT_LLOYD_MCP_SERVERS: "
+        + ", ".join(offenders)
+    )

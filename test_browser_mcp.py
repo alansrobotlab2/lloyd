@@ -15,7 +15,11 @@ import json
 import re
 import sys
 
-from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, MCPPool
+from app.harness.mcp_pool import (
+    DEFAULT_LLOYD_MCP_SERVERS,
+    DEFAULT_LLOYD_MCP_URL,
+    MCPPool,
+)
 
 TIMEOUT = 30.0
 
@@ -59,9 +63,7 @@ def _setup():
     global _pool, _loop
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
-    _pool = MCPPool({
-        "lloyd-mcp": {"type": "streamable-http", "url": DEFAULT_LLOYD_MCP_URL}
-    })
+    _pool = MCPPool(DEFAULT_LLOYD_MCP_SERVERS)
     try:
         _loop.run_until_complete(_pool.open())
     except Exception as exc:
