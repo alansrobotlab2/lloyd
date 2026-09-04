@@ -160,7 +160,10 @@ def test_apply_writes_aliases_and_stamps_the_ledger(tmp_path):
     assert rep["tiers_allowed"] == ["CASE", "PUNCT", "SUFFIX_SAFE"]
     assert json.loads((out / "graph-baseline.json").read_text())["active_edges"] == 2
     # the plan carries the suffix cluster as review, with the reason
-    plan_lines = [json.loads(l) for l in (out / list(out.glob("entity-merges-*.jsonl"))[0].name).read_text().splitlines() if l.strip()]
+    plans = [q for q in out.glob("entity-merges-*.jsonl") if not q.is_symlink()]
+    assert len(plans) == 1 and (out / "entity-merges-latest.jsonl").resolve() == plans[0].resolve()
+    assert rep["plan_file"] == str(plans[0])
+    plan_lines = [json.loads(l) for l in plans[0].read_text().splitlines() if l.strip()]
     amb = [c for c in plan_lines if c["status"] == "AMBIGUOUS"]
     assert amb and "semantic gate" in amb[0]["decision"]
 
@@ -191,3 +194,12 @@ def test_apply_leaves_no_contamination_behind(tmp_path):
     assert any(f.get("merged_from") == "vllm" for f in merged["facts"])
     sys.path.insert(0, str(ROOT / "scripts" / "memory")); import kg_hygiene
     assert kg_hygiene.contamination(root)["dirs"] == 0
+
+
+def test_two_dry_runs_on_one_day_keep_both_plans(tmp_path):
+    root, rel, al = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    assert _run(root, rel, al, out).returncode == 0
+    import time; time.sleep(1.1)
+    assert _run(root, rel, al, out).returncode == 0
+    plans = [q for q in out.glob("entity-merges-*.jsonl") if not q.is_symlink()]
+    assert len(plans) == 2, "a second dry-run must not overwrite the first plan"

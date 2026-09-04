@@ -1081,10 +1081,21 @@ def main() -> int:
     if gs.get("asked"):
         print(f"  Semantic gate:   {gs['asked']} suffix pairs judged — {gs['same']} clusters SAME, {gs['review']} to review")
 
-    # Emit plan
+    # Emit plan. Timestamped: the old `entity-merges-<date>.jsonl` was opened in
+    # write mode by every dry-run, so a second run on the same day overwrote the
+    # plan an earlier --apply had executed — the only record of what that apply
+    # was shown. `-latest` is a convenience pointer for readers.
     print_plan(plan)
-    plan_out = out_dir / f"entity-merges-{args.date}.jsonl"
+    run_ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    plan_out = out_dir / f"entity-merges-{args.date}-{run_ts}.jsonl"
     write_plan_jsonl(plan, plan_out)
+    latest = out_dir / "entity-merges-latest.jsonl"
+    try:
+        if latest.is_symlink() or latest.exists():
+            latest.unlink()
+        latest.symlink_to(plan_out.name)
+    except OSError:
+        pass
     print(f"Plan written: {plan_out}")
 
     if not args.apply:
@@ -1138,6 +1149,7 @@ def main() -> int:
     apply_out = out_dir / f"entity-merges-applied-{args.date}-{ts}.json"
     apply_out.parent.mkdir(parents=True, exist_ok=True)
     report_to_save = {k: v for k, v in report.items() if k != "aliases"}
+    report_to_save["plan_file"] = str(plan_out)
     report_to_save["tiers_allowed"] = sorted(allowed_tiers)
     report_to_save["gate_stats"] = plan.get("gate_stats")
     report_to_save["baseline_active_edges"] = baseline
