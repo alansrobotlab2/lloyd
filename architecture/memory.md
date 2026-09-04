@@ -43,9 +43,10 @@ Layer 1: Source Documents
            ▼
 Layer 2: Fact Files + Entity Relationship Graph
   ┌──────────────────────────────────────────────────────────────────────┐
-  │  ~/obsidian/facts/{entity}/{entity}-{category}.md                    │
-  │  (740 entity dirs,1087 fact files — structured YAML frontmatter)   │
-  │  ~/obsidian/facts/_relationships.json  (2,503 entity relationships) │
+  │  _pipeline/vault-derived/facts/{entity}/{entity}-{category}.md       │
+  │  (23,571 entity dirs, 61,394 fact files — YAML frontmatter)          │
+  │  _pipeline/vault-derived/kg.sqlite  (edges, aliases, entities,       │
+  │   facts_idx — behind app.kg_store; see [[knowledge-graph]])          │
   └──────────────────────────────────────────────────────────────────────┘
            │ rebuild_index
            ▼
