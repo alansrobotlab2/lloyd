@@ -25,7 +25,14 @@ HERE = Path(__file__).resolve().parent
 LLOYD_HOME = HERE.parent
 sys.path.insert(0, str(LLOYD_HOME))
 
-from agent_mcp.vault import _vault_recall
+from agent_mcp.vault import (
+    RECALL_DEMOTE_DAILY_LOGS,
+    RECALL_GRAPH_HOPS,
+    RECALL_GRAPH_RERANK,
+    RECALL_GRAPH_TOP_K,
+    RECALL_RERANK_ALPHA,
+    _vault_recall,
+)
 from agent_mcp.facts import _extract_entities_from_query
 
 
@@ -237,10 +244,14 @@ def print_table(records: list[dict], summary: dict) -> None:
         print(f"{r['id']:<26} {(r['category'] or ''):<10} {eh:<4} {dh:<4} {er:<6} {dr:<6} {rk:<5} {ndcg:<6} {fer:<6} {r['latency_ms']:<7.0f}")
     print()
     o = summary["overall"]
-    print(f"Overall: n={o['n_queries']}  entity_hit={o['entity_hit_rate']:.2f}  doc_hit={o['doc_hit_rate']:.2f}  "
+    # fact_entity_recall sits next to MRR because it is the metric the fact
+    # side of recall actually moves: MRR and NDCG score documents, and a
+    # graph change can lift the facts returned without touching either.
+    print(f"Overall: n={o['n_queries']}  MRR={o['mrr_doc']:.3f}  NDCG10={o['ndcg10']:.3f}  "
+          f"fact_entity_recall={o['fact_entity_recall_avg'] or 0:.3f}")
+    print(f"         entity_hit={o['entity_hit_rate']:.2f}  doc_hit={o['doc_hit_rate']:.2f}  "
           f"ent_recall={o['entity_recall_avg']:.2f}  doc_recall={o['doc_recall_avg']:.2f}  "
-          f"MRR={o['mrr_doc']:.3f}  NDCG10={o['ndcg10']:.3f}  fER={o['fact_entity_recall_avg'] or 0:.3f}  "
-          f"avg_lat={o['latency_ms_avg']:.0f}ms")
+          f"avg_lat={o['latency_ms_avg']:.0f}ms  errors={o['errors']}")
     print("\nBy category:")
     for cat, s in summary["by_category"].items():
         print(f"  {cat:<10} n={s['n']:<3} entity_hit={s['entity_hit_rate']:.2f}  "
@@ -254,12 +265,21 @@ def main() -> int:
     ap.add_argument("--label", default="baseline", help="Label embedded in the output filename")
     ap.add_argument("--notes", default="", help="Free-text notes saved with the run (e.g. config knobs)")
     ap.add_argument("--limit", type=int, default=20)
+    # Defaults ARE production's, imported from agent_mcp.vault. The nightly
+    # eval used to run graph_rerank=False, alpha=0.5 against a production
+    # that runs True and 0.3 — it measured a configuration nothing serves,
+    # so a retrieval regression could not show up in it (2026-09-03 review).
     ap.add_argument("--no-graph", action="store_true", help="Disable expand_graph (default: on)")
-    ap.add_argument("--graph-rerank", action="store_true", help="Enable Phase 3 graph-vote re-ranking")
-    ap.add_argument("--alpha", type=float, default=0.5, help="Re-rank alpha: 1.0=pure QMD, 0.0=pure graph (default 0.5)")
+    ap.add_argument("--no-graph-rerank", dest="graph_rerank", action="store_false",
+                    default=RECALL_GRAPH_RERANK,
+                    help=f"Disable graph-vote re-ranking (production: {RECALL_GRAPH_RERANK})")
+    ap.add_argument("--alpha", type=float, default=RECALL_RERANK_ALPHA,
+                    help=f"Re-rank alpha: 1.0=pure QMD, 0.0=pure graph (production {RECALL_RERANK_ALPHA})")
     ap.add_argument("--demote-factor", type=float, default=None, help="Daily-log demote factor (default uses module constant 0.4)")
-    ap.add_argument("--graph-top-k", type=int, default=5, help="Graph expansion breadth (neighbours kept; historic default 5)")
-    ap.add_argument("--graph-hops", type=int, default=1, help="Graph expansion depth (historic default 1)")
+    ap.add_argument("--graph-top-k", type=int, default=RECALL_GRAPH_TOP_K,
+                    help=f"Graph expansion breadth (production {RECALL_GRAPH_TOP_K})")
+    ap.add_argument("--graph-hops", type=int, default=RECALL_GRAPH_HOPS,
+                    help=f"Graph expansion depth (production {RECALL_GRAPH_HOPS})")
     args = ap.parse_args()
 
     spec_file = Path(args.queries)
@@ -286,6 +306,16 @@ def main() -> int:
         "expand_graph": not args.no_graph,
         "graph_rerank": args.graph_rerank,
         "rerank_alpha": args.alpha,
+        "graph_top_k": args.graph_top_k,
+        "graph_hops": args.graph_hops,
+        "demote_daily_logs": RECALL_DEMOTE_DAILY_LOGS,
+        "matches_production_defaults": (
+            args.graph_rerank == RECALL_GRAPH_RERANK
+            and args.alpha == RECALL_RERANK_ALPHA
+            and args.graph_top_k == RECALL_GRAPH_TOP_K
+            and args.graph_hops == RECALL_GRAPH_HOPS
+            and not args.no_graph
+        ),
         "graph_top_k": args.graph_top_k,
         "graph_hops": args.graph_hops,
         "summary": summary,

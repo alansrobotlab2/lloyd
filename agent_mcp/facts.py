@@ -210,21 +210,55 @@ def _fact_add(params: dict) -> dict:
 
 
 def _fact_profile(params: dict) -> dict:
+    """All of an entity's facts, grouped by category.
+
+    Capped at `FACT_RANK_CAP_SEED` per category. Uncapped, `fact_profile` on
+    a god node returned every fact it had — `Lloyd` alone carries 5,489, and
+    the whole list went into the model's context to answer one question.
+    With a `query`, each category is ranked by token overlap and the cap
+    keeps the most relevant; without one it keeps the most recent.
+    """
     entity = params.get("entity", "").strip()
     if not entity:
         return _err("entity is required", ErrorCode.MISSING_PARAM)
+    query = (params.get("query") or "").strip()
+    cap = int(params.get("limit_per_category", FACT_RANK_CAP_SEED))
     try:
         facts = _get_facts_sync(entity).get("facts", [])
         categories: dict = {}
         for fact in facts:
             cat = fact.get("category", "general")
             categories.setdefault(cat, []).append(fact)
+
+        tokens = _fact_query_tokens(query) if query else []
+        truncated: dict = {}
+        for cat, cat_facts in categories.items():
+            if tokens:
+                cat_facts.sort(key=lambda f: (-_fact_score(f, tokens),
+                                              str(f.get("created_at") or "")), reverse=False)
+            else:
+                cat_facts.sort(key=lambda f: str(f.get("created_at") or ""), reverse=True)
+            if len(cat_facts) > cap:
+                truncated[cat] = len(cat_facts)
+                categories[cat] = cat_facts[:cap]
+
         lines = [f"Profile for: {entity}"]
         for cat, cat_facts in categories.items():
-            lines.append(f"\n{cat.upper()}:")
+            total = truncated.get(cat, len(cat_facts))
+            header = f"\n{cat.upper()}:" + (f"  (showing {len(cat_facts)} of {total})" if cat in truncated else "")
+            lines.append(header)
             for f in cat_facts[:3]:
                 lines.append(f"  - {f.get('fact', '')}")
-        return {"entity": entity, "categories": categories, "fact_count": len(facts), "summary": "\n".join(lines)}
+        result = {"entity": entity, "categories": categories, "fact_count": len(facts),
+                  "summary": "\n".join(lines)}
+        if truncated:
+            result["truncated_categories"] = truncated
+            result["hint"] = (
+                f"{entity} has {len(facts)} facts; each category is capped at {cap}. "
+                "Pass `query` to rank by relevance, or `fact_get(entity, category=…)` "
+                "for one category in full."
+            )
+        return result
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
 
@@ -240,40 +274,80 @@ def _fact_check(params: dict) -> dict:
 
 
 def _fact_resolve(params: dict) -> dict:
+    """Report contradictions; optionally mark the weaker side invalid.
+
+    `auto_resolve` now defaults to FALSE. It defaulted to true, so a bare
+    `fact_resolve(entity=...)` — which reads like a query — silently expired
+    facts, and its contradiction detector fires on `_token_overlap > 0.6`,
+    which is two facts phrased similarly, not two facts that disagree.
+
+    When it does act it sets `invalid_at` only, not `expired_at`. The two
+    mean different things: expired is "was true, no longer is"; invalid is
+    "should not have been recorded". A same-confidence pair is left alone —
+    there is no basis to pick a winner.
+
+    Refuses outright on an entity above FACT_GODNODE_THRESHOLD facts, where
+    the pairwise scan is O(n²) and the overlap heuristic produces mostly
+    false positives.
+    """
     entity = params.get("entity", "").strip()
     if not entity:
         return _err("entity is required", ErrorCode.MISSING_PARAM)
+    auto_resolve = bool(params.get("auto_resolve", False))
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
-        result = _detect_contradictions_sync(entity)
-        contradictions = result.get("contradictions", [])
+        detection = _detect_contradictions_sync(entity)
+        contradictions = detection.get("contradictions", [])
+        if not auto_resolve:
+            return {"entity": entity, "resolved": 0,
+                    "contradictions": contradictions[:20],
+                    "remaining": len(contradictions),
+                    "hint": ("Reporting only. Pass auto_resolve=true to mark the "
+                             "lower-confidence side invalid, or use fact_invalidate "
+                             "to expire a specific fact.")}
+        if detection.get("checked", 0) > FACT_GODNODE_THRESHOLD:
+            return _err(
+                f"{entity} has {detection['checked']} facts; auto_resolve is refused "
+                f"above {FACT_GODNODE_THRESHOLD} because the overlap heuristic yields "
+                "mostly false positives at that size. Use fact_invalidate on specific facts.",
+                ErrorCode.INVALID_PARAM, resolved=0, remaining=len(contradictions))
+
+        entity_dir = _find_entity_dir(entity)
         resolved = 0
-        if params.get("auto_resolve", True) and contradictions:
-            entity_dir = _find_entity_dir(entity)
-            if entity_dir:
-                for contradiction in contradictions:
-                    f1, f2 = contradiction.get("fact1", {}), contradiction.get("fact2", {})
-                    c1, c2 = f1.get("confidence", 0.5), f2.get("confidence", 0.5)
-                    invalidate_id = f2.get("id") if c1 >= c2 else f1.get("id")
-                    if not invalidate_id:
-                        continue
-                    for fact_file in entity_dir.glob("*.md"):
-                        content = fact_file.read_text(encoding="utf-8")
-                        frontmatter = _parse_fact_frontmatter(content)
-                        if "facts" not in frontmatter:
-                            continue
-                        changed = False
-                        for f in frontmatter["facts"]:
-                            if f.get("id") == invalidate_id:
-                                f["invalid_at"] = now_iso
-                                f["expired_at"] = now_iso
-                                changed = True
-                        if changed:
-                            body_start = content.find("---", 3)
-                            body = content[body_start + 3:] if body_start != -1 else ""
-                            atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
-                            resolved += 1
-        return {"entity": entity, "resolved": resolved, "remaining": len(contradictions) - resolved}
+        if entity_dir:
+            to_invalidate: dict[str, str] = {}
+            for contradiction in contradictions:
+                f1, f2 = contradiction.get("fact1", {}), contradiction.get("fact2", {})
+                c1, c2 = f1.get("confidence", 0.5), f2.get("confidence", 0.5)
+                if c1 == c2:
+                    continue     # no basis to pick a winner
+                loser = f2 if c1 > c2 else f1
+                if loser.get("id"):
+                    to_invalidate[loser["id"]] = contradiction.get("reason", "contradiction")
+            for fact_file in entity_dir.glob("*.md"):
+                content = fact_file.read_text(encoding="utf-8")
+                frontmatter = _parse_fact_frontmatter(content)
+                if "facts" not in frontmatter:
+                    continue
+                changed = False
+                for f in frontmatter["facts"]:
+                    reason = to_invalidate.get(f.get("id"))
+                    if reason and not f.get("invalid_at"):
+                        f["invalid_at"] = now_iso
+                        f["invalid_reason"] = f"fact_resolve: {reason}"
+                        changed = True
+                        resolved += 1
+                if changed:
+                    body_start = content.find("---", 3)
+                    body = content[body_start + 3:] if body_start != -1 else ""
+                    with locked_file(fact_file):
+                        atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
+                    try:
+                        _store().facts_idx.update_file(fact_file, root=FACTS_ROOT)
+                    except StoreUnavailable:
+                        pass
+        return {"entity": entity, "resolved": resolved,
+                "remaining": len(contradictions) - resolved}
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
 
@@ -515,12 +589,19 @@ async def list_tools():
             "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "as_of": {"type": "string", "description": "ISO date — return facts valid at this point in time"}, "include_expired": {"type": "boolean", "description": "If true, include expired/invalidated facts"}}, "required": ["entity"]}),
         Tool(name="fact_add", description="Add a structured fact for a named entity/category.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "fact": {"type": "string"}, "confidence": {"type": "number"}, "valid_at": {"type": "string"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string"}}, "required": ["entity", "category", "fact"]}),
-        Tool(name="fact_profile", description="Get synthesized profile for an entity — all facts grouped by category.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}}, "required": ["entity"]}),
+        Tool(name="fact_profile", description=f"Synthesized profile for an entity: facts grouped by category, capped at {FACT_RANK_CAP_SEED} per category. Pass `query` to rank each category by relevance instead of recency.", inputSchema={
+            "type": "object", "properties": {
+                "entity": {"type": "string"},
+                "query": {"type": "string", "description": "Rank facts by relevance to this text"},
+                "limit_per_category": {"type": "integer", "description": f"Facts kept per category (default {FACT_RANK_CAP_SEED})"},
+            }, "required": ["entity"]}),
         Tool(name="fact_check", description="Detect contradictions in stored facts for an entity.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}}, "required": ["entity"]}),
-        Tool(name="fact_resolve", description="Resolve contradictions by keeping higher-confidence fact.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string"}, "auto_resolve": {"type": "boolean"}}, "required": ["entity"]}),
+        Tool(name="fact_resolve", description="Report contradictions between an entity's facts. Reports only unless auto_resolve=true, which marks the lower-confidence side invalid (never expired).", inputSchema={
+            "type": "object", "properties": {
+                "entity": {"type": "string"},
+                "auto_resolve": {"type": "boolean", "description": "Mark the weaker side invalid (default false)"},
+            }, "required": ["entity"]}),
         Tool(name="fact_invalidate", description="Expire facts that are no longer current. Sets expired_at on matching facts.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string"}, "category": {"type": "string"}, "fact_substring": {"type": "string", "description": "Match facts containing this text"}, "ended": {"type": "string", "description": "ISO date when fact stopped being true"}, "reason": {"type": "string", "description": "Why the fact was expired"}}, "required": ["entity", "ended"]}),
         Tool(name="fact_relate", description="Add a typed relationship edge between two entities.", inputSchema={
@@ -529,13 +610,13 @@ async def list_tools():
             "type": "object", "properties": {"entity": {"type": "string"}, "direction": {"type": "string", "enum": ["in", "out", "both"]}, "type": {"type": "string"}}, "required": ["entity"]}),
         Tool(name="fact_path", description="Find shortest path between two entities via relationship graph.", inputSchema={
             "type": "object", "properties": {"source": {"type": "string"}, "target": {"type": "string"}, "max_hops": {"type": "integer"}}, "required": ["source", "target"]}),
-        Tool(name="fact_neighbors", description="Get neighborhood subgraph around an entity within N hops. Truncates at 200 nodes / 500 edges by default; hub entities at hops=2 will be truncated — narrow with hops=1 or higher min_confidence.", inputSchema={
+        Tool(name="fact_neighbors", description=f"Neighborhood subgraph around an entity within N hops. Truncates at {_FACT_NEIGHBORS_MAX_NODES} nodes / {_FACT_NEIGHBORS_MAX_EDGES} edges; hub entities at hops=2 will truncate — narrow with hops=1 or a higher min_confidence.", inputSchema={
             "type": "object", "properties": {
                 "entity": {"type": "string"},
-                "hops": {"type": "integer"},
-                "min_confidence": {"type": "number"},
-                "max_nodes": {"type": "integer", "description": "Cap on returned nodes (default 200)"},
-                "max_edges": {"type": "integer", "description": "Cap on returned edges (default 500)"},
+                "hops": {"type": "integer", "description": "Traversal depth (default 1)"},
+                "min_confidence": {"type": "number", "description": "Drop edges below this confidence (default 0.5)"},
+                "max_nodes": {"type": "integer", "description": f"Cap on returned nodes (default {_FACT_NEIGHBORS_MAX_NODES})"},
+                "max_edges": {"type": "integer", "description": f"Cap on returned edges (default {_FACT_NEIGHBORS_MAX_EDGES})"},
             }, "required": ["entity"]}),
     ]
 

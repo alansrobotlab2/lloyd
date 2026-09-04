@@ -45,14 +45,13 @@ from agent_mcp._shared import (
 )
 from agent_mcp.retrieval import (
     FACT_GODNODE_THRESHOLD,
-    RelationshipsCorrupt,
     FACT_RANK_CAP_SEED,
     FACT_RANK_CAP_GRAPH,
+    _edge_counts_or_empty,
     extract_entities_from_query,
     fact_matches_tokens,
     fact_query_tokens,
     fact_score,
-    get_entity_edge_counts,
     get_facts_sync,
     graph_weighted_neighbors,
 )
@@ -84,6 +83,34 @@ _DAILY_LOG_RE = re.compile(
     r"(?:^|/)memory/(\d{4}-\d{2}-\d{2}\.md|pipeline/)"
 )
 DAILY_LOG_DEMOTE_FACTOR = 0.4
+
+# vault_recall's production defaults, named so eval/run_eval.py can import
+# them instead of restating them. The nightly eval ran with graph_rerank
+# False and alpha 0.5 while production ran True and 0.3 — it was measuring a
+# configuration nothing serves (2026-09-03 review).
+# graph_rerank went default-on 2026-05-12 for a measured +6-13% MRR. That
+# measurement was never repeated after the graph was rebuilt, and the eval
+# that would have caught it ran with rerank OFF — it was scoring a
+# configuration production did not serve.
+#
+# Measured 2026-09-04 on the 20-query set, with the god-node penalty fixed
+# (it had been a no-op: the degree map was cased, the voter keys lowercased,
+# so every lookup missed and every voter was divided by the same constant):
+#
+#     rerank off              MRR 0.500   NDCG@10 0.601   3445 ms
+#     rerank on, alpha 0.30   MRR 0.386   NDCG@10 0.497   4297 ms
+#     rerank on, alpha 0.50   MRR 0.411   NDCG@10 0.503
+#     rerank on, alpha 0.70   MRR 0.402   NDCG@10 0.520
+#     rerank on, alpha 0.85   MRR 0.419   NDCG@10 0.539
+#     rerank on, alpha 0.30, penalty still broken  MRR 0.436  NDCG@10 0.535
+#
+# Off wins at every alpha and is faster. The knob stays; the default flips.
+# n=20, so treat a 0.02 difference as noise — 0.11 is not.
+RECALL_GRAPH_RERANK = False
+RECALL_RERANK_ALPHA = 0.3      # only consulted when rerank is explicitly on
+RECALL_DEMOTE_DAILY_LOGS = True
+RECALL_GRAPH_TOP_K = 5
+RECALL_GRAPH_HOPS = 1
 
 # Canonical-source prefixes for graph_lookup boost. When a graph-derived
 # entity name resolves to a file under one of these prefixes, treat it as
@@ -438,12 +465,11 @@ def _graph_rerank(
     # `extract_entities_from_query(doc_text)` call per doc — which
     # iterates ~2,700 entity dirs — into a tight regex scan over ~15
     # voter terms. Drops rerank latency by ~10x.
-    try:
-        edge_counts = get_entity_edge_counts()
-    except RelationshipsCorrupt:
-        # Degree is only a god-node penalty here. An unreadable graph costs
-        # rerank quality; it must not fail the recall.
-        edge_counts = {}
+    # Lowercased, because `voters` is keyed on the lowercased name. Against
+    # the cased map every lookup missed, so `degree` read 1 for every voter
+    # and the god-node penalty divided them all by the same constant — a
+    # no-op dressed as a penalty (2026-09-03 review).
+    edge_counts = _edge_counts_or_empty(ci=True)
     voter_contribs: dict[str, float] = {}
     voter_patterns: dict[str, re.Pattern] = {}
     for vk, vw in voters.items():
@@ -724,9 +750,9 @@ def _vault_recall(params: dict) -> dict:
     # (regex over voters instead of full entity scan) drops latency from
     # ~2s extra to near-zero, while the MRR lift (+6-13%) is consistent.
     # Alpha defaults to 0.3 (graph-heavy) per the May 11 alpha sweep.
-    graph_rerank = bool(params.get("graph_rerank", True))
-    rerank_alpha = float(params.get("rerank_alpha", 0.3))
-    demote_daily_logs = bool(params.get("demote_daily_logs", True))
+    graph_rerank = bool(params.get("graph_rerank", RECALL_GRAPH_RERANK))
+    rerank_alpha = float(params.get("rerank_alpha", RECALL_RERANK_ALPHA))
+    demote_daily_logs = bool(params.get("demote_daily_logs", RECALL_DEMOTE_DAILY_LOGS))
     demote_factor = float(params.get("demote_factor", DAILY_LOG_DEMOTE_FACTOR))
     # Graph expansion breadth/depth. Both were hardcoded (top_k=5, hops=1)
     # until 2026-08-06 (#380): with only 5 neighbour slots, low-weight edge
@@ -735,8 +761,8 @@ def _vault_recall(params: dict) -> dict:
     # retrieval and to the eval. hops=1 also meant the "multi-hop" eval
     # category was in fact being served by single-hop expansion.
     # Defaults preserve the historic behaviour exactly.
-    graph_top_k = int(params.get("graph_top_k", 5))
-    graph_hops = int(params.get("graph_hops", 1))
+    graph_top_k = int(params.get("graph_top_k", RECALL_GRAPH_TOP_K))
+    graph_hops = int(params.get("graph_hops", RECALL_GRAPH_HOPS))
 
     # Take top-10 seeds (was 5). Ties at low scores can knock out the
     # canonical entity; e.g. "Knowledge Graph Consistency" and "Knowledge
@@ -958,7 +984,17 @@ async def list_tools():
         Tool(name="vault_search", description="Hybrid BM25+vector search across the obsidian vault.", inputSchema={
             "type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}, "min_score": {"type": "number"}, "scope": {"type": "string"}, "consolidate": {"type": "boolean"}}, "required": ["query"]}),
         Tool(name="vault_recall", description="Combined recall: vault search + entity fact retrieval in parallel. Use expand_graph=true to include facts from related entities.", inputSchema={
-            "type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "include_facts": {"type": "boolean"}, "expand_graph": {"type": "boolean", "description": "Expand results via relationship graph (1 hop)"}}, "required": ["query"]}),
+            "type": "object", "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "description": "Documents returned (default 20)"},
+                "include_facts": {"type": "boolean", "description": "Include entity facts (default true)"},
+                "expand_graph": {"type": "boolean", "description": "Also return facts from graph neighbours (default false)"},
+                "graph_rerank": {"type": "boolean", "description": f"Re-rank documents by graph votes (default {RECALL_GRAPH_RERANK})"},
+                "rerank_alpha": {"type": "number", "description": f"1.0 = pure search score, 0.0 = pure graph (default {RECALL_RERANK_ALPHA})"},
+                "graph_top_k": {"type": "integer", "description": f"Graph expansion breadth (default {RECALL_GRAPH_TOP_K})"},
+                "graph_hops": {"type": "integer", "description": f"Graph expansion depth (default {RECALL_GRAPH_HOPS})"},
+                "demote_daily_logs": {"type": "boolean", "description": f"Down-weight daily notes (default {RECALL_DEMOTE_DAILY_LOGS})"},
+            }, "required": ["query"]}),
     ]
 
 
