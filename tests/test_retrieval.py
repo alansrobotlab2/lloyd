@@ -299,3 +299,46 @@ def test_kind_recognises_tasks_docs_and_skills():
     assert derive_kind("knowledge/ai/note.md") == "doc"
     assert derive_kind("nightly-reflection") == "skill"
     assert derive_kind("vLLM") == "system"
+
+
+# ── every fact write updates the index ───────────────────────────────────────
+
+def test_fact_invalidate_updates_the_index(world):
+    """The markdown is the fact layer, but facts_idx is what the router and
+    fact_profile read. fact_invalidate wrote expired_at to the file and left
+    the index alone, so the Memory page went on showing the fact as current."""
+    root, st = world
+    _write_facts(root, "Lloyd", "state", [
+        {"id": "stat-001", "fact": "Lloyd runs on Ollama", "confidence": 0.9, "category": "state"},
+        {"id": "stat-002", "fact": "Lloyd runs on vLLM", "confidence": 0.9, "category": "state"},
+    ])
+    st.facts_idx.reindex(root=root)
+    assert len(st.facts_idx.for_entity("Lloyd")) == 2
+
+    out = facts_mod._fact_invalidate({
+        "entity": "Lloyd", "ended": "2026-09-04", "fact_substring": "ollama",
+        "reason": "moved to vLLM"})
+    assert out["expired_count"] == 1
+
+    live = st.facts_idx.for_entity("Lloyd")
+    assert [f["fact_id"] for f in live] == ["stat-002"], "the index still serves the expired fact"
+    everything = st.facts_idx.for_entity("Lloyd", include_expired=True)
+    assert len(everything) == 2
+    expired = next(f for f in everything if f["fact_id"] == "stat-001")
+    assert expired["expired_at"] == "2026-09-04"
+
+
+def test_fact_add_and_resolve_also_update_the_index(world):
+    root, st = world
+    add = facts_mod._fact_add({"entity": "Newthing", "category": "state", "fact": "it exists"})
+    assert add["success"]
+    assert [f["fact"] for f in st.facts_idx.for_entity("Newthing")] == ["it exists"]
+
+    _write_facts(root, "Pair", "state", [
+        {"id": "stat-001", "fact": "the flag is enabled", "confidence": 0.9, "category": "state"},
+        {"id": "stat-002", "fact": "the flag is disabled", "confidence": 0.4, "category": "state"},
+    ])
+    st.facts_idx.reindex(root=root)
+    retrieval.invalidate_fact_file_cache()
+    assert facts_mod._fact_resolve({"entity": "Pair", "auto_resolve": True})["resolved"] == 1
+    assert [f["fact_id"] for f in st.facts_idx.for_entity("Pair")] == ["stat-001"]

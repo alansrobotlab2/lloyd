@@ -80,6 +80,20 @@ app = Server("lloyd-facts")
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def _reindex_files(paths) -> None:
+    """Re-read written fact files into the store's index.
+
+    Every writer of a fact file owes the index this call: the markdown is
+    the fact layer, but `facts_idx` is what the router, `fact_profile` and
+    the health report actually read. A write that skips it leaves the two
+    disagreeing until the next full reindex.
+    """
+    try:
+        _store().facts_idx.reindex(list(paths), root=FACTS_ROOT)
+    except StoreUnavailable:
+        pass          # markdown is written; `kg reindex` rebuilds the index
+
+
 def _generate_fact_id(category: str, existing_ids=()) -> str:
     """The next `<prefix>-NNN` for this file.
 
@@ -382,10 +396,7 @@ def _fact_resolve(params: dict) -> dict:
                     body = content[body_start + 3:] if body_start != -1 else ""
                     with locked_file(fact_file):
                         atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
-                    try:
-                        _store().facts_idx.update_file(fact_file, root=FACTS_ROOT)
-                    except StoreUnavailable:
-                        pass
+                    _reindex_files([fact_file])
         return {"entity": entity, "resolved": resolved,
                 "remaining": len(contradictions) - resolved}
     except Exception as exc:
@@ -417,27 +428,35 @@ def _fact_invalidate(params: dict) -> dict:
                 files_to_scan.append(fact_file)
         else:
             files_to_scan = list(entity_dir.glob("*.md"))
+        touched: list = []
         for fact_file in files_to_scan:
-            content = fact_file.read_text(encoding="utf-8")
-            frontmatter = _parse_fact_frontmatter(content)
-            if "facts" not in frontmatter:
-                continue
-            changed = False
-            for f in frontmatter["facts"]:
-                if f.get("expired_at") or f.get("invalid_at"):
+            with locked_file(fact_file):
+                content = fact_file.read_text(encoding="utf-8")
+                frontmatter = _parse_fact_frontmatter(content)
+                if "facts" not in frontmatter:
                     continue
-                if fact_substring and fact_substring not in f.get("fact", "").lower():
-                    continue
-                f["expired_at"] = ended
-                if reason:
-                    f["expired_reason"] = reason
-                changed = True
-                expired_count += 1
-                matched_facts.append({"id": f.get("id"), "fact": f.get("fact", "")[:80]})
-            if changed:
-                body_start = content.find("---", 3)
-                body = content[body_start + 3:] if body_start != -1 else ""
-                atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
+                changed = False
+                for f in frontmatter["facts"]:
+                    if f.get("expired_at") or f.get("invalid_at"):
+                        continue
+                    if fact_substring and fact_substring not in f.get("fact", "").lower():
+                        continue
+                    f["expired_at"] = ended
+                    if reason:
+                        f["expired_reason"] = reason
+                    changed = True
+                    expired_count += 1
+                    matched_facts.append({"id": f.get("id"), "fact": f.get("fact", "")[:80]})
+                if changed:
+                    body_start = content.find("---", 3)
+                    body = content[body_start + 3:] if body_start != -1 else ""
+                    atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
+                    touched.append(fact_file)
+        # The index is what the router and vault_recall read. Without this an
+        # expired fact went on being served as current until the next full
+        # reindex — the markdown said expired, the Memory page said active.
+        if touched:
+            _reindex_files(touched)
         return {"success": True, "entity": resolved, "expired_count": expired_count, "matched_facts": matched_facts}
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, expired_count=0)
