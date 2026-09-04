@@ -7,7 +7,7 @@ Lloyd is a fully local AI agent. It runs its own in-process agent loop (`app/har
 - **Backend**: `server.py` (FastAPI, port 8080)
 - **Frontend**: `web/` (Vite dev server, proxied through backend)
 - **Config**: `config.yaml`
-- **MCP aggregator**: `agent_mcp/main.py` (unified `Server("lloyd")` on `:8500/sse`)
+- **MCP aggregator**: `agent_mcp/main.py` (unified `Server("lloyd")` on `:8500/mcp`, Streamable HTTP)
 - **Agent harness**: `app/harness/` (`run_query(messages, options)` — async generator)
 - **Venv**: `.venvs/lloyd/bin/python`
 
@@ -59,7 +59,7 @@ After editing frontend files, Vite HMR usually picks up changes automatically (n
 │   ├── tool_schema.py   # MCP tools → OpenAI tool schema translation
 │   └── errors.py        # ParseError, ToolDispatchError, MaxTurnsExceeded
 │
-├── agent_mcp/           # Unified MCP aggregator (Server("lloyd") on :8500/sse)
+├── agent_mcp/           # Unified MCP aggregator (Server("lloyd") on :8500/mcp)
 │   ├── main.py          # Aggregates all modules; MCP SSE endpoint
 │   ├── builtin_bash.py  # Bash tool (timeout, truncation)
 │   ├── builtin_fs.py    # Read, Write, Edit, Grep, Glob tools
@@ -171,8 +171,8 @@ subagents:
 
 mcp_servers:
   lloyd-mcp:
-    type: sse
-    url: http://127.0.0.1:8500/sse
+    type: streamable-http
+    url: http://127.0.0.1:8500/mcp
     disabled_tools: []  # bare tool names, e.g. [Bash, browser_screenshot]
 
 agent:

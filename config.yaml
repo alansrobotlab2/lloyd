@@ -93,8 +93,8 @@ mcp_servers:
     - discord_send
     - discord_send_embed
     name: lloyd-mcp
-    type: sse
-    url: http://127.0.0.1:8500/sse
+    type: streamable-http
+    url: http://127.0.0.1:8500/mcp
 model:
   default: primary
 compaction:
@@ -244,7 +244,7 @@ server:
   port: 8080
 services:
   backend: http://127.0.0.1:8080
-  lloyd_mcp: http://127.0.0.1:8500/sse
+  lloyd_mcp: http://127.0.0.1:8500/mcp
   qmd: http://localhost:8181/query
 youtube:
   transcript_fallback_chain:

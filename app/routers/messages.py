@@ -161,15 +161,15 @@ def _build_notification_drain(session_id: str, turn_id: str):
     ``source: "bg_task_notification"``, and returns the harness shapes
     for the loop to splice into ``chat_messages``.
     """
-    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, get_or_open_pool
+    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, get_or_open_pool
 
     async def drain() -> list[dict[str, Any]]:
         try:
-            pool = await get_or_open_pool(
-                {"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}}
-            )
+            pool = await get_or_open_pool(DEFAULT_LLOYD_MCP_SERVERS)
+            # Session id rides in `_meta`, not the arguments (see
+            # MCPPool.call_tool) — the aggregator reads it from there.
             result = await pool.call_tool(
-                "_BackgroundTaskDrain", {"_session_id": session_id}
+                "_BackgroundTaskDrain", {}, session_id=session_id
             )
         except Exception as exc:
             logger.warning(f"bg-task drain: dispatch failed: {exc}")

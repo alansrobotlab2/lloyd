@@ -72,7 +72,7 @@ async def _task(args: dict[str, Any]) -> str:
     # Import here to avoid circular import at module load time.
     from app.harness.hooks import HookRegistry
     from app.harness.loop import run_query
-    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL
+    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.harness.options import RunOptions
     from app.harness.safety import install_default_safety_hook
 
@@ -115,7 +115,7 @@ async def _task(args: dict[str, Any]) -> str:
         max_turns=profile["max_turns"],
         disallowed_tools=disallowed,
         hooks=task_hooks,
-        mcp_servers={"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}},
+        mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         # Per-invocation session id so each subagent run gets its own
         # tool_search LoadedToolSet — different disallowed_tools profiles
         # would otherwise share one cache entry.

@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""Comprehensive test of all 14 browser MCP tools via SSE endpoint.
+"""Manual smoke test of all 14 browser MCP tools against a running lloyd-mcp.
 
-Uses the SSE transport: a persistent GET /sse connection receives responses,
-while requests are POSTed to the messages endpoint.
+Run with the aggregator up:  .venvs/lloyd/bin/python test_browser_mcp.py
+
+Transport: Streamable HTTP (MCP 2026-07-28) via the SDK client, driven
+through the harness's own MCPPool so this exercises the same path the
+agent does. It used to hand-roll the SSE protocol — a GET stream in a
+listener thread, ids matched by hand — which was the third hand-rolled
+MCP client in this repo and broke the moment the transport changed.
 """
 
+import asyncio
 import json
-import httpx
-import sys
 import re
-import threading
-import time
+import sys
 
-SSE_URL = "http://127.0.0.1:8500/sse"
-BASE_URL = "http://127.0.0.1:8500"
+from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, MCPPool
+
 TIMEOUT = 30.0
 
 results = []
-pending = {}
-response_events = {}
+
 
 def report(name, passed, detail=""):
     status = "PASS" if passed else "FAIL"
@@ -27,120 +29,56 @@ def report(name, passed, detail=""):
     print(f"  {tag} {name}" + (f" -- {detail}" if detail else ""), flush=True)
 
 
-# -- SSE listener thread --
-session_url = None
-sse_ready = threading.Event()
-sse_error = None
+_pool: MCPPool | None = None
+_loop: asyncio.AbstractEventLoop | None = None
 
-def sse_listener():
-    global session_url, sse_error
-    try:
-        with httpx.Client(timeout=None) as c:
-            with c.stream("GET", SSE_URL) as resp:
-                event_type = None
-                for line in resp.iter_lines():
-                    if line.startswith("event:"):
-                        event_type = line[len("event:"):].strip()
-                    elif line.startswith("data:"):
-                        data = line[len("data:"):].strip()
-                        if event_type == "endpoint" or session_url is None:
-                            if data.startswith("/"):
-                                session_url = BASE_URL + data
-                            elif data.startswith("http"):
-                                session_url = data
-                            sse_ready.set()
-                        elif event_type == "message":
-                            try:
-                                msg = json.loads(data)
-                                msg_id = msg.get("id")
-                                if msg_id is not None:
-                                    pending[msg_id] = msg
-                                    evt = response_events.get(msg_id)
-                                    if evt:
-                                        evt.set()
-                            except json.JSONDecodeError:
-                                pass
-                        event_type = None
-                    elif line == "":
-                        event_type = None
-    except Exception as e:
-        sse_error = e
-        sse_ready.set()
-
-t = threading.Thread(target=sse_listener, daemon=True)
-t.start()
-sse_ready.wait(timeout=10)
-
-if not session_url:
-    print(f"FATAL: Could not get session URL. Error: {sse_error}", flush=True)
-    sys.exit(1)
-
-print(f"Session URL: {session_url}", flush=True)
-
-post_client = httpx.Client(timeout=TIMEOUT)
-req_id = 0
-
-def rpc(method, params=None, timeout=TIMEOUT):
-    global req_id
-    req_id += 1
-    my_id = req_id
-    body = {"jsonrpc": "2.0", "id": my_id, "method": method}
-    if params is not None:
-        body["params"] = params
-
-    evt = threading.Event()
-    response_events[my_id] = evt
-    post_client.post(session_url, json=body)
-
-    if not evt.wait(timeout=timeout):
-        return {"error": {"code": -1, "message": "Timeout waiting for response"}}
-    return pending.pop(my_id, None)
 
 def call_tool(name, args=None, timeout=TIMEOUT):
-    resp = rpc("tools/call", {"name": name, "arguments": args or {}}, timeout=timeout)
-    if resp and "result" in resp:
-        return resp["result"]
-    if resp and "error" in resp:
-        return {"error": resp["error"]}
-    return resp
+    """Synchronous facade so the test bodies below stay unchanged."""
+    assert _loop is not None and _pool is not None
+    try:
+        return _loop.run_until_complete(
+            asyncio.wait_for(
+                _pool.call_tool(name, args or {}, timeout_seconds=timeout),
+                timeout=timeout + 5,
+            )
+        )
+    except Exception as exc:
+        return {"content": f'{{"error": "{exc}"}}', "is_error": True}
+
 
 def text_of(result):
-    if not result:
-        return ""
-    content = result.get("content", [])
-    parts = []
-    for c in content:
-        if c.get("type") == "text":
-            parts.append(c["text"])
-    return "\n".join(parts)
+    return (result or {}).get("content", "") or ""
+
 
 def is_error(result):
-    if not result:
-        return True
-    if "error" in result:
-        return True
-    return result.get("isError", False)
+    return bool((result or {}).get("is_error", True))
 
 
-# -- Initialize --
-print("Sending initialize...", flush=True)
-init = rpc("initialize", {
-    "protocolVersion": "2024-11-05",
-    "capabilities": {},
-    "clientInfo": {"name": "test-runner", "version": "1.0"}
-})
-print(f"Init: {json.dumps(init, default=str)[:200]}", flush=True)
+def _setup():
+    global _pool, _loop
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
+    _pool = MCPPool({
+        "lloyd-mcp": {"type": "streamable-http", "url": DEFAULT_LLOYD_MCP_URL}
+    })
+    try:
+        _loop.run_until_complete(_pool.open())
+    except Exception as exc:
+        print(f"FATAL: could not reach lloyd-mcp at {DEFAULT_LLOYD_MCP_URL}: {exc}")
+        sys.exit(1)
+    names = [t["name"] for _s, ts in _pool.discovered for t in ts]
+    browser_tools = sorted(n for n in names if n.startswith("browser_"))
+    print(f"Connected: {len(names)} tools", flush=True)
+    print(f"Browser tools ({len(browser_tools)}): {browser_tools}", flush=True)
 
-post_client.post(session_url, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
-time.sleep(0.3)
 
-# List tools
-tools_resp = rpc("tools/list", {})
-tool_names = []
-if tools_resp and "result" in tools_resp:
-    tool_names = [t["name"] for t in tools_resp["result"].get("tools", [])]
-browser_tools = [n for n in tool_names if n.startswith("browser_")]
-print(f"Browser tools ({len(browser_tools)}): {browser_tools}", flush=True)
+def _teardown():
+    if _pool is not None and _loop is not None:
+        _loop.run_until_complete(_pool.aclose())
+
+
+_setup()
 
 print("\n" + "=" * 60)
 print("RUNNING BROWSER MCP TOOL TESTS")
@@ -376,10 +314,11 @@ except Exception as e:
 print("\n-- Test 12: browser_screenshot --", flush=True)
 try:
     r = call_tool("browser_screenshot", {})
-    content = r.get("content", []) if r else []
-    has_image = any(c.get("type") == "image" for c in content)
-    has_text = any(c.get("type") == "text" for c in content)
+    # MCPPool flattens content blocks to text; a non-text block is rendered
+    # as {"type": "..."} by the pool, which is what we look for here.
     txt = text_of(r)
+    has_image = '"type": "image"' in txt
+    has_text = bool(txt)
     ok = not is_error(r) and (has_image or len(txt) > 0)
     report("browser_screenshot", ok, f"has_image={has_image}, has_text={has_text}, text_len={len(txt)}")
 except Exception as e:
@@ -500,4 +439,4 @@ if failed == 0:
 else:
     print(f"\n{failed} test(s) FAILED.", flush=True)
 
-post_client.close()
+_teardown()

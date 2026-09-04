@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """
-Lloyd unified MCP server — every tool in one Server("lloyd") over SSE.
+Lloyd unified MCP server — every tool in one Server("lloyd").
 
 Run with:  python -m agent_mcp.main  (from ~/lloyd directory)
-Endpoints: http://127.0.0.1:8500/sse     MCP transport
+Endpoints: http://127.0.0.1:8500/mcp     MCP transport (Streamable HTTP)
            http://127.0.0.1:8500/health  discovery/liveness JSON
+
+Protocol: MCP 2026-07-28, stateless. There is no initialize/initialized
+handshake and no Mcp-Session-Id — every request carries its own context in
+`_meta`, so any request can be served without prior state. The old
+HTTP+SSE transport (a GET stream plus a separate /messages/ POST mount) is
+deprecated upstream and gone here; it was also the source of the recurring
+"Expected ASGI message 'http.response.body'" errors in logs/mcp.err,
+which came from its `return Response()` teardown.
 
 Module contract
 ---------------
@@ -31,13 +39,12 @@ from contextlib import asynccontextmanager
 from typing import Any, Protocol, runtime_checkable
 
 import uvicorn
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
+from mcp.server.caching import CacheHint
+from mcp.server.lowlevel import Server
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, TextContent, Tool
-from starlette.applications import Starlette
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount, Route
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from agent_mcp import (
     _task_registry,
@@ -128,8 +135,6 @@ for _mod in MODULES:
     _check_module(_mod)
 
 
-combined = Server("lloyd")
-
 # tool_name -> module, rebuilt on each list_tools call.
 #
 # Never mutated in place. `list_tools` builds a fresh dict and rebinds this
@@ -153,9 +158,12 @@ META_SESSION_ID = "lloyd/session_id"
 # check as a backstop for non-aggregator servers).
 TOOL_NAME_MAX = 64
 
+# How long a client may treat a tools/list result as fresh. Short enough
+# that toggling a tool in the Tools page reaches a running harness.
+TOOLS_LIST_TTL_MS = 60_000
 
-@combined.list_tools()
-async def list_tools():
+
+async def list_tools() -> list[Tool]:
     """Aggregate every module's tools.
 
     A module that raises is logged, recorded in `_discovery_status` and
@@ -206,7 +214,24 @@ async def list_tools():
     return all_tools
 
 
-def _bound_session_id(arguments: dict) -> str:
+async def on_list_tools(ctx, params) -> ListToolsResult:
+    """tools/list handler.
+
+    `ttl_ms`/`cache_scope` let the client cache this result instead of
+    re-asking on every connection — the 2026-07-28 replacement for both
+    our hand-rolled discovery caches and `tools/list_changed`. Kept short
+    enough that a tool toggled in the Tools page reaches a running harness
+    within the window, rather than never (discovery used to be frozen for
+    the life of a pool).
+    """
+    return ListToolsResult(
+        tools=await list_tools(),
+        ttl_ms=TOOLS_LIST_TTL_MS,
+        cache_scope="private",
+    )
+
+
+def _bound_session_id(arguments: dict, meta: Any = None) -> str:
     """Resolve the harness session id for the in-flight tool call.
 
     Preferred source is the request's `_meta` — the field the MCP spec
@@ -219,12 +244,8 @@ def _bound_session_id(arguments: dict) -> str:
     real parameter and would be rejected outright by any schema setting
     `additionalProperties: false`.
     """
-    try:
-        meta = combined.request_context.meta
-    except LookupError:
-        meta = None  # called outside a request (tests, direct dispatch)
-    if meta is not None:
-        sid = getattr(meta, META_SESSION_ID, None)
+    if isinstance(meta, dict):
+        sid = meta.get(META_SESSION_ID)
         if isinstance(sid, str) and sid:
             return sid
     if isinstance(arguments, dict):
@@ -232,8 +253,7 @@ def _bound_session_id(arguments: dict) -> str:
     return ""
 
 
-@combined.call_tool()
-async def call_tool(name: str, arguments: dict):
+async def call_tool(name: str, arguments: dict, meta: Any = None):
     if not _dispatch:
         await list_tools()
     mod = _dispatch.get(name)
@@ -243,7 +263,7 @@ async def call_tool(name: str, arguments: dict):
             isError=True,
         )
 
-    sid = _bound_session_id(arguments)
+    sid = _bound_session_id(arguments, meta)
     # Strip the legacy argument form before the per-tool handler validates,
     # so module schemas never have to advertise an internal field.
     if isinstance(arguments, dict) and "_session_id" in arguments:
@@ -256,24 +276,43 @@ async def call_tool(name: str, arguments: dict):
         _task_registry.current_session_id.reset(token)
 
 
+async def on_call_tool(ctx, params) -> CallToolResult:
+    """tools/call handler.
+
+    `ctx.meta` carries the caller's per-request context — on 2026-07-28
+    that includes the protocol version and client info the old handshake
+    used to negotiate once, plus our own `lloyd/session_id`.
+    """
+    result = await call_tool(params.name, params.arguments or {}, ctx.meta)
+    if isinstance(result, CallToolResult):
+        return result
+    # A module that still returns a bare content list.
+    return CallToolResult(content=list(result), isError=False)
+
+
 # DNS-rebinding protection. The aggregator binds loopback with no auth, so
 # the only thing standing between a page in the user's browser and this
-# tool surface is that a cross-origin POST to /messages/ needs a preflight
-# it won't get. That's an accident of content-type rules, not a control —
-# the SDK ships the actual control, so use it.
+# tool surface is that a cross-origin POST needs a preflight it won't get.
+# That's an accident of content-type rules, not a control — the SDK ships
+# the actual control, so use it.
+#
+# Hosts and origins are matched by NAME with a wildcard port. The threat
+# this blocks is DNS rebinding — a page on an attacker's domain resolving
+# that domain to 127.0.0.1 and talking to this server; such a request
+# carries the attacker's hostname in Host/Origin, which is what gets
+# rejected. The port is not part of that defence, and pinning it to PORT
+# is actively harmful: the aggregator answers /health happily on any other
+# port while every MCP request fails 421 "Invalid Host header" — a
+# silent-partial-failure of exactly the kind this review set out to remove.
+_LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"]
 _security = TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
-    allowed_hosts=[f"127.0.0.1:{PORT}", f"localhost:{PORT}"],
-    allowed_origins=[f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"],
+    allowed_hosts=[f"{h}:*" for h in _LOOPBACK_HOSTS] + _LOOPBACK_HOSTS,
+    allowed_origins=(
+        [f"http://{h}:*" for h in _LOOPBACK_HOSTS]
+        + [f"http://{h}" for h in _LOOPBACK_HOSTS]
+    ),
 )
-
-transport = SseServerTransport("/messages/", security_settings=_security)
-
-
-async def handle_sse(request):
-    async with transport.connect_sse(request.scope, request.receive, request._send) as streams:
-        await combined.run(streams[0], streams[1], combined.create_initialization_options())
-    return Response()
 
 
 async def health(request):
@@ -323,13 +362,40 @@ async def lifespan(app):
             await _task_registry.terminate_all()
 
 
-starlette_app = Starlette(
-    routes=[
-        Route("/sse", handle_sse, methods=["GET"]),
-        Route("/health", health, methods=["GET"]),
-        Mount("/messages/", app=transport.handle_post_message),
-    ],
+combined = Server(
+    "lloyd",
+    version="2.0",
+    instructions="Lloyd's unified tool surface: filesystem, shell, knowledge "
+                 "graph, vault, mail, calendar, browser and automation.",
     lifespan=lifespan,
+    on_list_tools=on_list_tools,
+    on_call_tool=on_call_tool,
+    # Protocol-level freshness hints. The client caches tools/list for this
+    # long instead of re-querying on every connection.
+    cache_hints={"tools/list": CacheHint(ttl_ms=TOOLS_LIST_TTL_MS, scope="private")},
+)
+
+# Streamable HTTP replaces the GET-stream + POST-mount pair. `stateless_http`
+# matches the 2026-07-28 core: no session is pinned to this process, so a
+# dropped connection costs a reconnect (~6ms) rather than a torn-down
+# session shared by every in-flight turn.
+# `json_response=True` returns each response as a plain JSON body instead
+# of wrapping it in an SSE event.
+#
+# This is not a preference — it is required. Streamable HTTP's SSE framing
+# runs through httpx2's parser, which enforces a 1 MiB
+# DEFAULT_MAX_EVENT_SIZE_BYTES, and mcp's client constructs its
+# `EventSource(response)` with no way to raise it. A tool result above
+# 1 MiB (fact_get on a well-connected entity returns ~1.4 MB) therefore
+# died as "SSE stream ended without a response" — with the real cause
+# swallowed into a debug log. We use no progress notifications or partial
+# streaming, so the SSE framing buys nothing and costs a size ceiling.
+starlette_app = combined.streamable_http_app(
+    streamable_http_path="/mcp",
+    stateless_http=True,
+    json_response=True,
+    transport_security=_security,
+    custom_starlette_routes=[Route("/health", health, methods=["GET"])],
 )
 
 if __name__ == "__main__":

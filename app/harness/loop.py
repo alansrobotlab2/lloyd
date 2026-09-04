@@ -29,7 +29,7 @@ from app.harness.tool_result_spill import (
     maybe_spill,
 )
 from app.harness.events import NormalizedEvent
-from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL, MCPPool, get_or_open_pool
+from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
 from app.harness.tool_schema import build_tool_list
 from app.harness import tool_search_cache
@@ -458,7 +458,7 @@ async def _build_pool(options: RunOptions) -> MCPPool:
     """
     cfg = dict(options.mcp_servers)
     if not cfg:
-        cfg = {"lloyd-mcp": {"type": "sse", "url": DEFAULT_LLOYD_MCP_URL}}
+        cfg = DEFAULT_LLOYD_MCP_SERVERS
     return await get_or_open_pool(cfg)
 
 

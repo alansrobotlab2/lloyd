@@ -79,7 +79,7 @@ def test_wrap_produces_call_tool_result():
     parsed = json.loads(item.text)
     assert parsed == {"foo": "bar"}
     # No "error" key -> a successful result.
-    assert wrapped.isError is False
+    assert wrapped.is_error is False
 
 
 def test_wrap_sets_is_error_from_error_key():
@@ -87,7 +87,7 @@ def test_wrap_sets_is_error_from_error_key():
     # reach the harness as is_error=True, not as a successful result whose
     # text happens to contain {"error": ...}.
     wrapped = _wrap(_err("entity is required", ErrorCode.MISSING_PARAM))
-    assert wrapped.isError is True
+    assert wrapped.is_error is True
 
 
 def test_wrap_handles_datetime_via_default_str():
@@ -224,7 +224,7 @@ def test_unknown_tool_wrap_err_composition():
     # JSON envelope on the wire.
     wrapped = _wrap(_err("Unknown tool: bogus", ErrorCode.UNKNOWN_TOOL))
     assert isinstance(wrapped, CallToolResult) and len(wrapped.content) == 1
-    assert wrapped.isError is True
+    assert wrapped.is_error is True
     parsed = json.loads(wrapped.content[0].text)
     assert parsed == {
         "error": "Unknown tool: bogus",
