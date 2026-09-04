@@ -121,7 +121,6 @@ compaction:
     buffer_tokens: 3000
 harness:
   stream_chunk_timeout_seconds: 60
-  max_tools_per_request: 128
   tool_search:
     enabled: true
     threshold_tools: 30
@@ -137,6 +136,8 @@ harness:
     - http_fetch
     - http_request
     - http_search
+    - browser_navigate
+    - browser_snapshot
     - vault_write
     - vault_recall
     - mc_get_state

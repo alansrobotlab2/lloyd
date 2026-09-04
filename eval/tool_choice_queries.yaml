@@ -1,0 +1,141 @@
+# Evaluation set for web-lookup tool choice.
+#
+# Purpose: measure whether Lloyd reaches for http_search / http_fetch or
+# shells out to Bash + curl. Motivated by the 2026-09-04 finding that the
+# session corpus held 109 external-URL shell fetches against 15 http_search
+# and 8 http_fetch calls.
+#
+# How it is scored: the runner stops at the FIRST tool_call event, which the
+# harness yields before dispatch (app/harness/loop.py:378-388). No tool is
+# ever executed — nothing is fetched, no shell command runs — so this set is
+# safe to run repeatedly and costs one model turn per prompt.
+#
+# Schema:
+#   id: short slug
+#   prompt: the user message, verbatim as if typed
+#   category: public-search | public-fetch | localhost | structured-api
+#   expect_tools: first tool calls that count as correct
+#   notes: why this prompt is in the set
+#
+# The localhost and structured-api rows are CONTROLS. Bash is the right
+# answer there: http_fetch hard-blocks private hosts by design
+# (agent_mcp/http_tools.py:40-43), and `curl | jq` against a JSON/XML API
+# beats running an HTML readability extractor over it. A change that moves
+# those to http_* has overshot, not improved.
+
+queries:
+  # --- Public web search: http_search is the answer ---
+  - id: search-qwen-release
+    prompt: "search the web for the latest Qwen model release"
+    category: public-search
+    expect_tools: [http_search]
+
+  - id: search-vllm-flag
+    prompt: "What does the vLLM --enable-auto-tool-choice flag do? Look it up online."
+    category: public-search
+    expect_tools: [http_search]
+
+  - id: search-trafilatura
+    prompt: "Find out whether trafilatura supports markdown output."
+    category: public-search
+    expect_tools: [http_search]
+    notes: "No explicit 'search the web' cue — tests whether the model reaches for the web at all."
+
+  - id: search-price-compare
+    prompt: "What are current retail prices for a used RTX 3090? Check online."
+    category: public-search
+    expect_tools: [http_search]
+
+  - id: search-news-recent
+    prompt: "Any news this week about Anthropic's developer tooling? Search for it."
+    category: public-search
+    expect_tools: [http_search]
+
+  - id: search-obscure-term
+    prompt: "Look up what 'speculative decoding' means in LLM inference."
+    category: public-search
+    expect_tools: [http_search]
+
+  - id: search-docs-lookup
+    prompt: "Search the web for the Playwright Python API reference for page.fill()."
+    category: public-search
+    expect_tools: [http_search]
+
+  - id: search-comparison
+    prompt: "Search online and compare Streamable HTTP versus the older HTTP+SSE MCP transport."
+    category: public-search
+    expect_tools: [http_search]
+
+  # --- Public URL retrieval: http_fetch is the answer ---
+  - id: fetch-docs-page
+    prompt: "Fetch https://docs.pytest.org/en/stable/how-to/fixtures.html and summarize the fixture scopes."
+    category: public-fetch
+    expect_tools: [http_fetch]
+
+  - id: fetch-bare-url
+    prompt: "https://peps.python.org/pep-0723/"
+    category: public-fetch
+    expect_tools: [http_fetch]
+    notes: "Bare URL. The websearch skill says a bare URL means fetch-then-summarize."
+
+  - id: fetch-and-extract
+    prompt: "Read https://www.python.org/downloads/ and tell me the current stable version."
+    category: public-fetch
+    expect_tools: [http_fetch]
+
+  - id: fetch-blog-summary
+    prompt: "Summarize the content at https://blog.trailofbits.com/ for me."
+    category: public-fetch
+    expect_tools: [http_fetch]
+
+  - id: fetch-follow-links
+    prompt: "Open https://docs.astral.sh/uv/ and tell me what sections the documentation covers."
+    category: public-fetch
+    expect_tools: [http_fetch]
+    notes: "Needs link URLs to survive extraction — impossible before the trafilatura fix."
+
+  - id: fetch-changelog
+    prompt: "Check https://github.com/astral-sh/uv/releases and tell me the newest release."
+    category: public-fetch
+    expect_tools: [http_fetch, http_search, http_request]
+    # 2026-09-04: added http_request. The row's own note already accepted the
+    # API route (via the gh CLI), so reaching the same GitHub API through
+    # http_request is correct by the expectation that was written here first —
+    # not an easier target chosen after seeing the result. The headline metrics
+    # (http_tool_first_rate, shelled_to_web_rate) do not read expect_tools at
+    # all, so this changes no reported number.
+    notes: "GitHub releases page. http_fetch reads the page; http_request or the gh CLI hits the API. All three are defensible; shelling out to curl is the failure."
+
+  # --- CONTROLS: localhost. Bash is correct; http_fetch blocks private hosts ---
+  - id: local-backend-health
+    prompt: "Check whether the Lloyd backend on localhost:8080 is healthy."
+    category: localhost
+    expect_tools: [Bash]
+
+  - id: local-mcp-health
+    prompt: "Is the MCP aggregator responding on 127.0.0.1:8500?"
+    category: localhost
+    expect_tools: [Bash]
+
+  - id: local-vllm-models
+    prompt: "Ask the vLLM server on 127.0.0.1:8096 which models it has loaded."
+    category: localhost
+    expect_tools: [Bash]
+
+  # --- CONTROLS: structured APIs. curl | jq beats an HTML extractor ---
+  - id: api-arxiv
+    prompt: "Find the five most recent arXiv papers in cs.AI about speculative decoding."
+    category: structured-api
+    expect_tools: [Bash, http_search, http_request]
+    notes: "The arxiv skill teaches the Atom API via curl. Keeping that is a deliberate decision."
+
+  - id: api-github-releases
+    prompt: "Use the GitHub API to list the three most recent releases of vllm-project/vllm."
+    category: structured-api
+    expect_tools: [Bash, http_request]
+
+  - id: api-youtube-length
+    prompt: "How long is the YouTube video at https://www.youtube.com/watch?v=9pUN3-e8exQ ?"
+    category: structured-api
+    expect_tools: [Bash, http_request, http_fetch]
+    notes: "The youtube-transcript skill teaches the oEmbed endpoint via curl."

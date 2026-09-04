@@ -21,6 +21,8 @@ harness:
     - http_fetch
     - http_request
     - http_search
+    - browser_navigate
+    - browser_snapshot
     - vault_write
     - vault_recall
     - mc_get_state

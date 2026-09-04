@@ -18,6 +18,9 @@ mcp>=2.1.0,<3
 # HTTP tools
 httpx>=0.27.0
 ddgs>=6.0.0
+# Readability extraction for http_fetch. Rides lxml; keeps headings, lists,
+# tables and link hrefs, which the hand-rolled HTMLParser extractor dropped.
+trafilatura>=2.2.0
 
 # Data handling
 pyyaml>=6.0.0

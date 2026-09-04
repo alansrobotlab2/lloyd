@@ -39,6 +39,14 @@ _CANON_SKILLS_DIRS = [
 ]
 
 
+# Same quarantine vocabulary the MCP skills module enforces — imported so the
+# advertised index and the readable set cannot drift apart.
+try:
+    from agent_mcp.skills import _QUARANTINE_STATUSES
+except Exception:  # pragma: no cover - prompt building must not hard-depend on MCP
+    _QUARANTINE_STATUSES = {"inactive", "archived", "disabled", "retired", "quarantined"}
+
+
 def _resolve_overlay(overlay_dir: str | Path | None) -> Path | None:
     """Normalize an overlay-dir argument (falls back to LLOYD_OVERLAY_DIR env var)."""
     raw = overlay_dir if overlay_dir is not None else os.environ.get("LLOYD_OVERLAY_DIR")
@@ -276,6 +284,24 @@ def build_system_prompt(
     )
     parts.append(bg_tasks)
 
+    # Web lookups. Bash gets an affordance paragraph directly above, and the
+    # model has both it and the http_* tools in the ToolSearch baseline on
+    # every request — so without this the only prompt-level guidance about
+    # reaching the internet was Bash's. That asymmetry is how curl became the
+    # habit (2026-09-04 tool-choice investigation).
+    web_lookups = (
+        "Web lookups: to reach the public internet use http_search (find pages "
+        "by query) and http_fetch (read a page as markdown, links included, so "
+        "you can follow them). Use http_request for APIs and non-GET verbs. Do "
+        "not shell out to curl or wget to read the web — you would get raw HTML "
+        "to strip yourself. Bash and curl remain correct for localhost and "
+        "private hosts, which http_fetch blocks by design, and for the "
+        "structured API pipelines individual skills document. If a fetched page "
+        "comes back near-empty it is JavaScript-rendered: use browser_navigate "
+        "then browser_snapshot rather than retrying the fetch."
+    )
+    parts.append(web_lookups)
+
     turn_discipline = (
         "Turn discipline: never end a turn on an unfulfilled announcement. If you "
         "say \"Let me …\", \"I'll …\", \"Now I'll …\", or end a sentence on a colon "
@@ -317,6 +343,29 @@ def _load_memories(overlay: Path | None = None) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
+def _is_quarantined_skill(skill_file: Path) -> bool:
+    """True if the skill's frontmatter status pulls it from circulation.
+
+    `agent_mcp.skills` already refuses to serve these, so advertising them
+    here promised the model a skill that `skills_read` would then decline —
+    the same "the prompt names something that does not work" failure as the
+    phantom `web_search` tool references (2026-09-04).
+    """
+    try:
+        head = skill_file.read_text(encoding="utf-8", errors="replace")[:2000]
+    except OSError:
+        return False
+    if not head.startswith("---"):
+        return False
+    fm_end = head.find("\n---", 3)
+    fm = head[3:fm_end] if fm_end != -1 else head
+    for line in fm.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "status":
+            return value.strip().strip("'\"").lower() in _QUARANTINE_STATUSES
+    return False
+
+
 def _load_skills_index(overlay: Path | None = None) -> str | None:
     """Build a list of available skill names from skill directories (overlay first)."""
     dirs: list[Path] = []
@@ -335,7 +384,7 @@ def _load_skills_index(overlay: Path | None = None) -> str | None:
             if entry.name in seen:
                 continue
             skill_file = entry / "SKILL.md"
-            if skill_file.exists():
+            if skill_file.exists() and not _is_quarantined_skill(skill_file):
                 skill_names.append(entry.name)
                 seen.add(entry.name)
     if not skill_names:

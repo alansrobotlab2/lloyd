@@ -261,10 +261,16 @@ uv venv .venvs/lloyd --python 3.12
 > once if you want the bare `pip` path this document used to assume.
 
 Install from **`requirements.lock`**, not `requirements.txt`. The lock is the
-frozen 162-package snapshot; `requirements.txt` holds loose human-edited intent
+frozen 175-package snapshot; `requirements.txt` holds loose human-edited intent
 and resolving it fresh will pull an incompatible `mcp` major. It carries the
 voice stack too — `faster-whisper`, `ctranslate2`, `openwakeword`, `onnxruntime`,
 `Resemblyzer`, `livekit`, and a CPU `torch` 2.11.
+
+`trafilatura` (with `lxml`, `courlan`, `htmldate`, `justext`) is what `http_fetch`
+extracts pages with — pure Python over the system `libxml2` that `lxml` already
+needs, no extra system package and no network access at import time. Without it
+`http_fetch` silently degrades to a whitespace-joined text dump with every link
+URL discarded.
 
 Only reach for `requirements.txt` when intentionally upgrading, then refreeze:
 

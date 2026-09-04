@@ -160,7 +160,10 @@ models:
 
 harness:
   stream_chunk_timeout_seconds: 60
-  max_tools_per_request: 128
+  tool_search:            # progressive disclosure; baseline + ToolSearch
+    enabled: true
+    threshold_tools: 30
+    baseline_tools: [Bash, Read, Edit, http_search, http_fetch, ...]
 
 subagents:
   general-purpose:

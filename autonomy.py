@@ -697,15 +697,27 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     try:
         from app.harness import run_query, RunOptions
         from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
+        from app.mcp_discovery import _get_disallowed_tools, _get_tool_search_kwargs
         from prompt_builder import build_system_prompt
 
         system_prompt = build_system_prompt()
 
         config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
-        disallowed_tools: list[str] = []
-        for name, cfg in config.get("mcp_servers", {}).items():
-            for tool_name in cfg.get("disabled_tools", []):
-                disallowed_tools.append(f"mcp__{name}__{tool_name}")
+        # Resolve the tool surface through the same helpers the chat and voice
+        # routers use (app/routers/messages.py:1243). Two things were wrong
+        # with building it here by hand:
+        #
+        #   * the raw yaml.safe_load bypassed ${VAR} expansion and
+        #     data/tool_overrides.yaml — the same defect the 2026-09-04 review
+        #     fixed in builtin_task, in a second location;
+        #   * tool_search kwargs were never passed, so tool_search_baseline
+        #     stayed empty and the harness fell back to _DEFAULT_BASELINE_TOOLS
+        #     (Bash, Read, Write, Edit, Grep, Glob, Task). Every autonomy run
+        #     therefore had Bash permanently visible while http_search and
+        #     http_fetch sat behind a ToolSearch round-trip — and the nightly
+        #     research jobs are what generate the trajectories the skill miner
+        #     learns from, so the bias fed itself.
+        disallowed_tools = _get_disallowed_tools()
 
         options = RunOptions(
             model=task_model,
@@ -717,6 +729,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             disallowed_tools=disallowed_tools,
             env=model_env,
             priority=1,
+            **_get_tool_search_kwargs(),
         )
 
         messages = [{"role": "user", "content": prompt}]

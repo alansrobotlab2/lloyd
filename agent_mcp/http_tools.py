@@ -3,6 +3,13 @@
 Lloyd MCP Server: HTTP Tools — web search, fetch, and generic requests.
 
 Tools: http_search, http_fetch, http_request
+
+Extraction: `http_fetch` runs trafilatura, which keeps the document's shape —
+headings, lists, tables, and crucially the href of every link, so the model can
+fetch an index page and then follow it. The hand-rolled `_TextExtractor` below
+survives only as the fallback for pages trafilatura declines to parse; on its
+own it returned one whitespace-joined blob with every URL discarded, which is
+why callers kept giving up on this tool and shelling out to `curl`.
 """
 
 import json
@@ -11,6 +18,7 @@ import urllib.parse
 from html.parser import HTMLParser
 
 import httpx
+import trafilatura
 
 from agent_mcp._shared import make_sync_http_client, text_result
 from ddgs import DDGS
@@ -68,13 +76,18 @@ class _TextExtractor(HTMLParser):
             self._title_tag = False
 
     def handle_data(self, data):
+        # <title> lives inside <head>, which is in _skip_tags — so the title
+        # has to be read before the skip check, or it is always empty.
+        if self._title_tag:
+            text = data.strip()
+            if text and not self._title:
+                self._title = text
+            return
         if self._in_skip > 0:
             return
         text = data.strip()
         if text:
-            if self._title_tag and not self._title:
-                self._title = text
-            elif self._in_body or not self._title:
+            if self._in_body or not self._title:
                 self.text_parts.append(text)
 
     def get_text(self):
@@ -100,8 +113,76 @@ def _http_search(query: str, count: int = 5) -> str:
     return json.dumps({"results": results})
 
 
+EXTRACT_MODES = ("markdown", "text")
+
+
+_MD_LINK = re.compile(r"\[([^\]]*)\]\((?!https?://|mailto:|#)([^)\s]+)\)")
+
+
+def _absolutize_links(markdown: str, base_url: str) -> str:
+    """Rewrite relative markdown link targets against the page URL.
+
+    Trafilatura emits hrefs exactly as the page wrote them, so a docs index
+    comes back full of `../topic/packaging/`. Those are unfollowable once the
+    content leaves the page context — and following a link off an index page
+    is the main reason markdown mode keeps hrefs at all.
+    """
+    def repl(m):
+        try:
+            return f"[{m.group(1)}]({urllib.parse.urljoin(base_url, m.group(2))})"
+        except Exception:
+            return m.group(0)
+    return _MD_LINK.sub(repl, markdown)
+
+
+def _extract_html(html_text: str, extract_mode: str) -> tuple[str, str]:
+    """(title, content) for an HTML document.
+
+    `extract_mode` is a real branch: "markdown" keeps headings, list markers,
+    inline code and `[text](href)` links; "text" is the same content flattened
+    to prose with the link URLs dropped. Before 2026-09-04 this argument was
+    advertised, accepted, and then never read — both values returned identical
+    bytes, so the fallback chain the skills library documented ("retry with
+    extract_mode: text") could not do anything.
+    """
+    title = ""
+    try:
+        meta = trafilatura.extract_metadata(html_text)
+        title = ((meta.title if meta else "") or "").strip()
+    except Exception:
+        title = ""
+
+    content = None
+    try:
+        content = trafilatura.extract(
+            html_text,
+            output_format="markdown" if extract_mode == "markdown" else "txt",
+            include_links=(extract_mode == "markdown"),
+            include_tables=True,
+            include_comments=False,
+        )
+    except Exception:
+        content = None
+
+    if not (content or "").strip():
+        # Trafilatura declines documents it reads as boilerplate or as too
+        # short to score. Falling back keeps a thin answer better than none.
+        parser = _TextExtractor()
+        parser.feed(html_text)
+        content = parser.get_text()
+        title = title or (parser._title or "")
+
+    content = re.sub(r"\n\s*\n+", "\n\n", content or "").strip()
+    return title, content
+
+
 def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000) -> str:
     max_chars_ = min(max(max_chars, 1000), 200000)
+    extract_mode_ = (extract_mode or "markdown").strip().lower()
+    if extract_mode_ not in EXTRACT_MODES:
+        return json.dumps({
+            "error": f'Invalid extract_mode "{extract_mode}" — expected one of {", ".join(EXTRACT_MODES)}'
+        })
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception:
@@ -129,14 +210,38 @@ def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000
     try:
         raw_bytes = response.content[:WEB_MAX_RESPONSE_BYTES]
         html_text = raw_bytes.decode("utf-8", errors="replace")
-        parser = _TextExtractor()
-        parser.feed(html_text)
-        title = parser._title or ""
-        content = parser.get_text()
-        content = re.sub(r"\n\s*\n+", "\n\n", content).strip()
-        full = f"# {title}\n\n{content}" if title else content
+        title, content = _extract_html(html_text, extract_mode_)
+        if extract_mode_ == "markdown":
+            # Resolve against the FINAL url so relative links on a redirected
+            # page resolve to where the content actually came from.
+            base = str(getattr(response, "url", "") or url)
+            content = _absolutize_links(content, base)
+        # The title is a heading only in markdown mode, and only when the
+        # extracted content does not already open with it — trafilatura
+        # usually keeps the page's own <h1>, and printing both reads as a
+        # duplicated heading.
+        first_line = content.lstrip().split("\n", 1)[0].lstrip("# ").strip()
+        # Either direction counts as "already there": trafilatura keeps the
+        # page's <h1> ("PEP 723 - Inline script metadata") while the <title>
+        # carries a site suffix ("... | peps.python.org"), so neither string
+        # contains the other outright.
+        t_low, f_low = title.strip().lower(), first_line.lower()
+        needs_heading = (
+            title
+            and extract_mode_ == "markdown"
+            and f_low != ""
+            and t_low not in f_low
+            and f_low not in t_low
+        )
+        full = f"# {title}\n\n{content}" if needs_heading else content
         truncated = full[:max_chars_]
-        return json.dumps({"url": url, "title": title, "content": truncated, "truncated": len(truncated) < len(full)})
+        return json.dumps({
+            "url": url,
+            "title": title,
+            "extract_mode": extract_mode_,
+            "content": truncated,
+            "truncated": len(truncated) < len(full),
+        })
     except Exception as exc:
         return json.dumps({"error": f"Extraction failed: {exc}"})
 
@@ -166,7 +271,13 @@ def _http_request(method: str, url: str, headers: dict | None = None, body: str 
 
 async def list_tools():
     return [
-        Tool(name="http_search", description="Web search via DuckDuckGo. Returns titles, URLs, and snippets.", inputSchema={
+        Tool(name="http_search", description=(
+            "Search the public web (DuckDuckGo) and get back ranked titles, URLs and snippets. "
+            "This is the way to look something up online — reach for it before Bash whenever the "
+            "answer is on the internet rather than on this machine, including when you do not yet "
+            "know which URL you need. Pair it with http_fetch to read a result in full. Do not shell "
+            "out to curl or wget for web search."
+        ), inputSchema={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query"},
@@ -174,16 +285,30 @@ async def list_tools():
             },
             "required": ["query"],
         }),
-        Tool(name="http_fetch", description="Fetch a URL over HTTP GET and extract its readable content as markdown or plain text, stripping navigation and boilerplate. For non-GET requests use http_request.", inputSchema={
+        Tool(name="http_fetch", description=(
+            "Fetch a public http(s) URL and read it as clean markdown or plain text, keeping headings, "
+            "lists, tables and link URLs while dropping navigation and boilerplate. Use it for any web "
+            "page, article or documentation page — in markdown mode the links come back as "
+            "[text](href), so you can fetch an index page and then follow it. Prefer this over running "
+            "curl in Bash, which returns raw HTML you then have to strip yourself. Use http_request "
+            "instead for non-GET verbs, custom headers, or a JSON/XML API whose raw body you want; use "
+            "Bash + curl for localhost, which this tool blocks by design. If a page comes back near-empty "
+            "it is probably JavaScript-rendered — switch to browser_navigate + browser_snapshot rather "
+            "than retrying."
+        ), inputSchema={
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "URL to fetch"},
-                "extract_mode": {"type": "string", "description": "Extraction mode: markdown or text"},
-                "max_chars": {"type": "integer", "description": "Max characters to return (1000-200000)"},
+                "extract_mode": {"type": "string", "enum": ["markdown", "text"], "description": "markdown (default) keeps headings, lists, tables and [text](href) links; text returns flat prose with link URLs dropped"},
+                "max_chars": {"type": "integer", "description": "Max characters to return; clamped to 1000-200000, default 50000. Out-of-range values are clamped, not rejected"},
             },
             "required": ["url"],
         }),
-        Tool(name="http_request", description="Generic HTTP request. Returns status code, headers, and body.", inputSchema={
+        Tool(name="http_request", description=(
+            "Make a raw HTTP request with any verb, custom headers and a body, and get back the status "
+            "code, response headers and the unparsed body. Use it for REST/GraphQL APIs, for POST/PUT/PATCH/DELETE, and whenever you want JSON or XML exactly as the server sent it rather than extracted "
+            "prose. For reading a human-facing web page use http_fetch; to find a URL first use http_search."
+        ), inputSchema={
             "type": "object",
             "properties": {
                 "method": {"type": "string", "description": "HTTP method (GET, POST, PUT, PATCH, DELETE, HEAD)"},
