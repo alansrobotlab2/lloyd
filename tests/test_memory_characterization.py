@@ -250,12 +250,12 @@ def test_list_tools_required_inputs_present():
     tools = asyncio.run(_aggregated_list_tools())
     by_name = {t.name: t for t in tools}
 
-    assert by_name["fact_get"].inputSchema.get("required") == ["entity"]
-    assert by_name["fact_add"].inputSchema.get("required") == ["entity", "category", "fact"]
-    assert by_name["fact_relate"].inputSchema.get("required") == ["source", "target", "type"]
-    assert by_name["vault_read"].inputSchema.get("required") == ["path"]
-    assert by_name["vault_write"].inputSchema.get("required") == ["path", "content"]
-    assert by_name["vault_search"].inputSchema.get("required") == ["query"]
+    assert by_name["fact_get"].input_schema.get("required") == ["entity"]
+    assert by_name["fact_add"].input_schema.get("required") == ["entity", "category", "fact"]
+    assert by_name["fact_relate"].input_schema.get("required") == ["source", "target", "type"]
+    assert by_name["vault_read"].input_schema.get("required") == ["path"]
+    assert by_name["vault_write"].input_schema.get("required") == ["path", "content"]
+    assert by_name["vault_search"].input_schema.get("required") == ["query"]
 
 
 # ---------------------------------------------------------------------------

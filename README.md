@@ -23,7 +23,7 @@ network.)
 |---|---|---|
 | **Agent harness** | In-process agent loop: SSE stream from vLLM → tool dispatch → repeat. Handles compaction, tool-result spill, and a searchable tool index. | [`app/harness/`](app/harness/) |
 | **Backend** | FastAPI, 18 routers, SSE streaming to the browser. Port 8080. | [`server.py`](server.py), [`app/routers/`](app/routers/) |
-| **MCP aggregator** | One `Server("lloyd")` on `:8500/sse` fronting every tool — including the built-in Bash/Read/Write/Edit/Grep/Glob/Task. | [`agent_mcp/`](agent_mcp/) |
+| **MCP aggregator** | One `Server("lloyd")` on `:8500/mcp` (Streamable HTTP, MCP 2026-07-28) fronting every tool — including the built-in Bash/Read/Write/Edit/Grep/Glob/Task. | [`agent_mcp/`](agent_mcp/) |
 | **Mission Control** | React + Vite dashboard: chat, sessions, token usage, service health, an embedded editor. Port 5173. | [`web/`](web/) |
 | **Voice** | LiveKit room → wake word (openwakeword) → VAD → faster-whisper STT → speaker ID → harness → Qwen3-TTS. | [`agent-services/livekit_worker.py`](agent-services/livekit_worker.py) |
 | **Memory** | Obsidian vault at `~/obsidian`, searched by a qmd daemon over seven per-segment collections. | [`architecture/memory.md`](architecture/memory.md) |

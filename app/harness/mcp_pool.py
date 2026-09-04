@@ -1,12 +1,14 @@
 """Persistent MCP client for the harness.
 
-The lloyd-mcp aggregator at http://127.0.0.1:8500/sse owns every MCP
+The lloyd-mcp aggregator at http://127.0.0.1:8500/mcp owns every MCP
 tool — built-ins (Bash, Read, Edit, Write, Grep, Glob, Task) plus the
 existing domain modules. The harness `loop.py` reuses one process-wide
 pool keyed by mcp_servers config (see `get_or_open_pool`); cleanup is
 handled at FastAPI shutdown via `lifecycle.shutdown_cleanup`.
 
-SSE/HTTP and stdio transports are both wired. stdio is what the
+Streamable HTTP, legacy SSE and stdio transports are all wired.
+lloyd-mcp speaks Streamable HTTP (MCP 2026-07-28); SSE remains for any
+third-party server still on the deprecated transport. stdio is what the
 Thunderbird bridge runs on (`agent_mcp.thunderbird`) — it speaks MCP over
 a pipe, so it gets an SDK client rather than the hand-rolled JSON-RPC
 exchange it used to have.
@@ -17,13 +19,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from contextlib import AsyncExitStack
-from datetime import timedelta
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
-from mcp import ClientSession, McpError
+from mcp import ClientSession, MCPError
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamable_http_client
 
 from app.config import service_url
 from app.harness.errors import ToolDispatchError
@@ -31,7 +33,23 @@ from app.harness.errors import ToolDispatchError
 logger = logging.getLogger("lloyd-harness-mcp-pool")
 
 # Default URL for the unified lloyd-mcp aggregator (agent_mcp/main.py).
-DEFAULT_LLOYD_MCP_URL = service_url("lloyd_mcp", "http://127.0.0.1:8500/sse")
+DEFAULT_LLOYD_MCP_URL = service_url("lloyd_mcp", "http://127.0.0.1:8500/mcp")
+
+# The canonical server-config for the aggregator. Callers that need a pool
+# without going through `app.mcp_discovery` (the background-task drain, the
+# harness's own fallback, the Task subagent) must use this rather than
+# writing the dict inline.
+#
+# Three separate callsites used to hardcode `{"type": "sse", "url":
+# DEFAULT_LLOYD_MCP_URL}`. When the aggregator moved to Streamable HTTP the
+# URL constant updated and the transport did not, so an SSE client GET'd
+# the /mcp endpoint and hung waiting for an `endpoint` event that never
+# came — inside `get_or_open_pool`, which holds the process-wide pool-cache
+# lock across `open()`. One stale literal therefore froze every agent turn
+# in the process while /health stayed green.
+DEFAULT_LLOYD_MCP_SERVERS: dict[str, dict[str, Any]] = {
+    "lloyd-mcp": {"type": "streamable-http", "url": DEFAULT_LLOYD_MCP_URL},
+}
 
 # `_meta` key carrying the harness session id. Must match
 # agent_mcp.main.META_SESSION_ID.
@@ -42,6 +60,10 @@ META_SESSION_ID = "lloyd/session_id"
 # this only fires when something is genuinely wedged. Without it a hung tool
 # blocks the harness indefinitely — there is no default in the MCP client.
 CALL_TIMEOUT_SECONDS = 660.0
+
+# Transports that carry the 2026-07-28 stateless protocol. Nothing is pinned
+# to a connection for these, so the pool does not hold one open.
+HTTP_TRANSPORT_TYPES = ("http", "streamable-http", "streamable_http", "sse")
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +104,8 @@ class MCPPool:
 
     The pool is server-config-aware: pass the same shape that
     `app.mcp_discovery._get_mcp_servers()` returns — a dict of
-    {server_name: {"type": "sse"|"stdio", "url"|"command"|"args": ...}}.
+    {server_name: {"type": "streamable-http"|"sse"|"stdio",
+                   "url"|"command"|"args": ...}}.
 
     All tools advertise to the model under bare MCP names. The pool
     resolves them by asking each server for its tools/list and building
@@ -92,12 +115,23 @@ class MCPPool:
 
     def __init__(self, server_configs: dict[str, dict[str, Any]]):
         self._configs = server_configs
+        # HTTP servers are connected per call; stdio servers keep a
+        # persistent session held by the owner task. See `_owner_loop`.
+        self._http_configs = {
+            n: c for n, c in server_configs.items()
+            if c.get("type", "stdio") in HTTP_TRANSPORT_TYPES
+        }
+        self._stdio_configs = {
+            n: c for n, c in server_configs.items()
+            if c.get("type", "stdio") not in HTTP_TRANSPORT_TYPES
+        }
         self._sessions: dict[str, ClientSession] = {}
         self._tool_routes: dict[str, str] = {}  # bare_name → server_name
         self._schemas: dict[str, dict[str, Any]] = {}  # bare_name → inputSchema
         self._discovered: list[tuple[str, list[dict[str, Any]]]] = []
         self._opened = False
         self._open_lock = asyncio.Lock()
+        self._reopen_lock = asyncio.Lock()
         # Owner-task pattern: a single dedicated task holds the AsyncExitStack
         # for the SSE clients and ClientSessions. All cleanup happens in that
         # same task, avoiding anyio's "cancel scope exited in a different task"
@@ -115,19 +149,78 @@ class MCPPool:
         Idempotent — concurrent callers wait on the lock and see the
         already-opened pool.
         """
+        if self._opened:
+            return
         async with self._open_lock:
             if self._opened:
                 return
-            self._owner_task = asyncio.create_task(
-                self._owner_loop(), name="mcp_pool_owner"
-            )
-            await self._opened_event.wait()
-            if self._open_error is not None:
-                # Owner task already exited; surface the error and reset.
-                err = self._open_error
-                self._open_error = None
-                raise err
+
+            # HTTP servers: connect once, in THIS task, purely to discover
+            # tools, then close. Nothing is held afterwards — under the
+            # stateless protocol each call brings its own context, and a
+            # connection held open across tasks is precisely what made the
+            # anyio cancel scopes fragile.
+            for server_name, cfg in self._http_configs.items():
+                try:
+                    async with self._http_session(cfg) as session:
+                        tools = await self._list_tools(server_name, session)
+                except Exception as exc:
+                    logger.warning(
+                        "mcp_pool: failed to discover %s: %s", server_name, exc
+                    )
+                    continue
+                self._register(server_name, tools)
+
+            # stdio servers: a subprocess must outlive the call, so those
+            # keep the owner-task pattern.
+            if self._stdio_configs:
+                self._owner_task = asyncio.create_task(
+                    self._owner_loop(), name="mcp_pool_owner"
+                )
+                await self._opened_event.wait()
+                if self._open_error is not None:
+                    err = self._open_error
+                    self._open_error = None
+                    raise err
             self._opened = True
+
+    def _register(self, server_name: str, tools: list[dict[str, Any]]) -> None:
+        """Record a server's tools in the routing table."""
+        self._discovered.append((server_name, tools))
+        for tool in tools:
+            bare = tool["name"]
+            if bare in self._tool_routes:
+                logger.warning(
+                    "mcp_pool: tool name collision on %r — %s wins over %s",
+                    bare, self._tool_routes[bare], server_name,
+                )
+                continue
+            self._tool_routes[bare] = server_name
+            schema = tool.get("inputSchema")
+            if isinstance(schema, dict):
+                self._schemas[bare] = schema
+
+    @asynccontextmanager
+    async def _http_session(self, cfg: dict[str, Any]):
+        """An MCP session over HTTP, entered and exited in the caller's task.
+
+        Deliberately short-lived. The 2026-07-28 core is stateless — no
+        session is pinned to the server — so a connection buys nothing and
+        costs the thing that made this file hard: `streamable_http_client`
+        runs an anyio task group, and holding one across the boundary
+        between the task that entered it and the task that uses it is what
+        anyio's cancel scopes will not tolerate. Reconnecting measures in
+        single-digit milliseconds.
+        """
+        url = cfg["url"]
+        if cfg.get("type") == "sse":
+            ctx = sse_client(url)
+        else:
+            ctx = streamable_http_client(url)
+        async with ctx as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                yield session
 
     async def _owner_loop(self) -> None:
         """Hold every SSE/ClientSession context for the pool's lifetime.
@@ -139,7 +232,7 @@ class MCPPool:
         """
         try:
             async with AsyncExitStack() as stack:
-                for server_name, cfg in self._configs.items():
+                for server_name, cfg in self._stdio_configs.items():
                     try:
                         session = await self._open_session(stack, server_name, cfg)
                     except Exception as exc:
@@ -148,22 +241,7 @@ class MCPPool:
                         )
                         continue
                     self._sessions[server_name] = session
-                    tools = await self._list_tools(server_name, session)
-                    self._discovered.append((server_name, tools))
-                    for tool in tools:
-                        bare = tool["name"]
-                        if bare in self._tool_routes:
-                            logger.warning(
-                                "mcp_pool: tool name collision on %r — %s wins over %s",
-                                bare,
-                                self._tool_routes[bare],
-                                server_name,
-                            )
-                            continue
-                        self._tool_routes[bare] = server_name
-                        schema = tool.get("inputSchema")
-                        if isinstance(schema, dict):
-                            self._schemas[bare] = schema
+                    self._register(server_name, await self._list_tools(server_name, session))
                 self._opened_event.set()
                 await self._shutdown_event.wait()
         except BaseException as exc:
@@ -245,46 +323,57 @@ class MCPPool:
                     name, f"no server claims tool {bare!r}"
                 )
 
-        session = self._sessions.get(server_name)
-        if session is None:
+        if server_name not in self._http_configs and server_name not in self._sessions:
+            # HTTP servers have no held session by design; only a stdio
+            # server can be "not open".
             raise ToolDispatchError(name, f"server {server_name!r} not open")
 
         coerced = _coerce_args(args, self._schemas.get(bare))
         meta = {META_SESSION_ID: session_id} if session_id else None
         budget = timeout_seconds if timeout_seconds is not None else CALL_TIMEOUT_SECONDS
+
         try:
-            result = await session.call_tool(
-                bare,
-                coerced,
-                read_timeout_seconds=timedelta(seconds=budget),
-                meta=meta,
-            )
-        except McpError as exc:
-            # A protocol-level error from a live session: the server was
-            # reachable and answered. That is a failed *call*, not a failed
-            # transport — surfacing it as a tool error keeps the session
-            # (shared with every other in-flight turn) intact.
+            result = await self._invoke(server_name, bare, coerced, budget, meta)
+        except MCPError as exc:
+            # A protocol-level error from a live server: it was reachable
+            # and it answered. That is a failed *call*, not a failed
+            # transport — surface it as a tool error and leave the pool be.
             logger.info("mcp_pool: %s on %s returned an MCP error: %s", bare, server_name, exc)
             return {"content": f"MCP error calling {bare}: {exc}", "is_error": True}
         except Exception as exc:
-            # Transport-shaped failure. Mark poisoned, evict from cache,
-            # and signal the owner task to tear the pool down in its own
-            # context. The owner task closes the AsyncExitStack — that's
-            # the task that entered the cancel scopes, so anyio is happy.
-            #
-            # This is deliberately blunt: the session is shared, so a dead
-            # transport has to take it down for everyone. The 2026-07-28
-            # stateless protocol removes the shared session and with it
-            # this whole failure mode; until then, a timeout is what stops
-            # one wedged tool from hanging every concurrent turn forever.
-            self._poisoned = True
-            _evict_pool(self)
-            self._shutdown_event.set()
+            # Transport-shaped failure. Under the 2026-07-28 stateless core
+            # there is no session pinned to the server, so this is just a
+            # dropped connection: reopen and try once more. Reconnecting
+            # costs single-digit milliseconds, which is why the old
+            # behaviour — poison the pool, evict it from the cache, tear
+            # down the session every concurrent turn was sharing — is no
+            # longer a trade worth making.
             logger.warning(
-                "mcp_pool: %s on %s failed (%s); pool evicted from cache",
+                "mcp_pool: %s on %s failed (%s); reconnecting and retrying once",
                 bare, server_name, exc,
             )
-            raise ToolDispatchError(name, f"transport error: {exc}") from exc
+            try:
+                await self._reopen()
+                result = await self._invoke(server_name, bare, coerced, budget, meta)
+            except MCPError as retry_exc:
+                return {
+                    "content": f"MCP error calling {bare}: {retry_exc}",
+                    "is_error": True,
+                }
+            except Exception as retry_exc:
+                # Still failing after a fresh connection: the server is
+                # genuinely down, not a blip. Evict so the next turn builds
+                # a new pool rather than reusing this one.
+                self._poisoned = True
+                _evict_pool(self)
+                self._shutdown_event.set()
+                logger.warning(
+                    "mcp_pool: %s on %s failed again after reconnect (%s); pool evicted",
+                    bare, server_name, retry_exc,
+                )
+                raise ToolDispatchError(
+                    name, f"transport error: {retry_exc}"
+                ) from retry_exc
 
         # MCP CallToolResult.content is a list of TextContent /
         # ImageContent / EmbeddedResource. We flatten to text — the
@@ -297,6 +386,59 @@ class MCPPool:
             else:
                 text_parts.append(json.dumps({"type": getattr(item, "type", "?")}))
         return {"content": "".join(text_parts), "is_error": _is_error(result)}
+
+    async def _invoke(
+        self,
+        server_name: str,
+        bare: str,
+        args: dict[str, Any],
+        budget: float,
+        meta: dict[str, Any] | None,
+    ):
+        """One tools/call, on a fresh HTTP session or the stdio one."""
+        cfg = self._http_configs.get(server_name)
+        if cfg is not None:
+            async with self._http_session(cfg) as session:
+                return await session.call_tool(
+                    bare, args, read_timeout_seconds=budget, meta=meta,
+                )
+        session = self._sessions.get(server_name)
+        if session is None:
+            raise ToolDispatchError(bare, f"server {server_name!r} not open")
+        return await session.call_tool(
+            bare, args, read_timeout_seconds=budget, meta=meta,
+        )
+
+    async def _reopen(self) -> None:
+        """Tear down and rebuild every session, in place.
+
+        Keeps this MCPPool instance (and therefore its cache entry and its
+        tool routes) valid, so callers holding a reference keep working.
+        """
+        async with self._reopen_lock:
+            if not self._stdio_configs:
+                # HTTP-only pool: every call already opens its own session,
+                # so there is nothing to rebuild — just clear the failure
+                # flag and let the retry go out on a fresh connection.
+                self._poisoned = False
+                return
+            self._shutdown_event.set()
+            if self._owner_task is not None:
+                try:
+                    await self._owner_task
+                except Exception as exc:
+                    logger.debug("mcp_pool: owner task exit during reopen: %s", exc)
+                self._owner_task = None
+            self._sessions.clear()
+            self._tool_routes.clear()
+            self._schemas.clear()
+            self._discovered = []
+            self._opened = False
+            self._poisoned = False
+            self._shutdown_event = asyncio.Event()
+            self._opened_event = asyncio.Event()
+            self._open_error = None
+            await self.open()
 
     # ------------------------------------------------------------------
     # Internals
@@ -313,9 +455,14 @@ class MCPPool:
         the same task that entered the contexts.
         """
         server_type = cfg.get("type", "stdio")
-        if server_type in ("sse", "http"):
-            url = cfg["url"]
-            ctx = sse_client(url)
+        if server_type in ("http", "streamable-http", "streamable_http"):
+            ctx = streamable_http_client(cfg["url"])
+        elif server_type == "sse":
+            # Legacy HTTP+SSE transport, deprecated upstream as of
+            # 2026-07-28 with a 12-month removal window. Kept for any
+            # third-party server that hasn't moved; lloyd-mcp is on
+            # streamable HTTP.
+            ctx = sse_client(cfg["url"])
         elif server_type == "stdio":
             command = cfg.get("command")
             if not command:
@@ -462,12 +609,33 @@ async def get_or_open_pool(server_configs: dict[str, dict[str, Any]]) -> MCPPool
     key = _config_key(server_configs)
     async with _POOL_CACHE_LOCK:
         pool = _POOL_CACHE.get(key)
-        if pool is not None and not pool._poisoned:
+        if pool is None or pool._poisoned:
+            pool = MCPPool(server_configs)
+            _POOL_CACHE[key] = pool
+        elif pool._opened:
             return pool
-        pool = MCPPool(server_configs)
+
+    # Open OUTSIDE the process-wide cache lock.
+    #
+    # This lock used to be held across `await pool.open()`, which made any
+    # interruption of a first open a permanent, process-wide deadlock:
+    # `run_query` is an async generator, and `autonomy.run_task` iterates
+    # it under `asyncio.timeout`. When that timeout fires mid-open the
+    # generator is abandoned while suspended — its `async with` never
+    # unwinds, so the lock is never released — and every later caller,
+    # including every user turn, blocks on it forever with no error
+    # anywhere. `MCPPool.open()` is idempotent and serialized by its own
+    # per-pool lock, so the global one only needs to guard the dict.
+    try:
         await pool.open()
-        _POOL_CACHE[key] = pool
-        return pool
+    except BaseException:
+        # Includes CancelledError: never leave a half-open pool cached for
+        # the next caller to inherit.
+        async with _POOL_CACHE_LOCK:
+            if _POOL_CACHE.get(key) is pool:
+                _POOL_CACHE.pop(key, None)
+        raise
+    return pool
 
 
 def _evict_pool(pool: MCPPool) -> None:

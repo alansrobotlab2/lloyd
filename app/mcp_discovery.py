@@ -73,20 +73,49 @@ def _categorize_tool(name: str) -> str:
     return "Other"
 
 
+# Transports MCPPool._open_session knows how to open. Kept here so an
+# unrecognized `type:` fails loudly at config-read time.
+HTTP_TRANSPORTS = ("http", "streamable-http", "streamable_http", "sse")
+STDIO_TRANSPORTS = ("stdio",)
+
+
 def _get_mcp_servers() -> dict[str, dict]:
-    """Build MCP server configs for SDK options, filtering out disabled servers."""
-    servers = {}
+    """Build MCP server configs for the harness pool, skipping disabled servers.
+
+    An unknown `type:` raises rather than falling through to stdio. The
+    fall-through used to be silent, and it was: when lloyd-mcp moved to
+    `type: streamable-http`, this function's whitelist still only knew
+    ("sse", "http"), so it emitted `{"command": "python", "args": []}` —
+    a config that spawns a bare Python REPL and hangs the pool open
+    forever. `/health` stayed green throughout, because the aggregator
+    itself was fine; only the client's view of it was broken.
+    """
+    servers: dict[str, dict] = {}
     for name, cfg in CONFIG.get("mcp_servers", {}).items():
         if not cfg.get("enabled", True):
             continue
         server_type = cfg.get("type", "stdio")
-        if server_type in ("sse", "http"):
-            servers[name] = {"type": server_type, "url": cfg["url"]}
-        else:
-            servers[name] = {
+        if server_type in HTTP_TRANSPORTS:
+            url = cfg.get("url")
+            if not url:
+                raise ValueError(f"mcp server {name!r} has type {server_type!r} but no url")
+            servers[name] = {"type": server_type, "url": url}
+        elif server_type in STDIO_TRANSPORTS:
+            entry = {
+                "type": "stdio",
                 "command": cfg.get("command", "python"),
-                "args": cfg.get("args", []),
+                "args": list(cfg.get("args") or []),
             }
+            if cfg.get("env"):
+                entry["env"] = dict(cfg["env"])
+            if cfg.get("cwd"):
+                entry["cwd"] = cfg["cwd"]
+            servers[name] = entry
+        else:
+            raise ValueError(
+                f"mcp server {name!r} has unknown transport type {server_type!r}; "
+                f"expected one of {HTTP_TRANSPORTS + STDIO_TRANSPORTS}"
+            )
     return servers
 
 

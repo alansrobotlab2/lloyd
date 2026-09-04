@@ -889,7 +889,7 @@ curl -s localhost:8080/api/models   | jq -r '.[]?.alias // empty' 2>/dev/null ||
 curl -s localhost:8080/api/services
 
 # MCP aggregator — SSE endpoint should hold open
-curl -sN --max-time 2 localhost:8500/sse | head -3
+curl -s --max-time 2 localhost:8500/health
 
 # qmd
 qmd status

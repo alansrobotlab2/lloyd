@@ -143,7 +143,7 @@ async def test_dispatch_never_observed_empty_during_rebuild():
 async def test_failures_set_is_error(tool, args):
     result = await M.call_tool(tool, args)
     assert isinstance(result, CallToolResult)
-    assert result.isError is True, f"{tool}{args} did not report isError"
+    assert result.is_error is True, f"{tool}{args} did not report isError"
 
 
 @pytest.mark.parametrize("tool,args", [
@@ -154,13 +154,13 @@ async def test_failures_set_is_error(tool, args):
 async def test_successes_do_not_set_is_error(tool, args):
     result = await M.call_tool(tool, args)
     assert isinstance(result, CallToolResult)
-    assert result.isError is False
+    assert result.is_error is False
 
 
 async def test_unknown_tool_is_an_error_result():
     result = await M.call_tool("NoSuchToolAtAll", {})
     assert isinstance(result, CallToolResult)
-    assert result.isError is True
+    assert result.is_error is True
 
 
 # ── Schema hygiene ───────────────────────────────────────────────────────────
@@ -173,7 +173,7 @@ def test_no_toplevel_additional_properties_false(tools):
     """
     offenders = [
         t.name for t in tools
-        if (t.inputSchema or {}).get("additionalProperties") is False
+        if (t.input_schema or {}).get("additionalProperties") is False
     ]
     assert offenders == []
 
@@ -194,7 +194,7 @@ def test_tool_parameters_are_documented(tools):
     """P1-4: `Edit.old_string` with no description is the whole tool."""
     undocumented: list[str] = []
     for t in tools:
-        props = (t.inputSchema or {}).get("properties") or {}
+        props = (t.input_schema or {}).get("properties") or {}
         for pname, spec in props.items():
             if not isinstance(spec, dict) or not (spec.get("description") or "").strip():
                 undocumented.append(f"{t.name}.{pname}")
@@ -308,9 +308,88 @@ def test_field_accessors_handle_both_sdk_naming_conventions():
     assert _input_schema(NoFlag()) == {"type": "object", "properties": {}}
 
 
-def test_mcp_is_pinned_below_2():
-    """The decorator API agent_mcp/main.py registers handlers with is gone
-    in mcp 2.x. Until that migration lands, an unpinned upgrade breaks
-    tool discovery at import time."""
+def test_mcp_is_pinned_to_2x():
+    """agent_mcp/main.py passes handlers as Server(...) constructor
+    arguments and reads model fields by their snake_case names; neither
+    works on mcp 1.x, so the floor is a hard requirement, not a
+    preference."""
     req = (ROOT / "requirements.txt").read_text()
-    assert "mcp>=1.27.0,<2" in req
+    assert "mcp>=2.1.0,<3" in req
+
+
+def test_negotiates_the_stateless_protocol():
+    """The point of the 2.x move is the 2026-07-28 stateless core."""
+    from mcp_types.version import LATEST_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSIONS
+
+    assert "2026-07-28" in MODERN_PROTOCOL_VERSIONS
+    assert LATEST_PROTOCOL_VERSION == "2026-07-28"
+
+
+def test_aggregator_serves_streamable_http_not_sse():
+    """The legacy HTTP+SSE transport is deprecated upstream; the
+    aggregator must not still be mounting it."""
+    paths = {getattr(r, "path", None) for r in M.starlette_app.routes}
+    assert "/mcp" in paths
+    assert "/health" in paths
+    assert "/sse" not in paths and "/messages/" not in paths
+
+
+# ── Server config resolution ─────────────────────────────────────────────────
+
+def test_configured_transport_survives_into_the_pool_config():
+    """`_get_mcp_servers` must not drop the transport it was given.
+
+    Its transport whitelist used to be a hardcoded ("sse", "http"), and
+    anything else fell through to the stdio branch. When lloyd-mcp moved to
+    `type: streamable-http` that produced `{"command": "python", "args":
+    []}` — a config that spawns a bare Python REPL and hangs `pool.open()`
+    forever. Nothing caught it: the aggregator was healthy, `/health`
+    returned 200, and only an actual agent turn would have failed.
+    """
+    from app.mcp_discovery import _get_mcp_servers
+
+    servers = _get_mcp_servers()
+    assert servers, "no MCP servers resolved from config"
+    for name, cfg in servers.items():
+        assert "type" in cfg, f"{name} lost its transport type"
+        if cfg["type"] in ("http", "streamable-http", "streamable_http", "sse"):
+            assert cfg.get("url"), f"{name} is an HTTP transport with no url"
+        else:
+            assert cfg.get("command"), f"{name} is stdio with no command"
+
+
+def test_unknown_transport_type_raises():
+    import app.mcp_discovery as D
+
+    original = D.CONFIG.get("mcp_servers")
+    D.CONFIG["mcp_servers"] = {"bogus": {"type": "carrier-pigeon", "url": "x"}}
+    try:
+        with pytest.raises(ValueError, match="unknown transport type"):
+            D._get_mcp_servers()
+    finally:
+        D.CONFIG["mcp_servers"] = original
+
+
+def test_http_transport_without_url_raises():
+    import app.mcp_discovery as D
+
+    original = D.CONFIG.get("mcp_servers")
+    D.CONFIG["mcp_servers"] = {"bogus": {"type": "streamable-http"}}
+    try:
+        with pytest.raises(ValueError, match="no url"):
+            D._get_mcp_servers()
+    finally:
+        D.CONFIG["mcp_servers"] = original
+
+
+def test_pool_open_session_accepts_every_advertised_transport():
+    """The transports config may name and the ones the pool can open must
+    be the same set — the mismatch above is what caused the outage."""
+    import inspect
+
+    from app.harness import mcp_pool
+    from app.mcp_discovery import HTTP_TRANSPORTS, STDIO_TRANSPORTS
+
+    src = inspect.getsource(mcp_pool.MCPPool._open_session)
+    for transport in HTTP_TRANSPORTS + STDIO_TRANSPORTS:
+        assert f'"{transport}"' in src, f"MCPPool cannot open transport {transport!r}"
