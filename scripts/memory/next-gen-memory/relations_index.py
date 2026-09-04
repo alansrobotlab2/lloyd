@@ -581,7 +581,7 @@ class RelationsIndexGenerator:
     def _calculate_similarity(self, doc1: dict, doc2: dict) -> float:
         """Calculate document similarity using proven heuristics.
         
-        Based on semantic_relationships.py heuristics:
+        Heuristics inherited from the retired semantic_relationships.py:
         - Wiki-link co-occurrence (strongest signal, score 100-180)
         - Tag overlap (2+ shared tags, score 80-90)
         - Entity co-occurrence (shared entity mentions, score 15)

@@ -42,6 +42,9 @@ What it captures, and why each matters:
 | `~/lloyd/data/tool_overrides.yaml` | tiny | Gitignored UI tool toggles, merged over config.yaml at boot. |
 | `~/lloyd/agent-services/services/tts/qwen3-tts/voice_library/profiles/cullen/` | 2.7 MB | The **`clone:cullen` voice** referenced by `config.yaml` → `livekit.tts.voice`. Untracked and not reproducible. |
 | `~/lloyd/agent-services/cert/` | 84 KB | mTLS CA + server cert + minted client bundles. Regenerating the CA invalidates every enrolled device. |
+| `~/lloyd/_pipeline/vault-derived/kg.sqlite` | 76 MB | **The knowledge graph.** Edges, aliases, the entity registry and the fact index. Fact *content* can be re-extracted from the vault over a few GPU-nights; the edges, the merge history and the hand-review state cannot be reproduced at all. Copy it with `sqlite3 kg.sqlite ".backup out.sqlite"` or the daily tarball — a plain `cp` of a WAL database taken mid-write is not restorable. |
+| `~/lloyd/_pipeline/vault-derived/facts/` | 282 MB | The fact layer, 61,392 markdown files. Re-extractable, but that is ~5 GPU-hours. |
+| `~/lloyd/_pipeline/memory-graph/` | small | Merge plans, apply reports, semantic verdicts, `graph-baseline.json`. This is the evidence that makes a bad merge revertable. |
 | `~/lloyd/sessions/` | 725 MB | Conversation history. Gitignored. Optional but not recoverable. |
 | `~/backups/backup_*.tar.gz` (latest + `.sha256`) | varies | The daily archive itself. |
 
@@ -824,13 +827,48 @@ binary, the fix is almost always its `environment=...PATH=...` line.
 ### Optional timers
 
 ```bash
-systemctl --user enable --now backup.timer   # scripts/backup.sh, daily 02:00
+systemctl --user enable --now backup.timer               # scripts/backup.sh, daily 02:00
+systemctl --user enable --now lloyd-graph-backup.timer   # knowledge graph, daily 05:30
 ```
 
 Note that `backup.sh` targets `~/backups` on the local disk and covers only
 `~/obsidian` and `~/lloyd/scripts`. Consider pointing `BACKUP_BASE` at external
 storage and widening `SOURCE_DIRS` to include the untracked items listed in
 [Part 0](#part-0--before-you-wipe).
+
+`lloyd-graph-backup.timer` is the one that matters most and is easiest to
+forget, because it is the only copy of state that cannot be regenerated. Its
+units are not in the repo — write them on a fresh install:
+
+```ini
+# ~/.config/systemd/user/lloyd-graph-backup.service
+[Unit]
+Description=Lloyd knowledge-graph daily backup
+[Service]
+Type=oneshot
+ExecStart=%h/lloyd/scripts/backup/backup-graph.sh
+```
+
+```ini
+# ~/.config/systemd/user/lloyd-graph-backup.timer
+[Unit]
+Description=Daily Lloyd knowledge-graph backup
+[Timer]
+# 05:30 — after the 22:00-04:00 extraction/classifier write window closes and
+# before the morning report tasks read the graph.
+OnCalendar=*-*-* 05:30:00
+Persistent=true
+RandomizedDelaySec=300
+[Install]
+WantedBy=timers.target
+```
+
+The script takes a consistent SQLite backup plus a JSON export and keeps 30
+days under `_pipeline/backups/daily/`. It **refuses** — non-zero, previous
+snapshots untouched — when the store will not open or when active edges have
+fallen below half of `_pipeline/memory-graph/graph-baseline.json`. A snapshot
+taken after a wipe is worse than none: it rotates the last good one out of the
+window and records the damage as normal.
 
 ---
 

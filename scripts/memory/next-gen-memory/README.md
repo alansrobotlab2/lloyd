@@ -1,207 +1,87 @@
-# Next-Gen Memory System - Implementation
+# next-gen-memory — fact extraction
 
-Complete implementation of the next-gen memory system for OpenClaw.
-
-## Directory Structure
+Three modules. Everything else that used to live here was a one-off batch
+runner or a report with no consumer, and was deleted on 2026-09-04.
 
 ```
-obsidian/agents/memory/scripts/next-gen-memory/
-├── README.md                 # This file
-├── fact_extractor.py         # Fact extraction pipeline
-├── relations_index.py        # Relations index generator
-├── context_bundle.py         # Context retrieval tool
-├── profile_synthesis.py      # Profile synthesis
-├── mcp_tools.py              # MCP tools (9 tools)
-├── nightly_extraction.py     # Nightly extraction job
-├── knowledge_ingestion.py    # Knowledge ingestion
-└── vault_bootstrap.py        # Full vault bootstrap
+next-gen-memory/
+├── nightly_extraction.py   # the entry point: corpus → extract → index → overviews
+├── fact_extractor.py       # one document → facts → markdown + store edges
+├── profile_generator.py    # entity overview files (definition + summary)
+├── relations_index.py      # document-level co-occurrence index (relations-index.json)
+└── pipeline_config.yaml    # THE CORPUS. Edit this, not the code.
 ```
 
-## Quick Start
+## The corpus is an allow-list
 
-### 1. Test Fact Extraction
+`pipeline_config.yaml` `sources.paths` names the directories that get
+ingested: `knowledge`, `projects`, `people`, `personal`, `work`, and daily
+notes once they have settled — 2,829 documents.
+
+Until 2026-09-04 `nightly_extraction` walked the whole vault minus a
+deny-list. Every new directory was ingested by default, and the pipeline read
+its own output back as knowledge: roughly half the 205,000 facts in the tree
+were re-extracted exhaust, and one note had been reprocessed ten times in a
+single day. The content-hash gate could not stop it, because the loop
+genuinely changed the bytes each pass.
+
+**To change what is ingested, edit the config.** An empty `sources.paths` is
+an error, not a fall back to the whole vault.
+
+## Running it
+
 ```bash
-cd ~/obsidian/agents/memory/scripts/next-gen-memory
-python3 fact_extractor.py
+cd ~/lloyd/scripts/memory/next-gen-memory
+
+# the nightly run: files changed in the last 24h
+~/lloyd/.venvs/lloyd/bin/python nightly_extraction.py --workers 4
+
+# bootstrap / backfill: every file, bounded and resumable, checkpointed
+~/lloyd/.venvs/lloyd/bin/python nightly_extraction.py --full --limit 200 --workers 4
+
+# rebuild the document relations index and stop
+~/lloyd/.venvs/lloyd/bin/python nightly_extraction.py --rebuild-index-only
 ```
 
-### 2. Get Facts
-```bash
-python3 mcp_tools.py get-facts alan
-python3 mcp_tools.py get-facts alan preferences
+It prints one machine-readable line the autonomy skill branches on:
+
+```
+PIPELINE_RESULT files_processed=3 facts=12 failed=0 status=ran
 ```
 
-### 3. Add Facts
-```bash
-python3 mcp_tools.py add-fact alan preferences "New preference statement"
-```
+`failed=N` counts documents whose extraction raised. Those files are **not**
+content-hashed, so the next run retries them — an LLM error used to return an
+empty fact list, which marked the document extracted forever.
 
-### 4. Get Relations
-```bash
-python3 mcp_tools.py get-relations "projects/lloyd/architecture/next-gen-memory-subsystem/phase-1-schema-design.md"
-```
+## What a fact carries
 
-### 5. Context Bundle
-```bash
-python3 context_bundle.py "alan preferences and tools"
-```
+Every fact written since 2026-09-04 has `created_at`, `source_doc`,
+`source_hash` and `provenance`, so it can be dated, attributed and selectively
+reverted. 99.7% of the facts extracted before that had none of them.
 
-### 6. Get Profile
-```bash
-python3 profile_synthesis.py alan
-```
+IDs are `<prefix>-NNN` from `app.fact_ids`, continuing from the highest
+already in the file. They used to restart at 1 every run, which is why 43% of
+fact files carried duplicate IDs — and anything addressing a fact by ID acted
+on whichever it found first.
 
-### 7. Detect Contradictions
-```bash
-python3 mcp_tools.py detect-contradictions alan
-```
+Categories come from `CATEGORY_VOCAB` (13 terms). The model's free-text answer
+used to be written through verbatim: 287 spellings of the same handful of
+categories, each making its own fact file.
 
-### 8. Rebuild Index
-```bash
-python3 mcp_tools.py rebuild-index all
-```
+## Edges
 
-### 9. Run Nightly Extraction
-```bash
-python3 nightly_extraction.py
-```
+`fact_extractor` emits a `mentions` edge into `app.kg_store` for every other
+known entity a fact names, with the source document and the fact text as
+evidence. This is the graph's growth path — before it, edges only appeared
+when someone ran `seed_relationship_edges.py` by hand, and node coverage sat
+at 13.7%. `classify-relationships-v4.py` upgrades those to typed relations.
 
-### 10. Detect Knowledge Gaps
-```bash
-python3 knowledge_ingestion.py detect-gaps
-python3 knowledge_ingestion.py gap-report
-```
+## Safety properties worth not regressing
 
-### 11. Full Vault Bootstrap
-```bash
-python3 vault_bootstrap.py
-```
-
-## MCP Tool Integration
-
-To integrate with OpenClaw MCP server, add these tools to `tool_services.py`:
-
-```python
-from obsidian.agents.memory.scripts.next-gen-memory.mcp_tools import MemoryMCPTools, register_mcp_tools
-
-# In your MCP server setup
-tools = MemoryMCPTools()
-
-@mcp.tool()
-def get_facts(entity: str, category: str = None, status: str = "current") -> dict:
-    """Get facts for an entity/category."""
-    return tools.get_facts(entity, category, status)
-
-# ... repeat for all 9 tools
-```
-
-Or use the registration helper:
-```python
-register_mcp_tools(mcp)
-```
-
-## Nightly Cron Job
-
-Add to crontab for nightly extraction at 2 AM PST:
-
-```cron
-0 2 * * * cd /home/alansrobotlab/obsidian/agents/memory/scripts/next-gen-memory && python3 nightly_extraction.py >> /home/alansrobotlab/obsidian/memory/nightly-extraction.log 2>&1
-```
-
-## Fact File Format
-
-```yaml
----
-type: facts
-entity: alan
-category: preferences
-facts:
-  - id: pref-001
-    fact: Prefers concise, conversational responses
-    confidence: 0.95
-    status: current
-    document_date: '2026-02-28'
-    event_date: null
-    source: agents/lloyd/USER.md
-    ttl_category: permanent
-last_updated: '2026-03-20T20:08:59.072047'
-relationships: []
----
-
-# Alan - Preferences
-
-**Entity:** alan
-**Category:** preferences
-**Fact Count:** 1
-
-## Facts
-
-### pref-001
-
-**Fact:** Prefers concise, conversational responses
-**Confidence:** 0.95
-**Status:** current
-```
-
-## Relation Types
-
-- `implements` ↔ `designed-by`
-- `supersedes` ↔ `superseded-by`
-- `depends-on` ↔ `required-by`
-- `derived-from` ↔ `produces`
-- `related-to` ↔ `related-to` (symmetric)
-- `conflicts-with` ↔ `conflicts-with` (symmetric)
-
-## Entity Categories
-
-### Alan
-- `preferences` — Communication style, tools, environment
-- `work` — Job, role, projects
-- `household` — Living situation, roommates
-- `relationships` — Family, friends
-- `skills` — Technical skills
-- `goals` — Goals and objectives
-
-### Lloyd
-- `configuration` — System configuration
-- `architecture` — System design
-- `operations` — Operational decisions
-
-### Alfie
-- `status` — Current project state
-- `hardware` — Components, specs
-
-### Work
-- `decisions` — Work-related decisions
-- `projects` — Project statuses
-
-## Quality Thresholds
-
-- Fact extraction accuracy: >85%
-- Relationship precision: >80%
-- Classification accuracy: >90%
-- Index consistency: 100%
-
-## Troubleshooting
-
-### LLM Connection Failed
-Check if local LLM is running on port 8097:
-```bash
-curl http://localhost:8097/v1/models
-```
-
-### Fact File Not Found
-Ensure `memory/facts/` directory exists:
-```bash
-mkdir -p ~/obsidian/memory/facts/{alan,lloyd,alfie,work}
-```
-
-### Index Not Updating
-Rebuild index manually:
-```bash
-python3 relations_index.py --rebuild
-```
-
-## License
-
-Internal use only - OpenClaw project
+- Writes go through `atomic_write_text` inside `locked_file`, so four worker
+  threads and a `fact_add` from a chat turn cannot drop each other's facts.
+- A fact file that will not parse is renamed `*.corrupt-<ts>` and skipped.
+  It used to fall through to `existing_facts = []` and be rewritten, which
+  deleted an entity's whole history over one bad character.
+- A junk entity name is rejected BEFORE it is registered. It used to be
+  registered first, which is how 921 pipeline-run names became canonicals.

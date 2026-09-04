@@ -102,6 +102,45 @@ config.yaml holds the hand-edited defaults and is **read-only at boot**; UI togg
 
 Disabled tools are enforced via `RunOptions.disallowed_tools` as `mcp__<server>__<tool>`. The harness's bare-name aliasing in `tool_schema.py` blocks both the bare and namespaced form at advertise + dispatch time, so disabling `Bash` via `mcp_servers.lloyd-mcp.disabled_tools: [Bash]` blocks the model from calling either `Bash` or `mcp__lloyd-mcp__Bash`.
 
+## Knowledge graph
+
+Two layers, and the distinction matters:
+
+- **Fact layer** — markdown, one dir per entity under
+  `_pipeline/vault-derived/facts/<Entity>/<Entity>-<category>.md`. Human
+  readable, editable, diffable.
+- **Store** — `_pipeline/vault-derived/kg.sqlite`, behind `app/kg_store.py`.
+  Edges, aliases, the entity registry and a fact index derived from the
+  markdown.
+
+**Nothing opens the store except `app.kg_store`.** Not a script, not a
+router, not a test fixture. Before 2026-09 the same state lived in two JSON
+blobs that six programs rewrote whole with no lock, which produced the
+2026-08-22 wipe (12,131 edges) and the 2026-09-03 merge incident (151
+entities fused against a 2-edge graph).
+
+```python
+from app.kg_store import store
+s = store()
+s.edges.add({"source": "Lloyd", "target": "vLLM", "type": "uses"}, origin="fact_relate")
+s.aliases.resolve("vllm")     # -> "vLLM"
+s.facts_idx.for_entity("Lloyd", category="state")
+```
+
+Rules worth not relearning:
+
+- A store that will not open raises `StoreUnavailable`. Never return an empty
+  graph on a read failure — a writer will persist that emptiness.
+- Expire edges, never delete them. `rewrite_endpoint` returns `(old_id,
+  new_id)` pairs so a merge is exactly revertable.
+- `LLOYD_FACTS_ROOT` / `LLOYD_KG_DB` point the fact tree and the store
+  elsewhere — that is how a rebuild extracts without touching the live one.
+- The extraction corpus is an allow-list in
+  `scripts/memory/next-gen-memory/pipeline_config.yaml`. Edit the config,
+  not the walk.
+
+`architecture/knowledge-graph.md` is the long version.
+
 ## Config Structure (config.yaml)
 
 ```yaml

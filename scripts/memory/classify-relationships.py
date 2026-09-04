@@ -1,33 +1,16 @@
 #!/usr/bin/env python3
-"""Typed-edge relation classifier for the entity relationship graph.
+"""Typed-edge relation classifier — v1. RETIRED as a driver, kept for its helpers.
 
-Phase 1B of backlog #294. Reads `_relationships.json`, finds `mentions` edges
-(the ~97.8% dominant type produced by substring matching in
-`seed-relationships.py`), and asks a local LLM to reclassify each edge into a
-richer typed vocabulary.
+`classify-v4-batch.py` is the runner; it and `classify-relationships-v4.py`
+import this module's fact-snippet loading, entity-dir resolution, prompt
+scaffolding and defaults. `main()` was removed on 2026-09-04 — running v1
+against today's graph would write JSON nothing applies.
 
-Output: JSONL at `_pipeline/memory-graph/classified.jsonl`, one record per
-edge. Does NOT modify `_relationships.json` — a separate apply step promotes
-classifications into the graph after review.
+Original purpose (backlog #294 Phase 1B): read the edge graph, find `mentions`
+edges — the ~97.8% dominant type produced by substring matching — and ask a
+local LLM to reclassify each into a richer typed vocabulary. v4 does that now,
+with quote grounding and a direction check.
 
-Usage:
-  # validate the prompt + output shape on a small sample first
-  .venvs/lloyd/bin/python scripts/memory/classify-relationships.py --sample 20
-
-  # dry-run (no writes, prints each classification)
-  .venvs/lloyd/bin/python scripts/memory/classify-relationships.py --sample 20 --dry-run
-
-  # full run (append to classified.jsonl, skip already-seen edges)
-  .venvs/lloyd/bin/python scripts/memory/classify-relationships.py
-
-Flags:
-  --sample N          classify only first N candidate edges
-  --dry-run           don't write output, print classifications to stdout
-  --output PATH       output path (default: _pipeline/memory-graph/classified.jsonl)
-  --model NAME        model alias for the request body (default: primary)
-  --endpoint URL      LLM endpoint (default: http://127.0.0.1:8096/v1/chat/completions)
-  --all-types         classify all edges (not just `mentions`)
-  --max-ctx-chars N   cap on fact-context chars per edge (default: 1500)
 """
 from __future__ import annotations
 
@@ -384,121 +367,8 @@ def _already_classified(output_path: Path) -> set:
     return seen
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("--sample", type=int, default=None, help="Classify only first N candidate edges")
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    p.add_argument("--model", default=DEFAULT_MODEL)
-    p.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
-    p.add_argument("--all-types", action="store_true", help="Classify all edges, not just 'mentions'")
-    p.add_argument(
-        "--only-types",
-        default=None,
-        help="Comma-separated list of current edge types to classify (e.g., 'created_by,supersedes'). "
-             "Overrides default mentions-only filter. Mutually exclusive with --all-types.",
-    )
-    p.add_argument("--max-ctx-chars", type=int, default=DEFAULT_MAX_CTX_CHARS)
-    p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC)
-    args = p.parse_args()
-
-    if args.all_types and args.only_types:
-        print("[error] --all-types and --only-types are mutually exclusive", file=sys.stderr)
-        return 2
-
-    data = _load_relationships()
-    all_edges = data.get("edges", [])
-    if args.only_types:
-        only_set = {t.strip() for t in args.only_types.split(",") if t.strip()}
-        unknown = only_set - set(VOCABULARY)
-        if unknown:
-            print(f"[error] --only-types contains unknown types: {sorted(unknown)}", file=sys.stderr)
-            return 2
-        candidates = [e for e in all_edges if not e.get("expired_at") and e.get("type") in only_set]
-        print(f"[info] {len(candidates)} candidate edges (only_types={sorted(only_set)})")
-    elif args.all_types:
-        candidates = [e for e in all_edges if not e.get("expired_at")]
-        print(f"[info] {len(candidates)} candidate edges (all_types=True)")
-    else:
-        candidates = [e for e in all_edges if not e.get("expired_at") and e.get("type") == "mentions"]
-        print(f"[info] {len(candidates)} candidate edges (mentions only)")
-
-    seen = _already_classified(args.output) if not args.dry_run else set()
-    if seen:
-        print(f"[info] {len(seen)} edges already classified in {args.output}")
-    candidates = [e for e in candidates if _edge_key(e) not in seen]
-    if args.sample:
-        candidates = candidates[: args.sample]
-    print(f"[info] will classify {len(candidates)} edges")
-
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    out_fh = None
-    if not args.dry_run:
-        out_fh = args.output.open("a")
-
-    vocab_counts: dict[str, int] = {t: 0 for t in VOCABULARY}
-    t_start = time.perf_counter()
-    ok = 0
-    fail = 0
-
-    for i, edge in enumerate(candidates, 1):
-        source = edge["source"]
-        target = edge["target"]
-        original_type = edge.get("type", "")
-        context = _load_fact_snippets(source, target, args.max_ctx_chars)
-        prompt = _build_prompt(source, target, context)
-
-        t0 = time.perf_counter()
-        raw = _call_llm(args.endpoint, args.model, prompt, args.timeout)
-        dt_ms = (time.perf_counter() - t0) * 1000
-        if raw is None:
-            fail += 1
-            print(f"  [{i}/{len(candidates)}] FAIL {source!r} -> {target!r} ({dt_ms:.0f}ms)", file=sys.stderr)
-            continue
-        norm = _normalize_classification(raw, fallback_reason="classifier output normalized")
-        vocab_counts[norm["type"]] += 1
-        ok += 1
-
-        record = {
-            "source": source,
-            "target": target,
-            "original_type": original_type,
-            "new_type": norm["type"],
-            "confidence": norm["confidence"],
-            "reason": norm["reason"],
-            "classified_at": datetime.now(timezone.utc).isoformat(),
-            "model": args.model,
-        }
-        if out_fh is not None:
-            out_fh.write(json.dumps(record) + "\n")
-            out_fh.flush()
-
-        print(
-            f"  [{i}/{len(candidates)}] {norm['type']:<14}  "
-            f"c={norm['confidence']:.2f}  {dt_ms:5.0f}ms  "
-            f"{source[:28]!r:<32} -> {target[:28]!r:<32}  {norm['reason'][:60]}"
-        )
-
-    if out_fh is not None:
-        out_fh.close()
-
-    elapsed = time.perf_counter() - t_start
-    print()
-    print("=" * 72)
-    print(f"Classified: {ok} ok, {fail} failed in {elapsed:.1f}s")
-    if ok > 0:
-        print(f"Mean latency: {elapsed / ok * 1000:.0f} ms/edge")
-    print("Vocab distribution:")
-    for t in VOCABULARY:
-        c = vocab_counts[t]
-        if c == 0:
-            continue
-        pct = (c / ok * 100) if ok else 0
-        print(f"  {c:>4}  ({pct:5.1f}%)  {t}")
-    if not args.dry_run:
-        print(f"\nWrote -> {args.output}")
-    return 0 if fail == 0 else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+# main() removed 2026-09-04. The v1 driver is retired — `classify-v4-batch.py`
+# is the runner and reads the store directly. This module survives only for the
+# helpers v4 imports from it (`_load_fact_snippets`, `_resolve_entity_dir`, the
+# prompt scaffolding and the defaults). Running v1 against today's graph would
+# write JSON that nothing applies.
