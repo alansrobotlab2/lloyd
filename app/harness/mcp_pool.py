@@ -149,6 +149,8 @@ class MCPPool:
         Idempotent — concurrent callers wait on the lock and see the
         already-opened pool.
         """
+        if self._opened:
+            return
         async with self._open_lock:
             if self._opened:
                 return
@@ -607,12 +609,33 @@ async def get_or_open_pool(server_configs: dict[str, dict[str, Any]]) -> MCPPool
     key = _config_key(server_configs)
     async with _POOL_CACHE_LOCK:
         pool = _POOL_CACHE.get(key)
-        if pool is not None and not pool._poisoned:
+        if pool is None or pool._poisoned:
+            pool = MCPPool(server_configs)
+            _POOL_CACHE[key] = pool
+        elif pool._opened:
             return pool
-        pool = MCPPool(server_configs)
+
+    # Open OUTSIDE the process-wide cache lock.
+    #
+    # This lock used to be held across `await pool.open()`, which made any
+    # interruption of a first open a permanent, process-wide deadlock:
+    # `run_query` is an async generator, and `autonomy.run_task` iterates
+    # it under `asyncio.timeout`. When that timeout fires mid-open the
+    # generator is abandoned while suspended — its `async with` never
+    # unwinds, so the lock is never released — and every later caller,
+    # including every user turn, blocks on it forever with no error
+    # anywhere. `MCPPool.open()` is idempotent and serialized by its own
+    # per-pool lock, so the global one only needs to guard the dict.
+    try:
         await pool.open()
-        _POOL_CACHE[key] = pool
-        return pool
+    except BaseException:
+        # Includes CancelledError: never leave a half-open pool cached for
+        # the next caller to inherit.
+        async with _POOL_CACHE_LOCK:
+            if _POOL_CACHE.get(key) is pool:
+                _POOL_CACHE.pop(key, None)
+        raise
+    return pool
 
 
 def _evict_pool(pool: MCPPool) -> None:

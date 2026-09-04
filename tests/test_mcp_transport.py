@@ -233,3 +233,48 @@ async def test_persistent_transport_failure_still_gives_up(pool, monkeypatch):
     monkeypatch.undo()
     await pool._reopen()
     assert (await pool.call_tool("Bash", {"command": "echo restored"}))["is_error"] is False
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_cancelled_open_does_not_wedge_the_pool_cache(aggregator, monkeypatch):
+    """A cancelled first open must not hold the process-wide cache lock.
+
+    `run_query` is an async generator, and `autonomy.run_task` iterates it
+    under `asyncio.timeout`. When that timeout fires the generator is
+    abandoned while suspended — its `async with` blocks never unwind. The
+    cache lock used to be held across `await pool.open()`, so a single
+    autonomy task timing out during a first open deadlocked MCP for the
+    whole process: every later turn blocked forever, with no error in any
+    log and /health still green.
+    """
+    from app.harness import mcp_pool as MP
+
+    cfg = {"lloyd-mcp": {"type": "streamable-http", "url": aggregator}}
+    key = MP._config_key(cfg)
+    MP._POOL_CACHE.pop(key, None)
+
+    real_open = MP.MCPPool.open
+    started = asyncio.Event()
+
+    async def hanging_open(self):
+        started.set()
+        await asyncio.sleep(3600)          # stand in for a slow first open
+
+    monkeypatch.setattr(MP.MCPPool, "open", hanging_open)
+    victim = asyncio.create_task(MP.get_or_open_pool(cfg))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    victim.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await victim
+
+    # The lock must be free and the half-open pool must not be cached.
+    assert not MP._POOL_CACHE_LOCK.locked()
+    assert key not in MP._POOL_CACHE
+
+    # And the very next caller succeeds.
+    monkeypatch.setattr(MP.MCPPool, "open", real_open)
+    pool = await asyncio.wait_for(MP.get_or_open_pool(cfg), timeout=20)
+    result = await pool.call_tool("Bash", {"command": "echo recovered"})
+    assert result["content"].strip() == "recovered"
+    await pool.aclose()
+    MP._POOL_CACHE.pop(key, None)
