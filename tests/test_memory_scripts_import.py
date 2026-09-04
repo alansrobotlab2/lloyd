@@ -102,3 +102,33 @@ def test_no_script_reads_the_retired_json_files():
             if "read_text" in line or "json.load" in line or "write_text" in line:
                 offenders.append(f"{path.name}:{line_no}: {stripped}")
     assert not offenders, "scripts still touching the retired JSON:\n" + "\n".join(offenders)
+
+
+def test_swap_refuses_when_a_fact_was_stated_after_the_export(tmp_path, monkeypatch):
+    """The rebuild runs for hours with the system live. A fact stated in a
+    chat turn meanwhile lands in the tree `swap` renames to
+    facts-quarantine-<ts>, and re-extraction cannot reproduce it."""
+    from app import kg_store
+    db = tmp_path / "kg.sqlite"
+    kg_store.configure(db)
+    st = kg_store.store()
+    st.facts_idx.reindex(root=tmp_path / "empty", register_entities=False) if False else None
+    with st.transaction() as c:
+        c.execute(
+            "INSERT INTO facts_idx(entity, category, fact_id, text_hash, fact, "
+            "created_at, provenance, file_path) VALUES (?,?,?,?,?,?,?,?)",
+            ("Lloyd", "state", "stat-001", "h", "stated during the rebuild",
+             "2030-01-01T00:00:00+00:00", "STATED", "Lloyd/Lloyd-state.md"))
+    kg_store.reset()
+
+    m = _load(MEMORY / "kg_rebuild.py")
+    monkeypatch.setattr(m, "VAULT_KG_DB", db)
+    state = {"export": {"exported_at": "2020-01-01T00:00:00+00:00"}}
+    missed = m._facts_written_since_export(state)
+    assert len(missed) == 1 and missed[0]["entity"] == "Lloyd"
+
+    # An export taken after the fact sees nothing outstanding.
+    assert m._facts_written_since_export(
+        {"export": {"exported_at": "2031-01-01T00:00:00+00:00"}}) == []
+    # No export recorded at all -> nothing to compare, no false alarm.
+    assert m._facts_written_since_export({}) == []

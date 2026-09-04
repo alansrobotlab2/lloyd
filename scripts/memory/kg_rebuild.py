@@ -134,7 +134,7 @@ def cmd_freeze(args) -> int:
 
     # The write flag `_fact_add` reads. A chat turn can still add a fact while
     # the rebuild runs; without this it lands in a tree about to be renamed.
-    if not args.dry_run:
+    if not args.dry_run and not args.keep_writes:
         _set_write_enabled(False)
 
     baseline = _run_eval("rebuild-before", run_dir)
@@ -464,6 +464,29 @@ def cmd_gate(args) -> int:
 
 # ── swap / rollback ──────────────────────────────────────────────────────────
 
+def _facts_written_since_export(state: dict) -> list[dict]:
+    """Hand-stated facts added to the LIVE tree after the carry-over export.
+
+    The rebuild runs for hours and the system stays usable throughout, so a
+    fact stated in a chat turn tonight lands in the tree that `swap` renames
+    to facts-quarantine-<ts>. Anything found here has to be re-exported
+    before the swap or it is lost.
+    """
+    exported_at = (state.get("export") or {}).get("exported_at")
+    if not exported_at:
+        return []
+    st = KGStore(VAULT_KG_DB)
+    try:
+        rows = st._query(
+            "SELECT entity, category, fact, created_at, provenance FROM facts_idx "
+            "WHERE created_at > ? AND (provenance IN ('STATED','INFERRED','AMBIGUOUS') "
+            "OR source_doc LIKE '%session%') ORDER BY created_at",
+            (exported_at,))
+        return [{k: r[k] for k in r.keys()} for r in rows]
+    finally:
+        st.close()
+
+
 def cmd_swap(args) -> int:
     """Two renames and a reindex. Refuses without a passing gate."""
     state = load_state()
@@ -474,6 +497,20 @@ def cmd_swap(args) -> int:
     if not REBUILD_FACTS.is_dir():
         print(f"no rebuild tree at {REBUILD_FACTS}", file=sys.stderr)
         return 2
+
+    missed = _facts_written_since_export(state)
+    if missed and not args.force:
+        print(f"REFUSING: {len(missed)} hand-stated fact(s) were added to the live tree "
+              f"after the carry-over export at {(state.get('export') or {}).get('exported_at')}.",
+              file=sys.stderr)
+        for m in missed[:10]:
+            print(f"  {m['created_at']}  {m['entity']}/{m['category']}: {(m['fact'] or '')[:70]}",
+                  file=sys.stderr)
+        if len(missed) > 10:
+            print(f"  … and {len(missed) - 10} more", file=sys.stderr)
+        print("\nRe-run `export` then `import`, and swap after that. Those facts came "
+              "from a conversation and re-extraction cannot reproduce them.", file=sys.stderr)
+        return 3
 
     ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
     quarantine = VAULT_DERIVED_ROOT / f"facts-quarantine-{ts}"
@@ -549,7 +586,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("freeze"); p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("freeze")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--keep-writes", action="store_true",
+                   help="Leave fact writes enabled. The extraction runs for hours and "
+                        "the system stays useful; `swap` refuses if anything was stated "
+                        "in the meantime and not re-exported.")
     p.set_defaults(fn=cmd_freeze)
     sub.add_parser("export").set_defaults(fn=cmd_export)
     p = sub.add_parser("extract")

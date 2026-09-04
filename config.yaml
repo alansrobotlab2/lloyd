@@ -308,4 +308,4 @@ workers:
 # Fact writes through the fact_add MCP tool. The rebuild sets this
 # false so a chat turn cannot add a fact to a tree about to be renamed.
 knowledge_graph:
-  write_enabled: false
+  write_enabled: true
