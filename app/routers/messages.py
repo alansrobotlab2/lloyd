@@ -1024,11 +1024,18 @@ async def _slash_compact_sse(
     if cfg["microcompact"].get("enabled", True):
         mc = cfg["microcompact"]
         tools = mc.get("compactable_tools") or DEFAULT_COMPACTABLE_TOOLS
+        # `/compact` is an explicit user request to shrink the context, so
+        # this path keeps the count rule rather than gating on pressure —
+        # the user has already decided. It still spills before clearing,
+        # so the shrink is recoverable and the markers name their calls.
         convo, micro_cleared = microcompact(
             convo,
-            keep_recent_tools=int(mc.get("keep_recent_tools", 5)),
+            keep_recent_tools=int(mc.get("keep_recent_tools", 15)),
             count_threshold=int(mc.get("count_threshold", 20)),
             compactable_tools=tools,
+            min_chars_to_clear=int(mc.get("min_chars_to_clear", 2_000)),
+            session_id=session_id,
+            legacy_count_rule=True,
         )
 
     # Layer A — force LLM summary regardless of threshold

@@ -128,7 +128,22 @@ compaction:
   keep_recent_turns: 5
   microcompact:
     enabled: true
-    keep_recent_tools: 5
+    # Budget-driven since 2026-09-05. Below `trigger_fraction` of the
+    # truncation threshold this pass does nothing; above it, it clears the
+    # OLDEST tool results one at a time until the conversation is back
+    # under `target_fraction`, spilling each to disk first so the marker
+    # can name the file. The old count-only rule cleared 93 of 97 results
+    # on a review using 17% of its context window.
+    trigger_fraction: 0.8
+    target_fraction: 0.6
+    # Floor on results kept inline. A code review's working set is 15-25
+    # files; the old default of 5 was below the point of usefulness.
+    keep_recent_tools: 15
+    # Clearing a result smaller than this saves fewer tokens than the
+    # marker replacing it costs.
+    min_chars_to_clear: 2000
+    # Legacy; no longer a trigger. app.compaction passes the budget
+    # instead and disables the count rule outright.
     count_threshold: 20
     compactable_tools:
     - Read

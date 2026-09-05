@@ -762,8 +762,10 @@ def test_intra_turn_microcompact_clears_in_place():
     so the observer's shared list reference still sees the cleared
     results. This pins that contract.
     """
-    from app.harness.microcompact import microcompact, CLEARED_MARKER
-    # Build a chat with 18 compactable tool results (>15 threshold).
+    from app.harness.microcompact import microcompact
+    # 18 compactable tool results, each big enough to be worth clearing
+    # (results under `min_chars_to_clear` are left alone — the marker
+    # would cost more tokens than the content it replaces).
     msgs: list[dict] = []
     for i in range(18):
         msgs.append({
@@ -773,17 +775,22 @@ def test_intra_turn_microcompact_clears_in_place():
         msgs.append({
             "role": "tool",
             "tool_call_id": f"tc{i}",
-            "content": f"file content {i}",
+            "content": f"file content {i}\n" * 200,
         })
     handle = msgs  # observer would hold this reference
     original_id = id(handle)
-    compacted, cleared = microcompact(handle, keep_recent_tools=5, count_threshold=15)
+    compacted, cleared = microcompact(
+        handle, keep_recent_tools=5, count_threshold=15, legacy_count_rule=True,
+    )
     assert cleared >= 13, cleared  # 18 - 5 kept = 13 cleared
     # Simulate the loop's in-place replace.
     handle[:] = compacted
     # The observer's reference is still valid AND sees the cleared content.
     assert id(handle) == original_id, "in-place replace must preserve list identity"
-    cleared_msgs = [m for m in handle if m.get("role") == "tool" and CLEARED_MARKER in str(m.get("content", ""))]
+    cleared_msgs = [
+        m for m in handle
+        if m.get("role") == "tool" and "cleared from context" in str(m.get("content", ""))
+    ]
     assert len(cleared_msgs) == cleared
     # Most recent 5 stay inline.
     recent_msgs = [m for m in handle if m.get("role") == "tool" and "file content" in str(m.get("content", ""))]
@@ -805,7 +812,9 @@ def test_intra_turn_microcompact_skips_under_threshold():
             "tool_call_id": f"tc{i}",
             "content": f"file content {i}",
         })
-    compacted, cleared = microcompact(msgs, keep_recent_tools=5, count_threshold=15)
+    compacted, cleared = microcompact(
+        msgs, keep_recent_tools=5, count_threshold=15, legacy_count_rule=True,
+    )
     assert cleared == 0
     assert compacted == msgs  # unchanged
     print("test_intra_turn_microcompact_skips_under_threshold: OK")

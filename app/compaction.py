@@ -286,9 +286,17 @@ def _compaction_cfg() -> dict[str, Any]:
     cfg.setdefault("keep_recent_turns", 5)
     micro = dict(cfg.get("microcompact") or {})
     micro.setdefault("enabled", True)
-    micro.setdefault("keep_recent_tools", 5)
+    micro.setdefault("keep_recent_tools", 15)
     micro.setdefault("count_threshold", 20)
     micro.setdefault("compactable_tools", None)  # None → use module default
+    # Budget gating. Microcompaction gets first refusal above
+    # `trigger_fraction` of the truncation threshold — it is cheaper than
+    # summarization and preserves more — and clears down to
+    # `target_fraction` so it does not have to run again next turn.
+    # Below the trigger it does nothing at all.
+    micro.setdefault("trigger_fraction", 0.8)
+    micro.setdefault("target_fraction", 0.6)
+    micro.setdefault("min_chars_to_clear", 2_000)
     cfg["microcompact"] = micro
     restore = dict(cfg.get("restore") or {})
     restore.setdefault("enabled", True)
@@ -392,11 +400,30 @@ async def load_and_compact_session(
             tools: Iterable[str] = (
                 mc_cfg.get("compactable_tools") or DEFAULT_COMPACTABLE_TOOLS
             )
+            # Budget the pass against the same threshold Layer A uses.
+            # Trigger high enough that a conversation with room to spare
+            # is left completely alone; clear down to a lower target so
+            # the next turn does not immediately re-trigger.
+            trigger = int(threshold * float(mc_cfg.get("trigger_fraction", 0.8)))
+            target = int(threshold * float(mc_cfg.get("target_fraction", 0.6)))
+            # `session_id` is the session file's stem — the same key the
+            # spill module names its directory after. Without it,
+            # spill-before-clear is skipped and nothing is cleared that
+            # was not already on disk.
             convo, micro_cleared = microcompact(
                 convo,
-                keep_recent_tools=int(mc_cfg.get("keep_recent_tools", 5)),
+                keep_recent_tools=int(mc_cfg.get("keep_recent_tools", 15)),
                 count_threshold=int(mc_cfg.get("count_threshold", 20)),
                 compactable_tools=tools,
+                token_budget=target if tokens_before > trigger else None,
+                # Never the count rule: below the trigger this pass must
+                # do nothing beyond dropping previews already on disk.
+                legacy_count_rule=False,
+                estimate_fn=(
+                    lambda msgs: estimate_conversation_tokens(msgs, system_prompt)
+                ),
+                min_chars_to_clear=int(mc_cfg.get("min_chars_to_clear", 2_000)),
+                session_id=path.stem,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("microcompact pre-pass failed: %s", e)

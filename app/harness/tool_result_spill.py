@@ -142,6 +142,38 @@ def maybe_spill(
     return msg
 
 
+def persist_for_compaction(
+    content: str, *, tool_use_id: str, session_id: str,
+) -> Path | None:
+    """Write ``content`` to this session's spill dir and return the path.
+
+    Unlike :func:`maybe_spill` this has no size threshold and builds no
+    preview block — the caller is about to remove the content from the
+    prompt entirely, so a 2 KB preview would defeat the point. It exists
+    so microcompaction can be lossless: content leaves the prompt, never
+    the machine.
+
+    Returns ``None`` on any filesystem error. The caller must treat that
+    as "do not clear" — clearing content that failed to persist is the
+    one outcome worth avoiding.
+    """
+    if not isinstance(content, str) or not content:
+        return None
+    if not session_id or not tool_use_id:
+        return None
+    path = _spill_path(session_id, tool_use_id, is_json=_looks_like_json(content))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "spill: failed to persist %s for %s/%s: %s",
+            path, session_id, tool_use_id, e,
+        )
+        return None
+    return path
+
+
 def fallback_for_empty_result(content: str | None, tool_name: str) -> str:
     """Replace empty/whitespace-only tool results with an explicit
     "no output" marker. Some local models (notably qwen3-derived) treat
@@ -159,5 +191,6 @@ __all__ = [
     "PERSISTED_OUTPUT_TAG",
     "PERSISTED_OUTPUT_CLOSING_TAG",
     "maybe_spill",
+    "persist_for_compaction",
     "fallback_for_empty_result",
 ]

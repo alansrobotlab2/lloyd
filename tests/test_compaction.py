@@ -199,11 +199,10 @@ def test_load_and_compact_filters_ui_only_roles():
 # ---------------------------------------------------------------------------
 
 
-def test_microcompact_clears_old_tool_results_when_over_count():
-    """Build a session with 30 Read tool-call/result pairs; expect the
-    pre-pass to clear the older ones, leaving the most recent 5."""
-    msgs: list[dict] = [{"role": "user", "content": "read these files"}]
-    for i in range(30):
+def _tool_pairs(n: int, *, chars: int = 3_000, prefix: str = "f") -> list[dict]:
+    """n assistant/tool pairs of Read calls with `chars`-sized results."""
+    msgs: list[dict] = []
+    for i in range(n):
         cid = f"call_{i:03d}"
         msgs.append({
             "role": "assistant",
@@ -211,40 +210,194 @@ def test_microcompact_clears_old_tool_results_when_over_count():
             "tool_calls": [{
                 "id": cid,
                 "type": "function",
-                "function": {"name": "Read", "arguments": json.dumps({"file_path": f"/f{i}.py"})},
+                "function": {
+                    "name": "Read",
+                    "arguments": json.dumps({"file_path": f"/{prefix}{i}.py"}),
+                },
             }],
         })
         msgs.append({
             "role": "tool",
             "tool_call_id": cid,
-            "content": f"contents of file {i}\n" * 50,
+            "content": f"contents of file {i}\n" * (chars // 20),
         })
+    return msgs
+
+
+def _marker_text(msg: dict) -> str:
+    c = msg.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list) and c:
+        return c[0].get("text", "")
+    return ""
+
+
+def test_microcompact_does_nothing_without_context_pressure():
+    """The defect that motivated the budget gate.
+
+    Session 20260905_024955_iv5f05 peaked at 106,802 tokens against a
+    210,144 threshold — 40% of budget — and the pre-pass still cleared 93
+    of 97 tool results, because the trigger counted tools and never looked
+    at tokens. The turn hit max_turns with no output; the next turn began
+    with its evidence erased.
+    """
+    msgs: list[dict] = [{"role": "user", "content": "read these files"}]
+    msgs += _tool_pairs(30)
     msgs.append({"role": "user", "content": "now what?"})
-    msgs.append({"role": "assistant", "content": "..."})
 
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "s.json"
         _write_session(p, msgs)
-        # mode=truncate so the LLM path is skipped; we're testing
-        # microcompact in isolation.
-        out = _run(load_and_compact_session(
-            p, model="qwen", mode_override="truncate",
-        ))
-        # Expect 30 - 5 = 25 cleared.
-        assert out["microcompacted"] == 25, (
-            f"expected 25 cleared, got {out['microcompacted']}"
+        out = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
+        assert out["microcompacted"] == 0, (
+            f"cleared {out['microcompacted']} results on a conversation using "
+            f"{out['tokens_before']} of {out['threshold']} tokens"
         )
-        # Sanity check: the cleared marker text appears in older tool messages.
-        from app.harness.microcompact import CLEARED_MARKER
-        cleared_count = sum(
-            1 for m in out["history"]
-            if m.get("role") == "tool"
-            and CLEARED_MARKER in (
-                m["content"] if isinstance(m.get("content"), str)
-                else (m["content"][0].get("text", "") if m.get("content") else "")
-            )
+        assert out["tokens_after"] == out["tokens_before"]
+
+
+def test_microcompact_clears_only_down_to_target_when_over_budget():
+    """Above the trigger it clears oldest-first and stops at the target —
+    not everything but the last N."""
+    from app.harness.microcompact import microcompact
+
+    msgs = _tool_pairs(40, chars=4_000)
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+    before = est(msgs)
+    target = int(before * 0.6)
+
+    out, cleared = microcompact(
+        msgs, token_budget=target, estimate_fn=est,
+        keep_recent_tools=15, legacy_count_rule=False,
+    )
+    after = est(out)
+    assert cleared > 0, "should have cleared something"
+    assert after <= target, f"still over target: {after} > {target}"
+    # Proportional, not scorched-earth: the old rule would have cleared
+    # all 25 candidates outright.
+    assert cleared < 25, f"cleared {cleared}; expected the minimum needed"
+    # The recent window is untouched.
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    for m in tool_msgs[-15:]:
+        assert "cleared from context" not in _marker_text(m)
+
+
+def test_microcompact_never_clears_below_the_recent_floor():
+    from app.harness.microcompact import microcompact
+
+    msgs = _tool_pairs(18, chars=4_000)
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+    # An unreachable budget: it must still refuse to touch the last 15.
+    out, cleared = microcompact(
+        msgs, token_budget=1, estimate_fn=est,
+        keep_recent_tools=15, legacy_count_rule=False,
+    )
+    assert cleared == 3, (
+        f"expected exactly the 3 candidates outside the floor, cleared {cleared}"
+    )
+
+
+def test_microcompact_skips_results_too_small_to_be_worth_clearing():
+    """Clearing a 200-byte result saves less than the marker costs."""
+    from app.harness.microcompact import microcompact
+
+    msgs = _tool_pairs(30, chars=200)
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+    out, cleared = microcompact(
+        msgs, token_budget=1, estimate_fn=est,
+        keep_recent_tools=5, min_chars_to_clear=2_000, legacy_count_rule=False,
+    )
+    assert cleared == 0, f"cleared {cleared} sub-threshold results"
+
+
+def test_microcompact_marker_names_the_call_and_the_spill_file():
+    """"[content cleared — retrieve via Read if needed]" is an instruction
+    the model cannot follow: it names neither the file nor the call."""
+    from app.harness.microcompact import microcompact
+    from app.paths import SESSIONS_DIR
+
+    sid = "test_microcompact_marker"
+    msgs = _tool_pairs(20, chars=4_000)
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+    spill_dir = SESSIONS_DIR / f"{sid}.tool-results"
+    try:
+        out, cleared = microcompact(
+            msgs, token_budget=1, estimate_fn=est,
+            keep_recent_tools=5, session_id=sid, legacy_count_rule=False,
         )
-        assert cleared_count == 25, f"expected 25 marker hits, got {cleared_count}"
+        assert cleared > 0
+        marker = _marker_text([m for m in out if m.get("role") == "tool"][0])
+        assert "Read" in marker, marker
+        assert "file_path=" in marker, marker
+        assert str(spill_dir) in marker, marker
+        # And the content is genuinely on disk, not merely named.
+        assert list(spill_dir.glob("*.txt")), "marker names a file that was never written"
+    finally:
+        if spill_dir.exists():
+            for f in spill_dir.iterdir():
+                f.unlink()
+            spill_dir.rmdir()
+
+
+def test_microcompact_refuses_to_clear_what_it_could_not_persist():
+    """Staying over budget is recoverable; deleting evidence is not."""
+    from app.harness import microcompact as mc_mod
+
+    msgs = _tool_pairs(20, chars=4_000)
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+    original = mc_mod.persist_for_compaction
+    mc_mod.persist_for_compaction = lambda *a, **k: None  # simulate disk failure
+    try:
+        out, cleared = mc_mod.microcompact(
+            msgs, token_budget=1, estimate_fn=est,
+            keep_recent_tools=5, session_id="whatever", legacy_count_rule=False,
+        )
+        assert cleared == 0, f"cleared {cleared} results it failed to persist"
+        assert out == msgs or all(
+            "cleared from context" not in _marker_text(m)
+            for m in out if m.get("role") == "tool"
+        )
+    finally:
+        mc_mod.persist_for_compaction = original
+
+
+def test_microcompact_preserves_the_spill_path_it_promises_to_keep():
+    """The module docstring said twice that a spilled result keeps its
+    file path. `_replace_tool_content` overwrote the whole block with a
+    path-free marker, so the one genuinely lossless case was lossy."""
+    from app.harness.microcompact import microcompact
+    from app.harness.tool_result_spill import PERSISTED_OUTPUT_TAG
+
+    spilled = (
+        f"{PERSISTED_OUTPUT_TAG}\n"
+        "Output too large (54.7 KB, 56,034 chars). "
+        "Full output saved to: /sessions/s.tool-results/abc.txt\n\n"
+        "Preview (first 2.0 KB):\n" + ("x" * 2000) + "\n</persisted-output>"
+    )
+    msgs = _tool_pairs(20, chars=100)
+    msgs[1]["content"] = spilled
+
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+    out, cleared = microcompact(
+        msgs, token_budget=None, estimate_fn=est,
+        keep_recent_tools=5, legacy_count_rule=False,
+    )
+    first = _marker_text([m for m in out if m.get("role") == "tool"][0])
+    assert cleared == 1, f"spill-aware pass should clear exactly this one, got {cleared}"
+    assert "/sessions/s.tool-results/abc.txt" in first, first
+    assert "xxxx" not in first, "preview should be dropped"
+
+
+def test_microcompact_legacy_count_rule_still_available():
+    """Direct callers that pass no budget keep the old behavior."""
+    from app.harness.microcompact import microcompact
+
+    msgs = _tool_pairs(30, chars=3_000)
+    out, cleared = microcompact(
+        msgs, keep_recent_tools=5, count_threshold=20, legacy_count_rule=True,
+    )
+    assert cleared == 25, f"expected legacy 30-5=25, got {cleared}"
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +418,69 @@ def test_truncation_threshold_math():
 # Runner
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Mid-turn microcompaction (app/harness/loop.py)
+# ---------------------------------------------------------------------------
+
+
+def test_intra_turn_microcompact_is_silent_without_pressure():
+    """The call site that did the most damage, and the one easiest to miss.
+
+    `loop.py` clears tool results *during* a turn. Until 2026-09-05 its
+    only trigger was `tool_count >= 15`, so turn 20260905_024955_iv5f05 —
+    70 tool calls at a peak of 106,802 tokens against a 210,144 threshold
+    — was held to 5 inline results for its whole length.
+    """
+    from app.harness.loop import _intra_turn_microcompact
+
+    class _Opts:
+        model = "primary"
+        session_id = "intra_turn_probe"
+        intra_turn_microcompact_trigger_fraction = 0.8
+        intra_turn_microcompact_target_fraction = 0.6
+        intra_turn_microcompact_min_chars = 2_000
+
+    msgs = _tool_pairs(40, chars=4_000)
+    before = list(msgs)
+    _intra_turn_microcompact(
+        msgs, options=_Opts(), total_usage={"input_tokens": 40_000},
+        keep_recent=15, tool_count=40, iteration=40,
+    )
+    assert msgs == before, "cleared tool results with the window 80% empty"
+
+
+def test_intra_turn_microcompact_fires_when_actually_near_the_wall():
+    """And it must still work — this is a real defense on a long turn."""
+    from app.harness.loop import _intra_turn_microcompact
+    from app.compaction import get_context_window, truncation_threshold
+
+    class _Opts:
+        model = "primary"
+        session_id = "intra_turn_probe2"
+        intra_turn_microcompact_trigger_fraction = 0.8
+        intra_turn_microcompact_target_fraction = 0.6
+        intra_turn_microcompact_min_chars = 2_000
+
+    threshold = truncation_threshold(get_context_window("primary"))
+    msgs = _tool_pairs(40, chars=4_000)
+    original_id = id(msgs)
+    # vLLM reports a prompt well past the trigger; the estimator alone
+    # would not have caught it, which is why the real figure is consulted.
+    _intra_turn_microcompact(
+        msgs, options=_Opts(), total_usage={"input_tokens": int(threshold * 0.95)},
+        keep_recent=15, tool_count=40, iteration=40,
+    )
+    assert id(msgs) == original_id, "must mutate in place for the observer's handle"
+    cleared = sum(
+        1 for m in msgs
+        if m.get("role") == "tool" and "cleared from context" in _marker_text(m)
+    )
+    assert cleared > 0, "near the wall it must still clear"
+    # The recent floor is respected even under pressure.
+    tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+    assert all("cleared from context" not in _marker_text(m) for m in tool_msgs[-15:])
+
+
 _TESTS = [
     test_estimate_tokens_returns_int,
     test_estimate_tokens_empty_string,
@@ -278,7 +494,16 @@ _TESTS = [
     test_load_and_compact_triggers_truncation,
     test_load_and_compact_accepts_str_path,
     test_load_and_compact_filters_ui_only_roles,
-    test_microcompact_clears_old_tool_results_when_over_count,
+    test_microcompact_does_nothing_without_context_pressure,
+    test_microcompact_clears_only_down_to_target_when_over_budget,
+    test_microcompact_never_clears_below_the_recent_floor,
+    test_microcompact_skips_results_too_small_to_be_worth_clearing,
+    test_microcompact_marker_names_the_call_and_the_spill_file,
+    test_microcompact_refuses_to_clear_what_it_could_not_persist,
+    test_microcompact_preserves_the_spill_path_it_promises_to_keep,
+    test_microcompact_legacy_count_rule_still_available,
+    test_intra_turn_microcompact_is_silent_without_pressure,
+    test_intra_turn_microcompact_fires_when_actually_near_the_wall,
     test_truncation_threshold_math,
 ]
 

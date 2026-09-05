@@ -404,30 +404,31 @@ async def run_query(
                 })
 
             # Mid-turn microcompaction. After this iteration's tool calls
-            # land, check whether tool results have piled up enough to
-            # warrant clearing stale ones. Mutates `chat_messages` in
+            # land, clear stale tool results IF the prompt is actually
+            # pressing on the context window. Mutates `chat_messages` in
             # place so the observer's chat_messages_handle stays pointing
             # at the same list.
+            #
+            # The tool-count threshold is a cheap pre-check only. Until
+            # 2026-09-05 it was the entire trigger, so a turn that ran 70
+            # tool calls at 40% of its context window was held to 5 inline
+            # results the whole way, and everything it had read was gone.
             if (
                 tool_calls_committed
                 and getattr(options, "intra_turn_microcompact_enabled", True)
             ):
                 threshold = getattr(options, "intra_turn_microcompact_threshold", 15)
-                keep = getattr(options, "intra_turn_microcompact_keep_recent", 5)
+                keep = getattr(options, "intra_turn_microcompact_keep_recent", 15)
                 tool_count = sum(1 for m in chat_messages if m.get("role") == "tool")
                 if tool_count >= threshold:
-                    compacted, cleared = _intra_microcompact(
+                    _intra_turn_microcompact(
                         chat_messages,
-                        keep_recent_tools=keep,
-                        count_threshold=threshold,
+                        options=options,
+                        total_usage=total_usage,
+                        keep_recent=keep,
+                        tool_count=tool_count,
+                        iteration=num_turns,
                     )
-                    if cleared:
-                        chat_messages[:] = compacted
-                        logger.info(
-                            "loop: intra-turn microcompact cleared %d/%d tool results "
-                            "(kept last %d, iter=%d)",
-                            cleared, tool_count, keep, num_turns,
-                        )
 
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         result_done_evt = events.result(
@@ -487,6 +488,85 @@ def _merge_usage(acc: dict[str, int], chunk: dict[str, Any]) -> dict[str, int]:
             continue
         out[_USAGE_KEY_REMAP.get(k, k)] = v
     return out
+
+
+def _intra_turn_microcompact(
+    chat_messages: list[dict],
+    *,
+    options: Any,
+    total_usage: dict[str, int],
+    keep_recent: int,
+    tool_count: int,
+    iteration: int,
+) -> None:
+    """Clear stale tool results in place, but only under real pressure.
+
+    Uses the same threshold arithmetic as the turn-start pass in
+    `app.compaction`, so the two cannot disagree about where the wall is.
+    Imports it lazily: `app.compaction` already lazy-imports this package
+    in the other direction, and a module-level edge here would close the
+    cycle.
+
+    Context size anchors on vLLM's reported `input_tokens` — the real size
+    of the prompt the server just processed — while the estimator supplies
+    the per-message deltas. The gap between them is the system prompt and
+    tool schemas, which `chat_messages` does not contain; carrying it as an
+    `offset` keeps both halves in the same units. Triggering on the real
+    figure while budgeting against the estimate would mean triggering and
+    then clearing nothing, since the estimate is always the smaller number.
+    """
+    try:
+        from app.compaction import (
+            estimate_conversation_tokens,
+            get_context_window,
+            truncation_threshold,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("loop: intra-turn microcompact unavailable: %s", e)
+        return
+
+    threshold = truncation_threshold(get_context_window(getattr(options, "model", "")))
+    trigger = int(threshold * float(
+        getattr(options, "intra_turn_microcompact_trigger_fraction", 0.8)
+    ))
+    target = int(threshold * float(
+        getattr(options, "intra_turn_microcompact_target_fraction", 0.6)
+    ))
+
+    def _estimate(msgs: list[dict]) -> int:
+        return estimate_conversation_tokens(msgs, "")
+
+    estimated = _estimate(chat_messages)
+    reported = int(total_usage.get("input_tokens", 0) or 0)
+    # Everything in the prompt that isn't in `chat_messages`. Clamped at 0
+    # so an over-reporting estimate can't invent headroom.
+    offset = max(0, reported - estimated)
+    current = estimated + offset
+    if current <= trigger:
+        return
+
+    compacted, cleared = _intra_microcompact(
+        chat_messages,
+        keep_recent_tools=keep_recent,
+        # Budget in estimator units: the offset is fixed cost this pass
+        # cannot reduce. If it alone exceeds the target, clear down to the
+        # floor and let context-overflow recovery handle the remainder.
+        token_budget=max(1, target - offset),
+        estimate_fn=_estimate,
+        min_chars_to_clear=int(
+            getattr(options, "intra_turn_microcompact_min_chars", 2_000)
+        ),
+        session_id=getattr(options, "session_id", "") or "",
+        legacy_count_rule=False,
+    )
+    if cleared:
+        chat_messages[:] = compacted
+        logger.info(
+            "loop: intra-turn microcompact cleared %d/%d tool results "
+            "(kept last %d, %d -> %d tokens, target %d, iter=%d)",
+            cleared, tool_count, keep_recent, current,
+            _estimate(chat_messages) + offset, target, iteration,
+        )
 
 
 def _accumulate_iteration_usage(

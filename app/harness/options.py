@@ -107,5 +107,14 @@ class RunOptions:
     # any older result with a `<persisted-output>` marker also gets cleared
     # since its content is already on disk and re-readable via Read.
     intra_turn_microcompact_enabled: bool = True
-    intra_turn_microcompact_threshold: int = 15  # tool results before triggering
-    intra_turn_microcompact_keep_recent: int = 5  # keep this many most-recent inline
+    intra_turn_microcompact_threshold: int = 15  # tool results before considering
+    intra_turn_microcompact_keep_recent: int = 15  # keep this many most-recent inline
+    # Budget gate, added 2026-09-05. The tool-count threshold above is now
+    # only a cheap pre-check: clearing happens solely when the prompt is
+    # actually pressing on the context window. Session 20260905_024955_iv5f05
+    # ran 70 tool calls in one turn at a peak of 106,802 tokens against a
+    # 210,144 threshold, and this pass held it to 5 inline tool results the
+    # whole way, because it counted tools and never looked at tokens.
+    intra_turn_microcompact_trigger_fraction: float = 0.8
+    intra_turn_microcompact_target_fraction: float = 0.6
+    intra_turn_microcompact_min_chars: int = 2_000
