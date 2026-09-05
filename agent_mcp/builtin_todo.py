@@ -60,10 +60,27 @@ async def _todo_write(args: dict[str, Any]) -> str:
     if not ok:
         return json.dumps({"error": f"Session {session_id} not found"})
 
+    # Echo the stored list back. The bare prose confirmation left the
+    # list itself with exactly one appearance in the model's context —
+    # the call it just made — after which it decayed with distance. On
+    # 20260905_151355_iv5174 that was iteration 6 of 52, and the list was
+    # never touched again. Echoing costs a few hundred tokens and puts
+    # the current state in context at the moment it changes.
+    if not new_todos:
+        return (
+            "Todos have been modified successfully. All items were completed, "
+            "so the list has been cleared."
+        )
+    rendered = "\n".join(
+        f"  - [{t['status']}] {t['content']}" for t in new_todos
+    )
+    open_count = sum(1 for t in new_todos if t["status"] != "completed")
     return (
-        "Todos have been modified successfully. Ensure that you continue "
-        "to use the todo list to track your progress. Please proceed with "
-        "the current tasks if applicable"
+        "Todos have been modified successfully. Current list "
+        f"({open_count} of {len(new_todos)} still open):\n"
+        f"{rendered}\n"
+        "Keep this list current — call TodoWrite again with the full "
+        "updated list as soon as an item's status changes."
     )
 
 

@@ -184,6 +184,23 @@ async def run_query(
                         "loop: drained %d background-task notification(s)", len(drained),
                     )
 
+            # Per-iteration state re-anchor (todos / plan / goal). Appended,
+            # never merged into the system prompt: position 0 must stay
+            # byte-stable or every iteration re-prefills the whole context.
+            # These are NOT persisted — see RunOptions.state_anchor.
+            if options.state_anchor is not None:
+                try:
+                    anchors = await options.state_anchor(num_turns)
+                except Exception as exc:
+                    logger.warning("loop: state_anchor raised: %s", exc)
+                    anchors = []
+                if anchors:
+                    chat_messages.extend(anchors)
+                    logger.info(
+                        "loop: state anchor re-injected %d message(s) (iter=%d)",
+                        len(anchors), num_turns,
+                    )
+
             # Plan B — per-iteration disallowed-tools refresh. When the
             # caller wired a refresher (typically a closure over session
             # state), the harness re-evaluates the disallowed list on
@@ -340,9 +357,15 @@ async def run_query(
             # failure the observer exists for — and the persisted session
             # kept the same shape. The echo-guard re-prompt below always
             # appended after the assistant message and got this right.
+            keep_reasoning = int(
+                getattr(options, "preserve_thinking_iterations", 0) or 0
+            )
             chat_messages.append(_assistant_message_for_history(
-                text=assistant_text, tool_calls=tool_calls_committed
+                text=assistant_text, tool_calls=tool_calls_committed,
+                reasoning=thinking_text if keep_reasoning > 0 else "",
             ))
+            if keep_reasoning > 0:
+                _prune_reasoning(chat_messages, keep=keep_reasoning)
 
             # Snapshot chat_messages length before firing OnEvent. The
             # observer may append a user message ("inject" lever); if it
@@ -722,13 +745,29 @@ def _commit_tool_calls(acc: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _assistant_message_for_history(
-    *, text: str, tool_calls: list[dict[str, Any]]
+    *, text: str, tool_calls: list[dict[str, Any]], reasoning: str = "",
 ) -> dict[str, Any]:
     """Build the OpenAI assistant message we append back to chat_messages
     for the next loop iteration. Strips the `_args_dict` helper so what
     we send to vLLM is spec-compliant.
+
+    ``reasoning`` carries this iteration's thinking back into history.
+    Qwen3.8-Flash-Next renders it into the `<think>` block of each prior
+    assistant turn ("preserved thinking", on by default in the chat
+    template) and its model card calls that out as reducing redundant
+    reasoning in agent loops. Dropping it — which the harness did until
+    2026-09-05 — showed the model 50+ prior turns in which it had
+    apparently thought nothing, and made it re-derive its own conclusions
+    every iteration.
+
+    The field is `reasoning`, NOT `reasoning_content`: vLLM 0.28 accepts
+    both on the wire but only populates the template from `reasoning`
+    (entrypoints/chat_utils.py:2000). Sending `reasoning_content` alone is
+    silently dropped and renders an empty `<think>` block.
     """
     msg: dict[str, Any] = {"role": "assistant", "content": text}
+    if reasoning:
+        msg["reasoning"] = reasoning
     if tool_calls:
         msg["tool_calls"] = [
             {
@@ -743,6 +782,32 @@ def _assistant_message_for_history(
         if not text:
             msg["content"] = None
     return msg
+
+
+def _prune_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) -> None:
+    """Keep `reasoning` on the most recent `keep` assistant messages only.
+
+    Preserved thinking is not free: the review turn on
+    20260905_151355_iv5174 generated 66.6k reasoning tokens, so carrying
+    all of it would have pushed peak input from 162k past the 209k
+    microcompaction trigger toward the 262k ceiling. Microcompaction only
+    knows how to clear tool results, so unbounded reasoning would have no
+    relief valve. Bounding it to a recent window keeps the useful part —
+    continuity with what the model was just doing — at a fixed cost.
+
+    Mutates in place. Older assistant turns keep their text and tool
+    calls and simply render an empty `<think>` block, exactly as every
+    turn did before preserved thinking was wired up.
+    """
+    seen = 0
+    for msg in reversed(chat_messages):
+        if msg.get("role") != "assistant":
+            continue
+        if "reasoning" not in msg:
+            continue
+        seen += 1
+        if seen > keep:
+            msg.pop("reasoning", None)
 
 
 async def _dispatch_one_tool_call(

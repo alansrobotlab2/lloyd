@@ -118,7 +118,7 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
     import yaml as _yaml
     from app.harness import RunOptions
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
-    from app.mcp_discovery import _get_disallowed_tools, _get_tool_search_kwargs
+    from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
     from prefetch import prefetch_context
     from prompt_builder import build_system_prompt
 
@@ -129,7 +129,7 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
     # empty, which silently defers every http_* tool behind ToolSearch and
     # leaves Bash the only visible way to reach a URL.
     disallowed = _get_disallowed_tools()
-    tool_search_kwargs = _get_tool_search_kwargs()
+    tool_search_kwargs = _get_harness_kwargs()
 
     models = config.get("models") or {}
     default_alias = model or (config.get("model") or {}).get("default", "primary")

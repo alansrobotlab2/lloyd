@@ -86,6 +86,7 @@ async def _task(args: dict[str, Any]) -> str:
     # `mcp_servers.<server>.disabled_tools` stayed fully callable inside
     # a Task — the one execution context with no human watching the
     # stream. Same reasoning that puts the safety hook here.
+    from app.config import CONFIG
     from app.mcp_discovery import _get_disallowed_tools
 
     disallowed = list(_get_disallowed_tools())
@@ -120,36 +121,111 @@ async def _task(args: dict[str, Any]) -> str:
         # tool_search LoadedToolSet — different disallowed_tools profiles
         # would otherwise share one cache entry.
         session_id=f"task:{subagent_type}:{uuid.uuid4().hex[:8]}",
+        # A subagent is an agent loop like any other and has the same
+        # redundant-reasoning problem the main loop does — more so, since
+        # it runs its whole investigation inside one turn.
+        preserve_thinking_iterations=int(
+            (CONFIG.get("harness") or {}).get("preserve_thinking_iterations", 0)
+        ),
     )
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
 
-    final_text = ""
+    # The subagent's answer is the text of its TERMINATING iteration —
+    # the one that stopped without calling a tool. Accumulating every
+    # `text_delta` instead (as this did until 2026-09-05) concatenates
+    # each iteration's preamble, so a subagent that burns all its turns
+    # mid-investigation returns its opening "I'll start by reading the
+    # repo" as though that were the finished review. Session
+    # 20260905_151355_iv5174 lost 231s to exactly that: 19 tool calls,
+    # a preamble for an answer, and no signal to the caller that the
+    # work never happened.
+    final_text = ""            # terminal (tool-call-free) iteration's text
+    last_iter_text = ""        # most recent iteration's text, terminal or not
+    last_iter_thinking = ""    # ...and its reasoning, for diagnosing empty answers
     tool_calls_summary: list[str] = []
+    stop_reason = "stop"
+    num_turns = 0
 
     token = _task_depth.set(depth + 1)
     try:
         async for evt in run_query(messages, options):
-            if evt["type"] == "text_delta":
-                final_text += evt["text"]
+            if evt["type"] == "assistant_message":
+                last_iter_text = evt.get("text") or ""
+                last_iter_thinking = evt.get("thinking") or ""
+                if not evt.get("tool_calls"):
+                    final_text = last_iter_text
             elif evt["type"] == "tool_call":
                 tool_calls_summary.append(evt["name"])
             elif evt["type"] == "result":
                 stop_reason = evt.get("stop_reason", "stop")
-                if stop_reason not in ("stop", "end_turn"):
-                    final_text += f"\n[stopped: {stop_reason}]"
+                num_turns = int(evt.get("num_turns", 0) or 0)
     except Exception as exc:
         logger.exception("Task subagent error for prompt=%r", prompt[:120])
         return json.dumps({"error": f"Subagent failed: {exc}"})
     finally:
         _task_depth.reset(token)
 
+    # A subagent that dispatched tools but never produced a closing
+    # message did NOT do the job. Return an error rather than a
+    # plausible-looking empty string — the caller cannot otherwise tell
+    # "reviewed it, found nothing" from "never got there".
+    if not final_text.strip() and tool_calls_summary:
+        reason = _diagnose_empty_answer(
+            stop_reason=stop_reason,
+            num_turns=num_turns,
+            max_turns=profile["max_turns"],
+            thinking=last_iter_thinking,
+        )
+        logger.warning(
+            "Task subagent produced no final answer (%s): stop_reason=%s "
+            "turns=%d/%d tools=%d",
+            reason, stop_reason, num_turns, profile["max_turns"],
+            len(tool_calls_summary),
+        )
+        err: dict[str, Any] = {
+            "error": (
+                f"Subagent ran {len(tool_calls_summary)} tool calls but returned "
+                f"no final answer ({reason}). The task was NOT completed — do "
+                f"not treat any text below as the result."
+            ),
+            "stop_reason": stop_reason,
+            "turns_used": num_turns,
+            "max_turns": profile["max_turns"],
+            "tools_used": tool_calls_summary,
+        }
+        if last_iter_text.strip():
+            err["partial_text"] = last_iter_text[:500]
+        if description:
+            err["description"] = description
+        return json.dumps(err)
+
     result: dict[str, Any] = {"response": final_text}
+    # Surface truncation even when there IS text — a max_turns run can
+    # still end on a partial answer.
+    if stop_reason not in ("stop", "end_turn"):
+        result["stop_reason"] = stop_reason
+        result["truncated"] = True
+        result["turns_used"] = num_turns
+        result["max_turns"] = profile["max_turns"]
     if tool_calls_summary:
         result["tools_used"] = tool_calls_summary
     if description:
         result["description"] = description
     return json.dumps(result)
+
+
+def _diagnose_empty_answer(
+    *, stop_reason: str, num_turns: int, max_turns: int, thinking: str,
+) -> str:
+    """Short human-readable cause for a subagent that returned no answer."""
+    if stop_reason == "max_turns" or num_turns >= max_turns:
+        return f"exhausted its {max_turns}-turn budget"
+    if stop_reason == "cancelled":
+        return "was cancelled"
+    if thinking.strip():
+        return "emitted reasoning but no final message"
+    return f"stopped with an empty final message (stop_reason={stop_reason})"
 
 
 async def list_tools():

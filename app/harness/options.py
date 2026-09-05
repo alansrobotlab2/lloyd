@@ -85,6 +85,34 @@ class RunOptions:
     # owns persistence past run_query's entry.
     notification_drain: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
 
+    # Per-iteration state re-anchor. Session state that lives OUTSIDE the
+    # conversation — the todo list, the plan, the goal — is rendered into
+    # the system prompt once at turn start and then goes stale: the system
+    # prompt sits at position 0 and the loop only ever appends, so
+    # rewriting it mid-turn would invalidate the whole cached prefix on
+    # every iteration. This callback re-anchors that state by APPENDING
+    # instead, which keeps the prefix intact.
+    #
+    # Called with the 1-based iteration number; returns messages to splice
+    # in, or [] for "nothing to say". Unlike `notification_drain` these
+    # are ephemeral scaffolding and must NOT be persisted to the session
+    # JSON — they describe state as of this iteration and would be stale
+    # (and duplicated) on the next turn's reconstruction.
+    #
+    # Motivating case: session 20260905_151355_iv5174 called TodoWrite at
+    # iteration 6 of 52 and never again. The `<active_todos>` block was
+    # empty at turn start, so for 46 iterations the only trace of the list
+    # was a tool call 130k tokens back.
+    state_anchor: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = None
+
+    # Preserved thinking. Carry this many recent iterations' reasoning
+    # back into `chat_messages` as the assistant messages' `reasoning`
+    # field, which Qwen3.8-Flash-Next's template renders into each prior
+    # turn's <think> block. 0 disables (the pre-2026-09-05 behaviour:
+    # every historical turn shows an empty <think>, and the model
+    # re-derives its own conclusions each iteration).
+    preserve_thinking_iterations: int = 0
+
     # Forwarded to vLLM unchanged. Most local deployments ignore these,
     # but we keep them so config-driven thinking knobs can survive into
     # extra_body if ever needed.

@@ -173,6 +173,21 @@ compaction:
     buffer_tokens: 3000
 harness:
   stream_chunk_timeout_seconds: 60
+  # Re-anchor session.todos this often (in agent-loop iterations) when
+  # items are still open and the list has gone untouched. The system
+  # prompt's <active_todos> block is frozen at turn start, so a turn that
+  # creates its own list would otherwise never see it again. 0 disables.
+  todo_anchor_interval_iterations: 10
+  # Preserved thinking. Carry this many recent iterations' reasoning back
+  # into history as each assistant message's `reasoning` field, which
+  # Qwen3.8-Flash-Next renders into that turn's <think> block. Its model
+  # card calls preserved thinking out as reducing redundant reasoning in
+  # agent loops; the harness dropped it entirely until 2026-09-05, so the
+  # model saw 50+ prior turns in which it had apparently thought nothing.
+  # Bounded because reasoning is not free: an unbounded window on a long
+  # review turn would push peak context past the microcompaction trigger,
+  # and microcompaction can only clear tool results. 0 disables.
+  preserve_thinking_iterations: 6
   tool_search:
     enabled: true
     threshold_tools: 30
@@ -208,14 +223,19 @@ harness:
 subagents:
   general-purpose:
     system_prompt: ''
-    max_turns: 20
+    # 20 was too low for read-heavy delegation: a review subagent spent
+    # all 20 turns reading and returned nothing (session
+    # 20260905_151355_iv5174, 231s wasted). Task now reports budget
+    # exhaustion as an error rather than an empty answer, but the budget
+    # itself also needed room to finish.
+    max_turns: 40
     disallowed_tools: []
     model: primary
     base_url: ''
   read-only:
     system_prompt: You are a read-only research assistant. You may use Read, Grep,
       Glob, and Bash (read-only commands only). Do not write, edit, or delete files.
-    max_turns: 15
+    max_turns: 30
     disallowed_tools:
     - Write
     - Edit

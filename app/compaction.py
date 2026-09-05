@@ -113,10 +113,21 @@ def _message_text(message: dict) -> str:
 
 
 def estimate_message_tokens(message: dict) -> int:
-    """Estimate tokens for a single message dict."""
+    """Estimate tokens for a single message dict.
+
+    Harness assistant messages may carry a `reasoning` field (preserved
+    thinking — see app/harness/loop.py::_prune_reasoning). It is rendered
+    into the prompt's `<think>` block, so it costs real context and is
+    counted here. Session-shape messages never carry it, so this is a
+    no-op for every other caller.
+    """
     if not message:
         return 0
-    return estimate_tokens(_message_text(message))
+    text = _message_text(message)
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        text = f"{text}\n[thinking: {reasoning}]"
+    return estimate_tokens(text)
 
 
 def estimate_conversation_tokens(messages: list[dict], system_prompt: str = "") -> int:

@@ -697,7 +697,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     try:
         from app.harness import run_query, RunOptions
         from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
-        from app.mcp_discovery import _get_disallowed_tools, _get_tool_search_kwargs
+        from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
         from prompt_builder import build_system_prompt
 
         system_prompt = build_system_prompt()
@@ -729,7 +729,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             disallowed_tools=disallowed_tools,
             env=model_env,
             priority=1,
-            **_get_tool_search_kwargs(),
+            **_get_harness_kwargs(),
         )
 
         messages = [{"role": "user", "content": prompt}]

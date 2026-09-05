@@ -89,6 +89,29 @@ Events yielded by type:
 - `result` — `{type, stop_reason, usage}` — turn complete
 - `stream_raw` — `{type, line}` — raw SSE line on parse failure
 
+**Mid-turn state (the position-0 rule)**: the system prompt is built once
+per turn and inserted at index 0; the loop only ever appends. That keeps the
+whole prompt prefix KV-cached across every iteration, so a 160k-token turn
+re-prefills nothing. The cost is that anything rendered into the system
+prompt — `<active_todos>`, the plan, the goal — is frozen at turn start.
+**Never refresh the system prompt mid-turn**; re-anchor by appending instead
+(`RunOptions.state_anchor`, mirroring `notification_drain`). A turn that
+creates its own todo list would otherwise never see it again — see
+`app/routers/messages.py::_build_state_anchor`.
+
+**Preserved thinking**: assistant messages carry their reasoning back into
+history as `reasoning` (NOT `reasoning_content` — vLLM 0.28 accepts both but
+only renders the template from the former), bounded to
+`harness.preserve_thinking_iterations` recent iterations. Qwen3.8-Flash-Next
+renders it into each prior turn's `<think>` block; dropping it showed the
+model turn after turn in which it had apparently thought nothing. A/B it with
+`eval/run_preserve_thinking_eval.py` before changing the window.
+
+Scope is **intra-turn only**: history is rebuilt from the session JSON on each
+user turn (`load_and_compact_session`), which does not carry per-iteration
+reasoning, so the window resets at every turn boundary. That is where the cost
+was anyway — the motivating turn ran 52 iterations inside one turn.
+
 **Tool naming**: Built-in tools (Bash, Read, Write, Edit, Grep, Glob, Task) are advertised to vLLM under bare names. This keeps session JSON, SOUL.md deny rules, and Inner Voice `pretooluse_deny` patterns working unchanged.
 
 ## Tools
@@ -160,6 +183,8 @@ models:
 
 harness:
   stream_chunk_timeout_seconds: 60
+  todo_anchor_interval_iterations: 10   # re-append session.todos this often
+  preserve_thinking_iterations: 6       # carry N iterations' reasoning back
   tool_search:            # progressive disclosure; baseline + ToolSearch
     enabled: true
     threshold_tools: 30
@@ -168,7 +193,7 @@ harness:
 subagents:
   general-purpose:
     system_prompt: ""
-    max_turns: 20
+    max_turns: 40
     disallowed_tools: []
     model: primary
 

@@ -469,21 +469,34 @@ def _format_pending_todos_block(
         "response under review actually accomplish it (yes), or is it still "
         "pending (no)?",
         "",
-        f"  - ALL pending todos addressed → noop (the work is done).",
         f"  - ANY pending todo unaddressed → {on_unmet}, naming the specific "
         "todo and what's missing.",
+        f"  - ALL pending todos addressed, but the list above still shows "
+        f"them pending/in_progress → {on_unmet} asking ONLY for the "
+        "bookkeeping, in one sentence: \"the work is done — call TodoWrite "
+        "marking <items> completed.\" Do not re-litigate the work itself. "
+        "This is the delivered-but-unmarked case: the primary finished and "
+        "simply never updated its own list, which leaves the user's task "
+        "view showing nothing accomplished.",
+        "  - The response hands control back to the USER — it asks a "
+        "question, presents options, or waits on a decision → noop. Open "
+        "todos are correct there: the turn is pausing for input, not "
+        "abandoning the work, and an inject would talk over a question the "
+        "user is meant to answer.",
         "",
         "Do NOT noop on the basis that the primary 'announced intent' or "
         "'will dispatch tools next.' The harness has terminated this iteration; "
         "there is no next dispatch unless you act now. A textual promise to "
         "do work later is evidence the work was NOT done.",
         "",
-        f"Equally, do NOT {on_unmet} just because a todo isn't echoed verbatim. "
-        "A response that delivers the substance of a todo (rephrased, "
-        "synthesized, or bundled with another) is sufficient — match meaning, "
-        f"not exact wording. Only {on_unmet} when a todo is plainly "
-        "unaddressed AND the response shows stub-announce or mid-cutoff "
-        "symptoms.",
+        f"Equally, do NOT {on_unmet} ABOUT THE WORK just because a todo "
+        "isn't echoed verbatim. A response that delivers the substance of a "
+        "todo (rephrased, synthesized, or bundled with another) is "
+        f"sufficient — match meaning, not exact wording. Only {on_unmet} "
+        "about unfinished work when a todo is plainly unaddressed AND the "
+        "response shows stub-announce or mid-cutoff symptoms. That bar "
+        "governs the work only; the bookkeeping case above is separate and "
+        "applies precisely BECAUSE the substance was delivered.",
     ])
     return "\n".join(lines)
 

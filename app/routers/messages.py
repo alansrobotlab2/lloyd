@@ -48,7 +48,7 @@ from app.sessions_io import (
     enqueue_ambient_prefetch,
     AmbientPrefetchEntry,
 )
-from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_tool_search_kwargs
+from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_harness_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
 from prompt_builder import build_system_prompt
 from prefetch import prefetch_context_async
@@ -110,6 +110,76 @@ def _load_session_todos(session_id: str) -> list[dict]:
         return json.loads(meta_path.read_text()).get("todos") or []
     except Exception:
         return []
+
+
+def _build_state_anchor(session_id: str):
+    """Build the closure handed to ``RunOptions.state_anchor``.
+
+    Re-anchors `session.todos` inside a long turn. The `<active_todos>`
+    block in the system prompt is rendered once, from the list as it
+    stood at turn START, and the system prompt is never rebuilt mid-turn
+    (it sits at position 0; rewriting it would invalidate the entire
+    cached prefix on every iteration). So a turn that CREATES its todo
+    list — the common case — runs to completion with an empty block and
+    no in-context reminder of its own checklist.
+
+    That is what happened on 20260905_151355_iv5174: TodoWrite at
+    iteration 6 of 52, never called again, review delivered with every
+    item still `pending`/`in_progress`.
+
+    Emission rule: only when items are still open, and only once every
+    `todo_anchor_interval_iterations` iterations. A change to the list
+    resets the counter, because TodoWrite's own result already echoes
+    the updated list back (agent_mcp/builtin_todo.py) — the model has
+    just seen it and does not need telling twice.
+    """
+    from app.config import CONFIG
+
+    interval = int(
+        (CONFIG.get("harness") or {}).get("todo_anchor_interval_iterations", 10)
+    )
+    state = {"sig": None, "last_iter": 0}
+
+    async def anchor(iteration: int) -> list[dict[str, Any]]:
+        if interval <= 0:
+            return []
+        todos = _load_session_todos(session_id)
+        # Order matters (the list is the model's own sequence), so this is
+        # a positional signature, not a set comparison.
+        sig = json.dumps([(t.get("content"), t.get("status")) for t in todos])
+        if sig != state["sig"]:
+            # List changed (or first sight) — TodoWrite just echoed it.
+            state["sig"] = sig
+            state["last_iter"] = iteration
+            return []
+        open_items = [
+            t for t in todos
+            if (t.get("status") or "") in ("pending", "in_progress")
+        ]
+        if not open_items:
+            return []
+        if iteration - int(state["last_iter"]) < interval:
+            return []
+        state["last_iter"] = iteration
+        lines = [
+            "<active_todos>",
+            f"Reminder — your task list still has {len(open_items)} open "
+            f"item(s) and has not been updated in {interval} iterations:",
+        ]
+        for t in todos:
+            status = (t.get("status") or "?").strip()
+            content = (t.get("content") or "").strip()
+            if content:
+                lines.append(f"  - [{status}] {content}")
+        lines.append(
+            "Call TodoWrite with the full updated list whenever an item's "
+            "status changes. Mark completed work completed; do not finish "
+            "the turn leaving done work marked pending."
+        )
+        lines.append("</active_todos>")
+        return [{"role": "user", "content": "\n".join(lines)}]
+
+    return anchor
 
 
 def _load_session_plan(session_id: str) -> dict:
@@ -451,6 +521,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # the UI can style them and so session reconstruction includes
     # them on later turns.
     options.notification_drain = _build_notification_drain(session_id, turn.turn_id)
+
+    # Re-anchor session.todos inside the turn. The system prompt's
+    # <active_todos> block is frozen at turn start and cannot be refreshed
+    # without invalidating the cached prefix, so this appends instead.
+    options.state_anchor = _build_state_anchor(session_id)
 
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,
@@ -1264,7 +1339,7 @@ async def post_message_stream(request: Request):
         hooks=iv_hooks,
         priority=0,
         # cancel_event and session_id wired in _run_turn at run time
-        **_get_tool_search_kwargs(),
+        **_get_harness_kwargs(),
     )
 
     await _save_session_meta(session_id, model, preview=text)
@@ -1364,7 +1439,7 @@ async def build_ambient_turn(
         hooks=iv_hooks,
         session_id=session_id,
         priority=0,
-        **_get_tool_search_kwargs(),
+        **_get_harness_kwargs(),
     )
 
     # Envelope the raw producer text so the agent sees framing + knows it
@@ -1486,7 +1561,10 @@ async def post_message(request: Request):
         hooks=iv_hooks,
         session_id=session_id,
         priority=0,
-        **_get_tool_search_kwargs(),
+        # This path calls run_query directly rather than going through
+        # _run_turn, so it wires its own anchor.
+        state_anchor=_build_state_anchor(session_id),
+        **_get_harness_kwargs(),
     )
 
     comp = await load_and_compact_session(meta_path, model=model)

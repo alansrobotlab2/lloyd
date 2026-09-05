@@ -624,13 +624,35 @@ Config block `inner_voice.todo_stewardship`. Four behaviors:
 | Flag | Default | Behavior |
 |---|---|---|
 | `enabled` | `true` | Master switch; gates the TODOS block in the prompt. |
-| `completion_gate` | `true` | On a terminal `assistant_message` or at `result`, append a PENDING TODOS block asking IV to intervene if the primary is stopping with work undone. At `result` this drives `ambient` (inject is a no-op there). |
+| `completion_gate` | `true` | On a terminal `assistant_message` or at `result`, append a PENDING TODOS block asking IV to intervene if the primary is stopping with work undone **or if it finished the work and never marked the list**. At `result` this drives `ambient` (inject is a no-op there). |
 | `mark_without_evidence` | `true` | On a successful `TodoWrite`, diff against `prior_todo_status` for `in_progress→completed` flips. Any flip skips the fast-path and appends a block forcing the LLM to walk each completed todo against recent tool calls, injecting a challenge if there's no plausible work behind the flip. |
 | `stalled_progress` | `true` | Count non-`TodoWrite`, non-error tool results since the last status change. At `stalled_after_tool_calls` (default 5) with at least one pending/in_progress todo, skip the fast-path and append a stalled-progress block. Counter resets on any status change and immediately after firing. **On since v5.2.** It stacks with the 1-in-5 tool-result sampler, so on a long todo-driven turn it is a real contributor to LLM-call volume — see [Cost](#cost). |
 
 `state.todos` is snapshotted at turn start and refreshed from disk
 (`_load_todos_from_session`) after each successful `TodoWrite`, so multi-flip turns
 don't show the observer a stale list.
+
+#### Delivered but unmarked
+
+The gate's original rule was `ALL pending todos addressed → noop (the work is
+done)`. That is correct about the work and silent about the bookkeeping. On
+`20260905_151355_iv5174` the primary delivered a full architecture review on
+its final iteration and never called `TodoWrite`; the gate saw the work as
+done, noop'd, and the turn ended with all five items showing
+pending/in_progress in the user's task panel. Nothing anywhere checked
+"finished the work, never marked the list."
+
+That branch now asks for the `TodoWrite` in one sentence instead of noop'ing,
+and the meaning-match caveat below it is scoped to the *work* so the two do
+not contradict each other. Pinned by
+`tests/integration/test_iv_todo_bookkeeping.py`.
+
+Note the asymmetry this exposed: the **observer** re-reads todos from disk
+mid-turn, but the **primary** did not — its `<active_todos>` block is frozen
+at turn start and cannot be refreshed without invalidating the cached prompt
+prefix. IV nudging is therefore the second line of defence, not the first; the
+first is `RunOptions.state_anchor`, which re-appends the list every
+`harness.todo_anchor_interval_iterations` iterations.
 
 ### Persistent-goal completion loop (`/goal`)
 

@@ -192,15 +192,21 @@ def _get_disallowed_tools(plan_mode: bool = False) -> list[str]:
 DISCOVERY_TIMEOUT_SECONDS = 30.0
 
 
-def _get_tool_search_kwargs() -> dict:
-    """Resolve harness.tool_search.* config into RunOptions kwargs.
+def _get_harness_kwargs() -> dict:
+    """Resolve `harness.*` config into RunOptions kwargs.
 
     Splatted into RunOptions(**...) at every construction site (chat
-    streaming, ambient, sync, voice). Defaults align with RunOptions's
-    own dataclass defaults so missing config keys behave sanely.
+    streaming, ambient, sync, voice, autonomy). Defaults align with
+    RunOptions's own dataclass defaults so missing config keys behave
+    sanely.
     """
-    cfg = (CONFIG.get("harness") or {}).get("tool_search") or {}
+    harness = CONFIG.get("harness") or {}
+    cfg = harness.get("tool_search") or {}
     out: dict = {}
+    if "preserve_thinking_iterations" in harness:
+        out["preserve_thinking_iterations"] = int(
+            harness["preserve_thinking_iterations"]
+        )
     if "enabled" in cfg:
         out["tool_search_enabled"] = bool(cfg["enabled"])
     if "threshold_tools" in cfg:
