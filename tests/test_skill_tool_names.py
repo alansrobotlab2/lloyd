@@ -44,6 +44,8 @@ PHANTOM_TOOLS = {
     "write_file", "file_write", "file_edit", "file_read", "read_file",
     "vault_get", "run_bash", "search_files", "add_fact",
     "skill_view",
+    "file_glob", "file_grep", "tag_search", "tag_explore",
+    "pipeline_dispatch", "chat_send", "sessions_send",
 }
 
 # `terminal` was the OpenClaw name for Bash. It is also an ordinary English
@@ -66,6 +68,12 @@ ALLOWED_TO_MENTION = {
     "nightly-skills-management",
     "trajectory-skill-mining",
     "nightly-skill-consolidation",
+    # Defines a plugin hook literally named chat_send in Python.
+    "create-hermes-plugin",
+    # Cites the names as the worked example of wrong-tool-name diagnosis.
+    "autonomy-task-diagnosis",
+    # Says in its own text that pipeline_dispatch is not a tool.
+    "pipeline-dispatch",
 }
 
 

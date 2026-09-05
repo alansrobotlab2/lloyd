@@ -217,12 +217,15 @@ PHANTOM_TOOLS = frozenset({
     "write_file", "file_write", "file_edit", "file_read", "read_file",
     "vault_get", "run_bash", "search_files", "add_fact",
     "skill_view",
+    "file_glob", "file_grep", "tag_search", "tag_explore",
+    "pipeline_dispatch", "chat_send", "sessions_send",
 })
 
 # Skills whose job is to say these names are not real.
 PHANTOM_EXEMPT = frozenset({
     "web-search-and-fetch", "nightly-skills-management", "trajectory-skill-mining",
-    "nightly-skill-consolidation",
+    "nightly-skill-consolidation", "create-hermes-plugin", "autonomy-task-diagnosis",
+    "pipeline-dispatch",
 })
 
 
@@ -244,24 +247,40 @@ def check_phantom_tools(name: str, content: str) -> list[str]:
     return sorted(found)
 
 
-def find_duplicates(names: list[str]) -> list[tuple[str, str, float]]:
-    """Return list of (name_a, name_b, similarity) for near-duplicate pairs.
+# Two skills are duplicates only if they do the same THING. A similar name is
+# the cheap signal; on its own it flags whole naming conventions as duplicates
+# — `read-validation-handling` vs `grep-validation-handling` were 0.92 similar
+# and about different tools. Descriptions are the real evidence, and since
+# 2026-09-04 every skill has one, so both must match.
+DUPLICATE_DESC_RATIO_THRESHOLD = 0.60
 
-    Uses difflib.SequenceMatcher on the raw name strings. Threshold set at
-    `DUPLICATE_EDIT_RATIO_THRESHOLD` to catch e.g. `nightly-skills-management`
-    vs `nightly-skill-consolidation` without flooding on shared prefixes.
+
+def find_duplicates(skills: list[tuple[str, str]]) -> list[tuple[str, str, float]]:
+    """Near-duplicate pairs from a list of (name, description).
+
+    A pair is reported only when the names are close (`DUPLICATE_EDIT_RATIO_THRESHOLD`)
+    AND the descriptions are close (`DUPLICATE_DESC_RATIO_THRESHOLD`). The
+    reported score is the name ratio, so the report reads as before.
+
+    A skill with no description falls back to name-only, which keeps the check
+    working for anything the MISSING_DESC category has yet to catch.
     """
     out: list[tuple[str, str, float]] = []
     seen: set[tuple[str, str]] = set()
-    for i, a in enumerate(names):
-        for b in names[i + 1:]:
+    for i, (a, desc_a) in enumerate(skills):
+        for b, desc_b in skills[i + 1:]:
             key = (a, b) if a < b else (b, a)
             if key in seen:
                 continue
             seen.add(key)
             ratio = difflib.SequenceMatcher(None, a, b).ratio()
-            if ratio >= DUPLICATE_EDIT_RATIO_THRESHOLD:
-                out.append((*key, round(ratio, 3)))
+            if ratio < DUPLICATE_EDIT_RATIO_THRESHOLD:
+                continue
+            if desc_a and desc_b:
+                d_ratio = difflib.SequenceMatcher(None, desc_a.lower(), desc_b.lower()).ratio()
+                if d_ratio < DUPLICATE_DESC_RATIO_THRESHOLD:
+                    continue
+            out.append((*key, round(ratio, 3)))
     return sorted(out, key=lambda t: -t[2])
 
 
@@ -292,7 +311,7 @@ def lint() -> dict:
     drift: list[dict] = []
     stale: list[dict] = []
     phantom: list[dict] = []
-    names: list[str] = []
+    skills: list[tuple[str, str]] = []
     total = 0
 
     for entry in sorted(SKILLS_DIR.iterdir()):
@@ -302,7 +321,7 @@ def lint() -> dict:
         if not skill_file.exists():
             continue
         total += 1
-        names.append(entry.name)
+        # description filled in below once frontmatter is parsed
 
         try:
             content = skill_file.read_text(encoding="utf-8", errors="replace")
@@ -326,6 +345,7 @@ def lint() -> dict:
             continue  # drift check is redundant when already dead
 
         desc = (fm.get("description") or "").strip()
+        skills.append((entry.name, desc))
         tags = fm.get("tags") or []
         if not desc and tags:
             # Has tags but no description → MISSING_DESC (fires via tag/name only,
@@ -362,7 +382,7 @@ def lint() -> dict:
                 "status": fm.get("status", "(unset)"),
             })
 
-    duplicates = find_duplicates(names)
+    duplicates = find_duplicates(skills)
 
     return {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
