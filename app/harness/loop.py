@@ -322,8 +322,30 @@ async def run_query(
                 finish_reason=finish_reason or "stop",
             )
             yield asst_evt
+            accumulated_text += assistant_text
+
+            # Append this iteration's assistant turn to history BEFORE firing
+            # the hook.
+            #
+            # The observer's `inject` lever appends to this same list, so
+            # firing first put the nudge at index n and the assistant text it
+            # was reacting to at n+1:
+            #
+            #   user:      "[INNER VOICE] You ended the turn by announcing…"
+            #   assistant: "Let me check the logs:"   <- what the inject is about
+            #
+            # The nudge preceded its referent and the request the model then
+            # generated from ended on its own assistant turn rather than on a
+            # user message. That is the stall-rescue path — the dominant
+            # failure the observer exists for — and the persisted session
+            # kept the same shape. The echo-guard re-prompt below always
+            # appended after the assistant message and got this right.
+            chat_messages.append(_assistant_message_for_history(
+                text=assistant_text, tool_calls=tool_calls_committed
+            ))
+
             # Snapshot chat_messages length before firing OnEvent. The
-            # observer may append a system message ("inject" lever); if it
+            # observer may append a user message ("inject" lever); if it
             # does AND the model is otherwise about to terminate this turn
             # (no tool calls), we continue the loop so the inject takes
             # effect on the next iteration instead of being lost.
@@ -331,14 +353,6 @@ async def run_query(
             if options.hooks is not None:
                 await options.hooks.fire_on_event(asst_evt)
             observer_injected = len(chat_messages) > chat_msgs_len_before_hook
-
-            accumulated_text += assistant_text
-
-            # Append assistant turn to history for the next loop pass
-            # (or for the final result, harmless either way).
-            chat_messages.append(_assistant_message_for_history(
-                text=assistant_text, tool_calls=tool_calls_committed
-            ))
 
             if not tool_calls_committed:
                 if observer_injected:

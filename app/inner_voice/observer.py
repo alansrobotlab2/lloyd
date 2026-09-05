@@ -1,4 +1,4 @@
-"""Inner Voice observer — a thin second-agent harness (v4).
+"""Inner Voice observer — a thin second-agent harness (v5).
 
 One observer per primary turn. The observer:
 
@@ -128,6 +128,21 @@ def _observer_cfg() -> dict[str, Any]:
     obs.setdefault("silent_iterations_before_review", 10)
     # Minimum primary iterations between two discretionary injects.
     obs.setdefault("inject_cooldown_iterations", 4)
+    # Hard ceiling on DETERMINISTIC injects (stall rescue, repetition) per
+    # turn. Those bypass the discretionary budget by design, which means a
+    # miscalibrated guard has nothing stopping it: on 2026-09-04 the
+    # repetition guard fired 19 times in one evening, and on one turn ten
+    # of them also consumed the discretionary budget, so the observer's one
+    # correct judgment of that turn was downgraded to noop_budget_exhausted.
+    # Bypassing the budget is right; being unbounded is not.
+    obs.setdefault("deterministic_inject_budget", 5)
+    # Deadline for judgments that run OFF the critical path. The primary is
+    # not waiting on these, so the tight 5s deadline that protects the two
+    # synchronous terminal calls only serves to throw away work: 7 of the 7
+    # observer errors on 2026-09-04 were `timeout after 5.0s`, every one of
+    # them on a spawned non-terminal call. Bounded by
+    # async_drain_timeout_seconds at the next terminal event either way.
+    obs.setdefault("async_timeout_seconds", 12.0)
     # vLLM scheduling priority. Lower is HIGHER priority, and the primary
     # runs at 0 — an observer also at 0 competes with the agent it is
     # supposed to be watching rather than yielding to it.
@@ -689,8 +704,9 @@ def _fast_path_tool_result(
 _STUB_ANNOUNCE_RE = _guards._STUB_ANNOUNCE_RE
 _STALL_RESCUE_CONTENT = _guards.STALL_RESCUE_CONTENT
 
-# Signatures retained for repetition comparison. One more than the widest
-# comparison window so the window is always fully populated.
+# Signatures retained for repetition comparison and for the command previews
+# `build_tool_result_summary` reads back. Sized from the configured window at
+# install time (see `ring_cap`); this is the floor.
 _REPETITION_RING = 16
 
 
@@ -884,6 +900,11 @@ class ObserverState:
     accumulated_text: str = ""
     interventions_used: int = 0
     intervention_budget: int = _prompt.DEFAULT_INTERVENTION_BUDGET
+    # Deterministic (bypass_budget) injects fired this turn, counted
+    # separately. They are exempt from the discretionary budget — rationing
+    # a stall rescue is what leaves a turn stuck — but not unbounded; see
+    # `deterministic_inject_budget`.
+    bypass_interventions_used: int = 0
     sequence: int = 0
     cfg: dict[str, Any] = field(default_factory=dict)
     closed: bool = False
@@ -918,9 +939,15 @@ class ObserverState:
     # the deterministic repetition guard (which needs the ARGUMENTS — a loop
     # is invisible in the tool name and the result alone) and supplies the
     # command text that `build_tool_result_summary` shows the observer.
-    # Cleared when the repetition guard fires, so re-firing needs a fresh
-    # cluster of near-duplicates rather than the same one twice.
+    # `repetition_baseline` (rather than clearing the ring) is what makes
+    # re-firing need a FRESH cluster of near-duplicates: comparison only
+    # looks at calls appended after the last fire. Clearing the list also
+    # threw away the command previews that `build_tool_result_summary` reads
+    # back to show the observer what the primary actually ran — the single
+    # thing that turn 20260905_011748_iv84e4 proved the observer needs.
     recent_tool_calls: list[_guards.ToolCallSignature] = field(default_factory=list)
+    tool_calls_seen: int = 0
+    repetition_baseline: int = 0
     # Consecutive tool-dispatch-only iterations — the primary working with
     # its mouth shut. On turn 20260905_011748_iv84e4 every one of 33
     # iterations was text-free (`response_chars: 0`) and the assistant_message
@@ -987,11 +1014,32 @@ _INNER_VOICE_PREFIX_RE = re.compile(
 )
 
 
+def _count_intervention(state: ObserverState, decision: ObserverDecision) -> None:
+    """Charge an applied lever to the right budget.
+
+    A `bypass_budget` decision is deterministic — stall rescue, repetition —
+    and the whole point of the flag is that it is not discretionary spend.
+    Charging it to `interventions_used` anyway meant a misfiring guard could
+    exhaust the observer's real budget before it had judged anything: on turn
+    8f3b7e77de07 ten false repetition injects downgraded the one correct
+    decision of the turn ("hit max_turns with zero review delivered") to
+    `noop_budget_exhausted`.
+    """
+    if decision.bypass_budget:
+        state.bypass_interventions_used += 1
+    else:
+        state.interventions_used += 1
+
+
 async def _apply_lever(
     state: ObserverState, decision: ObserverDecision, trigger: str,
     *, related_tool: str | None = None,
 ) -> None:
-    """Apply the observer's chosen action against primary state."""
+    """Apply the observer's chosen action against primary state.
+
+    `related_tool` is recorded on the emitted event-log entry so an
+    intervention can be traced back to the tool call that provoked it.
+    """
     a = decision.action
     if a == "noop":
         return
@@ -1034,6 +1082,30 @@ async def _apply_lever(
         decision.reason = ((decision.reason or "") + " [budget exhausted]").strip()
         return
 
+    # Deterministic injects skip the gate above by design. They still need a
+    # ceiling: a guard that misfires has nothing else stopping it, and the
+    # 2026-09-04 storm put ten repetition injects into a single turn.
+    if decision.bypass_budget:
+        cap = int(state.cfg.get("deterministic_inject_budget", 5))
+        if cap > 0 and state.bypass_interventions_used >= cap:
+            logger.warning(
+                "[iv.observer] deterministic inject cap reached session=%s "
+                "turn=%s cap=%d reason=%r",
+                state.session_id, state.turn_id, cap, decision.reason,
+            )
+            _event_log.log_event(
+                state.session_id,
+                "inner_voice.deterministic_budget_exhausted",
+                {"trigger": trigger, "reason": decision.reason, "cap": cap},
+                turn_id=state.turn_id,
+            )
+            decision.action = "noop_deterministic_budget_exhausted"
+            decision.reason = (
+                (decision.reason or "")
+                + f" [deterministic inject cap of {cap} reached this turn]"
+            ).strip()
+            return
+
     if a == "inject":
         content_clean = _INNER_VOICE_PREFIX_RE.sub("", decision.content.strip()).strip()
         if not content_clean:
@@ -1058,7 +1130,7 @@ async def _apply_lever(
                 )
             except Exception as e:
                 logger.warning("[iv.observer] inject persist failed: %s", e)
-        state.interventions_used += 1
+        _count_intervention(state, decision)
         logger.info(
             "[iv.observer] inject session=%s turn=%s reason=%s",
             state.session_id, state.turn_id, decision.reason,
@@ -1066,7 +1138,9 @@ async def _apply_lever(
         _event_log.log_event(
             state.session_id,
             "inner_voice.observer_injected",
-            {"trigger": trigger, "reason": decision.reason, "content": decision.content},
+            {"trigger": trigger, "reason": decision.reason,
+             "content": decision.content, "related_tool": related_tool,
+             "deterministic": decision.bypass_budget},
             turn_id=state.turn_id,
         )
         return
@@ -1092,7 +1166,8 @@ async def _apply_lever(
         _event_log.log_event(
             state.session_id,
             "inner_voice.observer_cancelled",
-            {"trigger": trigger, "reason": decision.reason},
+            {"trigger": trigger, "reason": decision.reason,
+             "related_tool": related_tool},
             turn_id=state.turn_id,
         )
         # Mark the observer closed so any pretool callbacks that fire
@@ -1115,7 +1190,7 @@ async def _apply_lever(
             decision.action = "noop_ambient_failed"
             decision.error = (decision.error or "") + f"; ambient_enqueue: {e}"
             return
-        state.interventions_used += 1
+        _count_intervention(state, decision)
         logger.info(
             "[iv.observer] ambient session=%s turn=%s reason=%s",
             state.session_id, state.turn_id, decision.reason,
@@ -1123,7 +1198,8 @@ async def _apply_lever(
         _event_log.log_event(
             state.session_id,
             "inner_voice.observer_ambient",
-            {"trigger": trigger, "reason": decision.reason, "content": decision.content},
+            {"trigger": trigger, "reason": decision.reason,
+             "content": decision.content, "related_tool": related_tool},
             turn_id=state.turn_id,
         )
         return
@@ -1141,7 +1217,7 @@ async def _apply_lever(
             return
         # Clarify pauses the primary so the user can answer.
         state.cancel_event.set()
-        state.interventions_used += 1
+        _count_intervention(state, decision)
         logger.info(
             "[iv.observer] clarify session=%s turn=%s reason=%s",
             state.session_id, state.turn_id, decision.reason,
@@ -1149,7 +1225,8 @@ async def _apply_lever(
         _event_log.log_event(
             state.session_id,
             "inner_voice.observer_clarified",
-            {"trigger": trigger, "reason": decision.reason, "content": decision.content},
+            {"trigger": trigger, "reason": decision.reason,
+             "content": decision.content, "related_tool": related_tool},
             turn_id=state.turn_id,
         )
         return
@@ -1398,8 +1475,42 @@ async def _handle_persistent_goal_at_result(
 
     # Goal not achieved — bump attempts and either queue ambient or
     # escalate to clarify.
-    new_attempts = attempts + 1
-    await _persist_goal_state(state.session_id, bump_attempts=True)
+    #
+    # The attempt counter is the ONLY thing bounding this loop. A
+    # `inner_voice_goal` follow-up is deliberately exempt from the
+    # self-observation refusal (see `_SELF_OBSERVED_PRODUCERS`), so the turn
+    # it queues is itself observed and can queue another. `attempts` is
+    # re-read from the session JSON every turn, so a mutation that fails
+    # silently means the counter never advances, `max_attempts` is never
+    # reached, and the follow-up re-queues without bound. Treat a failed
+    # persist as a reason to stop, not to continue.
+    persisted_goal = await _persist_goal_state(state.session_id, bump_attempts=True)
+    if persisted_goal is None:
+        logger.warning(
+            "[iv.observer] goal attempt counter did not persist session=%s "
+            "turn=%s — skipping the follow-up rather than looping unbounded",
+            state.session_id, state.turn_id,
+        )
+        eval_decision.action = "noop_goal_attempts_not_persisted"
+        eval_decision.reason = (
+            eval_decision.reason
+            + " [attempt counter did not persist; follow-up skipped so the "
+            "goal loop cannot run unbounded]"
+        )
+        eval_decision.error = (
+            (eval_decision.error or "") + "; goal_attempts_persist_failed"
+        )
+        _event_log.log_event(
+            state.session_id,
+            "inner_voice.goal_attempts_persist_failed",
+            {"goal_text": goal_text, "attempts": attempts},
+            turn_id=state.turn_id,
+        )
+        await _persist(
+            state, eval_decision, trigger="result", related_tool="goal_completion",
+        )
+        return
+    new_attempts = int(persisted_goal.get("attempts") or (attempts + 1))
 
     follow_up_body = (
         verdict.reason
@@ -1503,12 +1614,25 @@ def _now_iso_for_goal() -> str:
 # ---------------------------------------------------------------------------
 
 
+# A cancel that justifies itself by injects the primary supposedly ignored.
+# Only these reasons are checked against `injects_primary_has_seen` — a cancel
+# for a destructive loop, or for a wedged tool, is legitimate with zero injects
+# behind it and must not be gated on one.
+_IGNORED_INJECT_REASON_PATTERN = re.compile(
+    r"\b(?:ignor\w*|exhaust\w*|budget|unheeded|disregard\w*|"
+    r"not listening|isn'?t listening|didn'?t listen|"
+    r"(?:\d+|two|three|several|multiple|repeated)\s+(?:injects?|nudges?))\b",
+    re.IGNORECASE,
+)
+
+
 def _apply_decision_guards(
     state: ObserverState,
     decision: ObserverDecision,
     *,
     trigger: str,
     tool_calls: list[dict[str, Any]],
+    has_pending_tools: bool | None = None,
     is_terminal: bool = False,
 ) -> None:
     """Run the deterministic guards over a fresh LLM decision, in place.
@@ -1605,10 +1729,50 @@ def _apply_decision_guards(
     # task is complete" only adds a red breadcrumb to a turn that worked.
     # Allowed through once the observer has already intervened — that is
     # escalation from ignored injects, which is the documented path.
+    # Escalation-to-cancel must rest on injects the primary actually READ.
+    # `interventions_used` counts injects fired, and several can land inside
+    # one dispatch batch with no model turn between them — the observer then
+    # force-stops the turn for disobedience the primary never had a chance to
+    # commit. `injects_primary_has_seen` counts only injects followed by a
+    # completed primary iteration.
+    if decision.action == "cancel" and _IGNORED_INJECT_REASON_PATTERN.search(
+        decision.reason or ""
+    ):
+        seen = _guards.injects_primary_has_seen(state.decisions_this_turn)
+        if seen == 0 and state.interventions_used > 0:
+            logger.info(
+                "[iv.observer] blocked cancel-for-unread-injects session=%s "
+                "turn=%s trigger=%s used=%d seen=0 reason=%r",
+                state.session_id, state.turn_id, trigger,
+                state.interventions_used, decision.reason,
+            )
+            _event_log.log_event(
+                state.session_id,
+                "inner_voice.cancel_blocked_unread_injects",
+                {"trigger": trigger, "reason": decision.reason,
+                 "interventions_used": state.interventions_used},
+                turn_id=state.turn_id,
+            )
+            decision.action = "noop_cancel_unread_injects"
+            decision.reason = (
+                (decision.reason or "")
+                + " [blocked: no primary iteration has completed since those "
+                "injects, so they cannot have been ignored]"
+            ).strip()
+            return
+
+    # `has_pending_tools` is passed explicitly rather than derived from
+    # `tool_calls`: at `pretool` a tool is dispatching by definition and at
+    # `tool_result` the harness is inside its dispatch loop, but neither
+    # trigger carries the iteration's tool_calls list. Deriving it meant a
+    # cancel-for-completion at `pretool` was recorded as
+    # `acknowledge_complete`, which the UI renders as "IV agrees the answer
+    # is complete" — on a turn that was mid-tool-call.
+    pending = bool(tool_calls) if has_pending_tools is None else has_pending_tools
     downgrade = _guards.cancel_for_completion_verdict(
         action=decision.action,
         reason=decision.reason or "",
-        has_pending_tools=bool(tool_calls),
+        has_pending_tools=pending,
         interventions_used=state.interventions_used,
     )
     if downgrade is not None:
@@ -1733,6 +1897,20 @@ def install_observer(
         cfg.get("repetition_threshold", _guards.REPETITION_THRESHOLD)
     )
     silent_limit = int(cfg.get("silent_iterations_before_review", 10))
+    async_timeout = float(cfg.get("async_timeout_seconds", 12.0))
+    # One more than the widest comparison window so the window is always
+    # fully populated even when `repetition_window` is raised past the floor.
+    ring_cap = max(_REPETITION_RING, repetition_window + 1)
+
+    def _judge_timeout(is_async: bool) -> float | None:
+        """Deadline for one observer call.
+
+        The two synchronous terminal judgments keep the tight
+        `timeout_seconds` — the primary is blocked on them. Everything else
+        runs off the critical path, where a short deadline buys nothing and
+        throws the judgment away; `_drain_pending` is the real bound there.
+        """
+        return async_timeout if is_async else None
     # `inject_cooldown_iterations` is read from `state.cfg` inside
     # `_apply_decision_guards`, which is module-level; no local needed.
 
@@ -1796,18 +1974,28 @@ def install_observer(
         state.recent_tool_calls.append(
             _guards.tool_call_signature(tool_name, tool_input)
         )
-        if len(state.recent_tool_calls) > _REPETITION_RING:
-            del state.recent_tool_calls[:-_REPETITION_RING]
+        state.tool_calls_seen += 1
+        if len(state.recent_tool_calls) > ring_cap:
+            del state.recent_tool_calls[:-ring_cap]
         if repetition_enabled:
+            # Compare only against calls made SINCE the guard last spoke, so
+            # another inject needs a fresh cluster of near-duplicates rather
+            # than the same one re-judged. Done with a baseline rather than by
+            # clearing the ring, because the ring also carries the command
+            # previews `build_tool_result_summary` reads back — dropping those
+            # blinds the observer to what the primary actually ran, which is
+            # the one thing turn 20260905_011748_iv84e4 proved it needs.
+            since_fire = state.tool_calls_seen - state.repetition_baseline
+            comparable = (
+                state.recent_tool_calls[-since_fire:] if since_fire > 0 else []
+            )
             rep = _guards.repetition_verdict(
-                state.recent_tool_calls,
+                comparable,
                 window=repetition_window,
                 threshold=repetition_threshold,
             )
             if rep is not None:
-                # Clearing the ring is the rate limit: another inject needs a
-                # fresh cluster of near-duplicates, not the same one re-judged.
-                state.recent_tool_calls = []
+                state.repetition_baseline = state.tool_calls_seen
                 decision = ObserverDecision(
                     action="inject",
                     reason=(
@@ -1863,7 +2051,10 @@ def install_observer(
         async def _judge_pretool() -> None:
             summary = _prompt.build_pretool_event_summary(tool_name, tool_input)
             user_prompt = _build_event_user_prompt(state, summary)
-            decision = await _call_observer(user_prompt=user_prompt, cfg=state.cfg)
+            decision = await _call_observer(
+                user_prompt=user_prompt, cfg=state.cfg,
+                timeout_override=_judge_timeout(async_nonterminal),
+            )
             if state.closed or state.cancel_event.is_set():
                 decision.action = "noop_pretool_after_cancel"
                 decision.reason = (
@@ -1872,7 +2063,10 @@ def install_observer(
                 ).strip()
                 await _persist(state, decision, trigger="pretool", related_tool=tool_name)
                 return
-            _apply_decision_guards(state, decision, trigger="pretool", tool_calls=[])
+            _apply_decision_guards(
+                state, decision, trigger="pretool", tool_calls=[],
+                has_pending_tools=True,
+            )
             await _apply_lever(state, decision, trigger="pretool", related_tool=tool_name)
             await _persist(state, decision, trigger="pretool", related_tool=tool_name)
 
@@ -1962,6 +2156,9 @@ def install_observer(
                 user_prompt = _build_event_user_prompt(state, summary)
                 decision = await _call_observer(
                     user_prompt=user_prompt, cfg=state.cfg,
+                    timeout_override=_judge_timeout(
+                        async_nonterminal and not is_terminal
+                    ),
                 )
                 if state.closed or state.cancel_event.is_set():
                     decision.action = "noop_assistant_after_cancel"
@@ -2120,6 +2317,7 @@ def install_observer(
                 user_prompt = _build_event_user_prompt(state, summary)
                 decision = await _call_observer(
                     user_prompt=user_prompt, cfg=state.cfg,
+                    timeout_override=_judge_timeout(async_nonterminal),
                 )
                 if state.closed or state.cancel_event.is_set():
                     decision.action = "noop_tool_result_after_cancel"
@@ -2133,6 +2331,9 @@ def install_observer(
                     return
                 _apply_decision_guards(
                     state, decision, trigger="tool_result", tool_calls=[],
+                    # Mid-dispatch: the harness is inside its tool loop and
+                    # the primary has not produced its next iteration.
+                    has_pending_tools=True,
                 )
                 await _apply_lever(
                     state, decision, trigger="tool_result", related_tool=tool_name,
@@ -2184,8 +2385,27 @@ def install_observer(
                 await _persist(state, decision, trigger="result")
                 state.closed = True
                 return
+            # Translate the lever to what can still happen BEFORE running
+            # the guards. The harness has already emitted its terminal event,
+            # so an `inject` chosen here is really a request for an ambient
+            # follow-up — but the guards see the raw `inject` and the
+            # consecutive-inject suppressor or the cooldown can downgrade it
+            # to a noop, silently discarding the follow-up. Downgrade first
+            # and the guards act on the lever that will actually fire.
+            translated, note = _guards.result_trigger_downgrade(
+                action=decision.action,
+                has_ambient_channel=state.enqueue_ambient_callback is not None,
+                has_content=bool(decision.content.strip()),
+            )
+            if translated != decision.action:
+                if note:
+                    decision.reason = (
+                        (decision.reason or "") + f" [{note}]"
+                    ).strip()
+                decision.action = translated
             _apply_decision_guards(
                 state, decision, trigger="result", tool_calls=[],
+                has_pending_tools=False,
             )
             await _apply_lever(state, decision, trigger="result")
             await _persist(state, decision, trigger="result")

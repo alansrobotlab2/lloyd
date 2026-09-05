@@ -64,8 +64,18 @@ def test_repetition_fires_on_the_real_loop():
             fired_at.append(idx)
             ring = []
 
-    assert fired_at == [62], (
-        f"expected one fire, at message 62 (the 4th grep of the loop cluster); got {fired_at}"
+    # 62 — the 4th grep of the search-reformulation cluster (messages 53-66).
+    # 76 — the second pathological cluster, where the primary hunts
+    # `build_subliminal_context` / `_messages_subliminal`, a symbol that is
+    # never defined anywhere (see the fixture docstring, messages 72-79). The
+    # ambient-path tokenisation used through 2026-09-04 could not see this
+    # one: `alansrobotlab` padded every identifier set, so the containment
+    # ratio was diluted and the real shared symbol never carried a match.
+    # Both fires are inside a region the fixture labels pathological, and the
+    # 15 healthy exploration calls before them stay silent — see
+    # test_repetition_silent_through_healthy_exploration.
+    assert fired_at == [62, 76], (
+        f"expected fires at the two loop clusters (62, 76); got {fired_at}"
     )
     print("test_repetition_fires_on_the_real_loop: OK")
 
@@ -570,10 +580,14 @@ def test_real_turn_replayed_through_the_pretool_hook():
 
     injected = asyncio.new_event_loop().run_until_complete(scenario())
 
-    assert len(injected) == 1, f"expected exactly one nudge, got {len(injected)}"
+    # One nudge per pathological cluster — the search-reformulation loop and
+    # the hunt for a symbol that does not exist. See
+    # test_repetition_fires_on_the_real_loop for why there are two.
+    assert len(injected) == 2, f"expected two nudges, got {len(injected)}"
     body = str(injected[0].get("content"))
     assert "iv_cancel_requested" in body or "iv_inject_queue" in body
     assert "ANSWER" in body
+    assert "_messages_subliminal" in str(injected[1].get("content"))
     print("test_real_turn_replayed_through_the_pretool_hook: OK")
 
 

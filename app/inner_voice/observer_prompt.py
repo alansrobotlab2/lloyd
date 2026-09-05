@@ -852,9 +852,21 @@ def build_assistant_message_summary(
             f"Iteration text: {text_preview!r}.{eval_block}{pending_block}"
         )
     # finish_reason in {length, tool_calls without committed tools, error, ...}
+    #
+    # The harness exits the turn on ANY iteration that commits no tool calls,
+    # whatever the finish_reason — `stop_reason = finish_reason or "stop"`
+    # then break. So this branch is terminal too, and saying the primary "may
+    # or may not continue" told the observer to wait for an iteration that
+    # was never coming. `finish_reason="length"` in particular means the
+    # model was cut off mid-generation, which is the case most likely to need
+    # a nudge.
+    pending_block = _format_pending_todos_block(todos, on_unmet="inject")
     return (
-        f"Iteration {iteration} finished (finish_reason={finish_reason!r}). "
-        f"Text: {text_preview!r}. No tool calls. Primary may or may not continue."
+        f"Iteration {iteration} finished (finish_reason={finish_reason!r}) with "
+        f"NO tool calls, so the harness EXITS the turn here unless you inject. "
+        f"A finish_reason of 'length' means the model hit its output cap "
+        f"mid-generation — the text is very likely truncated.\n"
+        f"Iteration text: {text_preview!r}.{pending_block}"
     )
 
 

@@ -41,22 +41,41 @@ logger = logging.getLogger("lloyd-server")
 # Session opt-in helpers
 # ---------------------------------------------------------------------------
 
+def _session_iv_flags(session_id: str) -> tuple[bool, bool]:
+    """Read both Inner Voice opt-in flags in ONE pass over the session JSON.
+
+    `_iv_should_fire_on_turn` used to parse the file three times per call:
+    once itself, then once more inside `_session_iv_evaluate_user_turns_enabled`,
+    which re-invoked `_session_inner_voice_enabled` first. The file is read on
+    the turn's critical path and can be several megabytes on a long session.
+
+    Returns `(enabled, evaluate_user_turns)`, both False on any miss — no
+    session yet, malformed JSON, missing field. Inner Voice is opt-in only.
+    """
+    if not session_id:
+        return (False, False)
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        return (False, False)
+    try:
+        data = json.loads(meta_path.read_text())
+    except Exception:
+        return (False, False)
+    enabled = bool(data.get("inner_voice", False))
+    if not enabled:
+        # The user-turn flag is meaningless without the master switch, and
+        # reporting it True would let a caller act on it alone.
+        return (False, False)
+    return (enabled, bool(data.get("inner_voice_evaluate_user_turns", False)))
+
+
 def _session_inner_voice_enabled(session_id: str) -> bool:
     """Read the `inner_voice` flag from the session JSON.
 
     Returns False on any miss (no session yet, malformed JSON, missing
     field). Inner Voice is opt-in only.
     """
-    if not session_id:
-        return False
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    if not meta_path.exists():
-        return False
-    try:
-        data = json.loads(meta_path.read_text())
-        return bool(data.get("inner_voice", False))
-    except Exception:
-        return False
+    return _session_iv_flags(session_id)[0]
 
 
 def _session_iv_evaluate_user_turns_enabled(session_id: str) -> bool:
@@ -66,16 +85,7 @@ def _session_iv_evaluate_user_turns_enabled(session_id: str) -> bool:
     chat unless explicitly opted in. Ambient/autonomy turns always get the
     observer when IV is enabled.
     """
-    if not _session_inner_voice_enabled(session_id):
-        return False
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    if not meta_path.exists():
-        return False
-    try:
-        data = json.loads(meta_path.read_text())
-        return bool(data.get("inner_voice_evaluate_user_turns", False))
-    except Exception:
-        return False
+    return _session_iv_flags(session_id)[1]
 
 
 # Ambient turns the observer produced for itself. Plain `inner_voice`
@@ -107,13 +117,14 @@ def _iv_should_fire_on_turn(
     isn't caught — is the accepted tradeoff: the user has UI controls to
     drive follow-up, and the next user turn re-opens IV observation.
     """
-    if not _session_inner_voice_enabled(session_id):
+    enabled, evaluate_user_turns = _session_iv_flags(session_id)
+    if not enabled:
         return False
     if turn_source == "ambient":
         if producer_source.startswith("inner_voice"):
             return producer_source in _SELF_OBSERVED_PRODUCERS
         return True
-    return _session_iv_evaluate_user_turns_enabled(session_id)
+    return evaluate_user_turns
 
 
 def _load_prior_turn_interventions(
@@ -358,6 +369,7 @@ async def attach_observer_for_turn(
 
 __all__ = [
     "ObserverState",
+    "_session_iv_flags",
     "_session_inner_voice_enabled",
     "_session_iv_evaluate_user_turns_enabled",
     "_iv_should_fire_on_turn",

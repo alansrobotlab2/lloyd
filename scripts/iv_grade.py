@@ -47,6 +47,19 @@ SESSIONS_DIR = _LLOYD_HOME / "sessions"
 
 INTERVENTIONS = ("inject", "cancel", "ambient", "clarify")
 
+# A row whose decision came from a deterministic guard rather than the model.
+# These cost no LLM call, so `_was_llm_call` already excludes them from the
+# cost tables — which also made them invisible in the per-trigger interventions
+# column, and `pretool` vanished from the report entirely even on the evening it
+# fired 19 injects. They also trivially satisfy the precision proxy: they only
+# ever fire mid-turn, so the loop always continues afterwards, and 19 false
+# positives read as a 1.0 landed rate. Score them apart.
+_DETERMINISTIC_REASON_RE = re.compile(r"^(?:deterministic:|fast-path:)", re.IGNORECASE)
+
+
+def _is_deterministic(row: dict) -> bool:
+    return bool(_DETERMINISTIC_REASON_RE.match(row.get("reason") or ""))
+
 # The user's next message reading as a correction is the strongest cheap
 # signal that a terminal noop was wrong. Deliberately narrow: a follow-up
 # question is normal conversation, not a correction.
@@ -103,11 +116,20 @@ def _grade_injects(rows: list[dict]) -> dict[str, Any]:
         by_turn[r["turn_id"]].append(r)
 
     landed = stranded = 0
+    deterministic = 0
+    deterministic_turns: Counter = Counter()
     stranded_examples: list[dict] = []
     for turn_id, turn_rows in by_turn.items():
         turn_rows.sort(key=lambda r: r["sequence_in_turn"])
         for i, r in enumerate(turn_rows):
             if r["action"] != "inject":
+                continue
+            if _is_deterministic(r):
+                # A guard inject always fires mid-turn, so "the loop continued"
+                # is true by construction and says nothing about whether the
+                # nudge was right. Count them; do not score them.
+                deterministic += 1
+                deterministic_turns[turn_id] += 1
                 continue
             later = turn_rows[i + 1:]
             continued = any(x["trigger"] == "assistant_message" for x in later)
@@ -122,12 +144,19 @@ def _grade_injects(rows: list[dict]) -> dict[str, Any]:
                         "reason": (r["reason"] or "")[:110],
                     })
     total = landed + stranded
+    worst = deterministic_turns.most_common(3)
     return {
         "injects": total,
         "landed": landed,
         "stranded": stranded,
         "landed_rate": round(landed / total, 3) if total else None,
         "stranded_examples": stranded_examples,
+        "deterministic_injects": deterministic,
+        # More than a couple of guard injects in one turn is the shape of a
+        # miscalibrated guard, not of a primary in trouble.
+        "deterministic_worst_turns": [
+            {"turn_id": t, "injects": n} for t, n in worst
+        ],
     }
 
 
@@ -195,7 +224,7 @@ def _cost(rows: list[dict]) -> dict[str, Any]:
     in_tok = sum(r["input_tokens"] or 0 for r in rows)
     cached = sum(r["cache_read"] or 0 for r in rows)
     by_trigger: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"calls": 0, "in_tok": 0, "ms": 0, "interventions": 0}
+        lambda: {"calls": 0, "in_tok": 0, "ms": 0, "interventions": 0, "guard": 0}
     )
     for r in llm:
         b = by_trigger[r["trigger"]]
@@ -204,6 +233,13 @@ def _cost(rows: list[dict]) -> dict[str, Any]:
         b["ms"] += r["latency_ms"] or 0
         if r["action"] in INTERVENTIONS:
             b["interventions"] += 1
+    # Guard interventions cost no LLM call, so they are absent from `llm` —
+    # which is why `pretool` disappeared from this table entirely on the
+    # evening the repetition guard fired 19 times. Count them separately so a
+    # trigger that is spending nothing but acting a lot is still visible.
+    for r in rows:
+        if r["action"] in INTERVENTIONS and _is_deterministic(r):
+            by_trigger[r["trigger"]]["guard"] += 1
     return {
         "observations": len(rows),
         "turns": len(turns),
@@ -282,19 +318,27 @@ def main() -> int:
     if c["errors"]:
         print(f"  errors                 {c['errors']}")
     print("\n  by trigger:")
-    print(f"    {'trigger':<20}{'calls':>7}{'interv':>8}{'in_tok':>12}{'tok/interv':>12}")
+    print(f"    {'trigger':<20}{'calls':>7}{'interv':>8}{'guard':>7}"
+          f"{'in_tok':>12}{'tok/interv':>12}")
     for trig, b in c["by_trigger"].items():
         per = f"{b['in_tok'] // b['interventions']:,}" if b["interventions"] else "—"
         print(f"    {trig:<20}{b['calls']:>7}{b['interventions']:>8}"
-              f"{b['in_tok']:>12,}{per:>12}")
+              f"{b.get('guard', 0):>7}{b['in_tok']:>12,}{per:>12}")
 
     print(f"\nPRECISION PROXY  (did an inject keep the primary working?)")
-    print(f"  injects                {p['injects']}")
+    print(f"  model-judged injects   {p['injects']}")
     print(f"  loop continued after   {p['landed']}")
     print(f"  turn ended anyway      {p['stranded']}")
     print(f"  landed rate            {p['landed_rate']}")
     for ex in p["stranded_examples"]:
         print(f"    stranded [{ex['trigger']}] {ex['reason']}")
+    print(f"  guard injects          {p['deterministic_injects']}"
+          f"   (not scored — they always fire mid-turn, so 'the loop "
+          f"continued' is true by construction)")
+    for t in p["deterministic_worst_turns"]:
+        if t["injects"] >= 3:
+            print(f"    !! {t['injects']} guard injects in turn {t['turn_id']} "
+                  f"— check the guard, not the primary")
 
     print(f"\nRECALL PROXY  (did a signed-off turn draw a correction?)")
     print(f"  terminal noops checked {r['terminal_noops_with_a_following_user_message']}")

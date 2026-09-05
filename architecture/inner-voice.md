@@ -2,7 +2,7 @@
 title: Inner Voice — Architecture
 status: active
 created: 2026-05-02
-updated: 2026-09-04
+updated: 2026-09-05
 related:
   - architecture/agents.md
   - architecture/verification-system.md
@@ -16,12 +16,17 @@ a problem. One LLM, one prompt, five soft levers, one goal card. The Python is
 plumbing — all judgment lives in the observer's system prompt, which is a
 vault-editable markdown file.
 
-**Version: v5.1.** v4's function-tool levers are unchanged; v5 changed *when* the
+**Version: v5.3.** v4's function-tool levers are unchanged; v5 changed *when* the
 observer spends an LLM call, *where* those calls run relative to the primary's
-critical path, and whether the subsystem can measure itself. Since 2026-09-04 the
-observer no longer runs on the primary model — see
+critical path, and whether the subsystem can measure itself. The observer moved
+to the secondary model on 2026-09-04 and is now pinned back to `primary` — see
 [Observer runs on the secondary model](#observer-runs-on-the-secondary-model-since-2026-09-04)
-and [Version history](#version-history). Open defects are listed under
+and [Version history](#version-history).
+
+v5.2 added deterministic loop detection. v5.3 is the correction pass over it,
+after that guard fired 19 times in one evening on ordinary file reads and, on one
+turn, spent the discretionary budget that the observer's only correct judgment of
+the turn then needed. Open defects are listed under
 [Known defects](#known-defects).
 
 ## Design intent
@@ -188,9 +193,25 @@ as the next user message *after* the tool dispatches.
 
 Default cap: **3 interventions per turn** (`inner_voice.observer.intervention_budget`).
 Counted against: `inject`, `ambient`, `clarify`. **Not** counted: `cancel`, and any
-decision with `bypass_budget=True` (stall rescue). After exhaustion, further
-lever choices are downgraded to `noop_budget_exhausted` and persisted with that
-label so the UI shows what *would* have happened.
+decision with `bypass_budget=True` (stall rescue, repetition). After exhaustion,
+further lever choices are downgraded to `noop_budget_exhausted` and persisted with
+that label so the UI shows what *would* have happened.
+
+**The `bypass_budget` exemption was documented but not implemented until v5.3.**
+`_apply_lever` incremented `interventions_used` on every applied inject,
+deterministic or not. That is invisible while the deterministic guards are rare
+and fatal once one misfires: on turn `8f3b7e77de07` ten false repetition injects
+exhausted a budget of three, and the observer's one correct judgment of the whole
+turn — *"Turn hit max_turns with zero review delivered; all six todos
+unresolved"* — was recorded as `noop_budget_exhausted` and never fired.
+`_count_intervention` now charges deterministic injects to a separate
+`bypass_interventions_used`.
+
+Exempt from the budget is not the same as unbounded, and nothing bounded them.
+`deterministic_inject_budget` (default **5**) is a hard ceiling on
+`bypass_budget` injects per turn; past it they are downgraded to
+`noop_deterministic_budget_exhausted`. A miscalibrated guard now costs at most
+five nudges, not a whole turn.
 
 ## Tiered triggering
 
@@ -333,8 +354,8 @@ harness terminates the turn. `_STUB_ANNOUNCE_RE` matches text whose last line is
 bare announce verb (`let me`, `I'll`, `I'm going to`, `next, I'll`, `I need to`, …)
 or that ends on a colon.
 
-**Two-stage since v5.** The announce regex proposes; a false-positive regex
-disposes. On its own the announce pattern also matched delivered answers —
+**Three-stage since v5.3.** The announce regex proposes; a false-positive regex
+disposes; and a sentence that closed on its own terms is exempt. On its own the announce pattern also matched delivered answers —
 "Let me know if you need anything else!", "I'll be happy to help", "I need to
 note that X", "I should mention one caveat: …" — and the stall-rescue inject
 bypasses *both* the intervention budget and the consecutive-inject suppressor by
@@ -347,6 +368,34 @@ the note; nothing is deferred). Both directions are pinned by tests in
 This never fired in the first production window, so the bug was latent, not
 observed — which is exactly why it was worth fixing before the trigger rate went
 up.
+
+**The exclusion list was not enough.** It named specific sign-off phrases, so it
+only caught the shapes someone had thought of. Any final line *starting* with an
+announce verb still matched regardless of what followed it, which made all of
+these stalls:
+
+```
+I'll leave the config as-is since it already works.
+I'm going to recommend option B because it is simpler.
+I will not change that file because it is generated.
+Going to the source, the loop appends the assistant message after the hook.
+```
+
+Every one is a delivered statement. v5.3 adds two structural rules, applied only
+to a last line that **closed** — a line ending in a colon or an ellipsis is still
+a stall outright, since that is the signal that the primary stopped mid-thought:
+
+- `_ANNOUNCE_RESOLVED_RE` — a justification or negation clause (`because`,
+  `since`, `rather than`, `will not`, `won't`) means the sentence resolved rather
+  than deferred.
+- `_ANNOUNCE_NOUN_FOLLOWER_RE` — "going to **the** source" heads a noun phrase,
+  not a promised action.
+
+The false-positive list also gained the decision verbs (`recommend`, `suggest`,
+`leave`, `hear`, `go with`) and an optional adverb slot, so "I should **also**
+mention …" is recognised the way "I should mention …" already was. `Let me read
+the config file.` and `I'll update the docs to match.` are still stalls;
+`tests/integration/test_iv_v52_review.py` pins both directions.
 
 Two paths handle it:
 
@@ -432,6 +481,56 @@ that preceded it. Both directions are pinned in
 `tests/integration/test_iv_loop_guards.py`, which replays the real commands from
 `fixture_iv_loop_turn.py` through `fire_pre_tool_use` with the LLM patched to
 raise — the guard must never need a model.
+
+#### Corrected in v5.3, after 19 misfires in one evening
+
+As shipped, the identifier set came from the whole `key=value` rendering of the
+arguments. Two consequences:
+
+- Argument **key names** counted as shared identifiers, so any two `Edit` calls
+  shared `file_path`, `old_string` and `new_string` before their contents were
+  considered at all.
+- **Path components** counted, so every absolute path contributed the username —
+  13 characters, comfortably past the length filter, and present in literally
+  every path the agent touches.
+
+Two shared identifiers is all a near match needs, so three Reads of unrelated
+files matched each other. Of the 19 deterministic injects on 2026-09-04, 15 named
+a path segment or an argument key as the thing the primary "kept chasing":
+`deterministic: 3 near-identical Read calls for alansrobotlab, file_path,
+architecture`. Three changes:
+
+1. **Identifiers come from argument values only.** `exact` still renders the full
+   `key=value` form, so an exact repeat is still an exact repeat.
+2. **Ambient path fragments are stripped** — the home directory and the username —
+   before tokenising.
+3. **Path-addressed tools compare by exact repeat only.** `Read`, `Write`,
+   `Edit`, `MultiEdit`, `NotebookEdit`, `Glob` and `TodoWrite` are in
+   `_EXACT_ONLY_TOOLS`. Near-matching was built for shell reformulation and does
+   not transfer to a tool addressed by path. Re-reading one file verbatim is
+   still caught; a chunked read carries a different offset and is correctly not a
+   repeat.
+
+Stripping the ambient tokens removed the free second identifier that
+`min_overlap: 2` had been calibrated against, so a genuine hunt for one symbol
+would no longer have fired. `guards._is_distinctive` restores it: an identifier
+with three or more underscore-joined parts, or 16+ characters, carries a match on
+its own. `iv_inject_queue` and `zzq_phantom_handle_v3` qualify; `inner_voice`,
+`file_path` and `observer_prompt` do not — those are modules and argument keys
+that half the calls in a session mention in passing.
+
+Net effect on the fixture: the first fire is still exactly at the 4th
+near-duplicate, and a **second** cluster is now caught — messages 72-79, where
+the primary hunts `build_subliminal_context`, a symbol never defined anywhere.
+Ambient-token dilution had hidden it. The 15 healthy exploration calls stay
+silent. `tests/integration/test_iv_v52_review.py` pins the negative direction
+against real Read / Edit / Write / Glob / TodoWrite sequences.
+
+The ring is no longer **cleared** on a fire. A `repetition_baseline` counter marks
+the fire point and comparison looks only at calls made after it. Same "needs a
+fresh cluster" rate limit, without discarding the command previews that
+`build_tool_result_summary` reads back — the one thing turn
+`20260905_011748_iv84e4` proved the observer needs to see.
 
 The inject carries `bypass_budget=True`, like stall rescue: it prevents a
 pathological outcome rather than nagging, and it is the observer's only signal
@@ -527,7 +626,7 @@ Config block `inner_voice.todo_stewardship`. Four behaviors:
 | `enabled` | `true` | Master switch; gates the TODOS block in the prompt. |
 | `completion_gate` | `true` | On a terminal `assistant_message` or at `result`, append a PENDING TODOS block asking IV to intervene if the primary is stopping with work undone. At `result` this drives `ambient` (inject is a no-op there). |
 | `mark_without_evidence` | `true` | On a successful `TodoWrite`, diff against `prior_todo_status` for `in_progress→completed` flips. Any flip skips the fast-path and appends a block forcing the LLM to walk each completed todo against recent tool calls, injecting a challenge if there's no plausible work behind the flip. |
-| `stalled_progress` | `false` | Count non-`TodoWrite`, non-error tool results since the last status change. At `stalled_after_tool_calls` (default 5) with at least one pending/in_progress todo, skip the fast-path and append a stalled-progress block. Counter resets on any status change and immediately after firing. **Currently off.** |
+| `stalled_progress` | `true` | Count non-`TodoWrite`, non-error tool results since the last status change. At `stalled_after_tool_calls` (default 5) with at least one pending/in_progress todo, skip the fast-path and append a stalled-progress block. Counter resets on any status change and immediately after firing. **On since v5.2.** It stacks with the 1-in-5 tool-result sampler, so on a long todo-driven turn it is a real contributor to LLM-call volume — see [Cost](#cost). |
 
 `state.todos` is snapshotted at turn start and refreshed from disk
 (`_load_todos_from_session`) after each successful `TodoWrite`, so multi-flip turns
@@ -717,8 +816,8 @@ single-digit rates.
 ```
 app/inner_voice/
 ├── __init__.py             # public surface
-├── observer.py             # state, lever dispatch, fast-path, goal loop (2054 ln)
-├── observer_prompt.py      # vault prompt loading + per-event prompt builders (1074 ln)
+├── observer.py             # state, lever dispatch, fast-path, goal loop
+├── observer_prompt.py      # vault prompt loading + per-event prompt builders
 └── lever_tools.py          # LEVER_TOOLS / GOAL_EXTRACTION_TOOLS /
                             # GOAL_COMPLETION_TOOLS function schemas
 
@@ -752,8 +851,14 @@ web/src/components/
 tests/integration/
 ├── test_observer.py        # tool-call extraction, lever dispatch, fast-path
 ├── test_iv_guards.py       # guards + v5 behavior (added in v5)
+├── test_iv_loop_guards.py  # v5.2 guards, replayed against the real turn
+├── fixture_iv_loop_turn.py #   the 28 Bash calls from that turn, verbatim
+├── test_iv_v52_review.py   # v5.3 corrections (added in v5.3)
 ├── test_goal_loop.py       # persistent-goal completion loop
 └── smoke_observer_e2e.py   # live e2e against running backend
+
+app/harness/tests/
+└── test_loop_inject_ordering.py  # terminal-inject ordering, real run_query
 ```
 
 ## Persistence schema
@@ -809,6 +914,10 @@ dispatcher downgraded:
 | `noop_budget_exhausted` | Would have intervened, but already at budget. |
 | `noop_empty_content` | `inject` returned empty content. |
 | `noop_inject_after_inject` | Consecutive-inject suppressor (mid-work only). |
+| `noop_inject_on_cooldown` | Discretionary inject too soon after the last one. |
+| `noop_deterministic_budget_exhausted` | A `bypass_budget` inject past `deterministic_inject_budget`. |
+| `noop_cancel_unread_injects` | Cancel citing ignored injects, but no primary iteration has completed since they fired. |
+| `noop_goal_attempts_not_persisted` | `/goal` follow-up skipped because the attempt counter did not persist. |
 | `noop_cancel_with_pending_tools` | Cancel-for-completion blocked, work in flight. |
 | `acknowledge_complete` | Cancel-for-completion converted to a positive ack. |
 | `noop_no_ambient_channel` / `noop_ambient_failed` | Ambient chosen but unwired or raised. |
@@ -902,6 +1011,10 @@ inner_voice:
     silent_iterations_before_review: 10      # escalate a text-free streak
     inject_cooldown_iterations: 4            # primary iterations between
                                              #   discretionary injects
+    deterministic_inject_budget: 5           # ceiling on bypass_budget injects
+    async_timeout_seconds: 12                # deadline for off-critical-path
+                                             #   judgments (terminal calls keep
+                                             #   the tight timeout_seconds)
   todo_stewardship:
     enabled: true
     completion_gate: true
@@ -983,8 +1096,18 @@ does not pass `--enable-prompt-tokens-details`, so all 116 observation rows
 written during the move recorded `cache_read = 0`, and the number that was
 supposed to decide whether a smaller observer model pays for itself went
 unmeasured through the entire experiment. `scripts/iv_grade.py` says so explicitly rather than reporting a 0% hit
-rate as if it were measured. The fix is one line in `start-secondary.sh` plus a
-restart of `agent-llm-secondary`.
+rate as if it were measured.
+
+**Both launchers carry `--enable-prompt-tokens-details` as of v5.3** — it was
+added to `start-secondary.sh` alongside the rest of that pass. Neither *running*
+server has it: both were started before the flag landed in their script, so every
+observation row still records `cache_read = 0`. The number is still unmeasured,
+not measured-as-bad, and it stays that way until `agent-llm-primary` and
+`agent-llm-secondary` are restarted. Verify with:
+
+```bash
+ps -eo args | grep vllm.entrypoints | grep -c enable-prompt-tokens-details
+```
 
 This matters more than it looks: the observer's prompt is a large, stable prefix
 (system prompt + goal card + subliminal block) re-sent on every event. Whether
@@ -1120,6 +1243,17 @@ seven stranded injects were `pretool` — the trigger v5 turns off.
   still in flight, and that a terminal judgment stays synchronous), prompt
   hot-reload, the goal-card append, and the observer-model column.
 - `tests/integration/test_goal_loop.py` — persistent-goal completion loop.
+- `tests/integration/test_iv_loop_guards.py` — the v5.2 guards replayed against
+  the real turn that motivated them (`fixture_iv_loop_turn.py`), with the LLM
+  patched to raise so the guard can never quietly depend on a model.
+- `tests/integration/test_iv_v52_review.py` — the v5.3 corrections. 17 of its 21
+  cases fail against the code as it stood on 2026-09-04; the other four are
+  controls that must pass in both directions (a verbatim repeat still fires, a
+  real stall is still a stall, the `/goal` loop still loops, the attach gate
+  still honours both flags).
+- `app/harness/tests/test_loop_inject_ordering.py` — drives the real `run_query`
+  with a scripted vLLM stream and asserts on the message list the model actually
+  receives, so terminal-inject ordering cannot regress silently.
 
 All three modules stub `record_inner_voice_observation` at import. Before that
 every test run appended rows to the production `usage.db` under fake session ids
@@ -1274,39 +1408,26 @@ real pattern.
 
 ## Known defects
 
-Open as of 2026-09-04. Each is reachable on the current default config.
+Open as of 2026-09-05. Each is reachable on the current default config. The
+2026-09-04 review's other findings were fixed in v5.3 — see
+[Version history](#version-history).
 
-### Message-ordering defects
+### An async inject can land inside a tool-call block
 
-**1. A terminal inject is written into history *before* the text it answers.**
-`loop.py` fires the `OnEvent` hook (line 332) and only afterwards appends the
-iteration's assistant message (line 339). The observer's `inject` therefore lands
-at index *n* and the assistant text it is reacting to at *n+1*:
-
-```
-user:      "[INNER VOICE] You ended the turn by announcing an action without doing it…"
-assistant: "Let me check the logs:"          ← what the inject is about
-                                             ← next request generates from here
-```
-
-The nudge precedes its referent, and the request the model receives ends on its
-own assistant turn rather than on a user message. This is the stall-rescue path —
-the dominant failure mode the whole subsystem was built around — and it is also
-the shape the persisted session JSON keeps, because a *terminal* assistant
-message is not flushed to disk until the turn ends while the inject breadcrumb is
-written during the hook. The harness's own echo-guard re-prompt, four lines
-below, appends after the assistant message and gets this right.
-
-Fix: snapshot and fire the hook after the `chat_messages.append(...)` of the
-assistant turn, or have `_apply_lever` insert at the correct index.
-
-**2. An async inject can land inside a tool-call block.** `_judge_tool_result`
-and mid-work `_judge_assistant_message` are spawned as tasks and resolve ~1 s
-later, at an arbitrary suspension point — including between an
+`_judge_tool_result` and mid-work `_judge_assistant_message` are spawned as tasks
+and resolve ~1 s later, at an arbitrary suspension point — including between an
 `assistant(tool_calls=[a,b])` message and its `role: "tool"` replies, or between
 two tool replies. The result is a message sequence no OpenAI-format producer
 would emit. vLLM's `qwen3_xml` template renders it without erroring, so this
 shows up as degraded judgment rather than a crash.
+
+The sibling defect — a *terminal* inject landing before the assistant text it
+answered — was fixed in v5.3 by appending the iteration's assistant turn to
+history before firing the hook, and is pinned by
+`app/harness/tests/test_loop_inject_ordering.py`. That test drives the real
+`run_query` and asserts on the message list the model receives, so the ordering
+cannot regress silently. It does not cover the async case, which needs a
+different fix.
 
 Fix: stage async injects in a queue and splice them in at the next iteration
 boundary rather than appending live.
@@ -1324,40 +1445,26 @@ no model turn between them" that v5 extended the suppressor to prevent.
 Fix: append a provisional entry to `decisions_this_turn` before applying the
 lever, or serialize lever application behind an `asyncio.Lock`.
 
-### `/goal` attempt counter can fail open
+### Goal extraction is pure added latency to first token
 
-`_handle_persistent_goal_at_result` computes `new_attempts = attempts + 1`
-locally but persists it with `await _persist_goal_state(..., bump_attempts=True)`
-whose failure is swallowed. `attempts` is re-read from the session JSON on the
-next turn, so if the mutation keeps failing the counter never advances,
-`max_attempts` is never reached, and the follow-up ambient re-queues without
-bound — on the one turn-source that is *deliberately* exempt from the
-self-observation refusal (`inner_voice_goal`). The attempt cap is the only thing
-bounding that loop, and it is the thing that fails silently.
+Goal extraction is `await`ed before `run_query` starts, so its LLM call (up to
+`goal_extraction_timeout_seconds: 8`) is added latency to first token on every IV
+turn. The card is not needed until the first judged event; the extraction could
+run concurrently with the primary's first iteration.
 
-Fix: treat a failed `_persist_goal_state` as a reason to skip the follow-up.
+The one complication is `goal_card_to_primary`, which appends the card to the
+primary's last user message — that has to happen before the request is built. A
+concurrent extraction would have to either drop that feature or accept that the
+primary sees the card from the *second* iteration onward.
 
-### Smaller items
+### `stalled_progress` has not been measured
 
-- `_apply_decision_guards` passes `tool_calls=[]` at the `pretool` and
-  `tool_result` triggers, so `cancel_for_completion_verdict` always sees
-  `has_pending_tools=False`. A cancel-for-completion at `pretool` — where a tool
-  is by definition about to dispatch — is recorded as `acknowledge_complete`,
-  which the UI renders as "IV reviewed and agrees the answer is complete."
-- Goal extraction is `await`ed before `run_query` starts, so its LLM call (up to
-  `goal_extraction_timeout_seconds: 8`) is pure added latency to first token on
-  every IV turn. The card is not needed until the first judged event; the
-  extraction could run concurrently with the primary's first iteration.
-- `_apply_lever`'s `related_tool` parameter is accepted and never used.
-- `observer.aclose_clients()` has no production call site; the pooled
-  `httpx.AsyncClient` is never closed on shutdown.
-- Stale docstrings: `app/inner_voice/__init__.py` still advertises "four levers
-  (inject / cancel / ambient / deny_tool)"; `observer.py`'s module docstring says
-  v4; `app/routers/inner_voice.py` documents `deny_tool | allow` actions. All
-  three describe a pre-v4 lever set.
-- `_iv_should_fire_on_turn` reads and parses the session JSON three times per
-  call (`_session_iv_evaluate_user_turns_enabled` re-invokes
-  `_session_inner_voice_enabled`, then re-reads the file itself).
+It went on by default in v5.2 without a before/after. It stacks with the 1-in-5
+tool-result sampler, and it fires on a fixed count of non-`TodoWrite` results, so
+on a long todo-driven turn it escalates roughly every fifth tool result on top of
+whatever the sampler already picked. Turn `8f3b7e77de07` ran 30 LLM calls and
+192k observer input tokens. Whether that spend earns anything is exactly the
+question `scripts/iv_grade.py` exists to answer, and it has not been asked.
 
 ## Version history
 
@@ -1373,4 +1480,5 @@ Fix: treat a failed `_persist_goal_state` as a reason to skip the follow-up.
 | **v5** | **Measured triggering.** Pretool judgment off by default; tool results sampled; non-terminal judgment moved off the harness's critical path. Judgment extracted to `guards.py` as pure functions. `scripts/iv_grade.py` scores the subsystem retrospectively. Prompts hot-reload from the vault. |
 | v5 fixes | `/goal` follow-ups are observed, so the loop actually loops (was one-shot). Stall regex no longer fires on sign-offs. Suppressor spans all mid-work triggers. Observer priority 1, not 0. Prefix-cache tokens read from the field vLLM actually sets. Timeouts labelled as timeouts. `model` column records the observer's model. `find -delete` / `wget` / `curl -o` escalate; `git status` doesn't. Tool-name matching is word-wise. Subagents get the safety hook. Tests no longer write to the production database. |
 | **v5.1** (observed, not planned) | `secondary_enabled: true` — the observer moved off the primary onto Qwen3.5-4B at `:8091` with the prefix-cache question still unmeasured. No code change; a config flip plus a supervisor program. Documented here because the v5 cost model, the `priority: 1` rationale and the "measure first" boundary all assumed it had not happened. **Reverted in v5.2**: on its one day at `:8091` the observer intervened on 6 of 15 LLM-judged events (40%) against primary’s 10 of 602 (1.7%), fabricated a finding, and cancelled a turn. |
+| **v5.3** | **Correction pass over v5.2**, from an architecture review run with Inner Voice watching. Repetition identifiers come from argument values with ambient path fragments stripped, and path-addressed tools compare by exact repeat only — the guard had fired 19 times in one evening on unrelated file reads. `bypass_budget` injects stop charging the discretionary budget (they never should have) and gain a `deterministic_inject_budget` ceiling. Stall detection exempts announce verbs in sentences that resolved. Terminal injects append after the assistant text they answer. `result` translates the lever before the guards run, so a cooldown can no longer discard a follow-up. `injects_primary_has_seen` is finally wired, gating cancel-for-ignored-injects. `close_observer` runs in `_run_turn`'s `finally`. `/goal` skips the follow-up when the attempt counter fails to persist. Off-critical-path judgments get their own longer deadline. |
 | **v5.2** | **Deterministic loop detection.** `guards.repetition_verdict` at `pretool` (free, no LLM); silent-streak escalation; failure payloads (`[stopped: max_turns]`, Bash timeouts) always escalate; `inject_cooldown_iterations` paces discretionary injects; `ObserverDecision.fast_path` keeps bookkeeping rows out of the guards' lookback and the observer's prompt window; `todo_stewardship.stalled_progress` on by default; `build_tool_result_summary` shows the primary's actual command. Observer pinned to `primary`, and `resolve_model_alias` logs its rewrite. All from turn `20260905_011748_iv84e4`. |

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -59,15 +60,60 @@ _ANNOUNCE_FALSE_POSITIVE_RE = re.compile(
     r"(?:please\s+)?let (?:me|us) know\b"
     r"|i(?:'ll| will| would|'d)? be (?:happy|glad|available)\b"
     r"|let me be (?:clear|specific|precise)\b"
-    # Speech acts completed in this very sentence. "I need to note that
-    # the config is read-only" is the note; nothing is being deferred.
-    r"|i (?:need to|should|will|'ll|must|want to|have to) "
+    # Speech acts and decisions completed in this very sentence. "I need to
+    # note that the config is read-only" is the note; nothing is deferred.
+    # `i\s*` rather than `i ` so the contracted "I'll note ..." matches —
+    # with a hard space the `'ll` branch could only ever match "I 'll".
+    # The optional adverb slot catches "I should ALSO mention ...".
+    r"|i\s*(?:need to|should|will|'ll|must|want to|have to)"
+    r"(?:\s+(?:just|also|simply|quickly|briefly|probably|likely|however|now|"
+    r"first|finally|therefore))?\s+"
     r"(?:note|mention|point out|flag|emphasi[sz]e|clarify|stress|add|say|"
     r"highlight|call out|correct|caveat|warn|reiterate|repeat|admit|"
-    r"acknowledge|be clear|be honest|be up ?front)\b"
+    r"acknowledge|be clear|be honest|be up ?front|"
+    # Decisions and recommendations. These resolve the question rather than
+    # deferring work: "I'll leave that to you", "I need to hear which you
+    # prefer" and "Let's go with option B" are answers, not stalls.
+    r"recommend|suggest|leave|hear|defer|assume|go with|stick with|"
+    r"proceed with)\b"
+    r"|let's (?:go with|stick with|proceed with|say|assume|call)\b"
     r")",
     re.IGNORECASE,
 )
+
+
+# An announce phrase followed by a determiner or pronoun heads a NOUN
+# phrase, not a promised action. "Going to the source, the loop appends the
+# assistant message after the hook" reads as an announce to the regex above
+# and is in fact a delivered sentence.
+_ANNOUNCE_NOUN_FOLLOWER_RE = re.compile(
+    r"(?:^|\n)\s*(?:now\s+|next,?\s+|first,?\s+)?going to\s+"
+    r"(?:the|a|an|this|that|these|those|my|your|our|their|its|his|her|"
+    r"it|them|him|be|where|what|which)\b",
+    re.IGNORECASE,
+)
+
+
+# A justification or negation clause means the sentence RESOLVED rather than
+# deferred. "I'll leave the config as-is since it already works" is a
+# decision the primary made and explained; "I will not change that file
+# because it is generated" is a refusal. Neither promises work it then
+# skipped, and both matched the raw announce regex.
+_ANNOUNCE_RESOLVED_RE = re.compile(
+    r"\b(?:because|since|as long as|so that|rather than|instead of|unless|"
+    r"although|though|given that|which is why|that is why|as-is|as is)\b"
+    r"|\b(?:will|am|is|are|do|does|did|can|could|would|should|must|going to)"
+    r"\s+not\b"
+    r"|\b(?:won't|can't|cannot|don't|doesn't|didn't|shouldn't|wouldn't|"
+    r"isn't|aren't|needn't)\b",
+    re.IGNORECASE,
+)
+
+
+# The last line ends without closing the thought — a colon or an ellipsis is
+# the strongest stall signal there is, and it outranks the resolved/noun
+# checks below.
+_ANNOUNCE_OPEN_END_RE = re.compile(r"(?::|\.\.\.|\u2026)\s*$")
 
 # Content for the deterministic stall-rescue inject (fast-path + lever paths).
 STALL_RESCUE_CONTENT = (
@@ -94,7 +140,18 @@ def is_terminal_stall(text: str) -> bool:
     # Check only the final non-empty line — that's what the announce
     # regex anchored on, and it's where a sign-off lives.
     last_line = stripped.rsplit("\n", 1)[-1].strip()
-    if _ANNOUNCE_FALSE_POSITIVE_RE.search("\n" + last_line):
+    probe = "\n" + last_line
+    if _ANNOUNCE_FALSE_POSITIVE_RE.search(probe):
+        return False
+    # An unclosed ending (colon, ellipsis) is the one signal strong enough
+    # to stand on its own: the primary stopped mid-thought. Everything
+    # below is about sentences that DID close, where the announce verb can
+    # belong to a delivered statement.
+    if _ANNOUNCE_OPEN_END_RE.search(last_line):
+        return True
+    if _ANNOUNCE_NOUN_FOLLOWER_RE.search(probe):
+        return False
+    if _ANNOUNCE_RESOLVED_RE.search(last_line):
         return False
     return True
 
@@ -321,6 +378,60 @@ def iteration_pressure(
 # camel/flat names with no underscore (`claudesdkclient`).
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
 
+# Cap the argument text scanned for identifiers. A `Write` carries a whole
+# file body and an `Edit` carries two; letting those dominate the identifier
+# set makes containment meaningless against a short sibling call.
+_IDENT_SCAN_CHARS = 2000
+
+# Tools whose repetition is only meaningful as a BYTE-IDENTICAL repeat.
+#
+# Near-matching exists for shell reformulation, where the same search is
+# reworded until it looks new. It does not transfer to tools addressed by
+# path: three Reads of unrelated files under one repo share their directory
+# components and nothing else, and two shared identifiers is all a near match
+# needs. On 2026-09-04 that fired 19 deterministic injects in one evening,
+# 15 of them naming a path segment or an argument key as the "term the
+# primary keeps chasing". Re-reading ONE file verbatim is still caught here —
+# that is an exact match and needs no similarity heuristic — and a chunked
+# read of the same file carries a different offset, so it is correctly not a
+# repeat.
+_EXACT_ONLY_TOOLS = frozenset({
+    "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "TodoWrite",
+})
+
+
+def _ambient_path_prefixes() -> tuple[str, ...]:
+    """Path fragments every call in a session shares, so they carry no signal.
+
+    `/home/<user>/<repo>/app/inner_voice/observer.py` contributed the
+    username to every signature it appeared in. The username is 13
+    characters, so it cleared the identifier length filter, and it is
+    present in literally every absolute path the agent ever touches.
+    """
+    try:
+        home = str(Path.home()).rstrip("/")
+    except Exception:  # noqa: BLE001 — no home is not an error here
+        return ()
+    if not home or home == "/":
+        return ()
+    user = home.rsplit("/", 1)[-1]
+    out = [home + "/", home]
+    if len(user) >= 4:
+        out.append(user)
+    return tuple(out)
+
+
+_AMBIENT_PATH_PREFIXES = _ambient_path_prefixes()
+
+
+def _strip_ambient(text: str) -> str:
+    """Drop the session-wide path fragments before extracting identifiers."""
+    out = text
+    for frag in _AMBIENT_PATH_PREFIXES:
+        out = out.replace(frag, " ")
+    return out
+
+
 REPETITION_WINDOW = 6
 REPETITION_MIN_OVERLAP = 2
 REPETITION_CONTAINMENT = 0.5
@@ -346,23 +457,33 @@ def _identifiers(text: str) -> frozenset[str]:
 
 
 def tool_call_signature(tool_name: str, tool_args: Any) -> ToolCallSignature:
-    """Reduce a proposed tool call to its comparable essence."""
+    """Reduce a proposed tool call to its comparable essence.
+
+    `exact` keeps the full `key=value` rendering, so two calls are byte-equal
+    only when every argument matches. `idents` is built from the argument
+    VALUES alone: key names are identical on every call of a given tool, so
+    counting them as shared identifiers meant `file_path` and `old_string`
+    alone could carry a near match between three unrelated Edits.
+    """
     if isinstance(tool_args, dict):
+        items = [(k, tool_args[k]) for k in sorted(tool_args) if k != "description"]
         if tool_name == "Bash":
             raw = str(tool_args.get("command") or "")
+            value_text = raw
         else:
             # Sorted so key order can't make two identical calls look different.
-            raw = " ".join(
-                f"{k}={tool_args[k]!r}" for k in sorted(tool_args) if k != "description"
-            )
+            raw = " ".join(f"{k}={v!r}" for k, v in items)
+            value_text = " ".join(str(v) for _, v in items)
     else:
         raw = str(tool_args or "")
+        value_text = raw
     normalized = " ".join(raw.split())
     preview = normalized if len(normalized) <= 160 else normalized[:157] + "..."
+    ident_src = _strip_ambient(" ".join(value_text.split())[:_IDENT_SCAN_CHARS])
     return ToolCallSignature(
         tool=tool_name or "",
         exact=normalized,
-        idents=_identifiers(normalized),
+        idents=_identifiers(ident_src),
         preview=preview,
     )
 
@@ -381,6 +502,23 @@ def _containment(a: frozenset[str], b: frozenset[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / min(len(a), len(b))
+
+
+def _is_distinctive(term: str) -> bool:
+    """True for an identifier specific enough to carry a match on its own.
+
+    `min_overlap = 2` was calibrated when ambient path components padded every
+    identifier set — the username alone was a free second term. With those
+    stripped, a genuine hunt for one symbol (`zzq_phantom_handle_v3`,
+    `iv_inject_queue`) shares exactly one identifier and would never reach the
+    threshold.
+
+    Segment count separates the two cases. A name with three or more
+    underscore-joined parts is a specific symbol somebody is chasing; a
+    two-part name (`inner_voice`, `file_path`, `observer_prompt`) is a module
+    or an argument key that half the calls in a session mention in passing.
+    """
+    return term.count("_") >= 2 or len(term) >= 16
 
 
 def repetition_verdict(
@@ -411,6 +549,8 @@ def repetition_verdict(
     matches: list[ToolCallSignature] = []
     exact = False
     shared: set[str] = set()
+    # Path-addressed tools compare by exact repeat only — see _EXACT_ONLY_TOOLS.
+    near_allowed = current.tool not in _EXACT_ONLY_TOOLS
     for p in prior:
         if p.tool != current.tool:
             continue
@@ -419,8 +559,17 @@ def repetition_verdict(
             exact = True
             shared |= current.idents
             continue
+        if not near_allowed:
+            continue
         overlap = current.idents & p.idents
-        if len(overlap) >= min_overlap and _containment(current.idents, p.idents) >= containment:
+        if not overlap:
+            continue
+        # Either several shared identifiers, or one distinctive enough to
+        # stand alone. See `_is_distinctive`.
+        enough = len(overlap) >= min_overlap or any(
+            _is_distinctive(t) for t in overlap
+        )
+        if enough and _containment(current.idents, p.idents) >= containment:
             matches.append(p)
             shared |= overlap
     if len(matches) < threshold:
@@ -452,11 +601,21 @@ def repetition_inject_content(v: RepetitionVerdict) -> str:
     key instruction is that a stable empty result is an ANSWER; treating it as
     a broken query is what drives the loop.
     """
-    terms = ", ".join(v.shared_terms[:6]) or "the same target"
-    kind = "the same call" if v.exact else "variations of the same search"
+    n = v.repeats + 1
+    if v.shared_terms:
+        target = ", ".join(v.shared_terms[:6])
+    elif v.previews:
+        target = repr(v.previews[0][:120])
+    else:
+        target = "the same target"
+    what = (
+        f"run the same call {n} times"
+        if v.exact
+        else f"run {n} variations of the same search"
+    )
     return (
-        f"Stop: you have now run {v.repeats + 1} {kind} for {terms}, and the result "
-        f"has not changed. A stable empty or unchanged result is the ANSWER, not a "
+        f"Stop: you have now {what} for {target}, and the result has not "
+        f"changed. A stable empty or unchanged result is the ANSWER, not a "
         f"failed query — do not rewrite the filter again. If you are looking for a "
         f"symbol that may simply not exist, one scoped check settles it; if it is "
         f"not there, say so and move on. State what you have established so far and "

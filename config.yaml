@@ -59,6 +59,18 @@ inner_voice:
     # Minimum primary iterations between two discretionary injects.
     # bypass_budget injects (stall rescue, repetition) are exempt.
     inject_cooldown_iterations: 4
+    # Ceiling on DETERMINISTIC injects (stall rescue, repetition) per turn.
+    # Those bypass the discretionary budget by design, which left nothing
+    # bounding a miscalibrated guard: on 2026-09-04 the repetition guard
+    # fired 19 times in one evening. Exempt from the budget, not unbounded.
+    deterministic_inject_budget: 5
+    # Deadline for judgments that run OFF the harness's critical path. The
+    # primary is not waiting on these, so the tight `timeout_seconds` that
+    # protects the two synchronous terminal calls only threw the work away —
+    # all 7 observer errors on 2026-09-04 were `timeout after 5.0s`, every
+    # one on a spawned non-terminal call. `async_drain_timeout_seconds` is
+    # the real bound at the next terminal event.
+    async_timeout_seconds: 12
   todo_stewardship:
     enabled: true
     completion_gate: true

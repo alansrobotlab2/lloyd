@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from app.harness.mcp_pool import close_all_pools
+from app.inner_voice.observer import aclose_clients as _iv_aclose_clients
 from app.sessions_io import _session_queues
 
 logger = logging.getLogger("lloyd-server.lifecycle")
@@ -36,3 +37,11 @@ async def shutdown_cleanup(grace_seconds: float = 2.0) -> None:
         await close_all_pools()
     except Exception as exc:
         logger.warning("Shutdown: close_all_pools raised: %s", exc)
+
+    # The Inner Voice observer keeps one pooled httpx.AsyncClient per event
+    # loop for its vLLM calls. It had no production call site, so the client
+    # and its keep-alive connections were never closed on shutdown.
+    try:
+        await _iv_aclose_clients()
+    except Exception as exc:
+        logger.warning("Shutdown: inner-voice client close raised: %s", exc)

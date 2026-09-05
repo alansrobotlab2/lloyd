@@ -30,6 +30,16 @@ export const ACTION_STYLES: Record<string, { color: string; bg: string; border: 
   noop_cancel_with_pending_tools:        { color: 'text-amber-500', bg: 'bg-amber-600/5', border: 'border-amber-500/20', dot: 'bg-amber-500', label: 'noop (mid-tool)', Icon: AlertTriangle },
   noop_pretool_after_cancel:             { color: 'text-slate-500', bg: 'bg-slate-600/5', border: 'border-slate-500/15', dot: 'bg-slate-500', label: 'noop (cancelled)', Icon: Info },
   noop_inject_after_inject:              { color: 'text-amber-500', bg: 'bg-amber-600/5', border: 'border-amber-500/20', dot: 'bg-amber-500', label: 'noop (inject suppressed)', Icon: AlertTriangle },
+  noop_inject_on_cooldown:               { color: 'text-amber-500', bg: 'bg-amber-600/5', border: 'border-amber-500/20', dot: 'bg-amber-500', label: 'noop (inject paced)', Icon: AlertTriangle },
+  noop_deterministic_budget_exhausted:   { color: 'text-amber-500', bg: 'bg-amber-600/5', border: 'border-amber-500/20', dot: 'bg-amber-500', label: 'noop (guard capped)', Icon: AlertTriangle },
+  noop_cancel_unread_injects:            { color: 'text-amber-500', bg: 'bg-amber-600/5', border: 'border-amber-500/20', dot: 'bg-amber-500', label: 'noop (injects unread)', Icon: AlertTriangle },
+  noop_assistant_after_cancel:           { color: 'text-slate-500', bg: 'bg-slate-600/5', border: 'border-slate-500/15', dot: 'bg-slate-500', label: 'noop (cancelled)', Icon: Info },
+  noop_tool_result_after_cancel:         { color: 'text-slate-500', bg: 'bg-slate-600/5', border: 'border-slate-500/15', dot: 'bg-slate-500', label: 'noop (cancelled)', Icon: Info },
+  noop_result_after_cancel:              { color: 'text-slate-500', bg: 'bg-slate-600/5', border: 'border-slate-500/15', dot: 'bg-slate-500', label: 'noop (cancelled)', Icon: Info },
+  noop_goal_ambient_already_queued:      { color: 'text-slate-500', bg: 'bg-slate-600/5', border: 'border-slate-500/15', dot: 'bg-slate-500', label: 'noop (goal queued)', Icon: Info },
+  noop_goal_ambient_failed:              { color: 'text-amber-500', bg: 'bg-amber-600/5', border: 'border-amber-500/20', dot: 'bg-amber-500', label: 'noop (goal fail)', Icon: AlertTriangle },
+  noop_goal_clarify_failed:              { color: 'text-amber-500', bg: 'bg-amber-600/5', border: 'border-amber-500/20', dot: 'bg-amber-500', label: 'noop (goal fail)', Icon: AlertTriangle },
+  noop_goal_attempts_not_persisted:      { color: 'text-amber-500', bg: 'bg-amber-600/5', border: 'border-amber-500/20', dot: 'bg-amber-500', label: 'noop (goal unbounded)', Icon: AlertTriangle },
   acknowledge_complete:       { color: 'text-emerald-400', bg: 'bg-emerald-600/10', border: 'border-emerald-500/30', dot: 'bg-emerald-400', label: 'agree: complete', Icon: CheckCircle2 },
 }
 
@@ -42,7 +52,16 @@ export const TRIGGER_LABEL: Record<InnerVoiceObservationTrigger, string> = {
 }
 
 export function actionStyle(action: string) {
-  return ACTION_STYLES[action] ?? ACTION_STYLES.noop
+  const known = ACTION_STYLES[action]
+  if (known) return known
+  // An unmapped `noop_*` label is a guard downgrade the UI hasn't been
+  // taught yet. Falling all the way back to plain `noop` styling hid the
+  // fact that the observer WANTED to act — render it as a downgrade and
+  // show the raw label so it is at least legible.
+  if (action?.startsWith('noop_')) {
+    return { ...ACTION_STYLES.noop_budget_exhausted, label: action.replace(/_/g, ' ') }
+  }
+  return ACTION_STYLES.noop
 }
 
 // IV `created_at` may be either:

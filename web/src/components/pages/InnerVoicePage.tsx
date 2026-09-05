@@ -278,13 +278,15 @@ function CountsStrip({ obsState }: { obsState: InnerVoiceState }) {
   const counts = obsState.observations_count_by_action || {}
   const totals = useMemo(() => {
     const total = Object.values(counts).reduce((a, b) => a + b, 0)
-    const noop = (counts.noop || 0)
-      + (counts.allow || 0)
-      + (counts.noop_budget_exhausted || 0)
-      + (counts.noop_empty_content || 0)
-      + (counts.noop_no_ambient_channel || 0)
-      + (counts.noop_ambient_failed || 0)
-      + (counts.noop_pretool_after_cancel || 0)
+    // Count by shape rather than by enumerating labels. The hand-written
+    // list missed most `noop_*` variants the observer already wrote
+    // (noop_inject_after_inject, noop_cancel_with_pending_tools, the
+    // *_on_result trio) and went stale again with every guard added.
+    const noop = Object.entries(counts).reduce(
+      (sum, [action, n]) =>
+        action === 'allow' || action.startsWith('noop') ? sum + (n || 0) : sum,
+      0,
+    )
     const interventions = (counts.inject || 0) + (counts.cancel || 0)
       + (counts.ambient || 0) + (counts.clarify || 0) + (counts.deny_tool || 0)
     return { total, noop, interventions }

@@ -33,9 +33,14 @@ async def list_observations(
 ) -> dict[str, Any]:
     """Observer observations, newest first.
 
-    Each row: one decision the observer made (action: noop | inject |
-    cancel | ambient | deny_tool | allow), plus the trigger event,
-    reason, and any content (injected text, ambient body, deny reason).
+    Each row: one decision the observer made, plus the trigger event, the
+    reason and any content (injected text, ambient body, clarify question).
+
+    `action` is one of the five levers (noop | inject | cancel | ambient |
+    clarify), `acknowledge_complete`, or a `noop_*` label recording what the
+    observer intended before a guard downgraded it. `deny_tool` and `allow`
+    appear only in rows written before v4, when Inner Voice could still gate
+    tool dispatch.
     """
     try:
         rows = usage_store.list_inner_voice_observations(

@@ -83,6 +83,7 @@ from app.routers._messages_inner_voice import (
     _iv_should_fire_on_turn,
     _inner_voice_hooks_dict,
     attach_observer_for_turn,
+    close_observer,
 )
 
 
@@ -846,6 +847,22 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
             else:
                 logger.error(f"Turn {turn.turn_id} harness error: {e}")
                 await _emit(turn, "error", {"detail": str(e)})
+    finally:
+        # Inner Voice — stop observing this turn, always.
+        #
+        # Non-terminal judgments run as tracked asyncio tasks. A turn that
+        # ends any way other than through the `result` event — the user hit
+        # Stop, the harness raised, the consumer was cancelled — leaves those
+        # tasks running against a dead turn, where they write observation
+        # rows and can append an inject to a `chat_messages` list nobody will
+        # read again. `close_observer` is synchronous by contract: it marks
+        # the state closed and requests cancellation, and the `state.closed`
+        # checks inside each task stop any lever from being applied.
+        if iv_observer_state is not None:
+            try:
+                close_observer(iv_observer_state)
+            except Exception as ce:  # noqa: BLE001 — cleanup must not raise
+                logger.warning(f"close_observer failed for {turn.turn_id}: {ce}")
 
 
 
