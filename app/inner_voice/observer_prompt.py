@@ -492,8 +492,20 @@ def _format_prior_decisions(decisions: list[dict[str, Any]] | None) -> str:
     """Render the observer's prior decisions this turn."""
     if not decisions:
         return ""
+    # Fast-path rows are deterministic bookkeeping — "read-only tool",
+    # "benign result (unsampled)", "tool-dispatch-only iteration". At roughly
+    # eight per iteration they filled all eight slots on turn
+    # 20260905_011748_iv84e4, so every inject that turn was decided against a
+    # history window containing no actual judgment. Show only judged rows and
+    # real interventions.
+    judged = [
+        d for d in decisions
+        if not d.get("fast_path") or d.get("action") not in ("noop", "")
+    ]
+    if not judged:
+        return ""
     lines = ["YOUR PRIOR DECISIONS THIS TURN:"]
-    for d in decisions[-8:]:  # cap at last 8 to keep prompts bounded
+    for d in judged[-8:]:  # cap at last 8 to keep prompts bounded
         trig = d.get("trigger", "?")
         act = d.get("action", "?")
         rsn = (d.get("reason") or "")[:80]
@@ -778,8 +790,13 @@ def build_assistant_message_summary(
     finish_reason: str = "stop",
     goal_card: dict[str, Any] | None = None,
     todos: list[dict[str, Any]] | None = None,
+    silent_streak: int = 0,
 ) -> str:
     """One-line summary of an assistant_message event for review.
+
+    `silent_streak` — consecutive iterations the primary has spent dispatching
+    tools with no user-visible text. Non-zero only when the streak crossed
+    the review threshold and this event was escalated past the fast path.
 
     Includes vLLM's `finish_reason` so IV can distinguish "primary done"
     (`finish_reason=stop` + no tool_calls → harness terminates) from
@@ -802,10 +819,21 @@ def build_assistant_message_summary(
     text_preview = windowed_text(text, 1200)
     if tool_calls:
         names = [tc.get("function", {}).get("name") or tc.get("name") or "?" for tc in tool_calls]
+        streak_block = ""
+        if silent_streak:
+            streak_block = (
+                f"\n\nSILENT STREAK: this is iteration {silent_streak} in a row in "
+                f"which the primary dispatched tools and produced NO user-visible "
+                f"text. It may be working productively and quietly — that is common "
+                f"and fine. Judge whether the tool calls are still converging on the "
+                f"user's request. Inject ONLY if the primary is accumulating context "
+                f"it is not using, or has drifted off the request; a long run of "
+                f"purposeful work is not by itself a problem."
+            )
         return (
             f"Iteration {iteration} finished (finish_reason={finish_reason!r}). "
             f"Text: {text_preview!r}. Tool calls proposed: {names}. "
-            f"Primary will continue after tool dispatch."
+            f"Primary will continue after tool dispatch.{streak_block}"
         )
     if finish_reason == "stop":
         pending_block = _format_pending_todos_block(todos, on_unmet="inject")
@@ -1014,8 +1042,16 @@ def build_tool_result_summary(
     stalled_progress: bool = False,
     tool_calls_since_flip_threshold: int = 0,
     active_todos: list[dict[str, Any]] | None = None,
+    call_preview: str = "",
 ) -> str:
     """One-line summary of a tool_result event for review.
+
+    `call_preview` — what the primary actually ran. Without it this summary
+    was the tool NAME plus 300 chars of the RESULT, and nothing else, which
+    is why the observer on turn 20260905_011748_iv84e4 could not see six
+    reformulations of one search and, judging a docstring in isolation,
+    asserted the primary had "discovered a subliminal injection bug" that it
+    had never mentioned. Intent lives in the arguments.
 
     `todo_flips` (Plan A.5) — when TodoWrite caused an in_progress→completed
     flip, the summary appends a mark-without-evidence check.
@@ -1023,6 +1059,7 @@ def build_tool_result_summary(
     crossed the threshold, append a stalled-progress block asking the
     LLM to judge whether tool activity is on-plan or drifted.
     """
+    called = f"Primary ran: {call_preview!r}. " if call_preview else ""
     extra = _format_mark_without_evidence_block(todo_flips, recent_decisions)
     if stalled_progress:
         extra += _format_stalled_progress_block(
@@ -1031,10 +1068,11 @@ def build_tool_result_summary(
     if not is_error:
         spilled = _format_spilled_summary(tool_name, result_preview)
         if spilled is not None:
-            return spilled + extra
+            return called + spilled + extra
     label = "ERROR" if is_error else "result"
     preview = result_preview[:300] + ("..." if len(result_preview) > 300 else "")
     return (
+        f"{called}"
         f"Tool {tool_name} returned {label}: {preview!r}. "
         f"Primary will see this and decide its next move."
         f"{extra}"

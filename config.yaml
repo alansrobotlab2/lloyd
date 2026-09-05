@@ -7,7 +7,13 @@ agent:
 # stopped the secondary 3 seconds after each backend restart.
 secondary_enabled: true
 inner_voice:
-  model: secondary
+  # Pinned to primary deliberately. `secondary_enabled: true` (2026-09-03,
+  # de893d7) made resolve_model_alias stop rewriting secondary -> primary,
+  # which silently moved the observer from Flash-Next to Qwen3.5-4B. On the
+  # first day it ran there it intervened on 40% of LLM-judged events vs 1.7%
+  # on primary, fabricated a finding the primary never reported, and cancelled
+  # a turn. Revisit only with iv_grade evidence.
+  model: primary
   observer:
     max_tokens: 400
     timeout_seconds: 5
@@ -36,11 +42,31 @@ inner_voice:
     cross_turn_memory_limit: 6
     # Show the primary the goal card it is being judged against.
     goal_card_to_primary: true
+    # Deterministic repetition guard. Compares the identifiers in each
+    # proposed tool call against the recent ones; fires when the same target
+    # is queried `repetition_threshold`+1 times inside `repetition_window`.
+    # Costs no LLM call, so it runs even with pretool judgment off — it is
+    # the only place the observer sees tool ARGUMENTS, and a loop is
+    # invisible in the tool name and result alone.
+    repetition_guard_enabled: true
+    repetition_window: 6
+    repetition_threshold: 2
+    # Escalate an otherwise fast-pathed assistant_message to LLM judgment
+    # after this many consecutive iterations with no user-visible text.
+    # 0 disables. The primary produced 33 in a row on 2026-09-04 and nothing
+    # with a whole-turn view ever looked.
+    silent_iterations_before_review: 10
+    # Minimum primary iterations between two discretionary injects.
+    # bypass_budget injects (stall rescue, repetition) are exempt.
+    inject_cooldown_iterations: 4
   todo_stewardship:
     enabled: true
     completion_gate: true
     mark_without_evidence: true
-    stalled_progress: false
+    # Nudge when the primary has run N tool calls without advancing any todo.
+    # Complements the repetition guard: that one catches re-running the same
+    # query, this one catches busy-but-not-converging with distinct calls.
+    stalled_progress: true
     stalled_after_tool_calls: 5
   goal:
     max_attempts: 10

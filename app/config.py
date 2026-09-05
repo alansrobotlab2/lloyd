@@ -225,13 +225,31 @@ def default_model_base_url() -> str:
     )
 
 
+# Alias rewrites already logged. CONFIG is loaded once at import, so the
+# rewrite decision is fixed for the life of the process; log it once per name
+# rather than on every call from the observer's hot path.
+_ALIAS_REWRITES_LOGGED: set[str] = set()
+
+
 def resolve_model_alias(name: str) -> str:
     """Route 'secondary' → 'primary' when secondary_enabled is false.
 
     Single switch for primary-only deployments. Callers that previously
     hardcoded 'secondary' (or its port) should pass through this helper
     before resolving base_url / model name.
+
+    The rewrite is logged once per name because it is invisible otherwise:
+    Inner Voice's config said `model: secondary` from 2026-05-07 onward and
+    ran on primary the whole time, because `secondary_enabled` was false.
+    When de893d7 flipped that flag on for the autonomy scheduler the observer
+    silently moved to a 4B model, and nothing in any log said so.
     """
     if name == "secondary" and not CONFIG.get("secondary_enabled", False):
+        if name not in _ALIAS_REWRITES_LOGGED:
+            _ALIAS_REWRITES_LOGGED.add(name)
+            logger.info(
+                "model alias 'secondary' -> 'primary' (secondary_enabled is false); "
+                "every caller asking for the secondary slot gets the primary model",
+            )
         return "primary"
     return name

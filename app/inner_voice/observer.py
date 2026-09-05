@@ -62,6 +62,12 @@ class ObserverDecision:
     # discretionary intervention budget: they're not nagging, they prevent a
     # premature turn end, and the harness's max_turns is the real backstop.
     bypass_budget: bool = False
+    # True for deterministic decisions that never consulted the LLM. The
+    # guards' lookback and the observer's prior-decisions prompt block both
+    # skip these: they record that an event happened, not that anything was
+    # judged, and at ~8 fast-path rows per iteration they otherwise crowd
+    # every real decision out of both windows.
+    fast_path: bool = False
     # Forensic / persistence fields
     raw_response: str = ""
     input_tokens: int = 0
@@ -112,6 +118,16 @@ def _observer_cfg() -> dict[str, Any]:
     obs.setdefault("cross_turn_memory_limit", 6)
     # Show the primary the goal card it is being judged against.
     obs.setdefault("goal_card_to_primary", True)
+    # Deterministic repetition guard — see guards.repetition_verdict. Free
+    # (no LLM call), so it runs regardless of pretool_llm_enabled.
+    obs.setdefault("repetition_guard_enabled", True)
+    obs.setdefault("repetition_window", _guards.REPETITION_WINDOW)
+    obs.setdefault("repetition_threshold", _guards.REPETITION_THRESHOLD)
+    # Escalate a fast-pathed assistant_message after this many consecutive
+    # text-free iterations. 0 disables.
+    obs.setdefault("silent_iterations_before_review", 10)
+    # Minimum primary iterations between two discretionary injects.
+    obs.setdefault("inject_cooldown_iterations", 4)
     # vLLM scheduling priority. Lower is HIGHER priority, and the primary
     # runs at 0 — an observer also at 0 competes with the agent it is
     # supposed to be watching rather than yielding to it.
@@ -600,11 +616,11 @@ def _fast_path_pretool(tool_name: str, tool_args: dict) -> ObserverDecision | No
     if not tool_name:
         return None
     if tool_name in _FAST_ALLOW_TOOL_NAMES:
-        return ObserverDecision(action="noop", reason="fast-path: read-only tool")
+        return ObserverDecision(action="noop", reason="fast-path: read-only tool", fast_path=True)
     if tool_name == "Bash":
         cmd = (tool_args.get("command") or "") if isinstance(tool_args, dict) else ""
         if _bash_command_is_safely_readonly(cmd):
-            return ObserverDecision(action="noop", reason="fast-path: read-only Bash")
+            return ObserverDecision(action="noop", reason="fast-path: read-only Bash", fast_path=True)
         return None
     # MCP tools: fast-noop when the name reads as a query AND args are
     # small (large args are usually writes). Names are bare (no
@@ -615,7 +631,7 @@ def _fast_path_pretool(tool_name: str, tool_args: dict) -> ObserverDecision | No
     if tokens & _SAFE_TOOL_NAME_KEYWORDS:
         args_str = json.dumps(tool_args, default=str) if isinstance(tool_args, dict) else str(tool_args)
         if len(args_str) < 1000:
-            return ObserverDecision(action="noop", reason="fast-path: read-shaped MCP tool")
+            return ObserverDecision(action="noop", reason="fast-path: read-shaped MCP tool", fast_path=True)
     return None
 
 
@@ -649,13 +665,23 @@ def _fast_path_tool_result(
         if "Tool call arguments could not be parsed as JSON" in content:
             return ObserverDecision(
                 action="noop", reason="fast-path: parse-error, primary will retry",
+                fast_path=True,
             )
         return None
     if len(content) >= escalate_bytes:
         return None
+    # A result that returned normally but reports the work did not happen.
+    # `Task` returning `{"response": "\n[stopped: max_turns]"}` is 300 bytes
+    # with is_error False, so both the size rule and the sampler skipped it
+    # and the observer never learned that a four-minute subagent produced
+    # nothing. Always escalate — these are rare and always material.
+    if _guards.looks_like_failure_payload(content):
+        return None
     if sample_every > 0 and benign_seen % sample_every == 0:
         return None  # sampled for LLM judgment
-    return ObserverDecision(action="noop", reason="fast-path: benign result (unsampled)")
+    return ObserverDecision(
+        action="noop", reason="fast-path: benign result (unsampled)", fast_path=True,
+    )
 
 
 # Stall detection lives in `guards.py` now. These aliases keep the old
@@ -663,8 +689,18 @@ def _fast_path_tool_result(
 _STUB_ANNOUNCE_RE = _guards._STUB_ANNOUNCE_RE
 _STALL_RESCUE_CONTENT = _guards.STALL_RESCUE_CONTENT
 
+# Signatures retained for repetition comparison. One more than the widest
+# comparison window so the window is always fully populated.
+_REPETITION_RING = 16
 
-def _fast_path_assistant_message(text: str, tool_calls: list) -> ObserverDecision | None:
+
+def _fast_path_assistant_message(
+    text: str,
+    tool_calls: list,
+    *,
+    silent_streak: int = 0,
+    silent_streak_limit: int = 0,
+) -> ObserverDecision | None:
     """Cheap deterministic decision for assistant messages that don't need
     LLM judgment.
 
@@ -684,9 +720,19 @@ def _fast_path_assistant_message(text: str, tool_calls: list) -> ObserverDecisio
        next iteration is rescued again rather than left to die.
     """
     if tool_calls and not text.strip():
+        # ...unless the primary has been silent for a long run. The stated
+        # rationale for this fast path is that the pretool gate already
+        # judged each call, but pretool LLM judgment is off by default since
+        # v5 — so on a turn where the primary never speaks, nothing with a
+        # whole-turn view ever reaches the LLM. Escalating on a streak costs
+        # one observer call per `silent_streak_limit` iterations and is the
+        # only way `response_chars: 0` at iteration 30 becomes visible.
+        if silent_streak_limit > 0 and silent_streak >= silent_streak_limit:
+            return None
         return ObserverDecision(
             action="noop",
-            reason="fast-path: tool-dispatch-only iteration; pretool gate handles it",
+            reason="fast-path: tool-dispatch-only iteration",
+            fast_path=True,
         )
     if not tool_calls and _guards.is_terminal_stall(text):
         return ObserverDecision(
@@ -868,6 +914,19 @@ class ObserverState:
     prior_todo_status: dict[str, str] = field(default_factory=dict)
     todo_stewardship_cfg: dict[str, Any] = field(default_factory=dict)
     tool_calls_since_last_flip: int = 0
+    # Bounded ring of recent tool-call signatures, appended at pretool. Feeds
+    # the deterministic repetition guard (which needs the ARGUMENTS — a loop
+    # is invisible in the tool name and the result alone) and supplies the
+    # command text that `build_tool_result_summary` shows the observer.
+    # Cleared when the repetition guard fires, so re-firing needs a fresh
+    # cluster of near-duplicates rather than the same one twice.
+    recent_tool_calls: list[_guards.ToolCallSignature] = field(default_factory=list)
+    # Consecutive tool-dispatch-only iterations — the primary working with
+    # its mouth shut. On turn 20260905_011748_iv84e4 every one of 33
+    # iterations was text-free (`response_chars: 0`) and the assistant_message
+    # fast path noop'd all 33, so the only trigger with a whole-turn view
+    # never once reached the LLM.
+    silent_iterations: int = 0
     # Plan B — committed plan artifact (or None when no plan exists or
     # the session is currently in plan_mode without a prior commit).
     # Shape mirrors `session.plan`: {plan_mode, plan_md_path, stages,
@@ -1145,6 +1204,7 @@ async def _persist(
         "action": decision.action,
         "reason": decision.reason,
         "related_tool": related_tool,
+        "fast_path": decision.fast_path,
     })
 
 
@@ -1501,6 +1561,45 @@ def _apply_decision_guards(
         ).strip()
         return
 
+    # Inject cooldown. The suppressor above enforces a one-iteration gap and
+    # only against the immediately preceding judged decision; it cannot stop
+    # the observer from injecting, noop-ing once, and injecting again. On turn
+    # 20260905_011748_iv84e4 that pattern spent the whole budget of 3 in 88
+    # seconds — the second inject landed three iterations after the first, on
+    # a primary that had already acted on it — leaving nothing but `cancel`
+    # when the drift actually continued. Deterministic and stall-rescue
+    # injects set bypass_budget and are exempt: they are specific and
+    # self-limiting, and rationing them is what leaves a turn stuck.
+    if (
+        decision.action == "inject"
+        and not decision.bypass_budget
+        and not is_terminal
+        and _guards.inject_on_cooldown(
+            state.decisions_this_turn,
+            cooldown_iterations=int(state.cfg.get("inject_cooldown_iterations", 4)),
+        )
+    ):
+        since = _guards.iterations_since_last_inject(state.decisions_this_turn)
+        logger.info(
+            "[iv.observer] inject on cooldown session=%s turn=%s trigger=%s "
+            "iterations_since_last=%s reason=%r",
+            state.session_id, state.turn_id, trigger, since, decision.reason,
+        )
+        _event_log.log_event(
+            state.session_id,
+            "inner_voice.inject_on_cooldown",
+            {"trigger": trigger, "reason": decision.reason,
+             "content": decision.content, "iterations_since_last_inject": since},
+            turn_id=state.turn_id,
+        )
+        decision.action = "noop_inject_on_cooldown"
+        decision.reason = (
+            (decision.reason or "")
+            + f" [suppressed: only {since} primary iterations since the last "
+            "inject; let the previous nudge play out before spending more budget]"
+        ).strip()
+        return
+
     # Cancel-for-completion. The harness terminates naturally on a
     # text-only iteration, so a cancel that justifies itself with "the
     # task is complete" only adds a red breadcrumb to a turn that worked.
@@ -1628,6 +1727,14 @@ def install_observer(
     async_nonterminal = bool(cfg.get("async_nonterminal", True))
     sample_every = int(cfg.get("tool_result_sample_every", 5))
     escalate_bytes = int(cfg.get("tool_result_escalate_bytes", 20000))
+    repetition_enabled = bool(cfg.get("repetition_guard_enabled", True))
+    repetition_window = int(cfg.get("repetition_window", _guards.REPETITION_WINDOW))
+    repetition_threshold = int(
+        cfg.get("repetition_threshold", _guards.REPETITION_THRESHOLD)
+    )
+    silent_limit = int(cfg.get("silent_iterations_before_review", 10))
+    # `inject_cooldown_iterations` is read from `state.cfg` inside
+    # `_apply_decision_guards`, which is module-level; no local needed.
 
     def _spawn(coro) -> None:
         """Run a non-terminal judgment off the harness's critical path.
@@ -1682,6 +1789,45 @@ def install_observer(
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input") or {}
 
+        # Tier 0: deterministic repetition guard. This is the only place the
+        # observer ever sees tool ARGUMENTS, and a loop lives entirely in the
+        # arguments — same tool, same target, endlessly reworded. It costs no
+        # LLM call, so it runs even though pretool judgment is otherwise off.
+        state.recent_tool_calls.append(
+            _guards.tool_call_signature(tool_name, tool_input)
+        )
+        if len(state.recent_tool_calls) > _REPETITION_RING:
+            del state.recent_tool_calls[:-_REPETITION_RING]
+        if repetition_enabled:
+            rep = _guards.repetition_verdict(
+                state.recent_tool_calls,
+                window=repetition_window,
+                threshold=repetition_threshold,
+            )
+            if rep is not None:
+                # Clearing the ring is the rate limit: another inject needs a
+                # fresh cluster of near-duplicates, not the same one re-judged.
+                state.recent_tool_calls = []
+                decision = ObserverDecision(
+                    action="inject",
+                    reason=(
+                        f"deterministic: {rep.repeats + 1} near-identical "
+                        f"{tool_name} calls for {', '.join(rep.shared_terms[:4])}"
+                    ),
+                    content=_guards.repetition_inject_content(rep),
+                    # Like stall rescue, this prevents a pathological outcome
+                    # rather than nagging, and it is the observer's most
+                    # reliable signal — it never guesses at intent.
+                    bypass_budget=True,
+                )
+                await _apply_lever(
+                    state, decision, trigger="pretool", related_tool=tool_name,
+                )
+                await _persist(
+                    state, decision, trigger="pretool", related_tool=tool_name,
+                )
+                return {}
+
         # Tier 1: cheap deterministic noop for benign tools — saves an LLM
         # call. The harness will dispatch the tool either way.
         fp = _fast_path_pretool(tool_name, tool_input) if fast_path_enabled else None
@@ -1701,6 +1847,7 @@ def install_observer(
         if not pretool_llm_enabled:
             decision = fp or ObserverDecision(
                 action="noop", reason="observation-only: pretool LLM disabled",
+                fast_path=True,
             )
             await _persist(state, decision, trigger="pretool", related_tool=tool_name)
             return {}
@@ -1764,11 +1911,28 @@ def install_observer(
                 # its decision is visible to the guards below.
                 await _drain_pending()
 
+            # Track the run of iterations with no user-visible text. Reset
+            # the moment the primary says anything.
+            if tool_calls and not text.strip():
+                state.silent_iterations += 1
+            else:
+                state.silent_iterations = 0
+
             # Tier 1: cheap noop for tool-dispatch-only iterations. The
             # pretool trigger already saw each proposed tool with its real
             # args — running an LLM here too is duplicate work.
+            escalated_silent_streak = 0
             if fast_path_enabled:
-                fp = _fast_path_assistant_message(text, tool_calls)
+                fp = _fast_path_assistant_message(
+                    text, tool_calls,
+                    silent_streak=state.silent_iterations,
+                    silent_streak_limit=silent_limit,
+                )
+                if fp is None and tool_calls and not text.strip():
+                    # Escalated on the silent streak. Re-arm so the next
+                    # review is another full streak away, not every iteration.
+                    escalated_silent_streak = state.silent_iterations
+                    state.silent_iterations = 0
                 if fp is not None:
                     # A stub-announce stall returns an inject — apply it so it
                     # appends to chat_messages and the loop continues this turn.
@@ -1791,6 +1955,7 @@ def install_observer(
                 iteration, text, tool_calls, finish_reason,
                 goal_card=state.goal_card,
                 todos=todos_for_gate,
+                silent_streak=escalated_silent_streak,
             )
 
             async def _judge_assistant_message() -> None:
@@ -1931,6 +2096,14 @@ def install_observer(
             # true, a stalled-progress block is appended asking the LLM
             # to inject if the primary is busy but not advancing the
             # committed plan.
+            # The call that produced this result. tool_result events carry
+            # no arguments, so recover them from the signature ring the
+            # pretool hook fills — most recent entry for this tool name.
+            call_preview = ""
+            for sig in reversed(state.recent_tool_calls):
+                if sig.tool == tool_name:
+                    call_preview = sig.preview
+                    break
             summary = _prompt.build_tool_result_summary(
                 tool_name, content, is_error,
                 todo_flips=todo_flips,
@@ -1940,6 +2113,7 @@ def install_observer(
                     ts_cfg.get("stalled_after_tool_calls", 5)
                 ) if stalled_fired else 0,
                 active_todos=state.todos if stalled_fired else None,
+                call_preview=call_preview,
             )
 
             async def _judge_tool_result() -> None:
