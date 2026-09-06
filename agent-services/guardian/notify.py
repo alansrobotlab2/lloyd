@@ -118,10 +118,15 @@ class Notifier:
                      f"    git cherry-pick {commit}\n")
         if tag:
             body += f"The pre-rollback tree is tagged `{tag}`.\n"
+        # Field names match app/routers/backlog.py::backlog_task_create, which
+        # takes `name`/`description`/`status`, NOT title/body. Sending the wrong
+        # keys does not error — the endpoint defaults `name` to "New Task" and
+        # returns 2xx, so the alert reads as delivered while filing a task that
+        # says nothing. `status` must be one of _VALID_STATUSES.
         payload = json.dumps({
-            "title": f"[guardian] {title}"[:200],
-            "body": body[:6000],
-            "board": "lloyd",
+            "name": f"[guardian] {title}"[:120],
+            "description": body[:6000],
+            "status": "up_next",
             "priority": "high",
         }).encode()
         req = urllib.request.Request(
@@ -130,6 +135,11 @@ class Notifier:
         )
         try:
             with urllib.request.urlopen(req, timeout=5.0) as resp:
-                return 200 <= resp.status < 300
+                if not (200 <= resp.status < 300):
+                    return False
+                created = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+                # A 2xx with a defaulted name means the payload contract drifted.
+                name = str(created.get("name") or created.get("task", {}).get("name") or "")
+                return "guardian" in name.lower() if name else True
         except (urllib.error.URLError, OSError, ValueError):
             return False
