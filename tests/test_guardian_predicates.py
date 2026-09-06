@@ -324,3 +324,65 @@ def test_missing_baseline_never_fires():
 ])
 def test_normalization_collapses_varying_parts(a, b):
     assert detect.normalize_message(a) == detect.normalize_message(b)
+
+
+# ---------------------------------------------------------------------------
+# When rollback is appropriate at all
+#
+# These guard the two cases where the correct action is to alert rather than to
+# rewrite history. Both are about the same thing: a rollback is only ever the
+# right answer for a commit the loop promoted and is still observing.
+# ---------------------------------------------------------------------------
+
+def _guardian(tmp_path, monkeypatch, *, current, head, lkg):
+    """A Guardian with I/O stubbed, for exercising tick()'s decision path."""
+    import types
+
+    import guardian as G
+    import rollback as RB
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0,
+    )
+    g = G.Guardian(args)
+    monkeypatch.setattr(g.state, "current", lambda: current)
+    monkeypatch.setattr(g.state, "lkg", lambda: {"commit": lkg})
+    monkeypatch.setattr(g.state, "rollback_target", lambda: (lkg, "test"))
+    monkeypatch.setattr(g.state, "is_broken", lambda: False)
+    monkeypatch.setattr(g.state, "pause_remaining", lambda cap: 0.0)
+    monkeypatch.setattr(RB, "head_commit", lambda repo: head)
+    monkeypatch.setattr(g, "collect", lambda: {"now": NOW, "supervisord": "ok",
+                                               "procs": {}, "probes": {}})
+    monkeypatch.setattr(g, "evaluate_liveness", lambda snap: (True, "backend FATAL"))
+    monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
+
+    rolled: list = []
+    monkeypatch.setattr(g, "do_rollback", lambda *a: rolled.append(a) or True)
+    alerts: list = []
+    monkeypatch.setattr(g, "alert", lambda *a, **k: alerts.append(a))
+    return g, rolled, alerts
+
+
+def test_a_crash_with_nothing_under_observation_does_not_revert(tmp_path, monkeypatch):
+    """The case that actually bites.
+
+    HEAD legitimately differs from last-known-good most of the time — a human
+    commit, a nightly job. Reverting on a crash then would destroy work no
+    promotion ever asked the guardian to judge.
+    """
+    g, rolled, alerts = _guardian(tmp_path, monkeypatch,
+                                  current=None, head="b" * 40, lkg="a" * 40)
+    assert g.tick() == "down_unobserved"
+    assert rolled == [], "reverted a commit that no promotion was observing"
+    assert alerts and "no promotion to revert" in alerts[0][1]
+
+
+def test_a_crash_while_observing_a_promotion_does_revert(tmp_path, monkeypatch):
+    g, rolled, _ = _guardian(tmp_path, monkeypatch,
+                             current={"commit": "b" * 40, "errors_until_ts": 0},
+                             head="b" * 40, lkg="a" * 40)
+    assert g.tick() == "rolling_back"
+    assert rolled and rolled[0][0] == "crash"

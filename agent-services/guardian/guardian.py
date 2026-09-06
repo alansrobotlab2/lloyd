@@ -449,12 +449,28 @@ class Guardian:
                 log(f"[paused {paused:.0f}s] would have fired: {live_reason}")
             return "paused"
 
+        current = self.state.current()
+
         if live_down:
+            # Rollback is only ever appropriate for a commit the LOOP promoted
+            # and is still observing. With no `current.json` the tree moved for
+            # some other reason — a human commit, a nightly job — and reverting
+            # that would destroy work nobody asked us to judge. Same reasoning
+            # as invariant 1 (HEAD == LKG never rolls back), and it is the case
+            # that actually bites: HEAD legitimately differs from LKG most of
+            # the time.
+            if not current:
+                log(f"liveness failure with nothing under observation: {live_reason}")
+                self.alert("error", "Service down, but no promotion to revert",
+                           f"{live_reason}\n\nHEAD is "
+                           f"{(rb.head_commit(self.repo) or '?')[:8]} and no self-modification "
+                           "is being observed, so this is infrastructure rather than a bad "
+                           "change. Not rewriting history — this needs a human.")
+                return "down_unobserved"
             log(f"liveness failure: {live_reason}")
             self.do_rollback("crash", live_reason)
             return "rolling_back"
 
-        current = self.state.current()
         if not current:
             return "armed"
 

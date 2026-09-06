@@ -94,9 +94,20 @@ def run_drill(round_id: str, worktree: Path, base: str, *,
         time.sleep(12)   # let supervisord give up and park it
 
         # Sanity: the drill is worthless if the build did not actually break.
+        # Parse per line — a naive substring check reads the *aggregator* being
+        # RUNNING as the backend being RUNNING.
         st = canary.ctl("status")
-        if "RUNNING" in st.stdout and "lloyd-backend" in st.stdout.split("RUNNING")[0]:
-            return False, "drill setup failed: the deliberately broken build started anyway"
+        backend_state = ""
+        for line in st.stdout.splitlines():
+            parts = line.split()
+            if parts and parts[0].endswith("lloyd-backend"):
+                backend_state = parts[1] if len(parts) > 1 else ""
+                break
+        if backend_state == "RUNNING":
+            return False, ("drill setup failed: the deliberately broken build started "
+                           f"anyway (state={backend_state})\n{st.stdout}")
+        if not backend_state:
+            return False, f"drill setup failed: no backend in canary status\n{st.stdout}"
 
         guardian_src = worktree / "agent-services" / "guardian" / "guardian.py"
         if not guardian_src.exists():

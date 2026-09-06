@@ -11,6 +11,10 @@
 Description=Lloyd self-modification guardian (rollback watchdog)
 After=agent-supervisord.service
 Wants=agent-supervisord.service
+# In [Unit], not [Service] — systemd silently ignores it in [Service] ("Unknown
+# key ... ignoring") and the default 5-starts-in-10s limit then applies, which
+# would let the watchdog rate-limit ITSELF into a failed state. 0 = never.
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
@@ -25,8 +29,6 @@ ExecStartPre=-/home/alansrobotlab/lloyd/agent-services/bin/guardian-stage.sh
 ExecStart=/usr/bin/python3 %h/.local/state/lloyd-guardian/bin/guardian.py
 Restart=always
 RestartSec=5
-# Never give up. A watchdog that can permanently park itself is not a watchdog.
-StartLimitIntervalSec=0
 # Catches a HUNG guardian, which supervisord could not. The loop pings
 # WATCHDOG=1 every tick (5s), so 90s is ~18 missed ticks.
 WatchdogSec=90
