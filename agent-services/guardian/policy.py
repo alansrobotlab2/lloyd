@@ -144,5 +144,8 @@ SUPERVISOR_SOCK = _os.environ.get("LLOYD_SUPERVISOR_SOCK", "/tmp/agent-superviso
 SUPERVISOR_RPC_TIMEOUT = 45.0
 SUPERVISORD_UNIT = "agent-supervisord.service"
 
+# Suppress an identical alert title repeating inside this window.
+ALERT_REPEAT_SECONDS = 900.0
+
 SELFTEST_INTERVAL_SECONDS = 24 * 3600.0
 HEARTBEAT_NAME = "heartbeat.json"

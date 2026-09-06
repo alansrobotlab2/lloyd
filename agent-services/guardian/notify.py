@@ -39,11 +39,21 @@ def _run(cmd: list[str], timeout: float = 5.0) -> bool:
 
 class Notifier:
     def __init__(self, *, ledger: Path, state_dir: Path, vault_root: str,
-                 backend_url: str = "http://127.0.0.1:8080"):
+                 backend_url: str = "http://127.0.0.1:8080",
+                 external: bool = True):
         self.ledger = ledger
         self.state_dir = Path(state_dir)
         self.vault_root = Path(vault_root)
         self.backend_url = backend_url.rstrip("/")
+        # When False, only the two channels scoped to this guardian's own state
+        # dir fire (ledger, ALERT.md). The drill runs a real guardian against a
+        # throwaway repo, and without this its test rollbacks land in the live
+        # vault daily note and file real backlog tasks — indistinguishable from
+        # production incidents. That actually happened: two drill rollbacks
+        # (26574f87, ddd6d1d0) were written to the 2026-09-06 daily note naming
+        # commits that exist only in a deleted scratch clone, and reading that
+        # note later suggested the audit trail had lost events.
+        self.external = external
 
     def alert(self, level: str, title: str, body: str, *, evidence: str = "",
               commit: str = "", trigger: str = "", tag: str = "") -> dict:
@@ -54,9 +64,11 @@ class Notifier:
             text += f"\n\n--- evidence ---\n{evidence[:4000]}"
 
         results["ledger"] = self._ledger(level, title, body, evidence, commit, trigger, tag)
+        results["alert_file"] = self._alert_file(level, title, text)
+        if not self.external:
+            return results
         results["journal"] = self._journal(level, f"{title} :: {body}")
         results["desktop"] = self._desktop(level, title, body)
-        results["alert_file"] = self._alert_file(level, title, text)
         results["vault"] = self._vault_note(title, text)
         if level == "critical" or trigger:
             results["backlog"] = self._backlog_task(title, text, commit, tag)

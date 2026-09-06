@@ -122,6 +122,8 @@ def run_drill(round_id: str, worktree: Path, base: str, *,
              "--backend-url", canary.backend_health,
              "--mcp-url", canary.mcp_health,
              "--programs", "lloyd-mc:lloyd-backend,lloyd-mc:lloyd-mcp",
+             # A rehearsal must not be able to look like a production incident.
+             "--no-external-alerts",
              "--once"],
             capture_output=True, text=True, timeout=budget,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
