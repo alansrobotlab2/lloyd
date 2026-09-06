@@ -28,7 +28,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from app.config import service_url
-from app.harness.errors import ToolDispatchError
+from app.harness.errors import ToolDiscoveryError, ToolDispatchError
 
 logger = logging.getLogger("lloyd-harness-mcp-pool")
 
@@ -169,6 +169,7 @@ class MCPPool:
             # stateless protocol each call brings its own context, and a
             # connection held open across tasks is precisely what made the
             # anyio cancel scopes fragile.
+            failed: list[str] = []
             for server_name, cfg in self._http_configs.items():
                 try:
                     async with self._http_session(cfg) as session:
@@ -177,6 +178,7 @@ class MCPPool:
                     logger.warning(
                         "mcp_pool: failed to discover %s: %s", server_name, exc
                     )
+                    failed.append(server_name)
                     continue
                 self._register(server_name, tools)
 
@@ -191,6 +193,31 @@ class MCPPool:
                     err = self._open_error
                     self._open_error = None
                     raise err
+
+            # Checked after BOTH transports have had their turn, so a failed
+            # HTTP server does not mask a healthy stdio one.
+            #
+            # One broken server among several must not take the whole tool
+            # surface down — that is what `continue` above is for. But a
+            # pool that discovered NOTHING is not degraded, it is useless,
+            # and marking it `_opened` caches that uselessness process-wide
+            # forever: `get_or_open_pool` short-circuits on `_opened`, and
+            # nothing else ever retries discovery.
+            #
+            # The cost of getting this wrong is not an obvious outage. An
+            # empty catalog makes `client.stream_chat` omit `tools` from the
+            # request, so vLLM never engages the tool parser, and the model
+            # degrades into narrating tool calls as prose instead of making
+            # them (2026-09-06, twice in one afternoon, ~30 min each).
+            #
+            # Raise instead: `get_or_open_pool` already evicts a pool whose
+            # `open()` raises, so the next caller rebuilds and re-discovers.
+            if failed and not self._tool_routes:
+                raise ToolDiscoveryError(
+                    "MCP discovery yielded no tools; "
+                    f"failed server(s): {', '.join(failed)}",
+                    servers=failed,
+                )
             self._opened = True
 
     def _register(self, server_name: str, tools: list[dict[str, Any]]) -> None:

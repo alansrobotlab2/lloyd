@@ -79,3 +79,34 @@ class StreamStalledError(HarnessError):
         )
         self.timeout_s = timeout_s
         self.lines_seen = lines_seen
+
+
+class ToolDiscoveryError(HarnessError):
+    """The MCP pool came up with no tools at all.
+
+    Raised by ``MCPPool.open()`` when every configured server failed
+    discovery, and by the agent loop when the advertised catalog is
+    empty. Both are the same latent failure and it is worth naming:
+
+    ``open()`` used to log a warning, ``continue``, and then set
+    ``_opened = True`` regardless. A pool that lost its only server to a
+    transient error (the aggregator restarting, say) was therefore cached
+    process-wide, by ``get_or_open_pool``, as a permanently *empty* pool.
+    Nothing ever retried discovery, so every later turn built an empty
+    catalog, and ``client.stream_chat`` omits ``tools`` entirely when the
+    list is falsy — which means vLLM never engages the ``qwen3_xml`` tool
+    parser. The model reasons its way to "call Bash", has no way to emit
+    a tool call, and either stops with an empty message or writes the
+    call out as prose. On 2026-09-06 that ran for ~30 minutes across two
+    windows and looked, from the outside, like the model had forgotten
+    how to use tools.
+
+    Raising instead of degrading matters because ``get_or_open_pool``
+    already evicts a pool whose ``open()`` raises — so the very next
+    caller rebuilds and re-discovers. The recovery path existed; only
+    something had to actually fail for it to run.
+    """
+
+    def __init__(self, message: str, *, servers: list[str] | None = None):
+        super().__init__(message)
+        self.servers = servers or []

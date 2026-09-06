@@ -182,6 +182,36 @@ user turn (`load_and_compact_session`), which does not carry per-iteration
 reasoning, so the window resets at every turn boundary. That is where the cost
 was anyway — the motivating turn ran 52 iterations inside one turn.
 
+**An empty tool pool is the worst failure in the system.** `client.stream_chat`
+omits `tools` from the request when the list is falsy, so vLLM never engages
+the `qwen3_xml` tool parser. The model still reads its whole toolbox in the
+system prompt, reasons its way to "call Bash", and then has no channel to emit
+a tool call on. What comes out is an empty message, or the call written as
+prose (`{"name":"Bash","input":...}` — an Anthropic shape that appears nowhere
+in this repo), or invented tool *output*. Nothing in the stream says "no
+tools"; it reads exactly like the model having forgotten how to use them, and
+Inner Voice's only lever — injecting more text — cannot help, because the
+intent was never missing, the capability was.
+
+`MCPPool.open()` used to log a warning, `continue`, and set `_opened = True`
+even when its only server failed discovery. `get_or_open_pool` caches
+process-wide and short-circuits on `_opened`, so one transient error (the
+aggregator restarting) pinned an empty pool for the life of the backend.
+`open()` now raises `ToolDiscoveryError` when discovery yields nothing, which
+makes `get_or_open_pool`'s **existing** eviction path fire so the next caller
+re-discovers — the recovery already existed, nothing ever failed loudly enough
+to trigger it. A *partial* failure still degrades gracefully; that is what the
+`continue` is for. `run_query` refuses a turn whose pool advertised nothing.
+
+Two things this cost on 2026-09-06, both invisible as tool failures:
+a 30-minute chat where Lloyd narrated `sqlite3` commands instead of running
+them, and four `domain-research` jobs killed at the 600s cap — a toolless
+research job cannot research, so it spins until the timer. The same job
+finished in 17s once tools came back. `tests/test_mcp_pool_discovery_failure.py`
+pins it. The tell in the log is `no server claims tool '_BackgroundTaskDrain'`
+firing right after `mcp_pool: failed to discover` — the drain shares the pool,
+so it is the cheapest early warning that every turn has gone toolless.
+
 **Stream stalls**: `harness.stream_chunk_timeout_seconds` bounds the gap
 *between* SSE lines once the engine has started producing, raising
 `StreamStalledError`. It deliberately does **not** bound time-to-first-line:

@@ -22,7 +22,12 @@ from typing import Any, AsyncIterator
 
 from app.harness import events
 from app.harness.client import stream_chat
-from app.harness.errors import ContextOverflowError, ParseError, ToolDispatchError
+from app.harness.errors import (
+    ContextOverflowError,
+    ParseError,
+    ToolDiscoveryError,
+    ToolDispatchError,
+)
 from app.harness.microcompact import microcompact as _intra_microcompact
 from app.harness.tool_result_spill import (
     fallback_for_empty_result,
@@ -122,6 +127,27 @@ async def run_query(
     # pools at FastAPI shutdown.
     try:
         catalog = build_tool_list(list(pool.discovered), set(options.disallowed_tools))
+        # A turn with no tools is not a degraded turn, it is a broken one,
+        # and it fails in the least legible way available: `stream_chat`
+        # omits `tools` from the request when the list is empty, vLLM
+        # therefore never engages its tool parser, and the model — which
+        # can still read its whole toolbox in the system prompt — reasons
+        # its way to "call Bash" and then has no channel to do it on. What
+        # comes out is an empty message, or the tool call written as prose,
+        # or invented tool *output*. Nothing in the stream says "no tools";
+        # it reads as the model having forgotten how to use them.
+        #
+        # `pool.discovered` empty means discovery, not config, is at fault:
+        # disabling all 130 tools via `disallowed_tools` would still leave
+        # `discovered` populated. Fail loudly so the turn surfaces an error
+        # instead of silently hallucinating for half an hour (2026-09-06).
+        if not any(tools for _srv, tools in pool.discovered):
+            raise ToolDiscoveryError(
+                "MCP pool advertised no tools — refusing to run a toolless "
+                "turn (the model would narrate tool calls instead of making "
+                "them). Check the lloyd-mcp aggregator on :8500.",
+                servers=sorted(options.mcp_servers or {}),
+            )
         # Record the tool universe so plan mode can derive its gate from
         # tool annotations rather than a hardcoded name list. Uses the
         # unfiltered discovery, not `catalog` — a tool disabled in config
