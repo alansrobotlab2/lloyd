@@ -68,6 +68,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _loads_or_none(raw: Any) -> Optional[dict]:
+    """Parse a JSON column, tolerating NULL and anything unparseable.
+
+    A malformed triage blob must not make a queue row unreadable — the row is
+    the work, the triage is a note about it.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 @dataclass
 class QueueItem:
     id: int
@@ -84,6 +99,8 @@ class QueueItem:
     completed_at: Optional[str]
     error: Optional[str]
     not_before: Optional[str] = None
+    triaged_at: Optional[str] = None
+    triage: Optional[dict] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "QueueItem":
@@ -102,6 +119,8 @@ class QueueItem:
             completed_at=row["completed_at"],
             error=row["error"],
             not_before=(row["not_before"] if "not_before" in row.keys() else None),
+            triaged_at=(row["triaged_at"] if "triaged_at" in row.keys() else None),
+            triage=(_loads_or_none(row["triage_json"]) if "triage_json" in row.keys() else None),
         )
 
     def to_dict(self) -> dict:
@@ -119,6 +138,8 @@ class QueueItem:
             "claimed_by": self.claimed_by,
             "completed_at": self.completed_at,
             "error": self.error,
+            "triaged_at": self.triaged_at,
+            "triage": self.triage,
         }
 
 
@@ -158,6 +179,14 @@ class WorkQueue:
             run_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
             if "meta_json" not in run_cols:
                 conn.execute("ALTER TABLE runs ADD COLUMN meta_json TEXT")
+            # Additive migration: poison-sweep bookkeeping. `triage_json` carries
+            # the revive budget across a re-poisoning — mark_failed rewrites
+            # state and error but leaves these alone, which is what stops a
+            # revived-then-failed item from being revived forever.
+            if "triaged_at" not in cols:
+                conn.execute("ALTER TABLE queue ADD COLUMN triaged_at TEXT")
+            if "triage_json" not in cols:
+                conn.execute("ALTER TABLE queue ADD COLUMN triage_json TEXT")
             conn.commit()
         logger.info("workers.db initialized at %s", self.db_path)
 
@@ -343,6 +372,73 @@ class WorkQueue:
                 logger.info("Recovered %d claimed/running items to queued", n)
             return n
 
+    # ── Poison triage (see workers/maintenance.py) ────────────────────────
+
+    def revive(
+        self,
+        item_id: int,
+        *,
+        attempts: int,
+        delay_seconds: float,
+        triage: dict | None = None,
+    ) -> bool:
+        """Return a poisoned item to `queued` for a bounded retry.
+
+        `attempts` is set explicitly rather than reset to 0: the sweep hands an
+        item exactly one more claim, not a fresh budget of `max_attempts`. A
+        job with a 600s cap given three fresh tries is half an hour of GPU
+        spent on a guess about a failure nobody has diagnosed yet.
+
+        The `dedup_key` is already gone (mark_failed NULLs it on poison) and
+        cannot be restored, so a revive cannot coalesce against whatever the
+        source enqueued in the meantime — callers must check `has_open_sibling`
+        first or the sweep becomes a duplicate-work generator.
+        """
+        not_before = (
+            datetime.now(timezone.utc) + timedelta(seconds=max(0.0, delay_seconds))
+        ).isoformat()
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE queue SET state='queued', attempts=?, claimed_at=NULL, "
+                "claimed_by=NULL, completed_at=NULL, not_before=?, "
+                "triaged_at=?, triage_json=? WHERE id=? AND state='poisoned'",
+                (int(attempts), not_before, _now_iso(),
+                 json.dumps(triage or {}, default=str), item_id),
+            )
+            conn.commit()
+            return bool(cur.rowcount)
+
+    def quarantine(self, item_id: int, triage: dict | None = None) -> bool:
+        """Move a poisoned item to the terminal `quarantined` state.
+
+        Quarantine is a distinct state rather than a flag on `poisoned` so that
+        `poisoned` keeps meaning "needs attention". An alarm that also counts
+        every row already looked at stops being an alarm.
+        """
+        now = _now_iso()
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE queue SET state='quarantined', "
+                "completed_at=COALESCE(completed_at, ?), dedup_key=NULL, "
+                "triaged_at=?, triage_json=? WHERE id=? AND state='poisoned'",
+                (now, now, json.dumps(triage or {}, default=str), item_id),
+            )
+            conn.commit()
+            return bool(cur.rowcount)
+
+    def has_open_sibling(
+        self, source: str, kind: str, payload: dict, exclude_id: int
+    ) -> bool:
+        """True if an equivalent item is already queued, claimed or running."""
+        payload_json = json.dumps(payload or {}, ensure_ascii=False, default=str)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM queue WHERE source=? AND kind=? AND payload_json=? "
+                "AND id<>? AND state IN ('queued','claimed','running') LIMIT 1",
+                (source, kind, payload_json, exclude_id),
+            ).fetchone()
+            return row is not None
+
     # ── Inspection ────────────────────────────────────────────────────────
 
     def get(self, item_id: int) -> Optional[QueueItem]:
@@ -455,6 +551,24 @@ class WorkQueue:
                 (source, key),
             ).fetchone()
             return row["value"] if row else None
+
+    def wm_all(self, source: str) -> dict[str, str]:
+        """Every watermark under one source. Used by the poison sweep to walk
+        and prune its per-signature tallies."""
+        with self._connect() as conn:
+            return {
+                r["key"]: r["value"]
+                for r in conn.execute(
+                    "SELECT key, value FROM watermarks WHERE source=?", (source,)
+                ).fetchall()
+            }
+
+    def wm_delete(self, source: str, key: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "DELETE FROM watermarks WHERE source=? AND key=?", (source, key)
+            )
+            conn.commit()
 
     def wm_set(self, source: str, key: str, value: str) -> None:
         with self._lock, self._connect() as conn:

@@ -1688,15 +1688,25 @@ export interface BackgroundTask {
   session_id: string
   description: string
   command: string
+  // running | completed | failed | killed
   status: string
   started_at: number
+  finished_at: number | null
+  exit_code: number | null
+  // Time since start while running; total duration once finished.
   elapsed_s: number
   output_path: string
 }
 
 export interface AgentState {
   subagents: { active: SubagentRun[]; active_count: number; recent: SubagentRun[] }
-  background_tasks: { active: BackgroundTask[]; active_count: number }
+  background_tasks: {
+    active: BackgroundTask[]
+    active_count: number
+    // Finished tasks, most recently finished first. Older builds of the
+    // aggregator don't send this — treat it as optional.
+    recent?: BackgroundTask[]
+  }
   tools: number
 }
 
@@ -1738,9 +1748,16 @@ export interface WorkersState {
   by_state: Record<string, number>
   open_total: number
   poisoned_total: number
+  quarantined_total: number
+  /** Last poison sweep, or null if one has never run. */
+  maintenance: {
+    at: string; scanned: number; revived: number; quarantined: number
+    escalations: Array<{ source: string; signature: string; count: number }>
+    report_path: string | null
+  } | null
   sources: Array<{
     name: string; enabled: boolean; open: number; running: number
-    completed: number; failed: number; poisoned: number
+    completed: number; failed: number; poisoned: number; quarantined: number
   }>
   recent_runs: Array<{
     run_id: string; source: string; status: string; started_at: string

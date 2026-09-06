@@ -392,6 +392,23 @@ workers:
   enabled: true
   max_attempts: 3
   slots: 2
+  # Poison sweep — periodic triage of the dead-letter pile. Runs from the
+  # pool's scheduler loop (not a work source: a source that repairs the queue
+  # would be starved by a backed-up queue) and is deterministic (no model:
+  # #76 Queue Health Check is the analyst on top, and it needs the very
+  # things that are in doubt when items are poisoning). See
+  # workers/maintenance.py.
+  maintenance:
+    enabled: true
+    interval_seconds: 900
+    # A transient failure buys exactly one more claim, ever. Task #76's log:
+    # "a weekly reset that does not fix the cause just re-poisons".
+    max_revives: 1
+    revive_delay_seconds: 300
+    # Nth poisoning of the same (source, signature) stops looking transient.
+    repeat_threshold: 3
+    tally_retention_days: 14
+    scan_limit: 200
   sources:
     autoresearch:
       enabled: true

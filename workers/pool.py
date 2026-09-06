@@ -66,6 +66,10 @@ class WorkerPool:
 
         # Recover any items stuck in claimed|running from a prior crash.
         self.queue.recover_claimed(self.worker_ids)
+        # A crash also leaves poisoned rows nobody will ever look at again.
+        # Triage them now rather than waiting out the first sweep interval —
+        # boot is when the pile is most likely to be non-empty.
+        await self._maybe_sweep_poisoned(force=True)
 
         for i in range(self.slots):
             self._workers.append(asyncio.create_task(
@@ -125,6 +129,8 @@ class WorkerPool:
         from workers.sources import SOURCE_REGISTRY, get_sources_config
 
         while self._running:
+            await self._maybe_sweep_poisoned()
+
             try:
                 cfg = get_sources_config()
                 interval = 60
@@ -148,6 +154,46 @@ class WorkerPool:
             except Exception as e:
                 logger.error("Scheduler loop error: %s", e, exc_info=True)
             await asyncio.sleep(interval)
+
+    # ── Queue maintenance — poison sweep ─────────────────────────────────
+
+    async def _maybe_sweep_poisoned(self, force: bool = False) -> None:
+        """Triage poisoned items on the maintenance interval.
+
+        Deliberately driven from the scheduler loop rather than registered as a
+        work source: a source that repairs the queue must be claimed by a free
+        worker slot, so it would be starved exactly when the queue is backed
+        up. See workers/maintenance.py for what a sweep decides.
+
+        Never raises — a failed sweep must not take the scheduler loop (and
+        with it every source's enqueue tick) down with it.
+        """
+        try:
+            from app.config import CONFIG
+            from workers import maintenance
+
+            cfg = (CONFIG.get("workers") or {}).get("maintenance") or {}
+            if not cfg.get("enabled", maintenance.DEFAULTS["enabled"]):
+                return
+
+            if not force:
+                interval = int(cfg.get("interval_seconds",
+                                       maintenance.DEFAULTS["interval_seconds"]))
+                last = self.queue.wm_get(maintenance.SOURCE, "last_sweep_at")
+                if last:
+                    try:
+                        elapsed = (datetime.now(timezone.utc)
+                                   - datetime.fromisoformat(last)).total_seconds()
+                    except ValueError:
+                        elapsed = interval  # unparseable watermark: sweep and rewrite it
+                    if elapsed < interval:
+                        return
+
+            await asyncio.to_thread(
+                maintenance.run_sweep, self.queue, cfg, self.max_attempts
+            )
+        except Exception as e:
+            logger.error("Poison sweep failed: %s", e, exc_info=True)
 
     # ── Worker loop — claims items and runs them ──────────────────────────
 

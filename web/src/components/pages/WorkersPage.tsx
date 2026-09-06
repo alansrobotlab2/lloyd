@@ -66,6 +66,8 @@ const STATE_COLORS: Record<string, string> = {
   completed: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
   failed: "bg-rose-500/20 text-rose-300 border-rose-500/30",
   poisoned: "bg-red-600/30 text-red-200 border-red-600/40",
+  // Poisoned and triaged by the sweep: terminal, but already looked at.
+  quarantined: "bg-zinc-500/20 text-zinc-300 border-zinc-500/30",
 };
 
 export default function WorkersPage() {
