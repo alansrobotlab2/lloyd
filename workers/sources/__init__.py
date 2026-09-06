@@ -43,6 +43,7 @@ def get_sources_config() -> dict[str, dict]:
 # ~/obsidian/autonomy/, chained via depends_on — no dedicated source.
 from workers.sources import scheduled_task as _scheduled_task  # noqa: E402,F401
 from workers.sources import autoresearch as _autoresearch  # noqa: E402,F401
+from workers.sources import selfmod_regression as _selfmod_regression  # noqa: E402,F401
 from workers.sources import gap_fill as _gap_fill  # noqa: E402,F401
 from workers.sources import session_distill as _session_distill  # noqa: E402,F401
 from workers.sources import domain_research as _domain_research  # noqa: E402,F401
@@ -50,6 +51,7 @@ from workers.sources import bench_mine as _bench_mine  # noqa: E402,F401
 
 register(_scheduled_task)
 register(_autoresearch)
+register(_selfmod_regression)
 register(_gap_fill)
 register(_session_distill)
 register(_domain_research)
