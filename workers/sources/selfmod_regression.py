@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import statistics
 import subprocess
 import time
@@ -51,7 +52,15 @@ DEFAULT_PRIORITY = 70
 DEDUP_KEY = "selfmod:regression"
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
-NOISE_PATH = LIVE_ROOT / "eval" / "baselines" / "selfmod-noise.json"
+
+# Deliberately NOT under eval/baselines/. That directory holds eval RUN
+# RECORDS, and `tests/test_eval_scorer.py` globs `*.json` there and asserts
+# every file carries a run record's fields — so parking a noise summary in it
+# fails an unrelated test. It also belongs with the loop's other runtime state,
+# which lives outside the repo so it survives a rollback.
+NOISE_PATH = Path(os.environ.get(
+    "LLOYD_SELFMOD_STATE",
+    Path.home() / ".local" / "state" / "lloyd-selfmod")) / "eval-noise.json"
 
 # Metrics that were bit-identical across repeated runs. Any movement in these
 # is signal. Everything else in the eval (ndcg10, doc_hit_rate) is reported
