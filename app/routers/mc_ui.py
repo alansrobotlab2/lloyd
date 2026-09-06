@@ -454,7 +454,44 @@ def _summarize_ide() -> dict:
     }
 
 
+def _summarize_dashboard() -> dict:
+    """Brief for `mc_navigate(tab="dashboard")`.
+
+    Deliberately not the full /api/dashboard payload — this is the one
+    or two lines the agent gets back after moving the user's UI, so it
+    carries only what would make someone say "look at the dashboard":
+    whether anything is busy and whether anything is unhealthy.
+    """
+    from app import sessions_io
+
+    out: dict = {}
+    try:
+        active = sessions_io.active_sessions_snapshot()
+        out["running_turns"] = sum(1 for s in active if s["running"])
+        out["queued_turns"] = sum(
+            s["pending_user"] + s["pending_ambient"] for s in active
+        )
+    except Exception:
+        pass
+    try:
+        from app.supervisor_client import (
+            _INFRA_SERVICES, _LLOYD_SERVICES, _health, _port_open,
+            _sup_state, _supervisor_all,
+        )
+        procs = _supervisor_all()
+        unhealthy = []
+        for sid, (_name, port) in {**_INFRA_SERVICES, **_LLOYD_SERVICES}.items():
+            active_state, _sub = _sup_state(procs.get(sid))
+            if _health(active_state, _port_open(port) if port else None) != "healthy":
+                unhealthy.append(sid)
+        out["unhealthy_services"] = unhealthy
+    except Exception:
+        pass
+    return out
+
+
 _SUMMARIZERS = {
+    "dashboard": _summarize_dashboard,
     "inner_voice": _summarize_inner_voice,
     "chat": _summarize_chat,
     "backlog": _summarize_backlog,

@@ -11,6 +11,7 @@ import AutonomyPage from './pages/AutonomyPage'
 import WorkersPage from './pages/WorkersPage'
 import InnerVoicePage from './pages/InnerVoicePage'
 import SettingsPage from './pages/SettingsPage'
+import DashboardPage from './pages/DashboardPage'
 
 // Architecture renders its own force graph, so it's the other page holding
 // three.js + react-force-graph-3d in the entry bundle. Lazy here too —
@@ -72,6 +73,7 @@ const GraphPage = () => (
   </div>
 )
 const PAGES: Record<string, React.FC> = {
+  dashboard: DashboardPage,
   services: ServicesPage,
   backlog: BacklogPage,
   // memory is rendered separately below — sticky, like the IDE.

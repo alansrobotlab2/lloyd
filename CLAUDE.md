@@ -48,6 +48,10 @@ After editing frontend files, Vite HMR usually picks up changes automatically (n
 ├── autonomy.py          # Task scheduler
 ├── usage_store.py       # SQLite usage tracking
 │
+├── app/host_metrics.py  # CPU/RAM/disk/GPU for the dashboard
+├── app/vllm_metrics.py  # vLLM /metrics scrape + rate derivation
+├── app/routers/dashboard.py  # GET /api/dashboard (one aggregated snapshot)
+│
 ├── app/harness/         # In-process agent loop (replaces claude-agent-sdk)
 │   ├── __init__.py      # Exports: run_query, RunOptions, HookRegistry
 │   ├── options.py       # RunOptions dataclass
@@ -124,6 +128,73 @@ Every tool lives inside an MCP server — built-ins (Bash/Read/Write/Edit/Grep/G
 config.yaml holds the hand-edited defaults and is **read-only at boot**; UI toggles (`/api/tool-toggle`, `/api/tool-discovery`) persist to `data/tool_overrides.yaml` (gitignored), which is merged over config.yaml at load (`app/config.py:_merge_tool_overrides`). To change tool state by hand, edit config.yaml and check `data/tool_overrides.yaml` isn't shadowing the same key.
 
 Disabled tools are enforced via `RunOptions.disallowed_tools` as `mcp__<server>__<tool>`. The harness's bare-name aliasing in `tool_schema.py` blocks both the bare and namespaced form at advertise + dispatch time, so disabling `Bash` via `mcp_servers.lloyd-mcp.disabled_tools: [Bash]` blocks the model from calling either `Bash` or `mcp__lloyd-mcp__Bash`.
+
+## Mission Control dashboard
+
+The `dashboard` tab (first in the sidebar, desktop landing tab) polls one
+aggregated endpoint, `GET /api/dashboard`, every 2s. It is deliberately a
+single endpoint rather than one per panel: the page is open all day, and
+eight requests per tick times however many tabs are open is real load on
+a box whose job is holding a 262k-token KV cache steady.
+
+Sections are gathered concurrently and **degrade independently** — a
+wedged supervisord turns one panel into an error string and leaves the
+rest live. A dashboard is most useful when something is broken, so it
+must not be the second thing to break.
+
+Where each section comes from:
+
+| Section | Source |
+|---|---|
+| `host` | `app/host_metrics.py` — psutil + `nvidia-smi` (2s cache) |
+| `vllm` | `app/vllm_metrics.py` — scrapes `<base_url>/metrics` per configured model |
+| `primary` | `sessions_io.active_sessions_snapshot()` |
+| `focus` | goal / plan / todos out of the session JSON |
+| `agents` | **the lloyd-mcp process**, over loopback — see below |
+| `services` | `app/supervisor_client.py` |
+| `workers` | `workers.queue` + `workers.pool` — pool slots, per-source depth, recent runs |
+| `autonomy` | `~/obsidian/autonomy/*.md` frontmatter + the pool's in-flight `scheduled-task` jobs |
+| `backlog` | `~/obsidian/backlog/*.md` frontmatter |
+| `usage` | `usage_store` |
+
+Sections that walk the vault (`autonomy`, `backlog`) are TTL-cached for
+10s — the backlog is 300+ markdown files and its status counts do not
+change between 2-second polls. Live sections are never cached; they are
+the point of the page.
+
+**Overdue is not "next up."** `_autonomy` splits scheduled tasks on
+`next_run` vs now and returns them as separate lists. Sorting them
+together ascending and labelling the head "next up" is how a fleet whose
+ticker is months behind renders as a healthy schedule — the most overdue
+task lands exactly where the soonest one belongs. Likewise `completed`
+is excluded from worker "open" counts (`_OPEN_STATES`): it dominates the
+depth table and would bury the handful of items actually waiting.
+
+**Subagents and background bash tasks live in the lloyd-mcp process, not
+the backend.** The aggregator owns the `Task` tool and spawns
+`Bash(run_in_background=true)` children, so the backend has no handle on
+either. `agent_mcp/main.py` exposes `GET :8500/state` beside `/health`
+and `app/routers/dashboard.py` reads it over loopback. Adding a new
+agent-side live panel means extending that route, not the backend.
+
+`agent_mcp/_subagent_registry.py` opens a row **before** the Task run
+loop starts — a `Task` blocks its caller for minutes, so a row created on
+completion would only ever describe runs that no longer need watching.
+Closing it is the subtle part: `finish` is idempotent and
+first-writer-wins, so a blanket `finally: finish("cancelled")` runs
+*before* the success path and silently stamps every completed run
+cancelled. Each exit path closes the row with its own real status;
+`tests/test_task_registry_wiring.py` pins that.
+
+**Counters vs. gauges.** vLLM exposes both. Gauges (`num_requests_running`,
+`kv_cache_usage_perc`) are read straight. Counters
+(`prompt_tokens_total`, `prefix_cache_hits_total`) are monotonic since
+engine boot, and their absolute value says nothing useful, so
+`vllm_metrics` keeps the previous scrape per engine and reports a rate.
+A counter that goes backwards (engine restarted) yields `None`, never a
+number — otherwise a restart renders as a one-second spike of the
+engine's entire history. An unreachable engine drops its baseline for the
+same reason.
 
 ## Knowledge graph
 

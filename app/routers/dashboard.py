@@ -50,6 +50,43 @@ async def _to_thread(fn, *args) -> Any:
     return await asyncio.to_thread(fn, *args)
 
 
+# Sections that walk the vault are cached: the backlog is 300+ markdown
+# files and its status counts do not change between 2-second polls.
+# Live sections (engines, host, running turns) are never cached — they
+# are the whole point of the page.
+_VAULT_SCAN_TTL_S = 10.0
+_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _cached(key: str, ttl: float, fn) -> Any:
+    hit = _cache.get(key)
+    now = time.monotonic()
+    if hit is not None and now - hit[0] < ttl:
+        return hit[1]
+    value = fn()
+    _cache[key] = (now, value)
+    return value
+
+
+def _frontmatter(path, limit: int = 3000) -> dict:
+    """First YAML block of a markdown file, or {} if there isn't one."""
+    import yaml
+
+    try:
+        head = path.read_text(encoding="utf-8")[:limit]
+    except OSError:
+        return {}
+    if not head.startswith("---"):
+        return {}
+    parts = head.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        return yaml.safe_load(parts[1]) or {}
+    except Exception:
+        return {}
+
+
 # ── Sections ───────────────────────────────────────────────────────────
 
 
@@ -197,18 +234,237 @@ def _services() -> dict[str, Any]:
     return {"services": out, "unhealthy": unhealthy, "total": len(out)}
 
 
+# Queue states that mean "not finished". `completed` dominates the depth
+# table (3,400+ rows on this box) and would drown the live numbers.
+_OPEN_STATES = ("queued", "claimed", "running", "pending", "ready")
+
+
 def _workers() -> dict[str, Any]:
-    """Worker pool + queue depth."""
+    """Worker pool, per-source depth, and what just ran."""
+    from app.config import CONFIG
+    from workers.pool import get_pool
     from workers.queue import get_queue
 
     q = get_queue()
     depth = q.depth_by_source() if hasattr(q, "depth_by_source") else {}
+
     by_state: dict[str, int] = {}
     for _src, states in (depth or {}).items():
         if isinstance(states, dict):
             for state, n in states.items():
                 by_state[state] = by_state.get(state, 0) + int(n)
-    return {"depth_by_source": depth, "by_state": by_state}
+
+    pool = None
+    try:
+        p = get_pool()
+        pool = p.status() if p else {"running": False}
+    except Exception:
+        pool = {"running": False}
+
+    # One row per configured source, with its open (unfinished) backlog
+    # split out from the lifetime completed count.
+    sources_cfg = (CONFIG.get("workers") or {}).get("sources") or {}
+    sources = []
+    for name, cfg in sources_cfg.items():
+        d = depth.get(name, {}) or {}
+        sources.append({
+            "name": name,
+            "enabled": bool((cfg or {}).get("enabled", False)),
+            "open": sum(int(d.get(st, 0)) for st in _OPEN_STATES),
+            "running": int(d.get("running", 0)),
+            "completed": int(d.get("completed", 0)),
+            "failed": int(d.get("failed", 0)),
+            "poisoned": int(d.get("poisoned", 0)),
+        })
+    sources.sort(key=lambda r: (-r["running"], -r["open"], r["name"]))
+
+    runs = []
+    try:
+        for r in (q.list_runs(limit=6) or []):
+            runs.append({
+                "run_id": r.get("run_id", ""),
+                "source": r.get("source", ""),
+                "status": r.get("status", ""),
+                "started_at": r.get("started_at", ""),
+                "duration_seconds": r.get("duration_seconds"),
+                "summary": (r.get("summary") or "")[:120],
+            })
+    except Exception:
+        pass
+
+    return {
+        "enabled": bool((CONFIG.get("workers") or {}).get("enabled", False)),
+        "pool": pool,
+        "depth_by_source": depth,
+        "by_state": by_state,
+        "open_total": sum(by_state.get(st, 0) for st in _OPEN_STATES),
+        "poisoned_total": by_state.get("poisoned", 0),
+        "sources": sources,
+        "recent_runs": runs,
+    }
+
+
+def _autonomy() -> dict[str, Any]:
+    """Scheduled-task fleet: what is due, what is running, what is broken.
+
+    Task definitions are markdown under ~/obsidian/autonomy/, so the file
+    walk is TTL-cached; the in-flight list comes from the live pool and
+    is not.
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    autonomy_dir = Path.home() / "obsidian" / "autonomy"
+
+    def _scan() -> dict[str, Any]:
+        if not autonomy_dir.exists():
+            return {"total": 0, "by_status": {}, "upcoming": [], "failing": []}
+        by_status: dict[str, int] = {}
+        upcoming: list[dict[str, Any]] = []
+        failing: list[dict[str, Any]] = []
+        total = 0
+        for path in autonomy_dir.glob("*.md"):
+            # Only NN-name.md task files — skip _config.md, reports, notes.
+            if not path.name[:1].isdigit():
+                continue
+            fm = _frontmatter(path)
+            if not fm:
+                continue
+            total += 1
+            status = str(fm.get("status") or "draft")
+            by_status[status] = by_status.get(status, 0) + 1
+            row = {
+                "name": str(fm.get("name") or path.stem),
+                "status": status,
+                "frequency": str(fm.get("frequency") or ""),
+                "next_run": _iso(fm.get("next_run")),
+                "last_run": _iso(fm.get("last_run")),
+            }
+            if status == "failed":
+                failing.append(row)
+            elif row["next_run"]:
+                upcoming.append(row)
+
+        # Split overdue from genuinely-upcoming. Sorting them together and
+        # calling the result "next up" is how 23 tasks whose next_run is
+        # months in the past read as a healthy schedule: the soonest-first
+        # sort puts the most overdue at the top, labelled as if it were
+        # the next thing to run.
+        now_iso = datetime.now(timezone.utc).isoformat()
+        overdue = [r for r in upcoming if (r["next_run"] or "") < now_iso]
+        pending = [r for r in upcoming if (r["next_run"] or "") >= now_iso]
+        overdue.sort(key=lambda r: r["next_run"] or "")        # worst first
+        pending.sort(key=lambda r: r["next_run"] or "")        # soonest first
+        return {
+            "total": total,
+            "by_status": by_status,
+            "overdue": overdue[:5],
+            "overdue_count": len(overdue),
+            "upcoming": pending[:5],
+            "failing": failing[:5],
+        }
+
+    out = _cached("autonomy", _VAULT_SCAN_TTL_S, _scan)
+
+    # Live: which scheduled tasks the pool is actually executing now.
+    running: list[dict[str, Any]] = []
+    try:
+        from workers.pool import get_pool
+
+        pool = get_pool()
+        status = pool.status() if pool else {}
+        now = datetime.now(timezone.utc)
+        for job_id, meta in (status.get("in_flight") or {}).items():
+            if (meta or {}).get("source") != "scheduled-task":
+                continue
+            started = _iso(meta.get("started_at"))
+            elapsed = None
+            if started:
+                try:
+                    dt = datetime.fromisoformat(started)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    elapsed = (now - dt).total_seconds()
+                except ValueError:
+                    pass
+            running.append({
+                "job_id": str(job_id),
+                "kind": (meta or {}).get("kind", ""),
+                "started_at": started,
+                "elapsed_s": elapsed,
+            })
+    except Exception:
+        pass
+
+    return {**out, "running": running, "running_count": len(running)}
+
+
+def _backlog() -> dict[str, Any]:
+    """Backlog board: open work by status and by board."""
+    from pathlib import Path
+
+    backlog_dir = Path.home() / "obsidian" / "backlog"
+
+    def _scan() -> dict[str, Any]:
+        if not backlog_dir.exists():
+            return {"total": 0, "by_status": {}, "by_board": [], "open_total": 0}
+        by_status: dict[str, int] = {}
+        # board -> {open, total}
+        boards: dict[str, dict[str, int]] = {}
+        total = 0
+        recent: list[dict[str, Any]] = []
+        for path in backlog_dir.glob("*.md"):
+            if not path.name[:1].isdigit():
+                continue
+            fm = _frontmatter(path)
+            if not fm:
+                continue
+            total += 1
+            status = str(fm.get("status") or "draft")
+            board = str(fm.get("board") or "default")
+            by_status[status] = by_status.get(status, 0) + 1
+            entry = boards.setdefault(board, {"open": 0, "total": 0})
+            entry["total"] += 1
+            if status not in _BACKLOG_CLOSED:
+                entry["open"] += 1
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                recent.append({
+                    "name": str(fm.get("name") or path.stem),
+                    "status": status,
+                    "board": board,
+                    "mtime": mtime,
+                })
+        recent.sort(key=lambda r: r["mtime"], reverse=True)
+        return {
+            "total": total,
+            "by_status": by_status,
+            "by_board": sorted(
+                ({"board": b, **v} for b, v in boards.items()),
+                key=lambda r: -r["open"],
+            ),
+            "open_total": sum(
+                n for st, n in by_status.items() if st not in _BACKLOG_CLOSED
+            ),
+            "recent_open": recent[:5],
+        }
+
+    return _cached("backlog", _VAULT_SCAN_TTL_S, _scan)
+
+
+# Statuses that take a task off the board.
+_BACKLOG_CLOSED = frozenset({"done", "closed", "cancelled", "wontfix"})
+
+
+def _iso(value: Any) -> str:
+    """Frontmatter dates arrive as str or datetime depending on the writer."""
+    from datetime import date, datetime
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value) if value else ""
 
 
 def _usage() -> dict[str, Any]:
@@ -243,6 +499,8 @@ async def get_dashboard():
         _gather("agents", _agent_state()),
         _gather("services", _to_thread(_services)),
         _gather("workers", _to_thread(_workers)),
+        _gather("autonomy", _to_thread(_autonomy)),
+        _gather("backlog", _to_thread(_backlog)),
         _gather("usage", _to_thread(_usage)),
     )
     payload: dict[str, Any] = dict(sections)

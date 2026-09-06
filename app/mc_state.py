@@ -22,6 +22,7 @@ from app.paths import LLOYD_HOME
 logger = logging.getLogger("lloyd-server")
 
 VALID_TABS = {
+    "dashboard",
     "inner_voice", "chat", "backlog", "autonomy", "workers",
     "memory", "architecture", "skills", "tools", "services",
     "settings", "graph", "ide",

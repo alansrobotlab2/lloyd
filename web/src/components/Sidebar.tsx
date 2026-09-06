@@ -14,6 +14,7 @@ import {
   Workflow,
   BrainCircuit,
   FileCode2,
+  LayoutDashboard,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -25,7 +26,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 
-export type Page = 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'ide'
+export type Page = 'dashboard' | 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'ide'
 
 interface NavItem {
   id: Page
@@ -34,6 +35,7 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'inner_voice', label: 'Inner Voice', icon: BrainCircuit },
   { id: 'chat', label: 'Chat', icon: MessageCircle },
   { id: 'backlog', label: 'Backlog', icon: LayoutGrid },

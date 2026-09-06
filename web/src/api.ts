@@ -1524,3 +1524,239 @@ export interface IdeWriteResponse {
   size: number
   mtime: number
 }
+
+// ── Dashboard ────────────────────────────────────────────────────────────
+//
+// Every section is gathered independently by the backend, so any one of
+// them can come back as `{error}` while the rest hold real data. The
+// `| SectionError` unions are load-bearing: the page renders a degraded
+// panel rather than blanking when, say, supervisord is wedged.
+
+export interface SectionError { error: string }
+
+export interface VllmEngine {
+  alias: string
+  base_url: string
+  reachable: boolean
+  error?: string
+  model_name?: string
+  awake?: boolean
+  requests_running?: number | null
+  requests_waiting?: number | null
+  requests_waiting_by_reason?: Record<string, number>
+  kv_cache_usage?: number | null
+  prompt_tokens_per_s?: number | null
+  generation_tokens_per_s?: number | null
+  preemptions_per_s?: number | null
+  ttft_s?: number | null
+  itl_s?: number | null
+  prompt_tokens_total?: number | null
+  generation_tokens_total?: number | null
+  preemptions_total?: number | null
+  finished_by_reason?: Record<string, number>
+  prefix_cache_hit_rate?: number | null
+  prefix_cache_hit_rate_recent?: number | null
+  spec_decode_hit_rate?: number | null
+  spec_decode_hit_rate_recent?: number | null
+}
+
+export interface GpuInfo {
+  index: number
+  name: string
+  gpu_util: number | null
+  mem_util: number | null
+  memory_used_mb: number | null
+  memory_total_mb: number | null
+  memory_pct: number | null
+  temperature_c: number | null
+  power_draw_w: number | null
+  power_limit_w: number | null
+}
+
+export interface HostMetrics {
+  cpu: { percent: number; count: number; physical_count: number; load_average: number[] | null }
+  memory: { used_bytes: number; total_bytes: number; percent: number }
+  swap: { used_bytes: number; total_bytes: number; percent: number }
+  disks: Array<{ path: string; used_bytes: number; total_bytes: number; percent: number }>
+  gpus: GpuInfo[]
+  uptime_seconds: number
+  boot_time: number
+}
+
+export interface PrimaryState {
+  model: string
+  base_url: string
+  context_length: number | null
+  max_turns: number | null
+  permission_mode: string
+  preserve_thinking_iterations: number | null
+  sessions: Array<{
+    session_id: string
+    running: boolean
+    turn_id: string | null
+    source: string | null
+    started_at: string | null
+    enqueued_at: string | null
+    preempted: boolean
+    pending_user: number
+    pending_ambient: number
+  }>
+  running_count: number
+  queued_count: number
+  busy: boolean
+}
+
+export interface FocusSession {
+  session_id?: string
+  preview?: string
+  message_count?: number
+  inner_voice?: boolean
+  platform?: string
+  goal?: string
+  goal_set_at?: string | null
+  goal_achieved?: boolean
+  plan_mode?: boolean
+  plan_stages?: number
+  todos?: Array<{ content: string; status: string; activeForm: string }>
+  todo_counts?: Record<string, number>
+}
+
+export interface SubagentRun {
+  run_id: string
+  subagent_type: string
+  description: string
+  prompt_preview: string
+  parent_session_id: string
+  session_id: string
+  model: string
+  max_turns: number
+  started_at: number
+  finished_at: number | null
+  elapsed_s: number
+  status: string
+  turns: number
+  stop_reason: string
+  error: string
+  response_chars: number
+  tool_call_count: number
+  tool_counts: Record<string, number>
+  last_tool: string
+}
+
+export interface BackgroundTask {
+  task_id: string
+  session_id: string
+  description: string
+  command: string
+  status: string
+  started_at: number
+  elapsed_s: number
+  output_path: string
+}
+
+export interface AgentState {
+  subagents: { active: SubagentRun[]; active_count: number; recent: SubagentRun[] }
+  background_tasks: { active: BackgroundTask[]; active_count: number }
+  tools: number
+}
+
+export interface ServiceRow {
+  id: string
+  name: string
+  group: 'infra' | 'lloyd'
+  port: number | null
+  state: string
+  sub_state: string
+  port_healthy: boolean | null
+  health: 'healthy' | 'degraded' | 'stopped' | string
+  uptime: string | null
+}
+
+export interface UsageBucket {
+  bucket: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_create: number
+  cache_read: number
+  cost_usd: number
+}
+
+export interface DashboardUsage {
+  last_hour: Record<string, number>
+  last_24h: Record<string, number>
+  last_7d: Record<string, number>
+  daily: UsageBucket[]
+  by_model_24h: Array<{ model: string } & Record<string, number>>
+}
+
+export interface WorkersState {
+  enabled: boolean
+  pool: { running: boolean; paused?: boolean; slots?: number; in_flight_count?: number
+          in_flight?: Record<string, { source: string; kind: string; started_at: string }> }
+  depth_by_source: Record<string, Record<string, number>>
+  by_state: Record<string, number>
+  open_total: number
+  poisoned_total: number
+  sources: Array<{
+    name: string; enabled: boolean; open: number; running: number
+    completed: number; failed: number; poisoned: number
+  }>
+  recent_runs: Array<{
+    run_id: string; source: string; status: string; started_at: string
+    duration_seconds: number | null; summary: string
+  }>
+}
+
+export interface AutonomyTaskRow {
+  name: string
+  status: string
+  frequency: string
+  next_run: string
+  last_run: string
+}
+
+export interface AutonomyState {
+  total: number
+  by_status: Record<string, number>
+  overdue: AutonomyTaskRow[]
+  overdue_count: number
+  upcoming: AutonomyTaskRow[]
+  failing: AutonomyTaskRow[]
+  running: Array<{ job_id: string; kind: string; started_at: string; elapsed_s: number | null }>
+  running_count: number
+}
+
+export interface BacklogState {
+  total: number
+  by_status: Record<string, number>
+  by_board: Array<{ board: string; open: number; total: number }>
+  open_total: number
+  recent_open: Array<{ name: string; status: string; board: string; mtime: number }>
+}
+
+export interface DashboardSnapshot {
+  host: HostMetrics | SectionError
+  vllm: VllmEngine[] | SectionError
+  primary: PrimaryState | SectionError
+  focus: FocusSession | SectionError
+  agents: AgentState | SectionError
+  services: { services: ServiceRow[]; unhealthy: string[]; total: number } | SectionError
+  workers: WorkersState | SectionError
+  autonomy: AutonomyState | SectionError
+  backlog: BacklogState | SectionError
+  usage: DashboardUsage | SectionError
+  timestamp: number
+}
+
+export function sectionOk<T>(section: T | SectionError | undefined): section is T {
+  return !!section && !(typeof section === 'object' && 'error' in (section as object))
+}
+
+export const dashboardApi = {
+  get: (): Promise<DashboardSnapshot> =>
+    fetch(`${API_BASE}/dashboard`).then(r => {
+      if (!r.ok) throw new Error(`dashboard ${r.status}`)
+      return r.json()
+    }),
+}
