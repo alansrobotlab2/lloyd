@@ -24,7 +24,8 @@ from typing import Any
 from app.config import default_model_base_url
 from mcp.types import Tool
 
-from agent_mcp._shared import text_result
+from agent_mcp import _subagent_registry
+from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-task")
 
@@ -109,6 +110,12 @@ async def _task(args: dict[str, Any]) -> str:
     task_hooks = HookRegistry()
     install_default_safety_hook(task_hooks)
 
+    # Per-invocation session id so each subagent run gets its own
+    # tool_search LoadedToolSet — different disallowed_tools profiles
+    # would otherwise share one cache entry. Bound here rather than
+    # inline so the registry row and the harness agree on the id.
+    sub_session_id = f"task:{subagent_type}:{uuid.uuid4().hex[:8]}"
+
     options = RunOptions(
         model=model,
         base_url=base_url,
@@ -117,10 +124,7 @@ async def _task(args: dict[str, Any]) -> str:
         disallowed_tools=disallowed,
         hooks=task_hooks,
         mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
-        # Per-invocation session id so each subagent run gets its own
-        # tool_search LoadedToolSet — different disallowed_tools profiles
-        # would otherwise share one cache entry.
-        session_id=f"task:{subagent_type}:{uuid.uuid4().hex[:8]}",
+        session_id=sub_session_id,
         # A subagent is an agent loop like any other and has the same
         # redundant-reasoning problem the main loop does — more so, since
         # it runs its whole investigation inside one turn.
@@ -147,21 +151,45 @@ async def _task(args: dict[str, Any]) -> str:
     stop_reason = "stop"
     num_turns = 0
 
+    # Open the live row BEFORE the loop starts. A Task blocks its caller
+    # for as long as it runs, so a row created on completion would only
+    # ever describe runs that already finished — precisely the ones that
+    # no longer need watching.
+    record = _subagent_registry.register(
+        subagent_type=subagent_type,
+        description=description,
+        prompt=prompt,
+        parent_session_id=get_bound_session(),
+        session_id=sub_session_id,
+        model=model,
+        max_turns=profile["max_turns"],
+    )
+
     token = _task_depth.set(depth + 1)
     try:
         async for evt in run_query(messages, options):
             if evt["type"] == "assistant_message":
                 last_iter_text = evt.get("text") or ""
                 last_iter_thinking = evt.get("thinking") or ""
+                record.note_turn()
                 if not evt.get("tool_calls"):
                     final_text = last_iter_text
             elif evt["type"] == "tool_call":
                 tool_calls_summary.append(evt["name"])
+                record.note_tool(evt["name"])
             elif evt["type"] == "result":
                 stop_reason = evt.get("stop_reason", "stop")
                 num_turns = int(evt.get("num_turns", 0) or 0)
+    except asyncio.CancelledError:
+        # Closed here rather than in `finally`: a finally runs before the
+        # success paths below, and `finish` is idempotent, so a blanket
+        # close there would stamp every completed run "cancelled" and
+        # make the real status a no-op.
+        _subagent_registry.finish(record, status="cancelled", stop_reason="cancelled")
+        raise
     except Exception as exc:
         logger.exception("Task subagent error for prompt=%r", prompt[:120])
+        _subagent_registry.finish(record, status="error", error=str(exc))
         return json.dumps({"error": f"Subagent failed: {exc}"})
     finally:
         _task_depth.reset(token)
@@ -198,6 +226,9 @@ async def _task(args: dict[str, Any]) -> str:
             err["partial_text"] = last_iter_text[:500]
         if description:
             err["description"] = description
+        _subagent_registry.finish(
+            record, status="failed", stop_reason=stop_reason, error=reason,
+        )
         return json.dumps(err)
 
     result: dict[str, Any] = {"response": final_text}
@@ -212,6 +243,12 @@ async def _task(args: dict[str, Any]) -> str:
         result["tools_used"] = tool_calls_summary
     if description:
         result["description"] = description
+    _subagent_registry.finish(
+        record,
+        status="completed",
+        stop_reason=stop_reason,
+        response_chars=len(final_text),
+    )
     return json.dumps(result)
 
 

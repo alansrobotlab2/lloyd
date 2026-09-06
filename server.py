@@ -35,6 +35,7 @@ from app.routers import mc_ui as _mc_ui_router
 from app.routers import system as _system_router
 from app.routers import ide as _ide_router
 from app.routers import lsp as _lsp_router
+from app.routers import dashboard as _dashboard_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -131,6 +132,7 @@ app.include_router(_mc_ui_router.router)
 app.include_router(_system_router.router)
 app.include_router(_ide_router.router)
 app.include_router(_lsp_router.router)
+app.include_router(_dashboard_router.router)
 
 app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
 app.on_event("startup")(_workers_router.start_worker_pool)

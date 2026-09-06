@@ -35,6 +35,7 @@ aggregator calls the module functions directly. See `_check_module`.
 import asyncio
 import json
 import logging
+import time as _time
 from contextlib import asynccontextmanager
 from typing import Any, Protocol, runtime_checkable
 
@@ -47,6 +48,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from agent_mcp import (
+    _subagent_registry,
     _task_registry,
     annotations as tool_annotations,
     ambient,
@@ -334,6 +336,36 @@ async def health(request):
     }, status_code=200 if not degraded else 503)
 
 
+async def state(request):
+    """Live agent-side state for the Mission Control dashboard.
+
+    Subagents and background bash tasks both run inside THIS process,
+    not the backend — the aggregator owns the `Task` tool and spawns the
+    `Bash(run_in_background=true)` children. The backend has no handle on
+    either, so it reads them over loopback here rather than through a
+    shared file, which would need a lock and would still be a snapshot of
+    the past.
+    """
+    tasks = [
+        {
+            "task_id": r.task_id,
+            "session_id": r.session_id,
+            "description": r.description,
+            "command": r.command[:200],
+            "status": r.status,
+            "started_at": r.started_at,
+            "elapsed_s": round(_time.time() - r.started_at, 1),
+            "output_path": str(r.output_path),
+        }
+        for r in _task_registry.list_active()
+    ]
+    return JSONResponse({
+        "subagents": _subagent_registry.snapshot(),
+        "background_tasks": {"active": tasks, "active_count": len(tasks)},
+        "tools": len(_dispatch),
+    })
+
+
 @asynccontextmanager
 async def lifespan(app):
     await discord_bot.start_bot_task()
@@ -395,7 +427,10 @@ starlette_app = combined.streamable_http_app(
     stateless_http=True,
     json_response=True,
     transport_security=_security,
-    custom_starlette_routes=[Route("/health", health, methods=["GET"])],
+    custom_starlette_routes=[
+        Route("/health", health, methods=["GET"]),
+        Route("/state", state, methods=["GET"]),
+    ],
 )
 
 if __name__ == "__main__":

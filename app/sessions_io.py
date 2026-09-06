@@ -361,6 +361,37 @@ async def enqueue_turn(session_id: str, turn: SessionTurn, consumer_factory) -> 
     }
 
 
+def active_sessions_snapshot() -> list[dict[str, Any]]:
+    """Every session with a running or queued turn, for the dashboard.
+
+    Exposed as a function rather than letting callers walk
+    `_session_queues` themselves: the dict is mutated by the turn
+    consumer under `q.lock`, and a reader iterating it directly races
+    that. Building the list in one pass here keeps the private state
+    private and the snapshot self-consistent.
+    """
+    out: list[dict[str, Any]] = []
+    for session_id, q in list(_session_queues.items()):
+        cur = q.current
+        if cur is None and not q.pending_user and not q.pending_ambient:
+            continue
+        out.append({
+            "session_id": session_id,
+            "running": cur is not None,
+            "turn_id": cur.turn_id if cur else None,
+            "source": cur.source if cur else None,
+            "started_at": cur.started_at.isoformat() if cur and cur.started_at else None,
+            "enqueued_at": cur.enqueued_at.isoformat() if cur else None,
+            "preempted": bool(cur.preempted) if cur else False,
+            "pending_user": len(q.pending_user),
+            "pending_ambient": len(q.pending_ambient),
+        })
+    # Running turns first, then longest-queued — the order an operator
+    # scanning the panel wants.
+    out.sort(key=lambda e: (not e["running"], e["started_at"] or ""))
+    return out
+
+
 async def _broadcast_queue_state(session_id: str) -> None:
     """Push a `queue_state` event into the running turn's broker so any
     SSE subscriber sees queue changes.

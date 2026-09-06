@@ -148,6 +148,19 @@ def get_ide_snapshot() -> Optional[dict]:
     return dict(ide) if isinstance(ide, dict) else None
 
 
+def get_focus_snapshot() -> dict:
+    """Synchronous snapshot of the tab + per-tab focus map.
+
+    Same trade as `get_ide_snapshot`: read without the lock so sync call
+    sites (the dashboard aggregator runs its disk reads in a thread) can
+    use it. Worst case is a one-poll-stale tab name.
+    """
+    return {
+        "tab": _state.get("tab", ""),
+        "focus_by_tab": dict(_state.get("focus_by_tab") or {}),
+    }
+
+
 _SENTINEL = object()
 
 
