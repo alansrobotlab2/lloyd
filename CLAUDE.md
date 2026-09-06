@@ -309,6 +309,58 @@ number — otherwise a restart renders as a one-second spike of the
 engine's entire history. An unreachable engine drops its baseline for the
 same reason.
 
+## The poisoned pile
+
+An item that fails `workers.max_attempts` times lands in state `poisoned`, and
+nothing in the pool ever looks at a poisoned row again. That is right for a
+queue and wrong for a fleet: the pile is the only place a systemic failure
+shows up, and an unbounded pile of untriaged rows reads the same as a healthy
+one. `workers/maintenance.py` sweeps it on `workers.maintenance.interval_seconds`
+(default 900s), plus once at pool boot.
+
+Each poisoned row is classified from its error string and gets one of two
+outcomes:
+
+| Class | Examples | Outcome |
+|---|---|---|
+| transient | `TimeoutError`, dropped connection, 503 | **revived** — one more claim, after a delay |
+| structural | `unknown source`, `KeyError`, bad payload | **quarantined** — terminal, needs a human |
+
+An error matching neither is treated as structural. Retrying an unclassified
+error spends GPU-hours on a guess; quarantining it costs a line in a report.
+
+Three things veto a revive, all for the reason task #76's activity log already
+records — *"a weekly reset that does not fix the cause just re-poisons"*: the
+item's `max_revives` budget is spent (tracked in the row's own `triage_json`, so
+it survives a re-poisoning); the `(source, signature)` pair has poisoned
+`repeat_threshold` times across sweeps (tallied in `watermarks`, pruned after
+`tally_retention_days`); or an equivalent item is already open, because
+`mark_failed` NULLs `dedup_key` on poison and a revive therefore cannot
+coalesce against what the source re-enqueued.
+
+Three design choices that are load-bearing:
+
+- **It runs from the pool's scheduler loop, not as a work source.** A source
+  that repairs the queue has to be claimed by a free worker slot, and there are
+  two of them holding jobs for up to an hour — it would be starved exactly when
+  the queue is backed up. The scheduler loop is a separate asyncio task on a
+  60s tick.
+- **It is deterministic — no model call.** Autonomy task #76 (Queue Health
+  Check) is the model-driven analyst on top, and its own log argues for a floor
+  underneath it: it timed out at 600s on three of its last six runs, because
+  reaching a model needs the primary engine, a free worker slot and a healthy
+  queue — the three things in doubt when items are poisoning.
+- **`quarantined` is a distinct state, not a flag on `poisoned`.** The
+  dashboard's `poisoned_total` is an alarm; one that also counts every row
+  already triaged stops being an alarm. Quarantined rows show as `+Nq` beside
+  it.
+
+A sweep that changed nothing records only its timestamp — at a 15-minute
+cadence, a run row per tick would be 96 "nothing poisoned" rows a day burying
+the handful that mean something. A sweep that acted writes
+`autonomy-runs/queue-maintenance/sweep_<ts>.md` and a `runs` row, and logs
+ERROR per escalation.
+
 ## Session titles and live activity
 
 Every Mission Control surface that names a session — the chat history

@@ -288,6 +288,7 @@ def _workers() -> dict[str, Any]:
             "completed": int(d.get("completed", 0)),
             "failed": int(d.get("failed", 0)),
             "poisoned": int(d.get("poisoned", 0)),
+            "quarantined": int(d.get("quarantined", 0)),
         })
     sources.sort(key=lambda r: (-r["running"], -r["open"], r["name"]))
 
@@ -305,6 +306,17 @@ def _workers() -> dict[str, Any]:
     except Exception:
         pass
 
+    # The poison sweep's last pass. `poisoned_total` is the alarm — items no
+    # sweep has reached yet; `quarantined_total` is the pile it has already
+    # ruled not-retryable, which needs a human but not an alarm.
+    maintenance = None
+    try:
+        from workers import maintenance as _maintenance
+
+        maintenance = _maintenance.last_sweep(q)
+    except Exception:
+        pass
+
     return {
         "enabled": bool((CONFIG.get("workers") or {}).get("enabled", False)),
         "pool": pool,
@@ -312,6 +324,8 @@ def _workers() -> dict[str, Any]:
         "by_state": by_state,
         "open_total": sum(by_state.get(st, 0) for st in _OPEN_STATES),
         "poisoned_total": by_state.get("poisoned", 0),
+        "quarantined_total": by_state.get("quarantined", 0),
+        "maintenance": maintenance,
         "sources": sources,
         "recent_runs": runs,
     }

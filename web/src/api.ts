@@ -1748,9 +1748,16 @@ export interface WorkersState {
   by_state: Record<string, number>
   open_total: number
   poisoned_total: number
+  quarantined_total: number
+  /** Last poison sweep, or null if one has never run. */
+  maintenance: {
+    at: string; scanned: number; revived: number; quarantined: number
+    escalations: Array<{ source: string; signature: string; count: number }>
+    report_path: string | null
+  } | null
   sources: Array<{
     name: string; enabled: boolean; open: number; running: number
-    completed: number; failed: number; poisoned: number
+    completed: number; failed: number; poisoned: number; quarantined: number
   }>
   recent_runs: Array<{
     run_id: string; source: string; status: string; started_at: string
