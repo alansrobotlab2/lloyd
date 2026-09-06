@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Manual smoke test of all 14 browser MCP tools against a running lloyd-mcp.
+"""Manual smoke check of all 14 browser MCP tools against a running lloyd-mcp.
 
-Run with the aggregator up:  .venvs/lloyd/bin/python test_browser_mcp.py
+Run with the aggregator up:  .venvs/lloyd/bin/python smoke_browser_mcp.py
+
+Deliberately NOT named test_*.py: it drives a live MCP server over HTTP, so
+pytest can neither run it offline nor fail meaningfully — and a `test_` file
+sitting outside `testpaths` reads as coverage that does not exist. It is a
+smoke script; the name now says so.
+
 
 Transport: Streamable HTTP (MCP 2026-07-28) via the SDK client, driven
 through the harness's own MCPPool so this exercises the same path the
