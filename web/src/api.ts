@@ -60,12 +60,25 @@ export interface Session {
   id: string
   session_key: string
   display_name?: string
+  // Few-word label written by the secondary model after a turn completes.
+  // Empty until a session has been titled — render `preview`, then the id.
+  title?: string
   preview?: string
   last_active: string
   platform?: string
   // Inner Voice: A/B linkage tag and critic opt-in flag.
   experiment_id?: string | null
   inner_voice?: boolean
+}
+
+export interface SessionMeta {
+  session_id: string
+  title: string
+  preview: string
+  platform: string
+  model: string
+  message_count: number
+  inner_voice: boolean
 }
 
 // ── Inner Voice types (thin observer) ───────────────────────────────
@@ -148,6 +161,7 @@ export interface InnerVoiceSession {
   session_id: string
   experiment_id: string | null
   title: string
+  preview?: string
   created_at: string | null
   updated_at: string | null
   message_count: number
@@ -801,6 +815,14 @@ export const api = {
     const response = await fetch(`${API_BASE}/sessions`)
     return response.json()
   },
+
+  // Display metadata for one session, without pulling the whole list.
+  // The chat header uses this to name the session it is showing.
+  getSessionMeta: (sessionId: string): Promise<SessionMeta> =>
+    fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/meta`).then(r => {
+      if (!r.ok) throw new Error(`session meta ${sessionId}: ${r.status}`)
+      return r.json()
+    }),
 
   async clearSession(sessionKey: string): Promise<ApiResponse> {
     const response = await fetch(`${API_BASE}/clear`, {
@@ -1587,6 +1609,15 @@ export interface HostMetrics {
   boot_time: number
 }
 
+// One live snapshot of what a running turn is doing. `kind` is the state
+// machine; `label`/`detail` carry the tool name and its headline argument.
+export interface TurnActivity {
+  kind: 'starting' | 'prefill' | 'thinking' | 'responding' | 'tool' | 'working'
+  label: string
+  detail: string
+  at: string
+}
+
 export interface PrimaryState {
   model: string
   base_url: string
@@ -1596,12 +1627,16 @@ export interface PrimaryState {
   preserve_thinking_iterations: number | null
   sessions: Array<{
     session_id: string
+    title?: string
     running: boolean
     turn_id: string | null
     source: string | null
     started_at: string | null
     enqueued_at: string | null
     preempted: boolean
+    // What the turn is doing right now. Null before the first event of a
+    // turn, and on every queued (not yet running) session.
+    activity: TurnActivity | null
     pending_user: number
     pending_ambient: number
   }>
@@ -1612,6 +1647,7 @@ export interface PrimaryState {
 
 export interface FocusSession {
   session_id?: string
+  title?: string
   preview?: string
   message_count?: number
   inner_voice?: boolean

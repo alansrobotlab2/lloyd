@@ -42,6 +42,8 @@ import { useMcStateSync } from '../hooks/useMcStateSync'
 import { useMcNavigationEvents } from '../hooks/useMcNavigationEvents'
 import { api, type ModelInfo } from '../api'
 import { useIsMobile } from '../hooks/useIsMobile'
+import { useSessionMeta } from '../hooks/useSessionMeta'
+import { sessionLabel } from '@/lib/sessionLabel'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
@@ -197,6 +199,12 @@ export default function Layout() {
 
   const visibleSlot = useMemo(() => slots.find(s => s.slotId === visibleSlotId) ?? null, [slots, visibleSlotId])
   const currentModel = visibleSlot?.model ?? ''
+
+  // Name the open session in the header. Only polled while the chat page
+  // is actually showing — this is a label, not telemetry.
+  const visibleSessionMeta = useSessionMeta(visibleSlot?.sessionKey ?? null, {
+    enabled: page === 'chat' && !isMobile,
+  })
 
   // Mirror chat focus (visible slot's session) for the agent.
   useReportMcFocus(
@@ -390,6 +398,16 @@ export default function Layout() {
                 </Button>
                 <MessageCircle className="w-5 h-5 text-primary" />
                 <h2 className="text-lg font-semibold text-foreground">Chat</h2>
+                {/* The session's own name, not its timestamp id — with two
+                    slots open, "Chat" alone doesn't say which is showing. */}
+                {visibleSessionMeta && (
+                  <span
+                    className="max-w-[28rem] truncate text-sm text-muted-foreground"
+                    title={visibleSessionMeta.session_id}
+                  >
+                    {sessionLabel(visibleSessionMeta)}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-1.5">
                 {models.length > 0 && (

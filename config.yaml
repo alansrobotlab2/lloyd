@@ -136,6 +136,12 @@ discord:
 display:
   personality: kawaii
   streaming: true
+# Few-word session titles, written by the secondary after a turn completes
+# (app/session_titles.py). They are what the chat history, the dashboard's
+# agent panel, the Inner Voice picker and the chat header render instead of
+# a timestamp id. Off means those surfaces fall back to the preview text.
+session_titles:
+  enabled: true
 mcp_servers:
   lloyd-mcp:
     disabled_tools:

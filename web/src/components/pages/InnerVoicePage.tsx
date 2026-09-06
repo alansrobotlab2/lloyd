@@ -33,6 +33,8 @@ import {
 } from '../../api'
 import ChatPanel from '../ChatPanel'
 import { actionStyle } from '../innerVoiceStyles'
+import { sessionLabel } from '@/lib/sessionLabel'
+import { useSessionMeta } from '../../hooks/useSessionMeta'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
@@ -78,14 +80,21 @@ export default function InnerVoicePage() {
   const loadSessions = useCallback(async () => {
     try {
       const r = await api.innerVoiceSessions(50)
-      setSessions(r.sessions || [])
-      if (!selectedSession && r.sessions && r.sessions.length > 0) {
-        setSelectedSession(r.sessions[0].session_id)
+      const list = r.sessions || []
+      setSessions(list)
+      // Fall back to the newest session only if nothing is selected *now*.
+      // Reading a captured `selectedSession` here raced incoming focus and
+      // always lost: the fetch starts on mount with no selection, and by
+      // the time it resolves a click (or the agent's `mc_navigate`) has
+      // chosen one — which the stale closure then overwrote with the most
+      // recent session, so every row on the dashboard opened the same chat.
+      if (list.length > 0) {
+        setSelectedSession(prev => prev ?? list[0].session_id)
       }
     } catch {
       // best-effort
     }
-  }, [selectedSession])
+  }, [])
 
   useEffect(() => {
     loadSessions()
@@ -246,6 +255,31 @@ function SessionPicker({
   selectedSession: string | null
   onSelect: (id: string | null) => void
 }) {
+  // This list holds only Inner-Voice-enabled sessions, but focus can arrive
+  // from outside it — the dashboard's agent panel, or the agent's own
+  // `mc_navigate` — pointing at any session at all. A Select whose value
+  // matches no option renders an empty trigger, so the page would sit there
+  // showing a transcript above a blank picker. Carry the odd one in as its
+  // own option instead.
+  const outsider = selectedSession && !sessions.some(s => s.session_id === selectedSession)
+    ? selectedSession
+    : null
+  // Only fetched for the outsider — the listed ones already carry a name.
+  const outsiderMeta = useSessionMeta(outsider)
+
+  const options = useMemo(() => {
+    if (!outsider) return sessions
+    return [{
+      session_id: outsider,
+      experiment_id: null,
+      title: outsiderMeta?.title ?? '',
+      preview: outsiderMeta?.preview ?? '',
+      created_at: null,
+      updated_at: null,
+      message_count: outsiderMeta?.message_count ?? 0,
+    } as InnerVoiceSession, ...sessions]
+  }, [sessions, outsider, outsiderMeta])
+
   return (
     <div className="flex items-center gap-2 ml-2">
       <span className="text-xs text-muted-foreground">session:</span>
@@ -253,15 +287,17 @@ function SessionPicker({
         value={selectedSession ?? '__none__'}
         onValueChange={(v) => onSelect(v === '__none__' ? null : v)}
       >
-        <SelectTrigger className="h-8 w-72 text-xs font-mono"><SelectValue /></SelectTrigger>
+        <SelectTrigger className="h-8 w-72 text-xs"><SelectValue /></SelectTrigger>
         <SelectContent>
-          {sessions.length === 0 && <SelectItem value="__none__">— none —</SelectItem>}
-          {sessions.map(s => (
-            <SelectItem key={s.session_id} value={s.session_id} className="font-mono text-xs">
-              {s.session_id}
-              {s.evaluate_user_turns ? ' [chat]' : ''}
-              {s.experiment_id ? ` · ${s.experiment_id}` : ''}
-              {s.message_count ? ` · ${s.message_count}msg` : ''}
+          {options.length === 0 && <SelectItem value="__none__">— none —</SelectItem>}
+          {options.map(s => (
+            <SelectItem key={s.session_id} value={s.session_id} className="text-xs">
+              <span className="text-foreground">{sessionLabel(s, s.session_id)}</span>
+              <span className="text-muted-foreground">
+                {s.evaluate_user_turns ? ' [chat]' : ''}
+                {s.experiment_id ? ` · ${s.experiment_id}` : ''}
+                {s.message_count ? ` · ${s.message_count}msg` : ''}
+              </span>
             </SelectItem>
           ))}
         </SelectContent>

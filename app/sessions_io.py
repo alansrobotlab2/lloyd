@@ -48,6 +48,10 @@ class SessionTurn:
     preempted: bool = False
     events: asyncio.Queue = field(default_factory=asyncio.Queue)
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    # What the turn is doing right now, for the dashboard's agent panel:
+    # {"kind", "label", "detail", "at"}. Display-only and lossy by design
+    # — the loop never reads it back. See `set_turn_activity`.
+    activity: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -284,6 +288,77 @@ def get_cancel_event(session_id: str) -> Optional[asyncio.Event]:
     return q.cancel_event
 
 
+# Argument worth showing for a tool call, in preference order. A tool not
+# listed falls back to its first short string argument, which names the
+# thing being worked on far more often than it doesn't.
+_ACTIVITY_ARG_KEYS = (
+    "command", "file_path", "pattern", "path", "query",
+    "description", "prompt", "url", "content",
+)
+
+
+def tool_activity_detail(args_json: str, limit: int = 80) -> str:
+    """One-line summary of a tool call's arguments, for display.
+
+    `Bash` alone says nothing; `Bash · supervisorctl restart` says what the
+    agent is doing. Never raises — a tool whose arguments failed to parse
+    still deserves to have its name shown.
+    """
+    try:
+        args = json.loads(args_json or "{}")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    if not isinstance(args, dict):
+        return ""
+
+    def _flatten(value: str) -> str:
+        one_line = " ".join(value.split())
+        return one_line[: limit - 1] + "…" if len(one_line) > limit else one_line
+
+    for key in _ACTIVITY_ARG_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return _flatten(value)
+    for value in args.values():
+        if isinstance(value, str) and value.strip():
+            return _flatten(value)
+    return ""
+
+
+def set_turn_activity(
+    session_id: str, kind: str, label: str = "", detail: str = ""
+) -> None:
+    """Record what the running turn is doing right now.
+
+    Feeds the dashboard's agent panel, which otherwise can only say that a
+    session is busy — true of a turn that is thinking, one that has been
+    running `Bash` for four minutes, and one that is wedged, which are not
+    the same situation to an operator.
+
+    Best-effort: a no-op when nothing is running, and unchanged states are
+    dropped so the streaming path can call this per token without churning
+    a timestamp.
+    """
+    q = _session_queues.get(session_id)
+    cur = q.current if q else None
+    if cur is None:
+        return
+    prev = cur.activity
+    if (
+        prev is not None
+        and prev.get("kind") == kind
+        and prev.get("label") == label
+        and prev.get("detail") == detail
+    ):
+        return
+    cur.activity = {
+        "kind": kind,
+        "label": label,
+        "detail": detail,
+        "at": datetime.now().isoformat(),
+    }
+
+
 def get_current_turn(session_id: str) -> Optional[SessionTurn]:
     q = _session_queues.get(session_id)
     if q is None:
@@ -411,6 +486,7 @@ def active_sessions_snapshot() -> list[dict[str, Any]]:
             "started_at": cur.started_at.isoformat() if cur and cur.started_at else None,
             "enqueued_at": cur.enqueued_at.isoformat() if cur else None,
             "preempted": bool(cur.preempted) if cur else False,
+            "activity": dict(cur.activity) if cur and cur.activity else None,
             "pending_user": len(q.pending_user),
             "pending_ambient": len(q.pending_ambient),
         })

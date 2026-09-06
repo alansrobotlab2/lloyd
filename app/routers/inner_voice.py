@@ -155,28 +155,38 @@ async def list_inner_voice_sessions(
     if not SESSIONS_DIR.exists():
         return {"sessions": [], "count": 0}
     try:
-        files = sorted(
-            SESSIONS_DIR.glob("*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        files = list(SESSIONS_DIR.glob("*.json"))
     except Exception as e:
         logger.warning("list_inner_voice_sessions glob failed: %s", e)
         return {"sessions": [], "count": 0, "error": str(e)}
 
+    # Ordered by when the conversation was last active, not by file mtime —
+    # background writers (post-session capture, the titler, TodoWrite) touch
+    # a session file long after the talking stopped. See
+    # `app.routers.sessions._last_active_ts`.
+    from app.routers.sessions import _last_active_ts
+
+    loaded: list[tuple[float, Any, dict]] = []
     for path in files:
-        if len(out) >= limit:
-            break
         try:
             data = json.loads(path.read_text())
         except Exception:
             continue
         if not data.get("inner_voice"):
             continue
+        loaded.append((_last_active_ts(path, data), path, data))
+    loaded.sort(key=lambda row: row[0], reverse=True)
+
+    for _ts, path, data in loaded:
+        if len(out) >= limit:
+            break
         out.append({
             "session_id": path.stem,
             "experiment_id": data.get("experiment_id"),
             "title": data.get("title") or data.get("topic") or "",
+            # Fallback label for a session the titler hasn't reached yet —
+            # without it an untitled row renders as a bare timestamp id.
+            "preview": data.get("preview", ""),
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
             "message_count": len(data.get("messages") or []),

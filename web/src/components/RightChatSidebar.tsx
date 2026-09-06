@@ -13,7 +13,9 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { sessionLabel } from '@/lib/sessionLabel'
 import { api } from '../api'
+import { useSessionMeta } from '../hooks/useSessionMeta'
 import { useVoiceMode } from '../contexts/VoiceModeContext'
 
 // Aura colorShift drives how much hue varies across the shader's iteration
@@ -161,6 +163,9 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
   const [width, setWidth] = useState<number>(loadStoredWidth)
   // On mobile the sidebar IS the chat UI — never collapsed, full width.
   const [collapsed, setCollapsed] = useState<boolean>(() => isMobile ? false : loadCollapsed())
+  // Only polled while the sidebar is expanded — the collapsed bar has no
+  // room for a name.
+  const sessionMeta = useSessionMeta(sessionKey, { enabled: !collapsed })
   const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null)
   // ChatPanel publishes its "harness is thinking / streaming" state via
   // onThinkingChange. We mirror it here so the aura can flip to 'thinking'
@@ -518,6 +523,17 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
             <MicDbMeter audioTrack={localTrack} />
           </div>
         </div>
+        {/* Which conversation this is. On mobile this sidebar IS the chat
+            tab, and without a name it gives no sign of which of the day's
+            sessions the "new" button just left behind. */}
+        {sessionMeta && (
+          <div
+            className="truncate text-xs text-muted-foreground"
+            title={sessionMeta.session_id}
+          >
+            {sessionLabel(sessionMeta)}
+          </div>
+        )}
         {error && (
           <div className="text-xs text-destructive break-words">{error}</div>
         )}

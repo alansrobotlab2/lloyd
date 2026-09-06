@@ -9,6 +9,8 @@ import psutil
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from datetime import datetime
+
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
     is_session_active,
@@ -28,17 +30,46 @@ from app.sessions_io import (
 router = APIRouter()
 
 
+def _last_active_ts(path, data: dict) -> float:
+    """When the *conversation* was last active, not when its file was last
+    written.
+
+    Background writers touch a session file long after the talking stopped
+    — post-session capture stamps `captured`, the titler writes `title`,
+    TodoWrite persists a checklist. Under an mtime sort each of those
+    silently promotes an old session to the top of the history, and a
+    backfill that touches every session at once reorders the whole list.
+    `last_active` is written by the message-append path only, so it means
+    what the list is actually trying to show.
+    """
+    raw = data.get("last_active") or ""
+    try:
+        # Naive local ISO, as `datetime.now().isoformat()` writes it.
+        return datetime.fromisoformat(raw).timestamp()
+    except (TypeError, ValueError):
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+
 @router.get("/api/sessions")
 async def list_sessions():
     sessions = []
-    for sf in sorted(SESSIONS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True):
+    loaded: list[tuple[float, dict, object]] = []
+    for sf in SESSIONS_DIR.glob("*.json"):
         try:
             data = json.loads(sf.read_text())
-            if data.get("platform") == "autonomy":
-                continue
+        except Exception:
+            continue
+        if data.get("platform") == "autonomy":
+            continue
+        loaded.append((_last_active_ts(sf, data), data, sf))
+    loaded.sort(key=lambda row: row[0], reverse=True)
 
-            mtime = sf.stat().st_mtime
-            delta = time.time() - mtime
+    for last_active_ts, data, sf in loaded:
+        try:
+            delta = time.time() - last_active_ts
             if delta < 60:
                 relative_time = "just now"
             elif delta < 3600:
@@ -51,6 +82,10 @@ async def list_sessions():
             sessions.append({
                 "id": data.get("session_id", sf.stem),
                 "session_key": data.get("session_id", sf.stem),
+                # Few-word label written by the secondary (app/session_titles.py).
+                # Empty until the first turn has been titled; every consumer
+                # falls back to `preview`, then to the id.
+                "title": (data.get("title") or "").strip(),
                 "preview": data.get("preview", ""),
                 "last_active": relative_time,
                 "platform": data.get("platform", "mission-control"),
@@ -595,6 +630,29 @@ async def kill_session_proc(session_id: str):
         pass
 
     return JSONResponse({"killed": killed, "session_id": session_id})
+
+
+@router.get("/api/sessions/{session_id}/meta")
+async def get_session_meta(session_id: str):
+    """Display metadata for one open session — title, preview, platform.
+
+    The chat header needs a label for the session it is showing. Pulling
+    the whole session list to find one row is wasteful when a slot only
+    ever shows one session at a time.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    data = json.loads(meta_path.read_text())
+    return JSONResponse({
+        "session_id": data.get("session_id", session_id),
+        "title": (data.get("title") or "").strip(),
+        "preview": data.get("preview", ""),
+        "platform": data.get("platform", "mission-control"),
+        "model": data.get("model", ""),
+        "message_count": data.get("message_count", 0),
+        "inner_voice": bool(data.get("inner_voice", False)),
+    })
 
 
 @router.get("/api/sessions/{session_id}/status")

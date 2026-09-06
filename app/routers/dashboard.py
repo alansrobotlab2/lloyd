@@ -109,6 +109,18 @@ async def _primary_state() -> dict[str, Any]:
     from app.config import CONFIG
 
     active = sessions_io.active_sessions_snapshot()
+    # The snapshot is pure in-memory queue state and stays that way — it is
+    # also the selfmod promoter's idle gate. Titles live on disk, so they
+    # are joined on here, off the loop and behind a TTL cache.
+    if active:
+        from app import session_titles
+
+        titles = await asyncio.to_thread(
+            session_titles.titles_for, [s["session_id"] for s in active]
+        )
+        for entry in active:
+            entry["title"] = titles.get(entry["session_id"], "")
+
     models = CONFIG.get("models") or {}
     default_alias = (CONFIG.get("model") or {}).get("default", "primary")
     default_cfg = models.get(default_alias) or {}
@@ -169,6 +181,7 @@ def _focus_session() -> dict[str, Any]:
     goal = data.get("goal") if isinstance(data.get("goal"), dict) else {}
     return {
         "session_id": session_id,
+        "title": (data.get("title") or "").strip(),
         "preview": (data.get("preview") or "")[:160],
         "message_count": data.get("message_count"),
         "inner_voice": bool(data.get("inner_voice")),

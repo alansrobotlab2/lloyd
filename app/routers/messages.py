@@ -46,10 +46,13 @@ from app.sessions_io import (
     set_last_user_session,
     take_ambient_decision,
     enqueue_ambient_prefetch,
+    set_turn_activity,
+    tool_activity_detail,
     AmbientPrefetchEntry,
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_harness_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
+from app.session_titles import maybe_title_session
 from prompt_builder import build_system_prompt
 from prefetch import prefetch_context_async
 from app.compaction import load_and_compact_session
@@ -549,6 +552,9 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     }, turn_id=turn.turn_id)
 
     cancelled_mid_stream = False
+    # Prefill emits no SSE bytes, so without this a 160k-token context
+    # spends its whole first minute displayed as "starting".
+    set_turn_activity(session_id, "prefill")
     try:
         async for evt in run_query(harness_messages, options):
             etype = evt["type"]
@@ -568,6 +574,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             f"[TIMING] first text token after "
                             f"{time.perf_counter() - t_query_start:.3f}s (model TTFT)"
                         )
+                        set_turn_activity(session_id, "responding")
                     full_response += delta_text
                     await _emit(turn, "text_delta", {"text": delta_text})
                     _stream_delta_count += 1
@@ -582,6 +589,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
             elif etype == "thinking_delta":
                 thinking_text = evt.get("text", "")
                 if thinking_text:
+                    if not accumulated_thinking:
+                        set_turn_activity(session_id, "thinking")
                     accumulated_thinking += thinking_text
                     await _emit(turn, "thinking_delta", {"text": thinking_text})
 
@@ -638,6 +647,9 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     "function": {"name": name, "arguments": args_json},
                 }
                 tool_calls_log.append(tc)
+                set_turn_activity(
+                    session_id, "tool", name, tool_activity_detail(args_json)
+                )
                 await _emit(turn, "tool_start", {
                     "call_id": call_id, "name": name,
                     "args": args_json, "context_tokens": last_turn_input,
@@ -655,6 +667,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 if len(result_str) > 2000:
                     result_str = result_str[:2000] + "...(truncated)"
                 tool_results_log.append({"call_id": call_id, "result": result_str})
+                set_turn_activity(session_id, "working")
                 await _emit(turn, "tool_complete", {
                     "call_id": call_id, "name": evt.get("name", ""), "result": result_str,
                 })
@@ -877,6 +890,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
                 asyncio.ensure_future(_post_session_capture(session_id))
                 asyncio.ensure_future(_maybe_extract_focus(session_id))
+                asyncio.ensure_future(maybe_title_session(session_id))
 
                 done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
                 if accumulated_thinking:
@@ -982,6 +996,7 @@ async def _session_consumer(session_id: str) -> None:
                 q.current = turn
                 q.cancel_event = asyncio.Event()
             turn.started_at = datetime.now()
+            set_turn_activity(session_id, "starting")
             try:
                 await _run_turn(session_id, turn, q)
             except asyncio.CancelledError:

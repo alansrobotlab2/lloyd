@@ -181,6 +181,54 @@ def test_open_states_exclude_completed():
     assert "queued" in dash._OPEN_STATES and "running" in dash._OPEN_STATES
 
 
+# ── Agent panel ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_primary_state_names_sessions_by_title(monkeypatch):
+    """The panel renders titles, but the snapshot they decorate must stay
+    pure in-memory queue state — it is also the selfmod promoter's idle
+    gate, and a disk read there would put the filesystem in front of a
+    restart decision."""
+    from app import session_titles
+
+    monkeypatch.setattr(
+        dash.sessions_io, "active_sessions_snapshot",
+        lambda: [{
+            "session_id": "20260906_214751_iv1620",
+            "running": True, "turn_id": "t1", "source": "user",
+            "started_at": None, "enqueued_at": None, "preempted": False,
+            "activity": {"kind": "tool", "label": "Bash",
+                         "detail": "pytest -q", "at": "now"},
+            "pending_user": 0, "pending_ambient": 0,
+        }],
+    )
+    monkeypatch.setattr(
+        session_titles, "titles_for",
+        lambda ids: {i: "Setting up TTS with cloned voice" for i in ids},
+    )
+
+    state = await dash._primary_state()
+    (session,) = state["sessions"]
+    assert session["title"] == "Setting up TTS with cloned voice"
+    assert session["activity"]["label"] == "Bash"
+
+
+@pytest.mark.asyncio
+async def test_primary_state_without_active_sessions_reads_no_titles(monkeypatch):
+    """No running turns means no disk touched — this endpoint is polled
+    every 2 seconds all day."""
+    from app import session_titles
+
+    monkeypatch.setattr(dash.sessions_io, "active_sessions_snapshot", lambda: [])
+
+    def _never(ids):
+        raise AssertionError("titles_for called with no active sessions")
+
+    monkeypatch.setattr(session_titles, "titles_for", _never)
+    assert (await dash._primary_state())["sessions"] == []
+
+
 # ── Degradation ────────────────────────────────────────────────────────
 
 

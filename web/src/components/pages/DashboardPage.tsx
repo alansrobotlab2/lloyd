@@ -9,8 +9,9 @@ import {
   type DashboardSnapshot, type GpuInfo,
   type SubagentRun, type UsageBucket, type VllmEngine, type WorkersState,
 } from '../../api'
-import { useReportMcFocus } from '../../contexts/McUiContext'
+import { useMcUi, useReportMcFocus } from '../../contexts/McUiContext'
 import { cn } from '@/lib/utils'
+import { sessionLabel, activityLabel } from '@/lib/sessionLabel'
 
 // Poll cadence. Fast enough that a turn starting is visible almost
 // immediately, slow enough that the aggregated endpoint (~25-100ms) is
@@ -747,6 +748,17 @@ export default function DashboardPage() {
 
   useReportMcFocus('dashboard', null)
 
+  // Clicking a live session hands it to the Inner Voice tab, which is the
+  // only surface that shows a turn's transcript alongside the observer's
+  // decisions — the thing you actually want when a row on this panel looks
+  // wrong. Same context path the agent's own `mc_navigate` uses, so the
+  // page consuming it doesn't care who asked.
+  const { setCurrentTab, setPendingFocus } = useMcUi()
+  const openInInnerVoice = useCallback((sessionId: string) => {
+    setPendingFocus({ tab: 'inner_voice', focusId: sessionId })
+    setCurrentTab('inner_voice')
+  }, [setPendingFocus, setCurrentTab])
+
   const load = useCallback(async () => {
     // Skip if the previous poll is still out — a slow backend must not
     // build a queue of overlapping requests.
@@ -928,24 +940,47 @@ export default function DashboardPage() {
                 {primary.sessions.length === 0 ? (
                   <div className="text-[11px] text-muted-foreground">No active turns.</div>
                 ) : (
-                  <div className="space-y-1.5">
-                    {primary.sessions.map(s => (
-                      <div key={s.session_id} className="flex items-center gap-2 text-[10px]">
-                        <span
-                          className={cn(
-                            'h-1.5 w-1.5 flex-shrink-0 rounded-full',
-                            s.running ? 'animate-pulse bg-violet-400' : 'bg-amber-400',
+                  <div className="space-y-1">
+                    {primary.sessions.map(s => {
+                      const activity = activityLabel(s.activity)
+                      return (
+                        <button
+                          key={s.session_id}
+                          type="button"
+                          onClick={() => openInInnerVoice(s.session_id)}
+                          title={`${s.session_id} — open in Inner Voice`}
+                          className="w-full rounded-md px-1.5 py-1 text-left text-[10px] transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={cn(
+                                'h-1.5 w-1.5 flex-shrink-0 rounded-full',
+                                s.running ? 'animate-pulse bg-violet-400' : 'bg-amber-400',
+                              )}
+                            />
+                            <span className="truncate text-foreground">
+                              {sessionLabel(s, s.session_id)}
+                            </span>
+                            <span className="flex-shrink-0 text-muted-foreground">
+                              {s.source ?? 'queued'}
+                            </span>
+                            <span className="ml-auto flex-shrink-0 text-muted-foreground">
+                              {s.pending_user + s.pending_ambient > 0
+                                ? `+${s.pending_user + s.pending_ambient} queued`
+                                : s.running ? 'running' : 'pending'}
+                            </span>
+                          </div>
+                          {/* "Busy" is true of a turn that is thinking, one
+                              four minutes into a build, and one that is
+                              wedged. Only this line tells them apart. */}
+                          {s.running && activity && (
+                            <div className="ml-3.5 truncate font-mono text-[10px] text-violet-400/80">
+                              {activity}
+                            </div>
                           )}
-                        />
-                        <span className="truncate font-mono text-foreground">{s.session_id}</span>
-                        <span className="text-muted-foreground">{s.source ?? 'queued'}</span>
-                        <span className="ml-auto flex-shrink-0 text-muted-foreground">
-                          {s.pending_user + s.pending_ambient > 0
-                            ? `+${s.pending_user + s.pending_ambient} queued`
-                            : s.running ? 'running' : 'pending'}
-                        </span>
-                      </div>
-                    ))}
+                        </button>
+                      )
+                    })}
                   </div>
                 )}
               </div>
@@ -958,7 +993,7 @@ export default function DashboardPage() {
           {sectionOk(focus) && focus.session_id ? (
             <Panel>
               <div className="truncate text-[11px] text-foreground">
-                {focus.preview || focus.session_id}
+                {sessionLabel(focus, focus.session_id)}
               </div>
               <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
                 <span className="font-mono">{focus.session_id}</span>

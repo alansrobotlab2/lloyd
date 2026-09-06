@@ -4,6 +4,7 @@ import { api } from '../api'
 import { useSessionActivity } from '../hooks/useSessionActivity'
 import RunningAgentsPanel from './RunningAgentsPanel'
 import { cn } from '@/lib/utils'
+import { sessionLabel, hasSessionTitle } from '@/lib/sessionLabel'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 
@@ -11,6 +12,9 @@ interface Session {
   id: string
   session_key: string
   last_active: string
+  // Few-word label from the secondary model; empty until the session has
+  // been titled, in which case the preview is what gets rendered.
+  title?: string
   preview: string
   platform?: string
   model?: string
@@ -119,9 +123,17 @@ export default function SessionsPanel({ onSwitchSession, currentSessionKey, refr
                       : 'hover:bg-accent',
                   )}
                 >
-                  <div className="text-[10px] text-muted-foreground truncate mb-1">
-                    {session.preview || 'No preview'}
+                  <div className="text-[11px] text-foreground truncate mb-0.5">
+                    {sessionLabel(session, key)}
                   </div>
+                  {/* Once a session is titled, the preview stops being the
+                      name and becomes context under it. Untitled sessions
+                      already show the preview above, so don't repeat it. */}
+                  {hasSessionTitle(session) && session.preview && (
+                    <div className="text-[10px] text-muted-foreground truncate mb-1">
+                      {session.preview}
+                    </div>
+                  )}
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
                       <Clock className="w-2.5 h-2.5" />

@@ -245,3 +245,53 @@ def _sync_secondary_focus_extraction(transcript: str) -> list[str]:
     except Exception as e:
         logger.debug(f"35B focus extraction call failed: {e}")
         return []
+
+
+_TITLE_SYSTEM = (
+    "You name conversations. Given a transcript, reply with a title of 3-6 "
+    "words naming the specific subject — the system, file, bug, or decision "
+    "the conversation is actually about. No quotes, no punctuation at the "
+    "end, no preamble, no explanation. Output the title and nothing else."
+)
+
+
+def _sync_secondary_title(transcript: str, timeout: float = 30.0) -> Optional[str]:
+    """Call the secondary for a few-word title describing a session.
+
+    Returns the model's raw text — cleaning and validation belong to
+    `app.session_titles`, which is the only caller and the only place that
+    knows what a usable title looks like.
+    """
+    if not transcript.strip():
+        return None
+
+    url, model_name = _endpoint()
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": _TITLE_SYSTEM},
+            {"role": "user", "content": (
+                "Title this conversation in 3-6 words.\n\n"
+                f"Transcript:\n{transcript}"
+            )},
+        ],
+        "temperature": 0.2,
+        # Room for a long-ish title and nothing more. A model that wants to
+        # explain itself gets cut off rather than indulged.
+        "max_tokens": 32,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip() or None
+    except Exception as e:
+        logger.warning(f"secondary title call failed: {e}")
+        return None

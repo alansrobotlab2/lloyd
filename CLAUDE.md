@@ -91,6 +91,7 @@ step in an auto-landing loop is either ceremony or a contradiction.
 ├── autonomy.py          # Task scheduler
 ├── usage_store.py       # SQLite usage tracking
 │
+├── app/session_titles.py # few-word session names (secondary model)
 ├── app/host_metrics.py  # CPU/RAM/disk/GPU for the dashboard
 ├── app/vllm_metrics.py  # vLLM /metrics scrape + rate derivation
 ├── app/routers/dashboard.py  # GET /api/dashboard (one aggregated snapshot)
@@ -228,7 +229,7 @@ Where each section comes from:
 |---|---|
 | `host` | `app/host_metrics.py` — psutil + `nvidia-smi` (2s cache) |
 | `vllm` | `app/vllm_metrics.py` — scrapes `<base_url>/metrics` per configured model |
-| `primary` | `sessions_io.active_sessions_snapshot()` |
+| `primary` | `sessions_io.active_sessions_snapshot()` + `session_titles` |
 | `focus` | goal / plan / todos out of the session JSON |
 | `agents` | **the lloyd-mcp process**, over loopback — see below |
 | `services` | `app/supervisor_client.py` |
@@ -289,6 +290,69 @@ A counter that goes backwards (engine restarted) yields `None`, never a
 number — otherwise a restart renders as a one-second spike of the
 engine's entire history. An unreachable engine drops its baseline for the
 same reason.
+
+## Session titles and live activity
+
+Every Mission Control surface that names a session — the chat history
+list, the chat header, the dashboard's agent panel, the Inner Voice
+picker — renders a few-word **title** rather than the timestamp id.
+`app/session_titles.py` owns it end to end; the id survives as the
+element's `title=` tooltip.
+
+Titles are written by the **secondary** model
+(`_sync_secondary_title`), fired and forgotten off turn completion
+beside `_post_session_capture`. That slot is single-tenant
+(llama.cpp `--parallel 1`) and agent turns already queue behind it, so
+`should_title` re-titles on a **geometric** schedule — after the 1st
+real user message, then the 3rd, the 9th, the 27th — recorded in
+`title_at_count`. A per-turn title call would put a model call in that
+queue for a label nobody asked to be refreshed.
+
+`clean_title` is strict on purpose and returning `""` is a normal
+outcome: a bad title is worse than none, because the id at least
+identifies the row while `Here is a title for the conversation` just
+looks like a bug. Consumers share one fallback chain —
+`web/src/lib/sessionLabel.ts`, title → preview → id — so a session never
+reads as two different sessions in two panels.
+
+`title_for` caches on a **TTL, not on mtime**. The session JSON is
+rewritten on every appended message, so an mtime-keyed cache would
+re-parse a multi-megabyte transcript on every 2-second dashboard poll,
+which is the exact cost the cache exists to avoid. `invalidate` closes
+the staleness window when a title is written.
+
+**Live activity** is the second half. `SessionTurn.activity`
+(`{kind, label, detail, at}`) is stamped by the turn runner as it
+streams — `starting` → `prefill` → `thinking`/`responding` → `tool` →
+`working` — and surfaces through `active_sessions_snapshot`. "Busy" is
+equally true of a turn prefilling 160k tokens, one four minutes into a
+`Bash` build, and one wedged on a dead engine; this line is what tells
+them apart. It is display state the loop never reads back, so writing it
+is a no-op when nothing is running and a no-op again when the state is
+unchanged (the text path calls it per token).
+
+The snapshot itself stays **pure in-memory queue state** — it is also
+the selfmod promoter's idle gate, and a disk read there would put the
+filesystem in front of a restart decision. Titles are joined on in
+`_primary_state`, off the loop via `asyncio.to_thread`.
+
+Each row on that panel is a button that opens the session in the Inner
+Voice tab, through the same `setPendingFocus` + `setCurrentTab` pair the
+agent's `mc_navigate` uses — so `InnerVoicePage` never has to know who
+asked. Two things that panel taught us:
+
+- **A page that applies incoming focus must not race its own list
+  fetch.** `loadSessions` used to read `selectedSession` out of its
+  closure to decide whether to default to the newest session. On mount
+  that closure captures `null`, the fetch resolves *after* the focus has
+  been applied, and the stale `null` overwrites it — so every row on the
+  dashboard opened the same chat. Use the functional updater
+  (`setSelectedSession(prev => prev ?? list[0].session_id)`) and keep the
+  callback's deps empty; anything else reintroduces the race.
+- **The Inner Voice picker holds only IV-enabled sessions**, but focus
+  can point anywhere. A `Select` whose value matches no option renders an
+  empty trigger, so the picker carries an out-of-list selection in as its
+  own option and names it from `/api/sessions/{id}/meta`.
 
 ## Model slots
 
@@ -403,6 +467,9 @@ mcp_servers:
 agent:
   max_turns: 60
   permission_mode: bypassPermissions
+
+session_titles:
+  enabled: true    # false => surfaces fall back to the preview text
 ```
 
 ## Development Notes
