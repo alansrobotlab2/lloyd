@@ -535,3 +535,81 @@ def test_the_supervisor_rpc_timeout_exceeds_stopwaitsecs():
     import policy
 
     assert policy.SUPERVISOR_RPC_TIMEOUT > 15.0
+
+
+# ---------------------------------------------------------------------------
+# A rehearsal must not look like a production incident
+#
+# The drill runs a REAL guardian against a throwaway repo. Without scoping, its
+# test rollbacks land in the live vault daily note and file real backlog tasks.
+# That happened on 2026-09-06: two drill rollbacks (26574f87, ddd6d1d0) were
+# written to the daily note naming commits that exist only in a deleted scratch
+# clone, and reading that note later suggested the audit trail had lost events.
+# ---------------------------------------------------------------------------
+
+def test_external_channels_are_suppressible(tmp_path):
+    import notify
+
+    vault = tmp_path / "obsidian" / "memory"
+    vault.mkdir(parents=True)
+    n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                        vault_root=str(tmp_path / "obsidian"), external=False)
+    res = n.alert("critical", "drill rollback", "should stay local",
+                  trigger="crash", commit="a" * 40)
+
+    assert set(res) == {"ledger", "alert_file"}, res
+    assert list(vault.glob("*.md")) == [], "a drill wrote into the vault"
+    assert "backlog" not in res and "desktop" not in res
+
+
+def test_external_channels_fire_by_default(tmp_path):
+    import notify
+
+    (tmp_path / "obsidian" / "memory").mkdir(parents=True)
+    n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                        vault_root=str(tmp_path / "obsidian"),
+                        backend_url="http://127.0.0.1:1")
+    res = n.alert("warn", "real rollback", "body")
+    assert "vault" in res and res["vault"] is True
+
+
+def test_the_drill_passes_no_external_alerts(tmp_path):
+    """The flag is only useful if rehearse.py actually sends it."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent /
+           "scripts" / "selfmod" / "rehearse.py").read_text()
+    assert "--no-external-alerts" in src
+
+
+def test_repeated_identical_alerts_are_suppressed(tmp_path, monkeypatch):
+    """A persistent condition ticks every 5s; five identical notices in 30
+    seconds bury the one that matters."""
+    import types
+
+    import guardian as G
+    import policy
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "s"),
+        guardian_state=str(tmp_path / "g"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0, no_external_alerts=True,
+    )
+    g = G.Guardian(args)
+    sent: list = []
+    monkeypatch.setattr(g.notifier, "alert",
+                        lambda *a, **k: sent.append(a[1]) or {})
+
+    for _ in range(5):
+        g.alert("error", "Service down, but no promotion to revert", "body")
+    assert len(sent) == 1, f"expected 1 fan-out, got {len(sent)}"
+
+    # A different condition still gets through immediately.
+    g.alert("error", "Something else entirely", "body")
+    assert len(sent) == 2
+
+    # And the same one fires again once the window has passed.
+    g._alert_seen["Service down, but no promotion to revert"] -= policy.ALERT_REPEAT_SECONDS + 1
+    g.alert("error", "Service down, but no promotion to revert", "body")
+    assert len(sent) == 3

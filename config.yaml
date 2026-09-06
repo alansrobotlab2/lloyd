@@ -361,6 +361,23 @@ workers:
       interval_seconds: 3600
       max_inflight: 1
       max_duration_seconds: 1800
+    # Behavioural-regression check for a landed self-modification. Off until
+    # the loop itself is enabled — it is a no-op without a promotion under
+    # observation, but there is no reason to schedule it before then.
+    selfmod-regression:
+      enabled: false
+      interval_seconds: 86400
+      max_inflight: 1
+      max_duration_seconds: 1800
+    # Re-checks one backlog item per run against the system as it is today.
+    # Read-only: it reaches a verdict and retires stale items, and never
+    # implements anything — confirmed items go through the selfmod gate as a
+    # separate, explicit act. 30min interval works ~53 open items in a day.
+    backlog-selfmod:
+      enabled: false
+      interval_seconds: 1800
+      max_inflight: 1
+      max_duration_seconds: 1200
     bench-mine:
       enabled: true
       interval_seconds: 7200

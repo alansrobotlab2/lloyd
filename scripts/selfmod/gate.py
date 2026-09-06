@@ -273,11 +273,21 @@ class Gate:
         live_venv = self.live / ".venvs" / "lloyd"
         clone = self.worktree / ".venvs" / "lloyd"
         clone.parent.mkdir(parents=True, exist_ok=True)
-        # /home is btrfs, so --reflink=auto is a metadata-only copy of ~6.2GB
-        # and writes to the clone do not touch the live venv.
-        cp = _run(["cp", "--reflink=auto", "-a", str(live_venv), str(clone)], timeout=900)
-        if cp.returncode != 0:
-            return False, f"venv clone failed: {cp.stderr[-400:]}", {}
+        # /home is btrfs, so this is a copy-on-write clone: measured at 3.2s
+        # and effectively zero allocation for the 6.2GB / 48k-file venv, and
+        # writes to the clone do not touch the live one.
+        #
+        # `--reflink=always` deliberately, not `auto`: auto falls back to a
+        # real 6GB copy *silently*, so a filesystem change would turn this rung
+        # into a multi-minute mystery. Fail loudly, then retry as a real copy
+        # so the gate still works — but say which happened.
+        cp = _run(["cp", "--reflink=always", "-a", str(live_venv), str(clone)], timeout=900)
+        reflinked = cp.returncode == 0
+        if not reflinked:
+            shutil.rmtree(clone, ignore_errors=True)
+            cp = _run(["cp", "-a", str(live_venv), str(clone)], timeout=1800)
+            if cp.returncode != 0:
+                return False, f"venv clone failed: {cp.stderr[-400:]}", {}
 
         lock = self.worktree / "requirements.lock"
         req = lock if lock.exists() else self.worktree / "requirements.txt"
@@ -295,7 +305,9 @@ class Gate:
 
         self.python = clone / "bin" / "python"
         self.report.venv = str(clone)
-        return True, "candidate venv built (reflink clone + delta) and imports cleanly", {}
+        how = "reflink clone" if reflinked else "FULL COPY (reflink unavailable)"
+        return True, f"candidate venv built ({how} + delta) and imports cleanly", {
+            "reflinked": reflinked}
 
     def rung_canary_boot(self):
         self._canary = C.Canary(W.round_dir(self.round_id), self.worktree,

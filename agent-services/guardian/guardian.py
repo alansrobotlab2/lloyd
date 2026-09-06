@@ -86,7 +86,9 @@ class Guardian:
             ledger=self.state.ledger, state_dir=self.gdir,
             vault_root=policy.VAULT_ROOT,
             backend_url=args.backend_url.rsplit("/health", 1)[0],
+            external=not getattr(args, "no_external_alerts", False),
         )
+        self._alert_seen: dict[str, float] = {}
         self.cursor = logtail.LogCursor(self.gdir / "logcursors.json")
 
         self.tick_n = 0
@@ -388,6 +390,17 @@ class Guardian:
                           f"{self.state.broken} once resolved.")
 
     def alert(self, level: str, title: str, body: str, **kw) -> None:
+        # Repeat-suppression. A persistent condition ticks every 5s, and an
+        # un-deduped alert buries the one that matters: on 2026-09-06 five
+        # identical "Service down, but no promotion to revert" notices landed
+        # in 30 seconds. Same title within the window is logged, not fanned out.
+        now = time.time()
+        last = self._alert_seen.get(title, 0.0)
+        self._alert_seen[title] = now
+        if now - last < policy.ALERT_REPEAT_SECONDS:
+            log(f"(suppressed repeat) [{level}] {title}")
+            self.last_alert = f"{gstate.now_iso()} {level}: {title} (repeat)"
+            return
         self.last_alert = f"{gstate.now_iso()} {level}: {title}"
         log(f"ALERT [{level}] {title} :: {body[:200]}")
         try:
@@ -574,6 +587,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--programs", default=",".join(policy.WATCHED))
     p.add_argument("--interval", type=float, default=policy.TICK_SECONDS)
     p.add_argument("--once", action="store_true", help="single tick, then exit")
+    p.add_argument("--no-external-alerts", action="store_true",
+                   help="ledger and ALERT.md only — no vault note, desktop "
+                        "notification or backlog task. Used by the drill so a "
+                        "rehearsal cannot look like a production incident.")
     p.add_argument("--selftest", action="store_true", help="run the self-check and exit")
     return p
 

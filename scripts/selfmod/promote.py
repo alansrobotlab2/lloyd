@@ -167,10 +167,16 @@ def promote(round_id: str, worktree: Path, base: str, *,
         "parent": live_head,
         "rollback_target": live_head,
         "branch": f"selfmod/{round_id}",
-        "landed_at": S.now_iso(),
-        "landed_ts": now,
-        "liveness_until_ts": now + LIVENESS_WINDOW,
-        "errors_until_ts": now + ERRORS_WINDOW,
+        "state": "landing",
+        "landed_at": None,
+        "landed_ts": None,
+        # Deliberately not started yet. The idle gate can wait up to 15
+        # minutes for a turn to finish, and starting the observation clock
+        # here would burn most of the window before the code is even live —
+        # the guardian would then settle a promotion it had barely watched.
+        # Both are set after the restart verifies, below.
+        "liveness_until_ts": None,
+        "errors_until_ts": None,
         "changed_paths": changed,
         "venv_swapped": False,
         "touched_guardian": any(p.startswith("agent-services/guardian/") for p in changed),
@@ -230,7 +236,17 @@ def promote(round_id: str, worktree: Path, base: str, *,
         if current.get("boot_id") and (body or {}).get("boot_id") == current["boot_id"]:
             raise PromoteError("backend boot_id unchanged — the process was never replaced")
 
+        # The code is live and verified: start the clock now.
+        landed = time.time()
+        current["state"] = "observing"
+        current["landed_at"] = S.now_iso()
+        current["landed_ts"] = landed
+        current["liveness_until_ts"] = landed + LIVENESS_WINDOW
+        current["errors_until_ts"] = landed + ERRORS_WINDOW
         current["boot_id"] = (body or {}).get("boot_id")
+        # Re-baseline the error cursor too: everything logged while we waited
+        # for idle belongs to the OLD build and must not be attributed here.
+        current["err_offset"] = _err_size()
         S.write_verified(S.CURRENT_PATH, current)
         S.append_event({"event": "promoted", "round_id": round_id, "commit": head,
                         "parent": live_head, "changed_paths": changed,

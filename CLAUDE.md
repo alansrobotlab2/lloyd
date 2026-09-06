@@ -38,6 +38,49 @@ The process group is `lloyd-mc`, not `lloyd-backend` bare. Always use `lloyd-mc:
 After editing `server.py`, restart `lloyd-mc:lloyd-backend` for changes to take effect.  
 After editing frontend files, Vite HMR usually picks up changes automatically (no restart needed).
 
+## Self-modification
+
+Lloyd can change his own code through a gated loop with automatic rollback.
+`architecture/self-modification.md` is the long version. The master switch is
+`selfmod.enabled` in config.yaml and it defaults to **false**.
+
+```bash
+python -m scripts.selfmod.round status              # state + ledger + guardian
+python -m scripts.selfmod.round start "goal"        # cuts a worktree
+python -m scripts.selfmod.round gate  SM_<id>       # 7 rungs, ~2 min
+python -m scripts.selfmod.round land  SM_<id>       # idle-gated, verified
+python -m scripts.selfmod.rehearse --yes-i-mean-it  # prove rollback still works
+```
+
+Four things worth knowing before touching any of it:
+
+- **The guardian is a systemd unit, not a supervisord program.**
+  `agent-supervisord.service` sets `KillMode=control-group`, so a
+  supervisord-managed watchdog dies exactly when it is needed. It is stdlib
+  only, runs on `/usr/bin/python3`, and never imports from `app/` — it must not
+  share a failure domain with what it guards.
+- **It runs from a pinned snapshot** at `~/.local/state/lloyd-guardian/bin/`,
+  staged only if the candidate compiles and passes its own selftest. Editing
+  `agent-services/guardian/` does nothing until a staged copy proves itself, so
+  a broken guardian degrades to a *stale* watchdog, never to none.
+- **State lives at `~/.local/state/lloyd-selfmod/`**, outside the repo, because
+  the guardian must read its rollback target while the repo is being rewritten.
+- **`HEAD == last-known-good` never rolls back.** Everything broken with
+  nothing promoted is infrastructure, not a bad change.
+
+Errors are read from `logs/server.err`, never `server.log` — `basicConfig`
+writes to stderr, so `server.log` is uvicorn's access log and holds zero
+error-shaped lines.
+
+### Development happens in ~/lloyd-sandbox
+
+`/home/alansrobotlab/lloyd` is production: a saved file is a deploy. Non-trivial
+work belongs in the `~/lloyd-sandbox` clone (remotes: `origin` = GitHub,
+`live` = the production tree), pushed as a PR. The autonomous loop is the
+exception — it cuts worktrees from live `main` and lands offline, because a PR
+step in an auto-landing loop is either ceremony or a contradiction.
+
+
 ## Architecture
 
 ```
