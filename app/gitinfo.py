@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# Lowercase only; every caller lowercases before comparing.
 _HEX = set("0123456789abcdef")
 
 
