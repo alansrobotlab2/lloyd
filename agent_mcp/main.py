@@ -380,6 +380,28 @@ async def health(request):
     }, status_code=200 if not degraded else 503)
 
 
+def _task_row(r) -> dict:
+    """One background-bash row for the dashboard, running or finished.
+
+    A running task's elapsed time is measured against now; a finished one
+    against when it finished, or its duration keeps ticking up forever and
+    a task that ran for two seconds reads as hours old by evening.
+    """
+    end = r.finished_at if r.finished_at is not None else _time.time()
+    return {
+        "task_id": r.task_id,
+        "session_id": r.session_id,
+        "description": r.description,
+        "command": r.command[:200],
+        "status": r.status,
+        "started_at": r.started_at,
+        "finished_at": r.finished_at,
+        "exit_code": r.exit_code,
+        "elapsed_s": round(end - r.started_at, 1),
+        "output_path": str(r.output_path),
+    }
+
+
 async def state(request):
     """Live agent-side state for the Mission Control dashboard.
 
@@ -390,22 +412,17 @@ async def state(request):
     shared file, which would need a lock and would still be a snapshot of
     the past.
     """
-    tasks = [
-        {
-            "task_id": r.task_id,
-            "session_id": r.session_id,
-            "description": r.description,
-            "command": r.command[:200],
-            "status": r.status,
-            "started_at": r.started_at,
-            "elapsed_s": round(_time.time() - r.started_at, 1),
-            "output_path": str(r.output_path),
-        }
-        for r in _task_registry.list_active()
-    ]
+    tasks = [_task_row(r) for r in _task_registry.list_active()]
+    recent_tasks = [_task_row(r) for r in _task_registry.list_recent(10)]
     return JSONResponse({
         "subagents": _subagent_registry.snapshot(),
-        "background_tasks": {"active": tasks, "active_count": len(tasks)},
+        "background_tasks": {
+            "active": tasks,
+            "active_count": len(tasks),
+            # Without this a background task vanished the moment it exited,
+            # so a failure three seconds in looked like it never ran.
+            "recent": recent_tasks,
+        },
         "tools": len(_dispatch),
     })
 

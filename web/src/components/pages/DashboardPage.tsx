@@ -6,7 +6,7 @@ import {
 import {
   dashboardApi, sectionOk,
   type AutonomyState, type AutonomyTaskRow, type BacklogState,
-  type DashboardSnapshot, type GpuInfo,
+  type BackgroundTask, type DashboardSnapshot, type GpuInfo,
   type SubagentRun, type UsageBucket, type VllmEngine, type WorkersState,
 } from '../../api'
 import { useMcUi, useReportMcFocus } from '../../contexts/McUiContext'
@@ -393,6 +393,35 @@ const RUN_TONE: Record<string, Tone> = {
   failed: 'crit',
   error: 'crit',
   cancelled: 'warn',
+}
+
+// Background bash, running or finished. A finished task carries its exit
+// code and total duration; without those a failure was indistinguishable
+// from a task that simply left the panel.
+function BackgroundTaskRow({ task }: { task: BackgroundTask }) {
+  const running = task.status === 'running'
+  const tone = RUN_TONE[task.status] ?? (task.status === 'killed' ? 'warn' : 'idle')
+  const failed = task.exit_code !== null && task.exit_code !== 0
+  return (
+    <div className="flex items-center gap-2 text-[10px]">
+      {running ? (
+        <Terminal className="h-3 w-3 flex-shrink-0 text-violet-400" />
+      ) : (
+        <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full', TONE_FILL[tone])} />
+      )}
+      <span className="truncate text-foreground" title={task.command}>
+        {task.description || task.command}
+      </span>
+      {!running && (
+        <span className={cn('flex-shrink-0', TONE_TEXT[tone])}>
+          {failed ? `${task.status} (${task.exit_code})` : task.status}
+        </span>
+      )}
+      <span className="ml-auto flex-shrink-0 font-mono tabular-nums text-muted-foreground">
+        {task.elapsed_s.toFixed(0)}s
+      </span>
+    </div>
+  )
 }
 
 function SubagentRow({ run }: { run: SubagentRun }) {
@@ -813,6 +842,9 @@ export default function DashboardPage() {
   const activeSubagents = sectionOk(agents) ? agents.subagents.active : []
   const recentSubagents = sectionOk(agents) ? agents.subagents.recent : []
   const bgTasks = sectionOk(agents) ? agents.background_tasks.active : []
+  // `recent` is absent on an aggregator that predates it — the backend and
+  // the MCP process restart independently, so this can be a live mismatch.
+  const recentBgTasks = sectionOk(agents) ? agents.background_tasks.recent ?? [] : []
 
   const unhealthy = sectionOk(services) ? services.unhealthy : []
   const autonomyFailed = sectionOk(autonomy) ? (autonomy.by_status.failed ?? 0) : 0
@@ -1077,15 +1109,7 @@ export default function DashboardPage() {
                   <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
                     Background bash ({bgTasks.length})
                   </div>
-                  {bgTasks.map(t => (
-                    <div key={t.task_id} className="flex items-center gap-2 text-[10px]">
-                      <Terminal className="h-3 w-3 flex-shrink-0 text-violet-400" />
-                      <span className="truncate text-foreground">{t.description}</span>
-                      <span className="ml-auto flex-shrink-0 font-mono tabular-nums text-muted-foreground">
-                        {t.elapsed_s.toFixed(0)}s
-                      </span>
-                    </div>
-                  ))}
+                  {bgTasks.map(t => <BackgroundTaskRow key={t.task_id} task={t} />)}
                 </div>
               )}
             </Panel>
@@ -1093,11 +1117,21 @@ export default function DashboardPage() {
               <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
                 Recent
               </div>
-              {recentSubagents.length === 0 ? (
+              {recentSubagents.length === 0 && recentBgTasks.length === 0 ? (
                 <div className="text-[11px] text-muted-foreground">Nothing finished yet.</div>
               ) : (
                 <div className="space-y-1.5">
                   {recentSubagents.slice(0, 5).map(r => <SubagentRow key={r.run_id} run={r} />)}
+                </div>
+              )}
+              {recentBgTasks.length > 0 && (
+                <div className="mt-3 space-y-1.5 border-t border-border pt-2">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Background bash ({recentBgTasks.length})
+                  </div>
+                  {recentBgTasks.slice(0, 5).map(t => (
+                    <BackgroundTaskRow key={t.task_id} task={t} />
+                  ))}
                 </div>
               )}
             </Panel>

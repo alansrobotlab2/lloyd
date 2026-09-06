@@ -258,6 +258,24 @@ either. `agent_mcp/main.py` exposes `GET :8500/state` beside `/health`
 and `app/routers/dashboard.py` reads it over loopback. Adding a new
 agent-side live panel means extending that route, not the backend.
 
+`background_tasks` carries `active` **and** `recent`. `list_active`
+filters on `status == "running"`, so before that a background bash left
+the dashboard the instant it exited — a task that died three seconds in
+was indistinguishable from one that never started, which is the opposite
+of what a background task most needs to report when nobody is watching
+its terminal. `list_recent` is bounded by its limit rather than by
+eviction: `_records` is kept whole so a later `get(task_id)` can still
+hand the model an output path to Read. A finished row's `elapsed_s` is
+measured against `finished_at`, not `now`, or a task that ran for two
+seconds reads as hours old by evening.
+
+**Workers are not in that panel.** The worker pool lives in the backend
+(`workers.queue` + `workers.pool`, rendered by `WorkersPanel`), while
+subagents and background bash live in the aggregator. A worker job whose
+prompt calls `Task` does put subagent rows there — via
+`workers/sources/_common.py::run_prompt_on_primary` — but anonymously:
+nothing on the row says which worker source it came from.
+
 `agent_mcp/_subagent_registry.py` opens a row **before** the Task run
 loop starts — a `Task` blocks its caller for minutes, so a row created on
 completion would only ever describe runs that no longer need watching.

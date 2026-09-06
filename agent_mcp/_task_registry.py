@@ -168,6 +168,24 @@ def list_active() -> list[TaskRecord]:
     return [r for r in _records.values() if r.status == "running"]
 
 
+def list_recent(limit: int = 10) -> list[TaskRecord]:
+    """Finished records, most recently finished first.
+
+    A background task used to leave the dashboard the instant it exited —
+    `list_active` filters on `status == "running"`, and nothing else
+    rendered the rest. One that died three seconds in was indistinguishable
+    from one that never started, which is the opposite of what a background
+    task most needs to report.
+
+    Bounded by `limit` rather than by eviction: `_records` is deliberately
+    kept whole so a later `get(task_id)` can still resolve an output path
+    for the model to Read.
+    """
+    done = [r for r in _records.values() if r.status != "running"]
+    done.sort(key=lambda r: r.finished_at or 0.0, reverse=True)
+    return done[:limit]
+
+
 async def drain_completed_for_session(session_id: str) -> list[TaskRecord]:
     """Pop all pending completion records for a session.
 

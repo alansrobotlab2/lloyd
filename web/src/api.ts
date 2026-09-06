@@ -1688,15 +1688,25 @@ export interface BackgroundTask {
   session_id: string
   description: string
   command: string
+  // running | completed | failed | killed
   status: string
   started_at: number
+  finished_at: number | null
+  exit_code: number | null
+  // Time since start while running; total duration once finished.
   elapsed_s: number
   output_path: string
 }
 
 export interface AgentState {
   subagents: { active: SubagentRun[]; active_count: number; recent: SubagentRun[] }
-  background_tasks: { active: BackgroundTask[]; active_count: number }
+  background_tasks: {
+    active: BackgroundTask[]
+    active_count: number
+    // Finished tasks, most recently finished first. Older builds of the
+    // aggregator don't send this — treat it as optional.
+    recent?: BackgroundTask[]
+  }
   tools: number
 }
 
