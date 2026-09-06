@@ -47,10 +47,16 @@ set -euo pipefail
 #     1.49       nvfp4_experts_mtp     1.5 GiB   MTP draft head
 #                                     --------
 #                                      74.9 GiB
-#   At --gpu-memory-utilization 0.93 (89.3 GiB of the 96 GiB card, less ~1.1 GiB
-#   the desktop already holds) that leaves roughly 12-13 GiB for KV cache. That
-#   should go a long way here: only a minority of the 48 layers hold a real KV
+#   At --gpu-memory-utilization 0.9345 (89.7 GiB of the 96 GiB card, less ~1.1
+#   GiB the desktop already holds) that leaves roughly 12-13 GiB for KV cache,
+#   which goes a long way here: only a minority of the 48 layers hold a real KV
 #   cache (the rest carry Gated DeltaNet recurrent state) and QSA is sparse.
+#   The odd-looking 0.9345 is vLLM's own number. CUDA-graph memory profiling
+#   (on by default since 0.21) charges its estimate against the fraction, so the
+#   boot log says 0.93 is "equivalent to --gpu-memory-utilization 0.9255 without
+#   CUDA graph memory profiling. To maintain the same effective KV cache size as
+#   before, increase --gpu-memory-utilization to 0.9345." Taking that advice is
+#   worth ~14k KV tokens. Do not round it back to 0.93.
 #
 #   If you need more KV: this checkpoint ships a vision tower (333 model.visual.*
 #   tensors in shards 3-4, ~1-2 GiB). We serve text-only, so
@@ -77,8 +83,9 @@ set -euo pipefail
 #   2. async-scheduling shared-event race. PleOffloadConnector allocated ONE
 #      _input_ready_event for the whole connector, assuming one request in
 #      flight; async scheduling breaks that. Fixed by 4e8b849b8d97 (in branch).
-#      --async-scheduling is therefore omitted below out of caution, not
-#      necessity; add it back once this is serving reliably.
+#      ENABLED below since 2026-09-06, after the config had served for three
+#      days without a wedge. If the engine ever hangs with requests running but
+#      no tokens emitted, drop --async-scheduling first — that is this race.
 #   3. TP=1 startup rendezvous race. The registration handoff can be lost, after
 #      which the first warmup forward enqueues an untimed cuStreamWaitValue32
 #      that nothing ever signals. Patched from davidtai/vllm PR #10 (into the
@@ -143,19 +150,19 @@ VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-qwen38-flash-next}"
 MODEL_DIR="${MODEL_DIR:-$PROJECT_DIR/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4}"
 
 # Context length. Deliberately NOT 262144 on first boot.
-#   Budget at --gpu-memory-utilization 0.93 on the 96 GiB card:
-#     89.3 GiB total - 74.1 weights - ~2 activation - ~0.3 cudagraph = ~13 GiB KV.
+#   Budget at --gpu-memory-utilization 0.9345 on the 96 GiB card:
+#     89.7 GiB total - 74.1 weights - ~2 activation - ~0.3 cudagraph = ~13 GiB KV.
 #   How many tokens that buys depends on how many of the 48 layers hold a real KV
 #   cache (the rest are Gated DeltaNet recurrent state) and on QSA's block
 #   sparsity, which this fleet has not measured yet. If max-model-len exceeds what
 #   the KV cache can hold for ONE request, vLLM refuses to start with
 #   "max seq len is larger than the maximum number of tokens that can be stored".
-#   MEASURED 2026-09-03 on this box: "GPU KV cache size: 277,414 tokens", so the
-#   full 262144 native context fits with ~15k tokens to spare. Set to 262144,
+#   MEASURED 2026-09-03 on this box at 0.93: "GPU KV cache size: 314,572
+#   tokens, Maximum concurrency for 262,144 tokens per request: 1.20x", so the
+#   full 262144 native context fits with ~52k tokens to spare. Set to 262144,
 #   which also matches config.yaml's context_length for the primary slot.
-#   Concurrency is the tradeoff the boot log reports next to it:
-#     131072 -> 2.12x   (two full-length requests in flight)
-#     262144 -> ~1.06x  (one; long requests serialize)
+#   Concurrency is the tradeoff the boot log reports next to it; re-read that
+#   line after any change here rather than trusting this comment.
 #   Drop back with MAX_MODEL_LEN=131072 if concurrency matters more than reach.
 #   To go past 262144 you also need YaRN, which is a config override, not a flag:
 #     --hf-overrides '{"rope_parameters":{"rope_type":"yarn","factor":4.0,
@@ -239,12 +246,13 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --distributed-executor-backend mp \
   --max-model-len "$MAX_MODEL_LEN" \
   --max-num-seqs 8 \
-  --gpu-memory-utilization 0.93 \
+  --gpu-memory-utilization 0.9345 \
   --enable-prefix-caching \
   --enable-prompt-tokens-details \
   --no-enable-flashinfer-autotune \
   --no-enable-log-requests \
   --scheduling-policy priority \
+  --async-scheduling \
   --enable-auto-tool-choice \
   --tool-call-parser qwen3_xml \
   --reasoning-parser qwen3 \
