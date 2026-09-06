@@ -22,8 +22,20 @@ BOOT_GRACE = {
 DEFAULT_BOOT_GRACE = 30.0
 
 # Consecutive failed HTTP probes before a RUNNING process is called down.
-# 3 x 5s = 15s of continuous failure.
-PROBE_FAIL_STREAK = 3
+#
+# Split by cause, because they mean different things. A REFUSED connection
+# means nothing is listening — the process is gone, and 3 x 5s = 15s is
+# plenty. A TIMEOUT means the socket accepted but the app did not answer in
+# time, which for this backend is routine: /health is served by the same
+# asyncio loop as the agent's own work, and an hourly autoresearch round fans
+# 77 bench trials through it.
+#
+# This is not hypothetical. On 2026-09-06 an autoresearch round starting at
+# 11:29:18 made /health miss three consecutive 2s probes, and the guardian
+# reverted a perfectly good promotion at 11:30:39. A watchdog that reverts
+# good code every time the machine gets busy is worse than no watchdog.
+PROBE_FAIL_STREAK = 3            # refused / http-error
+PROBE_TIMEOUT_STREAK = 24        # 24 x 5s = 2 minutes of no answer
 
 # supervisord itself unreachable for this many consecutive ticks before we
 # try to restart the unit. Never a code-rollback trigger.
@@ -48,7 +60,9 @@ RESTART_ORDER = ("lloyd-mc:lloyd-mcp", "lloyd-mc:lloyd-backend")
 # ── Endpoints ──────────────────────────────────────────────────────────────
 BACKEND_HEALTH_URL = "http://127.0.0.1:8080/health"
 MCP_HEALTH_URL = "http://127.0.0.1:8500/health"
-PROBE_TIMEOUT_SECONDS = 2.0
+# Generous: this is how long a BUSY event loop may take to answer, not how
+# long a healthy one does (measured at 0.37ms).
+PROBE_TIMEOUT_SECONDS = 10.0
 HEALTH_WAIT_MCP = 60.0
 HEALTH_WAIT_BACKEND = 90.0
 
@@ -123,6 +137,11 @@ GUARDIAN_STATE = _Path(
     _os.environ.get("LLOYD_GUARDIAN_STATE", _Path.home() / ".local/state/lloyd-guardian")
 )
 SUPERVISOR_SOCK = _os.environ.get("LLOYD_SUPERVISOR_SOCK", "/tmp/agent-supervisor.sock")
+# Must exceed stopwaitsecs (15s) — a blocking stopProcess(wait=True) legitimately
+# takes that long, and a shorter client timeout reports "error: timed out" for a
+# stop that is actually working, so the rollback proceeds without knowing whether
+# the writers are down. Observed exactly that during the 11:30 rollback.
+SUPERVISOR_RPC_TIMEOUT = 45.0
 SUPERVISORD_UNIT = "agent-supervisord.service"
 
 SELFTEST_INTERVAL_SECONDS = 24 * 3600.0

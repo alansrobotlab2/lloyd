@@ -53,6 +53,8 @@ def process_down(
     crash_loop_starts: int,
     crash_loop_window: float,
     intentional_stop: bool = False,
+    probe_timeout_streak: int = 0,
+    probe_timeout_threshold: int = 10**9,
 ) -> tuple[bool, str]:
     """Return (down, reason). See the module docstring for the ordering rule."""
     if info is None:
@@ -75,8 +77,16 @@ def process_down(
     if state == "RUNNING":
         if is_starting(info, now, grace):
             return False, "starting"
+        # A refused connection means nothing is listening. A timeout means the
+        # socket accepted but the app was too busy to answer — for this backend
+        # that is routine (an hourly autoresearch round pushes 77 bench trials
+        # through the same event loop that serves /health), so it needs a much
+        # longer budget before it counts as death.
         if probe_fail_streak >= probe_threshold:
-            return True, f"health probe failed {probe_fail_streak} consecutive times"
+            return True, f"health probe refused {probe_fail_streak} consecutive times"
+        if probe_timeout_streak >= probe_timeout_threshold:
+            return True, (f"health probe timed out {probe_timeout_streak} consecutive "
+                          f"times — unresponsive, not merely busy")
         return False, "running"
 
     if state in ("STARTING", "BACKOFF"):

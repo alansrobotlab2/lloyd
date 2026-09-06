@@ -94,8 +94,9 @@ def test_a_freshly_started_process_failing_probes_is_starting_not_down():
 
 
 def test_after_the_grace_window_a_failing_probe_streak_is_down():
+    # `down()` feeds the refused/http-error streak, which keeps the short budget.
     is_down, reason = down(info(start_ago=600.0), streak=3)
-    assert is_down and "probe failed" in reason
+    assert is_down and "refused" in reason
 
 
 def test_two_failed_probes_are_not_enough():
@@ -460,3 +461,77 @@ def test_settle_ignores_a_record_with_no_commit(tmp_path, monkeypatch):
     written, _ = _settle_guardian(
         tmp_path, monkeypatch, {"errors_until_ts": NOW - 1_000_000})
     assert written == {}
+
+
+# ---------------------------------------------------------------------------
+# Why a probe failed matters more than that it failed
+#
+# Regression tests for a real false-positive rollback on 2026-09-06. An
+# autoresearch round started 77 bench trials at 11:29:18; /health shares its
+# event loop with that work, missed three consecutive 2s probes, and at
+# 11:30:39 the guardian reverted a perfectly good promotion. A watchdog that
+# reverts good code whenever the machine gets busy is worse than none.
+# ---------------------------------------------------------------------------
+
+def down2(proc, *, refused=0, timed_out=0, grace=45.0):
+    return detect.process_down(
+        proc, now=NOW, grace=grace,
+        probe_fail_streak=refused, probe_threshold=3,
+        probe_timeout_streak=timed_out, probe_timeout_threshold=24,
+        start_history=[NOW - 3600],
+        crash_loop_starts=3, crash_loop_window=180.0,
+    )
+
+
+def test_a_busy_backend_timing_out_is_not_dead():
+    """The exact shape of the 11:30 false positive: three missed probes."""
+    is_down, reason = down2(info(start_ago=600.0), timed_out=3)
+    assert not is_down, reason
+
+
+def test_timeouts_still_fire_eventually():
+    """Unresponsive for two minutes is death, not busyness."""
+    is_down, reason = down2(info(start_ago=600.0), timed_out=24)
+    assert is_down and "unresponsive" in reason
+
+
+def test_a_refused_connection_is_death_on_the_short_budget():
+    """Nothing listening means the process is gone — no patience required."""
+    is_down, reason = down2(info(start_ago=600.0), refused=3)
+    assert is_down and "refused" in reason
+
+
+def test_refused_and_timeout_budgets_are_independent():
+    assert not down2(info(start_ago=600.0), refused=2, timed_out=20)[0]
+    assert down2(info(start_ago=600.0), refused=3, timed_out=0)[0]
+
+
+def test_the_probe_classifies_a_refusal_separately_from_a_timeout():
+    import probes
+
+    # Nothing listening on this port.
+    result = probes.probe("http://127.0.0.1:9/health", 0.5)
+    assert not result["ok"]
+    assert result["kind"] in ("refused", "timeout"), result
+
+
+def test_the_timeout_budget_covers_a_realistic_busy_window():
+    """77 bench trials took ~90s of loop pressure; the budget must exceed it."""
+    import policy
+
+    assert policy.PROBE_TIMEOUT_STREAK * policy.TICK_SECONDS >= 100
+    assert policy.PROBE_TIMEOUT_SECONDS >= 10, (
+        "a 2s timeout is shorter than a loaded event loop's scheduling delay")
+
+
+def test_the_supervisor_rpc_timeout_exceeds_stopwaitsecs():
+    """A blocking stopProcess(wait=True) legitimately takes stopwaitsecs.
+
+    At the old 5s client timeout the guardian logged "stop: error: timed out"
+    for a stop that was working, and proceeded without knowing whether the
+    writers were down — which is the one thing the stop-before-reset ordering
+    exists to guarantee.
+    """
+    import policy
+
+    assert policy.SUPERVISOR_RPC_TIMEOUT > 15.0
