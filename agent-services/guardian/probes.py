@@ -22,7 +22,8 @@ def probe(url: str, timeout: float) -> dict:
     """
     import time as _t
     started = _t.monotonic()
-    out = {"ok": False, "status": None, "body": None, "error": None, "latency_ms": None}
+    out = {"ok": False, "status": None, "body": None, "error": None,
+           "latency_ms": None, "kind": "ok"}
     try:
         req = urllib.request.Request(url, method="GET")
         # Never route a loopback health check through a proxy.
@@ -39,6 +40,18 @@ def probe(url: str, timeout: float) -> dict:
     except (urllib.error.URLError, socket.timeout, OSError, ValueError) as e:
         out["error"] = str(e)[:200]
         out["latency_ms"] = round((_t.monotonic() - started) * 1000, 2)
+        # WHY it failed matters more than THAT it failed. A refused connection
+        # means the process is gone. A timeout on a port that is still open
+        # means the process is alive and busy — which for this backend is
+        # routine: /health shares an event loop with the agent's own work, and
+        # an autoresearch round fans out 77 trials through it.
+        blob = f"{type(e).__name__}: {e}".lower()
+        if "refused" in blob or "no route" in blob or "not known" in blob:
+            out["kind"] = "refused"
+        elif "timed out" in blob or "timeout" in blob:
+            out["kind"] = "timeout"
+        else:
+            out["kind"] = "error"
         return out
 
     out["latency_ms"] = round((_t.monotonic() - started) * 1000, 2)
@@ -48,6 +61,7 @@ def probe(url: str, timeout: float) -> dict:
         out["body"] = None
     body_status = (out["body"] or {}).get("status") if isinstance(out["body"], dict) else None
     out["ok"] = out["status"] == 200 and (body_status in (None, "ok"))
+    out["kind"] = "ok" if out["ok"] else "http_error"
     return out
 
 

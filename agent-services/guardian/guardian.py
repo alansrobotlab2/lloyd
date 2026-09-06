@@ -76,7 +76,8 @@ class Guardian:
         self.state = gstate.SelfModState(Path(args.state))
         self.gdir = Path(args.guardian_state)
         self.gdir.mkdir(parents=True, exist_ok=True)
-        self.sup = SupervisorClient(args.supervisor_sock)
+        self.sup = SupervisorClient(args.supervisor_sock,
+                                    timeout=policy.SUPERVISOR_RPC_TIMEOUT)
         self.backend_url = args.backend_url
         self.mcp_url = args.mcp_url
         self.programs = tuple(p for p in args.programs.split(",") if p)
@@ -90,6 +91,7 @@ class Guardian:
 
         self.tick_n = 0
         self.probe_fail: dict[str, int] = {p: 0 for p in self.programs}
+        self.probe_timeout: dict[str, int] = {p: 0 for p in self.programs}
         self.start_history: dict[str, list[float]] = {p: [] for p in self.programs}
         self.sup_down_streak = 0
         self.quiet_until = 0.0
@@ -151,7 +153,15 @@ class Guardian:
             info = snap["procs"].get(program)
             result = snap["probes"].get(program)
             if result is not None:
-                self.probe_fail[program] = 0 if result["ok"] else self.probe_fail.get(program, 0) + 1
+                if result["ok"]:
+                    self.probe_fail[program] = 0
+                    self.probe_timeout[program] = 0
+                elif result.get("kind") == "timeout":
+                    # Alive but slow. Counted, but on its own long budget.
+                    self.probe_timeout[program] = self.probe_timeout.get(program, 0) + 1
+                    self.probe_fail[program] = 0
+                else:
+                    self.probe_fail[program] = self.probe_fail.get(program, 0) + 1
 
             grace = policy.BOOT_GRACE.get(program, policy.DEFAULT_BOOT_GRACE)
             down, reason = detect.process_down(
@@ -160,6 +170,8 @@ class Guardian:
                 grace=grace,
                 probe_fail_streak=self.probe_fail.get(program, 0),
                 probe_threshold=policy.PROBE_FAIL_STREAK,
+                probe_timeout_streak=self.probe_timeout.get(program, 0),
+                probe_timeout_threshold=policy.PROBE_TIMEOUT_STREAK,
                 start_history=self.start_history.get(program, []),
                 crash_loop_starts=policy.CRASH_LOOP_STARTS,
                 crash_loop_window=policy.CRASH_LOOP_WINDOW_SECONDS,
@@ -338,6 +350,7 @@ class Guardian:
         self.quiet_until = time.time() + policy.POST_ROLLBACK_QUIET_SECONDS
         for program in self.programs:
             self.probe_fail[program] = 0
+            self.probe_timeout[program] = 0
             self.start_history[program] = []
 
         recent = self.state.recent_rollbacks(policy.FLAP_WINDOW_SECONDS)
@@ -387,6 +400,8 @@ class Guardian:
         """Advance LKG once a promotion survives its full observation window."""
         errors_until = float(current.get("errors_until_ts") or 0)
         if not errors_until or time.time() < errors_until:
+            return
+        if current.get("state") == "landing":
             return
         commit = current.get("commit")
         if not commit:
@@ -450,6 +465,11 @@ class Guardian:
             return "paused"
 
         current = self.state.current()
+        # A record still in `landing` means the promoter is mid-flight (it may
+        # be waiting on the idle gate). Nothing has been deployed yet, so there
+        # is nothing to observe and nothing to revert.
+        if current and current.get("state") == "landing":
+            current = None
 
         if live_down:
             # Rollback is only ever appropriate for a commit the LOOP promoted
