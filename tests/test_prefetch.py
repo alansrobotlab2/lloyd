@@ -408,24 +408,39 @@ def test_single_term_query_still_runs(monkeypatch):
 
 
 def test_lex_ladder_stops_at_deadline(monkeypatch):
+    """The ladder must stop starting new calls once it is past the deadline.
+
+    Driven by a fake clock rather than real sleeps. The behaviour under test is
+    a comparison against `time.monotonic()`, not real timing, and the earlier
+    version — `time.sleep(0.05)` per call plus a wall-clock bound — failed
+    whenever the machine was busy. That matters more than usual here: the
+    self-modification gate runs this suite while a canary is booting, so a
+    load-sensitive test would randomly block promotions for reasons that have
+    nothing to do with the change being gated.
+    """
     calls: list[str] = []
+    clock = {"t": 1000.0}
+
+    def _fake_monotonic():
+        return clock["t"]
 
     def _search(query, focus=None, legs=("lex", "vec"), **kw):
         calls.append(query)
-        time.sleep(0.05)
-        return []  # never hits → ladder would keep stepping down
+        clock["t"] += 0.05          # each daemon round-trip "costs" 50ms
+        return []                   # never hits → the ladder keeps stepping down
 
+    monkeypatch.setattr(prefetch.time, "monotonic", _fake_monotonic)
     monkeypatch.setattr(prefetch, "_search_vault", _search)
     focus = prefetch.SessionFocus()
     focus.update("alfie servo shoulder pid gains oscillation tuning")
-    t0 = time.monotonic()
-    # Calls start at ~0, ~0.05, ~0.10s; a deadline of 0.08s (+margin) lets
-    # the second start and must stop the third even if the sleeps overshoot.
+
+    t0 = clock["t"]
+    # Calls start at t0, t0+0.05, t0+0.10. A deadline of t0+0.08 (+margin) lets
+    # the second start and must stop the third.
     hits = prefetch._search_vault_lex("alfie servo shoulder pid gains oscillation tuning", focus,
                                       deadline=t0 + 0.08 + prefetch.VAULT_LEX_DEADLINE_MARGIN_S)
     assert hits == []
-    assert len(calls) <= 2, calls  # not the 6-call maximum
-    assert time.monotonic() - t0 < 0.4
+    assert len(calls) == 2, calls   # not the 6-call maximum, and not 1
 
 
 # ── Session index cache window ────────────────────────────────────────────────

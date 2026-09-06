@@ -210,11 +210,20 @@ def test_query_stopwords_superset_of_entity():
 # Path constants — sanity
 # ---------------------------------------------------------------------------
 
-def test_path_constants_resolved_under_home():
-    home = Path.home()
-    assert memory.FACTS_ROOT == home / "lloyd" / "_pipeline" / "vault-derived" / "facts"
+def test_path_constants_follow_the_running_code_not_the_home_dir():
+    """State follows LLOYD_HOME, not `$HOME/lloyd`.
+
+    This test used to assert `Path.home()/"lloyd"`, which was the same thing in
+    the live checkout and silently wrong everywhere else: a second checkout
+    shared the first one's fact tree, and a self-modification canary would have
+    written into live state. The constants now anchor to the directory the
+    running code lives in (app/paths.py), so a worktree gets its own.
+    """
+    from app.paths import LLOYD_HOME, VAULT_ROOT
+
+    assert memory.FACTS_ROOT == LLOYD_HOME / "_pipeline" / "vault-derived" / "facts"
     assert memory.ALIASES_PATH == memory.FACTS_ROOT / "entity-aliases.json"
-    assert memory.VAULT == home / "obsidian"
+    assert memory.VAULT == VAULT_ROOT
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +325,7 @@ _TESTS = [
     test_scoring_stopwords_superset_of_entity,
     test_query_stopwords_superset_of_entity,
     # paths
-    test_path_constants_resolved_under_home,
+    test_path_constants_follow_the_running_code_not_the_home_dir,
     # tool surface
     test_list_tools_returns_expected_set,
     test_list_tools_required_inputs_present,
