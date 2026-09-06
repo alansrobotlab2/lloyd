@@ -1,0 +1,10 @@
+[Unit]
+Description=Nag every 15 minutes while the guardian is in a BROKEN state
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=lloyd-guardian-nag.service
+
+[Install]
+WantedBy=timers.target

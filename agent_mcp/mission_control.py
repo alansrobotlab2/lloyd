@@ -15,7 +15,7 @@ from mcp.types import Tool
 
 from agent_mcp._shared import text_result
 
-LLOYD_HOME = Path.home() / "lloyd"
+from app.paths import LLOYD_HOME  # the running code dir, not $HOME/lloyd
 SESSIONS_DIR = LLOYD_HOME / "sessions"
 
 

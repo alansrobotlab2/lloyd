@@ -27,7 +27,7 @@ from typing import Any
 logger = logging.getLogger("lloyd-task-registry")
 
 # Where bg-task output logs live. Created on first use.
-TASKS_DIR = Path(os.path.expanduser("~/lloyd/_pipeline/tasks"))
+from app.paths import TASKS_DIR  # anchored to LLOYD_HOME
 
 
 # Session correlation. Set by the harness wrapper before each MCP

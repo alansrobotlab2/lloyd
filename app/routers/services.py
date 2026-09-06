@@ -8,12 +8,14 @@ from fastapi.responses import JSONResponse
 from app.supervisor_client import (
     _INFRA_SERVICES,
     _LLOYD_SERVICES,
-    _supervisor_all,
-    _supervisor_proxy,
+    _supervisor_all_lenient,
     _port_open,
     _sup_state,
     _health,
     _read_log_tail,
+    start_process,
+    stop_process,
+    restart_process,
 )
 
 
@@ -22,7 +24,7 @@ router = APIRouter()
 
 @router.get("/api/services")
 async def get_services():
-    procs = _supervisor_all()
+    procs = _supervisor_all_lenient()
     now = datetime.now().isoformat()
     services = []
     for sid, (name, port) in _INFRA_SERVICES.items():
@@ -46,7 +48,7 @@ async def get_service_detail(id: str = ""):
     if not id or id not in _INFRA_SERVICES:
         raise HTTPException(status_code=404, detail=f"Service not found: {id}")
     name, port = _INFRA_SERVICES[id]
-    procs = _supervisor_all()
+    procs = _supervisor_all_lenient()
     proc = procs.get(id, {})
     active, sub = _sup_state(proc)
     pid = proc.get("pid") or None
@@ -78,26 +80,23 @@ async def service_action(request: Request):
         raise HTTPException(status_code=404, detail=f"Unknown service: {service_id}")
     if action not in ("start", "stop", "restart"):
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
-    try:
-        proxy = _supervisor_proxy()
-        if action == "start":
-            proxy.supervisor.startProcess(service_id)
-        elif action == "stop":
-            proxy.supervisor.stopProcess(service_id)
-        elif action == "restart":
-            try:
-                proxy.supervisor.stopProcess(service_id)
-            except Exception:
-                pass
-            proxy.supervisor.startProcess(service_id)
-        return JSONResponse({"success": True})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # These go through supervisor_client so the name is group-qualified.
+    # Passing the bare `lloyd-backend` here returned Fault 10 BAD_NAME for
+    # every service in the lloyd-mc group until 2026-09-06.
+    if action == "start":
+        ok, msg = start_process(service_id)
+    elif action == "stop":
+        ok, msg = stop_process(service_id)
+    else:
+        ok, msg = restart_process(service_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail=msg)
+    return JSONResponse({"success": True, "detail": msg})
 
 
 @router.get("/api/agent-services")
 async def get_agent_services():
-    procs = _supervisor_all()
+    procs = _supervisor_all_lenient()
     now = datetime.now().isoformat()
     services = []
     for sid, (name, port) in _LLOYD_SERVICES.items():
@@ -126,7 +125,7 @@ async def get_agent_service_detail(unit: str = ""):
     if not unit or unit not in _LLOYD_SERVICES:
         raise HTTPException(status_code=404, detail=f"Service not found: {unit}")
     name, port = _LLOYD_SERVICES[unit]
-    procs = _supervisor_all()
+    procs = _supervisor_all_lenient()
     proc = procs.get(unit, {})
     pid = proc.get("pid") or None
     log_path = f"/home/alansrobotlab/lloyd/logs/{unit.replace('lloyd-', '')}.log"

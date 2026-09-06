@@ -11,6 +11,19 @@ VAULT_ROOT = Path.home() / "obsidian"
 
 VAULT_DERIVED_ROOT = LLOYD_HOME / "_pipeline" / "vault-derived"
 
+# Runtime state directories. These were previously spelled `Path.home() /
+# "lloyd" / ...` at a dozen call sites, which pinned them to the *user's*
+# lloyd checkout rather than to the code that is running. That is a latent bug
+# on its own (a second checkout silently shares the first one's state) and it
+# is fatal for a self-modification canary: the canary boots from a worktree but
+# would still have claimed jobs from the live workers.db, written into the live
+# sessions dir, and rewritten live autonomy task files. Anchoring to LLOYD_HOME
+# means state follows the code, which is what every other path here already did.
+AUTONOMY_RUNS_DIR = LLOYD_HOME / "autonomy-runs"
+TASKS_DIR = LLOYD_HOME / "_pipeline" / "tasks"
+LOGS_DIR = LLOYD_HOME / "logs"
+SCREENSHOTS_DIR = LOGS_DIR / "screenshots"
+
 # The fact tree (one dir per entity, markdown fact files). LLOYD_FACTS_ROOT
 # lets a rebuild extract into a fresh tree without touching the live one.
 VAULT_FACTS_ROOT = Path(os.environ["LLOYD_FACTS_ROOT"]) if os.environ.get("LLOYD_FACTS_ROOT") \

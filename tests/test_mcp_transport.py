@@ -95,8 +95,26 @@ async def pool(aggregator):
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_discovery_over_the_wire(pool):
+    """The aggregator advertises its tool surface over a real transport.
+
+    The floor deliberately EXCLUDES thunderbird. That module contributes 40 of
+    the ~124 live tools, and `thunderbird.list_tools()` degrades to `[]`
+    whenever the mail client isn't running — so a flat `> 100` made this test,
+    and therefore the self-modification gate that runs the whole suite, depend
+    on whether the user happened to have Thunderbird open. Everything that is
+    not an external-app bridge is counted instead.
+    """
+    from agent_mcp import main as M
+
+    external = {"thunderbird"}
+    internal_expected = sum(
+        entry.get("tools", 0)
+        for name, entry in M._discovery_status.items()
+        if name not in external
+    )
     names = {t["name"] for _s, ts in pool.discovered for t in ts}
-    assert len(names) > 100
+    assert internal_expected >= 80, M._discovery_status
+    assert len(names) >= internal_expected
     assert {"Bash", "Read", "Write", "Edit", "Grep", "Glob"} <= names
 
 

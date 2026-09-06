@@ -49,7 +49,8 @@ from agent_mcp._shared import text_result
 
 logger = logging.getLogger("lloyd-thunderbird")
 
-BRIDGE_PATH = Path.home() / "lloyd" / "agent-services" / "services" / "thunderbird-mcp" / "mcp-bridge.cjs"
+from app.paths import LLOYD_HOME as _LH
+BRIDGE_PATH = _LH / "agent-services" / "services" / "thunderbird-mcp" / "mcp-bridge.cjs"
 
 # Bridge tool name -> Lloyd tool name.
 #

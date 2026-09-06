@@ -1,0 +1,10 @@
+2026-09-06 08:06:14,321 [INFO] lloyd-server: startup complete — /health will report ready
+2026-09-06 08:06:14,321 [ERROR] lloyd-workers.scheduled_task: autonomy scheduler may be stalled: oldest claimable queue item is 1266 min old
+2026-09-06 08:06:14,321 [WARNING] lloyd-server: discord_alert (no channel/token configured): autonomy scheduler may be stalled: oldest claimable queue item is 1266 min old
+2026-09-06 08:14:02,110 [INFO] lloyd-harness-mcp-pool: pool opened with 124 tools
+2026-09-06 09:06:14,900 [ERROR] lloyd-workers.scheduled_task: autonomy scheduler may be stalled: oldest claimable queue item is 1326 min old
+2026-09-06 09:06:14,901 [WARNING] lloyd-server: discord_alert (no channel/token configured): autonomy scheduler may be stalled: oldest claimable queue item is 1326 min old
+2026-09-06 09:31:55,004 [WARNING] lloyd-workers.pool: worker slot 1 idle for 300s
+2026-09-06 10:06:15,002 [ERROR] lloyd-workers.scheduled_task: autonomy scheduler may be stalled: oldest claimable queue item is 1386 min old
+2026-09-06 10:06:15,003 [WARNING] lloyd-server: discord_alert (no channel/token configured): autonomy scheduler may be stalled: oldest claimable queue item is 1386 min old
+2026-09-06 10:12:00,000 [INFO] lloyd-autonomy: Autonomy startup complete — worker pool handles task execution

@@ -148,6 +148,44 @@ def save_tool_overrides() -> None:
     )
 
 
+def _deep_merge(base: dict, over: dict) -> dict:
+    """Recursively merge `over` into `base`. Dicts merge; everything else replaces."""
+    out = dict(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _apply_config_overlay(raw: dict) -> dict:
+    """Deep-merge the YAML named by $LLOYD_CONFIG_OVERLAY over `raw`.
+
+    This is how a canary gets its own ports and its `workers.enabled: false`
+    without editing the tracked `config.yaml` in its worktree (which would
+    dirty the tree and risk the canary's config being committed).
+
+    Deliberately an env var rather than a `config.local.yaml` convention: a
+    stray file in the live tree would silently change production, whereas a
+    stray env var cannot appear without editing a supervisor conf. An
+    unreadable overlay is fatal, not ignored — a canary that silently ran on
+    live config would be worse than one that refuses to boot.
+    """
+    path = os.environ.get("LLOYD_CONFIG_OVERLAY")
+    if not path:
+        return raw
+    p = Path(path)
+    if not p.exists():
+        raise RuntimeError(f"LLOYD_CONFIG_OVERLAY points at a missing file: {p}")
+    with open(p, "r") as f:
+        overlay = yaml.safe_load(f) or {}
+    if not isinstance(overlay, dict):
+        raise RuntimeError(f"LLOYD_CONFIG_OVERLAY is not a YAML mapping: {p}")
+    logger.info("config overlay applied from %s", p)
+    return _deep_merge(raw, overlay)
+
+
 def _load_config() -> dict:
     _load_env_file(LLOYD_HOME / ".env")
     config_path = LLOYD_HOME / "config.yaml"
@@ -155,7 +193,7 @@ def _load_config() -> dict:
         return {}
     with open(config_path, "r") as f:
         raw = yaml.safe_load(f) or {}
-    return _merge_tool_overrides(_expand(raw))
+    return _merge_tool_overrides(_expand(_apply_config_overlay(raw)))
 
 
 CONFIG = _load_config()

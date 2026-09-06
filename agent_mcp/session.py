@@ -46,7 +46,7 @@ _INJECTION_PATTERNS = [
     re.compile(r"\x00|​|‌|‍|⁠|﻿", re.I),
 ]
 
-SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
+from app.paths import SESSIONS_DIR  # anchored to LLOYD_HOME, not $HOME/lloyd
 _SESSION_INDEX_TTL = 120       # cache session index for 2 min
 _SESSION_CORPUS_MAX = 5000     # max chars of searchable text per session
 

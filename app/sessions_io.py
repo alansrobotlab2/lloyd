@@ -248,6 +248,34 @@ def is_session_active(session_id: str) -> bool:
     return q.current is not None or bool(q.pending_user) or bool(q.pending_ambient)
 
 
+def active_turn_summary() -> dict:
+    """Process-wide turn liveness: {"active": N, "queued": M, "sessions": [...]}.
+
+    Nothing else answers "is any turn in flight anywhere". `is_session_active`
+    needs a session id; `/api/sessions/active` returns a heuristic *current*
+    session for ambient producers rather than a liveness answer; and
+    `/api/sessions/active-procs` only finds legacy SDK subprocesses, which the
+    in-process harness no longer spawns.
+
+    This is the idle gate for self-modification: the promoter must not restart
+    the backend out from under a running turn. Cheap by construction — a dict
+    walk over `_session_queues`, no filesystem and no locking (a torn read
+    just means the promoter waits one more poll).
+    """
+    active = 0
+    queued = 0
+    busy_sessions: list[str] = []
+    for sid, q in list(_session_queues.items()):
+        running = q.current is not None
+        pending = len(q.pending_user) + len(q.pending_ambient)
+        if running:
+            active += 1
+        queued += pending
+        if running or pending:
+            busy_sessions.append(sid)
+    return {"active": active, "queued": queued, "sessions": sorted(busy_sessions)}
+
+
 def get_cancel_event(session_id: str) -> Optional[asyncio.Event]:
     """Cancel-event for the currently-running turn, or None if idle."""
     q = _session_queues.get(session_id)

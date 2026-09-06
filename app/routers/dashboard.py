@@ -209,10 +209,10 @@ def _services() -> dict[str, Any]:
         _health,
         _port_open,
         _sup_state,
-        _supervisor_all,
+        _supervisor_all_lenient,
     )
 
-    procs = _supervisor_all()
+    procs = _supervisor_all_lenient()
     out: list[dict[str, Any]] = []
     for group, table in (("infra", _INFRA_SERVICES), ("lloyd", _LLOYD_SERVICES)):
         for sid, (name, port) in table.items():

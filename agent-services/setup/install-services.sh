@@ -4,9 +4,22 @@ set -euo pipefail
 # Installs the systemd user unit by symlinking from systemd/ to ~/.config/systemd/user/,
 # then reloads the systemd daemon.
 #
-# There is exactly ONE unit: agent-supervisord.service. It runs supervisord,
-# which in turn manages every Lloyd service (see supervisor/conf.d/). Individual
-# per-service systemd units were retired — do not expect lloyd-llm.service etc.
+# There are TWO units, and the second one is a deliberate exception.
+#
+#   agent-supervisord.service — runs supervisord, which manages every Lloyd
+#     service (see supervisor/conf.d/). Individual per-service systemd units
+#     were retired; do not expect lloyd-llm.service etc.
+#
+#   lloyd-guardian.service — the self-modification rollback watchdog. It
+#     cannot live under supervisord: agent-supervisord.service sets
+#     KillMode=control-group, so every supervisord child dies when that unit
+#     restarts or supervisord crashes, which is precisely the situation the
+#     guardian exists to survive. It also needs to be able to restart
+#     supervisord itself, and a child cannot restart its own supervisor and
+#     live. Plus supervisord parks a program in FATAL after startretries and
+#     never un-parks it, while systemd Restart=always never gives up.
+#
+# Anything that is not a watchdog still belongs in supervisor/conf.d/.
 #
 # Lingering must also be enabled or supervisord dies at logout and never starts
 # at boot:
@@ -20,7 +33,8 @@ echo "=== Installing Systemd Service Files ==="
 
 mkdir -p "$SYSTEMD_DST"
 
-for f in "$SYSTEMD_SRC"/*.service; do
+for f in "$SYSTEMD_SRC"/*.service "$SYSTEMD_SRC"/*.timer; do
+    [ -e "$f" ] || continue
     name="$(basename "$f")"
     src="$(realpath "$f")"
     dst="$SYSTEMD_DST/$name"

@@ -493,7 +493,7 @@ async def _handle_run(params: dict) -> str:
     if task_id == 0:
         return json.dumps({"error": "id is required"})
     try:
-        lloyd_home = Path.home() / "lloyd"
+        from app.paths import LLOYD_HOME as lloyd_home
         if str(lloyd_home) not in sys.path:
             sys.path.insert(0, str(lloyd_home))
         from autonomy import run_task

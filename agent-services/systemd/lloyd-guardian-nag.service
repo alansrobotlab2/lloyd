@@ -1,0 +1,9 @@
+[Unit]
+Description=Re-announce an unresolved Lloyd guardian BROKEN state
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c 'f="$HOME/.local/state/lloyd-selfmod/BROKEN"; [ -f "$f" ] || exit 0; msg="$(head -c 400 "$f")"; systemd-cat -t lloyd-guardian -p 2 -- echo "STILL BROKEN: $msg"; notify-send -u critical "Lloyd guardian: STILL BROKEN" "$msg" || true'
+Environment=DISPLAY=:1
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus

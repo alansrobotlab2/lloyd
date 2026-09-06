@@ -93,6 +93,20 @@ from app.routers._messages_inner_voice import (
 
 
 
+def _clamp_priority(value: Any, default: int = 0) -> int:
+    """Clamp a client-supplied vLLM scheduling priority into 0..2.
+
+    0 is interactive and preempts everything; higher numbers yield. The
+    self-modification canary sends 1 so a gate run cannot starve a real
+    user's chat. Anything unparseable falls back to `default` rather than
+    raising — a bad priority must never fail a turn.
+    """
+    try:
+        return max(0, min(2, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _load_session_todos(session_id: str) -> list[dict]:
     """Read `session.todos` from disk for system-prompt anchoring (Plan A.2).
 
@@ -1221,6 +1235,18 @@ async def post_message_stream(request: Request):
     if not text:
         raise HTTPException(status_code=400, detail="Message text required")
 
+    # Self-modification landing window. The promoter idles the backend, sets
+    # this flag, then restarts — without it a turn arriving in that gap is
+    # cancelled mid-flight by shutdown_cleanup's 2s grace. The flag carries a
+    # mandatory TTL, so a promoter that dies here cannot wedge the endpoint.
+    from app.routers.selfmod import drain_active, drain_remaining
+    if drain_active():
+        raise HTTPException(
+            status_code=503,
+            detail=(f"Lloyd is landing a code update; retry in "
+                    f"{drain_remaining():.0f}s."),
+        )
+
     # ------- /compact slash command (Layer D) -------------------------
     if text.split()[0].lower() == "/compact":
         if not session_id:
@@ -1321,6 +1347,9 @@ async def post_message_stream(request: Request):
         data.get("permission_mode")
         or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
     )
+    # vLLM scheduling priority. 0 = interactive (default), higher yields.
+    # The self-mod canary smoke turn sends 1 so a real user's chat preempts it.
+    llm_priority: int = _clamp_priority(data.get("priority", 0))
 
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
@@ -1337,7 +1366,7 @@ async def post_message_stream(request: Request):
         disallowed_tools_refresh=_refresh_disallowed_for_session,
         env=model_env,
         hooks=iv_hooks,
-        priority=0,
+        priority=llm_priority,
         # cancel_event and session_id wired in _run_turn at run time
         **_get_harness_kwargs(),
     )
@@ -1544,6 +1573,8 @@ async def post_message(request: Request):
         or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
     )
 
+    sync_llm_priority: int = _clamp_priority(data.get("priority", 0))
+
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
     install_default_safety_hook(iv_hooks)
@@ -1560,7 +1591,7 @@ async def post_message(request: Request):
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
-        priority=0,
+        priority=sync_llm_priority,
         # This path calls run_query directly rather than going through
         # _run_turn, so it wires its own anchor.
         state_anchor=_build_state_anchor(session_id),

@@ -423,14 +423,14 @@ def _summarize_skills() -> dict:
 def _summarize_services() -> dict:
     try:
         from app.supervisor_client import (
-            _supervisor_all,
+            _supervisor_all_lenient,
             _INFRA_SERVICES,
             _LLOYD_SERVICES,
             _sup_state,
         )
     except Exception:
         return {}
-    procs = _supervisor_all()
+    procs = _supervisor_all_lenient()
     counts = {"running": 0, "stopped": 0, "other": 0}
     for sid in (*_INFRA_SERVICES.keys(), *_LLOYD_SERVICES.keys()):
         proc = procs.get(sid, {})
@@ -476,9 +476,9 @@ def _summarize_dashboard() -> dict:
     try:
         from app.supervisor_client import (
             _INFRA_SERVICES, _LLOYD_SERVICES, _health, _port_open,
-            _sup_state, _supervisor_all,
+            _sup_state, _supervisor_all_lenient,
         )
-        procs = _supervisor_all()
+        procs = _supervisor_all_lenient()
         unhealthy = []
         for sid, (_name, port) in {**_INFRA_SERVICES, **_LLOYD_SERVICES}.items():
             active_state, _sub = _sup_state(procs.get(sid))

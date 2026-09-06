@@ -34,7 +34,7 @@ import yaml
 
 logger = logging.getLogger("lloyd-discord")
 
-LLOYD_HOME = Path.home() / "lloyd"
+from app.paths import LLOYD_HOME  # the running code dir, not $HOME/lloyd
 SESSIONS_DIR = LLOYD_HOME / "sessions"
 LLOYD_BACKEND = service_url("backend", "http://127.0.0.1:8080")
 DISCORD_API = "https://discord.com/api/v10"

@@ -29,8 +29,9 @@ logger = logging.getLogger("lloyd-workers.bench_mine")
 NAME = "bench-mine"
 DEFAULT_PRIORITY = 80
 
-LEDGER_PATH = Path.home() / "lloyd" / "_pipeline" / "research" / "ledger.jsonl"
-AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
+from app.paths import LLOYD_HOME as _LH
+LEDGER_PATH = _LH / "_pipeline" / "research" / "ledger.jsonl"
+from app.paths import AUTONOMY_RUNS_DIR
 
 
 def _recent_ledger_losers(days: int = 7, limit: int = 5) -> list[dict]:

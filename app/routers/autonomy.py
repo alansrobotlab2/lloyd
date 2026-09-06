@@ -18,7 +18,7 @@ router = APIRouter()
 logger = logging.getLogger("lloyd-server")
 
 _AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
-_AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
+from app.paths import AUTONOMY_RUNS_DIR as _AUTONOMY_RUNS_DIR
 
 
 # ── Runtime control ──────────────────────────────────────────────────────────
@@ -347,7 +347,18 @@ async def autonomy_runs(task_id: int = 0, limit: int = 20):
 
 
 async def start_autonomy_ticker():
-    """Recover stuck tasks on startup. Scheduling is driven by the worker pool."""
+    """Recover stuck tasks on startup. Scheduling is driven by the worker pool.
+
+    `recover_stuck_tasks()` REWRITES task files under the autonomy dir. A
+    self-modification canary sets `autonomy.ticker_enabled: false` so a gate
+    run cannot mutate real task state. (The canary also runs with its own
+    HOME, so the dir it would touch is an empty scratch one — this flag is the
+    second, explicit layer.)
+    """
+    from app.config import CONFIG
+    if not (CONFIG.get("autonomy") or {}).get("ticker_enabled", True):
+        logger.info("autonomy.ticker_enabled=false → skipping stuck-task recovery")
+        return
     try:
         from autonomy import recover_stuck_tasks
         recovered = recover_stuck_tasks()

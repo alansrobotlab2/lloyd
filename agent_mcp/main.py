@@ -35,9 +35,11 @@ aggregator calls the module functions directly. See `_check_module`.
 import asyncio
 import json
 import logging
+import os
 import time as _time
 from contextlib import asynccontextmanager
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 import uvicorn
 from mcp.server.caching import CacheHint
@@ -76,7 +78,29 @@ from agent_mcp import (
 
 logger = logging.getLogger("lloyd-mcp")
 
-PORT = 8500
+
+def _resolve_port() -> int:
+    """Bind port for the aggregator.
+
+    Every *client* of this server resolves its URL through `services.lloyd_mcp`
+    in config.yaml (`app/config.py::service_url`), but the server itself used
+    to bind a hardcoded 8500 — so moving the port in config silently pointed
+    every client at a server that was still on the old one. Resolve from the
+    same registry the clients use, with an env override so a canary can take a
+    second port without a config edit.
+    """
+    env = os.environ.get("LLOYD_MCP_PORT")
+    if env:
+        return int(env)
+    try:
+        from app.config import service_url
+        parsed = urlparse(service_url("lloyd_mcp", "http://127.0.0.1:8500/mcp"))
+        return parsed.port or 8500
+    except Exception:
+        return 8500
+
+
+PORT = _resolve_port()
 
 # memory.py was split into facts/vault/session in #340 PR 5. The legacy
 # memory module remains as a backward-compat re-export shim for callers

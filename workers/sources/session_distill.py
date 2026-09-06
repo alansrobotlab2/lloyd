@@ -21,7 +21,7 @@ logger = logging.getLogger("lloyd-workers.session_distill")
 
 NAME = "session-distill"
 DEFAULT_PRIORITY = 70
-SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
+from app.paths import SESSIONS_DIR  # anchored to LLOYD_HOME, not $HOME/lloyd
 
 _MAX_ENQUEUE_PER_TICK = 3
 

@@ -1,0 +1,42 @@
+[Unit]
+# Self-modification watchdog. Deliberately a SECOND systemd unit, breaking the
+# "there is exactly ONE unit" convention in setup/install-services.sh — the
+# rationale for that convention (per-service units were retired in favour of
+# supervisord) does not reach a watchdog whose entire job is to survive
+# supervisord. Concretely: agent-supervisord.service sets
+# KillMode=control-group, so a supervisord-managed guardian dies whenever that
+# unit restarts or crashes, which is exactly when it is needed. It must also
+# be able to restart supervisord itself, and a child cannot restart its own
+# supervisor and live.
+Description=Lloyd self-modification guardian (rollback watchdog)
+After=agent-supervisord.service
+Wants=agent-supervisord.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+# Stage the snapshot before every start: compile + selftest, and only then
+# copy into ~/.local/state/lloyd-guardian/bin. Prefixed with `-` so a failing
+# stage can NEVER block the guardian from starting — it just keeps running the
+# previous known-good snapshot. Degrades to a stale watchdog, never to none.
+ExecStartPre=-/home/alansrobotlab/lloyd/agent-services/bin/guardian-stage.sh
+# Runs from the PINNED SNAPSHOT, not the repo, and on the SYSTEM python — so
+# neither a bad commit nor a wrecked venv can stop it.
+ExecStart=/usr/bin/python3 %h/.local/state/lloyd-guardian/bin/guardian.py
+Restart=always
+RestartSec=5
+# Never give up. A watchdog that can permanently park itself is not a watchdog.
+StartLimitIntervalSec=0
+# Catches a HUNG guardian, which supervisord could not. The loop pings
+# WATCHDOG=1 every tick (5s), so 90s is ~18 missed ticks.
+WatchdogSec=90
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# notify-send needs these; the guardian tolerates their absence.
+Environment=DISPLAY=:1
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+
+[Install]
+WantedBy=default.target

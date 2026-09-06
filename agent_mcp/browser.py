@@ -26,7 +26,7 @@ logger = logging.getLogger("lloyd-browser")
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 CHROMIUM_EXECUTABLE = "/usr/bin/chromium"
-SCREENSHOTS_DIR = Path("/home/alansrobotlab/lloyd/logs/screenshots")
+from app.paths import SCREENSHOTS_DIR  # was an absolute literal
 MAX_SNAPSHOT_CHARS = 8000
 MAX_TABS = 10
 

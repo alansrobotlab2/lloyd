@@ -36,6 +36,8 @@ from app.routers import system as _system_router
 from app.routers import ide as _ide_router
 from app.routers import lsp as _lsp_router
 from app.routers import dashboard as _dashboard_router
+from app.routers import health as _health_router
+from app.routers import selfmod as _selfmod_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -133,6 +135,8 @@ app.include_router(_system_router.router)
 app.include_router(_ide_router.router)
 app.include_router(_lsp_router.router)
 app.include_router(_dashboard_router.router)
+app.include_router(_health_router.router)
+app.include_router(_selfmod_router.router)
 
 app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
 app.on_event("startup")(_workers_router.start_worker_pool)
@@ -161,6 +165,13 @@ async def _sync_secondary_llm_state() -> None:
     from app.supervisor_client import start_process, stop_process
 
     log = logging.getLogger("lloyd-server")
+    # A canary boots from a worktree but the supervisord socket path is a
+    # process-wide constant, so without this flag a gate run would reach the
+    # LIVE supervisord and stop the live secondary vLLM. Canary configs set
+    # `services.sync_secondary_llm: false`.
+    if not (CONFIG.get("services") or {}).get("sync_secondary_llm", True):
+        log.info("services.sync_secondary_llm=false → skipping secondary reconcile")
+        return
     enabled = bool(CONFIG.get("secondary_enabled", False))
     proc = "agent-llm-secondary"
     if enabled:
@@ -169,6 +180,17 @@ async def _sync_secondary_llm_state() -> None:
     else:
         ok, msg = stop_process(proc)
         log.info("secondary_enabled=false → stop %s: %s (ok=%s)", proc, msg, ok)
+
+
+@app.on_event("startup")
+async def _mark_ready() -> None:
+    """Flip /health from `starting` to `ok`.
+
+    Registered after every other startup hook, so readiness means "the whole
+    lifespan finished", not merely "the socket is bound". The canary boot
+    probe and the post-restart verification both key off this.
+    """
+    _health_router.mark_startup_complete()
 
 
 @app.on_event("shutdown")
