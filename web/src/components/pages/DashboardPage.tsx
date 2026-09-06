@@ -585,6 +585,7 @@ const STATUS_TONE: Record<string, Tone> = {
   running: 'accent',
   failed: 'crit',
   poisoned: 'crit',
+  quarantined: 'idle',
   paused: 'warn',
   queued: 'warn',
   claimed: 'warn',
@@ -767,6 +768,7 @@ const RUN_STATUS_TONE: Record<string, Tone> = {
   failed: 'crit',
   timeout: 'crit',
   poisoned: 'crit',
+  quarantined: 'idle',
 }
 
 function WorkersPanel({ workers }: { workers: WorkersState }) {
@@ -777,6 +779,9 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
   const busy = workers.sources.filter(s => s.open > 0 || s.running > 0 || s.poisoned > 0)
   // The KV budget gate (workers/pool.py). Absent on an older backend.
   const gate = pool.kv_gate
+  // Only worth a line once it has something to report — a sweep that has
+  // never found anything is not news.
+  const sweep = workers.maintenance?.scanned ? workers.maintenance : null
 
   return (
     <Panel>
@@ -811,6 +816,11 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
           <div className={cn('font-mono text-lg leading-none',
             workers.poisoned_total > 0 ? 'text-rose-400' : 'text-muted-foreground')}>
             {workers.poisoned_total}
+            {workers.quarantined_total > 0 && (
+              <span className="text-[11px] text-muted-foreground/60">
+                {' '}+{workers.quarantined_total}q
+              </span>
+            )}
           </div>
         </div>
         <div title="duplicate side effects the #544 effect ledger refused on retried worker items — null means the ledger file was unreadable">
@@ -840,6 +850,20 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
             <span className="ml-auto flex-shrink-0 font-mono tabular-nums text-muted-foreground"
                   title="times the gate has engaged since the backend started">
               {gate.engagements}×
+            </span>
+          )}
+        </div>
+      )}
+
+      {sweep && (
+        <div className="mt-2 border-t border-border pt-2 text-[10px]">
+          <span className="text-muted-foreground">Last sweep </span>
+          <span className="text-foreground/80">
+            {sweep.revived}&nbsp;revived, {sweep.quarantined}&nbsp;quarantined
+          </span>
+          {sweep.escalations.length > 0 && (
+            <span className="text-rose-400">
+              {' '}· {sweep.escalations.length} recurring
             </span>
           )}
         </div>
