@@ -34,7 +34,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+
 
 STATE_DIR = Path(
     os.environ.get("LLOYD_SELFMOD_STATE", Path.home() / ".local" / "state" / "lloyd-selfmod")

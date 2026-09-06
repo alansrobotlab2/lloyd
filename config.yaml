@@ -312,6 +312,26 @@ livekit:
     anchor_threshold: 0.4
     device: cpu
     unknown_label: Unknown
+# Self-modification loop: worktree -> gate -> promote, with guardian rollback.
+# `enabled: false` is the master switch and the default. The machinery lands
+# inert; turning it on is a deliberate human act.
+selfmod:
+  enabled: false
+  canary:
+    backend_port: 18080
+    mcp_port: 18500
+    boot_timeout_s: 180
+    smoke_timeout_s: 240
+  gate:
+    pytest_min_collected: 1000
+    mcp_min_tools_excl_thunderbird: 80
+  landing:
+    idle_max_wait_s: 900
+    idle_quiet_polls: 3
+    drain_ttl_s: 180
+    liveness_window_s: 120
+    errors_window_s: 900
+
 server:
   host: 0.0.0.0
   port: 8080

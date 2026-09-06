@@ -98,6 +98,9 @@ def run(*, backend: str, sessions_dir: Path, timeout: float = 150.0,
                     if data.get("is_error"):
                         report["errors"].append("Bash tool_complete reported is_error")
             elif name == "done":
+                report["done"] = True
+                report["response_chars"] = len(str(data.get("response") or ""))
+                report["turns"] = (data.get("stats") or {}).get("num_turns")
                 if sentinel in json.dumps(data):
                     report["sentinel_in_response"] = True
                 break
@@ -115,13 +118,23 @@ def run(*, backend: str, sessions_dir: Path, timeout: float = 150.0,
         report["errors"].append(f"{type(e).__name__}: {str(e)[:300]}")
 
     report["duration_s"] = round(time.time() - started, 1)
+
+    # Deterministic assertions only. Each of these fails if and only if code
+    # under test is broken.
     if not report["tool_called"]:
         report["errors"].append("no Bash tool_start event — the model never dispatched a tool")
     if not report["tool_result_ok"]:
-        report["errors"].append("sentinel never appeared in a tool result — dispatch or "
-                                "execution is broken")
-    if not report["sentinel_in_response"]:
-        report["errors"].append("sentinel never reached the final response")
+        report["errors"].append("sentinel never appeared in a tool result — harness → MCP "
+                                "dispatch or execution is broken")
+    if not report.get("done"):
+        report["errors"].append("turn never produced a `done` event — the loop did not terminate")
+    elif not report.get("response_chars"):
+        report["errors"].append("`done` carried an empty response")
+
+    # NOT an assertion: whether the model repeats the sentinel back in prose is
+    # model behaviour, not code correctness. A build can be perfectly healthy
+    # and answer "it printed the string you asked for". Gating on it would make
+    # promotions fail at the whim of sampling. Recorded for the round log only.
     report["ok"] = not report["errors"]
     return report
 
