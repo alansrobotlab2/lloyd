@@ -386,3 +386,77 @@ def test_a_crash_while_observing_a_promotion_does_revert(tmp_path, monkeypatch):
                              head="b" * 40, lkg="a" * 40)
     assert g.tick() == "rolling_back"
     assert rolled and rolled[0][0] == "crash"
+
+
+# ---------------------------------------------------------------------------
+# Settle — the only path that advances last-known-good
+#
+# The promoter deliberately never writes LKG. If this path is wrong, "last
+# known good" silently stops meaning "observed healthy in production" and a
+# later rollback aims at a commit that was never watched.
+# ---------------------------------------------------------------------------
+
+def _settle_guardian(tmp_path, monkeypatch, current, *, degraded=None):
+    import types
+
+    import guardian as G
+    import probes as P
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0,
+    )
+    g = G.Guardian(args)
+    monkeypatch.setattr(P, "probe", lambda url, t: {
+        "ok": True, "status": 200,
+        "body": {"status": "ok", "degraded_modules": degraded or []},
+        "error": None, "latency_ms": 1.0})
+    written: dict = {}
+    monkeypatch.setattr(g.state, "set_lkg",
+                        lambda commit, **kw: written.update({"commit": commit, **kw}))
+    cleared: list = []
+    monkeypatch.setattr(g.state, "clear_current", lambda: cleared.append(True))
+    monkeypatch.setattr(G.gstate, "append_event", lambda *a, **k: None)
+    g.maybe_settle(current)
+    return written, cleared
+
+
+def test_settle_advances_last_known_good_once_the_window_closes(tmp_path, monkeypatch):
+    written, cleared = _settle_guardian(
+        tmp_path, monkeypatch,
+        {"commit": "b" * 40, "errors_until_ts": NOW - 1_000_000})
+    assert written["commit"] == "b" * 40
+    assert cleared, "the observation record must be cleared once settled"
+
+
+def test_settle_does_not_fire_before_the_window_closes(tmp_path, monkeypatch):
+    import time
+    written, cleared = _settle_guardian(
+        tmp_path, monkeypatch,
+        {"commit": "b" * 40, "errors_until_ts": time.time() + 600})
+    assert written == {} and not cleared
+
+
+def test_settle_does_not_fire_on_a_record_with_no_window(tmp_path, monkeypatch):
+    """A `landing` record has null timestamps — nothing has been deployed."""
+    written, _ = _settle_guardian(
+        tmp_path, monkeypatch,
+        {"commit": "b" * 40, "state": "landing", "errors_until_ts": None})
+    assert written == {}
+
+
+def test_settle_snapshots_the_mcp_degradation_baseline(tmp_path, monkeypatch):
+    """So a module already degraded at settle cannot trigger a later rollback."""
+    written, _ = _settle_guardian(
+        tmp_path, monkeypatch,
+        {"commit": "b" * 40, "errors_until_ts": NOW - 1_000_000},
+        degraded=["thunderbird"])
+    assert written["health"]["mcp_degraded_modules"] == ["thunderbird"]
+
+
+def test_settle_ignores_a_record_with_no_commit(tmp_path, monkeypatch):
+    written, _ = _settle_guardian(
+        tmp_path, monkeypatch, {"errors_until_ts": NOW - 1_000_000})
+    assert written == {}
