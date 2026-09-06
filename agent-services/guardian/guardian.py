@@ -388,6 +388,8 @@ class Guardian:
         errors_until = float(current.get("errors_until_ts") or 0)
         if not errors_until or time.time() < errors_until:
             return
+        if current.get("state") == "landing":
+            return
         commit = current.get("commit")
         if not commit:
             return
@@ -450,6 +452,11 @@ class Guardian:
             return "paused"
 
         current = self.state.current()
+        # A record still in `landing` means the promoter is mid-flight (it may
+        # be waiting on the idle gate). Nothing has been deployed yet, so there
+        # is nothing to observe and nothing to revert.
+        if current and current.get("state") == "landing":
+            current = None
 
         if live_down:
             # Rollback is only ever appropriate for a commit the LOOP promoted
