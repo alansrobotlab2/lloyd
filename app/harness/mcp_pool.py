@@ -55,6 +55,15 @@ DEFAULT_LLOYD_MCP_SERVERS: dict[str, dict[str, Any]] = {
 # agent_mcp.main.META_SESSION_ID.
 META_SESSION_ID = "lloyd/session_id"
 
+# `_meta` keys carrying the CALLING turn's model and endpoint. The Task
+# tool runs inside the aggregator process, which has no other way to know
+# which model the turn that invoked it is running on — so a subagent used
+# to be pinned to whatever `subagents.<type>.model` said (always
+# `primary`), and a turn on the secondary silently delegated to the
+# primary. Must match agent_mcp.main.META_MODEL / META_BASE_URL.
+META_MODEL = "lloyd/model"
+META_BASE_URL = "lloyd/base_url"
+
 # Ceiling on a single tools/call round trip. Sits above the Bash tool's own
 # 600s hard cap so a legitimately long command finishes on its own terms and
 # this only fires when something is genuinely wedged. Without it a hung tool
@@ -286,6 +295,8 @@ class MCPPool:
         args: dict[str, Any],
         *,
         session_id: str = "",
+        model: str = "",
+        base_url: str = "",
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Dispatch a tool call to the right server.
@@ -297,7 +308,8 @@ class MCPPool:
         when routing or transport fails — caller maps to a tool_result
         with ``is_error=True``.
 
-        `session_id` travels in the request's ``_meta``, not in ``args``.
+        `session_id`, `model` and `base_url` travel in the request's
+        ``_meta``, not in ``args``.
         The MCP server validates ``args`` against the tool's inputSchema
         before its handler runs, so anything injected there is validated
         as a real parameter; ``_meta`` is the field the spec reserves for
@@ -329,11 +341,19 @@ class MCPPool:
             raise ToolDispatchError(name, f"server {server_name!r} not open")
 
         coerced = _coerce_args(args, self._schemas.get(bare))
-        meta = {META_SESSION_ID: session_id} if session_id else None
+        meta: dict[str, Any] = {}
+        if session_id:
+            meta[META_SESSION_ID] = session_id
+        if model:
+            meta[META_MODEL] = model
+        if base_url:
+            meta[META_BASE_URL] = base_url
         budget = timeout_seconds if timeout_seconds is not None else CALL_TIMEOUT_SECONDS
 
         try:
-            result = await self._invoke(server_name, bare, coerced, budget, meta)
+            result = await self._invoke(
+                server_name, bare, coerced, budget, meta or None
+            )
         except MCPError as exc:
             # A protocol-level error from a live server: it was reachable
             # and it answered. That is a failed *call*, not a failed
@@ -354,7 +374,9 @@ class MCPPool:
             )
             try:
                 await self._reopen()
-                result = await self._invoke(server_name, bare, coerced, budget, meta)
+                result = await self._invoke(
+                server_name, bare, coerced, budget, meta or None
+            )
             except MCPError as retry_exc:
                 return {
                     "content": f"MCP error calling {bare}: {retry_exc}",

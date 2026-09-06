@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# SUPERSEDED 2026-09-06 — use `MODEL=qwen36 bin/start-secondary.sh` instead,
+# which is what supervisord runs for the :8091 secondary slot.
+#
+# This script predates the RTX 5090's removal (2026-05-18) and is wrong on
+# three counts now: GPU 0 is a 24 GB 3090, not a 32 GB 5090; the model path
+# does not match where the GGUF actually lives; and `--alias A,secondary` is
+# one literal alias string, not two, so nothing could resolve `secondary`.
+# Kept for reference on the llama-server flag set only.
+#
 # Starts Qwen3.6-35B-A3B via llama-server on GPU 0 (RTX 5090, 32GB)
 # UD-Q3_K_XL quant (~17GB), 256K context, all layers GPU-offloaded, port 8091
 #

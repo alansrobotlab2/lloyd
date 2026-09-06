@@ -1539,6 +1539,10 @@ export interface VllmEngine {
   base_url: string
   reachable: boolean
   error?: string
+  // Which server produced this snapshot. The secondary slot is llama.cpp
+  // (Qwen3.6-35B-A3B GGUF); everything else is vLLM. llama.cpp reports no
+  // KV-occupancy gauge and no TTFT, so those come back null there.
+  engine?: 'vllm' | 'llama.cpp'
   model_name?: string
   awake?: boolean
   requests_running?: number | null

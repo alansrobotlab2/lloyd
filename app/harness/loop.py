@@ -238,6 +238,9 @@ async def run_query(
                     timeout_s=options.request_timeout_s,
                     api_key=options.api_key,
                     priority=options.priority,
+                    chunk_timeout_s=getattr(
+                        options, "stream_chunk_timeout_s", 0.0
+                    ),
                 ):
                     # Usage chunk arrives as the last event when
                     # stream_options.include_usage=True. vLLM emits it
@@ -760,14 +763,27 @@ def _assistant_message_for_history(
     apparently thought nothing, and made it re-derive its own conclusions
     every iteration.
 
-    The field is `reasoning`, NOT `reasoning_content`: vLLM 0.28 accepts
-    both on the wire but only populates the template from `reasoning`
-    (entrypoints/chat_utils.py:2000). Sending `reasoning_content` alone is
-    silently dropped and renders an empty `<think>` block.
+    Both `reasoning` and `reasoning_content` are set, because the two
+    engines behind this harness disagree about which one is real:
+
+      * vLLM 0.28 accepts both on the wire but only populates the template
+        from `reasoning` (entrypoints/chat_utils.py:2000). Sending
+        `reasoning_content` alone is silently dropped and renders an empty
+        `<think>` block.
+      * llama.cpp applies the model's jinja template directly, and
+        Qwen3.6's reads `message.reasoning_content` (chat_template.jinja:91)
+        — it never looks at `reasoning`.
+
+    So sending only one field breaks preserved thinking on whichever
+    engine is not vLLM, in exactly the silent way this whole mechanism
+    exists to prevent: the model sees prior turns in which it apparently
+    thought nothing. The secondary slot became llama.cpp on 2026-09-06
+    (Qwen3.6-35B-A3B GGUF), which is when this stopped being academic.
     """
     msg: dict[str, Any] = {"role": "assistant", "content": text}
     if reasoning:
         msg["reasoning"] = reasoning
+        msg["reasoning_content"] = reasoning
     if tool_calls:
         msg["tool_calls"] = [
             {
@@ -798,16 +814,22 @@ def _prune_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) -> None:
     Mutates in place. Older assistant turns keep their text and tool
     calls and simply render an empty `<think>` block, exactly as every
     turn did before preserved thinking was wired up.
+
+    Both spellings go together — `_assistant_message_for_history` writes
+    the pair (vLLM reads one, llama.cpp's Qwen3.6 template reads the
+    other), so dropping only `reasoning` would leave the full reasoning
+    still on the wire for llama.cpp and defeat the bound entirely.
     """
     seen = 0
     for msg in reversed(chat_messages):
         if msg.get("role") != "assistant":
             continue
-        if "reasoning" not in msg:
+        if "reasoning" not in msg and "reasoning_content" not in msg:
             continue
         seen += 1
         if seen > keep:
             msg.pop("reasoning", None)
+            msg.pop("reasoning_content", None)
 
 
 async def _dispatch_one_tool_call(
@@ -920,11 +942,18 @@ async def _dispatch_one_tool_call(
         # tools (e.g. Bash) are responsible for tearing down child
         # processes in their own finally clauses.
         cancel_event = getattr(options, "cancel_event", None)
+        # `model` / `base_url` let a Task subagent inherit the calling
+        # turn's model instead of falling back to `primary`.
+        call_kw = {
+            "session_id": session_id,
+            "model": options.model,
+            "base_url": options.base_url,
+        }
         if cancel_event is None:
-            result = await pool.call_tool(name, dispatch_args, session_id=session_id)
+            result = await pool.call_tool(name, dispatch_args, **call_kw)
         else:
             tool_task = asyncio.create_task(
-                pool.call_tool(name, dispatch_args, session_id=session_id)
+                pool.call_tool(name, dispatch_args, **call_kw)
             )
             cancel_task = asyncio.create_task(cancel_event.wait())
             try:

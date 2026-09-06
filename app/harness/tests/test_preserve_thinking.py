@@ -127,13 +127,21 @@ def test_reasoning_is_carried_into_history(monkeypatch):
     assert asst[0].get("reasoning") == "DEEP_THOUGHT_ONE", asst[0]
 
 
-def test_field_is_reasoning_not_reasoning_content(monkeypatch):
-    """Regression guard: vLLM only renders the template from `reasoning`.
+def test_both_reasoning_fields_are_sent(monkeypatch):
+    """Regression guard: the two engines disagree about which key is real.
 
-    `reasoning_content` is accepted and silently dropped, which produces
-    an empty <think> block — the exact bug this change fixes. If a future
-    edit renames the key, this test fails rather than quietly restoring
-    the old behaviour.
+    vLLM 0.28 accepts both but populates the template only from
+    `reasoning` (entrypoints/chat_utils.py:2000) — `reasoning_content`
+    alone is silently dropped. llama.cpp applies the model's jinja
+    directly and Qwen3.6's template reads `message.reasoning_content`
+    (chat_template.jinja:91), never `reasoning`. Sending one field breaks
+    preserved thinking on the other engine, in exactly the silent way
+    this mechanism exists to prevent: the model sees prior turns in which
+    it apparently thought nothing.
+
+    This stopped being academic on 2026-09-06, when the secondary slot
+    became llama.cpp serving Qwen3.6-35B-A3B. Dropping either key here
+    should fail loudly rather than degrade one engine quietly.
     """
     script = _ThinkingScript([
         ("THOUGHT", "checking", BASH_TC),
@@ -142,9 +150,11 @@ def test_field_is_reasoning_not_reasoning_content(monkeypatch):
     captured = _run(monkeypatch, script, preserve_thinking_iterations=6)
 
     asst = _assistants(captured[1])[0]
-    assert "reasoning" in asst, asst
-    assert "reasoning_content" not in asst, (
-        "reasoning_content alone is dropped by vLLM — the key must be `reasoning`"
+    assert asst.get("reasoning") == "THOUGHT", (
+        "vLLM renders <think> only from `reasoning`"
+    )
+    assert asst.get("reasoning_content") == "THOUGHT", (
+        "Qwen3.6's jinja template reads only `reasoning_content`"
     )
 
 

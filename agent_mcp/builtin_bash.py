@@ -51,6 +51,9 @@ DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
 OUTPUT_TRUNCATE_CHARS = 30_000
 
+# Anything below this is read as SECONDS, not milliseconds. See _bash().
+_SECONDS_CEILING_MS = 5_000
+
 
 def _kill_proc_tree(proc: asyncio.subprocess.Process) -> None:
     """Send SIGTERM (then SIGKILL after a short grace period) to the
@@ -112,9 +115,28 @@ async def _bash(args: dict[str, Any]) -> str:
     if not command or not isinstance(command, str):
         return json.dumps({"error": "command (string) is required"})
 
-    timeout_ms = int(args.get("timeout", DEFAULT_TIMEOUT_MS) or DEFAULT_TIMEOUT_MS)
-    if timeout_ms <= 0:
-        timeout_ms = DEFAULT_TIMEOUT_MS
+    # `timeout` is milliseconds, documented as such ("Max ms before kill,
+    # default 120000"), and models routinely pass SECONDS anyway. That is not
+    # model stupidity: Anthropic's own bash toolset takes seconds — see
+    # `bash command timed out after {timeout}s` in
+    # anthropic/lib/tools/agent_toolset.py:532 — so seconds is the trained
+    # prior every checkpoint arrives with.
+    #
+    # The mismatch failed silently and expensively. On 2026-09-06 task #75
+    # (AI Engineer monitor), running on the 35B secondary, passed
+    # `timeout: 600` meaning ten minutes. The tool took it literally as
+    # 0.6 seconds, SIGKILLed `ai-engineer-monitor.py --process-one` before
+    # the RSS fetch finished, the model read the failure as "nothing to do",
+    # and the run was recorded `status: success` with `[SILENT]` — so the
+    # channel went unmonitored while the scheduler reported green.
+    #
+    # Sub-5-second kills are never what a caller wants from a shell command,
+    # so interpret anything under the ceiling as seconds and scale it. Values
+    # at or above the ceiling are taken as milliseconds, then clamped.
+    timeout = int(args.get("timeout", DEFAULT_TIMEOUT_MS) or DEFAULT_TIMEOUT_MS)
+    if 0 < timeout < _SECONDS_CEILING_MS:
+        timeout *= 1_000
+    timeout_ms = timeout if timeout > 0 else DEFAULT_TIMEOUT_MS
     timeout_ms = min(timeout_ms, MAX_TIMEOUT_MS)
     timeout_s = timeout_ms / 1000.0
 

@@ -22,7 +22,7 @@ import httpx
 
 import re
 
-from app.harness.errors import ContextOverflowError, ParseError
+from app.harness.errors import ContextOverflowError, ParseError, StreamStalledError
 
 logger = logging.getLogger("lloyd-harness-client")
 
@@ -38,6 +38,7 @@ async def stream_chat(
     timeout_s: float,
     api_key: str = "no-key-required",
     priority: int | None = None,
+    chunk_timeout_s: float = 0.0,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream raw OpenAI-format chunks from vLLM.
 
@@ -47,6 +48,14 @@ async def stream_chat(
 
     Cancellation is checked between every line read; on cancel the
     httpx context exits cleanly and vLLM aborts the request.
+
+    `chunk_timeout_s` (0 disables) bounds the gap BETWEEN lines once the
+    stream has started producing, raising `StreamStalledError`. It
+    deliberately does not bound time-to-first-line: prefill emits no
+    bytes, and the secondary slot serialises requests behind
+    `--parallel 1`, so silence before the first line is normal and is
+    `timeout_s`'s job. Without this the read is unbounded (`read=None`)
+    and a wedged engine mid-generation hangs the turn forever.
     """
     payload: dict[str, Any] = {
         "model": model,
@@ -99,7 +108,27 @@ async def stream_chat(
                     request=resp.request,
                     response=resp,
                 )
-            async for raw in resp.aiter_lines():
+            # Manual iteration so each line read can carry its own
+            # deadline; `async for` gives no hook for that.
+            lines = resp.aiter_lines().__aiter__()
+            lines_seen = 0
+            while True:
+                try:
+                    if chunk_timeout_s > 0 and lines_seen:
+                        raw = await asyncio.wait_for(
+                            lines.__anext__(), timeout=chunk_timeout_s
+                        )
+                    else:
+                        raw = await lines.__anext__()
+                except StopAsyncIteration:
+                    break
+                except (asyncio.TimeoutError, TimeoutError):
+                    logger.warning(
+                        "stream_chat: no data for %.1fs after %d line(s) from %s",
+                        chunk_timeout_s, lines_seen, url,
+                    )
+                    raise StreamStalledError(chunk_timeout_s, lines_seen=lines_seen)
+                lines_seen += 1
                 if cancel_event is not None and cancel_event.is_set():
                     logger.info("stream_chat: cancel_event set, breaking")
                     break

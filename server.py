@@ -183,6 +183,39 @@ async def _sync_secondary_llm_state() -> None:
 
 
 @app.on_event("startup")
+async def _verify_model_identity() -> None:
+    """Check each slot actually serves the model config claims.
+
+    Runs detached: the sweep retries around a cold engine for minutes and
+    readiness must not wait on it. Reports only — a mismatch is logged at
+    ERROR and surfaced on GET /api/models/identity rather than acted on,
+    because restarting a slot is exactly the operation that would have
+    swapped the model in the first place.
+    """
+    import asyncio
+    import logging
+    from app.config import CONFIG
+
+    log = logging.getLogger("lloyd-server")
+    # Same guard as the secondary reconcile: a canary boots from a worktree
+    # against the live ports and its verdict would be about someone else's
+    # engines.
+    if not (CONFIG.get("services") or {}).get("sync_secondary_llm", True):
+        log.info("services.sync_secondary_llm=false → skipping model identity check")
+        return
+
+    from app import model_identity
+
+    async def _sweep() -> None:
+        try:
+            await model_identity.verify_models_with_retry()
+        except Exception as exc:
+            log.warning("model identity check failed: %s", exc)
+
+    asyncio.create_task(_sweep())
+
+
+@app.on_event("startup")
 async def _mark_ready() -> None:
     """Flip /health from `starting` to `ok`.
 

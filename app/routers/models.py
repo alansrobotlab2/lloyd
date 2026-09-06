@@ -37,6 +37,27 @@ async def get_models():
     })
 
 
+@router.get("/api/models/identity")
+async def get_model_identity(refresh: bool = False):
+    """What each slot is actually serving, vs what config expects.
+
+    Answers from the boot sweep's cached verdict; `?refresh=1` re-probes.
+    A `MISMATCH` row means the endpoint behind an alias is serving a
+    different model than `models.<alias>.expect_model` declares — the
+    shape a reverted launcher takes (see app/model_identity.py).
+    """
+    from app import model_identity
+
+    if refresh or not model_identity.LAST_RESULT:
+        rows = await model_identity.verify_models()
+    else:
+        rows = list(model_identity.LAST_RESULT.values())
+    return JSONResponse({
+        "models": rows,
+        "mismatches": [r["alias"] for r in rows if r["status"] == "MISMATCH"],
+    })
+
+
 @router.post("/api/model/switch")
 async def switch_model(request: Request):
     data = await request.json()

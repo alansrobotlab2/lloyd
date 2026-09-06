@@ -58,6 +58,16 @@ class RunOptions:
     # interactive (chat, inner voice), 1 for background (workers, autonomy).
     priority: int | None = None
 
+    # Inter-chunk stall deadline, in seconds; 0 disables. Bounds the gap
+    # BETWEEN SSE lines once the engine has started producing — not
+    # time-to-first-line, which is `request_timeout_s`'s job (prefill emits
+    # no bytes, and the llama.cpp secondary serialises behind `--parallel 1`,
+    # so pre-first-line silence is normal). `client.stream_chat` sets httpx
+    # `read=None`, so without this a wedged engine mid-generation hangs the
+    # turn until the client gives up. Fed from
+    # `harness.stream_chunk_timeout_seconds`.
+    stream_chunk_timeout_s: float = 0.0
+
     # Hooks
     hooks: "HookRegistry | None" = None
 

@@ -126,15 +126,20 @@ step in an auto-landing loop is either ceremony or a contradiction.
 
 `run_query(messages: list[dict], options: RunOptions) -> AsyncIterator[NormalizedEvent]`
 
-Events yielded by type:
+Events yielded by type (constructors in `app/harness/events.py` are the
+authority — these keys are not the OpenAI wire names):
+- `system` — `{type, session_id, model}` — turn opened
 - `text_delta` — `{type, text}` — streaming text chunk
-- `thinking_delta` — `{type, text}` — vLLM reasoning content chunk
-- `thinking_done` — `{type}` — reasoning phase complete
-- `tool_call` — `{type, id, name, input}` — tool invocation
-- `tool_result` — `{type, tool_call_id, content, is_error}` — tool result
-- `assistant_message` — `{type, content, tool_calls}` — full assistant turn
-- `result` — `{type, stop_reason, usage}` — turn complete
-- `stream_raw` — `{type, line}` — raw SSE line on parse failure
+- `thinking_delta` — `{type, text}` — reasoning content chunk
+- `thinking_done` — `{type, text}` — reasoning phase complete
+- `tool_call` — `{type, call_id, name, args_json, args_dict}` — tool invocation
+- `tool_result` — `{type, call_id, name, content, is_error}` — tool result
+- `assistant_message` — `{type, text, tool_calls, thinking, usage,
+  duration_ms, iteration, finish_reason}` — one agent-loop iteration.
+  `usage` and `duration_ms` are per-iteration, not per-turn.
+- `result` — `{type, stop_reason, usage, num_turns, duration_ms,
+  response_text}` — turn complete
+- `stream_raw` — `{type, raw, error}` — raw SSE line on parse failure
 
 **Mid-turn state (the position-0 rule)**: the system prompt is built once
 per turn and inserted at index 0; the loop only ever appends. That keeps the
@@ -147,17 +152,49 @@ creates its own todo list would otherwise never see it again — see
 `app/routers/messages.py::_build_state_anchor`.
 
 **Preserved thinking**: assistant messages carry their reasoning back into
-history as `reasoning` (NOT `reasoning_content` — vLLM 0.28 accepts both but
-only renders the template from the former), bounded to
+history under **both** `reasoning` and `reasoning_content`, bounded to
 `harness.preserve_thinking_iterations` recent iterations. Qwen3.8-Flash-Next
 renders it into each prior turn's `<think>` block; dropping it showed the
 model turn after turn in which it had apparently thought nothing. A/B it with
 `eval/run_preserve_thinking_eval.py` before changing the window.
 
+The two spellings are not redundant — the engines disagree, and each one
+ignores the other's field *silently*:
+
+| Engine | Reads | Ignores |
+|---|---|---|
+| vLLM 0.28 (primary) | `reasoning` | `reasoning_content` |
+| llama.cpp (secondary, Qwen3.6) | `reasoning_content` | `reasoning` |
+
+vLLM accepts both on the wire but only populates the template from
+`reasoning` (`entrypoints/chat_utils.py:2000`); Qwen3.6's own
+`chat_template.jinja:91` reads `reasoning_content` and never looks at
+`reasoning`. Sending one spelling preserves thinking on one engine and
+quietly discards it on the other, which is the exact failure this mechanism
+exists to prevent. `_prune_reasoning` must drop the pair together or the
+token bound stops bounding anything. `tests/test_preserved_thinking.py`
+pins both halves; llama.cpp's `POST /apply-template` will show you the
+rendered prompt if you need to re-verify.
+
 Scope is **intra-turn only**: history is rebuilt from the session JSON on each
 user turn (`load_and_compact_session`), which does not carry per-iteration
 reasoning, so the window resets at every turn boundary. That is where the cost
 was anyway — the motivating turn ran 52 iterations inside one turn.
+
+**Stream stalls**: `harness.stream_chunk_timeout_seconds` bounds the gap
+*between* SSE lines once the engine has started producing, raising
+`StreamStalledError`. It deliberately does **not** bound time-to-first-line:
+prefill emits no bytes, and the secondary runs llama.cpp with `--parallel 1`,
+so a queued request legitimately sits silent for as long as the one ahead of
+it. `client.stream_chat` sets httpx `read=None`, so without this a wedged
+engine mid-generation hangs the turn until the client gives up. The key
+existed from the start and was read by nothing until 2026-09-06.
+
+**Two engines, two reasoning keys**: assistant messages carry reasoning back
+as **both** `reasoning` and `reasoning_content`. vLLM populates the template
+only from the former; Qwen3.6's own jinja (what llama.cpp applies) reads only
+the latter. Sending one breaks preserved thinking on the other engine
+silently. See `_assistant_message_for_history`.
 
 **Tool naming**: Built-in tools (Bash, Read, Write, Edit, Grep, Glob, Task) are advertised to vLLM under bare names. This keeps session JSON, SOUL.md deny rules, and Inner Voice `pretooluse_deny` patterns working unchanged.
 
@@ -229,6 +266,20 @@ first-writer-wins, so a blanket `finally: finish("cancelled")` runs
 cancelled. Each exit path closes the row with its own real status;
 `tests/test_task_registry_wiring.py` pins that.
 
+**Not every engine is vLLM.** The secondary slot (:8091) runs llama-server,
+because a GGUF Q3 is the only build of Qwen3.6-35B-A3B that fits a 24 GB
+3090 at the full 262144 window — unsloth's NVFP4 needs SM100+ and vLLM's
+GGUF path does not cover this hybrid linear-attention MoE. It serves the
+same OpenAI API, so the harness is unchanged, but it publishes `llamacpp:`
+Prometheus names. `vllm_metrics._translate_llamacpp` renames them into the
+vLLM vocabulary so one snapshot path and one dashboard card serve both.
+Two things genuinely do not exist there and are reported as `None` rather
+than `0`: live KV occupancy (no gauge) and TTFT (no per-request count).
+A llama.cpp engine is `awake` whenever it is reachable — it has no
+sleep-state gauge, and falling through to the vLLM check renders a healthy
+engine "asleep". Its model name comes from a `/props` probe cached per
+engine lifetime, since llama.cpp does not label its metrics.
+
 **Counters vs. gauges.** vLLM exposes both. Gauges (`num_requests_running`,
 `kv_cache_usage_perc`) are read straight. Counters
 (`prompt_tokens_total`, `prefix_cache_hits_total`) are monotonic since
@@ -238,6 +289,36 @@ A counter that goes backwards (engine restarted) yields `None`, never a
 number — otherwise a restart renders as a one-second spike of the
 engine's entire history. An unreachable engine drops its baseline for the
 same reason.
+
+## Model slots
+
+`models.<alias>` in config.yaml is only the *endpoint*. Which model actually
+answers there is decided by the supervisord program's `environment=MODEL=...`
+and its start script — three places that can drift apart, and did on
+2026-09-06 when a selfmod rollback reverted `agent-llm-secondary.conf` to a
+launcher branch serving a 4B under the same alias and port as the 35B.
+
+`models.<alias>.expect_model` is a case-insensitive substring checked against
+what the engine reports (vLLM `/v1/models`.root, llama.cpp `/props`.model_path).
+`app/model_identity.py` sweeps it at boot — detached, with retries, because a
+cold 35B takes minutes to load — and logs ERROR on a mismatch.
+`GET /api/models/identity?refresh=1` re-probes on demand. A slot with no
+`expect_model` reports `unchecked`, so **update it whenever you swap a slot's
+occupant** or the check is inert.
+
+Current occupants: primary `:8096` = Qwen3.8-Flash-Next (vLLM, GPU 1);
+secondary `:8091` = Qwen3.6-35B-A3B UD-Q3_K_XL (llama.cpp, GPU 2, single-tenant
+at ~21.7 of 24 GiB). The secondary serialises (`--parallel 1`) because
+llama.cpp divides `--ctx-size` across slots and the full 256K window was the
+point — `secondary_models.py` post-session jobs and voice summaries queue
+behind agent turns there.
+
+**Subagents inherit the calling turn's model.** `subagents.<type>.model: ''`
+means "whatever spawned me"; the harness ships it in the MCP request `_meta`
+(`lloyd/model`, `lloyd/base_url`) since Task runs in the aggregator process
+and has no other way to know. Pin an alias there to override. Empty
+`base_url` resolves from `models:` for the chosen model — *not* from
+`default_model_base_url()`, which always returns the primary's endpoint.
 
 ## Knowledge graph
 
@@ -289,6 +370,7 @@ models:
     alias: primary
     base_url: http://127.0.0.1:8096
     context_length: 262144
+    expect_model: Qwen3.8-Flash-Next   # identity check; see below
     env:
       ANTHROPIC_BASE_URL: "http://127.0.0.1:8096"
       ANTHROPIC_API_KEY: "no-key-required"
@@ -296,7 +378,7 @@ models:
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: "Primary"
 
 harness:
-  stream_chunk_timeout_seconds: 60
+  stream_chunk_timeout_seconds: 60      # gap BETWEEN SSE lines, not TTFB
   todo_anchor_interval_iterations: 10   # re-append session.todos this often
   preserve_thinking_iterations: 6       # carry N iterations' reasoning back
   tool_search:            # progressive disclosure; baseline + ToolSearch
@@ -309,7 +391,8 @@ subagents:
     system_prompt: ""
     max_turns: 40
     disallowed_tools: []
-    model: primary
+    model: ''        # '' = inherit the calling turn's model
+    base_url: ''     # '' = resolve from `models:` for the chosen model
 
 mcp_servers:
   lloyd-mcp:

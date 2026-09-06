@@ -18,8 +18,10 @@ def _clear_baselines():
     """Each test starts with no previous sample — the module cache is
     process-global and would otherwise leak between tests."""
     vm._previous.clear()
+    vm._llamacpp_model_name.clear()
     yield
     vm._previous.clear()
+    vm._llamacpp_model_name.clear()
 
 
 # ── Parsing ────────────────────────────────────────────────────────────
@@ -206,3 +208,151 @@ async def test_unreachable_engine_degrades_and_drops_its_baseline():
 @pytest.mark.asyncio
 async def test_collect_returns_empty_for_no_configured_engines():
     assert await vm.collect({}) == []
+
+
+# ── llama.cpp engines ──────────────────────────────────────────────────
+#
+# The secondary slot is llama-server, not vLLM (Qwen3.6-35B-A3B only fits
+# a 24 GB card as a GGUF Q3). Its /metrics speaks the same protocol with
+# different names, and the dashboard renders one card shape for both, so
+# the translation has to land in exactly the vLLM snapshot keys.
+
+
+def _llamacpp_text(*, prompt=1000.0, cached=800.0, predicted=200.0,
+                   predicted_s=4.0, processing=1.0, deferred=2.0):
+    return f"""
+# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total {prompt}
+llamacpp:prompt_tokens_cached_total {cached}
+llamacpp:tokens_predicted_total {predicted}
+llamacpp:tokens_predicted_seconds_total {predicted_s}
+llamacpp:requests_processing {processing}
+llamacpp:requests_deferred {deferred}
+llamacpp:n_decode_total 55.0
+"""
+
+
+def test_llamacpp_metrics_map_into_the_vllm_snapshot_shape():
+    snap = vm._snapshot_from_text("secondary", _llamacpp_text())
+    assert snap["engine"] == "llama.cpp"
+    assert snap["reachable"] is True
+    assert snap["requests_running"] == 1
+    assert snap["requests_waiting"] == 2
+    assert snap["prompt_tokens_total"] == 1000.0
+    assert snap["generation_tokens_total"] == 200.0
+
+
+def test_llamacpp_engine_is_awake_when_reachable():
+    """llama.cpp has no sleep/wake gauge. Falling through to the vLLM
+    check would compare None == 1.0 and render a live engine 'asleep'."""
+    assert vm._snapshot_from_text("secondary", _llamacpp_text())["awake"] is True
+
+
+def test_vllm_engines_still_report_themselves_as_vllm():
+    assert vm._snapshot_from_text("primary", _text())["engine"] == "vllm"
+
+
+def test_llamacpp_reports_no_kv_usage_or_ttft_rather_than_zero():
+    """Neither is derivable from llama.cpp's endpoint. Reporting 0.0 would
+    draw a saturated cache as an empty one and an unknown TTFT as instant."""
+    vm._snapshot_from_text("secondary", _llamacpp_text())
+    snap = vm._snapshot_from_text("secondary", _llamacpp_text(prompt=2000.0))
+    assert snap["kv_cache_usage"] is None
+    assert snap["ttft_s"] is None
+
+
+def test_llamacpp_inter_token_latency_from_seconds_over_tokens():
+    """`tokens_predicted_seconds_total / tokens_predicted_total` is a
+    sum/count pair over generated tokens — exactly what ITL means."""
+    vm._snapshot_from_text("secondary", _llamacpp_text(predicted=200.0, predicted_s=4.0))
+    snap = vm._snapshot_from_text(
+        "secondary", _llamacpp_text(predicted=300.0, predicted_s=6.0)
+    )
+    # 2.0s of decode over 100 new tokens = 20ms/token.
+    assert snap["itl_s"] == pytest.approx(0.02)
+
+
+def test_llamacpp_prefix_cache_hit_rate_from_cached_prompt_tokens():
+    snap = vm._snapshot_from_text("secondary", _llamacpp_text(prompt=1000.0, cached=800.0))
+    assert snap["prefix_cache_hit_rate"] == pytest.approx(0.8)
+
+
+def test_llamacpp_throughput_is_a_rate_not_a_since_boot_total():
+    vm._snapshot_from_text("secondary", _llamacpp_text(prompt=1000.0))
+    vm._previous["secondary"]["_t"] -= 2.0
+    snap = vm._snapshot_from_text("secondary", _llamacpp_text(prompt=1400.0))
+    assert snap["prompt_tokens_per_s"] == pytest.approx(200.0, rel=0.02)
+
+
+def test_llamacpp_counter_reset_yields_none_not_a_spike():
+    vm._snapshot_from_text("secondary", _llamacpp_text(prompt=100000.0))
+    snap = vm._snapshot_from_text("secondary", _llamacpp_text(prompt=10.0))
+    assert snap["prompt_tokens_per_s"] is None
+
+
+@pytest.mark.asyncio
+async def test_llamacpp_model_name_probed_once_from_props():
+    """The loaded GGUF cannot change while the process lives, so /props is
+    worth one GET per engine lifetime — not one per 2-second poll."""
+    calls = []
+
+    class _Client:
+        async def get(self, url, **_kw):
+            calls.append(url)
+            if url.endswith("/props"):
+                return _Resp(json_body={
+                    "model_path": "/x/models/Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf"
+                })
+            return _Resp(text=_llamacpp_text())
+
+    client = _Client()
+    first = await vm._scrape_one(client, "secondary", "http://127.0.0.1:8091")
+    assert first["model_name"] == "Qwen3.6-35B-A3B-UD-Q3_K_XL"
+
+    second = await vm._scrape_one(client, "secondary", "http://127.0.0.1:8091")
+    assert second["model_name"] == "Qwen3.6-35B-A3B-UD-Q3_K_XL"
+    assert calls.count("http://127.0.0.1:8091/props") == 1
+
+
+@pytest.mark.asyncio
+async def test_llamacpp_props_failure_does_not_lose_the_scrape():
+    class _Client:
+        async def get(self, url, **_kw):
+            if url.endswith("/props"):
+                raise RuntimeError("no /props on this build")
+            return _Resp(text=_llamacpp_text())
+
+    snap = await vm._scrape_one(_Client(), "secondary", "http://127.0.0.1:8091")
+    assert snap["reachable"] is True
+    assert snap["model_name"] == ""
+    assert snap["requests_running"] == 1
+
+
+@pytest.mark.asyncio
+async def test_unreachable_llamacpp_drops_its_cached_model_name():
+    """A restart can load a different GGUF, so the label must not outlive
+    the process it described."""
+    import httpx
+
+    vm._llamacpp_model_name["secondary"] = "Qwen3.6-35B-A3B-UD-Q3_K_XL"
+
+    class _Failing:
+        async def get(self, *_a, **_kw):
+            raise httpx.ConnectError("connection refused")
+
+    await vm._scrape_one(_Failing(), "secondary", "http://127.0.0.1:8091")
+    assert "secondary" not in vm._llamacpp_model_name
+
+
+class _Resp:
+    def __init__(self, *, text="", json_body=None):
+        self.text = text
+        self.status_code = 200
+        self._json = json_body
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._json

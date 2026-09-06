@@ -55,3 +55,27 @@ class ContextOverflowError(HarnessError):
     def __init__(self, message: str, *, requested_input_tokens: int | None = None):
         super().__init__(message)
         self.requested_input_tokens = requested_input_tokens
+
+
+class StreamStalledError(HarnessError):
+    """The SSE stream went quiet mid-generation.
+
+    Raised only after the engine has already sent at least one line and
+    then produced nothing for `harness.stream_chunk_timeout_seconds`.
+    Time-to-first-line is deliberately NOT bounded by this: a cold prefill
+    emits no bytes at all, and the secondary slot runs llama.cpp with
+    `--parallel 1`, so a queued request legitimately sits silent for as
+    long as the request ahead of it takes. Those are governed by
+    `RunOptions.request_timeout_s`.
+
+    Distinct from a plain read timeout because `client.stream_chat` sets
+    httpx `read=None` — without this, a wedged engine mid-generation
+    blocks the turn forever.
+    """
+
+    def __init__(self, timeout_s: float, *, lines_seen: int = 0):
+        super().__init__(
+            f"stream produced no data for {timeout_s:g}s after {lines_seen} line(s)"
+        )
+        self.timeout_s = timeout_s
+        self.lines_seen = lines_seen

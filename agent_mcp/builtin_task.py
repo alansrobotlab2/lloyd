@@ -33,6 +33,20 @@ logger = logging.getLogger("lloyd-builtin-task")
 _task_depth: contextvars.ContextVar[int] = contextvars.ContextVar("_task_depth", default=0)
 MAX_TASK_DEPTH = 1
 
+# The calling turn's model and endpoint, bound by `agent_mcp.main.call_tool`
+# from the request's `_meta` (see META_MODEL / META_BASE_URL there). This is
+# the only channel that exists: Task runs inside the aggregator process, so
+# without it a subagent has no idea which model spawned it and every profile
+# fell back to `primary`. A turn on the secondary 35B delegated its
+# subagents to the primary, which made the 35B untestable for exactly the
+# fan-out work Task exists for.
+current_parent_model: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_parent_model", default=""
+)
+current_parent_base_url: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_parent_base_url", default=""
+)
+
 def _load_subagent_profile(subagent_type: str) -> dict[str, Any]:
     """Read one `subagents:` profile from the live config.
 
@@ -52,6 +66,26 @@ def _load_subagent_profile(subagent_type: str) -> dict[str, Any]:
         "model": profile.get("model", ""),
         "base_url": profile.get("base_url", ""),
     }
+
+
+def _base_url_for(model: str) -> str:
+    """Endpoint that serves `model`, preferring the caller's own.
+
+    The parent's base_url is authoritative when the model matches: it is
+    the endpoint the turn is actually streaming from, which survives a
+    caller that overrode the config default. Otherwise resolve the alias
+    through `models:` in config, and only then fall back to the default
+    model's endpoint.
+    """
+    if model and model == current_parent_model.get(""):
+        parent_url = current_parent_base_url.get("")
+        if parent_url:
+            return parent_url
+    from app.config import _get_model_cfg
+
+    cfg = _get_model_cfg(model) or {}
+    url = cfg.get("base_url") or (cfg.get("env") or {}).get("ANTHROPIC_BASE_URL", "")
+    return url or default_model_base_url()
 
 
 async def _task(args: dict[str, Any]) -> str:
@@ -77,9 +111,21 @@ async def _task(args: dict[str, Any]) -> str:
     from app.harness.options import RunOptions
     from app.harness.safety import install_default_safety_hook
 
-    # Resolve model and base_url — fall back to primary defaults.
-    model = profile["model"] or "primary"
-    base_url = profile["base_url"] or default_model_base_url()
+    # Resolve model and base_url.
+    #
+    # Precedence: an explicit `subagents.<type>.model` pin wins; otherwise
+    # the subagent inherits the calling turn's model, so delegating from a
+    # turn on the secondary keeps the work on the secondary. Falls back to
+    # `primary` only when there is no parent context at all (Task invoked
+    # outside a harness turn).
+    #
+    # base_url is resolved FROM the chosen model rather than from
+    # `default_model_base_url()`, which always returns the primary's
+    # endpoint: a profile pinned to `model: secondary` with an empty
+    # `base_url` used to send "secondary" to the primary's port, where the
+    # engine does not serve that name.
+    model = profile["model"] or current_parent_model.get("") or "primary"
+    base_url = profile["base_url"] or _base_url_for(model)
 
     # Config-level tool disables apply to subagents too. They did not
     # before: `disallowed` came from the profile alone, so any tool
@@ -130,6 +176,12 @@ async def _task(args: dict[str, Any]) -> str:
         # it runs its whole investigation inside one turn.
         preserve_thinking_iterations=int(
             (CONFIG.get("harness") or {}).get("preserve_thinking_iterations", 0)
+        ),
+        # A wedged engine inside a subagent is worse than one on the main
+        # turn: the caller is blocked on `_task` with nothing streaming and
+        # no human watching. Same deadline as the parent.
+        stream_chunk_timeout_s=float(
+            (CONFIG.get("harness") or {}).get("stream_chunk_timeout_seconds", 0)
         ),
     )
 

@@ -180,6 +180,13 @@ _discovery_status: dict[str, dict[str, Any]] = {}
 # convention for implementation-specific metadata.
 META_SESSION_ID = "lloyd/session_id"
 
+# `_meta` keys carrying the CALLING turn's model and endpoint. Only the
+# Task tool consumes them, so a subagent can inherit the model of the turn
+# that spawned it rather than defaulting to `primary`. Must match
+# app.harness.mcp_pool.META_MODEL / META_BASE_URL.
+META_MODEL = "lloyd/model"
+META_BASE_URL = "lloyd/base_url"
+
 # OpenAI's spec caps tool names at 64 chars. Enforced here at registration
 # so a bad name fails loudly on the first list_tools() instead of
 # mid-conversation in the harness translator (tool_schema.py keeps its own
@@ -297,11 +304,22 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     if isinstance(arguments, dict) and "_session_id" in arguments:
         arguments = {k: v for k, v in arguments.items() if k != "_session_id"}
 
+    parent_model = meta.get(META_MODEL, "") if isinstance(meta, dict) else ""
+    parent_base_url = meta.get(META_BASE_URL, "") if isinstance(meta, dict) else ""
+
     token = _task_registry.current_session_id.set(sid)
+    mtok = builtin_task.current_parent_model.set(
+        parent_model if isinstance(parent_model, str) else ""
+    )
+    btok = builtin_task.current_parent_base_url.set(
+        parent_base_url if isinstance(parent_base_url, str) else ""
+    )
     try:
         return await mod.call_tool(name, arguments)
     finally:
         _task_registry.current_session_id.reset(token)
+        builtin_task.current_parent_model.reset(mtok)
+        builtin_task.current_parent_base_url.reset(btok)
 
 
 async def on_call_tool(ctx, params) -> CallToolResult:
