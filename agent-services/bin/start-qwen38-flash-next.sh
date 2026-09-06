@@ -208,8 +208,43 @@ fi
 # (1.49 GiB, mtp_num_hidden_layers=1). Guarded the same way as the 27B script:
 # a future re-download that drops it should degrade to plain decode, not wedge
 # the engine on a missing draft model.
+#
+# MTP_ENABLED=0 turns speculative decode off without editing this file. It is an
+# A/B knob only -- leave it at 1. Measured 2026-09-06, both arms on a freshly
+# booted engine, batch-1 decode, identical 60,004-token reuse probe:
+#
+#                      decode        KV pool        concurrency   prefix reuse
+#   MTP on (default)   181.9 tok/s   330,159 tok    1.26x         96.0%
+#   MTP off             78.2 tok/s   465,046 tok    1.77x         99.3%
+#
+# MTP is worth 2.33x on decode; it costs 135k tokens of KV (the draft head's
+# 2.12 GiB). Keep it on. Mean acceptance length 3.047 of 4 over 7,511 samples.
+#
+# THE SCARY BOOT WARNING IS BENIGN. kv_cache_utils.py::_warn_if_unannotated_eagle_mamba
+# fires here -- "prefix-cache reuse across requests will be disabled" -- because vLLM
+# cannot identify the qwen4_exp draft group: rule 1's marker (non_causal_multi_token_decode)
+# exists only on MLA attention and QSA is not MLA, and rule 2 is gated on
+# model_type == "deepseek_v4". So the coordinator conservatively flags every group,
+# Mamba included, and applies the EAGLE last-block drop. Measured cost of that drop:
+# 1,984 tokens per request (96.0% reuse vs 99.3%), i.e. 3.3% -- NOT the whole cache.
+# Not worth patching the venv to fix.
+#
+# Also measured, and the reason an obvious test misleads: cross-request reuse needs
+# TWO warm-up passes before it engages (passes 1-2 cache nothing, pass 3+ hits ~96%
+# and runs ~18x faster). A 2-pass A/B shows 0% on BOTH arms and proves nothing.
+# Mechanism behind the warm-up not yet identified.
+#
+# Reproduce with agent-services/bin/bench-prefix-reuse.py (decode x3 then a 5-pass
+# reuse probe reading usage.prompt_tokens_details.cached_tokens, which is
+# per-request and so immune to the agent's own traffic). Do NOT use
+# vllm:prefix_cache_hits_total as a reuse rate: it sums across all KV groups
+# (673,179 queries for one 60k prompt) and sat at ~68% while real cross-request
+# reuse was zero.
+MTP_ENABLED="${MTP_ENABLED:-1}"
 SPEC_ARGS=()
-if [[ -f "$MODEL_DIR/nvfp4_experts_mtp.safetensors" ]]; then
+if [[ "$MTP_ENABLED" != "1" ]]; then
+  echo "NOTE: MTP_ENABLED=$MTP_ENABLED — starting WITHOUT speculative decode"
+elif [[ -f "$MODEL_DIR/nvfp4_experts_mtp.safetensors" ]]; then
   SPEC_ARGS=(--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}')
 else
   echo "WARNING: nvfp4_experts_mtp.safetensors missing — starting WITHOUT speculative decode"
