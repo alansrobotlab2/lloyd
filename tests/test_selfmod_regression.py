@@ -215,7 +215,6 @@ async def test_a_regression_is_handed_to_the_guardian(monkeypatch, tmp_path):
 
 async def test_a_missing_noise_file_means_cannot_evaluate(monkeypatch, tmp_path):
     """Never 'no regression'. `eval/baselines/` is gitignored and can be absent."""
-    import time
     import scripts.selfmod.state as S
     monkeypatch.setattr(S, "read_current", lambda: _observing())
     monkeypatch.setattr(S, "read_events", lambda **k: [])
@@ -226,7 +225,6 @@ async def test_a_missing_noise_file_means_cannot_evaluate(monkeypatch, tmp_path)
 
 
 async def test_a_failed_paired_baseline_does_not_silently_pass(monkeypatch, tmp_path):
-    import time
     import scripts.selfmod.state as S
     noise = tmp_path / "noise.json"
     noise.write_text(json.dumps(ZERO_NOISE))

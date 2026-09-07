@@ -17,7 +17,6 @@ those, so most of what follows asserts a negative.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -35,7 +34,7 @@ import gstate      # noqa: E402
 import policy      # noqa: E402
 import rollback as rb  # noqa: E402
 
-from scripts.selfmod import spec, state as S  # noqa: E402
+from scripts.selfmod import state as S  # noqa: E402
 
 
 def git(repo, *args):
@@ -301,9 +300,9 @@ def test_a_stale_rollback_request_is_discarded_not_obeyed():
 
 
 def test_a_rollback_request_round_trips(isolated_state):
-    req = S.request_rollback(reason="because", trigger="regression",
-                             target="a" * 40, commit="b" * 40,
-                             changed_paths=["app/x.py"])
+    S.request_rollback(reason="because", trigger="regression",
+                       target="a" * 40, commit="b" * 40,
+                       changed_paths=["app/x.py"])
     back = S.read_rollback_request()
     assert back["target"] == "a" * 40 and back["commit"] == "b" * 40
     assert back["changed_paths"] == ["app/x.py"]

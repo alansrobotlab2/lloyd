@@ -307,7 +307,6 @@ def promote(round_id: str, worktree: Path, base: str, *,
         return result
 
     # ── the rollback point, verified before anything moves ─────────────
-    now = time.time()
     current = {
         "schema": 1,
         "round_id": round_id,

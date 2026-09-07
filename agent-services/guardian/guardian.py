@@ -525,7 +525,7 @@ class Guardian:
                      "running on known-good code but cannot land more changes until you clear "
                      f"{self.state.halted}.")
 
-        route = (f"Reverted in place, keeping later commits."
+        route = ("Reverted in place, keeping later commits."
                  if surgical else "Reset to the pre-promotion tree.")
         self.alert(
             "critical" if extra else "warn",
