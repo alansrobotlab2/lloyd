@@ -376,6 +376,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
     full_response = ""
     accumulated_thinking = ""
+    # Wall time the model spent reasoning for the block currently held in
+    # `accumulated_thinking`, measured by the harness (first reasoning
+    # chunk to last). Persisted beside the text so the collapsed thinking
+    # panel can say how long it took on reload, not just live.
+    accumulated_thinking_ms = 0
     tool_calls_log: list[dict] = []
     tool_results_log: list[dict] = []
     persisted_tool_ids: set[str] = set()
@@ -621,10 +626,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
             elif etype == "thinking_done":
                 thinking_text = evt.get("text", "")
                 accumulated_thinking = thinking_text
-                await _emit(turn, "thinking_done", {"text": thinking_text})
+                accumulated_thinking_ms = int(evt.get("duration_ms") or 0)
+                await _emit(turn, "thinking_done", {
+                    "text": thinking_text,
+                    "duration_ms": accumulated_thinking_ms,
+                })
                 _event_log.log_event(session_id, "brain1.thinking_block_emitted", {
                     "thinking": thinking_text,
                     "chars": len(thinking_text),
+                    "duration_ms": accumulated_thinking_ms,
                 }, turn_id=turn.turn_id)
 
             elif etype == "assistant_message":
@@ -658,9 +668,12 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     }
                     if accumulated_thinking:
                         seg_entry["reasoning"] = accumulated_thinking
+                        if accumulated_thinking_ms:
+                            seg_entry["reasoning_ms"] = accumulated_thinking_ms
                     await _append_messages(session_id, [seg_entry])
                     full_response = ""
                     accumulated_thinking = ""
+                    accumulated_thinking_ms = 0
 
             elif etype == "tool_call":
                 call_id = evt["call_id"]
@@ -866,6 +879,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         }
                         if accumulated_thinking:
                             cancel_msg["reasoning"] = accumulated_thinking
+                            if accumulated_thinking_ms:
+                                cancel_msg["reasoning_ms"] = accumulated_thinking_ms
                         tail.append(cancel_msg)
                     if tail:
                         await _append_messages(session_id, tail)
@@ -884,6 +899,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                                  "timestamp": end_ts, "stats": stats_dict}
                     if accumulated_thinking:
                         msg_entry["reasoning"] = accumulated_thinking
+                        if accumulated_thinking_ms:
+                            msg_entry["reasoning_ms"] = accumulated_thinking_ms
                     if turn.source != "user":
                         msg_entry["source"] = turn.source
                     tail.append(msg_entry)
@@ -946,6 +963,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                                       'num_turns': num_turns_val}
                 if accumulated_thinking:
                     done_payload['reasoning'] = accumulated_thinking
+                    if accumulated_thinking_ms:
+                        done_payload['reasoning_ms'] = accumulated_thinking_ms
                 await _emit(turn, "done", done_payload)
 
         # The harness always emits a `result` event (even on cancel), so
@@ -980,6 +999,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                                  "timestamp": err_ts, "stats": stream_stats}
                     if accumulated_thinking:
                         err_msg_entry["reasoning"] = accumulated_thinking
+                        if accumulated_thinking_ms:
+                            err_msg_entry["reasoning_ms"] = accumulated_thinking_ms
                     tail.append(err_msg_entry)
                 if tail:
                     await _append_messages(session_id, tail)

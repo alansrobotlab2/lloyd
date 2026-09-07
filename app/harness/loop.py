@@ -268,6 +268,12 @@ async def run_query(
             iteration_usage: dict[str, int] = {}
             assistant_text = ""
             thinking_text = ""
+            # Wall time spent producing reasoning: first chunk to last.
+            # Deliberately not the iteration's own clock — that also
+            # covers prefill (which can be minutes on a cold 262k prompt)
+            # and the answer generated after thinking ends.
+            thinking_started_at: float | None = None
+            thinking_last_at: float = 0.0
             tool_calls_acc: dict[int, dict[str, Any]] = {}
             finish_reason: str | None = None
 
@@ -313,6 +319,10 @@ async def run_query(
                     if rc is None:
                         rc = delta.get("reasoning")
                     if rc:
+                        now = time.perf_counter()
+                        if thinking_started_at is None:
+                            thinking_started_at = now
+                        thinking_last_at = now
                         thinking_text += rc
                         yield events.thinking_delta(rc)
 
@@ -369,7 +379,12 @@ async def run_query(
                 break
 
             if thinking_text:
-                yield events.thinking_done(thinking_text)
+                thinking_ms = (
+                    int((thinking_last_at - thinking_started_at) * 1000)
+                    if thinking_started_at is not None
+                    else 0
+                )
+                yield events.thinking_done(thinking_text, duration_ms=thinking_ms)
 
             tool_calls_committed = _commit_tool_calls(
                 tool_calls_acc, summary_tools=summary_tools,

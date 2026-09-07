@@ -26,6 +26,17 @@ import {
 const timeStr = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
+// How long the model spent reasoning, for the collapsed thinking header.
+// Sub-minute keeps a decimal — the difference between 2s and 12s of
+// thinking is the interesting range and rounding it to whole seconds
+// flattens it; past a minute the tenths are noise.
+const thinkDuration = (ms: number): string => {
+  if (!(ms > 0)) return ''
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const total = Math.round(ms / 1000)
+  return `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, '0')}s`
+}
+
 type ToolCallRef = { name: string; args: string; summary: string }
 
 // Preserve per-message object identity across polling refreshes so memoized
@@ -40,7 +51,8 @@ const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => 
       const nt = n.content?.map(c => c.text).join('') || ''
       const sameStats = (p.stats == null && n.stats == null) ||
         (p.stats && n.stats && JSON.stringify(p.stats) === JSON.stringify(n.stats))
-      if (pt === nt && sameStats && p.reasoning === n.reasoning) {
+      if (pt === nt && sameStats && p.reasoning === n.reasoning
+          && p.reasoning_ms === n.reasoning_ms) {
         return p
       }
     }
@@ -136,7 +148,9 @@ const MessageRow = memo(function MessageRow({
                       <ChevronRight className="w-3 h-3 transition-transform group-data-[state=open]:rotate-90" />
                       <span className="font-semibold">Thinking</span>
                       <span className="text-muted-foreground/80 font-normal ml-1">
-                        ({msg.reasoning.length.toLocaleString()} chars)
+                        ({[thinkDuration(msg.reasoning_ms ?? 0),
+                           `${msg.reasoning.length.toLocaleString()} chars`]
+                          .filter(Boolean).join(' · ')})
                       </span>
                     </CollapsibleTrigger>
                     <CollapsibleContent className="mt-2 p-3 bg-purple-900/10 border border-purple-500/10 rounded text-xs text-foreground/90 whitespace-pre-wrap max-h-96 overflow-y-auto">
@@ -753,6 +767,14 @@ export default function ChatPanel({
       let streamingStartedG = false
       let settledG = false
       let accumulatedThinkingG = ''
+      // Live duration: the harness only reports it on `thinking_done`,
+      // which lands *after* the iteration's text, so the panel would show
+      // no time for the whole stream. Measure the delta timestamps the
+      // same way (first chunk to last) until the real number arrives.
+      let thinkStartG = 0
+      let thinkLastG = 0
+      let thinkMsG = 0
+      const thinkingMsG = () => thinkMsG || (thinkStartG ? thinkLastG - thinkStartG : 0)
       let pendingDeltaG = ''
       let rafIdG: number | null = null
       const flushDeltaG = () => {
@@ -762,9 +784,10 @@ export default function ChatPanel({
         pendingDeltaG = ''
         const cid = assistantMsgIdG
         const ct = accumulatedThinkingG
+        const cms = thinkingMsG()
         setMessages(prev => prev.map(m =>
           m.id === cid
-            ? { ...m, content: [{ type: 'text' as const, text: m.content[0].text + delta }], ...(ct && !m.reasoning ? { reasoning: ct } : {}) }
+            ? { ...m, content: [{ type: 'text' as const, text: m.content[0].text + delta }], ...(ct && !m.reasoning ? { reasoning: ct, ...(cms ? { reasoning_ms: cms } : {}) } : {}) }
             : m
         ))
       }
@@ -786,6 +809,7 @@ export default function ChatPanel({
           setActiveToolName(name)
           assistantMsgIdG = null
           accumulatedThinkingG = ''
+          thinkStartG = 0; thinkLastG = 0; thinkMsG = 0
           setMessages(prev => [
             ...prev,
             { id: `msg_${callId}_tc`, role: 'assistant', content: [{ type: 'text', text: '' }], tool_calls: [{ id: callId, call_id: callId, type: 'function', function: { name, arguments: args }, summary }], timestamp: new Date().toISOString() },
@@ -803,15 +827,22 @@ export default function ChatPanel({
             setTodoRefreshKey(k => k + 1)
           }
         },
-        onThinkingDelta: (delta) => { accumulatedThinkingG += delta },
-        onThinkingDone: (fullText) => { accumulatedThinkingG = fullText || accumulatedThinkingG },
+        onThinkingDelta: (delta) => {
+          thinkLastG = Date.now()
+          if (!thinkStartG) thinkStartG = thinkLastG
+          accumulatedThinkingG += delta
+        },
+        onThinkingDone: (fullText, durationMs) => {
+          accumulatedThinkingG = fullText || accumulatedThinkingG
+          thinkMsG = durationMs || thinkMsG
+        },
         onTextDelta: (delta) => {
           streamingStartedG = true
           if (assistantMsgIdG === null) {
             segmentCounterG += 1
             const nid = `msg_${Date.now()}_resp_${segmentCounterG}`
             assistantMsgIdG = nid
-            setMessages(prev => [...prev, { id: nid, role: 'assistant', content: [{ type: 'text', text: delta }], timestamp: new Date().toISOString(), ...(accumulatedThinkingG ? { reasoning: accumulatedThinkingG } : {}) }])
+            setMessages(prev => [...prev, { id: nid, role: 'assistant', content: [{ type: 'text', text: delta }], timestamp: new Date().toISOString(), ...(accumulatedThinkingG ? { reasoning: accumulatedThinkingG, ...(thinkingMsG() ? { reasoning_ms: thinkingMsG() } : {}) } : {}) }])
           } else {
             pendingDeltaG += delta
             scheduleFlushG()
@@ -883,6 +914,13 @@ export default function ChatPanel({
     let streamingStarted = false
     let settled = false
     let accumulatedThinking = ''
+    // See the goal path above: `thinking_done` (which carries the
+    // harness's own measurement) arrives after the iteration's text, so
+    // the live panel measures the delta timestamps until it lands.
+    let thinkStart = 0
+    let thinkLast = 0
+    let thinkMs = 0
+    const thinkingMs = () => thinkMs || (thinkStart ? thinkLast - thinkStart : 0)
 
     // RAF-batched delta flush — per-token setState on long sessions kills the
     // main thread; coalesce into a single update per animation frame instead.
@@ -895,12 +933,18 @@ export default function ChatPanel({
       pendingDelta = ''
       const currentId = assistantMsgId
       const currentThinking = accumulatedThinking
+      const currentThinkingMs = thinkingMs()
       setMessages(prev => prev.map(m =>
         m.id === currentId
           ? {
               ...m,
               content: [{ type: 'text' as const, text: m.content[0].text + delta }],
-              ...(currentThinking && !m.reasoning ? { reasoning: currentThinking } : {}),
+              ...(currentThinking && !m.reasoning
+                ? {
+                    reasoning: currentThinking,
+                    ...(currentThinkingMs ? { reasoning_ms: currentThinkingMs } : {}),
+                  }
+                : {}),
             }
           : m
       ))
@@ -922,6 +966,7 @@ export default function ChatPanel({
         setActiveToolName(name)
         assistantMsgId = null
         accumulatedThinking = ''
+        thinkStart = 0; thinkLast = 0; thinkMs = 0
         setMessages(prev => [
           ...prev,
           {
@@ -961,9 +1006,14 @@ export default function ChatPanel({
           || _name === 'SetGoal' || _name === 'ClearGoal'
         ) setTodoRefreshKey(k => k + 1)
       },
-      onThinkingDelta: (delta) => { accumulatedThinking += delta },
-      onThinkingDone: (fullText) => {
+      onThinkingDelta: (delta) => {
+        thinkLast = Date.now()
+        if (!thinkStart) thinkStart = thinkLast
+        accumulatedThinking += delta
+      },
+      onThinkingDone: (fullText, durationMs) => {
         accumulatedThinking = fullText || accumulatedThinking
+        thinkMs = durationMs || thinkMs
       },
       onTextDelta: (delta) => {
         streamingStarted = true
@@ -976,20 +1026,26 @@ export default function ChatPanel({
             role: 'assistant' as const,
             content: [{ type: 'text' as const, text: delta }],
             timestamp: new Date().toISOString(),
-            ...(accumulatedThinking ? { reasoning: accumulatedThinking } : {}),
+            ...(accumulatedThinking
+              ? {
+                  reasoning: accumulatedThinking,
+                  ...(thinkingMs() ? { reasoning_ms: thinkingMs() } : {}),
+                }
+              : {}),
           }])
         } else {
           pendingDelta += delta
           scheduleFlush()
         }
       },
-      onDone: (response, _sid, stats, reasoning) => {
+      onDone: (response, _sid, stats, reasoning, _cancelled, reasoningMs) => {
         if (settled) return
         settled = true
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
         const pendingFinal = pendingDelta
         pendingDelta = ''
         const finalReasoning = accumulatedThinking || reasoning || ''
+        const finalReasoningMs = reasoningMs || thinkingMs()
         if (!streamingStarted && response) {
           const fallbackId = `msg_${Date.now()}_resp_final`
           setMessages(prev => [...prev, {
@@ -998,7 +1054,12 @@ export default function ChatPanel({
             content: [{ type: 'text' as const, text: response }],
             timestamp: new Date().toISOString(),
             stats,
-            ...(finalReasoning ? { reasoning: finalReasoning } : {}),
+            ...(finalReasoning
+              ? {
+                  reasoning: finalReasoning,
+                  ...(finalReasoningMs ? { reasoning_ms: finalReasoningMs } : {}),
+                }
+              : {}),
           }])
         } else if (assistantMsgId && (stats || finalReasoning || pendingFinal)) {
           const lastId = assistantMsgId
@@ -1008,7 +1069,12 @@ export default function ChatPanel({
                   ...m,
                   ...(pendingFinal ? { content: [{ type: 'text' as const, text: m.content[0].text + pendingFinal }] } : {}),
                   ...(stats ? { stats } : {}),
-                  ...(finalReasoning ? { reasoning: finalReasoning } : {}),
+                  ...(finalReasoning
+                    ? {
+                        reasoning: finalReasoning,
+                        ...(finalReasoningMs ? { reasoning_ms: finalReasoningMs } : {}),
+                      }
+                    : {}),
                 }
               : m
           ))

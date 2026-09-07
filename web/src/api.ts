@@ -33,6 +33,10 @@ export interface MessageEntry {
   session_key?: string
   model?: string
   reasoning?: string
+  /** Wall time the model spent reasoning, in milliseconds: first
+   *  reasoning chunk to last. Absent on sessions that predate the field
+   *  and on turns where the harness reported nothing. */
+  reasoning_ms?: number
   stats?: TurnStats
   context_tokens?: number
   tool_calls?: Array<{
@@ -627,8 +631,8 @@ export const api = {
       onToolProgress?: (name: string, preview: string) => void
       onTextDelta?: (text: string) => void
       onThinkingDelta?: (text: string) => void
-      onThinkingDone?: (fullText: string) => void
-      onDone?: (response: string, sessionId: string, stats?: TurnStats, reasoning?: string, cancelled?: boolean) => void
+      onThinkingDone?: (fullText: string, durationMs?: number) => void
+      onDone?: (response: string, sessionId: string, stats?: TurnStats, reasoning?: string, cancelled?: boolean, reasoningMs?: number) => void
       onError?: (detail: string) => void
       onAborted?: () => void
       onQueueState?: (state: QueueState) => void
@@ -683,8 +687,8 @@ export const api = {
               case 'tool_progress': callbacks.onToolProgress?.(payload.name, payload.preview); break
               case 'text_delta': callbacks.onTextDelta?.(payload.text); break
               case 'thinking_delta': callbacks.onThinkingDelta?.(payload.text); break
-              case 'thinking_done': callbacks.onThinkingDone?.(payload.text); break
-              case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats, payload.reasoning, payload.cancelled); break
+              case 'thinking_done': callbacks.onThinkingDone?.(payload.text, payload.duration_ms); break
+              case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats, payload.reasoning, payload.cancelled, payload.reasoning_ms); break
               case 'error': callbacks.onError?.(payload.detail); break
               case 'queue_state': callbacks.onQueueState?.(payload as QueueState); break
             }

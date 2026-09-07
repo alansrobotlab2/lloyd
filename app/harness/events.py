@@ -15,7 +15,8 @@ Event types:
                         delta.reasoning on 0.23+, under --reasoning-parser
                         qwen3)
     thinking_done     — final accumulated reasoning text for this
-                        assistant message
+                        assistant message, plus `duration_ms`: wall time
+                        from the first reasoning chunk to the last one
     tool_call         — a single fully-accumulated tool call from the
                         assistant (after finish_reason="tool_calls" or
                         stream end)
@@ -65,6 +66,9 @@ class NormalizedEvent(TypedDict, total=False):
     content: str
     is_error: bool
 
+    # thinking_done / assistant_message / result
+    duration_ms: int
+
     # assistant_message
     tool_calls: list[dict[str, Any]]
     thinking: str
@@ -75,7 +79,6 @@ class NormalizedEvent(TypedDict, total=False):
     stop_reason: Literal["stop", "tool_calls", "max_turns", "cancelled", "error"]
     usage: dict[str, int]
     num_turns: int
-    duration_ms: int
     response_text: str
 
     # stream_raw
@@ -95,8 +98,18 @@ def thinking_delta(text: str) -> NormalizedEvent:
     return {"type": "thinking_delta", "text": text}
 
 
-def thinking_done(text: str) -> NormalizedEvent:
-    return {"type": "thinking_done", "text": text}
+def thinking_done(text: str, duration_ms: int = 0) -> NormalizedEvent:
+    """Reasoning phase complete.
+
+    ``duration_ms`` spans the first reasoning chunk to the last one — the
+    time actually spent generating thinking, not the iteration's wall
+    time, which also covers prefill and the answer that follows.
+    """
+    return {
+        "type": "thinking_done",
+        "text": text,
+        "duration_ms": duration_ms,
+    }
 
 
 def tool_call(
