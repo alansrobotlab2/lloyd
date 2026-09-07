@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Activity, Play, Square, RotateCcw, RefreshCw, ChevronDown, Terminal, Cpu, HardDrive, Clock, AlertTriangle } from "lucide-react";
+import { Activity, Play, Square, RotateCcw, RefreshCw, ChevronDown, Terminal, Cpu, HardDrive, Clock } from "lucide-react";
 import { api, type ServiceStatus, type ServiceDetail, type LloydServiceUnit, type LloydServiceDetail } from "../../api";
 import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
 
