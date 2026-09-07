@@ -91,3 +91,6 @@ eval/baselines/
 # so without this git would try to record it as a gitlink to a commit nobody
 # else can fetch. Read qmd/CLAUDE.md before touching it.
 /qmd/
+
+# ad-hoc experiments; must not dirty the tree the selfmod gate refuses to gate against
+_scratch/
