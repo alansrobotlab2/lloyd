@@ -96,6 +96,30 @@ from app.routers._messages_inner_voice import (
 
 
 
+def _turn_budget(data: dict) -> int:
+    """Iteration budget for one turn: `agent.max_turns`, or a per-request
+    `max_turns` clamped to `agent.max_turns_ceiling`.
+
+    Exists for worker-driven turns that need more room than a chat turn. The
+    unattended backlog triage was written with a 30-iteration budget; the three
+    triages a human drove by hand used 45, 65 and 76. Running out is silent —
+    the loop stops with `stop_reason="max_turns"` and returns partial text —
+    so a budget that is too small does not fail loudly, it produces a verdict
+    with no evidence block, which the caller records as "unverifiable". The
+    ceiling keeps a tailnet client from asking for an unbounded turn.
+    """
+    agent = CONFIG.get("agent", {}) or {}
+    default = int(agent.get("max_turns", 60))
+    ceiling = int(agent.get("max_turns_ceiling", 120))
+    try:
+        requested = int(data.get("max_turns") or 0)
+    except (TypeError, ValueError):
+        requested = 0
+    if requested <= 0:
+        return default
+    return max(1, min(requested, ceiling))
+
+
 def _clamp_priority(value: Any, default: int = 0) -> int:
     """Clamp a client-supplied vLLM scheduling priority into 0..2.
 
@@ -911,7 +935,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 asyncio.ensure_future(_maybe_extract_focus(session_id))
                 asyncio.ensure_future(maybe_title_session(session_id))
 
-                done_payload: dict = {'response': done_text, 'session_id': session_id, 'stats': stats_dict}
+                done_payload: dict = {'response': done_text, 'session_id': session_id,
+                                      'stats': stats_dict,
+                                      # A worker that drove this turn needs to tell a
+                                      # finished turn from one that hit its budget: the
+                                      # text looks the same, and treating the second as
+                                      # a verdict is how an item gets retired as
+                                      # "unverifiable" for running out of room.
+                                      'stop_reason': stop_reason,
+                                      'num_turns': num_turns_val}
                 if accumulated_thinking:
                     done_payload['reasoning'] = accumulated_thinking
                 await _emit(turn, "done", done_payload)
@@ -1393,7 +1425,7 @@ async def post_message_stream(request: Request):
         model=model,
         base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
         system_prompt=system_prompt,
-        max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
+        max_turns=_turn_budget(data),
         permission_mode=permission_mode,
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active) + extra_disallowed,
