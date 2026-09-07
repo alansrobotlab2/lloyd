@@ -316,8 +316,21 @@ livekit:
   tts:
     api_url: http://127.0.0.1:8090
     model: qwen3-tts
-    voice: Ryan            # built-in male voice; was clone:cullen (voice profile lost in rebuild)
-    speed: 1.0
+    # Cloned voice: Dave Cullen (The Dave Cullen Show, @TheDaveCullenShow).
+    # Profile: agent-services/services/tts/qwen3-tts/voice_library/profiles/dave_cullen/
+    # Provenance + measurements: ~/obsidian/projects/lloyd/voice/voice-source-dave-cullen.md
+    # Was `Ryan` (built-in) after the 08-22 rebuild destroyed the old clone:cullen
+    # profile.  `Ryan` still works as a fallback, but needs the CustomVoice model —
+    # switching back to it means the backend swaps models on the next request.
+    voice: clone:dave_cullen
+    # Same-sentence sweep against the reference clip (Dave speaks 2.06 words/s),
+    # identical input text so the numbers are comparable:
+    #   speed 0.85 -> 2.81 w/s (1.36x too fast)
+    #   speed 0.70 -> 2.10 w/s (1.02x — matches Dave)
+    #   speed 0.60 -> 2.01 w/s (0.97x — slightly slower than him)
+    # 0.70 is the match.  All speeds returned the full word count with 0
+    # insertions (faster-whisper base.en); cost is ~0.4 s more wall time.
+    speed: 0.70
     sample_rate: 24000
     skip_empty: true
   vad:
