@@ -146,6 +146,12 @@ SUPERVISORD_UNIT = "agent-supervisord.service"
 
 # Suppress an identical alert title repeating inside this window.
 ALERT_REPEAT_SECONDS = 900.0
+# Speech repeats far more slowly than the toast. A toast you have already seen
+# costs a glance; a sentence you have already heard costs the whole sentence,
+# and the nag re-announces an unresolved BROKEN state every 15 minutes for as
+# long as it lasts. At 900s that is four utterances an hour, indefinitely —
+# which is how a useful alarm becomes one that gets muted for good.
+VOICE_REPEAT_SECONDS = 3600.0
 
 SELFTEST_INTERVAL_SECONDS = 24 * 3600.0
 HEARTBEAT_NAME = "heartbeat.json"

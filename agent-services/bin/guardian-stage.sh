@@ -42,7 +42,17 @@ if ! ( cd "$STAGE" && /usr/bin/python3 selftest.py >/dev/null 2>&1 ); then
     exit 1
 fi
 
-# 3. Promote the snapshot.
+# 3. Push the voice settings across. Best-effort and last-but-one: the
+# guardian speaks in the same cloned voice as voice mode, and config.yaml is
+# the single source for that, but the guardian cannot read yaml. Failure here
+# leaves speak.py on its built-in defaults, which still sound right — it only
+# means a voice CHANGE has not reached the guardian yet.
+VENV_PY="/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python"
+if [ -x "$VENV_PY" ] && [ -f "$SRC/../bin/sync-voice-config.py" ]; then
+    "$VENV_PY" "$SRC/../bin/sync-voice-config.py" || log "voice config sync failed (non-fatal)"
+fi
+
+# 4. Promote the snapshot.
 mkdir -p "$DST"
 rm -f "$DST"/*.py "$DST"/*.pyc 2>/dev/null || true
 rm -rf "$DST/__pycache__" 2>/dev/null || true

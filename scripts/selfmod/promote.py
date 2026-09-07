@@ -130,6 +130,44 @@ def _err_size() -> int:
         return 0
 
 
+def _announce_promoted(round_id: str, commit: str, changed: list) -> None:
+    """Say out loud that the loop just landed code on itself.
+
+    Until now the self-modification loop only ever spoke when it *failed*:
+    every notify-send in the tree hung off a guardian alert. A loop that can
+    rewrite the running system in the background and is silent when it works
+    is the wrong way round — the successful landings are the ones nobody is
+    watching a terminal for.
+
+    Routed through the guardian's `Notifier.announce` rather than a private
+    notify-send so it shares the one fan-out, and guarded end to end: an
+    announcement must never be able to fail a promotion that already
+    succeeded and is being observed.
+    """
+    try:
+        import sys
+        gdir = Path(__file__).resolve().parents[2] / "agent-services" / "guardian"
+        if not (gdir / "notify.py").is_file():
+            return
+        if str(gdir) not in sys.path:
+            sys.path.insert(0, str(gdir))
+        import gstate, notify as notify_mod, policy
+        notifier = notify_mod.Notifier(
+            ledger=gstate.SelfModState(Path(policy.SELFMOD_STATE)).ledger,
+            state_dir=Path(policy.GUARDIAN_STATE),
+            vault_root=policy.VAULT_ROOT,
+            voice_window=policy.VOICE_REPEAT_SECONDS,
+        )
+        n = len(changed)
+        notifier.announce(
+            f"Promoted {round_id}",
+            f"{n} file{'' if n == 1 else 's'} changed. "
+            f"Watching for {int(ERRORS_WINDOW // 60)} minutes.",
+        )
+    except Exception:
+        pass
+
+
 def promote(round_id: str, worktree: Path, base: str, *,
             gate_report: dict | None = None, dry_run: bool = False) -> dict:
     live = LIVE_ROOT
@@ -251,6 +289,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         S.append_event({"event": "promoted", "round_id": round_id, "commit": head,
                         "parent": live_head, "changed_paths": changed,
                         "errors_until": current["errors_until_ts"]})
+        _announce_promoted(round_id, head, changed)
         result["promoted"] = True
         return result
 

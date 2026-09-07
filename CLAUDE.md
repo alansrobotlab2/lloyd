@@ -72,6 +72,75 @@ Errors are read from `logs/server.err`, never `server.log` — `basicConfig`
 writes to stderr, so `server.log` is uvicorn's access log and holds zero
 error-shaped lines.
 
+### Alerts: one fan-out, six channels
+
+`agent-services/guardian/notify.py` is the **only** producer of user-facing
+alerts. That is a recent property, not an accident: `lloyd-guardian-nag.service`
+used to run its own inline `notify-send`, a second private definition of "tell
+the human" that was structurally incapable of gaining any channel this module
+grew. It now calls `nag.py`, which goes through the same `Notifier`. Anything
+that wants to announce something goes through here.
+
+Two entry points, and picking the wrong one is the trap:
+
+- **`alert()`** — an incident. Fans out to all six: ledger, ALERT.md, journal,
+  desktop toast, voice, vault note, plus a backlog task when critical.
+- **`announce()`** — news, with no bookkeeping. Journal, toast and voice only.
+  Used by a successful promotion and by the 15-minute nag. The nag is the
+  reason `announce` takes a `level`: the state really is critical and should
+  look it, but it has **already** been recorded, and re-announcing through
+  `alert` would append a ledger row and file a fresh backlog task every 15
+  minutes, burying the task the rollback filed under copies of itself.
+
+Promotion *success* is announced too. Before, every notify-send in the tree
+hung off a guardian alert, so a loop that rewrites the running system in the
+background was silent whenever it worked — backwards, since the successful
+landings are the ones nobody is watching a terminal for.
+
+### The spoken channel
+
+`speak.py` says the alert aloud in the same cloned voice as voice mode. It
+lives in `agent-services/guardian/` because `guardian-stage.sh` stages
+`guardian/*.py` and nothing else — a module the guardian imports must be in
+that directory or it will not exist in the pinned snapshot.
+
+- **It reports *dispatched*, not *heard*.** The unit watchdogs the loop at
+  `WatchdogSec=90` against a 5s tick, so synthesis and playback happen in a
+  detached child and `alert()` returns in milliseconds. What actually came out
+  of the speaker is in `voice.log` in the guardian state dir.
+- **The child runs the venv python, and that is deliberate.** The guardian's
+  stdlib-only rule exists so the watchdog cannot be taken down by what it
+  watches. This child runs *after* all five reliable channels have fired,
+  nothing waits on its exit, and its failure cannot reach the loop — so
+  spending the venv buys the presence EQ (scipy) at no cost to the property
+  the rule protects. A wrecked venv costs a duller voice, never an alert.
+- **Shaping degrades in tiers and says which one ran.** EQ needs scipy, the
+  WSOLA speed needs only numpy, so a system-python fallback still fixes the
+  pace. The tier is logged because the first cut of this module called
+  `OutputShaper.enabled()` — it is a `@property` — and shipped *unshaped*
+  audio while looking perfectly healthy. A silent downgrade is
+  indistinguishable from success.
+- **Suppression is on disk**, keyed by alert title, because the two producers
+  are different processes: the daemon and the nag oneshot. In-memory dedupe
+  (`guardian.py::_alert_seen`, `ALERT_REPEAT_SECONDS` = 900s) cannot see the
+  nag. `policy.VOICE_REPEAT_SECONDS` is 3600s — a toast you have already seen
+  costs a glance, a sentence you have already heard costs the whole sentence,
+  and at 900s an unresolved incident would say the same thing aloud four times
+  an hour indefinitely.
+- **`LLOYD_VOICE_ALERTS=0`** keeps every other channel and drops only speech.
+  `tests/conftest.py` sets it for every test — otherwise `pytest tests/` talks
+  to the room from a process that outlives the test.
+- **Voice sits below the `external` gate**, like the vault note and the
+  backlog task: the drill runs a real guardian against a throwaway repo, and a
+  rehearsal that announces a rollback out loud is indistinguishable from a
+  production incident to anyone in the room.
+
+`config.yaml`'s `livekit.tts` stays the single source for the voice.
+`agent-services/bin/sync-voice-config.py` pushes it into the guardian's state
+dir at stage time (the guardian has no yaml, and must not read the repo on a
+critical path). If it never runs, `speak.py`'s built-in defaults still sound
+right — the sync only stops the two drifting after a voice *change*.
+
 ### Development happens in ~/lloyd-sandbox
 
 `/home/alansrobotlab/lloyd` is production: a saved file is a deploy. Non-trivial
@@ -503,7 +572,11 @@ listen files: `~/obsidian/projects/lloyd/voice/voice-source-dave-cullen.md`.
 
 A voice change needs **`lloyd-agent-worker`** restarted (it reads
 `livekit.tts` once at construction); `agent-livekit-server` is the SFU binary
-and never reads TTS config.
+and never reads TTS config. It also needs the guardian **re-staged**
+(`systemctl --user restart lloyd-guardian`), because the same voice is used
+for spoken alerts and `sync-voice-config.py` pushes `livekit.tts` across at
+stage time — see "The spoken channel" above. Neither restart is required for
+the voice to *work*, only for a change to reach that consumer.
 
 ## Knowledge graph
 

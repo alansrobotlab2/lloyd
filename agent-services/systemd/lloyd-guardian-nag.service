@@ -3,7 +3,22 @@ Description=Re-announce an unresolved Lloyd guardian BROKEN state
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c 'f="$HOME/.local/state/lloyd-selfmod/BROKEN"; [ -f "$f" ] || exit 0; msg="$(head -c 400 "$f")"; systemd-cat -t lloyd-guardian -p 2 -- echo "STILL BROKEN: $msg"; notify-send -u critical "Lloyd guardian: STILL BROKEN" "$msg" || true'
+# Routed through the guardian's own notify.Notifier rather than an inline
+# notify-send. The inline version was a second, private definition of "tell
+# the human": it could never gain a channel notify.py grew, so the day speech
+# was added this would have been the one alert that stayed silent.
+#
+# The bash arm behind `||` is not belt-and-braces, it is the stale-snapshot
+# case: guardian-stage.sh only promotes a candidate that compiles and passes
+# selftest, so a snapshot can legitimately predate nag.py existing. A stale
+# guardian must still nag, and notify-send needs nothing but dbus.
+ExecStart=/usr/bin/bash -c 'snap="$HOME/.local/state/lloyd-guardian/bin/nag.py"; \
+  if [ -f "$snap" ]; then exec /usr/bin/python3 "$snap"; fi; \
+  f="$HOME/.local/state/lloyd-selfmod/BROKEN"; [ -f "$f" ] || exit 0; \
+  msg="$(head -c 400 "$f")"; \
+  systemd-cat -t lloyd-guardian -p 2 -- echo "STILL BROKEN: $msg"; \
+  notify-send -u critical "Lloyd guardian: STILL BROKEN" "$msg" || true'
 Environment=DISPLAY=:1
+Environment=WAYLAND_DISPLAY=wayland-1
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus

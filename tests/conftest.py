@@ -22,6 +22,18 @@ sys.path.insert(0, str(ROOT))
 
 
 @pytest.fixture(autouse=True)
+def _no_voice_alerts_in_tests(monkeypatch):
+    """The guardian's sixth channel synthesises speech and plays it aloud.
+
+    `Notifier.alert` fans out to it like any other channel, so without this an
+    ordinary `pytest tests/` would talk to the room — and, worse, would do it
+    from a detached process that outlives the test. Muted for every test; the
+    ones that exercise the channel assert on the dispatch decision instead.
+    """
+    monkeypatch.setenv("LLOYD_VOICE_ALERTS", "0")
+
+
+@pytest.fixture(autouse=True)
 def _writes_enabled_in_tests(monkeypatch):
     """Fact writes are on unless a test says otherwise."""
     try:

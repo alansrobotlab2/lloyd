@@ -1,9 +1,16 @@
 """Alert fan-out. Stdlib only, and no channel may raise.
 
-Five channels, ordered so the most reliable goes first. They fail differently
+Six channels, ordered so the most reliable goes first. They fail differently
 on purpose: the ledger works when the network is down, the journal works when
 the filesystem state dir is unreadable, the desktop notification works when
-nobody is looking at a browser, and the vault note works tomorrow morning.
+nobody is looking at a browser, the spoken alert works when nobody is looking
+at the *screen*, and the vault note works tomorrow morning.
+
+This module is the one place a Lloyd alert becomes visible to a human, which
+is why the nag oneshot was folded into it: before, `lloyd-guardian-nag.service`
+ran its own inline `notify-send`, so it was structurally incapable of ever
+gaining a channel this module grew. Anything that wants to announce something
+goes through `alert()`.
 
 Deliberately **not** `app/discord_notify.py`: it is async, it imports
 `app.config`, and with `config.yaml`'s token empty — which is the current
@@ -40,7 +47,8 @@ def _run(cmd: list[str], timeout: float = 5.0) -> bool:
 class Notifier:
     def __init__(self, *, ledger: Path, state_dir: Path, vault_root: str,
                  backend_url: str = "http://127.0.0.1:8080",
-                 external: bool = True):
+                 external: bool = True, voice: bool = True,
+                 voice_window: float = 3600.0):
         self.ledger = ledger
         self.state_dir = Path(state_dir)
         self.vault_root = Path(vault_root)
@@ -54,6 +62,14 @@ class Notifier:
         # commits that exist only in a deleted scratch clone, and reading that
         # note later suggested the audit trail had lost events.
         self.external = external
+        # Speech gets its own, much longer repeat window than the toast. The
+        # nag fires every 15 minutes for as long as a BROKEN state lasts, and
+        # guardian.py's in-memory dedupe cannot see it because it is a separate
+        # process — so without this a bad night would say the same sentence out
+        # loud ninety-six times. See speak.should_speak, which keeps that
+        # record on disk precisely so both producers share it.
+        self.voice = voice
+        self.voice_window = voice_window
 
     def alert(self, level: str, title: str, body: str, *, evidence: str = "",
               commit: str = "", trigger: str = "", tag: str = "") -> dict:
@@ -69,9 +85,38 @@ class Notifier:
             return results
         results["journal"] = self._journal(level, f"{title} :: {body}")
         results["desktop"] = self._desktop(level, title, body)
+        results["voice"] = self._speak(level, title, body)
         results["vault"] = self._vault_note(title, text)
         if level == "critical" or trigger:
             results["backlog"] = self._backlog_task(title, text, commit, tag)
+        return results
+
+    def announce(self, title: str, body: str = "", level: str = "info") -> dict:
+        """Say something without recording an incident.
+
+        `alert` is for events that must survive being missed, so it writes
+        ALERT.md, appends to the ledger, and above a threshold files a backlog
+        task. Two callers want the *sound* without any of that bookkeeping:
+
+        * a successful promotion, which is not an incident at all — the ledger
+          already records it as `promoted`, and a second row saying the same
+          thing in different words is how two sources of truth begin;
+        * the 15-minute nag, which re-announces an incident that has **already**
+          been recorded. Routed through `alert` it would append a ledger row
+          and file a fresh backlog task every 15 minutes for as long as the
+          BROKEN state lasted, burying the one the rollback filed — the exact
+          failure `_backlog_task` was hardened against once already.
+
+        What is left is the three channels a human experiences in the room:
+        journal, toast, voice. `level` still steers journal priority and toast
+        urgency, so the nag can be loud without being permanent.
+        """
+        results: dict[str, bool] = {}
+        if not self.external:
+            return results
+        results["journal"] = self._journal(level, f"{title} :: {body}")
+        results["desktop"] = self._desktop(level, title, body)
+        results["voice"] = self._speak(level, title, body)
         return results
 
     # ── channels ───────────────────────────────────────────────────────
@@ -98,6 +143,30 @@ class Notifier:
         if not env_ok:
             return False
         return _run(["notify-send", "-u", urgency, f"Lloyd guardian: {title}", body[:400]])
+
+    def _speak(self, level: str, title: str, body: str) -> bool:
+        """Say it out loud, in Lloyd's cloned voice. See speak.py.
+
+        Reports *dispatched*, not *heard*: synthesis and playback happen in a
+        detached child so this cannot add seconds to a loop the unit watchdogs
+        at 90s. Whether the sound actually came out is in voice.log.
+
+        Below the `external` gate, for the same reason as the vault note and
+        the backlog task: the drill runs a real guardian against a throwaway
+        repo, and a rehearsal that announces a rollback out loud is
+        indistinguishable from a production incident to anyone in the room.
+        """
+        if not self.voice:
+            return False
+        try:
+            import speak
+        except Exception:
+            return False
+        try:
+            return speak.dispatch(level, title, body, self.state_dir,
+                                  window=self.voice_window)
+        except Exception:
+            return False
 
     def _alert_file(self, level: str, title: str, text: str) -> bool:
         try:

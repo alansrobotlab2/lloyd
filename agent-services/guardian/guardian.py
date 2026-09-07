@@ -87,6 +87,7 @@ class Guardian:
             vault_root=policy.VAULT_ROOT,
             backend_url=args.backend_url.rsplit("/health", 1)[0],
             external=not getattr(args, "no_external_alerts", False),
+            voice_window=policy.VOICE_REPEAT_SECONDS,
         )
         self._alert_seen: dict[str, float] = {}
         self.cursor = logtail.LogCursor(self.gdir / "logcursors.json")

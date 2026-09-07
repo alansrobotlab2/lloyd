@@ -587,7 +587,7 @@ function TaskModal({
                 onChange={(e) => setNotifyOnComplete(e.target.checked)}
                 className="rounded border-border bg-secondary text-primary focus:ring-primary/30"
               />
-              <span className="text-xs text-foreground/90">Notify on completion (toast)</span>
+              <span className="text-xs text-foreground/90">Notify on completion (Discord)</span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
               <input
