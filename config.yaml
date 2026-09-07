@@ -330,9 +330,30 @@ livekit:
     #   speed 0.60 -> 2.01 w/s (0.97x — slightly slower than him)
     # 0.70 is the match.  All speeds returned the full word count with 0
     # insertions (faster-whisper base.en); cost is ~0.4 s more wall time.
+    #
+    # Applied client-side by livekit_worker, NOT by the server: the server's
+    # streaming path (`generate_voice_clone_streaming`) takes no speed argument
+    # and silently drops it, so until 2026-09-06 voice mode spoke at 1.0 no
+    # matter what this said.  See agent-services/tts_shaping.py.
     speed: 0.70
     sample_rate: 24000
     skip_empty: true
+    # Corrective EQ on the synthesised audio.  The 12 Hz speech tokenizer
+    # matches the reference speaker to within 0.5 dB below 1.5 kHz and then
+    # rolls off — -1.8 dB at 2 kHz, -3.9 dB at 4 kHz, -6.2 dB above 9 kHz —
+    # which is the "he's in a broom closet" sound.  Two high shelves put the
+    # presence band back; fitted against the profile's own reference clip, they
+    # land BOX and spectral centroid on the real speaker's numbers.
+    #
+    # This is a vocoder property, not a bad reference: built-in voices with no
+    # cloning measure the same, and re-cutting from a second source video did
+    # not move it.  Do NOT "fix" it by cutting 300 Hz — that band already
+    # matches the reference to 0.1 dB, and cutting it trades hollow for thin.
+    shaping:
+      presence_eq: true
+      shelves:
+        - {freq: 1800, gain_db: 2.75, q: 1.0}
+        - {freq: 8000, gain_db: 4.0, q: 0.7}
   vad:
     speech_rms: 0.025
     min_speech_frames_to_start: 3

@@ -35,6 +35,7 @@ from typing import Callable, Optional
 
 import numpy as np
 import re
+import tts_shaping
 import yaml
 from livekit import api as lkapi
 from livekit import rtc
@@ -156,6 +157,16 @@ class TTSStreamer:
         self.voice = tts_cfg.get("voice", "clone:cullen")
         self.speed = float(tts_cfg.get("speed", 1.0))
         self.sample_rate = int(tts_cfg.get("sample_rate", 24000))
+        # Output shaping — restores the presence band the 12 Hz vocoder drops,
+        # and applies `speed`, which the server's *streaming* path silently
+        # ignores. See agent-services/tts_shaping.py for both measurements.
+        shaping = tts_cfg.get("shaping") or {}
+        self._shaper = tts_shaping.OutputShaper(
+            self.sample_rate,
+            speed=self.speed,
+            presence_eq=bool(shaping.get("presence_eq", True)),
+            shelves=shaping.get("shelves"),
+        )
         self.room = room
         # Optional callback fired (synchronously, no args) when an utterance
         # finishes draining — RoomBridge wires this to extend the wake-word
@@ -183,7 +194,10 @@ class TTSStreamer:
             options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
             await self.room.local_participant.publish_track(self.track, options)
             self._worker_task = asyncio.create_task(self._drain())
-            LOG.info("TTSStreamer published track 'lloyd-tts' @ %d Hz", self.sample_rate)
+            LOG.info(
+                "TTSStreamer published track 'lloyd-tts' @ %d Hz — voice=%s shaping=%s",
+                self.sample_rate, self.voice, self._shaper.describe(),
+            )
 
     async def speak(self, text: str) -> None:
         """Queue an utterance for synthesis + playback."""
@@ -272,32 +286,46 @@ class TTSStreamer:
 
         t0 = time.monotonic()
         n_pushed = 0
-        async with self._http.stream(
-            "POST",
-            f"{self.api_url}/v1/audio/speech",
-            json={
-                "model": self.model,
-                "input": text,
-                "voice": self.voice,
-                "response_format": "pcm",
-                "stream": True,
-                "speed": self.speed,
-            },
-        ) as resp:
-            if resp.status_code >= 300:
-                err = await resp.aread()
-                LOG.warning("TTS HTTP %d: %s", resp.status_code, err[:200])
-                return
-            async for chunk in resp.aiter_bytes():
-                if not chunk:
-                    continue
-                leftover.extend(chunk)
-                # Push complete 100ms frames; keep any tail for the next loop.
-                while len(leftover) >= bytes_per_frame:
-                    frame_bytes = bytes(leftover[:bytes_per_frame])
-                    del leftover[:bytes_per_frame]
-                    await self._push_frame(frame_bytes, samples_per_frame)
-                    n_pushed += 1
+        drained = False
+        try:
+            async with self._http.stream(
+                "POST",
+                f"{self.api_url}/v1/audio/speech",
+                json={
+                    "model": self.model,
+                    "input": text,
+                    "voice": self.voice,
+                    "response_format": "pcm",
+                    "stream": True,
+                    # Always 1.0 on the wire. The server drops `speed` on its
+                    # streaming path, so we apply it here; asking for it in both
+                    # places would stretch twice the day the server grows support.
+                    "speed": 1.0,
+                },
+            ) as resp:
+                if resp.status_code >= 300:
+                    err = await resp.aread()
+                    LOG.warning("TTS HTTP %d: %s", resp.status_code, err[:200])
+                    return
+                async for chunk in resp.aiter_bytes():
+                    if not chunk:
+                        continue
+                    leftover.extend(self._shaper.process(chunk))
+                    # Push complete 100ms frames; keep any tail for the next loop.
+                    while len(leftover) >= bytes_per_frame:
+                        frame_bytes = bytes(leftover[:bytes_per_frame])
+                        del leftover[:bytes_per_frame]
+                        await self._push_frame(frame_bytes, samples_per_frame)
+                        n_pushed += 1
+            leftover.extend(self._shaper.flush())
+            drained = True
+        finally:
+            # An interrupt cancels this coroutine mid-stream. The shaper carries
+            # filter and overlap state across chunks, so it has to be emptied
+            # here or the next utterance opens with the tail of the one the user
+            # just talked over.
+            if not drained:
+                self._shaper.flush()
         # Tail: any final partial frame (zero-padded to a 10ms boundary).
         if leftover:
             ten_ms = self.sample_rate // 100
@@ -312,6 +340,17 @@ class TTSStreamer:
                 n_pushed += 1
         elapsed = time.monotonic() - t0
         LOG.info("TTS spoke %r in %.2fs (%d frames)", text[:60], elapsed, n_pushed)
+        # The presence shelves add ~1.5 dB of peak. Measured output sits at 0.75
+        # full scale, so this should stay silent; if it ever fires the shelf
+        # gains are too hot for whatever the server is now sending.
+        if self._shaper.clipped and self._shaper.total:
+            ratio = self._shaper.clipped / self._shaper.total
+            if ratio > 0.001:
+                LOG.warning(
+                    "TTS shaping clipped %.2f%% of samples — lower livekit.tts.shaping gains",
+                    ratio * 100,
+                )
+            self._shaper.clipped = self._shaper.total = 0
 
     async def _push_frame(self, pcm_bytes: bytes, samples_per_channel: int) -> None:
         if self.source is None:

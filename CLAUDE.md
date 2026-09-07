@@ -453,6 +453,46 @@ and has no other way to know. Pin an alias there to override. Empty
 `base_url` resolves from `models:` for the chosen model — *not* from
 `default_model_base_url()`, which always returns the primary's endpoint.
 
+## Voice output
+
+The cloned voice (`clone:dave_cullen`, config `livekit.tts`) is synthesised by
+Qwen3-TTS at :8090 and then **shaped client-side** by
+`agent-services/tts_shaping.py` before it reaches LiveKit. Two things the
+server does not do, both fixed in the worker because the TTS tree is
+gitignored and a rebuild would silently delete a fix made there:
+
+- **The 12 Hz speech tokenizer rolls off above ~1.5 kHz.** Against the
+  clone's own reference clip the output matches the real speaker to within
+  0.5 dB below 1.5 kHz and is then 1.8–6.2 dB down all the way up. That
+  missing presence band is the "he's in a broom closet" sound. Two high
+  shelves (`livekit.tts.shaping.shelves`) put it back. It is a vocoder
+  property, not a bad reference — built-in voices with no cloning measure the
+  same, and re-cutting the reference from another source video did not move
+  it. **Do not "fix" it by cutting 300 Hz**: that band already matches the
+  reference to 0.1 dB, and cutting it trades hollow for thin. The trap is the
+  metric — gate frames on total RMS and raising the highs swaps vowel frames
+  for fricatives in your own measurement, which reads a +9 dB shelf as +24 dB.
+  Gate on sub-1 kHz energy, which the correction cannot move.
+- **`speed` is dropped by the server's streaming path.**
+  `generate_voice_clone_streaming` has no such parameter while the
+  non-streaming path applies `librosa.effects.time_stretch`, and voice mode
+  always streams — so `speed: 0.70` was inert for the only path that uses it,
+  and Lloyd spoke ~1.5x faster than the voice he clones. `WsolaStretch`
+  applies it in the worker, and the request now sends `speed: 1.0` so a future
+  server-side implementation cannot stretch twice. WSOLA rather than a phase
+  vocoder: a phase vocoder adds exactly the smeared quality the shelves exist
+  to remove.
+
+Both stages hold state across chunk boundaries and are reset per utterance —
+an interrupt mid-stream must drain the shaper or the next utterance opens with
+the tail of the one the user talked over. `tests/test_tts_output_shaping.py`
+pins chunk-invariance, rate stability, and pitch preservation. Measurements and
+listen files: `~/obsidian/projects/lloyd/voice/voice-source-dave-cullen.md`.
+
+A voice change needs **`lloyd-agent-worker`** restarted (it reads
+`livekit.tts` once at construction); `agent-livekit-server` is the SFU binary
+and never reads TTS config.
+
 ## Knowledge graph
 
 Two layers, and the distinction matters:
