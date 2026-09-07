@@ -300,6 +300,22 @@ models:
       ANTHROPIC_BASE_URL: http://127.0.0.1:8091
       ANTHROPIC_CUSTOM_MODEL_OPTION: secondary
       ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: Secondary
+# Guardian alert behaviour. Read by agent-services/bin/sync-voice-config.py at
+# guardian stage time, NOT by the backend — the guardian cannot parse yaml, so
+# settings are pushed to it rather than pulled.
+guardian:
+  voice:
+    # Quiet hours for SPOKEN ALERTS ONLY. Deliberately not under livekit.tts:
+    # voice mode must stay conversational at any hour, and this must never
+    # reach livekit_worker. Inside the window the toast, journal, ledger,
+    # vault note and backlog task all still fire — only the sound is withheld,
+    # so nothing is lost, it is just waiting in the morning.
+    quiet_hours:
+      enabled: true
+      start: 23              # local hour speech stops
+      end: 7                 # local hour it resumes (wraps midnight)
+      allow_critical: false  # true = a rollback still wakes you
+
 livekit:
   url: ws://127.0.0.1:7880
   api_key: ${LIVEKIT_API_KEY}

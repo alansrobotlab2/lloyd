@@ -127,6 +127,20 @@ that directory or it will not exist in the pinned snapshot.
   costs a glance, a sentence you have already heard costs the whole sentence,
   and at 900s an unresolved incident would say the same thing aloud four times
   an hour indefinitely.
+- **Quiet hours gate the clock, and only the sound.** `guardian.voice.quiet_hours`
+  in config.yaml (23–07 by default) withholds speech; the toast, journal,
+  ledger, vault note and backlog task all still fire, so nothing is lost — it
+  is waiting in the morning. That is what makes it safe to default on.
+  `allow_critical: true` lets a rollback wake you anyway. The window is
+  checked **before** `should_speak`, which records as it decides: recording a
+  quiet-hours drop would spend the hourly slot on an utterance nobody heard,
+  and the 08:00 repeat of an 03:00 alert would then stay silent for the wrong
+  reason. A window that wraps midnight is the normal shape, and `start == end`
+  means *no* window rather than a full day of silence.
+  It lives under `guardian.voice`, **not** `livekit.tts`, and the split is
+  load-bearing: `livekit_worker` reads `livekit.tts`, and a voice conversation
+  that went mute at 23:00 because an alert policy leaked into it would be a
+  real bug. Only alerts are gated by the hour.
 - **`LLOYD_VOICE_ALERTS=0`** keeps every other channel and drops only speech.
   `tests/conftest.py` sets it for every test — otherwise `pytest tests/` talks
   to the room from a process that outlives the test.

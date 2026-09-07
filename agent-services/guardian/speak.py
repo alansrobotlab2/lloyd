@@ -75,6 +75,11 @@ DEFAULTS: dict = {
     "shaping_module": f"{_REPO}/agent-services/tts_shaping.py",
     "synth_timeout": 60.0,
     "max_chars": 240,
+    # Spoken alerts only. This must never reach livekit_worker: voice mode has
+    # to stay conversational at any hour, and a Lloyd who goes mute mid-answer
+    # at 23:00 is a bug, not a courtesy. That is why the setting lives under
+    # `guardian.voice` in config.yaml rather than `livekit.tts`.
+    "quiet_hours": {"enabled": True, "start": 23, "end": 7, "allow_critical": False},
 }
 
 VENV_PYTHON = f"{_REPO}/.venvs/lloyd/bin/python"
@@ -105,7 +110,15 @@ def load_config(state_dir: Path) -> dict:
         raw = (Path(state_dir) / CONFIG_NAME).read_text(encoding="utf-8")
         loaded = json.loads(raw)
         if isinstance(loaded, dict):
-            cfg.update({k: v for k, v in loaded.items() if v is not None})
+            for k, v in loaded.items():
+                if v is None:
+                    continue
+                # One level of merge: {"quiet_hours": {"start": 22}} must move
+                # the hour without silently dropping `enabled` and `end`.
+                if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+                    cfg[k] = {**cfg[k], **v}
+                else:
+                    cfg[k] = v
     except Exception:
         pass
     return cfg
@@ -175,6 +188,32 @@ def utterance_for(level: str, title: str, body: str = "", *,
     if len(out) > max_chars:
         out = out[:max_chars].rsplit(" ", 1)[0] + "."
     return out
+
+
+def in_quiet_hours(cfg: dict, now: float | None = None) -> bool:
+    """True when the hour says to withhold speech.
+
+    Only the *sound* is withheld. The toast, journal, ledger, vault note and
+    backlog task all still fire, so nothing is lost — the record is intact and
+    waiting in the morning. That is what makes this safe to default on: it
+    drops an accompaniment, never an alert.
+
+    Local time, because the point is what hour it is in the room. A window
+    that wraps midnight is the normal case (23 to 7), so `start > end` is
+    handled, and `start == end` means no window rather than a full day of
+    silence — the reading of an empty range that cannot mute the box forever.
+    """
+    qh = cfg.get("quiet_hours") or {}
+    if not qh.get("enabled", False):
+        return False
+    try:
+        start, end = int(qh["start"]), int(qh["end"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if start == end:
+        return False
+    hour = time.localtime(now).tm_hour
+    return start <= hour < end if start < end else (hour >= start or hour < end)
 
 
 # ── suppression, shared across processes ──────────────────────────────
@@ -402,9 +441,16 @@ def dispatch(level: str, title: str, body: str, state_dir: Path, *,
         return False
     try:
         state_dir = Path(state_dir)
+        cfg = load_config(state_dir)
+        # Checked BEFORE should_speak, which records as it decides. Recording a
+        # quiet-hours drop would spend the hourly slot on an utterance nobody
+        # heard, so the 08:00 repeat of a 03:00 alert would stay silent too.
+        if in_quiet_hours(cfg) and not (
+                level == "critical" and cfg["quiet_hours"].get("allow_critical")):
+            _log(state_dir, f"quiet hours — withholding speech for {title!r}")
+            return False
         if not should_speak(key or title or "alert", state_dir, window):
             return False
-        cfg = load_config(state_dir)
         text = utterance_for(level, title, body, max_chars=int(cfg["max_chars"]))
         subprocess.Popen(
             [_worker_python(), str(Path(__file__).resolve()),

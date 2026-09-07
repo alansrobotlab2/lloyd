@@ -405,3 +405,115 @@ def test_announcing_cannot_fail_a_promotion(monkeypatch):
 
     monkeypatch.setattr(notify, "Notifier", boom)
     promote_mod._announce_promoted("SM_x", "a" * 40, ["a.py"])   # must not raise
+
+
+# ── quiet hours ───────────────────────────────────────────────────────
+
+def _at(hour: int) -> float:
+    """A local-time epoch for `hour` today. Built through mktime so the test
+    is correct in any timezone and across DST, which a fixed epoch is not."""
+    lt = list(time.localtime())
+    lt[3], lt[4], lt[5] = hour, 30, 0
+    lt[8] = -1                      # let mktime work out DST
+    return time.mktime(time.struct_time(lt))
+
+
+def _cfg(**qh):
+    base = {"enabled": True, "start": 23, "end": 7, "allow_critical": False}
+    return dict(speak.DEFAULTS, quiet_hours={**base, **qh})
+
+
+@pytest.mark.parametrize("hour,quiet", [
+    (23, True), (0, True), (3, True), (6, True),    # inside the wrapped window
+    (7, False), (12, False), (22, False),           # outside it
+])
+def test_quiet_window_wraps_midnight(hour, quiet):
+    """23->7 is the normal shape, and it is the one a naive `start <= h < end`
+    gets exactly backwards — it would be silent all day and loud all night."""
+    assert speak.in_quiet_hours(_cfg(), _at(hour)) is quiet
+
+
+@pytest.mark.parametrize("hour,quiet", [(1, False), (10, True), (13, True), (18, False)])
+def test_quiet_window_without_a_wrap(hour, quiet):
+    assert speak.in_quiet_hours(_cfg(start=9, end=17), _at(hour)) is quiet
+
+
+def test_an_empty_window_is_no_window_not_all_day():
+    """start == end has two readings and only one of them is survivable."""
+    assert speak.in_quiet_hours(_cfg(start=7, end=7), _at(3)) is False
+    assert speak.in_quiet_hours(_cfg(start=7, end=7), _at(15)) is False
+
+
+def test_quiet_hours_off_by_default_config_and_on_garbage():
+    assert speak.in_quiet_hours({}, _at(3)) is False
+    assert speak.in_quiet_hours(_cfg(enabled=False), _at(3)) is False
+    assert speak.in_quiet_hours({"quiet_hours": {"enabled": True}}, _at(3)) is False
+    assert speak.in_quiet_hours(_cfg(start="late", end=7), _at(3)) is False
+
+
+def test_quiet_hours_withhold_speech_but_nothing_else(tmp_path, monkeypatch):
+    """Only the sound is dropped. Every recording channel already ran by the
+    time dispatch is reached, which is what makes defaulting this on safe."""
+    monkeypatch.setenv("LLOYD_VOICE_ALERTS", "1")
+    monkeypatch.setattr(speak, "in_quiet_hours", lambda cfg, now=None: True)
+    spawned = []
+    monkeypatch.setattr(speak.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+
+    assert speak.dispatch("error", "Rolled back", "b", tmp_path, window=3600) is False
+    assert spawned == []
+    assert "quiet hours" in (tmp_path / speak.LOG_NAME).read_text()
+
+
+def test_allow_critical_wakes_you_for_a_rollback(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLOYD_VOICE_ALERTS", "1")
+    monkeypatch.setattr(speak.subprocess, "Popen", lambda *a, **k: object())
+    monkeypatch.setattr(speak, "in_quiet_hours", lambda cfg, now=None: True)
+    (tmp_path / speak.CONFIG_NAME).write_text(json.dumps(
+        {"quiet_hours": {"enabled": True, "start": 23, "end": 7, "allow_critical": True}}))
+
+    assert speak.dispatch("critical", "Rolled back", "b", tmp_path, window=3600) is True
+    assert speak.dispatch("error", "Something else", "b", tmp_path, window=3600) is False
+
+
+def test_a_withheld_utterance_does_not_burn_the_repeat_slot(tmp_path, monkeypatch):
+    """The ordering bug this guards: should_speak *records* as it decides, so
+    checking it before the clock would spend the hourly slot on an utterance
+    nobody heard — and the 08:00 repeat of an 03:00 alert would stay silent
+    for the wrong reason."""
+    monkeypatch.setenv("LLOYD_VOICE_ALERTS", "1")
+    spawned = []
+    monkeypatch.setattr(speak.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+
+    quiet = {"v": True}
+    monkeypatch.setattr(speak, "in_quiet_hours", lambda cfg, now=None: quiet["v"])
+    assert speak.dispatch("error", "Rolled back", "b", tmp_path, window=3600) is False
+    assert not (tmp_path / speak.SPOKEN_NAME).exists(), "a silent drop was recorded"
+
+    quiet["v"] = False              # morning
+    assert speak.dispatch("error", "Rolled back", "b", tmp_path, window=3600) is True
+    assert len(spawned) == 1
+
+
+def test_partial_override_keeps_its_sibling_defaults(tmp_path):
+    """A voice.json that moves only the start hour must not drop `enabled`."""
+    (tmp_path / speak.CONFIG_NAME).write_text('{"quiet_hours": {"start": 22}}')
+    qh = speak.load_config(tmp_path)["quiet_hours"]
+    assert qh == {"enabled": True, "start": 22, "end": 7, "allow_critical": False}
+
+
+def test_sync_pushes_quiet_hours_from_the_guardian_block_not_livekit():
+    """livekit_worker reads livekit.tts. If quiet hours lived there, a voice
+    conversation would go mute at 23:00 — an alert policy leaking into the
+    thing it must never touch."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "svc", Path(__file__).resolve().parent.parent
+        / "agent-services" / "bin" / "sync-voice-config.py")
+    svc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(svc)
+
+    tts = {"voice": "clone:dave_cullen", "speed": 0.85}
+    assert "quiet_hours" not in svc.build(tts, {})
+    out = svc.build(tts, {"quiet_hours": {"enabled": True, "start": 1, "end": 2}})
+    assert out["quiet_hours"]["start"] == 1
+    assert out["voice"] == "clone:dave_cullen"

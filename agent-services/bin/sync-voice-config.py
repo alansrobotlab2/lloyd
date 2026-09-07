@@ -32,13 +32,20 @@ DEST = Path(os.environ.get(
 KEYS = ("api_url", "model", "voice", "speed", "sample_rate", "tail_silence_ms")
 
 
-def build(tts: dict) -> dict:
+def build(tts: dict, guardian_voice: dict | None = None) -> dict:
     out = {k: tts[k] for k in KEYS if k in tts}
     shaping = tts.get("shaping") or {}
     if "presence_eq" in shaping:
         out["presence_eq"] = bool(shaping["presence_eq"])
     if shaping.get("shelves"):
         out["shelves"] = shaping["shelves"]
+    # Quiet hours come from `guardian.voice`, not `livekit.tts`, and the split
+    # is load-bearing: livekit_worker reads livekit.tts, and a conversation
+    # that goes mute at 23:00 because an alert policy leaked into it would be
+    # a genuine bug. Only alerts are gated by the clock.
+    qh = (guardian_voice or {}).get("quiet_hours")
+    if isinstance(qh, dict):
+        out["quiet_hours"] = qh
     return out
 
 
@@ -56,7 +63,8 @@ def main() -> int:
             print("sync-voice-config: livekit.tts is empty — nothing to sync",
                   file=sys.stderr)
             return 0
-        payload = build(tts)
+        guardian_voice = ((cfg.get("guardian") or {}).get("voice") or {})
+        payload = build(tts, guardian_voice)
         DEST.parent.mkdir(parents=True, exist_ok=True)
         tmp = DEST.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
