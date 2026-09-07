@@ -323,21 +323,26 @@ livekit:
     # profile.  `Ryan` still works as a fallback, but needs the CustomVoice model —
     # switching back to it means the backend swaps models on the next request.
     voice: clone:dave_cullen
-    # Same-sentence sweep against the reference clip (Dave speaks 2.06 words/s),
-    # identical input text so the numbers are comparable:
-    #   speed 0.85 -> 2.81 w/s (1.36x too fast)
-    #   speed 0.70 -> 2.10 w/s (1.02x — matches Dave)
-    #   speed 0.60 -> 2.01 w/s (0.97x — slightly slower than him)
-    # 0.70 is the match.  All speeds returned the full word count with 0
-    # insertions (faster-whisper base.en); cost is ~0.4 s more wall time.
+    # Set by ear, not by the words/second match.  Matching Dave's 2.06 w/s put
+    # this at 0.70 and that is audibly too slow — the metric is misleading
+    # because his reference clip is one deliberate segment and the model places
+    # its pauses differently, so the same w/s is a different perceived pace.
+    # For the record, one synthesis stretched to each setting:
+    #   0.70 -> 2.70 w/s   0.80 -> 3.09   0.85 -> 3.28   0.90 -> 3.47   1.00 -> 3.87
+    # Every one of those is already *faster* than Dave's 2.06 by that measure.
     #
     # Applied client-side by livekit_worker, NOT by the server: the server's
     # streaming path (`generate_voice_clone_streaming`) takes no speed argument
     # and silently drops it, so until 2026-09-06 voice mode spoke at 1.0 no
     # matter what this said.  See agent-services/tts_shaping.py.
-    speed: 0.70
+    speed: 0.85
     sample_rate: 24000
     skip_empty: true
+    # Silence appended to every utterance.  _stream_utterance returns once the
+    # audio is *queued*, not played, so whatever ran next — an `interrupt()`
+    # calling `clear_queue()`, the room going quiet — was cutting the last
+    # syllable off.  Padding puts silence in that position instead of speech.
+    tail_silence_ms: 250
     # Corrective EQ on the synthesised audio.  The 12 Hz speech tokenizer
     # matches the reference speaker to within 0.5 dB below 1.5 kHz and then
     # rolls off — -1.8 dB at 2 kHz, -3.9 dB at 4 kHz, -6.2 dB above 9 kHz —

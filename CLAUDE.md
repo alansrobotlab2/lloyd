@@ -476,12 +476,24 @@ gitignored and a rebuild would silently delete a fix made there:
 - **`speed` is dropped by the server's streaming path.**
   `generate_voice_clone_streaming` has no such parameter while the
   non-streaming path applies `librosa.effects.time_stretch`, and voice mode
-  always streams — so `speed: 0.70` was inert for the only path that uses it,
-  and Lloyd spoke ~1.5x faster than the voice he clones. `WsolaStretch`
+  always streams — so `livekit.tts.speed` was inert for the only path that
+  uses it. `WsolaStretch`
   applies it in the worker, and the request now sends `speed: 1.0` so a future
   server-side implementation cannot stretch twice. WSOLA rather than a phase
   vocoder: a phase vocoder adds exactly the smeared quality the shelves exist
   to remove.
+
+Pace is set by ear, not by matching the reference's words/second: the w/s
+match puts `speed` at 0.70 and that is audibly too slow, because the reference
+is one deliberate segment and the model places its pauses differently. Every
+setting from 0.70 to 1.00 measures *faster* than the reference by w/s. Sweep a
+single synthesis across settings rather than re-synthesising per setting, or
+sampling noise reads as the effect of the knob.
+
+An utterance also ends in `livekit.tts.tail_silence_ms` of silence and waits on
+`AudioSource.wait_for_playout()`: `_stream_utterance` returns when audio is
+*queued*, not played, so `on_utterance_end` fired early and a following
+`interrupt()` → `clear_queue()` cut the last syllable off.
 
 Both stages hold state across chunk boundaries and are reset per utterance —
 an interrupt mid-stream must drain the shaper or the next utterance opens with

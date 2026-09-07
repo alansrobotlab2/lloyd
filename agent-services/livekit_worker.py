@@ -157,6 +157,7 @@ class TTSStreamer:
         self.voice = tts_cfg.get("voice", "clone:cullen")
         self.speed = float(tts_cfg.get("speed", 1.0))
         self.sample_rate = int(tts_cfg.get("sample_rate", 24000))
+        self.tail_silence_ms = int(tts_cfg.get("tail_silence_ms", 250))
         # Output shaping — restores the presence band the 12 Hz vocoder drops,
         # and applies `speed`, which the server's *streaming* path silently
         # ignores. See agent-services/tts_shaping.py for both measurements.
@@ -326,6 +327,18 @@ class TTSStreamer:
             # just talked over.
             if not drained:
                 self._shaper.flush()
+        # Trailing silence. The last frames of an utterance were being cut off:
+        # this coroutine returns once the audio is *queued*, and whatever
+        # happens next — `interrupt()` calling `source.clear_queue()`, the room
+        # going quiet — discards whatever has not played yet. Padding means the
+        # audio holding that position is silence rather than the end of a word.
+        if self.tail_silence_ms > 0:
+            leftover.extend(bytes(2 * (self.sample_rate * self.tail_silence_ms // 1000)))
+        while len(leftover) >= bytes_per_frame:
+            frame_bytes = bytes(leftover[:bytes_per_frame])
+            del leftover[:bytes_per_frame]
+            await self._push_frame(frame_bytes, samples_per_frame)
+            n_pushed += 1
         # Tail: any final partial frame (zero-padded to a 10ms boundary).
         if leftover:
             ten_ms = self.sample_rate // 100
@@ -338,6 +351,11 @@ class TTSStreamer:
             if samples:
                 await self._push_frame(tail, samples)
                 n_pushed += 1
+        # Wait for the queue to actually play out, so `is_speaking` and
+        # `on_utterance_end` describe the audio the user hears rather than the
+        # moment we handed it to the SDK. Bounded and best-effort: a room with
+        # no subscriber must not wedge the drain loop.
+        await self._await_playout()
         elapsed = time.monotonic() - t0
         LOG.info("TTS spoke %r in %.2fs (%d frames)", text[:60], elapsed, n_pushed)
         # The presence shelves add ~1.5 dB of peak. Measured output sits at 0.75
@@ -351,6 +369,22 @@ class TTSStreamer:
                     ratio * 100,
                 )
             self._shaper.clipped = self._shaper.total = 0
+
+    async def _await_playout(self) -> None:
+        """Block until queued audio has played, at most its own duration + 2 s."""
+        src = self.source
+        if src is None:
+            return
+        try:
+            budget = float(getattr(src, "queued_duration", 0.0) or 0.0) + 2.0
+            await asyncio.wait_for(src.wait_for_playout(), timeout=budget)
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            LOG.warning("TTS playout wait timed out; continuing")
+        except Exception as e:
+            # Older SDKs may not expose wait_for_playout at all.
+            LOG.debug("TTS playout wait unavailable: %s", e)
 
     async def _push_frame(self, pcm_bytes: bytes, samples_per_channel: int) -> None:
         if self.source is None:
