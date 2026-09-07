@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Activity, AlertTriangle, Bot, CalendarClock, CheckCircle2, Cpu, Gauge,
+  AlertTriangle, Bot, CalendarClock, CheckCircle2, Cpu, Gauge,
   Layers, MinusCircle, Server, Terminal, Workflow, XCircle, Zap,
 } from 'lucide-react'
 import {
-  dashboardApi, sectionOk,
+  dashboardApi, sectionOk, sectionError,
   type AutonomyState, type AutonomyTaskRow, type BacklogState,
   type BackgroundTask, type DashboardSnapshot, type GpuInfo,
-  type SubagentRun, type UsageBucket, type VllmEngine, type WorkersState,
+  type RecentSession, type SubagentRun, type UsageBucket, type VllmEngine,
+  type WorkersState,
 } from '../../api'
 import { useMcUi, useReportMcFocus } from '../../contexts/McUiContext'
 import { cn } from '@/lib/utils'
@@ -466,6 +467,63 @@ function SubagentRow({ run }: { run: SubagentRun }) {
   )
 }
 
+// ── Recent chat row ────────────────────────────────────────────────────
+
+/**
+ * A chat that has stopped talking. Clicking it opens the transcript in
+ * Inner Voice, same as a live row — a finished chat is the one you most
+ * often want to read, and having to go find it by hand in the history
+ * list was the reason this panel replaced a mostly-empty focus card.
+ */
+function RecentChatRow({
+  chat, onOpen,
+}: {
+  chat: RecentSession
+  onOpen: (sessionId: string) => void
+}) {
+  const counts = chat.todo_counts ?? {}
+  const done = counts.completed ?? 0
+  const total = (counts.pending ?? 0) + (counts.in_progress ?? 0) + done
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(chat.session_id)}
+      title={`${chat.session_id} — open in Inner Voice`}
+      className="w-full rounded-md border border-border bg-secondary/30 px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+    >
+      <div className="flex items-center gap-2">
+        <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full', TONE_FILL.idle)} />
+        <span className="truncate text-[11px] text-foreground">
+          {sessionLabel(chat, chat.session_id)}
+        </span>
+        <span className="ml-auto flex-shrink-0 font-mono tabular-nums text-[10px] text-muted-foreground">
+          {relativeTime(chat.last_active)}
+        </span>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
+        <span className="font-mono tabular-nums">
+          {chat.message_count} msg
+        </span>
+        {chat.platform && <span>{chat.platform}</span>}
+        {chat.inner_voice && <span className="text-violet-400/80">inner voice</span>}
+        {total > 0 && (
+          <span className="font-mono tabular-nums">
+            todos {done}/{total}
+          </span>
+        )}
+        {chat.goal && (
+          <span className={chat.goal_achieved ? 'text-emerald-400' : 'text-amber-400/80'}>
+            {chat.goal_achieved ? 'goal met' : 'goal open'}
+          </span>
+        )}
+      </div>
+      {chat.goal && (
+        <div className="mt-1 truncate text-[10px] text-muted-foreground/80">{chat.goal}</div>
+      )}
+    </button>
+  )
+}
+
 // ── Autonomy / workers / backlog ───────────────────────────────────────
 
 /** Status counts as a labelled row of chips. Counts are the data; the
@@ -832,7 +890,7 @@ export default function DashboardPage() {
     )
   }
 
-  const { host, vllm, primary, focus, agents, services, workers, autonomy, backlog, usage } = snap
+  const { host, vllm, primary, recent, agents, services, workers, autonomy, backlog, usage } = snap
 
   const engines = sectionOk<VllmEngine[]>(vllm) ? vllm : []
   const primaryEngine = engines.find(e => e.alias === 'primary') ?? engines[0]
@@ -1021,61 +1079,23 @@ export default function DashboardPage() {
             <ErrorPanel what="Primary state" error={primary.error} />
           )}
 
-          {/* Goal / plan / todos for the session in view */}
-          {sectionOk(focus) && focus.session_id ? (
-            <Panel>
-              <div className="truncate text-[11px] text-foreground">
-                {sessionLabel(focus, focus.session_id)}
+          {/* The chats that just stopped talking */}
+          <Panel>
+            <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+              Recent chats
+            </div>
+            {!sectionOk(recent) ? (
+              <ErrorPanel what="Recent chats" error={sectionError(recent)} />
+            ) : recent.sessions.length === 0 ? (
+              <div className="text-[11px] text-muted-foreground">No finished chats yet.</div>
+            ) : (
+              <div className="space-y-1.5">
+                {recent.sessions.map(c => (
+                  <RecentChatRow key={c.session_id} chat={c} onOpen={openInInnerVoice} />
+                ))}
               </div>
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
-                <span className="font-mono">{focus.session_id}</span>
-                {focus.platform && <span>{focus.platform}</span>}
-                {focus.inner_voice && <span className="text-violet-400/80">inner voice</span>}
-                {focus.plan_mode && <span className="text-amber-400/80">plan mode</span>}
-                {(focus.plan_stages ?? 0) > 0 && <span>{focus.plan_stages} stages</span>}
-              </div>
-              {focus.goal && (
-                <div className="mt-2 rounded-md border border-violet-400/25 bg-violet-400/5 px-2 py-1.5">
-                  <div className="text-[10px] text-violet-400">Goal</div>
-                  <div className="text-[11px] text-foreground">{focus.goal}</div>
-                </div>
-              )}
-              {(focus.todos?.length ?? 0) > 0 && (
-                <div className="mt-2 space-y-1 border-t border-border pt-2">
-                  {focus.todos!.slice(0, 6).map((t, i) => (
-                    <div key={i} className="flex items-start gap-1.5 text-[10px]">
-                      {t.status === 'completed' ? (
-                        <CheckCircle2 className="mt-px h-3 w-3 flex-shrink-0 text-emerald-400" />
-                      ) : t.status === 'in_progress' ? (
-                        <Activity className="mt-px h-3 w-3 flex-shrink-0 animate-pulse text-violet-400" />
-                      ) : (
-                        <MinusCircle className="mt-px h-3 w-3 flex-shrink-0 text-muted-foreground/50" />
-                      )}
-                      <span
-                        className={cn(
-                          'truncate',
-                          t.status === 'completed'
-                            ? 'text-muted-foreground/60 line-through'
-                            : 'text-foreground',
-                        )}
-                      >
-                        {t.status === 'in_progress' && t.activeForm ? t.activeForm : t.content}
-                      </span>
-                    </div>
-                  ))}
-                  {focus.todos!.length > 6 && (
-                    <div className="text-[10px] text-muted-foreground/70">
-                      +{focus.todos!.length - 6} more
-                    </div>
-                  )}
-                </div>
-              )}
-            </Panel>
-          ) : (
-            <Panel className="flex items-center justify-center">
-              <span className="text-[11px] text-muted-foreground">No session in focus.</span>
-            </Panel>
-          )}
+            )}
+          </Panel>
         </div>
       </Section>
 

@@ -144,63 +144,98 @@ async def _primary_state() -> dict[str, Any]:
     }
 
 
-def _focus_session() -> dict[str, Any]:
-    """Goal / plan / todos for the session the operator is looking at.
+# Recent chats come off disk, and a session JSON carries its whole
+# transcript — 100 files and 7.5 MB across the tree today. Re-reading all
+# of that on a 2-second poll is the exact cost `session_titles.title_for`
+# caches around, so this scan is bounded twice: it opens only a window of
+# the newest files, and the parse is cached for longer than the poll.
+#
+# The window is safe because a file's mtime is never *earlier* than its
+# `last_active` — a background writer (the titler, post-session capture,
+# TodoWrite) only ever pushes a session's mtime later than its last real
+# message. Ordering by mtime can promote a stale session above its true
+# position, but it can never demote a fresh one out of the window.
+_RECENT_SHOWN = 2
+_RECENT_KEPT = 8
+_RECENT_CANDIDATES = 24
+_RECENT_TTL_S = 10.0
 
-    Prefers a session with a turn actually running; falls back to the
-    tab focus mirrored in `mc_state`. These live in the session JSON
-    (written by the goal/plan/todo built-ins), so this is a disk read,
-    hence the thread hop at the call site.
-    """
+
+def _scan_recent_sessions() -> list[dict[str, Any]]:
+    """Parse the newest session files into rows, newest conversation first."""
     import json
+    from datetime import datetime, timezone
 
-    from app import mc_state
     from app.paths import SESSIONS_DIR
 
-    running = [s for s in sessions_io.active_sessions_snapshot() if s["running"]]
-    session_id = running[0]["session_id"] if running else ""
+    # Shared with `GET /api/sessions` so the two lists cannot disagree
+    # about what "recent" means. Its docstring is the reason this sorts on
+    # `last_active` rather than on the mtime it selected candidates by.
+    from app.routers.sessions import _last_active_ts
 
-    if not session_id:
-        focus = mc_state.get_focus_snapshot().get("focus_by_tab", {})
-        for tab in ("chat", "inner_voice"):
-            entry = focus.get(tab) or {}
-            if entry.get("kind") == "session" and entry.get("id"):
-                session_id = entry["id"]
-                break
-    if not session_id:
-        return {}
-
-    path = SESSIONS_DIR / f"{session_id}.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"session_id": session_id}
+        paths = sorted(
+            SESSIONS_DIR.glob("*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[:_RECENT_CANDIDATES]
+    except OSError:
+        return []
 
-    todos = data.get("todos") or []
-    plan = data.get("plan") if isinstance(data.get("plan"), dict) else {}
-    goal = data.get("goal") if isinstance(data.get("goal"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        # Scheduled tasks have their own panel. They are not chats.
+        if data.get("platform") == "autonomy":
+            continue
+        goal = data.get("goal") if isinstance(data.get("goal"), dict) else {}
+        ts = _last_active_ts(path, data)
+        rows.append({
+            "session_id": data.get("session_id") or path.stem,
+            "title": (data.get("title") or "").strip(),
+            "preview": (data.get("preview") or "")[:160],
+            # Explicit UTC: `last_active` on disk is a naive *local* stamp,
+            # and handing that to `new Date()` in a browser on any other
+            # offset silently shifts every row.
+            "last_active": datetime.fromtimestamp(ts, timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "message_count": data.get("message_count") or 0,
+            "platform": data.get("platform", ""),
+            "inner_voice": bool(data.get("inner_voice")),
+            "model": data.get("model", ""),
+            "goal": goal.get("text", ""),
+            "goal_achieved": bool(goal.get("achieved_at")),
+            "todo_counts": _count_todos(data.get("todos") or []),
+            "_ts": ts,
+        })
+
+    rows.sort(key=lambda row: row["_ts"], reverse=True)
+    for row in rows:
+        row.pop("_ts", None)
+    return rows[:_RECENT_KEPT]
+
+
+def _recent_sessions() -> dict[str, Any]:
+    """The chats that most recently finished talking.
+
+    "Finished" means *no turn running or queued right now*: a live session
+    is already on the panel beside this one, and rendering it in both
+    costs the operator the only thing this half is for — what happened
+    just before now.
+
+    The live filter is applied outside the cache deliberately. The scan is
+    what is expensive; membership in the run queue is free and changes the
+    instant a turn is enqueued, so caching it would leave a chat that just
+    started reading as finished for up to ten seconds.
+    """
+    rows = _cached("recent_sessions", _RECENT_TTL_S, _scan_recent_sessions)
+    live = {s["session_id"] for s in sessions_io.active_sessions_snapshot()}
     return {
-        "session_id": session_id,
-        "title": (data.get("title") or "").strip(),
-        "preview": (data.get("preview") or "")[:160],
-        "message_count": data.get("message_count"),
-        "inner_voice": bool(data.get("inner_voice")),
-        "platform": data.get("platform", ""),
-        "goal": goal.get("text", ""),
-        "goal_set_at": goal.get("set_at"),
-        "goal_achieved": bool(goal.get("achieved_at")),
-        "plan_mode": bool(plan.get("plan_mode")),
-        "plan_stages": len(plan.get("stages") or []),
-        "todos": [
-            {
-                "content": t.get("content", ""),
-                "status": t.get("status", ""),
-                "activeForm": t.get("activeForm", ""),
-            }
-            for t in todos
-            if isinstance(t, dict)
-        ],
-        "todo_counts": _count_todos(todos),
+        "sessions": [r for r in rows if r["session_id"] not in live][:_RECENT_SHOWN]
     }
 
 
@@ -508,7 +543,7 @@ async def get_dashboard():
         _gather("host", host_metrics.collect()),
         _gather("vllm", vllm_metrics.collect(vllm_metrics.configured_engines())),
         _gather("primary", _primary_state()),
-        _gather("focus", _to_thread(_focus_session)),
+        _gather("recent", _to_thread(_recent_sessions)),
         _gather("agents", _agent_state()),
         _gather("services", _to_thread(_services)),
         _gather("workers", _to_thread(_workers)),

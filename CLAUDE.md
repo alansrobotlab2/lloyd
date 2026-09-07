@@ -260,7 +260,7 @@ Where each section comes from:
 | `host` | `app/host_metrics.py` — psutil + `nvidia-smi` (2s cache) |
 | `vllm` | `app/vllm_metrics.py` — scrapes `<base_url>/metrics` per configured model |
 | `primary` | `sessions_io.active_sessions_snapshot()` + `session_titles` |
-| `focus` | goal / plan / todos out of the session JSON |
+| `recent` | the last chats to stop talking — bounded scan of `sessions/` |
 | `agents` | **the lloyd-mcp process**, over loopback — see below |
 | `services` | `app/supervisor_client.py` |
 | `workers` | `workers.queue` + `workers.pool` — pool slots, per-source depth, recent runs |
@@ -272,6 +272,27 @@ Sections that walk the vault (`autonomy`, `backlog`) are TTL-cached for
 10s — the backlog is 300+ markdown files and its status counts do not
 change between 2-second polls. Live sections are never cached; they are
 the point of the page.
+
+`recent` is the third cached section and the one with a trap. A session
+JSON carries its whole transcript (100 files, 7.5 MB today), so the scan
+is bounded twice: only the newest `_RECENT_CANDIDATES` files by **mtime**
+are opened, and the parse is cached for 10s. The mtime window is safe
+only because mtime is never *earlier* than `last_active` — background
+writers (the titler, post-session capture, TodoWrite) push a file's mtime
+later than its last real message, so mtime can promote a stale chat but
+never demote a fresh one out of the window. The rows are then sorted on
+`last_active`, which is what `GET /api/sessions` sorts on too.
+
+The live filter — dropping sessions with a running or queued turn, which
+the panel beside it already shows — is applied **outside** that cache.
+Caching it would leave a chat that just started reading as finished for
+up to ten seconds. Cache the expensive scan, never the cheap freshness.
+
+A section can also be *missing*, not just failed: a browser tab left open
+across a backend restart polls the new build with the old snapshot shape,
+and `section.error` on an undefined section throws inside render and
+blanks the whole page — the one thing this design exists to prevent. Use
+`sectionError(section)` from `api.ts`, not `section.error`.
 
 **Overdue is not "next up."** `_autonomy` splits scheduled tasks on
 `next_run` vs now and returns them as separate lists. Sorting them

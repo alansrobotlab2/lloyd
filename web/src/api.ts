@@ -1645,20 +1645,24 @@ export interface PrimaryState {
   busy: boolean
 }
 
-export interface FocusSession {
-  session_id?: string
-  title?: string
-  preview?: string
-  message_count?: number
-  inner_voice?: boolean
-  platform?: string
-  goal?: string
-  goal_set_at?: string | null
-  goal_achieved?: boolean
-  plan_mode?: boolean
-  plan_stages?: number
-  todos?: Array<{ content: string; status: string; activeForm: string }>
-  todo_counts?: Record<string, number>
+/** A chat that has stopped talking — nothing running or queued on it. */
+export interface RecentSession {
+  session_id: string
+  title: string
+  preview: string
+  /** ISO 8601 with an explicit `Z`; safe to hand straight to `new Date()`. */
+  last_active: string
+  message_count: number
+  platform: string
+  inner_voice: boolean
+  model: string
+  goal: string
+  goal_achieved: boolean
+  todo_counts: Record<string, number>
+}
+
+export interface RecentSessions {
+  sessions: RecentSession[]
 }
 
 export interface SubagentRun {
@@ -1789,7 +1793,7 @@ export interface DashboardSnapshot {
   host: HostMetrics | SectionError
   vllm: VllmEngine[] | SectionError
   primary: PrimaryState | SectionError
-  focus: FocusSession | SectionError
+  recent: RecentSessions | SectionError
   agents: AgentState | SectionError
   services: { services: ServiceRow[]; unhealthy: string[]; total: number } | SectionError
   workers: WorkersState | SectionError
@@ -1801,6 +1805,22 @@ export interface DashboardSnapshot {
 
 export function sectionOk<T>(section: T | SectionError | undefined): section is T {
   return !!section && !(typeof section === 'object' && 'error' in (section as object))
+}
+
+/**
+ * The message to render when `sectionOk` said no.
+ *
+ * A section can be missing outright, not just failed: a tab left open
+ * across a backend restart polls the new build with the old snapshot
+ * shape, and `section.error` on an undefined section throws inside
+ * render — which blanks the whole page. A dashboard is most useful when
+ * something is broken, so it must not be the second thing to break.
+ */
+export function sectionError(section: unknown): string {
+  if (section && typeof section === 'object' && 'error' in section) {
+    return String((section as SectionError).error)
+  }
+  return 'no data — is the backend running this build?'
 }
 
 export const dashboardApi = {
