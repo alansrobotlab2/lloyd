@@ -54,7 +54,21 @@ def write_staging_note(
 
 
 async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
-    """Dispatch a prompt to the primary model at low vLLM priority."""
+    """Dispatch a prompt to the primary model at low vLLM priority.
+
+    **No session, therefore no Inner Voice.** `app/routers/messages.py` is the
+    only turn path that wires the observer: it needs a session id to read the
+    `inner_voice` flag from, to key observations on, and to attach a per-turn
+    observer to. A worker turn has none of that, so nothing here is watched and
+    nothing lands in the Inner Voice history.
+
+    That is why `selfmod_start` refuses a worker turn and why worker jobs are
+    barred from the selfmod tools below: a round must be observable, and this
+    path cannot be. If `backlog-selfmod` is ever enabled, its verdicts are
+    produced unobserved — acceptable for read-only triage, and the reason the
+    fix is to route worker turns through the one IV-capable path rather than to
+    copy the observer wiring into a second place.
+    """
     from app.harness import run_query, RunOptions
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from prompt_builder import build_system_prompt

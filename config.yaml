@@ -421,6 +421,14 @@ selfmod:
   # driven from a terminal — the MCP path would have failed on first use,
   # because the promoter ran inside the process it restarts.
   enabled: true
+  # A round may only be opened from a turn with Inner Voice attached. Two
+  # reasons: the observer watches the one activity that rewrites production,
+  # and an IV session is the only kind the Inner Voice tab lists, so this is
+  # what makes a round reviewable afterwards rather than just a ledger row and
+  # a diff. `selfmod_start` enables the flag and refuses once, because the
+  # observer attaches at turn start and cannot be added to a turn in flight.
+  # The CLI is exempt: no bound session, and a human is their own observer.
+  require_inner_voice: true
   canary:
     backend_port: 18080
     mcp_port: 18500

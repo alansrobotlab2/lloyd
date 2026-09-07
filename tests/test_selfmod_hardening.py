@@ -913,3 +913,82 @@ def test_a_noise_floor_records_the_questions_it_was_measured_against():
     src = (ROOT / "workers" / "sources" / "selfmod_regression.py").read_text()
     assert '"queries_fingerprint": queries_fingerprint()' in src
     assert "noise_floor_stale" in src
+
+
+# ===========================================================================
+# 13. A round must be observed
+# ===========================================================================
+
+def _iv_gate(monkeypatch, tmp_path, session_id, session_data=None, require=True):
+    """Drive `_inner_voice_gate` with a scratch sessions dir."""
+    import json
+
+    import agent_mcp.selfmod as M
+    if session_data is not None:
+        (tmp_path / f"{session_id}.json").write_text(json.dumps(session_data),
+                                                     encoding="utf-8")
+    monkeypatch.setattr(M, "get_bound_session", lambda: session_id)
+    monkeypatch.setattr(M, "_require_inner_voice", lambda: require)
+    import app.paths
+    monkeypatch.setattr(app.paths, "SESSIONS_DIR", tmp_path)
+    return M._inner_voice_gate("open a round")
+
+
+def test_a_round_is_refused_from_an_unobserved_turn(monkeypatch, tmp_path):
+    """The observer attaches at turn START, so enabling the flag mid-call
+    cannot cover the turn that enabled it.
+
+    A round driven in a single turn would otherwise report itself observed
+    while running blind, which is worse than being plainly unobserved.
+    """
+    gate = _iv_gate(monkeypatch, tmp_path, "s1", {"id": "s1", "inner_voice": False})
+    assert gate is not None
+    assert "refusing to open a round" in gate["error"]
+    assert gate["inner_voice_enabled_for_next_turn"] is True
+
+    # ...and it enabled it, so the retry is observed rather than refused again.
+    import json as _json
+    written = _json.loads((tmp_path / "s1.json").read_text())
+    assert written["inner_voice"] is True
+    assert written["inner_voice_evaluate_user_turns"] is True
+
+
+def test_an_observed_turn_proceeds(monkeypatch, tmp_path):
+    assert _iv_gate(monkeypatch, tmp_path, "s2", {"id": "s2", "inner_voice": True}) is None
+
+
+def test_the_cli_is_exempt(monkeypatch, tmp_path):
+    """No bound session means the CLI or the detached promoter. A human at a
+    terminal is their own observer, and blocking that path would make the
+    documented recovery commands unusable."""
+    assert _iv_gate(monkeypatch, tmp_path, "") is None
+
+
+def test_an_unreadable_session_does_not_block_self_modification(monkeypatch, tmp_path):
+    """Fail closed on the observer, not on the round. A missing session file
+    should not be able to disable self-modification entirely."""
+    assert _iv_gate(monkeypatch, tmp_path, "gone") is None
+
+
+def test_the_requirement_is_switchable(monkeypatch, tmp_path):
+    assert _iv_gate(monkeypatch, tmp_path, "s3", {"id": "s3", "inner_voice": False},
+                    require=False) is None
+
+
+def test_the_gate_is_actually_wired_into_selfmod_start():
+    """A gate nothing calls is the failure this whole review keeps finding."""
+    src = (ROOT / "agent_mcp" / "selfmod.py").read_text()
+    start = src.index('if name == "selfmod_start"')
+    body = src[start:start + 500]
+    assert "_inner_voice_gate(" in body, "selfmod_start does not consult the gate"
+
+
+def test_the_two_unobserved_paths_are_deliberate_and_say_so():
+    """The canary smoke turn and worker turns both run without an observer.
+    Neither is an oversight, and both must explain themselves where someone
+    would otherwise 'fix' them."""
+    smoke = (ROOT / "scripts" / "selfmod" / "canary_smoke.py").read_text()
+    assert "not a selfmod job" in smoke.lower() or "gate rung, not a selfmod job" in smoke
+
+    common = (ROOT / "workers" / "sources" / "_common.py").read_text()
+    assert "No session, therefore no Inner Voice" in common

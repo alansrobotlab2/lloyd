@@ -19,7 +19,7 @@ import logging
 
 from mcp.types import TextContent, Tool
 
-from agent_mcp._shared import text_result
+from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-mcp.selfmod")
 
@@ -30,6 +30,91 @@ def _enabled() -> bool:
         return bool((CONFIG.get("selfmod") or {}).get("enabled", False))
     except Exception:
         return False
+
+
+def _require_inner_voice() -> bool:
+    """`selfmod.require_inner_voice` in config.yaml, default true."""
+    try:
+        from app.config import CONFIG
+        return bool((CONFIG.get("selfmod") or {}).get("require_inner_voice", True))
+    except Exception:
+        return True
+
+
+def _inner_voice_gate(action: str) -> dict | None:
+    """Refuse to drive the loop from a turn with no observer attached.
+
+    Returns an error payload to hand back, or None to proceed.
+
+    **Enabling the flag is not sufficient, which is why this refuses rather
+    than merely switching it on.** Inner Voice attaches at turn START:
+    `attach_observer_for_turn` runs before `run_query` and is the only place
+    the observer is installed. Flipping `inner_voice` from inside a tool call
+    rewrites the session file for the *next* turn and does nothing for the one
+    making the call. Same shape as the position-0 rule for the system prompt.
+    A round driven inside a single turn would otherwise report itself observed
+    while running blind, which is worse than being plainly unobserved.
+
+    So: enable it, then refuse once. The retry runs observed, and the property
+    is real rather than aspirational.
+
+    Worth the friction for two independent reasons, and the second is the one
+    that survives a quiet round.
+
+    *Live:* a round is the one thing Lloyd does that rewrites production, and
+    the observer is what notices the loop drifting off the request, repeating
+    itself, or talking its way into a change nobody asked for.
+
+    *Afterwards:* an IV session is the only kind the Inner Voice tab lists, so
+    running rounds there is what makes self-modification **reviewable** — the
+    transcript, the observations and the interventions all land somewhere a
+    human can page back through. A round driven from a plain session leaves
+    nothing but a ledger row and a diff, which tells you what changed and
+    nothing about how the agent got there.
+
+    `app/routers/messages.py` is the ONLY turn path that wires the observer —
+    worker turns and Task subagents have none at all, which is why neither is
+    allowed to drive the loop.
+
+    No bound session means this is not a chat turn: the CLI, or the detached
+    promoter. A human at a terminal is their own observer, so that path passes.
+    """
+    if not _require_inner_voice():
+        return None
+    session_id = get_bound_session()
+    if not session_id:
+        return None
+
+    from app.paths import SESSIONS_DIR
+    path = SESSIONS_DIR / f"{session_id}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Fail closed on the observer, not on the round: an unreadable session
+        # file should not be able to block self-modification entirely.
+        return None
+    if data.get("inner_voice"):
+        return None
+
+    data["inner_voice"] = True
+    data["inner_voice_evaluate_user_turns"] = True
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        enabled = True
+    except OSError:
+        enabled = False
+
+    return {
+        "error": f"inner voice is not attached to this turn — refusing to {action}",
+        "inner_voice_enabled_for_next_turn": enabled,
+        "why": ("A round rewrites production code, and the observer is what catches "
+                "the loop drifting. It attaches at turn start, so switching it on "
+                "now cannot cover this turn."),
+        "next": ("End your turn and open the round again; the retry runs observed."
+                 if enabled else
+                 "Could not write the session file — enable Inner Voice on this "
+                 "session and retry."),
+    }
 
 
 def _err(message: str) -> str:
@@ -202,6 +287,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             goal = (arguments.get("goal") or "").strip()
             if not goal:
                 return text_result(_err("goal is required"))
+            gate = _inner_voice_gate("open a round")
+            if gate:
+                return text_result(json.dumps(gate, indent=2))
             return text_result(json.dumps(R.start(goal), indent=2))
 
         if name == "selfmod_gate":

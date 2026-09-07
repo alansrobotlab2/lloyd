@@ -66,7 +66,12 @@ def run(*, backend: str, sessions_dir: Path, timeout: float = 150.0,
         "title": "selfmod canary smoke",
         "model": model,
         "platform": "canary",
-        "inner_voice": False,   # deterministic and cheap
+        # Deliberately unobserved, and NOT a hole in the "rounds run under
+        # Inner Voice" rule. This is a gate rung, not a selfmod job: it drives
+        # one synthetic turn to prove a build can dispatch a tool. The observer
+        # adds LLM calls and non-determinism to a check whose entire value is
+        # that it fails if and only if code under test is broken.
+        "inner_voice": False,
         "messages": [],
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }), encoding="utf-8")

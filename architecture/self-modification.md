@@ -80,6 +80,28 @@ worktree path; Lloyd edits it with the ordinary Edit/Write/Bash tools and
 commits. There is deliberately no `selfmod_write_code` tool — proposing a
 change is just normal work that happens somewhere safe.
 
+**A round runs under Inner Voice, or not at all.** `selfmod_start` refuses a
+turn with no observer attached. Two reasons, and the second is the one that
+survives a round nobody was watching live: the observer catches the loop
+drifting off the request while it happens, and an IV session is the only kind
+the Inner Voice tab lists, so this is what makes self-modification reviewable
+afterwards. A round driven from a plain session leaves a ledger row and a diff,
+which say what changed and nothing about how the agent got there.
+
+It **enables the flag and then refuses once**, rather than just switching it
+on, because the observer attaches at turn start — `attach_observer_for_turn`
+runs before `run_query`. Flipping the flag mid-call covers the next turn and
+not the one that flipped it, the same shape as the position-0 rule for the
+system prompt. A single-turn round would otherwise report itself observed while
+running blind. The retry runs observed.
+
+Two paths stay unobserved on purpose. The **canary smoke turn** is a gate rung,
+not a selfmod job, and the observer would add LLM calls and non-determinism to
+a check whose value is failing if and only if code under test is broken.
+**Worker turns** have no session at all, so `messages.py` cannot attach an
+observer to them; that is why workers and Task subagents are barred from the
+selfmod tools rather than trusted with a prompt that says not to.
+
 ---
 
 ## 3. The process

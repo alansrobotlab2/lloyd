@@ -270,3 +270,12 @@ def test_the_new_state_files_exist_where_the_doc_says():
 def test_the_aggregator_verdict_streak_matches_the_doc():
     """§7.2: the aggregator's verdict is confirmed across ticks."""
     assert policy.MCP_FATAL_STREAK >= 2
+
+
+def test_a_round_requires_an_observer():
+    """§2: "A round runs under Inner Voice, or not at all"."""
+    src = (ROOT / "agent_mcp" / "selfmod.py").read_text()
+    assert "_inner_voice_gate" in src
+    import yaml
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
+    assert cfg["selfmod"]["require_inner_voice"] is True
