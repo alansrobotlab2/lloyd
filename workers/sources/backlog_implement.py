@@ -41,7 +41,12 @@ from workers.queue import WorkQueue, QueueItem
 logger = logging.getLogger("lloyd-workers.backlog-implement")
 
 NAME = "backlog-implement"
-DEFAULT_PRIORITY = 80
+# The queue dequeues `priority ASC`: a lower number runs sooner. Research and
+# distill jobs sit at 70 and arrive every few minutes, so at 80 the first
+# unattended round (job 4476, 2026-09-07) sat queued behind four of them with
+# no path to a slot. One round every four hours, gated on the loop being free,
+# is the rarest and most valuable job in this pool; it goes first.
+DEFAULT_PRIORITY = 40
 DEDUP_KEY = "backlog-implement:round"
 DEFAULT_MAX_TURNS = 100
 

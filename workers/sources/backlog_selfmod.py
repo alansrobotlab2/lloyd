@@ -28,7 +28,9 @@ from workers.queue import WorkQueue, QueueItem
 logger = logging.getLogger("lloyd-workers.backlog-selfmod")
 
 NAME = "backlog-selfmod"
-DEFAULT_PRIORITY = 75
+# `priority ASC` — lower runs sooner. Below the research/distill stream (70),
+# above the implement round (40): see backlog_implement.DEFAULT_PRIORITY.
+DEFAULT_PRIORITY = 55
 DEDUP_KEY = "backlog-selfmod:triage"
 
 PROMPT = """\

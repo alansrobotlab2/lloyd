@@ -442,3 +442,14 @@ def test_a_confirmed_acceptance_is_kept_whole_and_written_into_the_item(isolated
     assert "Acceptance — what must become true" in body and contract in body
     item, tri = B.select_confirmed(S.LEDGER_PATH)
     assert tri["acceptance"] == contract, "the implementer is handed the whole contract"
+
+
+def test_selfmod_jobs_are_not_queued_behind_routine_research():
+    """The pool dequeues `priority ASC`. At 80 the first implement round sat
+    behind four research/distill jobs at 70 with more arriving every few
+    minutes, and never reached a slot."""
+    from workers.sources import domain_research, session_distill
+    from workers import queue as Q
+    assert "ORDER BY priority ASC" in Path(Q.__file__).read_text(), "the assumption this test rests on"
+    routine = min(domain_research.DEFAULT_PRIORITY, session_distill.DEFAULT_PRIORITY)
+    assert I.DEFAULT_PRIORITY < M.DEFAULT_PRIORITY < routine
