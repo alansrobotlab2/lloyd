@@ -597,9 +597,31 @@ def repetition_inject_content(v: RepetitionVerdict) -> str:
     """The nudge text for a detected repetition.
 
     Names the shared terms, because the primary's failure mode is not knowing
-    that it is repeating — it believes each reformulation is a new query. The
-    key instruction is that a stable empty result is an ANSWER; treating it as
-    a broken query is what drives the loop.
+    that it is repeating — it believes each reformulation is a new query.
+
+    It says NOTHING about the results, because it cannot know. The guard sees
+    `ToolCallSignature` only: tool name, normalized arguments, identifiers
+    pulled out of argument VALUES. No field carries result content and result
+    text is never compared. Until 2026-09-07 this sentence read "and the result
+    has not changed" — an assertion of something never observed. Backlog #393
+    measured the 2026-09-05 sessions: 5 fires, and a real result-level check
+    (token-set Jaccard > 0.85 against every earlier result) found ZERO
+    unchanged-result repeats in two of the three sessions — 0 near-duplicates in
+    66 calls, 0 in 103. The guard was matching command shape (repeated
+    `grep -n … <symbol>` probes over *different* symbols) and reporting it as
+    repeated results. Two reasons that is worth code rather than prose: an
+    inject that asserts the unobserved trains the primary to discount injects,
+    and #83 Stage 2 promotes injected corrections into skills, so a false fire
+    becomes a false skill.
+
+    The loop-breaking instruction is the point of the message, so it survives —
+    reframed as guidance the primary can check against output it can see and the
+    guard cannot. Earning the "the result has not changed" sentence back means
+    putting result identity on the signature (a content hash or a coarse token
+    sketch) and requiring agreement before claiming it — #393 branch 1.
+    `tests/integration/test_iv_repetition_wording.py`
+    ::test_no_result_claim_without_a_result_field detects that landing and lifts
+    the ban.
     """
     n = v.repeats + 1
     if v.shared_terms:
@@ -611,15 +633,17 @@ def repetition_inject_content(v: RepetitionVerdict) -> str:
     what = (
         f"run the same call {n} times"
         if v.exact
-        else f"run {n} variations of the same search"
+        else f"issued {n} near-identical queries"
     )
     return (
-        f"Stop: you have now {what} for {target}, and the result has not "
-        f"changed. A stable empty or unchanged result is the ANSWER, not a "
-        f"failed query — do not rewrite the filter again. If you are looking for a "
-        f"symbol that may simply not exist, one scoped check settles it; if it is "
-        f"not there, say so and move on. State what you have established so far and "
-        f"continue to the deliverable the user actually asked for."
+        f"Stop: you have {what} for {target}. This guard compares the calls you "
+        f"issue, not what they returned, so look at those outputs yourself: if "
+        f"they came back empty or the same, that is the ANSWER, not a failed "
+        f"query — do not rewrite the filter a further time. If you are looking "
+        f"for a symbol that may simply not exist, one scoped check settles it; "
+        f"if it is not there, say so and move on. State what you have "
+        f"established so far and continue to the deliverable the user actually "
+        f"asked for."
     )
 
 

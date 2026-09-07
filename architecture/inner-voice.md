@@ -537,7 +537,46 @@ pathological outcome rather than nagging, and it is the observer's only signal
 that never guesses at intent. Its rate limit is structural — firing clears the
 signature ring, so speaking again requires a *fresh* cluster of near-duplicates.
 The content names the shared identifiers and states the thing the primary did
-not believe: **an unchanged result is the answer, not a failed query.**
+not believe: **a run of near-identical queries is evidence that the searching is
+done — if the outputs came back empty or the same, that is the answer, not a
+failed query.**
+
+#### Corrected again by #393 — the guard may only claim what it observes
+
+Until 2026-09-07 the inject said "…and the result has not changed." The guard has
+no way to know that: it compares `ToolCallSignature` — tool name, normalized
+arguments, identifiers from argument *values*. No field carries result content,
+and result text is never compared. A loop *is* visible in the arguments (the
+paragraph above is still right about that), but the sentence reached past the
+evidence to a conclusion about the outputs.
+
+Backlog #393 measured it on the 2026-09-05 sessions: 5 fires, and a genuine
+result-level check — token-set Jaccard > 0.85 of each tool result against every
+earlier result — found **zero** unchanged-result repeats in two of the three
+sessions (0 near-duplicates in 66 calls, 0 in 103). The only near-duplicate
+results anywhere in the sample were TodoWrite echoes. What the guard had actually
+matched was *command shape*: repeated `grep -n … <symbol>` probes over **different
+symbols**. In `usage.db`, 43 deterministic repetition injects carried the phrase
+— every one of them.
+
+Two reasons that is a code defect and not a phrasing nit: an inject that asserts
+the unobserved trains the primary to discount injects, and #83 Stage 2 treats
+injected corrections as user corrections, so a false fire becomes a false skill —
+which is why that pass had to reject the candidate this fix unblocks.
+
+Fix is #393 branch 2: the text now claims only the observable (**"you have issued
+N near-identical queries"**; exact repeats still read "run the same call N
+times") and hands the stable-answer guidance back as guidance the *primary* can
+check against output the guard cannot see. Firing logic, thresholds and
+`_EXACT_ONLY_TOOLS` are untouched — replaying 71 lloyd sessions / 1,377 tool
+calls through the pre-fix and post-fix guard gives identical fire points (21 →
+21) with the unobserved claim in 0 of 21 renders where it had been in 21 of 21.
+Branch 1 stays open: put result identity on the signature (content hash or coarse
+token sketch) and require agreement before the "the result has not changed"
+sentence is allowed back.
+`tests/integration/test_iv_repetition_wording.py::test_no_result_claim_without_a_result_field`
+watches for that — it detects a result-bearing field on the signature and lifts
+the ban rather than silently rotting.
 
 ### The silent primary
 
