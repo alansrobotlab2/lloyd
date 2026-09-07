@@ -552,13 +552,18 @@ runs move 0.0000, so all seven are armed again. The pin is a precondition:
 `execute` refuses rather than falling back to the live daemon, which would be
 the old broken comparison wearing the new name.
 
-**It is not free.** qmd embeds on the CPU — it appears on no GPU despite its
-CUDA environment — and one vector-leg query costs about 7 seconds of CPU
-against 3.7s wall. The eval is 20 queries with both legs, so a run is roughly
-2.7 CPU-minutes and a paired comparison is two of them plus a second embedding
-model. Fine once per promotion, which is what the dedup enforces. Not fine in
-a loop: re-measuring the noise floor repeatedly during development pegged the
-live daemon and slowed real retrieval for everything else on the box.
+**It is not free.** Measured: one eval run is 82s wall and **128 seconds of
+qmd CPU**, and a paired comparison is two runs plus a second embedding model.
+The cost is fan-out rather than embedding — `_vault_recall` queries each of the
+twelve vault segments separately, so a twenty-question run makes 240 qmd
+requests. Fine once per promotion, which is what the dedup enforces. Not fine
+in a loop: re-measuring the noise floor repeatedly during development loaded
+the live daemon and slowed real retrieval for everything else on the box.
+
+qmd itself is GPU-accelerated (3.6 GB resident, spiking to 93% on a vector
+leg). An earlier revision of this section claimed it was CPU-only; that came
+from piping `nvidia-smi --query-compute-apps` through `head`, which cut qmd off
+at entry fourteen of nineteen.
 
 **Only three metrics were armed for a while, and that number came from being wrong.** The
 original seven were chosen because five consecutive runs gave stdev 0.0000 for

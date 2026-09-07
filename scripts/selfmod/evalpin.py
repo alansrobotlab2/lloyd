@@ -30,18 +30,28 @@ a stale pin would answer today's question with last week's documents.
 holds a WAL, so a byte copy can tear. VACUUM INTO reads through a read-only
 connection and writes a consistent standalone database.
 
-**What this costs, measured 2026-09-07.** qmd embeds on the CPU — it appears
-on no GPU despite `QMD_LLAMA_GPU=cuda` — and one vector-leg query burns about
-**7 seconds of CPU** against 3.7s wall, roughly two cores saturated. A lex-only
-query costs 1s. The eval is 20 queries with both legs, so ONE run is around
-2.7 CPU-minutes, a paired comparison is two runs, and a pinned comparison also
-loads a second embedding model beside the live daemon.
+**What this costs, measured 2026-09-07.**
 
-That is affordable once per promotion, which is what the check does. It is not
-affordable in a loop: repeatedly re-measuring the noise floor during
-development is what pegged the live daemon and slowed real retrieval for
-everything else on the box. Prefer `--label` runs against the live daemon when
-you only need a number, and reach for the pin when you need two arms to be
+    one full eval run    82s wall, 128 seconds of qmd CPU
+    one qmd request      305ms warm, 734ms cold, ~1 CPU-second
+    first request idle   3.7s, while the embedding model loads onto the GPU
+
+qmd *does* use the GPU: 3.6 GB resident on GPU 0, utilisation spiking to 93%
+during a vector leg. An earlier note here said it was CPU-only. That was
+wrong, and wrong for an embarrassing reason — the check was
+`nvidia-smi --query-compute-apps ... | head`, and qmd is the fourteenth of
+nineteen entries, so it was cut off by the pipe. The conclusion was an
+artifact of truncated evidence.
+
+The cost is not the embedding, it is the **fan-out**. `_vault_recall` queries
+each of the twelve `VAULT_SEGMENTS` separately, four at a time, so one eval
+question becomes twelve qmd requests and a twenty-question run becomes 240.
+
+Affordable once per promotion, which is what the dedup enforces. Not
+affordable in a loop: re-measuring the noise floor repeatedly during
+development is what loaded the live daemon and slowed real retrieval for
+everything else on the box. Prefer a single `--label` run against the live
+daemon when you only need a number; reach for the pin when two arms have to be
 comparable.
 """
 
