@@ -999,6 +999,21 @@ they're distinguishable from LLM-judged ones in the UI and in analysis queries.
   observations_count_by_action, last_observation_at, latest_goal_card,
   latest_user_request, latest_turn_id}`. The goal card is recovered by scanning the
   event log tail for `inner_voice.goal_card_extracted`.
+
+  **That scan reads unexpanded, so the route must expand what it returns.**
+  `event_log` externalizes any field over 4 KB to `{"$blob": sha, "size": n}`,
+  and the scan walks up to 2000 events to find one — expanding every field of
+  every event on the way would be absurd. So it expands the single event it
+  matched (`event_log.expand_blobs`) and coerces the result with
+  `_display_text`. Both halves are load-bearing: a worker session's opening
+  prompt is routinely 8-15 KB, so `latest_user_request` arrived as a dict, and
+  the context strip renders it straight into JSX — React throws *"Objects are
+  not valid as a React child"* and **the whole Inner Voice tab goes blank**,
+  not just that line. A pruned blob store expands to `{"$blob_missing": sha}`,
+  which is also a dict, which is why expansion alone is not the fix. The page
+  carries its own `asText` guard for the same reason a dashboard section uses
+  `sectionError`: a tab left open across a backend restart polls the new build
+  with the old shape. `tests/test_inner_voice_state_blobs.py`.
 - `GET /sessions?limit=N` — sessions opted into IV.
 - `GET /event_log?session_id=X[&offset=...&limit=...&expand_blobs=true]` — raw event log.
 - `GET /event_log/blob/{sha}` — externalized blob lookup.

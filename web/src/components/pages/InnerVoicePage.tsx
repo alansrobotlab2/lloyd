@@ -385,12 +385,29 @@ function InlineStat({ label, value, warn }: { label: string; value: string; warn
 // Context row — last user input (left) | IV-captured intent (right)
 // ─────────────────────────────────────────────────────────────────────────
 
+// Render guard for anything this row shows. `/api/inner_voice/state` builds
+// its content out of the event log, where every field over 4 KB is stored as
+// a `{$blob, size}` reference instead of a string. The backend resolves those
+// now, but a tab left open across a restart still polls the old shape, and an
+// object reaching a JSX child throws inside render — which blanks the entire
+// Inner Voice tab rather than this one line.
+function asText(value: unknown): string | null {
+  if (typeof value === 'string') return value || null
+  if (typeof value === 'number') return String(value)
+  return null
+}
+
+function textList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.map(asText).filter((t): t is string => t !== null)
+}
+
 function ContextRow({ obsState }: { obsState: InnerVoiceState }) {
-  const userText = obsState.latest_user_request
+  const userText = asText(obsState.latest_user_request)
   const goal = obsState.latest_goal_card
-  const successCriteria = goal?.success_criteria || []
-  const outOfScope = goal?.out_of_scope || []
-  const completionSignals = goal?.completion_signals || []
+  const successCriteria = textList(goal?.success_criteria)
+  const outOfScope = textList(goal?.out_of_scope)
+  const completionSignals = textList(goal?.completion_signals)
   const hasGoal = successCriteria.length + outOfScope.length + completionSignals.length > 0
 
   if (!userText && !hasGoal) return null
@@ -400,7 +417,7 @@ function ContextRow({ obsState }: { obsState: InnerVoiceState }) {
       {/* Left — user input */}
       <div className="min-w-0">
         <div className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">user input</div>
-        <div className="text-foreground leading-relaxed whitespace-pre-wrap break-words">
+        <div className="text-foreground leading-relaxed whitespace-pre-wrap break-words max-h-20 overflow-y-auto">
           {userText || <span className="text-muted-foreground italic">(no user request yet)</span>}
         </div>
       </div>

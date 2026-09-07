@@ -20,6 +20,49 @@ logger = logging.getLogger("lloyd-server")
 
 router = APIRouter(prefix="/api/inner_voice", tags=["inner_voice"])
 
+# The context strip is a two-line header, not a transcript pane. A worker
+# session opens with a 15 KB prompt, and shipping all of it on a 4-second
+# poll costs more than it shows.
+_MAX_DISPLAY_CHARS = 2000
+
+
+def _display_text(value: Any) -> str | None:
+    """Coerce one event-log field into a string the UI can render.
+
+    Three shapes arrive here and only one of them is a string. A field
+    over `event_log.DEFAULT_BLOB_THRESHOLD_BYTES` was externalized to
+    `{"$blob": sha, "size": n}`; a blob whose file is gone expands to
+    `{"$blob_missing": sha}`. Both are dicts, and React throws
+    "Objects are not valid as a React child" on either — which blanks
+    the whole Inner Voice tab, not just this line. Anything that is not
+    a string after expansion becomes `None` here instead.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    if len(value) > _MAX_DISPLAY_CHARS:
+        return value[:_MAX_DISPLAY_CHARS] + "\u2026"
+    return value
+
+
+def _display_goal_card(value: Any) -> dict[str, Any]:
+    """Same coercion for the goal card's three string lists.
+
+    The card's own fields are short, but they pass through the same
+    externalizer, so a long criterion is a blob reference like any other
+    field and would crash the same render.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, val in value.items():
+        if isinstance(val, list):
+            out[key] = [t for t in (_display_text(v) for v in val) if t]
+        elif isinstance(val, str):
+            out[key] = _display_text(val) or ""
+        else:
+            out[key] = val
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Observations — replaces critiques + interventions
@@ -115,9 +158,13 @@ async def get_state(
                 # Walk backwards through the chunk so we find the latest first.
                 for ev in reversed(events):
                     if ev.get("event") == "inner_voice.goal_card_extracted":
-                        d = ev.get("data") or {}
-                        latest_goal_card = d.get("goal_card") or {}
-                        latest_user_request = d.get("user_request") or None
+                        # Expand blob references on the ONE event we matched
+                        # rather than reading with expand_blobs=True, which
+                        # would resolve every field of every event in every
+                        # chunk scanned just to find this one.
+                        d = event_log.expand_blobs(ev.get("data") or {})
+                        latest_goal_card = _display_goal_card(d.get("goal_card"))
+                        latest_user_request = _display_text(d.get("user_request"))
                         latest_turn_id = ev.get("turn_id")
                         break
                 if latest_goal_card is not None or offset == 0:

@@ -242,6 +242,9 @@ def read_events(
                     logger.warning(f"skipping malformed event line {i} in {path.name}: {e}")
                     continue
                 if expand_blobs:
+                    # `_expand_blobs`, not the public name: the keyword
+                    # argument above shadows it in this scope, and calling
+                    # a bool is a TypeError inside a `try` that swallows it.
                     obj = _expand_blobs(obj)
                 out.append(obj)
     except Exception as e:
@@ -273,15 +276,28 @@ def read_blob(sha: str) -> str | None:
         return None
 
 
-def _expand_blobs(obj: Any) -> Any:
-    """Recursively replace `{"$blob": <sha>, ...}` with the resolved string."""
+def expand_blobs(obj: Any) -> Any:
+    """Recursively replace `{"$blob": <sha>, ...}` with the resolved string.
+
+    Public because reading is not the only way a caller ends up holding a
+    reference: anything that scans a log with `expand_blobs=False` (the
+    paginated readers, `/api/inner_voice/state`) and then hands one field
+    to a consumer expecting a string has to resolve it itself. Doing that
+    per matched event is far cheaper than expanding every event in every
+    chunk scanned.
+    """
     if isinstance(obj, dict):
         if "$blob" in obj and isinstance(obj["$blob"], str):
             content = read_blob(obj["$blob"])
             if content is not None:
                 return content
             return {"$blob_missing": obj["$blob"]}
-        return {k: _expand_blobs(v) for k, v in obj.items()}
+        return {k: expand_blobs(v) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_expand_blobs(v) for v in obj]
+        return [expand_blobs(v) for v in obj]
     return obj
+
+
+# The parameter of the same name shadows the function inside `read_events`,
+# so that call site needs a second binding.
+_expand_blobs = expand_blobs
