@@ -536,6 +536,65 @@ def test_external_channels_fire_by_default(tmp_path):
     assert "vault" in res and res["vault"] is True
 
 
+def test_no_test_reaches_the_users_screen(tmp_path, monkeypatch):
+    """`external=False` was never the whole mute.
+
+    The toast and the journal line only need a session bus, so any in-process
+    test that builds a default `Notifier` paints the user's screen — which is
+    how `Lloyd guardian: real rollback / body` appeared on 2026-09-07, once
+    per gate run, with the literal word "body" as the detail because
+    "real rollback"/"body" are fixture strings from
+    `test_guardian_predicates.py` and `test_guardian_speak.py`. Asserting on
+    the *command* rather than the returned bool: `_run` reports True whenever
+    it managed to spawn `notify-send`, so a bool is not evidence of either
+    delivery or suppression.
+    """
+    import notify
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(notify, "_run",
+                        lambda cmd, timeout=5.0: seen.append(list(cmd)) or True)
+    (tmp_path / "obsidian" / "memory").mkdir(parents=True)
+    n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                        vault_root=str(tmp_path / "obsidian"),
+                        backend_url="http://127.0.0.1:1")
+
+    res = n.alert("critical", "real rollback", "body")
+
+    flat = " ".join(" ".join(c) for c in seen)
+    assert "notify-send" not in flat, f"a test toasted the user: {flat}"
+    assert "systemd-cat" not in flat, f"a test wrote to the live journal: {flat}"
+    assert res["desktop"] is False and res["journal"] is False, res
+    assert res["vault"] is True, "the in-suite mute must not reach the vault scope"
+
+
+def test_the_room_channels_are_switches_not_dead_code(tmp_path, monkeypatch):
+    """The mirror-image risk: an env gate that is always False makes the two
+    tests above pass for the wrong reason, and the real guardian silently
+    stops notifying. Opt one test back in and require both commands."""
+    import notify
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(notify, "_run",
+                        lambda cmd, timeout=5.0: seen.append(list(cmd)) or True)
+    monkeypatch.setenv("LLOYD_DESKTOP_ALERTS", "1")
+    monkeypatch.setenv("LLOYD_JOURNAL_ALERTS", "1")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+    (tmp_path / "obsidian" / "memory").mkdir(parents=True)
+    n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                        vault_root=str(tmp_path / "obsidian"),
+                        backend_url="http://127.0.0.1:1")
+
+    res = n.alert("critical", "real rollback", "the detail text")
+
+    flat = " ".join(" ".join(c) for c in seen)
+    assert "notify-send" in flat and "-u critical" in flat, flat
+    assert "Lloyd guardian: real rollback" in flat, flat
+    assert "the detail text" in flat, "the toast lost its body"
+    assert "systemd-cat" in flat, flat
+    assert res["desktop"] is True and res["journal"] is True, res
+
+
 def test_the_drill_passes_no_external_alerts(tmp_path):
     """The flag is only useful if rehearse.py actually sends it."""
     from pathlib import Path

@@ -44,6 +44,27 @@ def _run(cmd: list[str], timeout: float = 5.0) -> bool:
         return False
 
 
+def _channel_on(var: str) -> bool:
+    """Master mute, checked at dispatch time. Mirrors `speak.voice_enabled`.
+
+    The `external` gate cannot be the only mute, because two channels are
+    reachable from *any* process that has a session bus and a journal: the
+    desktop toast and the journal line. Any caller that builds a `Notifier`
+    with `external` left at its default — which is every in-process test, and
+    anything else not named "drill" — fans out to the room.
+
+    On 2026-09-07 every self-mod gate run (each one executes the full suite)
+    put `Lloyd guardian: real rollback / body` on the user's screen and wrote
+    `STILL BROKEN :: 2026-09-06 liveness failed` to the live journal at
+    priority 2. Both were fixture strings from tests that only care whether a
+    *different* channel dispatched. A fake critical incident in the live
+    journal is the same pollution the `external` gate was added for on
+    2026-09-06 — it just arrives through a path that gate never covered.
+    """
+    return str(os.environ.get(var, "1")).strip().lower() not in (
+        "0", "false", "no", "off", "")
+
+
 class Notifier:
     def __init__(self, *, ledger: Path, state_dir: Path, vault_root: str,
                  backend_url: str = "http://127.0.0.1:8080",
@@ -133,11 +154,15 @@ class Notifier:
             return False
 
     def _journal(self, level: str, message: str) -> bool:
+        if not _channel_on("LLOYD_JOURNAL_ALERTS"):
+            return False
         prio = {"critical": "2", "error": "3", "warn": "4"}.get(level, "5")
         return _run(["systemd-cat", "-t", "lloyd-guardian", "-p", prio,
                      "--", "echo", message[:4000]])
 
     def _desktop(self, level: str, title: str, body: str) -> bool:
+        if not _channel_on("LLOYD_DESKTOP_ALERTS"):
+            return False
         urgency = "critical" if level == "critical" else "normal"
         env_ok = bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS"))
         if not env_ok:

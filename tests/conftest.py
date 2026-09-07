@@ -34,6 +34,34 @@ def _no_voice_alerts_in_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_desktop_or_journal_alerts_in_tests(monkeypatch):
+    """The other two channels that reach the room from a test process.
+
+    `Notifier`'s `external` gate suppresses vault notes and backlog tasks, and
+    was added after drill rollbacks polluted the live vault on 2026-09-06. It
+    never covered the toast or the journal line, because those need nothing
+    but a session bus — so a test that builds a default `Notifier` and only
+    cares whether *voice* dispatched still paints the user's screen.
+
+    That is what happened on 2026-09-07: every self-mod gate run toasted
+    `Lloyd guardian: real rollback / body` and wrote
+    `STILL BROKEN :: 2026-09-06 liveness failed` to the live journal at
+    priority 2, from the fixture strings in `test_guardian_speak.py` and
+    `test_guardian_predicates.py`. A fake critical incident in the journal is
+    worse than a stray toast: it is the record you consult *after* an
+    incident, and it now contains fiction.
+
+    DBUS is blanked as well as the switch flipped, so the nag unit's
+    bash `notify-send` fallback — which reads the environment, not
+    `LLOYD_DESKTOP_ALERTS` — cannot fire from a test either. Tests that assert
+    on the channel's dispatch decision set these explicitly.
+    """
+    monkeypatch.setenv("LLOYD_DESKTOP_ALERTS", "0")
+    monkeypatch.setenv("LLOYD_JOURNAL_ALERTS", "0")
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _writes_enabled_in_tests(monkeypatch):
     """Fact writes are on unless a test says otherwise."""
     try:
