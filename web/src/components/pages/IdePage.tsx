@@ -4,6 +4,7 @@ import FileTree from '../ide/FileTree'
 import EditorTabs from '../ide/EditorTabs'
 import MonacoHost from '../ide/MonacoHost'
 import QuickOpen from '../ide/QuickOpen'
+import DirectoryPicker from '../ide/DirectoryPicker'
 import CommandPalette, { type PaletteCommand } from '../ide/CommandPalette'
 import { IdeProvider, useIde } from '../../contexts/IdeContext'
 import { useMcUi, type IdeState } from '../../contexts/McUiContext'
@@ -40,6 +41,7 @@ function IdePageInner() {
   const [folderInput, setFolderInput] = useState(openFolder ?? '')
   const [quickOpen, setQuickOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [dirPickerOpen, setDirPickerOpen] = useState(false)
   const [treeRefreshKey, setTreeRefreshKey] = useState(0)
 
   // Keep the input synced if the folder changes from outside (e.g. agent).
@@ -143,6 +145,13 @@ function IdePageInner() {
     setOpenFolder(trimmed)
   }
 
+  // Directory picker (the header "Open" button) → propagate the choice back
+  // into both the workspace state and the path field.
+  const handlePickFolder = useCallback((path: string) => {
+    setOpenFolder(path)
+    setFolderInput(path)
+  }, [setOpenFolder])
+
   const activeOpenFile = useMemo(
     () => openFiles.find(f => f.path === activeFile) ?? null,
     [openFiles, activeFile],
@@ -155,6 +164,12 @@ function IdePageInner() {
   // Command palette command list — derived from current state.
   const paletteCommands: PaletteCommand[] = useMemo(() => {
     const cmds: PaletteCommand[] = [
+      {
+        id: 'ide.openFolder',
+        label: 'Open Folder…',
+        description: 'Browse for a workspace directory',
+        run: () => setDirPickerOpen(true),
+      },
       {
         id: 'ide.quickOpen',
         label: 'Quick Open File…',
@@ -199,7 +214,13 @@ function IdePageInner() {
             placeholder="/absolute/path/to/folder"
             className="text-xs h-8"
           />
-          <Button size="sm" variant="ghost" onClick={handleOpenFolder} className="text-xs gap-1.5">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setDirPickerOpen(true)}
+            className="text-xs gap-1.5"
+            title="Browse for a folder"
+          >
             Open
           </Button>
         </div>
@@ -300,6 +321,14 @@ function IdePageInner() {
         onClose={() => setQuickOpen(false)}
         rootPath={openFolder}
         onPick={openFile}
+      />
+      <DirectoryPicker
+        open={dirPickerOpen}
+        onClose={() => setDirPickerOpen(false)}
+        initialPath={openFolder ?? folderInput}
+        onPick={handlePickFolder}
+        title="Open folder"
+        confirmLabel="Open here"
       />
       <CommandPalette
         open={paletteOpen}
