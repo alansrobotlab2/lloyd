@@ -198,6 +198,14 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   file is the fact: `backlog.existing_ids` checks each id on disk, the ledger
   records `spawned` and `spawned_unverified` separately, and the closed item's
   activity log names the ids so the split is followable from either end.
+  The proving run on #278 (`confirmed`, 16 iterations) filed #402 and #403
+  before its verdict, after checking `backlog_tasks` for duplicates — and
+  exposed that the acceptance check, the implementer's contract, was cut at
+  600 chars in the ledger mid-way through its regression guards and written
+  nowhere in the item. It is now kept whole (3,000) and `record_verdict`
+  writes it into the item as **Acceptance — what must become true**, because
+  the item is the handoff and a contract only the ledger holds is one the
+  item's next reader never sees.
 
 ### 3.3 For humans (this repo's development)
 

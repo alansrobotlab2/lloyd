@@ -173,7 +173,9 @@ def parse_verdict(text: str) -> dict | None:
         "verdict": verdict,
         "check": " ".join(joined("CHECK", 4000).split())[:400],
         "evidence": joined("EVIDENCE", 2000),
-        "acceptance": _acceptance_text(joined("ACCEPTANCE", 4000))[:600],
+        # The implementer's contract. 600 cut #278's mid-way through its
+        # regression guards; a contract is not the field to save bytes on.
+        "acceptance": _acceptance_text(joined("ACCEPTANCE", 4000))[:3000],
         "spawned": _parse_spawned(joined("SPAWNED", 400)),
     }
 
@@ -283,7 +285,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         logger.warning("backlog #%s: SPAWNED names %s but no such item exists",
                        candidate.id, unverified)
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
-                     check=parsed["check"], close=close, spawned=spawned)
+                     check=parsed["check"], close=close, spawned=spawned,
+                     acceptance=parsed["acceptance"])
 
     S.append_event({"event": "backlog_triage", "item_id": candidate.id,
                     "name": candidate.name[:200], "age_days": candidate.age_days,

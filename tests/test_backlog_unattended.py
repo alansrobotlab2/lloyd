@@ -424,3 +424,21 @@ def test_implementer_records_what_it_filed(isolated, monkeypatch):
           if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
     assert ev["spawned"] == [410] and ev["spawned_unverified"] == [411]
     assert B.parse_spawned_line("no line here") == []
+
+
+def test_a_confirmed_acceptance_is_kept_whole_and_written_into_the_item(isolated, monkeypatch):
+    """#278's contract was cut at 600 chars in the ledger, mid-way through
+    its regression guards, and appeared nowhere in the item file."""
+    contract = " ".join(f"guard{i} must still pass;" for i in range(60))
+    text = (f"...\n\nVERDICT: confirmed\nCHECK: grep -n x\nEVIDENCE: still there.\n"
+            f"ACCEPTANCE: {contract}\nSPAWNED: none\n")
+    write_item(isolated, 7)
+    monkeypatch.setattr(C, "run_prompt_in_session", _fake_turn(text))
+    asyncio.run(M.execute(_Item()))
+    ev = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert len(contract) > 600
+    assert ev["acceptance"] == contract
+    body = next(isolated.glob("7-*.md")).read_text()
+    assert "Acceptance — what must become true" in body and contract in body
+    item, tri = B.select_confirmed(S.LEDGER_PATH)
+    assert tri["acceptance"] == contract, "the implementer is handed the whole contract"

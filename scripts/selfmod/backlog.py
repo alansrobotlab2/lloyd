@@ -300,7 +300,8 @@ def select_confirmed(ledger: Path,
 
 def record_verdict(item: Item, verdict: str, evidence: str, *,
                    check: str = "", close: bool = False,
-                   spawned: list[int] | tuple[int, ...] = ()) -> Path:
+                   spawned: list[int] | tuple[int, ...] = (),
+                   acceptance: str = "") -> Path:
     """Append the verdict to the item's activity log, optionally closing it.
 
     Always writes the evidence, never just the conclusion. An item closed as
@@ -334,6 +335,10 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         section += f"\n**Premise check:**\n```\n{check.strip()}\n```\n"
     if spawned:
         section += "\n**Filed as new items:** " + ", ".join(f"#{i}" for i in spawned) + "\n"
+    if acceptance.strip():
+        # The item is the handoff. A contract that lives only in the ledger
+        # and a transcript is one the next reader of the item never sees.
+        section += f"\n**Acceptance — what must become true:**\n{acceptance.strip()}\n"
 
     item.path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
