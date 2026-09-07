@@ -359,3 +359,68 @@ def test_the_implementer_is_off_until_a_human_turns_it_on():
     src = cfg["workers"]["sources"]["backlog-implement"]
     assert src["enabled"] is False
     assert src["max_turns"] >= 76
+
+
+# ===========================================================================
+# Scope that is not this item's
+# ===========================================================================
+#
+# #229's verdict said two surviving claims "belong in two new items, not this
+# one" — and filed nothing, in a turn whose prompt forbade writing anything.
+# The item was then closed. A finding that lives only in EVIDENCE is lost.
+
+VERDICT_SPAWNING = ("...\n\nVERDICT: stale\nCHECK: ls\nEVIDENCE: headline premise gone; "
+                    "two claims survive.\nACCEPTANCE: none\nSPAWNED: #401, #999\n")
+
+
+def test_both_prompts_require_filing_what_the_item_does_not_cover():
+    assert "backlog_write_task" in M.PROMPT and "SPAWNED" in M.PROMPT
+    assert "backlog_write_task" in I.PROMPT and "SPAWNED" in I.PROMPT
+    # The read-only rule is about the code; it must not forbid the filing.
+    assert "do not edit, write, or commit anything. " not in M.PROMPT
+    assert "The backlog is the one thing you write to" in M.PROMPT
+    assert "say so in EVIDENCE" not in M.PROMPT, "the soft wording produced a mention, not an item"
+
+
+@pytest.mark.parametrize("value, ids", [
+    ("#401, #402", [401, 402]),
+    ("401 402", [401, 402]),
+    ("#401 and #401 again", [401]),
+    ("none", []), ("-", []), ("", []), (None, []),
+])
+def test_parse_spawned(value, ids):
+    assert B.parse_spawned(value) == ids
+
+
+def test_spawned_ids_are_verified_on_disk_then_recorded_on_ledger_and_item(isolated, monkeypatch):
+    write_item(isolated, 7)
+    write_item(isolated, 401, status="draft", days_old=0, name="Survivor")
+    monkeypatch.setattr(C, "run_prompt_in_session", _fake_turn(VERDICT_SPAWNING))
+    out = asyncio.run(M.execute(_Item()))
+    assert out["verdict"] == "stale"
+    ev = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert ev["spawned"] == [401], "only the id with a file behind it"
+    assert ev["spawned_unverified"] == [999], "an invented id is recorded as such, not as a link"
+    text = next(isolated.glob("7-*.md")).read_text()
+    assert "Filed as new items: #401" in text
+    assert "#999" not in text
+
+
+def test_parse_verdict_carries_spawned():
+    assert M.parse_verdict(VERDICT_SPAWNING)["spawned"] == [401, 999]
+    assert M.parse_verdict(VERDICT_OK)["spawned"] == []
+
+
+def test_implementer_records_what_it_filed(isolated, monkeypatch):
+    write_item(isolated, 2)
+    write_item(isolated, 410, status="draft", days_old=0, name="Found on the way")
+    _confirm(2)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
+    monkeypatch.setattr(C, "run_prompt_in_session",
+                        _fake_turn("gate: 7/7 ok\nlanded.\n\nSPAWNED: #410 #411\n"))
+    out = asyncio.run(I.execute(_Item()))
+    assert out["status"] == "success"
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
+    assert ev["spawned"] == [410] and ev["spawned_unverified"] == [411]
+    assert B.parse_spawned_line("no line here") == []

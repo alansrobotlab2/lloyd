@@ -73,6 +73,18 @@ The round is done when that has become true and a test pins it. If you cannot \
 make it true with one small, well-tested change, do not land a larger one — \
 abort the round, say why, and the item goes back to a human.
 
+**Scope you discover is not scope you take.** The work will show you things \
+the acceptance check does not cover — a second bug beside the first, a \
+refactor the fix wants, a test the area is missing, a premise in the item that \
+turned out wider than its check. Each one becomes **its own backlog item, filed \
+by you** with `backlog_write_task` (board `lloyd`, no `task_id`, tag \
+`spawned-by-selfmod`, first line "Found while implementing #{item_id}"), \
+written as a handoff a fresh session can execute alone: what is wrong, where \
+(file paths and line numbers), and how to verify. Then keep this round to the \
+contract. One change per round is what makes a rollback mean something. Do not \
+fold the discovery into this change, and do not leave it in your report — the \
+report is read once; the backlog is read until the item is done.
+
 Procedure:
 1. Re-read the item and the triage evidence. If anything has changed since the \
 triage and the premise no longer holds, say so and stop — that is a result.
@@ -85,7 +97,8 @@ pass. One change per round.
 5. `selfmod_land`. Then **end your turn immediately** — the landing needs the \
 backend idle, and your own turn is what keeps it busy.
 
-Report what you did, quoting the gate line rather than saying "it passed". \
+Report what you did, quoting the gate line rather than saying "it passed", \
+and end with one line `SPAWNED: <ids of the items you filed, or the word none>`. \
 Work autonomously; do not ask for confirmation.
 """
 
@@ -188,10 +201,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         return {"status": "skipped", "summary": f"landing in progress: {exc}"}
 
     round_id = _round_opened_since(S.read_events(limit=200), started)
+    claimed = B.parse_spawned_line(run.get("text") or "")
+    spawned = B.existing_ids(claimed)
     S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                     "phase": "finished", "session_id": run["session_id"],
                     "round_id": round_id, "stop_reason": run.get("stop_reason"),
                     "num_turns": run.get("num_turns"),
+                    "spawned": spawned,
+                    "spawned_unverified": [i for i in claimed if i not in spawned],
                     "response_tail": (run.get("text") or "")[-1500:]})
     outcome = f"round {round_id}" if round_id else "no round opened"
     logger.info("backlog #%s: %s (session %s, %s)", candidate.id, outcome,

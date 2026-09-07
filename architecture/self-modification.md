@@ -184,6 +184,20 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   as its contract. `backlog.acceptance_text` is now the one definition of
   blank (no alphanumerics, or a lone placeholder word), the parser records
   `""`, and the prompt says "otherwise the word none".
+- **A finding that lives only in EVIDENCE is lost.** #229's verdict said two
+  surviving claims "belong in two new items, not this one" — and filed
+  nothing, in a turn whose prompt forbade writing anything. The item was then
+  closed. Both prompts now make filing a **required step**: anything real the
+  in-focus item does not cover — a claim that survives a `stale`, a bug seen
+  on the way, scope the implementer's acceptance check does not reach — is
+  filed with `backlog_write_task` (tags `spawned-by-triage` /
+  `spawned-by-selfmod`, first line naming the source item) *before* the
+  verdict, and listed under a new `SPAWNED:` field. The triage prompt's
+  read-only rule now says read-only **on the code**, because as written it
+  forbade the very write. What the model says it filed is a claim and the
+  file is the fact: `backlog.existing_ids` checks each id on disk, the ledger
+  records `spawned` and `spawned_unverified` separately, and the closed item's
+  activity log names the ids so the split is followable from either end.
 
 ### 3.3 For humans (this repo's development)
 

@@ -177,6 +177,48 @@ def acceptance_text(value) -> str:
     return s
 
 
+_ID_RE = re.compile(r"#?(\d{1,6})\b")
+
+
+def parse_spawned(value) -> list[int]:
+    """Item ids from a `SPAWNED:` value — `#401, #402`, `401 402`, `none`."""
+    s = " ".join(str(value or "").split()).strip()
+    if not s or s.strip(" -<>()[].:'\"").lower() in _ACCEPTANCE_PLACEHOLDERS:
+        return []
+    out: list[int] = []
+    for m in _ID_RE.finditer(s):
+        i = int(m.group(1))
+        if i not in out:
+            out.append(i)
+    return out
+
+
+def parse_spawned_line(text: str) -> list[int]:
+    """The LAST `SPAWNED:` line in a turn's text, for turns with no verdict
+    block (the implementer's report)."""
+    found = ""
+    for line in (text or "")[-8000:].splitlines():
+        if line.strip().upper().startswith("SPAWNED:"):
+            found = line.strip()[8:]
+    return parse_spawned(found)
+
+
+def existing_ids(ids) -> list[int]:
+    """The subset of `ids` that exist on disk, any status. What the model says
+    it filed is a claim; the file is the fact. An id the model invented — or
+    meant to file and ran out of room before doing — is dropped, and the
+    caller records it as unverified rather than as a link to nothing."""
+    out: list[int] = []
+    for i in ids:
+        try:
+            i = int(i)
+        except (TypeError, ValueError):
+            continue
+        if any(BACKLOG_DIR.glob(f"{i}-*.md")):
+            out.append(i)
+    return out
+
+
 def triaged_ids(ledger: Path) -> dict[int, str]:
     """{item_id: verdict} for items with a TERMINAL verdict.
 
@@ -257,7 +299,8 @@ def select_confirmed(ledger: Path,
 
 
 def record_verdict(item: Item, verdict: str, evidence: str, *,
-                   check: str = "", close: bool = False) -> Path:
+                   check: str = "", close: bool = False,
+                   spawned: list[int] | tuple[int, ...] = ()) -> Path:
     """Append the verdict to the item's activity log, optionally closing it.
 
     Always writes the evidence, never just the conclusion. An item closed as
@@ -274,6 +317,8 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     entry = f"**{stamp}** — selfmod triage: **{verdict}**. {evidence.strip()}"
     if check:
         entry += f" Check: `{check}`"
+    if spawned:
+        entry += " Filed as new items: " + ", ".join(f"#{i}" for i in spawned) + "."
     log = list(fm.get("activity_log") or [])
     log.append(entry)
     fm["activity_log"] = log
@@ -287,6 +332,8 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
                f"**Verdict:** {verdict}\n\n{evidence.strip()}\n")
     if check:
         section += f"\n**Premise check:**\n```\n{check.strip()}\n```\n"
+    if spawned:
+        section += "\n**Filed as new items:** " + ", ".join(f"#{i}" for i in spawned) + "\n"
 
     item.path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"

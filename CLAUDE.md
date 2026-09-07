@@ -228,7 +228,11 @@ nobody reads, and the morning brief was delivered there.
 of that, and `/inject` refuses such a session with 409 so no producer counts
 it delivered. And a verdict's `ACCEPTANCE` is a contract only if
 `backlog.acceptance_text` says so: the old template's `else: ->` was copied
-verbatim, and `strip("-")` left a truthy `>`.
+verbatim, and `strip("-")` left a truthy `>`. And **a finding that lives only
+in EVIDENCE is lost**: #229 said two claims "belong in two new items" and filed
+none, in a turn told to write nothing. Both prompts now require filing whatever
+the in-focus item does not cover, via `backlog_write_task`, and report it under
+`SPAWNED:`; ids are verified on disk before the ledger links them.
 `architecture/self-modification.md` §3.2.
 
 ### Development happens in ~/lloyd-sandbox

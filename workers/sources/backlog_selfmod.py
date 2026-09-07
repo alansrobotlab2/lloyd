@@ -52,14 +52,30 @@ external services and vault content are `not_code`. Do not investigate further.
 3. **Design a check.** A command, a file to read, a grep, a metric to query — \
 something that would come out differently depending on whether the premise \
 holds. Write it down before running it.
-4. **Run the check.** Use Read, Grep, Glob and Bash. You are read-only: do not \
-edit, write, or commit anything. Do not start a selfmod round.
+4. **Run the check.** Use Read, Grep, Glob and Bash. You are read-only **on the \
+code**: do not edit, write, or commit anything under the repo, and do not start \
+a selfmod round. The backlog is the one thing you write to — step 6 requires it.
 5. **Reach a verdict** from the evidence:
    - `confirmed` — the premise still holds; the problem is real today
    - `already_done` — it was real, and something has since fixed it
    - `stale` — the premise no longer describes this system
    - `unverifiable` — the item states no claim that can be checked
    - `not_code` — not about Lloyd's own code
+6. **File everything real that this item does not cover.** A `stale` verdict \
+usually leaves survivors: a narrower claim that still holds, a bug you noticed \
+on the way, a newer premise the old one has become. Each one becomes **its own \
+backlog item, filed by you, now** — with `backlog_write_task` (board `lloyd`, no \
+`task_id`, tag `spawned-by-triage`), before you write the verdict block. First \
+run `backlog_tasks` to be sure no item already covers it; if one does, cite its \
+number in EVIDENCE instead. Write the description as a handoff a fresh session \
+can execute alone: the claim, the current state with file paths and line \
+numbers, the check that shows it, and the first line \
+"Split from #{item_id} during selfmod triage on <date>". The tool returns the \
+new id; list every one under SPAWNED. **A finding that lives only in EVIDENCE \
+is lost**: nobody reads this transcript for to-dos, and the item you are \
+triaging is about to be closed. Filing nothing is fine when there is nothing — \
+say `none` — but "those belong in two new items" with no items filed is the \
+one outcome this step exists to prevent.
 
 What good triage looks like — learned from the three items closed on \
 2026-09-07, each of which turned on one of these:
@@ -80,8 +96,9 @@ calls is `stale` whatever its premise says.
 should say which harness.
 - **Check for a newer item that already covers it.** Superseded is `stale`, \
 and the evidence is the newer item's number.
-- **An item making several claims gets a verdict per claim.** Splitting it \
-into smaller items is a legitimate outcome; say so in EVIDENCE.
+- **An item making several claims gets a verdict per claim.** The verdict \
+block judges the item's headline premise; every claim that survives it is \
+filed as its own item (step 6) and named under SPAWNED, not left in EVIDENCE.
 
 Rules that matter:
 
@@ -102,6 +119,7 @@ VERDICT: <one of confirmed|already_done|stale|unverifiable|not_code>
 CHECK: <the command or method you ran, one line>
 EVIDENCE: <2-4 sentences citing what you actually observed>
 ACCEPTANCE: <if confirmed: what must become true for this to be done; otherwise the word none>
+SPAWNED: <ids of the new items you filed in step 6, e.g. #401 #402; otherwise the word none>
 """
 
 def _acceptance_text(value: str) -> str:
@@ -109,7 +127,12 @@ def _acceptance_text(value: str) -> str:
     return acceptance_text(value)
 
 
-_FIELD = re.compile(r"^(VERDICT|CHECK|EVIDENCE|ACCEPTANCE):\s*(.*)$", re.I)
+def _parse_spawned(value: str) -> list[int]:
+    from scripts.selfmod.backlog import parse_spawned
+    return parse_spawned(value)
+
+
+_FIELD = re.compile(r"^(VERDICT|CHECK|EVIDENCE|ACCEPTANCE|SPAWNED):\s*(.*)$", re.I)
 
 
 def parse_verdict(text: str) -> dict | None:
@@ -151,6 +174,7 @@ def parse_verdict(text: str) -> dict | None:
         "check": " ".join(joined("CHECK", 4000).split())[:400],
         "evidence": joined("EVIDENCE", 2000),
         "acceptance": _acceptance_text(joined("ACCEPTANCE", 4000))[:600],
+        "spawned": _parse_spawned(joined("SPAWNED", 400)),
     }
 
 
@@ -250,14 +274,23 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # `confirmed` deliberately does NOT open a round — implementation is the
     # `backlog-implement` source's job, and it is gated separately.
     close = parsed["verdict"] in B.RETIRING
+
+    # What the model says it filed is a claim; the file on disk is the fact.
+    # An id with no file behind it is recorded as unverified, never as a link.
+    spawned = B.existing_ids(parsed["spawned"])
+    unverified = [i for i in parsed["spawned"] if i not in spawned]
+    if unverified:
+        logger.warning("backlog #%s: SPAWNED names %s but no such item exists",
+                       candidate.id, unverified)
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
-                     check=parsed["check"], close=close)
+                     check=parsed["check"], close=close, spawned=spawned)
 
     S.append_event({"event": "backlog_triage", "item_id": candidate.id,
                     "name": candidate.name[:200], "age_days": candidate.age_days,
                     "verdict": parsed["verdict"], "check": parsed["check"],
                     "evidence": parsed["evidence"][:1000],
                     "acceptance": parsed["acceptance"], "closed": close,
+                    "spawned": spawned, "spawned_unverified": unverified,
                     "session_id": session_id, "stop_reason": stop_reason,
                     "num_turns": run.get("num_turns"), "budget": budget})
 
