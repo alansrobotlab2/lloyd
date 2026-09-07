@@ -115,6 +115,16 @@ class RunOptions:
     # was a tool call 130k tokens back.
     state_anchor: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = None
 
+    # Tool-call summaries. Adds one string parameter, `summary`, to every
+    # advertised tool: a short phrase the model writes describing what the
+    # call is doing, rendered beside the tool name in the transcript. It is
+    # display metadata — the harness strips it before dispatch and before
+    # replaying the call back as history, so no tool ever sees it. Turning
+    # this off removes the parameter from every schema; the UI then falls
+    # back to showing the tool name alone. Fed from
+    # `harness.tool_call_summaries`.
+    tool_call_summaries: bool = True
+
     # Preserved thinking. Carry this many recent iterations' reasoning
     # back into `chat_messages` as the assistant messages' `reasoning`
     # field, which Qwen3.8-Flash-Next's template renders into each prior

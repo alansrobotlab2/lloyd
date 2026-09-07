@@ -36,7 +36,11 @@ from app.harness.tool_result_spill import (
 from app.harness.events import NormalizedEvent
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
-from app.harness.tool_schema import build_tool_list
+from app.harness.tool_schema import (
+    add_summary_param,
+    build_tool_list,
+    pop_summary,
+)
 from app.harness import tool_search_cache
 from app.harness.tool_search import (
     LoadedToolSet,
@@ -128,6 +132,17 @@ async def run_query(
     # pools at FastAPI shutdown.
     try:
         catalog = build_tool_list(list(pool.discovered), set(options.disallowed_tools))
+        # Every advertised tool grows one extra string parameter the model
+        # fills in with a phrase describing what the call is doing, which
+        # the transcript renders beside the tool name. `summary_tools` is
+        # the set that actually received it — a tool with a real `summary`
+        # parameter of its own (session_inject_context) keeps it, and its value must
+        # reach MCP untouched.
+        if options.tool_call_summaries:
+            summary_tools = add_summary_param(catalog)
+            summary_tools.add(TOOLSEARCH_TOOL_NAME)
+        else:
+            summary_tools = set()
         # A turn with no tools is not a degraded turn, it is a broken one,
         # and it fails in the least legible way available: `stream_chat`
         # omits `tools` from the request when the list is empty, vLLM
@@ -161,7 +176,9 @@ async def run_query(
             )
         except Exception as exc:  # never let bookkeeping break a turn
             logger.debug("loop: record_tool_universe skipped: %s", exc)
-        loaded_set = await _resolve_loaded_tool_set(options, catalog)
+        loaded_set = await _resolve_loaded_tool_set(
+            options, catalog, summaries=options.tool_call_summaries,
+        )
         if loaded_set.enabled:
             _inject_catalog_reminder(chat_messages, loaded_set)
 
@@ -354,7 +371,9 @@ async def run_query(
             if thinking_text:
                 yield events.thinking_done(thinking_text)
 
-            tool_calls_committed = _commit_tool_calls(tool_calls_acc)
+            tool_calls_committed = _commit_tool_calls(
+                tool_calls_acc, summary_tools=summary_tools,
+            )
 
             iteration_duration_ms = int((time.perf_counter() - iteration_started_at) * 1000)
             last_iteration_usage = iteration_usage
@@ -447,6 +466,7 @@ async def run_query(
                     name=tc["function"]["name"],
                     args_json=tc["function"]["arguments"],
                     args_dict=tc["_args_dict"],
+                    summary=tc.get("_summary", ""),
                 )
                 yield tc_evt
                 if options.hooks is not None:
@@ -768,13 +788,30 @@ def _parse_tool_args_tolerant(raw: str) -> tuple[dict[str, Any] | None, str | No
     return (v, repaired, None)
 
 
-def _commit_tool_calls(acc: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+def _commit_tool_calls(
+    acc: dict[int, dict[str, Any]],
+    *,
+    summary_tools: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Finalize accumulated tool calls.
 
     Parses `arguments` JSON; on failure, attaches an `_args_dict` of
     `{"__parse_error__": True, "raw": "..."}` so the dispatcher can
     surface a tool_result with `is_error=True` instead of crashing.
+
+    `summary_tools` is the set of tools whose advertised schema carried the
+    injected `summary` display parameter (see
+    ``tool_schema.add_summary_param``). For those, the value is lifted onto
+    `_summary` and removed from `_args_dict` — the aggregator validates
+    arguments against the tool's real inputSchema, so an extra key there is
+    a dispatch error rather than a spare field. It is deliberately NOT
+    removed from the `arguments` string: that string is what gets replayed
+    to the engine as history, and it is the only record of this call the
+    model will see again. Tools outside the set are left completely alone;
+    ``session_inject_context`` has its own required `summary` and popping it
+    would delete a real argument.
     """
+    summary_tools = summary_tools or set()
     committed: list[dict[str, Any]] = []
     for idx in sorted(acc):
         tc = acc[idx]
@@ -807,6 +844,25 @@ def _commit_tool_calls(acc: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
                 tc["function"]["name"], len(raw_args), len(repaired),
             )
             tc["function"]["arguments"] = repaired
+        if (
+            tc["function"]["name"] in summary_tools
+            and not args_dict.get("__parse_error__")
+        ):
+            # Popped from `_args_dict` (what reaches MCP) and NOT from
+            # `arguments` (what is replayed back as history). The two
+            # deliberately disagree, and the disagreement is the whole
+            # mechanism: `arguments` is the only record of this call the
+            # model will ever see again, so stripping the caption there
+            # taught it — within one turn — that calls of this tool do
+            # not carry one. Measured on session 20260907_184351_ivec8d:
+            # the FIRST call of each tool name had a summary and every
+            # repeat had none, 5/5 vs 0/31. The schema said required; the
+            # model's own most recent example said otherwise, and the
+            # example won. It costs ~10 tokens per historical tool call
+            # to keep, which is the price of the field working at all.
+            summary = pop_summary(args_dict)
+            if summary:
+                tc["_summary"] = summary
         tc["_args_dict"] = args_dict
         committed.append(tc)
     return committed
@@ -984,6 +1040,7 @@ async def _dispatch_one_tool_call(
             tool_name=name,
             tool_input=args_dict,
             tool_use_id=call_id,
+            tool_summary=tc.get("_summary", ""),
         )
         if deny:
             hso = deny.get("hookSpecificOutput") or {}
@@ -1121,7 +1178,10 @@ _DEFAULT_BASELINE_TOOLS = ("Bash", "Read", "Write", "Edit", "Grep", "Glob", "Tas
 
 
 async def _resolve_loaded_tool_set(
-    options: RunOptions, catalog: list[dict[str, Any]],
+    options: RunOptions,
+    catalog: list[dict[str, Any]],
+    *,
+    summaries: bool = False,
 ) -> LoadedToolSet:
     """Build the per-session LoadedToolSet, honoring activation thresholds.
 
@@ -1159,6 +1219,7 @@ async def _resolve_loaded_tool_set(
         catalog=catalog,
         baseline=baseline,
         enabled=enabled,
+        summaries=summaries,
     )
 
 

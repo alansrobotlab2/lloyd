@@ -43,6 +43,11 @@ export interface MessageEntry {
       name: string
       arguments: string
     }
+    // Model-written one-liner describing what this call is doing, rendered
+    // beside the tool name in the collapsed tool bubble. Absent on every
+    // session that predates the field, and on any call where the model
+    // skipped it — render the tool name alone in that case.
+    summary?: string
   }>
   tool_call_id?: string
   // #306: ephemeral context injection captured per turn (prefetch block,
@@ -617,7 +622,7 @@ export const api = {
     sessionId: string | undefined,
     callbacks: {
       onSession?: (sessionId: string) => void
-      onToolStart?: (callId: string, name: string, args: Record<string, unknown>, contextTokens?: number) => void
+      onToolStart?: (callId: string, name: string, args: string, contextTokens?: number, summary?: string) => void
       onToolComplete?: (callId: string, name: string, result: string) => void
       onToolProgress?: (name: string, preview: string) => void
       onTextDelta?: (text: string) => void
@@ -673,7 +678,7 @@ export const api = {
             const payload = JSON.parse(data)
             switch (eventType) {
               case 'session': callbacks.onSession?.(payload.session_id); break
-              case 'tool_start': callbacks.onToolStart?.(payload.call_id, payload.name, payload.args, payload.context_tokens); break
+              case 'tool_start': callbacks.onToolStart?.(payload.call_id, payload.name, payload.args, payload.context_tokens, payload.summary); break
               case 'tool_complete': callbacks.onToolComplete?.(payload.call_id, payload.name, payload.result); break
               case 'tool_progress': callbacks.onToolProgress?.(payload.name, payload.preview); break
               case 'text_delta': callbacks.onTextDelta?.(payload.text); break

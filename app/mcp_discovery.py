@@ -211,6 +211,8 @@ def _get_harness_kwargs() -> dict:
         out["stream_chunk_timeout_s"] = float(
             harness["stream_chunk_timeout_seconds"]
         )
+    if "tool_call_summaries" in harness:
+        out["tool_call_summaries"] = bool(harness["tool_call_summaries"])
     if "enabled" in cfg:
         out["tool_search_enabled"] = bool(cfg["enabled"])
     if "threshold_tools" in cfg:

@@ -18,6 +18,7 @@ must agree.
 
 from __future__ import annotations
 
+import json
 import re
 
 import logging
@@ -721,7 +722,9 @@ def build_goal_completion_user_prompt(
     )
 
 
-def build_pretool_event_summary(tool_name: str, tool_args: dict) -> str:
+def build_pretool_event_summary(
+    tool_name: str, tool_args: dict, tool_summary: str = "",
+) -> str:
     """One-line summary of a proposed tool call for the pretool trigger.
 
     Pretool is observation-only since v4 — the observer cannot block
@@ -729,14 +732,23 @@ def build_pretool_event_summary(tool_name: str, tool_args: dict) -> str:
     `app/harness/safety.py` without any LLM in the path. The only useful
     levers here are `noop` and, on clear off-task work, `inject` (which
     lands as the next user message AFTER the tool runs).
+
+    `tool_summary` is the primary's own caption for the call, written at
+    the moment of acting. "Clearly off-task" is a judgment about intent,
+    and this is the only place the primary states its intent per call in
+    its own words — so it is rendered *before* the arguments, which are
+    evidence of what it actually did. The two disagreeing is the signal.
+    It is a caption, not a fact: the arguments below it are what runs.
     """
     args_preview = str(tool_args)
     if len(args_preview) > 400:
         args_preview = args_preview[:400] + "...(truncated)"
+    intent = f' saying "{tool_summary}"' if tool_summary else ""
     return (
-        f"PRETOOL: primary is about to call `{tool_name}` with args {args_preview}. "
-        f"You cannot block this dispatch — the tool will run either way. "
-        f"`noop` unless the call is clearly off-task, in which case `inject`."
+        f"PRETOOL: primary is about to call `{tool_name}`{intent}, with args "
+        f"{args_preview}. You cannot block this dispatch — the tool will run "
+        f"either way. `noop` unless the call is clearly off-task, in which "
+        f"case `inject`."
     )
 
 
@@ -796,6 +808,48 @@ def _format_goal_eval_block(
     return "\n".join(lines)
 
 
+def _tool_call_labels(tool_calls: list[dict]) -> list[str]:
+    """Render each proposed call as `Name — caption`, or `Name` alone.
+
+    The caption is the primary's own `summary` argument
+    (`tool_schema.SUMMARY_ARG`), which is the only per-call statement of
+    intent it produces. Without it this list reads
+    ``['Bash', 'Bash', 'Bash', 'Bash']`` — the observer's core job is
+    judging whether the primary is still on the user's request, and a
+    wall of identical names is the least informative possible input for
+    that. With it: ``['Bash — Checking root disk usage', ...]``.
+
+    Three shapes carry the caption depending on where the list came from,
+    so all three are accepted: `_summary` on a live harness event,
+    `summary` on a tool call rebuilt from session JSON, and `summary`
+    inside the raw `arguments` string (which is where it genuinely lives
+    on the wire — the harness leaves it there on purpose so the model
+    sees its own captions on replay).
+
+    A caption is a claim, not a fact — it is what the primary *said* it
+    was doing. Callers render the arguments alongside it where they can.
+    """
+    labels: list[str] = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or tc.get("name") or "?"
+        caption = tc.get("_summary") or tc.get("summary") or ""
+        if not caption:
+            raw = fn.get("arguments")
+            if isinstance(raw, str) and raw:
+                try:
+                    parsed = json.loads(raw)
+                except (ValueError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict) and isinstance(parsed.get("summary"), str):
+                    caption = parsed["summary"]
+        caption = " ".join(str(caption).split())
+        if len(caption) > 120:
+            caption = caption[:119] + "…"
+        labels.append(f"{name} — {caption}" if caption else name)
+    return labels
+
+
 def build_assistant_message_summary(
     iteration: int,
     text: str,
@@ -831,7 +885,7 @@ def build_assistant_message_summary(
     # any response shape we expect.
     text_preview = windowed_text(text, 1200)
     if tool_calls:
-        names = [tc.get("function", {}).get("name") or tc.get("name") or "?" for tc in tool_calls]
+        names = _tool_call_labels(tool_calls)
         streak_block = ""
         if silent_streak:
             streak_block = (

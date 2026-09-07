@@ -21,9 +21,12 @@ Flow:
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable
+
+from app.harness.tool_schema import add_summary_param
 
 # ---------------------------------------------------------------------------
 # ToolSearch tool definition (advertised to vLLM as a real callable tool)
@@ -75,6 +78,17 @@ TOOLSEARCH_OPENAI_TOOL: dict[str, Any] = {
     },
 }
 
+# ToolSearch is intercepted in ``_dispatch_one_tool_call`` and never reaches
+# MCP, but it is still a tool call the user watches go by, so it carries the
+# same display `summary` parameter as everything else. Kept as a second
+# pre-built constant rather than injected in ``visible_tools()`` so the
+# per-iteration path stays allocation-free, and deep-copied because
+# ``add_summary_param`` rewrites the ``parameters`` object it is handed.
+TOOLSEARCH_OPENAI_TOOL_WITH_SUMMARY: dict[str, Any] = copy.deepcopy(
+    TOOLSEARCH_OPENAI_TOOL
+)
+add_summary_param([TOOLSEARCH_OPENAI_TOOL_WITH_SUMMARY])
+
 
 # ---------------------------------------------------------------------------
 # LoadedToolSet — per-session state object
@@ -104,6 +118,12 @@ class LoadedToolSet:
     to detect when a new ``run_query`` arrived with a different tool set
     (e.g. config reload changed disallowed_tools); on mismatch the cache
     drops the stale ``loaded`` set.
+
+    ``summaries`` records whether the catalog was built with the `summary`
+    display parameter injected, so ``visible_tools()`` advertises the
+    matching ToolSearch definition. Toggling it changes every schema in
+    the catalog, so the signature moves with it and the cache invalidates
+    on its own.
     """
 
     catalog: list[dict[str, Any]]
@@ -111,6 +131,10 @@ class LoadedToolSet:
     loaded: set[str] = field(default_factory=set)
     enabled: bool = False
     catalog_signature: str = ""
+    # Whether the catalog was built with the `summary` display parameter
+    # injected. Only affects which ToolSearch definition we advertise —
+    # the catalog tools carry theirs already.
+    summaries: bool = False
 
     def visible_tools(
         self, extra_disallowed: set[str] | None = None,
@@ -131,7 +155,10 @@ class LoadedToolSet:
             t for t in self.catalog
             if t["function"]["name"] in names and t["function"]["name"] not in extra
         ]
-        out.append(TOOLSEARCH_OPENAI_TOOL)
+        out.append(
+            TOOLSEARCH_OPENAI_TOOL_WITH_SUMMARY if self.summaries
+            else TOOLSEARCH_OPENAI_TOOL
+        )
         return out
 
     def is_visible(self, name: str, extra_disallowed: set[str] | None = None) -> bool:

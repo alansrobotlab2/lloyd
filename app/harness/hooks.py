@@ -91,17 +91,27 @@ class HookRegistry:
         tool_name: str,
         tool_input: dict[str, Any],
         tool_use_id: str | None = None,
+        tool_summary: str = "",
     ) -> dict[str, Any]:
         """Walk matching PreToolUse callbacks. First deny wins.
 
         Returns the deny dict (with `hookSpecificOutput`) if any callback
         denies; returns `{}` if all pass. Callback exceptions are logged
         and treated as pass — denial must be explicit, never accidental.
+
+        `tool_summary` is the model's own caption for this call (see
+        `tool_schema.SUMMARY_ARG`). It rides in `input_dict` rather than in
+        `tool_input` — deliberately, because `tool_input` is what safety
+        matching and the Inner Voice repetition guard read, and neither
+        should ever see a free-text caption. It is carried as a separate
+        key so a callback that wants the primary's stated intent can ask
+        for it, and every callback that does not is unaffected.
         """
         input_dict: dict[str, Any] = {
             "session_id": session_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
+            "tool_summary": tool_summary,
         }
         for matcher, cb in self._pre:
             if matcher is not None and matcher != tool_name:

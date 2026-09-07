@@ -32,6 +32,7 @@ async def get_or_create(
     catalog: list[dict],
     baseline: Iterable[str],
     enabled: bool,
+    summaries: bool = False,
 ) -> LoadedToolSet:
     """Return the session's LoadedToolSet, creating or invalidating as needed.
 
@@ -53,6 +54,7 @@ async def get_or_create(
             baseline=baseline_set,
             enabled=enabled,
             catalog_signature=sig,
+            summaries=summaries,
         )
 
     async with _LOCK:
@@ -63,6 +65,7 @@ async def get_or_create(
                 baseline=baseline_set,
                 enabled=enabled,
                 catalog_signature=sig,
+                summaries=summaries,
             )
             _CACHE[session_id] = cached
         else:
@@ -72,6 +75,7 @@ async def get_or_create(
             cached.catalog = catalog
             cached.baseline = baseline_set
             cached.enabled = enabled
+            cached.summaries = summaries
         return cached
 
 

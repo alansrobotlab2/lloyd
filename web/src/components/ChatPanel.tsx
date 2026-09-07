@@ -26,7 +26,7 @@ import {
 const timeStr = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
-type ToolCallRef = { name: string; args: string }
+type ToolCallRef = { name: string; args: string; summary: string }
 
 // Preserve per-message object identity across polling refreshes so memoized
 // rows don't re-render when nothing actually changed.
@@ -148,29 +148,46 @@ const MessageRow = memo(function MessageRow({
               </>
             ) : isTool ? (() => {
               const tc = msg.tool_call_id ? toolCallIndex.get(msg.tool_call_id) : undefined
-              const toolName = tc?.name || ''
+              const toolName = tc?.name || 'Tool'
+              const toolSummary = tc?.summary || ''
               const toolArgs = tc?.args || '{}'
               let argsDisplay = toolArgs
               try {
-                argsDisplay = JSON.stringify(JSON.parse(toolArgs), null, 2)
+                // `summary` rides in the arguments so the model sees its own
+                // captions when this call is replayed as history, but the tool
+                // never received it — this block shows what was dispatched, and
+                // the header already shows the caption. Dropped only when the
+                // header is rendering it, so a tool with a real `summary`
+                // parameter of its own still shows it here.
+                const parsed = JSON.parse(toolArgs)
+                if (toolSummary && parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                  delete (parsed as Record<string, unknown>).summary
+                }
+                argsDisplay = JSON.stringify(parsed, null, 2)
               } catch { /* keep raw */ }
               const responseText = textJoined
               return (
                 <Collapsible>
                   <CollapsibleTrigger className={cn(
-                    'group cursor-pointer flex items-center gap-1.5 text-xs transition-colors',
+                    'group cursor-pointer flex items-center gap-1.5 text-xs transition-colors w-full min-w-0 text-left',
                     isError
                       ? 'text-destructive hover:text-destructive/80'
                       : 'text-muted-foreground hover:text-foreground',
                   )}>
                     <ChevronRight className="w-3 h-3 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
                     <Wrench className="w-3 h-3 shrink-0" />
-                    <span className="font-semibold uppercase tracking-wide">Tool</span>
-                    {toolName && (
-                      <span className={cn(
-                        'font-mono font-normal truncate',
-                        isError ? 'text-destructive/80' : 'text-muted-foreground/80',
-                      )}>{toolName}</span>
+                    <span className={cn(
+                      'font-mono font-semibold shrink-0',
+                      isError ? 'text-destructive' : 'text-foreground',
+                    )}>{toolName}</span>
+                    {toolSummary && (
+                      <span
+                        title={toolSummary}
+                        className={cn(
+                          'font-normal truncate min-w-0',
+                          isError ? 'text-destructive/80' : 'text-muted-foreground/90',
+                        )}
+                      >&mdash; {toolSummary}</span>
                     )}
                   </CollapsibleTrigger>
                   <CollapsibleContent className="mt-2 space-y-2">
@@ -604,6 +621,7 @@ export default function ChatPanel({
             map.set(callId, {
               name: tc.function?.name || '',
               args: tc.function?.arguments || '{}',
+              summary: tc.summary || '',
             })
           }
         }
@@ -764,13 +782,13 @@ export default function ChatPanel({
           }
         },
         onQueueState: (s) => setQueueState(s),
-        onToolStart: (callId, name, args, contextTokens) => {
+        onToolStart: (callId, name, args, contextTokens, summary) => {
           setActiveToolName(name)
           assistantMsgIdG = null
           accumulatedThinkingG = ''
           setMessages(prev => [
             ...prev,
-            { id: `msg_${callId}_tc`, role: 'assistant', content: [{ type: 'text', text: '' }], tool_calls: [{ id: callId, call_id: callId, type: 'function', function: { name, arguments: JSON.stringify(args) } }], timestamp: new Date().toISOString() },
+            { id: `msg_${callId}_tc`, role: 'assistant', content: [{ type: 'text', text: '' }], tool_calls: [{ id: callId, call_id: callId, type: 'function', function: { name, arguments: args }, summary }], timestamp: new Date().toISOString() },
             { id: `msg_${callId}_result`, role: 'tool', content: [{ type: 'text', text: '⏳ Running...' }], tool_call_id: callId, context_tokens: contextTokens, timestamp: new Date().toISOString() },
           ])
         },
@@ -900,7 +918,7 @@ export default function ChatPanel({
         }
       },
       onQueueState: (state) => setQueueState(state),
-      onToolStart: (callId, name, args, contextTokens) => {
+      onToolStart: (callId, name, args, contextTokens, summary) => {
         setActiveToolName(name)
         assistantMsgId = null
         accumulatedThinking = ''
@@ -910,7 +928,11 @@ export default function ChatPanel({
             id: `msg_${callId}_tc`,
             role: 'assistant' as const,
             content: [{ type: 'text' as const, text: '' }],
-            tool_calls: [{ id: callId, call_id: callId, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+            // `args` is already the JSON string the model emitted. It used
+            // to be re-stringified here, which double-encoded it and made
+            // the live Arguments block render an escaped blob until the
+            // turn finished and the persisted row replaced it.
+            tool_calls: [{ id: callId, call_id: callId, type: 'function', function: { name, arguments: args }, summary }],
             timestamp: new Date().toISOString(),
           },
           {

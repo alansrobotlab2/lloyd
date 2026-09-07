@@ -642,22 +642,41 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 call_id = evt["call_id"]
                 name = evt["name"]
                 args_json = evt.get("args_json", "{}")
+                # The model's own one-liner for this call, already lifted
+                # off the arguments by the harness. Display metadata: it
+                # rides on the persisted tool_call so the transcript can
+                # render it on reload, and on the SSE frame so the live
+                # bubble has it before the result lands. Omitted entirely
+                # when empty rather than stored as "" — every historical
+                # session predates the field and reads the same way.
+                summary = evt.get("summary") or ""
                 tc = {
                     "id": call_id, "call_id": call_id, "type": "function",
                     "function": {"name": name, "arguments": args_json},
                 }
+                if summary:
+                    tc["summary"] = summary
                 tool_calls_log.append(tc)
+                # The model's own caption beats the one derived from the
+                # arguments, and it also settles an ambiguity: `summary`
+                # now rides inside args_json, and `tool_activity_detail`
+                # falls back to "first string value" for tools with no
+                # argument in its priority list — which would make the
+                # activity line silently order-dependent.
                 set_turn_activity(
-                    session_id, "tool", name, tool_activity_detail(args_json)
+                    session_id, "tool", name,
+                    summary or tool_activity_detail(args_json),
                 )
                 await _emit(turn, "tool_start", {
                     "call_id": call_id, "name": name,
                     "args": args_json, "context_tokens": last_turn_input,
+                    "summary": summary,
                 })
                 _event_log.log_event(session_id, "brain1.tool_call_proposed", {
                     "tool_call_id": call_id,
                     "name": name,
                     "args": args_json,
+                    "summary": summary,
                     "context_tokens": last_turn_input,
                 }, turn_id=turn.turn_id)
 

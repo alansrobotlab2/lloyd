@@ -272,7 +272,9 @@ authority — these keys are not the OpenAI wire names):
 - `text_delta` — `{type, text}` — streaming text chunk
 - `thinking_delta` — `{type, text}` — reasoning content chunk
 - `thinking_done` — `{type, text}` — reasoning phase complete
-- `tool_call` — `{type, call_id, name, args_json, args_dict}` — tool invocation
+- `tool_call` — `{type, call_id, name, args_json, args_dict, summary}` — tool
+  invocation. `summary` is the model's own one-liner for the transcript;
+  it is absent from `args_json`/`args_dict` (see "Tool-call summaries").
 - `tool_result` — `{type, call_id, name, content, is_error}` — tool result
 - `assistant_message` — `{type, text, tool_calls, thinking, usage,
   duration_ms, iteration, finish_reason}` — one agent-loop iteration.
@@ -378,6 +380,85 @@ Every tool lives inside an MCP server — built-ins (Bash/Read/Write/Edit/Grep/G
 config.yaml holds the hand-edited defaults and is **read-only at boot**; UI toggles (`/api/tool-toggle`, `/api/tool-discovery`) persist to `data/tool_overrides.yaml` (gitignored), which is merged over config.yaml at load (`app/config.py:_merge_tool_overrides`). To change tool state by hand, edit config.yaml and check `data/tool_overrides.yaml` isn't shadowing the same key.
 
 Disabled tools are enforced via `RunOptions.disallowed_tools` as `mcp__<server>__<tool>`. The harness's bare-name aliasing in `tool_schema.py` blocks both the bare and namespaced form at advertise + dispatch time, so disabling `Bash` via `mcp_servers.lloyd-mcp.disabled_tools: [Bash]` blocks the model from calling either `Bash` or `mcp__lloyd-mcp__Bash`.
+
+### Tool-call summaries
+
+Every advertised tool carries one extra string parameter, `summary`: a
+short phrase the model writes saying what the call is doing ("Reading
+server.py", "Restarting the backend"). The collapsed tool bubble in the
+chat and Inner Voice transcripts renders it as **`ToolName`** — summary,
+which is the whole point — a wall of `Bash`, `Bash`, `Read`, `Bash` says
+nothing about what a 50-iteration turn actually did.
+
+It is display metadata riding in the one channel a tool call has —
+its arguments — which makes *where it is removed* the whole design:
+
+- **`tool_schema.add_summary_param`** injects it and returns *which tools
+  got it*. That return value is load-bearing: `session_inject_context`
+  already has a required top-level `summary` of its own (1 of the 129
+  tools advertised today), and popping that one before dispatch would
+  delete a real argument. Injection **replaces** the `parameters` object
+  rather than mutating it — it arrives as the very `inputSchema` dict
+  held in `MCPPool.discovered`, which is process-shared for the life of
+  the pool, so an in-place write would make the *next* turn read `summary`
+  back as the tool's own parameter, skip injection, and stop stripping.
+- **`loop._commit_tool_calls`** lifts the value onto the tool call's
+  `_summary` and pops it from `_args_dict` — and *only* from there. The
+  two records of a call deliberately disagree: `_args_dict` is what
+  reaches MCP, which validates against each tool's real inputSchema (a
+  leaked `summary` is a dispatch error, not a spare field), while
+  `arguments` is what gets replayed to the engine and is **the only
+  record of this call the model will ever see again**.
+  **Stripping the caption from `arguments` too is what broke the first
+  cut of this**, and it broke it invisibly: session
+  `20260907_184351_ivec8d` shows the first call of each tool name
+  carrying a summary and every repeat carrying none — 5/5 vs 0/31. The
+  schema said `required`; the model's own most recent example of that
+  tool said otherwise, and the example won. A few-shot channel you are
+  writing into cannot be edited for brevity. It costs ~10 tokens per
+  historical tool call to keep, which is the price of the field working
+  past its first use.
+- **`summary` is injected first** in `properties` and in `required`.
+  Property order is the order the schema is shown to the model and
+  roughly the order it emits arguments in, so a caption placed after
+  Bash's `command` is one written after a 40-line heredoc.
+- `messages.py` persists it on the tool call (omitted when empty, so
+  every pre-existing session reads the same), puts it on the
+  `tool_start` SSE frame so the live bubble has it before the result
+  lands, and prefers it over `tool_activity_detail` for the dashboard's
+  live activity line.
+- The transcript's expanded **Arguments** block hides the key, because
+  that block shows what was *dispatched* and the header already shows
+  the caption. It is dropped only when the header is rendering it, so a
+  tool with a real `summary` parameter of its own still shows it there.
+
+The Inner Voice observer reads the caption in two of its three tool-call
+inputs, and the third exclusion is deliberate:
+
+- **`build_assistant_message_summary`** renders
+  `Bash — Checking root disk usage` per call instead of
+  `['Bash','Bash','Bash']`. The observer's job is judging whether the
+  primary is still on the user's request, and a wall of identical names
+  is the least informative possible input for that.
+  `observer_prompt._tool_call_labels` accepts all three shapes a caption
+  arrives in — `_summary` (live harness event), `summary` (rebuilt from
+  session JSON), and `summary` inside the raw `arguments` string.
+- **`build_pretool_event_summary`** states it before the arguments:
+  the caption is what the primary *said* it was doing and the arguments
+  are what it actually did, so the two disagreeing is the signal. (This
+  path is dormant while `pretool_llm_enabled: false`.)
+- **`guards.tool_call_signature` must never see it.** `exact` is the
+  full `key=value` rendering for every tool but Bash, so a caption in
+  the args makes two byte-identical calls compare as different — and
+  rewording is exactly what a looping model does. This is why
+  `fire_pre_tool_use` carries the caption as its own `tool_summary` key
+  rather than merging it into `tool_input`: `tool_input` is what safety
+  matching and the repetition guard read, and it stays clean.
+  `tests/test_tool_call_summaries.py` pins all three.
+
+`harness.tool_call_summaries: false` removes the parameter from every
+schema; the UI falls back to the bare tool name. Worth reaching for if a
+model ever starts spending its tool-call budget on the caption.
 
 ## Mission Control dashboard
 

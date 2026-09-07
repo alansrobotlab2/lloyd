@@ -208,6 +208,14 @@ harness:
   # review turn would push peak context past the microcompaction trigger,
   # and microcompaction can only clear tool results. 0 disables.
   preserve_thinking_iterations: 6
+  # Tool-call summaries. Adds a `summary` string parameter to every
+  # advertised tool — a short phrase the model writes describing what the
+  # call is doing, rendered beside the tool name in the chat and Inner
+  # Voice transcripts. Display metadata only: the harness strips it before
+  # dispatch and before the call is replayed back as history, so no tool
+  # ever receives it. false removes the parameter from every schema and the
+  # UI falls back to the bare tool name.
+  tool_call_summaries: true
   tool_search:
     enabled: true
     threshold_tools: 30

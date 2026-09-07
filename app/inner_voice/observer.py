@@ -1966,11 +1966,21 @@ def install_observer(
             return {}
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input") or {}
+        # The primary's own caption for this call. Carried beside
+        # `tool_input`, never inside it — see below.
+        tool_summary = input_data.get("tool_summary") or ""
 
         # Tier 0: deterministic repetition guard. This is the only place the
         # observer ever sees tool ARGUMENTS, and a loop lives entirely in the
         # arguments — same tool, same target, endlessly reworded. It costs no
         # LLM call, so it runs even though pretool judgment is otherwise off.
+        #
+        # `tool_summary` is deliberately NOT part of the signature. `exact`
+        # is the full key=value rendering and byte-equality is what makes a
+        # repeat "exact"; two identical commands carrying differently-worded
+        # captions would stop matching, and a caption is exactly the part of
+        # a call a looping model rewords each time. The guard must compare
+        # what was RUN, not what the primary said about it.
         state.recent_tool_calls.append(
             _guards.tool_call_signature(tool_name, tool_input)
         )
@@ -2049,7 +2059,9 @@ def install_observer(
         # as the next user message after the tool dispatches; a cancel
         # ends the turn after this tool finishes. Neither blocks dispatch.
         async def _judge_pretool() -> None:
-            summary = _prompt.build_pretool_event_summary(tool_name, tool_input)
+            summary = _prompt.build_pretool_event_summary(
+                tool_name, tool_input, tool_summary,
+            )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
                 user_prompt=user_prompt, cfg=state.cfg,

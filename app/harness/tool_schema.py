@@ -28,6 +28,89 @@ from typing import Any
 
 OPENAI_TOOL_NAME_MAX = 64
 
+# ---------------------------------------------------------------------------
+# The `summary` display parameter
+# ---------------------------------------------------------------------------
+
+# Every advertised tool carries one extra string parameter the model fills
+# in with a short phrase describing what the call is doing. It is display
+# metadata only: `_commit_tool_calls` lifts it off the parsed arguments and
+# onto the `tool_call` event, and it never reaches the MCP server — the
+# aggregator validates arguments against each tool's real inputSchema, so an
+# unknown key there is a dispatch error, not a spare field.
+SUMMARY_ARG = "summary"
+
+SUMMARY_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "Short present-tense summary of what this call is doing, for the "
+        "human watching the transcript — e.g. \"Reading server.py\", "
+        "\"Restarting the backend\", \"Searching the vault for voice notes\". "
+        "Under ~8 words, no trailing period, and don't repeat the tool name. "
+        "Display only: stripped before the tool runs."
+    ),
+}
+
+
+def add_summary_param(tools: list[dict[str, Any]]) -> set[str]:
+    """Add the `summary` display parameter to each advertised tool.
+
+    Returns the set of tool names that actually received it, which is what
+    the loop uses to decide whether a `summary` key in a model's arguments
+    is ours to strip. Two tools must never be treated the same way here:
+
+      * A tool that already declares its own top-level ``summary`` —
+        ``session_inject_context`` does, and it is *required* — keeps it untouched
+        and is left out of the returned set. Popping that value before
+        dispatch would silently delete a real argument.
+      * Everything else gets the injected copy and is stripped on the way
+        out.
+
+    The `parameters` object is replaced rather than mutated. It arrives as
+    the very ``inputSchema`` dict held in ``MCPPool.discovered``, which is
+    process-shared and reused for the life of the pool: mutating it in
+    place would leave `summary` in the pool's own copy, so the *second*
+    call would read it as the tool's own parameter, skip injection, and
+    stop stripping it — handing the aggregator an argument no tool
+    declares.
+    """
+    injected: set[str] = set()
+    for tool in tools:
+        fn = tool.get("function") or {}
+        name = fn.get("name") or ""
+        params = fn.get("parameters") or {"type": "object", "properties": {}}
+        props = params.get("properties") or {}
+        if SUMMARY_ARG in props:
+            continue
+        # First, not last, in both lists. Property order is the order the
+        # schema is rendered to the model and the order it tends to emit
+        # arguments in, so a caption placed after Bash's `command` is a
+        # caption written after a 40-line heredoc. Cheap to state up front,
+        # easy to trail off at the end.
+        new_props = {SUMMARY_ARG: dict(SUMMARY_PROPERTY), **props}
+        new_params = dict(params)
+        new_params["properties"] = new_props
+        required = list(new_params.get("required") or [])
+        if SUMMARY_ARG not in required:
+            required.insert(0, SUMMARY_ARG)
+        new_params["required"] = required
+        fn["parameters"] = new_params
+        injected.add(name)
+    return injected
+
+
+def pop_summary(args: dict[str, Any]) -> str:
+    """Remove and return the injected `summary` argument, if the model sent one.
+
+    Non-string values are dropped rather than coerced: a model that emits
+    ``summary: {...}`` has misunderstood the field, and rendering
+    ``[object Object]`` beside a tool name is worse than rendering nothing.
+    """
+    value = args.pop(SUMMARY_ARG, None)
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
 
 def mcp_tool_to_openai(tool: dict[str, Any]) -> dict[str, Any]:
     """Translate one MCP tool definition into the OpenAI tools schema."""
