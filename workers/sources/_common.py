@@ -105,7 +105,8 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
     # entire job is ingesting untrusted text. The backlog triage worker was
     # told not to start a round IN ITS PROMPT, which is not a control.
     for tname in ("selfmod_start", "selfmod_gate", "selfmod_land",
-                  "selfmod_abort", "selfmod_rollback"):
+                  "selfmod_abort", "selfmod_rollback",
+                  "selfmod_vault_land", "selfmod_vault_revert"):
         disallowed.append(tname)
         disallowed.append(f"mcp__lloyd-mcp__{tname}")
 

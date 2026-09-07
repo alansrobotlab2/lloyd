@@ -233,6 +233,16 @@ in EVIDENCE is lost**: #229 said two claims "belong in two new items" and filed
 none, in a turn told to write nothing. Both prompts now require filing whatever
 the in-focus item does not cover, via `backlog_write_task`, and report it under
 `SPAWNED:`; ids are verified on disk before the ledger links them.
+
+The verdict's `SURFACE:` picks the implementer's route. `code` and `frontend`
+run a worktree round through the gate — `web/src/**` is in scope since the
+`frontend` rung (tsc delta + `vite build`) exists. `vault` runs
+`scripts/selfmod/vault_round.py` (`selfmod_vault_land`): the vault is a live,
+shared tree with no worktree, so the route is validate the named paths (front
+matter; the real prompt/skill/task loaders for `skills/**`, `lloyd/**`,
+`autonomy/**`), commit exactly those paths on `main`, revert on failure. A
+`confirmed` whose fix needs a path the loop may never touch begins its
+acceptance with `human-only:` and is skipped, not attempted.
 `architecture/self-modification.md` §3.2.
 
 ### Development happens in ~/lloyd-sandbox

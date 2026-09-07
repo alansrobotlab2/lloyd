@@ -66,6 +66,7 @@ exactly.
 
 <triage>
 Verdict: confirmed
+Surface: {surface}
 Check that was run: {check}
 Evidence: {evidence}
 </triage>
@@ -90,17 +91,33 @@ contract. One change per round is what makes a rollback mean something. Do not \
 fold the discovery into this change, and do not leave it in your report — the \
 report is read once; the backlog is read until the item is done.
 
-Procedure:
+Procedure when the surface is `code` or `frontend`:
 1. Re-read the item and the triage evidence. If anything has changed since the \
 triage and the premise no longer holds, say so and stop — that is a result.
 2. `selfmod_start` with a goal naming item #{item_id}. Work only in the \
-worktree it returns.
+worktree it returns. The frontend is in scope: `web/src/**`, `web/index.html` \
+and `web/public/**` are writable and the gate type-checks and builds them; \
+`package.json`, the lockfile and the Vite/TS config are not.
 3. Write the test that fails today. Then the smallest change that makes it \
 pass. One change per round.
 4. `selfmod_gate`. If it fails twice on the same rung for the same reason, \
 `selfmod_abort` and report.
 5. `selfmod_land`. Then **end your turn immediately** — the landing needs the \
 backend idle, and your own turn is what keeps it busy.
+
+Procedure when the surface is `vault`:
+1. Re-read the item and the triage evidence, as above.
+2. Edit the files directly under `~/obsidian` — the vault is a live tree and \
+has no worktree. Touch only the paths the acceptance check names.
+3. Verify the acceptance check yourself, then \
+`selfmod_vault_land(paths, message, item_id={item_id})`. It validates exactly \
+those paths (front matter, and for skills, tasks and identity files the real \
+loaders), commits them on the vault's main and records the sha. If it refuses, \
+it has already reverted your edits: fix the cause and retry once, or stop and \
+report. Nothing restarts, so your turn continues.
+
+If the surface is `mixed`, land the vault half first, then run the code \
+procedure, and end your turn after `selfmod_land`.
 
 Report what you did, quoting the gate line rather than saying "it passed", \
 and end with one line `SPAWNED: <ids of the items you filed, or the word none>`. \
@@ -192,6 +209,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         item_id=candidate.id, status=candidate.status, priority=candidate.priority,
         name=candidate.name, body=candidate.body[:30_000],
         triaged_ago=_age_phrase(triage.get("ts")),
+        surface=triage.get("surface") or "code",
         check=triage.get("check") or "(none recorded)",
         evidence=(triage.get("evidence") or "(none recorded)")[:2000],
         acceptance=triage.get("acceptance") or "",
@@ -205,17 +223,25 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                         "phase": "skipped", "reason": f"landing in progress: {exc}"})
         return {"status": "skipped", "summary": f"landing in progress: {exc}"}
 
-    round_id = _round_opened_since(S.read_events(limit=200), started)
+    events = S.read_events(limit=200)
+    round_id = _round_opened_since(events, started)
+    vault_commits = [e.get("commit") for e in events
+                     if e.get("event") == "vault_land" and e.get("ok")
+                     and e.get("item_id") == candidate.id
+                     and float(e.get("ts") or 0) >= started]
     claimed = B.parse_spawned_line(run.get("text") or "")
     spawned = B.existing_ids(claimed)
     S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                     "phase": "finished", "session_id": run["session_id"],
-                    "round_id": round_id, "stop_reason": run.get("stop_reason"),
+                    "round_id": round_id, "vault_commits": vault_commits,
+                    "surface": triage.get("surface") or "code",
+                    "stop_reason": run.get("stop_reason"),
                     "num_turns": run.get("num_turns"),
                     "spawned": spawned,
                     "spawned_unverified": [i for i in claimed if i not in spawned],
                     "response_tail": (run.get("text") or "")[-1500:]})
-    outcome = f"round {round_id}" if round_id else "no round opened"
+    outcome = (f"round {round_id}" if round_id else
+               f"vault commit {vault_commits[-1][:8]}" if vault_commits else "no round opened")
     logger.info("backlog #%s: %s (session %s, %s)", candidate.id, outcome,
                 run["session_id"], run.get("stop_reason"))
     return {"status": "success", "item_id": candidate.id, "round_id": round_id,

@@ -49,8 +49,13 @@ Work in this order:
 1. **State the premise.** In one sentence, what does this item assert is true \
 about the system? If it asserts nothing checkable (it is an idea, a research \
 prompt, or a wish), the verdict is `unverifiable`.
-2. **Decide whether it is even about Lloyd's own code.** Hardware, robots, \
-external services and vault content are `not_code`. Do not investigate further.
+2. **Decide the surface.** Which part of the system would a fix touch? \
+`code` (Python under `~/lloyd`), `frontend` (`web/src`), `vault` (skills, \
+SOUL.md, memories, autonomy tasks and notes under `~/obsidian`), `mixed`, or \
+`external`. Hardware, robots and third-party services are `external`: the \
+verdict is `not_code`, do not investigate further. **Vault content is in \
+scope** — the loop lands vault changes through its own route — so an item \
+about a skill, a task definition or an identity file gets a real verdict.
 3. **Design a check.** A command, a file to read, a grep, a metric to query — \
 something that would come out differently depending on whether the premise \
 holds. Write it down before running it.
@@ -114,10 +119,17 @@ SHAs. A verdict without evidence is unusable, because the point of this pass is 
 that a human can audit it later.
 - If you find the premise confirmed, also state **how the fix would be \
 verified** — the check you just ran should fail to reproduce afterwards.
+- **Some paths the loop may never touch**: `config.yaml`, `data/**`, `.env*`, \
+`pytest.ini`, `.gitignore`, and under `web/` the build inputs (`package.json`, \
+the lockfile, `vite.config.*`, `tsconfig*.json`). If the fix needs one of \
+them the item is still `confirmed`, but a human has to land it: begin \
+ACCEPTANCE with `human-only:` and name the path. The implementer skips those \
+instead of spending a round finding out.
 
 Finish with exactly this block and nothing after it:
 
 VERDICT: <one of confirmed|already_done|stale|unverifiable|not_code>
+SURFACE: <one of code|frontend|vault|mixed|external>
 CHECK: <the command or method you ran, one line>
 EVIDENCE: <2-4 sentences citing what you actually observed>
 ACCEPTANCE: <if confirmed: what must become true for this to be done; otherwise the word none>
@@ -134,7 +146,7 @@ def _parse_spawned(value: str) -> list[int]:
     return parse_spawned(value)
 
 
-_FIELD = re.compile(r"^(VERDICT|CHECK|EVIDENCE|ACCEPTANCE|SPAWNED):\s*(.*)$", re.I)
+_FIELD = re.compile(r"^(VERDICT|SURFACE|CHECK|EVIDENCE|ACCEPTANCE|SPAWNED):\s*(.*)$", re.I)
 
 
 def parse_verdict(text: str) -> dict | None:
@@ -146,7 +158,7 @@ def parse_verdict(text: str) -> dict | None:
     silently wrong record, which for this pipeline means a `confirmed` that
     nobody actually concluded.
     """
-    from scripts.selfmod.backlog import VERDICTS
+    from scripts.selfmod.backlog import VERDICTS, SURFACES
 
     lines = text[-6000:].splitlines()
     start = None
@@ -169,10 +181,14 @@ def parse_verdict(text: str) -> dict | None:
     verdict = " ".join(fields.get("VERDICT", [])).strip().lower()
     if verdict not in VERDICTS:
         return None
+    surface = " ".join(fields.get("SURFACE", [])).strip().lower().strip("`'\"")
+    if surface not in SURFACES:
+        surface = "external" if verdict == "not_code" else "code"
     def joined(key: str, limit: int) -> str:
         return "\n".join(fields.get(key, [])).strip()[:limit]
     return {
         "verdict": verdict,
+        "surface": surface,
         "check": " ".join(joined("CHECK", 4000).split())[:400],
         "evidence": joined("EVIDENCE", 2000),
         # The implementer's contract. 600 cut #278's mid-way through its
@@ -292,7 +308,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     S.append_event({"event": "backlog_triage", "item_id": candidate.id,
                     "name": candidate.name[:200], "age_days": candidate.age_days,
-                    "verdict": parsed["verdict"], "check": parsed["check"],
+                    "verdict": parsed["verdict"], "surface": parsed["surface"],
+                    "check": parsed["check"],
                     "evidence": parsed["evidence"][:1000],
                     "acceptance": parsed["acceptance"], "closed": close,
                     "spawned": spawned, "spawned_unverified": unverified,

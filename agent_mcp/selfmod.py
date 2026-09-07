@@ -253,6 +253,44 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="selfmod_vault_land",
+            description=("Land a change to the Obsidian vault (~/obsidian) through the "
+                         "self-modification loop. The vault is a live tree with no worktree, "
+                         "so this runs AFTER you edit: it validates only the paths you name "
+                         "(front matter must parse; a touched skill must still load, a touched "
+                         "autonomy task must still parse, SOUL.md/memory/skill edits must still "
+                         "build the system prompt), commits exactly those paths on the vault's "
+                         "main, and records the sha in the selfmod ledger. If validation fails "
+                         "the paths are REVERTED (tracked files back to HEAD, new files deleted) "
+                         "and nothing lands. .obsidian/**, .git/** and .trash/** are denied. "
+                         "Requires Inner Voice on the turn, like selfmod_start."),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "paths": {"type": "array", "items": {"type": "string"},
+                              "description": "Vault-relative paths you changed, e.g. "
+                                             "skills/foo/SKILL.md"},
+                    "message": {"type": "string", "description": "Commit message"},
+                    "item_id": {"type": "integer",
+                                "description": "Backlog item this implements, if any"},
+                },
+                "required": ["paths", "message"],
+            },
+        ),
+        Tool(
+            name="selfmod_vault_revert",
+            description=("Revert a vault commit made by selfmod_vault_land (a plain git "
+                         "revert), recorded in the ledger. For a landed vault change that "
+                         "turned out wrong."),
+            inputSchema={
+                "type": "object",
+                "properties": {"sha": {"type": "string", "description": "The commit to revert"},
+                               "reason": {"type": "string",
+                                          "description": "Why; recorded in the ledger"}},
+                "required": ["sha"],
+            },
+        ),
+        Tool(
             name="selfmod_rollback",
             description=("Ask the guardian to revert the live tree and restart. Returns "
                          "immediately; the guardian acts within seconds and picks the "
@@ -305,6 +343,30 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         if name == "selfmod_abort":
             return text_result(json.dumps(R.abort(arguments.get("round_id") or ""), indent=2))
+
+        if name == "selfmod_vault_land":
+            from scripts.selfmod import vault_round as VR
+            gate = _inner_voice_gate("land a vault change")
+            if gate:
+                return text_result(json.dumps(gate, indent=2))
+            paths = [str(x) for x in (arguments.get("paths") or []) if str(x).strip()]
+            try:
+                out = VR.land(paths, str(arguments.get("message") or ""),
+                              item_id=arguments.get("item_id"))
+            except VR.VaultRoundError as exc:
+                return text_result(_err(str(exc)))
+            out["note"] = ("Committed on the vault's main and live already — nothing "
+                           "restarts. selfmod_vault_revert undoes it.")
+            return text_result(json.dumps(out, indent=2))
+
+        if name == "selfmod_vault_revert":
+            from scripts.selfmod import vault_round as VR
+            try:
+                out = VR.revert(str(arguments.get("sha") or ""),
+                                str(arguments.get("reason") or "manual"))
+            except VR.VaultRoundError as exc:
+                return text_result(_err(str(exc)))
+            return text_result(json.dumps(out, indent=2))
 
         if name == "selfmod_rollback":
             reason = arguments.get("reason") or "manual"

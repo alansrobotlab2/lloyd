@@ -49,6 +49,25 @@ DEFAULT_BOARDS = ("lloyd",)
 
 VERDICTS = ("confirmed", "already_done", "stale", "unverifiable", "not_code")
 
+# Which part of the system a fix would touch. Decides the implementer's route:
+# `code` and `frontend` go through a worktree round and the gate; `vault`
+# goes through `vault_round` (validate → commit only those paths → revert on
+# failure), because the vault is a live tree with no worktree; `mixed` does
+# the vault half first. `external` is hardware, robots and third-party
+# services — the only things `not_code` still means.
+SURFACES = ("code", "frontend", "vault", "mixed", "external")
+
+# An acceptance that opens with this is a contract only a human can execute:
+# the fix needs a path the loop may never touch (config.yaml, data/**, .env*,
+# pytest.ini, .gitignore, the frontend's build inputs). `select_confirmed`
+# skips it rather than spending an implement round discovering it — which is
+# exactly what #278 spent nine iterations on before web/src was allowed.
+HUMAN_ONLY_PREFIX = "human-only:"
+
+
+def is_human_only(acceptance) -> bool:
+    return str(acceptance or "").strip().lower().startswith(HUMAN_ONLY_PREFIX)
+
 # Verdicts that retire an item rather than producing work. Both are wins.
 RETIRING = {"already_done", "stale"}
 
@@ -253,6 +272,12 @@ def confirmed_verdicts(ledger: Path) -> dict[int, dict]:
     return out
 
 
+def human_only_ids(ledger: Path) -> dict[int, str]:
+    """{item_id: acceptance} for confirmed items only a human can land."""
+    return {i: ev.get("acceptance", "") for i, ev in confirmed_verdicts(ledger).items()
+            if is_human_only(ev.get("acceptance"))}
+
+
 def implemented_ids(ledger: Path) -> set[int]:
     """Items an implementation turn has already been run for, whatever it did."""
     return {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
@@ -291,6 +316,8 @@ def select_confirmed(ledger: Path,
         if not ev or item.id in done:
             continue
         if not acceptance_text(ev.get("acceptance")):
+            continue
+        if is_human_only(ev.get("acceptance")):
             continue
         ready.append((item, ev))
     if not ready:

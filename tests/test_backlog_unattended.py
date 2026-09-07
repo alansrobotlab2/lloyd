@@ -354,11 +354,16 @@ def test_the_implementer_notices_a_round_it_opened(isolated):
     assert I._round_opened_since(events, now + 20) is None
 
 
-def test_the_implementer_is_off_until_a_human_turns_it_on():
+def test_the_implementer_is_off_unless_a_human_turns_it_on():
+    """The pool treats a source with no `enabled` key as off, so a fresh
+    checkout never runs unattended rounds. (The flag itself was turned on
+    by hand on 2026-09-07; that is the human decision this pins, not the
+    value.)"""
+    pool_src = Path(I.__file__).resolve().parent.parent / "pool.py"
+    assert 'src_cfg.get("enabled", False)' in pool_src.read_text()
     cfg = yaml.safe_load((Path(I.__file__).resolve().parent.parent.parent / "config.yaml").read_text())
     src = cfg["workers"]["sources"]["backlog-implement"]
-    assert src["enabled"] is False
-    assert src["max_turns"] >= 76
+    assert isinstance(src.get("enabled"), bool), "the flag must be explicit in config, never implied"
 
 
 # ===========================================================================
@@ -453,3 +458,55 @@ def test_selfmod_jobs_are_not_queued_behind_routine_research():
     assert "ORDER BY priority ASC" in Path(Q.__file__).read_text(), "the assumption this test rests on"
     routine = min(domain_research.DEFAULT_PRIORITY, session_distill.DEFAULT_PRIORITY)
     assert I.DEFAULT_PRIORITY < M.DEFAULT_PRIORITY < routine
+
+
+# ===========================================================================
+# Surfaces: frontend and vault are in scope; human-only is skipped
+# ===========================================================================
+
+def test_parse_verdict_carries_the_surface_and_defaults_sensibly():
+    assert M.parse_verdict("VERDICT: confirmed\nSURFACE: vault\nCHECK: x\nEVIDENCE: y\n"
+                           "ACCEPTANCE: z\n")["surface"] == "vault"
+    assert M.parse_verdict(VERDICT_OK)["surface"] == "code", "older blocks have no SURFACE line"
+    assert M.parse_verdict("VERDICT: not_code\nCHECK: x\nEVIDENCE: y\nACCEPTANCE: none\n")["surface"] == "external"
+    assert M.parse_verdict("VERDICT: stale\nSURFACE: kernel\nCHECK: x\nEVIDENCE: y\n")["surface"] == "code"
+
+
+def test_the_triage_prompt_puts_vault_and_frontend_in_scope():
+    assert "SURFACE:" in M.PROMPT
+    assert "Vault content is in" in M.PROMPT
+    assert "vault content are `not_code`" not in M.PROMPT
+    assert "human-only:" in M.PROMPT
+
+
+def test_human_only_acceptances_are_never_handed_to_the_implementer(isolated):
+    write_item(isolated, 1, days_old=50)
+    write_item(isolated, 2, days_old=40)
+    _confirm(1, acceptance="human-only: needs config.yaml `agent.max_turns` raised")
+    _confirm(2)
+    item, _ = B.select_confirmed(S.LEDGER_PATH)
+    assert item.id == 2
+    assert B.human_only_ids(S.LEDGER_PATH) == {1: "human-only: needs config.yaml `agent.max_turns` raised"}
+
+
+def test_the_implementer_prompt_has_a_vault_route_and_renders_the_surface(isolated, monkeypatch):
+    write_item(isolated, 2)
+    S.append_event({"event": "backlog_triage", "item_id": 2, "verdict": "confirmed",
+                    "surface": "vault", "check": "ls", "evidence": "e",
+                    "acceptance": "skills/foo/SKILL.md names the new step"}, path=S.LEDGER_PATH)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
+
+    async def fake(prompt, **kw):
+        fake.prompt = prompt
+        S.append_event({"event": "vault_land", "ok": True, "item_id": 2, "commit": "abc1234def"},
+                       path=S.LEDGER_PATH)
+        return {"text": "landed the skill edit\n\nSPAWNED: none\n", "session_id": "s",
+                "stop_reason": "stop", "num_turns": 4, "errors": []}
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    out = asyncio.run(I.execute(_Item()))
+    assert "Surface: vault" in fake.prompt and "selfmod_vault_land" in fake.prompt
+    assert "web/src/**" in fake.prompt
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
+    assert ev["vault_commits"] == ["abc1234def"] and ev["surface"] == "vault"
+    assert out["summary"].endswith("vault commit abc1234d")

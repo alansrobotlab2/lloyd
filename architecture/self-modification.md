@@ -207,6 +207,36 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   the item is the handoff and a contract only the ledger holds is one the
   item's next reader never sees.
 
+**Surfaces.** The verdict block carries `SURFACE: code|frontend|vault|mixed|
+external`, and it decides the implementer's route. `code` and `frontend` go
+through a worktree round and the gate (the frontend rung builds `web/src`).
+`vault` goes through `scripts/selfmod/vault_round.py`, because the vault is a
+separate git repo and a *live* tree — Lloyd, the nightly jobs and Alan write
+into it at once, and `prompt_builder` and `autonomy` read it straight from
+disk — so there is no candidate to gate in isolation. The route is therefore
+*validate → commit only these paths → revert on failure*: `.obsidian/**`,
+`.git/**` and `.trash/**` are denied; every changed `.md` must have front
+matter that parses to a mapping; for paths that feed a prompt or the
+scheduler (`skills/**`, `lloyd/**`, `autonomy/**`) the real loaders run in a
+fresh interpreter, scoped to what changed — the system prompt must still
+build, a touched skill must still load, a touched task must still parse. A
+failure puts the round's paths back (tracked ones to HEAD, new ones deleted),
+because on a live tree "nothing lands" has to mean "nothing stays". Success
+commits exactly those paths on the vault's `main` (the same branch guard as
+`scripts/util/vault-commit.sh`) and records a `vault_land` ledger event with
+the sha; `selfmod_vault_revert` is a plain `git revert`, also recorded. Both
+tools sit behind the Inner Voice gate like `selfmod_start`, and both are
+denied to session-less worker turns. `not_code` is now reserved for
+`external` — hardware, robots, third-party services — and vault items get
+real verdicts.
+
+**Human-only.** Some paths the loop may never touch remain: `config.yaml`,
+`data/**`, `.env*`, `pytest.ini`, `.gitignore`, and the frontend's build
+inputs. A triage whose fix needs one records `confirmed` with an acceptance
+that begins `human-only:`, and `select_confirmed` skips it — the alternative
+was an implement round spent discovering it, which is what #278 cost before
+`web/src` was allowed.
+
 ### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the
