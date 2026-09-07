@@ -1,13 +1,3 @@
-# qmd collection definitions — reference copy of ~/.config/qmd/index.yml
-#
-# qmd reads ~/.config/qmd/index.yml, NOT this file. This is the tracked
-# source of truth so a rebuild does not depend on a backup existing:
-#   mkdir -p ~/.config/qmd && cp agent-services/conf/qmd-index.yml ~/.config/qmd/index.yml
-#   qmd update && qmd embed
-#
-# Re-sync after changing collections:
-#   cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml
-#
 collections:
   facts:
     path: /home/alansrobotlab/obsidian/facts
@@ -48,9 +38,20 @@ collections:
   autonomy:
     path: /home/alansrobotlab/obsidian/autonomy
     pattern: "*.md"
+  # Autonomy run records. architecture/autonomy-system.md claimed these were
+  # indexed long before anything indexed them, so ~19 MB of diagnoses written by
+  # tasks #67, #78 and #80 were unsearchable. Only current-format run_*.md
+  # records; the 844 legacy epoch-named files are retention fodder, not knowledge.
+  autonomy-runs:
+    path: /home/alansrobotlab/lloyd/autonomy-runs
+    pattern: "*/run_*.md"
   sessions:
     path: /home/alansrobotlab/obsidian/sessions
     pattern: "**/*.md"
   architecture:
     path: /home/alansrobotlab/obsidian/architecture
     pattern: "**/*.md"
+models:
+  embed: hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf
+  generate: hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf
+  rerank: hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf

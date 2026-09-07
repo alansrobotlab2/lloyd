@@ -1,0 +1,15 @@
+[Unit]
+Description=qmd orphaned-vector cleanup (the fork in ~/lloyd/qmd)
+Documentation=file:///home/alansrobotlab/lloyd/qmd/WORKLOG.md
+# Every re-embed leaves the previous chunks behind: 67% orphans on
+# 2026-09-07, back to 2% an hour after a cleanup. With the fork's in-memory
+# index they no longer slow queries, but they still take RAM, disk and reload
+# time. ~7 s at 3% orphans, VACUUM included; safe with the daemon running.
+
+[Service]
+Type=oneshot
+Environment=HOME=%h
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 QMD_LLAMA_GPU=cuda
+Environment=LD_LIBRARY_PATH=/usr/lib:/opt/cuda/lib64 CUDA_PATH=/opt/cuda CUDA_HOME=/opt/cuda
+ExecStart=/usr/bin/node %h/lloyd/qmd/dist/cli/qmd.js cleanup
+TimeoutStartSec=600

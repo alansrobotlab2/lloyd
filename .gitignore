@@ -83,3 +83,11 @@ eval/baselines/
 
 # scratch output some tools drop in the repo root
 /tmp/
+
+# ─── The qmd fork (its own repo, branch `lloyd`) ─
+# github.com/tobi/qmd plus Lloyd's changes. Since 2026-09-07 agent-qmd-daemon
+# runs THIS tree's dist/ (see agent-services/supervisor/conf.d/agent-qmd-daemon.conf);
+# the bun-installed package is only the revert path. It carries its own .git,
+# so without this git would try to record it as a gitlink to a commit nobody
+# else can fetch. Read qmd/CLAUDE.md before touching it.
+/qmd/

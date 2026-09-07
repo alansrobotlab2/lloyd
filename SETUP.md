@@ -45,6 +45,7 @@ What it captures, and why each matters:
 | `~/lloyd/_pipeline/vault-derived/kg.sqlite` | 76 MB | **The knowledge graph.** Edges, aliases, the entity registry and the fact index. Fact *content* can be re-extracted from the vault over a few GPU-nights; the edges, the merge history and the hand-review state cannot be reproduced at all. Copy it with `sqlite3 kg.sqlite ".backup out.sqlite"` or the daily tarball — a plain `cp` of a WAL database taken mid-write is not restorable. |
 | `~/lloyd/_pipeline/vault-derived/facts/` | 282 MB | The fact layer, 61,392 markdown files. Re-extractable, but that is ~5 GPU-hours. |
 | `~/lloyd/_pipeline/memory-graph/` | small | Merge plans, apply reports, semantic verdicts, `graph-baseline.json`. This is the evidence that makes a bad merge revertable. |
+| `~/lloyd/qmd/` — branch `lloyd` | small (the branch; `node_modules` reinstalls) | **The qmd fork the daemon runs** ([Part 6](#part-6--qmd-vault-search)). The clone is gitignored by this repo and its `lloyd` branch exists only on this disk until pushed: `git -C ~/lloyd/qmd push -u origin lloyd` (origin = `alansrobotlab2/qmd`). Its `WORKLOG.md`/`GAMEPLAN.md` are force-added to that branch, so the push carries them. |
 | `~/lloyd/sessions/` | 725 MB | Conversation history. Gitignored. Optional but not recoverable. |
 | `~/backups/backup_*.tar.gz` (latest + `.sha256`) | varies | The daily archive itself. |
 
@@ -440,9 +441,21 @@ backend — there is no production build step in the service path.
 
 ## Part 6 — qmd (vault search)
 
-qmd is the retrieval backbone. Installed via bun, but **run by system node** —
-the supervisord config invokes
-`/usr/bin/node .../@tobilu/qmd/dist/cli/qmd.js`, not the bun shim.
+qmd is the retrieval backbone. **Two installs, and the split is deliberate:**
+
+| | what | used by |
+|---|---|---|
+| published `@tobilu/qmd` 2.8.3 | bun global install | `agent-qmd-watcher` (`qmd update` / `qmd embed`), the `qmd` on your PATH, and the **revert path** for the daemon |
+| **the fork, `~/lloyd/qmd` branch `lloyd`** | git clone, built with `npm run build` | `agent-qmd-daemon` (port 8181 — every `vault_recall`/`vault_search`) and `lloyd-qmd-cleanup.timer` |
+
+Both are **run by system node** — the supervisord config invokes
+`/usr/bin/node .../dist/cli/qmd.js`, never the bun shim. They share the one
+index file; the daemon reloads its in-memory vector index on the next search
+after the watcher writes (~0.5 s), so mixing versions is fine as long as the
+daemon is the fork.
+
+**Published package first** (the watcher needs it, and the daemon falls back
+to it):
 
 ```bash
 npm install -g node-gyp            # better-sqlite3 builds against it; without it the install fails
@@ -451,6 +464,42 @@ bun install -g @tobilu/qmd
 bun pm -g trust node-llama-cpp    # runs the blocked postinstall; without it `qmd embed` has no backend
 /usr/bin/node ~/.bun/install/global/node_modules/@tobilu/qmd/dist/cli/qmd.js --version
 ```
+
+**Then the fork.** Why it exists: published 2.8.3 brute-forces every stored
+vector once *per collection* through sqlite-vec, so the twelve-collection
+fan-out took 9.3 s; it also ignores the `skipRerank` key the client sent, so
+`vault_recall` was being reranked without anyone knowing. The fork keeps a
+normalised in-memory copy of the vectors (162 ms for the same fan-out,
+identical results), honours the flag, and adds the two daemon knobs below.
+Measurements: `qmd/WORKLOG.md` section 6.
+
+```bash
+git clone https://github.com/alansrobotlab2/qmd.git ~/lloyd/qmd   # the clone is gitignored here
+cd ~/lloyd/qmd && git checkout lloyd
+bun install                        # bun.lock; trustedDependencies in package.json cover node-llama-cpp
+npm run build                      # tsc → dist/, stamps dist/cli/build-info.json with the commit
+cat dist/cli/build-info.json       # must not say "-dirty" for a deploy you intend to keep
+/usr/bin/node dist/cli/qmd.js --version
+```
+
+`agent-services/supervisor/conf.d/agent-qmd-daemon.conf` already points at
+`~/lloyd/qmd/dist/cli/qmd.js` and sets `QMD_LLM_IDLE_TIMEOUT_MS="0"` (models
+stay resident on GPU 0, ~3 GB, instead of reloading on the first query after
+five quiet minutes) and `QMD_RERANK_PARALLELISM="4"` (the reranker pool is
+otherwise sized from free VRAM at first use and came out at two).
+`QMD_RERANK_WINDOW_CHARS` is the next knob if reranking is too slow; it is
+documented in that conf with its measured cost.
+
+**To deploy a change to the fork:** edit, `npm run build`, then
+`supervisorctl ... restart agent-qmd-daemon`. Editing `src/` alone changes
+nothing — the daemon runs `dist/`. **To revert to the published package:**
+swap the `command=` line back to the bun path and restart.
+
+**The client side of this is not optional.** `agent_mcp/vault.py` sends
+`rerank: true` by default (`RECALL_QMD_RERANK`). With the fork honouring
+`skipRerank`, sending it costs 0.16 MRR on `vault_recall`; that constant's
+comment carries the measurement. `prefetch.py` skips the reranker on purpose,
+inside its latency budget.
 
 Three traps here, all verified on a clean 2026-08-22 rebuild:
 
@@ -463,7 +512,8 @@ Three traps here, all verified on a clean 2026-08-22 rebuild:
 - **bun blocks postinstalls by default.** `node-llama-cpp` needs its one to run
   (`bun pm -g trust`); the four `tree-sitter-*` ones can stay blocked.
 
-Current version is **2.8.3**, not 2.0.1.
+Published version is **2.8.3**, not 2.0.1. The fork is 2.8.3 plus the `lloyd`
+branch; `qmd --version` from its `dist/` prints the commit it was built from.
 
 ### Collections
 
@@ -475,9 +525,13 @@ mkdir -p ~/.config/qmd
 cp agent-services/conf/qmd-index.yml ~/.config/qmd/index.yml
 ```
 
-It defines the 14 collections (`facts`, `memory`, `knowledge`, `projects`,
-`lloyd`, `personal`, `work`, `skills`, `people`, `subliminal`, `backlog`,
-`autonomy`, `sessions`, `architecture`) all rooted under `~/obsidian`.
+It defines 15 collections: 14 rooted under `~/obsidian` (`facts`, `memory`,
+`knowledge`, `projects`, `lloyd`, `personal`, `work`, `skills`, `people`,
+`subliminal`, `backlog`, `autonomy`, `sessions`, `architecture`) plus
+`autonomy-runs`, which points into `~/lloyd/autonomy-runs`. Two of them —
+`facts` and `sessions` — are **empty** on disk; the real fact tree is
+`_pipeline/vault-derived/facts` and reaches retrieval through the knowledge
+graph, not qmd. The `models:` block pins the embed/expand/rerank GGUFs.
 
 If you change collections later, re-sync the tracked copy:
 
@@ -493,14 +547,20 @@ qmd embed       # vector embeddings — downloads the embedding model on first r
 qmd status
 ```
 
-A healthy index looks like ~9.4k documents / ~32k vectors at ~840 MB.
+A healthy index looks like ~11.8k documents / ~22k vectors at ~960 MB
+(2026-09-07, after `qmd cleanup`; the vector count runs higher between cleanups).
 
 ### Two known qmd traps
 
-- **Orphaned vectors.** If `vault_search` gets slow (`vec=700ms` at 0% GPU and
-  one pinned CPU core) or multi-hop recall collapses, the index has accumulated
-  orphaned embedding chunks. Fix with `qmd cleanup`. This is a *quality* fix,
-  not just speed.
+- **Orphaned vectors.** Every re-embed leaves the old chunks behind; on
+  2026-09-07 the index was 67% orphans and they were back to 2% within an
+  hour of a cleanup. Published 2.8.3 scanned every one of them on every query,
+  so `vault_search` got slow (`vec=700ms` at 0% GPU and one pinned CPU core)
+  and multi-hop recall collapsed. The fork's in-memory index makes the *speed*
+  cost go away but orphans still take RAM and disk, so
+  `lloyd-qmd-cleanup.timer` runs `qmd cleanup` nightly at 04:45
+  ([Optional timers](#optional-timers)). ~7 s at 3% orphans, VACUUM included,
+  safe with the daemon running.
 - **GPU arch mismatch.** If `vault_search` returns **0 results**, qmd's
   `node-llama-cpp` CUDA binary was built without the target GPU's arch and the
   vector leg crashes, zeroing the fused lex+vec query. Rebuild `node-llama-cpp`
@@ -537,8 +597,11 @@ nvidia-smi --query-compute-apps=pid,used_memory --format=csv | grep "$(pgrep -f 
 ```
 
 **Only model inference is GPU-accelerated.** Embedding, query expansion, and
-reranking run on the GPU; the BM25 lexical leg and the vector similarity scan are
-SQLite and stay on CPU. That is the design, not a misconfiguration.
+reranking run on the GPU; the BM25 lexical leg is SQLite FTS5 on CPU, and the
+vector similarity scan is a Float32 dot product over the fork's in-memory
+index (~12 ms for 21k chunks, also CPU). That is the design, not a
+misconfiguration. Published 2.8.3 did that scan through sqlite-vec instead,
+once per collection, which is what the fork replaced.
 
 `qmd status` reports `AST Chunking: active` as of 2.8.3, which bundles its own
 tree-sitter grammars (typescript, tsx, javascript, python, go, rust). Older notes
@@ -822,7 +885,7 @@ lsup reread && lsup update
 | `lloyd-agent-worker` | — | `.venvs/lloyd/bin/python agent-services/livekit_worker.py` | yes |
 | `agent-livekit-server` | 7880 | `bin/start-livekit-server.sh` | yes |
 | `agent-tts` | 8090 | `bin/start-qwen3-tts.sh` on GPU 0 | yes |
-| `agent-qmd-daemon` | 8181 | `node .../qmd.js mcp --http` on GPU 0 | yes |
+| `agent-qmd-daemon` | 8181 | `node ~/lloyd/qmd/dist/cli/qmd.js mcp --http` — **the fork**, on GPU 0 | yes |
 | `agent-qmd-watcher` | — | `scripts/qmd-watcher.sh` (inotify → reindex) | yes |
 | `agent-obsidian-sync` | — | `bin/start-obsidian-sync.sh` (`ob sync --continuous`) | yes |
 
@@ -835,7 +898,14 @@ binary, the fix is almost always its `environment=...PATH=...` line.
 ```bash
 systemctl --user enable --now backup.timer               # scripts/backup.sh, daily 02:00
 systemctl --user enable --now lloyd-graph-backup.timer   # knowledge graph, daily 05:30
+systemctl --user enable --now lloyd-qmd-cleanup.timer    # qmd orphan cleanup, daily 04:45
 ```
+
+`lloyd-qmd-cleanup.timer` is tracked in `agent-services/systemd/` and lands
+in `~/.config/systemd/user/` through `agent-services/setup/install-services.sh`
+like the guardian units, so it only needs enabling. It runs the fork's
+`qmd cleanup` after the 22:00–04:00 nightly write window and before the
+05:30 graph backup.
 
 Note that `backup.sh` targets `~/backups` on the local disk and covers only
 `~/obsidian` and `~/lloyd/scripts`. Consider pointing `BACKUP_BASE` at external

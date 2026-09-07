@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly qmd orphaned-vector cleanup
+
+[Timer]
+# 04:45 — after the 22:00–04:00 extraction/classifier write window (the
+# re-embeds that create orphans) and before the 05:30 graph backup, so the
+# night's disk work stays staggered.
+OnCalendar=*-*-* 04:45:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

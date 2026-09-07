@@ -63,8 +63,16 @@ AUDIT_LOG_FILE = AUDIT_LOG_DIR / "writes.jsonl"
 QMD_BIN = Path.home() / ".bun" / "bin" / "qmd"
 QMD_DAEMON_URL = service_url("qmd", "http://localhost:8181/query")
 
+# The qmd collections vault_search fans out over and vault_recall filters on.
+# `facts` is deliberately absent: qmd's `facts` collection points at
+# ~/obsidian/facts, which exists and is empty — the real fact tree is
+# _pipeline/vault-derived/facts and reaches retrieval through the knowledge
+# graph and fact layer, not qmd. Until 2026-09-07 it was listed anyway, so one
+# of every twelve fan-out requests went to an empty collection. Indexing the
+# real fact tree in qmd (61k files, ~3x the index) is a separate, measurable
+# decision; see qmd/GAMEPLAN.md item 4.
 VAULT_SEGMENTS = [
-    "facts", "memory", "knowledge", "projects", "personal", "work", "skills",
+    "memory", "knowledge", "projects", "personal", "work", "skills",
     "architecture", "lloyd", "autonomy", "backlog", "people",
 ]
 VAULT_EXCLUDE_DIRS = {"templates", "images"}
@@ -110,6 +118,21 @@ RECALL_RERANK_ALPHA = 0.3      # only consulted when rerank is explicitly on
 RECALL_DEMOTE_DAILY_LOGS = True
 RECALL_GRAPH_TOP_K = 5
 RECALL_GRAPH_HOPS = 1
+
+# qmd's own cross-encoder reranker, distinct from graph_rerank above. This
+# client sent `skipRerank: true` on every request from the day it was
+# written, and published qmd 2.8.3 silently ignored that key — it only
+# reads `rerank` — so vault_recall has been reranked all along. The fork
+# in ~/lloyd/qmd honours the flag, which is how the cost of skipping was
+# finally measured, 2026-09-07, corpus pinned on identical index snapshots:
+#
+#     qmd rerank on    MRR 0.484   NDCG@10 0.590   doc_hit 0.95
+#     qmd rerank off   MRR 0.323   NDCG@10 0.450   doc_hit 0.85
+#
+# 0.16 MRR is not noise at n=20. The old docstring's "rarely changes top-1"
+# was measured against a daemon that never turned it off. Prefetch still
+# skips it explicitly (prefetch.py) because it runs inside a latency budget.
+RECALL_QMD_RERANK = True
 
 # Canonical-source prefixes for graph_lookup boost. When a graph-derived
 # entity name resolves to a file under one of these prefixes, treat it as
@@ -309,22 +332,25 @@ def _qmd_post(payload: dict) -> list:
 
 
 def _qmd_daemon_search(query: str, limit: int, collections: list,
-                      skip_rerank: bool = True,
+                      skip_rerank: bool = not RECALL_QMD_RERANK,
                       legs: tuple[str, ...] = ("lex", "vec"),
                       lex_query: Optional[str] = None) -> Optional[list]:
     """Send a lex and/or vec query to the qmd daemon.
 
-    DEFAULT: skip_rerank=True. The reranker rarely changes top-1 and
-    shuffles within top-5; not worth the tax for LLM-context consumers.
-    Pass skip_rerank=False explicitly only when ordering within the top-5
-    matters for a human scanning results.
+    DEFAULT: rerank on (see RECALL_QMD_RERANK for the measurement). The
+    request carries an explicit `rerank` boolean — that is the key every
+    qmd version reads; `skipRerank` was a client-side name that published
+    2.8.3 ignored, so passing skip_rerank=True never actually skipped
+    anything until the fork. Pass skip_rerank=True only inside a latency
+    budget, as prefetch does.
 
-    `legs` selects which search legs run. Measured 2026-09-03 on this host
-    (6 collections, skipRerank): lex-only 10-80ms; anything including the
-    vec leg 1.1-2.6s — the query embedding dominates and the daemon's
-    embedding cache only brings a *repeated* query down to ~1.1s. The
-    prefetch path runs `("lex",)` inside its latency budget and the full
-    hybrid as a straggler whose result carries over to the next turn.
+    `legs` selects which search legs run. Measured 2026-09-07 on the fork,
+    twelve collections in one request: ~90 ms without the reranker, ~700 ms
+    with it (whole chunks, QMD_RERANK_PARALLELISM=4). Published 2.8.3 took
+    ~2 s either way because sqlite-vec scanned every vector once per
+    collection. The prefetch path runs `("lex",)` inside its latency budget
+    and the full hybrid as a straggler whose result carries over to the
+    next turn.
 
     `lex_query`, when given, replaces the lex leg's text. The lex leg is
     FTS5 with implicit AND (every term must match), so it wants a short,
@@ -349,22 +375,23 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
                      for leg in legs],
         "limit": limit,
         "collections": collections,
+        # Always explicit. Omitting it means "the daemon's default", which
+        # is rerank-on today and is not something this client should lean on.
+        "rerank": not skip_rerank,
     }
-    if skip_rerank:
-        payload["skipRerank"] = True
 
     try:
         return _qmd_post(payload)
     except urllib.error.HTTPError as e:
         # Rerank context OOM manifests as HTTP 500. One-shot retry without
         # rerank so callers see documents instead of silent zero-hits.
-        if e.code == 500 and not payload.get("skipRerank"):
+        if e.code == 500 and payload["rerank"]:
             try:
-                payload["skipRerank"] = True
-                _qmd_log("rerank failed (HTTP 500) — retrying with skipRerank")
+                payload["rerank"] = False
+                _qmd_log("rerank failed (HTTP 500) — retrying with rerank off")
                 return _qmd_post(payload)
             except Exception as e2:
-                _qmd_log(f"skipRerank retry also failed: {e2!r}")
+                _qmd_log(f"rerank-off retry also failed: {e2!r}")
                 return None
         _qmd_log(f"HTTPError {e.code}: {e.reason}")
         return None
