@@ -271,6 +271,15 @@ that reconcile is a no-op by construction.
    merge could expire mid-restart and hand the guardian its own deploy to
    judge.
 
+**The caller must then stop talking.** The idle gate counts the calling turn
+too, so an agent that lands and then polls `selfmod_status` in a loop is itself
+the reason the backend never goes idle — the landing waits its full 15 minutes
+and gives up. This is not a bug in the gate: the landing restarts the backend,
+which ends that turn regardless. `selfmod_land` says so in its own result, and
+the skill's step after "land it" is "end your turn". It only shows up when the
+loop is driven by the agent rather than from a terminal, which is exactly the
+path that had never been exercised.
+
 **Landing a *definition* is not the same as landing code.** `spec.py` calls
 the supervisor confs, the systemd units and the guardian "protected" — allowed
 to change, provided the drill passes — but nothing ever *applied* such a

@@ -581,3 +581,34 @@ def test_every_state_object_attribute_the_guardian_calls_exists(tmp_path):
                  "deny", "recent_rollbacks", "unfinished_rollback",
                  "pause_remaining"):
         assert hasattr(st, name), f"SelfModState.{name} is called but does not exist"
+
+
+# ===========================================================================
+# 9. The caller must stop talking after landing
+# ===========================================================================
+
+def test_landing_tells_the_caller_to_end_its_turn():
+    """Found by driving the loop end to end as the agent, not from a terminal.
+
+    The idle gate counts the CALLING turn too. An agent that lands and then
+    polls `selfmod_status` in a loop is itself the reason the backend never
+    goes idle, so the landing waits its full 15 minutes and gives up. The
+    landing restarts the backend and ends that turn regardless, so the only
+    correct move after `selfmod_land` returns is to stop.
+
+    This is only reachable on the path that had never been exercised, which is
+    the whole reason the loop was driven by the agent before being trusted.
+    """
+    src = (ROOT / "agent_mcp" / "selfmod.py").read_text()
+    assert "END YOUR TURN" in src
+    # ...and the tool description must not still say to poll, or the two
+    # halves of the contract contradict each other.
+    assert "Poll selfmod_status to follow it" not in src
+
+
+def test_the_skill_says_to_stop_after_landing():
+    skill = Path.home() / "obsidian" / "skills" / "selfmod-change-own-code" / "SKILL.md"
+    if not skill.exists():
+        pytest.skip("vault skill not present")
+    text = skill.read_text()
+    assert "End your turn" in text or "end your turn" in text

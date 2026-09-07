@@ -76,11 +76,17 @@ def _land_detached(round_id: str) -> dict:
         log, cwd=W.LIVE_ROOT)
     return {
         "landing": round_id, "pid": pid, "log": str(log),
-        "note": ("Detached: this restarts lloyd-mcp, which would otherwise kill the "
-                 "promoter mid-flight. It takes a minute or two, and can wait up to "
-                 "15 for the backend to go idle. Poll selfmod_status — `current.state` "
-                 "goes landing -> observing, and the guardian settles it 15 minutes "
-                 "later. Do not start another round until it settles."),
+        "next": "END YOUR TURN NOW. Do not poll, do not call another tool.",
+        "note": (
+            "Detached, because landing restarts lloyd-mcp and would otherwise kill "
+            "the promoter mid-flight. It now waits for the backend to be IDLE — and "
+            "your own turn is what is keeping it busy. Polling selfmod_status in a "
+            "loop starves the gate you are waiting on, and after 15 minutes the "
+            "landing gives up. Stop talking and the landing proceeds within seconds. "
+            "It will restart the backend, which ends this turn anyway. Check "
+            "selfmod_status on your NEXT turn: `current.state` goes landing -> "
+            "observing, and the guardian settles it to last-known-good 15 minutes "
+            f"after that. Progress is logged to {log}."),
     }
 
 
@@ -125,10 +131,12 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Promote a round whose gate passed. Returns IMMEDIATELY: the landing "
                 "runs detached, because it restarts this very process. It waits for the "
-                "backend to go idle (up to 15 min), fast-forwards, restarts MCP then "
-                "backend, and verifies the running commit changed. Poll selfmod_status "
-                "to follow it. The guardian then watches for 15 minutes before the "
-                "commit becomes last-known-good."
+                "backend to go IDLE, fast-forwards, restarts MCP then backend, and "
+                "verifies the running commit changed. END YOUR TURN once this returns — "
+                "your own turn is what keeps the backend busy, so polling starves the "
+                "gate the landing is waiting on. Check selfmod_status on your next "
+                "turn. The guardian then watches for 15 minutes before the commit "
+                "becomes last-known-good."
             ),
             inputSchema={
                 "type": "object",
