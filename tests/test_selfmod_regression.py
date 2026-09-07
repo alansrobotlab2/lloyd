@@ -210,7 +210,7 @@ async def test_a_regression_is_handed_to_the_guardian(monkeypatch, tmp_path):
     assert out["regressed"] is True
     assert captured["trigger"] == "regression"
     assert captured["target"] == "a" * 40 and captured["commit"] == "b" * 40
-    assert out["graph_side_reasons"], "an entity-side drop must be reported as graph-side"
+    assert out["fact_side_reasons"], "a fact-layer drop must be reported as such"
 
 
 async def test_a_missing_noise_file_means_cannot_evaluate(monkeypatch, tmp_path):

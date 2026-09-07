@@ -62,17 +62,39 @@ NOISE_PATH = Path(os.environ.get(
     "LLOYD_SELFMOD_STATE",
     Path.home() / ".local" / "state" / "lloyd-selfmod")) / "eval-noise.json"
 
-# Metrics that were bit-identical across repeated runs. Any movement in these
-# is signal. Everything else in the eval (ndcg10, doc_hit_rate) is reported
-# but never fires — their measured spread is a single query's worth.
-# Every one of these measured stdev 0.0000 over five runs on an unchanged
-# vault, so all of them are armed. `latency_ms_avg` is the only metric that
-# moves run to run (562ms stdev) and is never compared.
-ARMED_METRICS = ("entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg",
-                 "ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg")
-REPORT_ONLY = ("latency_ms_avg", "n_queries")
+# ARMED = the metrics this comparison actually CONTROLS, which is a smaller
+# set than the metrics that are merely repeatable.
+#
+# The original seven were chosen because five consecutive runs on an unchanged
+# vault gave stdev 0.0000 for all of them. That measurement is real and it is
+# the wrong question. It describes repeatability inside one short window; the
+# paired A/B runs its two arms MINUTES apart, and it cancels drift only in
+# what `LLOYD_FACTS_ROOT` and `LLOYD_KG_DB` redirect — the fact tree and the
+# knowledge graph. The document leg does not come from either. It queries the
+# qmd daemon at an absolute `http://localhost:8181/query`, whose index covers a
+# vault that is being written continuously by nightly jobs and session capture.
+# Neither env var reaches it, so the doc-side numbers are measured against a
+# corpus that moves between the arms.
+#
+# Measured 2026-09-06, first real run of this check, on a promotion whose whole
+# diff was TEXT INSIDE AN INJECT STRING and could not touch retrieval:
+#     ndcg10   0.5680 -> 0.5620   (Δ-0.0060, "beyond 3σ=0.0030")
+#     mrr_doc  0.4740 -> 0.4680   (Δ-0.0060, "beyond 3σ=0.0030")
+# and it asked for a rollback. Three back-to-back runs of IDENTICAL code and
+# data then gave 0.0000 spread on every entity metric and **0.0250 on
+# doc_recall_avg** — eight times its own tolerance. The doc leg is not stable
+# across the window this check spans, and the entity leg is.
+#
+# So the doc-side four are reported and never fire. They are also, separately,
+# structurally blind to the failure this check most needs to catch: with the
+# graph deleted entirely they read IDENTICAL to a real run (see below). They
+# were contributing noise and no signal, which is the precise recipe for a
+# detector that gets switched off in a week.
+ARMED_METRICS = ("entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg")
+REPORT_ONLY = ("ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg",
+               "latency_ms_avg", "n_queries")
 
-# Of the seven armed metrics, only these three can see the knowledge graph.
+# What the armed set can and cannot see, MEASURED rather than assumed.
 #
 # Measured 2026-09-06 against an empty LLOYD_FACTS_ROOT/LLOYD_KG_DB: with the
 # graph deleted entirely, mrr_doc (0.468), ndcg10 (0.563), doc_hit_rate (0.90)
@@ -82,13 +104,28 @@ REPORT_ONLY = ("latency_ms_avg", "n_queries")
 # that keeps working regardless. The doc-side numbers are real measurements of
 # the document retriever and say nothing whatsoever about graph quality.
 #
-# This is recorded because the failure it invites is the one this file's own
-# docstring warns about in a different form: a detector that looks healthy and
-# is structurally incapable of firing. A change that halved graph recall would
-# move only the three below. They stay armed, they are reported separately,
-# and `test_selfmod_doc_claims` pins the split so nobody "simplifies" it away.
-GRAPH_SENSITIVE_METRICS = ("entity_hit_rate", "entity_recall_avg",
-                           "fact_entity_recall_avg")
+# Two degradation drills on COPIES of the live store, 2026-09-06:
+#
+#   70% of fact_idx rows deleted (205,689 -> 61,707)
+#       entity_hit_rate    0.6000 -> 0.5500   FIRES
+#       entity_recall_avg  0.4430 -> 0.4330   FIRES
+#       every doc-side metric                 unchanged
+#
+#   70% of ACTIVE EDGES expired (4,029 -> 1,209)
+#       every metric, armed and reported      unchanged  <-- blind
+#
+# So the name matters. These three read the fact tree and the fact index; they
+# do NOT read graph edges, and a change that expires most of the edge set walks
+# past this check in silence. Calling them "graph sensitive" would be the exact
+# overclaim this whole detector is meant to avoid — a check that reports
+# healthy because it was never looking. Edge quality has no armed metric and is
+# a stated limit in architecture/self-modification.md §13, not a covered case.
+#
+# `test_selfmod_doc_claims` pins the split. Re-arming a doc-side metric means
+# first making the doc corpus part of the pairing — pointing both arms at a
+# pinned qmd index instead of the live daemon.
+FACT_LAYER_METRICS = ("entity_hit_rate", "entity_recall_avg",
+                      "fact_entity_recall_avg")
 # A floor, not a measurement: the eval contributes zero variance, so this only
 # absorbs float representation wobble. Real tolerance comes from the paired
 # comparison, which removes vault drift rather than budgeting for it.
@@ -331,7 +368,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             return {"skipped": msg}
 
     regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], noise)
-    graph_side = [r for r in reasons if r.split()[0] in GRAPH_SENSITIVE_METRICS]
+    fact_side = [r for r in reasons if r.split()[0] in FACT_LAYER_METRICS]
 
     # Hand the measurement to the guardian, which folds it into the LKG record
     # when this promotion settles. Written here rather than into
@@ -344,7 +381,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "regressed": regressed, "reasons": reasons,
     })
     S.append_event({"event": "regression_check", "regressed": regressed,
-                    "reasons": reasons, "graph_side_reasons": graph_side,
+                    "reasons": reasons, "fact_side_reasons": fact_side,
                     "stage": stage, "baseline_commit": baseline_commit,
                     "detail": detail, "commit": commit})
     if not regressed:
@@ -361,5 +398,5 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         reason=f"behavioural regression after {commit[:8]}: " + "; ".join(reasons),
         trigger="regression", target=baseline_commit, commit=commit,
         changed_paths=subject.get("changed_paths") or [])
-    return {"regressed": True, "reasons": reasons, "graph_side_reasons": graph_side,
+    return {"regressed": True, "reasons": reasons, "fact_side_reasons": fact_side,
             "rollback_requested_to": baseline_commit}

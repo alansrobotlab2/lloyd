@@ -534,15 +534,43 @@ the document leg queries the qmd daemon over an absolute URL that keeps
 working regardless. Only `entity_hit_rate`, `entity_recall_avg` and
 `fact_entity_recall_avg` moved, to zero.
 
-All seven stay armed, but the graph-sensitive three are named
-(`GRAPH_SENSITIVE_METRICS`) and reported separately, because a detector built
-on `mrr_doc` would look perfectly healthy while being incapable of seeing a
-graph regression. That is the same failure class as the 3000-byte front-matter
-cap and the stale log cursor, and it is why `eval/run_eval.py` now records
-**which corpus it scored** (`corpus_ok`, the resolved paths, entity and edge
-counts) and refuses an empty one unless `--allow-empty-corpus` is passed. An
-arm that scored an empty corpus is not a low score, it is a measurement that
-did not happen, and the worker treats it as "cannot evaluate".
+**Only three metrics are armed, and that number came from being wrong.** The
+original seven were chosen because five consecutive runs gave stdev 0.0000 for
+all of them — a real measurement of the wrong thing. It describes repeatability
+inside one short window; the paired A/B runs its arms *minutes* apart, and it
+cancels drift only in what `LLOYD_FACTS_ROOT` and `LLOYD_KG_DB` redirect. The
+document leg comes from neither: it queries the qmd daemon at an absolute
+`http://localhost:8181/query`, over a vault being written continuously by
+nightly jobs and session capture.
+
+The first real run proved it. On a promotion whose entire diff was text inside
+an inject string — incapable of touching retrieval — it reported `ndcg10`
+0.5680 → 0.5620 and `mrr_doc` 0.4740 → 0.4680, both "beyond 3σ", and asked for
+a rollback. Three back-to-back runs of identical code and data then gave
+0.0000 spread on every entity metric and **0.0250 on `doc_recall_avg`**, eight
+times its own tolerance. The doc side is not stable across the window this
+check spans; the fact side is. The doc-side four are now reported and never
+fire.
+
+**And the armed three are named for what they actually read.** Two degradation
+drills against copies of the live store:
+
+| Degradation | Armed metrics | Doc metrics |
+|---|---|---|
+| 70% of `facts_idx` rows deleted (205,689 → 61,707) | `entity_hit_rate` 0.60 → 0.55, `entity_recall_avg` 0.443 → 0.433 — **fires** | unchanged |
+| 70% of **active edges** expired (4,029 → 1,209) | unchanged — **blind** | unchanged |
+
+So they are `FACT_LAYER_METRICS`, not "graph sensitive". Edge quality has no
+armed metric at all: a change that expires most of the edge set walks past
+this check in silence, and that is a stated limit rather than a covered case.
+Naming them for the graph would have been the same overclaim the detector
+exists to prevent.
+
+This is also why `eval/run_eval.py` now records **which corpus it scored**
+(`corpus_ok`, the resolved paths, entity and edge counts) and refuses an empty
+one unless `--allow-empty-corpus` is passed. An arm that scored an empty
+corpus is not a low score, it is a measurement that did not happen, and the
+worker treats it as "cannot evaluate".
 
 The measurement is handed to the guardian in `eval_last.json` and folded into
 the LKG record's long-empty `eval` slot at settle. Read, never written, by the
@@ -755,6 +783,13 @@ from `denied.json` first).
 - **The quality check is one measurement per promotion**, on a corpus that
   drifts between promotions. It answers "did this commit make retrieval
   worse", not "is retrieval good".
+- **Graph EDGE quality is not checked by anything.** Expiring 70% of the
+  active edge set moved no metric the eval produces, armed or reported. The
+  armed three read the fact tree and fact index. Covering edges needs a metric
+  that traverses them, and there isn't one.
+- **The document leg is outside the pairing.** Both arms query the same live
+  qmd daemon, so doc-side numbers drift between them. Re-arming any of those
+  four means first pinning a qmd index both arms share.
 - **`POST /api/backlog/task-create` is still unauthenticated** on the tailnet
   when no client fingerprint is forwarded. The guardian files rollback tasks
   through it over loopback; `/api/selfmod/drain` was restricted because it can

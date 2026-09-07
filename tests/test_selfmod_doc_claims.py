@@ -118,11 +118,26 @@ def test_latency_is_never_armed():
     assert "latency_ms_avg" in R.REPORT_ONLY
 
 
-def test_the_armed_metrics_are_the_seven_measured_deterministic_ones():
+def test_only_metrics_the_pairing_controls_are_armed():
+    """§8.1: the doc leg queries a live qmd daemon neither env var redirects.
+
+    The original seven were picked for repeatability inside one window, which
+    is the wrong question for a comparison whose arms run minutes apart. The
+    doc side moved 0.0250 on doc_recall_avg across three identical runs and
+    produced a false regression on a text-only change the first time this ran.
+    """
     from workers.sources import selfmod_regression as R
     assert set(R.ARMED_METRICS) == {
-        "entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg",
-        "ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg"}
+        "entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg"}
+    for doc_side in ("ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg"):
+        assert doc_side in R.REPORT_ONLY, f"{doc_side} is armed but not paired"
+        assert doc_side not in R.ARMED_METRICS
+
+
+def test_everything_armed_reads_the_fact_layer():
+    """An armed set that reads nothing the change can touch cannot fire."""
+    from workers.sources import selfmod_regression as R
+    assert set(R.ARMED_METRICS) == set(R.FACT_LAYER_METRICS)
 
 
 def test_the_noise_file_is_not_in_the_eval_run_record_directory():
@@ -168,16 +183,21 @@ def test_the_chronic_set_expires_daily():
 
 # ── §8.1 which metrics can actually see the graph ───────────────────────────
 
-def test_the_graph_sensitive_metrics_are_the_three_entity_side_ones():
-    """§8.1: with the graph deleted, mrr_doc / ndcg10 / doc_hit_rate came back
-    IDENTICAL. A detector built on them cannot see a graph regression."""
+def test_the_armed_metrics_are_named_for_what_they_actually_read():
+    """§8.1: measured, not assumed.
+
+    Deleting 70% of fact_idx rows moves entity_hit_rate and entity_recall_avg
+    well past tolerance. Expiring 70% of ACTIVE EDGES moves nothing at all —
+    so these read the fact layer, not the edge set, and calling them "graph
+    sensitive" would be the same overclaim this detector exists to avoid.
+    """
     from workers.sources import selfmod_regression as R
-    assert set(R.GRAPH_SENSITIVE_METRICS) == {
+    assert not hasattr(R, "GRAPH_SENSITIVE_METRICS"), \
+        "the old name overclaims: edge expiry is invisible to every armed metric"
+    assert set(R.FACT_LAYER_METRICS) == {
         "entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg"}
-    # ...and they are a subset of what is armed, not a replacement for it.
-    assert set(R.GRAPH_SENSITIVE_METRICS) <= set(R.ARMED_METRICS)
     for doc_side in ("mrr_doc", "ndcg10", "doc_hit_rate"):
-        assert doc_side not in R.GRAPH_SENSITIVE_METRICS
+        assert doc_side not in R.FACT_LAYER_METRICS
 
 
 def test_the_eval_refuses_an_empty_corpus_by_default():
