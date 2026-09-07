@@ -38,8 +38,19 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, check=False)
 
 
-def _prepare_scratch(scratch: Path, source: Path, base: str) -> dict:
-    """Clone `source` into `scratch`, then commit a build that cannot boot."""
+LATER_FILE = "app/nightly_marker.py"
+
+
+def _prepare_scratch(scratch: Path, source: Path, base: str,
+                     *, later_commit: bool = False) -> dict:
+    """Clone `source` into `scratch`, then commit a build that cannot boot.
+
+    With `later_commit`, add an unrelated commit ON TOP of the broken one —
+    the nightly-job case. HEAD is then no longer the promotion, and a
+    `reset --hard` to the parent would take that work with it. This is the
+    scenario that cost 26 commits on 2026-09-06, so the drill rehearses it
+    rather than trusting the unit tests alone.
+    """
     scratch.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(source), str(scratch)],
                    check=True, capture_output=True)
@@ -53,12 +64,47 @@ def _prepare_scratch(scratch: Path, source: Path, base: str) -> dict:
     _git(scratch, "add", "-A")
     _git(scratch, "commit", "-q", "-m", "drill: deliberately unbootable")
     broken = _git(scratch, "rev-parse", "HEAD").stdout.strip()
-    return {"good": good, "broken": broken}
+
+    later = None
+    if later_commit:
+        (scratch / LATER_FILE).write_text(
+            "# unrelated work a nightly job committed to live main\nKEEP = True\n",
+            encoding="utf-8")
+        _git(scratch, "add", "-A")
+        _git(scratch, "commit", "-q", "-m", "drill: unrelated later work")
+        later = _git(scratch, "rev-parse", "HEAD").stdout.strip()
+    return {"good": good, "broken": broken, "later": later}
 
 
 def run_drill(round_id: str, worktree: Path, base: str, *,
               python: Path | None = None, budget: float = 240.0) -> tuple[bool, str]:
-    """Return (ok, detail). Never raises — a drill error is a drill failure."""
+    """Rehearse BOTH rollback routes. Returns (ok, detail); never raises.
+
+    Two scenarios, because there are two routes back and only one of them was
+    ever exercised:
+
+      reset   HEAD is still the promotion  -> reset --hard to its parent
+      revert  a later commit landed since  -> revert the promotion in place
+
+    The second is the one that matters most and was the least covered: nightly
+    jobs commit straight to live `main`, so a 15-minute window routinely
+    closes over work the loop never touched.
+    """
+    details = []
+    for surgical in (False, True):
+        ok, detail = _run_one_drill(f"{round_id}-{'revert' if surgical else 'reset'}",
+                                    worktree, base, python=python, budget=budget,
+                                    surgical=surgical)
+        details.append(f"[{'revert' if surgical else 'reset'}] {detail}")
+        if not ok:
+            return False, "\n".join(details)
+    return True, "\n".join(details)
+
+
+def _run_one_drill(round_id: str, worktree: Path, base: str, *,
+                   python: Path | None = None, budget: float = 240.0,
+                   surgical: bool = False) -> tuple[bool, str]:
+    """One scenario. Return (ok, detail). Never raises."""
     drill_root = Path.home() / "lloyd-work" / f"{round_id}-drill"
     scratch = drill_root / "home" / "lloyd"
     state_dir = drill_root / "selfmod-state"
@@ -72,7 +118,7 @@ def run_drill(round_id: str, worktree: Path, base: str, *,
         drill_root.mkdir(parents=True, exist_ok=True)
         marker.write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8")
 
-        shas = _prepare_scratch(scratch, worktree, base)
+        shas = _prepare_scratch(scratch, worktree, base, later_commit=surgical)
 
         # The scratch state the candidate guardian will read.
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -83,7 +129,7 @@ def run_drill(round_id: str, worktree: Path, base: str, *,
         (state_dir / "current.json").write_text(json.dumps({
             "schema": 1, "commit": shas["broken"], "parent": shas["good"],
             "rollback_target": shas["good"], "changed_paths": ["server.py"],
-            "landed_ts": time.time(), "liveness_until_ts": time.time() + 600,
+            "landed_ts": time.time(), "state": "observing",
             "errors_until_ts": time.time() + 600, "venv_swapped": False,
         }), encoding="utf-8")
 
@@ -133,9 +179,21 @@ def run_drill(round_id: str, worktree: Path, base: str, *,
         head_now = _git(scratch, "rev-parse", "HEAD").stdout.strip()
         branch_now = _git(scratch, "symbolic-ref", "--quiet", "HEAD").stdout.strip()
 
-        if head_now != shas["good"]:
-            return False, (f"guardian did NOT restore the tree: HEAD={head_now[:8]}, "
-                           f"expected {shas['good'][:8]}\n{log[-800:]}")
+        if surgical:
+            # The promotion must be undone WITHOUT discarding the later commit.
+            if head_now in (shas["good"], shas["broken"], shas["later"]):
+                return False, (f"expected a revert commit on top of "
+                               f"{shas['later'][:8]}, got HEAD={head_now[:8]}\n"
+                               f"{log[-800:]}")
+            if not (scratch / LATER_FILE).exists():
+                return False, ("the rollback DISCARDED unrelated later work — this is "
+                               f"the 26-commit failure mode\n{log[-800:]}")
+            if _git(scratch, "cat-file", "-e", f"{shas['later']}^{{commit}}").returncode != 0:
+                return False, "the later commit is no longer reachable"
+        else:
+            if head_now != shas["good"]:
+                return False, (f"guardian did NOT restore the tree: HEAD={head_now[:8]}, "
+                               f"expected {shas['good'][:8]}\n{log[-800:]}")
         if branch_now != "refs/heads/main":
             return False, f"guardian left HEAD detached ({branch_now!r})"
 
@@ -162,6 +220,10 @@ def run_drill(round_id: str, worktree: Path, base: str, *,
         if canary.sock and str(canary.sock) in log and "/tmp/agent-supervisor.sock" in log:
             return False, "drill contacted the live supervisord socket"
 
+        if surgical:
+            return True, (f"guardian reverted {shas['broken'][:8]} in place → "
+                          f"{head_now[:8]}, kept later commit {shas['later'][:8]} and "
+                          f"{LATER_FILE}, canary healthy again, ledger: {kinds}")
         return True, (f"guardian restored {shas['broken'][:8]} → {shas['good'][:8]}, "
                       f"canary healthy again, ledger: {kinds}")
 
