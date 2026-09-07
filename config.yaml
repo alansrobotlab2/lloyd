@@ -408,7 +408,11 @@ livekit:
 # `enabled: false` is the master switch and the default. The machinery lands
 # inert; turning it on is a deliberate human act.
 selfmod:
-  enabled: false
+  # Enabled 2026-09-06, after the autonomous path was fixed. It had shipped
+  # inert since it was written, and the two landings in its history were both
+  # driven from a terminal — the MCP path would have failed on first use,
+  # because the promoter ran inside the process it restarts.
+  enabled: true
   canary:
     backend_port: 18080
     mcp_port: 18500
