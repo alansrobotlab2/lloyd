@@ -184,6 +184,14 @@ class SelfModState:
     def is_broken(self) -> bool:
         return self.broken.exists()
 
+    def is_halted(self) -> bool:
+        """Promotions are halted — usually by this guardian's own flap protection.
+
+        Read by the liveness predicate: a STOPPED backend while halted is the
+        quarantine stop the guardian itself performed, not an outage.
+        """
+        return self.halted.exists()
+
     def set_broken(self, reason: str) -> None:
         self.broken.parent.mkdir(parents=True, exist_ok=True)
         self.broken.write_text(f"{now_iso()} {reason}\n", encoding="utf-8")

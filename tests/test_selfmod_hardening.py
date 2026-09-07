@@ -528,3 +528,56 @@ def test_the_promotion_record_carries_no_field_nothing_reads():
     for field in ("err_offset", "liveness_until_ts"):
         assert f'"{field}"' not in src, f"{field} is written and never read"
         assert field not in guardian
+
+
+# ===========================================================================
+# 8. The guardian must actually complete a tick
+# ===========================================================================
+
+def test_a_real_tick_completes_against_the_live_state(tmp_path):
+    """The regression test for shipping an AttributeError into the loop.
+
+    `tick()` catches every exception and logs "tick error (continuing)", which
+    is the right shape for a watchdog — it must not die on a transient — but
+    it means a plain typo degrades it to a process that runs forever and
+    watches nothing. Exactly that happened when `intentional_stop` started
+    calling `state.is_halted()`, which gstate did not have: the unit stayed
+    `active`, the heartbeat kept updating, and no unit test noticed because
+    they all exercise the predicates rather than the loop.
+
+    So: build a real Guardian against scratch state and a supervisord that
+    cannot be reached, and require a clean tick with nothing swallowed.
+    """
+    import guardian as G
+
+    args = G.build_parser().parse_args([
+        "--repo", str(ROOT),
+        "--state", str(tmp_path / "selfmod"),
+        "--guardian-state", str(tmp_path / "guardian"),
+        "--supervisor-sock", str(tmp_path / "no-such.sock"),
+        "--no-external-alerts",
+    ])
+    g = G.Guardian(args)
+
+    raised = []
+    real_tick = g.tick
+    try:
+        state = real_tick()
+    except Exception as exc:            # noqa: BLE001 - that is the point
+        raised.append(exc)
+        state = None
+    assert not raised, f"tick raised instead of completing: {raised}"
+    # Unreachable supervisord is invariant 2: infrastructure, never a code trigger.
+    assert state == "infra_down", state
+
+
+def test_every_state_object_attribute_the_guardian_calls_exists(tmp_path):
+    """A cheap structural guard against the same class of typo."""
+    st = gstate.SelfModState(tmp_path)
+    for name in ("lkg", "current", "floor", "rollback_target", "set_lkg",
+                 "clear_current", "write_last_settled", "read_eval_last",
+                 "read_rollback_request", "clear_rollback_request",
+                 "is_broken", "is_halted", "set_broken", "set_halted",
+                 "deny", "recent_rollbacks", "unfinished_rollback",
+                 "pause_remaining"):
+        assert hasattr(st, name), f"SelfModState.{name} is called but does not exist"
