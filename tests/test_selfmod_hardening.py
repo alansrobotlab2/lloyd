@@ -783,3 +783,133 @@ def test_an_aggregator_verdict_is_confirmed_across_ticks(tmp_path):
                            "body": {"tools": 130, "degraded_modules": []}}
     assert g.evaluate_liveness(snap)[0] is False
     assert g.mcp_fatal_streak == 0
+
+
+# ===========================================================================
+# 12. The pinned document corpus
+# ===========================================================================
+
+def test_the_grep_corpus_can_be_repointed(monkeypatch, tmp_path):
+    """The retriever greps the repository it ships in.
+
+    So in a paired comparison the code under test is also part of the corpus,
+    and each arm searched its own source. Measured 2026-09-07: the query
+    `lloyd-vllm-rel` returned six different files per arm, and ndcg10 and
+    mrr_doc each moved 0.0060 with the qmd corpus already pinned and no
+    retrieval code changed at all.
+    """
+    import importlib
+    (tmp_path / "agent_mcp").mkdir()
+    (tmp_path / "app").mkdir()
+    monkeypatch.setenv("LLOYD_CODE_ROOT", str(tmp_path))
+    import agent_mcp.vault as V
+    importlib.reload(V)
+    try:
+        assert V.LLOYD_CODE_ROOTS[0] == tmp_path / "agent_mcp"
+        assert V.LLOYD_CODE_PREFIX == str(tmp_path) + "/"
+    finally:
+        monkeypatch.delenv("LLOYD_CODE_ROOT", raising=False)
+        importlib.reload(V)
+
+
+def test_the_grep_corpus_defaults_to_this_checkout():
+    """Unset, behaviour must be exactly as before."""
+    import agent_mcp.vault as V
+    assert V.LLOYD_CODE_ROOTS[0] == V.LLOYD_HOME / "agent_mcp"
+
+
+def test_the_pin_refuses_a_port_it_did_not_start(tmp_path):
+    """Comparing against somebody else's daemon is comparing against unknown
+    data, which is the failure the pin exists to remove."""
+    import socket
+    from scripts.selfmod import evalpin
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        busy = s.getsockname()[1]
+        assert evalpin.port_free(busy) is False
+        with pytest.raises(evalpin.PinError) as exc:
+            with evalpin.PinnedCorpus(tmp_path, port=busy):
+                pass
+    assert "already in use" in str(exc.value)
+
+
+def test_the_overlay_repoints_only_the_qmd_service(tmp_path):
+    """It rides the same mechanism as the gate's canary, so it must not carry
+    anything else that could change how an arm behaves."""
+    import yaml
+    from scripts.selfmod import evalpin
+
+    path = evalpin.write_overlay(tmp_path / "o.yaml", port=18999)
+    doc = yaml.safe_load(path.read_text())
+    assert doc == {"services": {"qmd": "http://localhost:18999/query"}}
+
+
+def test_env_for_pins_both_halves_of_the_corpus(tmp_path):
+    from scripts.selfmod import evalpin
+    pin = evalpin.PinnedCorpus(tmp_path)
+    pin.overlay = tmp_path / "o.yaml"
+    env = pin.env_for({}, code_root="/some/tree")
+    assert env["LLOYD_CONFIG_OVERLAY"] == str(pin.overlay)
+    assert env["LLOYD_CODE_ROOT"] == "/some/tree"
+
+
+def test_the_retargeted_eval_query_is_satisfiable():
+    """The old `qwen35-users` expected files from ~/lloyd while qmd indexes
+    ~/obsidian, so no retrieval quality could satisfy it."""
+    import yaml
+    spec = yaml.safe_load((ROOT / "eval" / "vault_recall_queries.yaml").read_text())
+    ids = {q["id"] for q in spec["queries"]}
+    assert "qwen35-users" not in ids, "the unsatisfiable query is still armed"
+
+    q = next(q for q in spec["queries"] if q["id"] == "qwen38-local-serving")
+    vault = Path.home() / "obsidian"
+    for fragment in q["expect_docs"]:
+        hits = list(vault.rglob(f"*{fragment}*"))
+        assert hits, f"{fragment} matches nothing in the indexed vault"
+
+
+def test_the_pin_does_not_outlive_its_owner():
+    """`start_new_session=True` is the PROMOTER's requirement, and the exact
+    opposite of this one's.
+
+    A pinned corpus exists only for one comparison and holds an embedding
+    model. Orphaned, it keeps answering on :8182 and the next run refuses the
+    port it cannot verify.
+    """
+    import ast
+
+    src = (ROOT / "scripts" / "selfmod" / "evalpin.py").read_text()
+    popens = [n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.Call)
+              and isinstance(n.func, ast.Attribute) and n.func.attr == "Popen"]
+    assert popens, "no subprocess.Popen found in evalpin"
+    kwargs = {k.arg for call in popens for k in call.keywords}
+    assert "start_new_session" not in kwargs, "the pin would survive its owner"
+    assert "process_group" in kwargs, "stop() could not reach the whole tree"
+
+
+def test_the_pin_frees_its_snapshot_even_when_interrupted():
+    """The snapshot is 1 GB. `discard` on the happy path only meant an
+    interrupted run leaked it, which is what happened on 2026-09-07."""
+    import inspect
+    from scripts.selfmod import evalpin
+    body = inspect.getsource(evalpin.PinnedCorpus.__exit__)
+    assert "self.stop()" in body and "self.discard()" in body
+
+
+def test_a_noise_floor_records_the_questions_it_was_measured_against():
+    """A floor describes one experiment; retargeting a query changes it.
+
+    Not a gate: under a pinned corpus every armed metric is deterministic, so
+    the measured stdev is 0.0 and the tolerance falls back to MIN_SIGMA either
+    way. A stale floor cannot make the comparison wrong, only its record
+    misleading, so it is reported rather than enforced.
+    """
+    from workers.sources import selfmod_regression as R
+    fp = R.queries_fingerprint()
+    assert fp and len(fp) == 12
+    src = (ROOT / "workers" / "sources" / "selfmod_regression.py").read_text()
+    assert '"queries_fingerprint": queries_fingerprint()' in src
+    assert "noise_floor_stale" in src

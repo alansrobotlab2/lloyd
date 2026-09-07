@@ -37,12 +37,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import statistics
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from scripts.selfmod.evalpin import PinError, PinnedCorpus
 from workers.queue import WorkQueue, QueueItem
 
 logger = logging.getLogger("lloyd-workers.selfmod-regression")
@@ -52,6 +56,8 @@ DEFAULT_PRIORITY = 70
 DEDUP_KEY = "selfmod:regression"
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
+# Both arms score THESE questions, whichever commit's code is running.
+LIVE_QUERIES = LIVE_ROOT / "eval" / "vault_recall_queries.yaml"
 
 # Deliberately NOT under eval/baselines/. That directory holds eval RUN
 # RECORDS, and `tests/test_eval_scorer.py` globs `*.json` there and asserts
@@ -62,38 +68,41 @@ NOISE_PATH = Path(os.environ.get(
     "LLOYD_SELFMOD_STATE",
     Path.home() / ".local" / "state" / "lloyd-selfmod")) / "eval-noise.json"
 
-# ARMED = the metrics this comparison actually CONTROLS, which is a smaller
-# set than the metrics that are merely repeatable.
+# ARMED = the metrics this comparison actually CONTROLS.
 #
-# The original seven were chosen because five consecutive runs on an unchanged
-# vault gave stdev 0.0000 for all of them. That measurement is real and it is
-# the wrong question. It describes repeatability inside one short window; the
-# paired A/B runs its two arms MINUTES apart, and it cancels drift only in
-# what `LLOYD_FACTS_ROOT` and `LLOYD_KG_DB` redirect — the fact tree and the
-# knowledge graph. The document leg does not come from either. It queries the
-# qmd daemon at an absolute `http://localhost:8181/query`, whose index covers a
-# vault that is being written continuously by nightly jobs and session capture.
-# Neither env var reaches it, so the doc-side numbers are measured against a
-# corpus that moves between the arms.
+# This set was wrong twice, in opposite directions, and both corrections were
+# measured rather than reasoned.
 #
-# Measured 2026-09-06, first real run of this check, on a promotion whose whole
-# diff was TEXT INSIDE AN INJECT STRING and could not touch retrieval:
-#     ndcg10   0.5680 -> 0.5620   (Δ-0.0060, "beyond 3σ=0.0030")
-#     mrr_doc  0.4740 -> 0.4680   (Δ-0.0060, "beyond 3σ=0.0030")
-# and it asked for a rollback. Three back-to-back runs of IDENTICAL code and
-# data then gave 0.0000 spread on every entity metric and **0.0250 on
-# doc_recall_avg** — eight times its own tolerance. The doc leg is not stable
-# across the window this check spans, and the entity leg is.
+# First it held all seven, chosen because five consecutive runs gave stdev
+# 0.0000 for every one. Real measurement, wrong experiment: it describes
+# repeatability inside one short window, and the paired A/B runs its arms
+# minutes apart with a worktree checkout between them. The first real run
+# demanded a rollback of a promotion whose entire diff was text inside an
+# inject string, on ndcg10 -0.0060 and mrr_doc -0.0060. The four document
+# metrics were disarmed, which left every graph-to-document change
+# unfalsifiable.
 #
-# So the doc-side four are reported and never fire. They are also, separately,
-# structurally blind to the failure this check most needs to catch: with the
-# graph deleted entirely they read IDENTICAL to a real run (see below). They
-# were contributing noise and no signal, which is the precise recipe for a
-# detector that gets switched off in a week.
-ARMED_METRICS = ("entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg")
-REPORT_ONLY = ("ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg",
-               "latency_ms_avg", "n_queries")
+# The cause was not drift, and pinning the qmd corpus alone did not fix it:
+# the arms still differed by exactly -0.0060. **This retriever greps the
+# repository it ships in.** `_grep_lloyd_code` searches `agent_mcp/`, `app/`,
+# `scripts/` and `workers/` under its own checkout, so the code under test is
+# also part of the corpus, and each arm was searching its own source. Measured
+# 2026-09-07, the query `lloyd-vllm-rel` returned six different files per arm.
+#
+# With BOTH halves pinned — a frozen qmd snapshot and one shared
+# `LLOYD_CODE_ROOT` — the two arms agree to 0.0000 on all seven, and four
+# repeat runs under the same pin move 0.0000 on all seven. So all seven are
+# armed, and the pin is a precondition rather than an optimisation:
+# `execute` refuses to compare without it instead of falling back to the live
+# daemon, which would be the old broken comparison wearing the new name.
+#
+# `latency_ms_avg` is the one thing that still moves, by ~1.7s between a cold
+# and warm embedding cache, and it is never compared.
+ARMED_METRICS = ("entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg",
+                 "ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg")
+REPORT_ONLY = ("latency_ms_avg", "n_queries")
 
+# What the armed set can and cannot see, MEASURED rather than assumed.
 # What the armed set can and cannot see, MEASURED rather than assumed.
 #
 # Measured 2026-09-06 against an empty LLOYD_FACTS_ROOT/LLOYD_KG_DB: with the
@@ -165,62 +174,24 @@ def _load_run(baselines: Path, label: str) -> dict | None:
         return None
 
 
-def _run_eval(label: str, timeout: float = 600.0) -> dict | None:
-    """Run the deterministic vault-recall eval and return its overall summary."""
-    python = LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
-    r = subprocess.run(
-        [str(python), str(LIVE_ROOT / "eval" / "run_eval.py"), "--label", label],
-        cwd=str(LIVE_ROOT), capture_output=True, text=True, timeout=timeout, check=False,
-    )
-    if r.returncode != 0:
-        logger.error("run_eval failed: %s", (r.stdout + r.stderr)[-500:])
-        return None
-    return _load_run(LIVE_ROOT / "eval" / "baselines", label)
+@contextmanager
+def _baseline_worktree(commit: str):
+    """Check `commit` out into a scratch worktree for the duration of the block.
 
-
-
-def _run_eval_paired(lkg_commit: str, timeout: float = 900.0) -> dict | None:
-    """Run the eval against `lkg_commit`'s CODE and the LIVE data.
-
-    The point is to hold the data fixed. `LLOYD_FACTS_ROOT` and `LLOYD_KG_DB`
-    exist so a rebuild can extract into a fresh tree without touching the live
-    one; here they are used the other way round — old code, current data — so
-    the only difference between the two arms is the commit.
+    Kept open across BOTH arms, not just the baseline one: it is also the
+    shared grep corpus. See `_run_arm`.
     """
-    import os
-    import shutil
-    import tempfile
-
-    from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
-
     scratch = Path(tempfile.mkdtemp(prefix="selfmod-eval-"))
     wt = scratch / "lloyd"
     try:
         r = subprocess.run(["git", "-C", str(LIVE_ROOT), "worktree", "add",
-                            "--detach", "-q", str(wt), lkg_commit],
+                            "--detach", "-q", str(wt), commit],
                            capture_output=True, text=True, check=False)
         if r.returncode != 0:
             logger.error("paired eval worktree failed: %s", r.stderr[-300:])
-            return None
-        python = LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
-        env = {
-            **os.environ,
-            "PYTHONPATH": str(wt),
-            "LLOYD_FACTS_ROOT": str(VAULT_FACTS_ROOT),   # live data, old code
-            "LLOYD_KG_DB": str(VAULT_KG_DB),
-        }
-        label = "selfmod-paired-lkg"
-        r = subprocess.run([str(python), str(wt / "eval" / "run_eval.py"),
-                            "--label", label],
-                           cwd=str(wt), env=env, capture_output=True, text=True,
-                           timeout=timeout, check=False)
-        if r.returncode != 0:
-            logger.error("paired eval run failed: %s", (r.stdout + r.stderr)[-500:])
-            return None
-        return _load_run(wt / "eval" / "baselines", label)
-    except Exception as exc:
-        logger.error("paired eval error: %s", exc)
-        return None
+            yield None
+            return
+        yield wt
     finally:
         subprocess.run(["git", "-C", str(LIVE_ROOT), "worktree", "remove",
                         "--force", str(wt)], capture_output=True, check=False)
@@ -229,19 +200,96 @@ def _run_eval_paired(lkg_commit: str, timeout: float = 900.0) -> dict | None:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0) -> dict | None:
+    """Run the eval from `tree`, scoring the LIVE queries against a pinned corpus.
+
+    Three things are held identical across the two arms so that the only
+    difference left is the code being compared:
+
+    * the fact tree and knowledge graph, via `LLOYD_FACTS_ROOT`/`LLOYD_KG_DB`;
+    * the document corpus, via a frozen qmd snapshot the caller is serving and
+      a pinned `LLOYD_CODE_ROOT` for the grep leg;
+    * the QUESTIONS. The baseline arm runs the OLD `run_eval.py` out of a
+      worktree, which carries the OLD `vault_recall_queries.yaml`. Editing the
+      eval set would otherwise ask the two arms different questions and score
+      the difference as a code regression, which is how a change to the
+      MEASUREMENT gets attributed to the thing being measured.
+    """
+    from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
+
+    env = {
+        **env,
+        "PYTHONPATH": str(tree),
+        "LLOYD_FACTS_ROOT": str(VAULT_FACTS_ROOT),   # live data, whichever code
+        "LLOYD_KG_DB": str(VAULT_KG_DB),
+    }
+    r = subprocess.run(
+        [str(LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"),
+         str(tree / "eval" / "run_eval.py"),
+         "--label", label,
+         "--queries", str(LIVE_QUERIES)],
+        cwd=str(tree), env=env, capture_output=True, text=True,
+        timeout=timeout, check=False,
+    )
+    if r.returncode != 0:
+        logger.error("eval arm %s failed: %s", label, (r.stdout + r.stderr)[-500:])
+        return None
+    return _load_run(tree / "eval" / "baselines", label)
+
+
 def measure_noise(trials: int = 5) -> dict:
-    """Record mean/stdev per metric on an unchanged tree. Run once, by hand."""
+    """Record mean/stdev per metric on an unchanged tree. Run once, by hand.
+
+    Runs inside the pinned corpus, because that is the condition the armed
+    metrics are compared under. A noise floor measured against the live daemon
+    describes a different experiment from the one it is used to judge — which
+    is exactly how the doc-side metrics came to be armed on a "stdev 0.0000"
+    that did not hold when it mattered.
+    """
+    import tempfile as _tf
     samples: dict[str, list[float]] = {}
-    for i in range(trials):
-        overall = _run_eval(f"selfmod-noise-{i}")
-        if not overall:
-            continue
-        for key, value in overall.items():
-            if isinstance(value, (int, float)):
-                samples.setdefault(key, []).append(float(value))
+    work = Path(_tf.mkdtemp(prefix="selfmod-noise-pin-"))
+    try:
+        with PinnedCorpus(work) as pin:
+            env = pin.env_for(code_root=LIVE_ROOT)
+            for i in range(trials):
+                run = _run_arm(LIVE_ROOT, f"selfmod-noise-{i}", env)
+                overall = (run or {}).get("overall")
+                if not overall:
+                    continue
+                _accumulate(samples, overall)
+            pin.discard()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return _summarise_noise(samples, trials)
+
+
+def _accumulate(samples: dict, overall: dict) -> None:
+    for key, value in overall.items():
+        if isinstance(value, (int, float)):
+            samples.setdefault(key, []).append(float(value))
+
+
+def queries_fingerprint() -> str:
+    """Hash of the question set a measurement was taken against.
+
+    A noise floor describes one experiment. Retargeting a query changes the
+    experiment, and a floor carried over from the old one is provenance the
+    reader cannot see is stale. Recorded so `execute` can say so.
+    """
+    import hashlib
+    try:
+        return hashlib.sha1(LIVE_QUERIES.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return ""
+
+
+def _summarise_noise(samples: dict, trials: int) -> dict:
     noise = {
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "trials": trials,
+        "queries_fingerprint": queries_fingerprint(),
+        "pinned": True,
         "metrics": {
             k: {"mean": statistics.fmean(v),
                 "stdev": (statistics.stdev(v) if len(v) > 1 else 0.0),
@@ -340,15 +388,39 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         S.append_event({"event": "regression_skipped", "reason": msg})
         return {"skipped": msg}
 
-    # Paired, same-window, same-data. A recorded baseline from the last
-    # promotion would measure vault drift instead of the code change.
-    baseline = _run_eval_paired(baseline_commit)
+    # Both arms run inside ONE pinned corpus: a frozen qmd snapshot plus a
+    # single grep root. Without that the comparison measures the corpus as
+    # much as the code — this retriever searches the repository it ships in,
+    # so each arm was grepping its own source.
+    pin_provenance: dict = {}
+    work = Path(tempfile.mkdtemp(prefix="selfmod-pin-"))
+    try:
+        with PinnedCorpus(work) as pin:
+            pin_provenance = dict(pin.provenance)
+            with _baseline_worktree(baseline_commit) as wt:
+                if wt is None:
+                    S.append_event({"event": "regression_skipped",
+                                    "reason": "baseline worktree failed — cannot evaluate"})
+                    return {"skipped": "baseline worktree failed"}
+                # The baseline tree is the shared grep corpus for BOTH arms.
+                env = pin.env_for(code_root=wt)
+                baseline = _run_arm(wt, "selfmod-paired-lkg", env)
+                current = _run_arm(LIVE_ROOT, "selfmod-check", env)
+            pin.discard()
+    except PinError as exc:
+        # A comparison that quietly fell back to the live daemon would be the
+        # unpinned comparison this replaced, wearing its name.
+        msg = f"pinned corpus unavailable: {exc}"
+        logger.error(msg)
+        S.append_event({"event": "regression_skipped", "reason": msg})
+        return {"skipped": msg}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
     if not baseline:
         S.append_event({"event": "regression_skipped",
                         "reason": "paired baseline run failed — cannot evaluate"})
         return {"skipped": "paired baseline run failed"}
-
-    current = _run_eval("selfmod-check")
     if not current:
         S.append_event({"event": "regression_skipped", "reason": "eval run failed"})
         return {"skipped": "eval run failed"}
@@ -356,9 +428,6 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # An arm that scored an EMPTY corpus is not a low score, it is a
     # measurement that did not happen — and the doc-side metrics read
     # identically with the graph deleted, so it looks like an ordinary result.
-    # Treating that as data would compare two numbers neither of which
-    # describes the code. `corpus_ok` absent means an older record with no
-    # provenance: unknown, not false.
     for arm, blob in (("baseline", baseline), ("current", current)):
         if blob.get("corpus_ok") is False:
             msg = (f"{arm} arm scored an empty corpus "
@@ -366,6 +435,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             logger.error(msg)
             S.append_event({"event": "regression_skipped", "reason": msg})
             return {"skipped": msg}
+
+    # Provenance, not a gate. Under a pinned corpus every armed metric is
+    # deterministic, so the measured stdev is 0.0 and the tolerance falls back
+    # to the MIN_SIGMA floor either way — a floor taken against an older
+    # question set cannot make the comparison wrong, only its record
+    # misleading. Say so rather than silently carrying it.
+    stale_floor = (noise.get("queries_fingerprint") or "") != queries_fingerprint()
 
     regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], noise)
     fact_side = [r for r in reasons if r.split()[0] in FACT_LAYER_METRICS]
@@ -378,14 +454,17 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "commit": commit, "measured_at": S.now_iso(),
         "baseline_commit": baseline_commit, "stage": stage,
         "overall": current["overall"], "corpus": current.get("corpus") or {},
+        "pin": pin_provenance,
         "regressed": regressed, "reasons": reasons,
     })
     S.append_event({"event": "regression_check", "regressed": regressed,
                     "reasons": reasons, "fact_side_reasons": fact_side,
                     "stage": stage, "baseline_commit": baseline_commit,
+                    "pin": pin_provenance, "noise_floor_stale": stale_floor,
                     "detail": detail, "commit": commit})
     if not regressed:
-        return {"regressed": False, "stage": stage, "detail": detail}
+        return {"regressed": False, "stage": stage, "detail": detail,
+                "noise_floor_stale": stale_floor}
 
     logger.error("behavioural regression after %s: %s", commit[:8], "; ".join(reasons))
 

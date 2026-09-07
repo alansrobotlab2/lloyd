@@ -125,13 +125,30 @@ _CANONICAL_PREFIXES = (
 # tokens AND QMD's hit count is thin, fall back to ripgrep over the
 # code roots and merge results.
 LLOYD_HOME = Path(__file__).resolve().parent.parent
+# `LLOYD_CODE_ROOT` repoints the grep corpus, the way `LLOYD_FACTS_ROOT` and
+# `LLOYD_KG_DB` repoint the fact tree and the knowledge graph.
+#
+# It exists because this retriever searches the repository it ships in, which
+# makes the code both the thing under test and part of the corpus. The paired
+# quality comparison checks the previous commit out into a worktree and runs
+# both arms against the live vault — and each arm then grepped ITS OWN source.
+# Measured 2026-09-07 on a promotion that touched only an inject string:
+# `lloyd-vllm-rel` returned six different files per arm, and ndcg10 and mrr_doc
+# each moved 0.0060 with the qmd corpus pinned and no retrieval code changed at
+# all. Any commit large enough to add prose to `app/` or `scripts/` moves the
+# document metrics, for reasons that have nothing to do with retrieval quality.
+#
+# Pointing both arms at one tree makes the document corpus identical across
+# them. Unset, behaviour is exactly as before: grep this checkout.
+_CODE_ROOT = Path(os.environ["LLOYD_CODE_ROOT"]).resolve() \
+    if os.environ.get("LLOYD_CODE_ROOT") else LLOYD_HOME
 LLOYD_CODE_ROOTS = [
-    LLOYD_HOME / "agent_mcp",
-    LLOYD_HOME / "app",
-    LLOYD_HOME / "scripts",
-    LLOYD_HOME / "workers",
+    _CODE_ROOT / "agent_mcp",
+    _CODE_ROOT / "app",
+    _CODE_ROOT / "scripts",
+    _CODE_ROOT / "workers",
 ]
-LLOYD_CODE_PREFIX = str(LLOYD_HOME) + "/"
+LLOYD_CODE_PREFIX = str(_CODE_ROOT) + "/"
 # Match Python-style identifiers >=4 chars that look code-like:
 #   - have an underscore (vault_recall, _relationships)
 #   - OR have 2+ uppercase chars (FACT_GODNODE, KGMentionClassifier)

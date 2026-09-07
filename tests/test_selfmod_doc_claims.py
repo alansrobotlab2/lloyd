@@ -118,26 +118,40 @@ def test_latency_is_never_armed():
     assert "latency_ms_avg" in R.REPORT_ONLY
 
 
-def test_only_metrics_the_pairing_controls_are_armed():
-    """§8.1: the doc leg queries a live qmd daemon neither env var redirects.
+def test_all_seven_are_armed_because_the_corpus_is_now_pinned():
+    """§8.1: the armed set was wrong twice, in opposite directions.
 
-    The original seven were picked for repeatability inside one window, which
-    is the wrong question for a comparison whose arms run minutes apart. The
-    doc side moved 0.0250 on doc_recall_avg across three identical runs and
-    produced a false regression on a text-only change the first time this ran.
+    Disarming the document metrics was right while the corpus moved between
+    arms. Once BOTH halves are pinned, a frozen qmd snapshot and one shared
+    LLOYD_CODE_ROOT, the arms agree to 0.0000 on all seven and four repeat
+    runs move 0.0000. So all seven are armed again.
     """
     from workers.sources import selfmod_regression as R
     assert set(R.ARMED_METRICS) == {
-        "entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg"}
-    for doc_side in ("ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg"):
-        assert doc_side in R.REPORT_ONLY, f"{doc_side} is armed but not paired"
-        assert doc_side not in R.ARMED_METRICS
+        "entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg",
+        "ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg"}
+    assert set(R.REPORT_ONLY) == {"latency_ms_avg", "n_queries"}
 
 
-def test_everything_armed_reads_the_fact_layer():
-    """An armed set that reads nothing the change can touch cannot fire."""
-    from workers.sources import selfmod_regression as R
-    assert set(R.ARMED_METRICS) == set(R.FACT_LAYER_METRICS)
+def test_the_pin_is_a_precondition_not_an_optimisation():
+    """A comparison falling back to the live daemon would be the broken one
+    wearing the fixed one's name."""
+    src = (ROOT / "workers" / "sources" / "selfmod_regression.py").read_text()
+    assert "PinError" in src and "pinned corpus unavailable" in src
+
+
+def test_the_grep_corpus_is_pinnable():
+    """§8.1: this retriever greps the repository it ships in, so the code
+    under test is also part of the corpus it is scored against."""
+    assert "LLOYD_CODE_ROOT" in (ROOT / "agent_mcp" / "vault.py").read_text()
+
+
+def test_both_arms_score_the_same_questions():
+    """The baseline arm runs the OLD run_eval.py out of a worktree, carrying
+    the OLD query set. Editing the eval would otherwise ask the arms different
+    questions and score the difference as a code regression."""
+    src = (ROOT / "workers" / "sources" / "selfmod_regression.py").read_text()
+    assert "LIVE_QUERIES" in src and '"--queries"' in src
 
 
 def test_the_noise_file_is_not_in_the_eval_run_record_directory():

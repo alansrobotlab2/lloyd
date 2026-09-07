@@ -534,7 +534,33 @@ the document leg queries the qmd daemon over an absolute URL that keeps
 working regardless. Only `entity_hit_rate`, `entity_recall_avg` and
 `fact_entity_recall_avg` moved, to zero.
 
-**Only three metrics are armed, and that number came from being wrong.** The
+**The document corpus is pinned, and it has two halves.** The comparison
+already held the fact tree and the knowledge graph still. It now also serves
+both arms from a frozen qmd snapshot (`scripts/selfmod/evalpin.py`: qmd keeps
+its index in one SQLite file and takes `--index <name>`, so a `VACUUM INTO`
+copy on a second port is a 1.5-second freeze) and points both at one
+`LLOYD_CODE_ROOT`.
+
+That second half is the surprising one. **This retriever greps the repository
+it ships in** — `_grep_lloyd_code` searches `agent_mcp/`, `app/`, `scripts/`
+and `workers/` under its own checkout — so the code under test is also part of
+the corpus, and each arm was searching its own source. Pinning qmd alone did
+not fix the false positive: the arms still differed by exactly -0.0060, and
+the query `lloyd-vllm-rel` returned six different files per arm. With both
+halves pinned the arms agree to 0.0000 on all seven metrics, and four repeat
+runs move 0.0000, so all seven are armed again. The pin is a precondition:
+`execute` refuses rather than falling back to the live daemon, which would be
+the old broken comparison wearing the new name.
+
+**It is not free.** qmd embeds on the CPU — it appears on no GPU despite its
+CUDA environment — and one vector-leg query costs about 7 seconds of CPU
+against 3.7s wall. The eval is 20 queries with both legs, so a run is roughly
+2.7 CPU-minutes and a paired comparison is two of them plus a second embedding
+model. Fine once per promotion, which is what the dedup enforces. Not fine in
+a loop: re-measuring the noise floor repeatedly during development pegged the
+live daemon and slowed real retrieval for everything else on the box.
+
+**Only three metrics were armed for a while, and that number came from being wrong.** The
 original seven were chosen because five consecutive runs gave stdev 0.0000 for
 all of them — a real measurement of the wrong thing. It describes repeatability
 inside one short window; the paired A/B runs its arms *minutes* apart, and it
@@ -787,9 +813,10 @@ from `denied.json` first).
   active edge set moved no metric the eval produces, armed or reported. The
   armed three read the fact tree and fact index. Covering edges needs a metric
   that traverses them, and there isn't one.
-- **The document leg is outside the pairing.** Both arms query the same live
-  qmd daemon, so doc-side numbers drift between them. Re-arming any of those
-  four means first pinning a qmd index both arms share.
+- **The pinned corpus is a snapshot of a moving vault.** Both arms see the
+  same documents, which is what makes them comparable, but two comparisons run
+  a week apart are not comparable to each other. The check answers "did this
+  commit make retrieval worse", never "is retrieval better than last month".
 - **`POST /api/backlog/task-create` is still unauthenticated** on the tailnet
   when no client fingerprint is forwarded. The guardian files rollback tasks
   through it over loopback; `/api/selfmod/drain` was restricted because it can

@@ -103,11 +103,30 @@ queries:
     expect_entities: ["Nightly Reflection"]
     expect_docs: ["autonomy/39-", "autonomy/42-", "nightly-reflection"]
 
-  - id: qwen35-users
-    query: "what runs on Qwen3.5?"
+  # 2026-09-07: retargeted, and the id changed with the question.
+  # It was `qwen35-users`: "what runs on Qwen3.5?", expecting `start-llm-122b`
+  # and `config.yaml`. Both live in ~/lloyd, and qmd indexes ~/obsidian only,
+  # so no amount of retrieval quality could ever satisfy it — a permanent zero
+  # dragging mrr_doc, ndcg10 and doc_hit_rate down. Qwen3.5 had also stopped
+  # being the model that runs; primary is Qwen3.8-Flash-Next.
+  # The replacement keeps the shape that made the original valuable — multi-hop,
+  # a concept resolving to the several notes that cover it — and points at
+  # documents the vault genuinely owns. The expected docs were chosen by
+  # reading them, deliberately NOT by checking what the retriever already
+  # returns: picking targets it already hits would raise the score by moving
+  # the goalpost, which is the eval scoring itself rather than the retriever.
+  # Phrased conceptually, without echoing the target filenames. The first
+  # draft asked "what do we know about running Qwen3.8-Flash-Next locally?"
+  # and scored ndcg10 0.947 with first_doc_rank 1 — the expected file names
+  # contain the query's own words, so it tested lexical matching rather than
+  # the concept-to-instances hop the original was there to exercise. The
+  # expected documents are unchanged; only the question is.
+  - id: qwen38-local-serving
+    query: "how do we serve a hybrid linear-attention model on a single 24GB GPU?"
     category: multi-hop
-    expect_entities: ["Qwen3.5", "Qwen3.5-122B", "primary"]
-    expect_docs: ["start-llm-122b", "Qwen3.5", "config.yaml"]
+    expect_entities: ["Qwen3.8-Flash-Next", "Qwen3.8-27B"]
+    expect_docs: ["hybrid-gdn-qsa-inference-serving", "qwen38-27b-local-24gb",
+                  "qwen38-flash-next-engram"]
 
   # --- Recent / project-status (recency-biased — historically hard for semantic search) ---
   - id: tgs-rag-state

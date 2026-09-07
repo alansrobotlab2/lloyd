@@ -9,7 +9,9 @@ than a check against a number recorded at the last promotion.
 
 from __future__ import annotations
 
+import contextlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -99,6 +101,36 @@ def test_missing_metrics_are_skipped_not_assumed_good():
 # execute — the guard rails
 # ---------------------------------------------------------------------------
 
+class _FakePin:
+    """Stands in for the pinned corpus. The real one snapshots 1 GB and starts
+    a daemon; these tests are about `execute`'s decisions, not the pin."""
+    provenance = {"index": "/fake/evalpin.sqlite", "documents": 11756}
+    port = 8182
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def env_for(self, base=None, *, code_root=None):
+        return {"LLOYD_CONFIG_OVERLAY": "/fake/overlay.yaml",
+                "LLOYD_CODE_ROOT": str(code_root or "/fake/tree")}
+
+    def discard(self):
+        pass
+
+
+@contextlib.contextmanager
+def _fake_worktree(commit):
+    yield Path("/fake/worktree")
+
+
+def _pin_ok(monkeypatch):
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _FakePin())
+    monkeypatch.setattr(R, "_baseline_worktree", _fake_worktree)
+
+
 class _Item:
     payload: dict = {}
 
@@ -152,8 +184,11 @@ async def test_the_baseline_is_the_parent_not_the_lkg(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "read_events", lambda **k: [])
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
     monkeypatch.setattr(S, "read_lkg", lambda: {"commit": "b" * 40})   # == promoted
-    monkeypatch.setattr(R, "_run_eval_paired",
-                        lambda commit: seen.setdefault("baseline", commit) and None)
+    _pin_ok(monkeypatch)
+    monkeypatch.setattr(R, "_baseline_worktree",
+                        lambda c: seen.setdefault("baseline", c) and _fake_worktree(c)
+                        or _fake_worktree(c))
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: None)
     await R.execute(_Item())
     assert seen["baseline"] == "a" * 40, "must compare against the parent"
 
@@ -182,10 +217,10 @@ async def test_an_empty_corpus_arm_cannot_evaluate(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "read_current", lambda: _observing())
     monkeypatch.setattr(S, "read_events", lambda **k: [])
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
-    monkeypatch.setattr(R, "_run_eval_paired", lambda commit: {
-        "overall": base(), "corpus_ok": True, "corpus": {}})
-    monkeypatch.setattr(R, "_run_eval", lambda label: {
-        "overall": base(), "corpus_ok": False, "corpus": {"entities": 0}})
+    _pin_ok(monkeypatch)
+    arms = iter([{"overall": base(), "corpus_ok": True, "corpus": {}},
+                 {"overall": base(), "corpus_ok": False, "corpus": {"entities": 0}}])
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
     out = await R.execute(_Item())
     assert "empty corpus" in out["skipped"]
 
@@ -202,10 +237,10 @@ async def test_a_regression_is_handed_to_the_guardian(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
     monkeypatch.setattr(S, "write_eval_last", lambda payload: None)
     monkeypatch.setattr(S, "request_rollback", lambda **kw: captured.update(kw) or kw)
-    monkeypatch.setattr(R, "_run_eval_paired", lambda commit: {
-        "overall": base(), "corpus_ok": True, "corpus": {}})
-    monkeypatch.setattr(R, "_run_eval", lambda label: {
-        "overall": base(entity_hit_rate=0.1), "corpus_ok": True, "corpus": {}})
+    _pin_ok(monkeypatch)
+    arms = iter([{"overall": base(), "corpus_ok": True, "corpus": {}},
+                 {"overall": base(entity_hit_rate=0.1), "corpus_ok": True, "corpus": {}}])
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
     out = await R.execute(_Item())
     assert out["regressed"] is True
     assert captured["trigger"] == "regression"
@@ -233,7 +268,8 @@ async def test_a_failed_paired_baseline_does_not_silently_pass(monkeypatch, tmp_
     monkeypatch.setattr(S, "read_events", lambda **k: [])
     monkeypatch.setattr(S, "read_lkg", lambda: {"commit": "a" * 40})
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
-    monkeypatch.setattr(R, "_run_eval_paired", lambda commit: None)
+    _pin_ok(monkeypatch)
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: None)
     out = await R.execute(_Item())
     assert "paired baseline run failed" in out["skipped"]
 
