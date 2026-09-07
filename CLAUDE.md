@@ -67,6 +67,29 @@ Four things worth knowing before touching any of it:
   the guardian must read its rollback target while the repo is being rewritten.
 - **`HEAD == last-known-good` never rolls back.** Everything broken with
   nothing promoted is infrastructure, not a bad change.
+- **A rollback restores the promotion's own `rollback_target`, not the LKG.**
+  `gstate.rollback_target(current)` prefers what `current.json` recorded at
+  landing time, then its `parent`, and only then the LKG pointer. The LKG is
+  a blunt fallback because it advances *only when a promotion settles*: two
+  rollbacks in a row strand it wherever it last settled while HEAD keeps
+  moving with ordinary human commits. On 2026-09-06 that turned one false
+  positive into **26 discarded commits** — LKG had sat at 14:24 all day, so
+  reverting a promotion whose parent was six hours newer took the whole
+  evening with it. The promoter had written the correct target and nothing
+  read it. The failure is self-reinforcing, which is what makes it worth a
+  rule: every rollback that does not settle makes the next one wider.
+- **The log cursor advances on every tick, not only while observing.**
+  `Guardian.drain_logs()` runs at the top of `tick()`, above every early
+  return, and `evaluate_errors` reads the buffer it fills. Reading used to
+  live inside `evaluate_errors`, which only runs during an observation
+  window — so between rounds the cursor stood still and the first tick of a
+  new window read *everything since the last one*. That is what fired on
+  2026-09-06: a healthy promotion reverted four seconds after landing, on
+  nine `ConnectError` lines from 11:47–11:56 that morning. Errors are still
+  *judged* only inside a window; what changed is that the tape always moves.
+  The paused path additionally **discards** its buffer rather than skipping
+  it, because the promoter holds that pause across its own supervisord
+  restart and the window for that very deploy opens seconds later.
 
 Errors are read from `logs/server.err`, never `server.log` — `basicConfig`
 writes to stderr, so `server.log` is uvicorn's access log and holds zero

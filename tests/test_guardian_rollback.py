@@ -321,3 +321,62 @@ def test_recent_rollbacks_counts_only_inside_the_window(tmp_path):
         f.write(json.dumps(recent) + "\n")
     assert st.recent_rollbacks(6 * 3600) == 1, "the 10h-old rollback must age out"
     assert st.recent_rollbacks(24 * 3600) == 2
+
+
+# ---------------------------------------------------------------------------
+# Rollback target: the promotion's own record beats the LKG pointer
+#
+# LKG advances only when a promotion SETTLES. Two rollbacks in a row leave it
+# stranded wherever it last settled while HEAD keeps moving with ordinary
+# human commits, so reverting to it discards everything landed in between.
+# On 2026-09-06 that turned one false positive into 26 lost commits.
+# ---------------------------------------------------------------------------
+
+def test_the_promotions_own_target_beats_a_stranded_lkg(tmp_path):
+    st = gstate.SelfModState(tmp_path)
+    st.set_lkg("a" * 40)                       # stranded hours ago
+    # Deliberately distinct from `parent`, so this pins the preference order
+    # rather than passing on either branch: the promoter writes
+    # `rollback_target` at landing time and it is the authoritative answer.
+    current = {"commit": "c" * 40, "parent": "d" * 40, "rollback_target": "b" * 40}
+    target, source = st.rollback_target(current)
+    assert target == "b" * 40, "must restore the tree as it was before THIS change"
+    assert "rollback_target" in source
+
+
+def test_the_parent_is_used_when_no_explicit_target_was_recorded(tmp_path):
+    st = gstate.SelfModState(tmp_path)
+    st.set_lkg("a" * 40)
+    target, source = st.rollback_target({"commit": "c" * 40, "parent": "b" * 40})
+    assert target == "b" * 40 and "parent" in source
+
+
+def test_without_a_promotion_under_observation_the_lkg_still_wins(tmp_path):
+    """The old ladder is intact for every path that has no `current`."""
+    st = gstate.SelfModState(tmp_path)
+    st.set_lkg("a" * 40)
+    assert st.rollback_target(None)[0] == "a" * 40
+    assert st.rollback_target()[0] == "a" * 40
+
+
+def test_a_malformed_current_target_falls_through_to_the_lkg(tmp_path):
+    st = gstate.SelfModState(tmp_path)
+    st.set_lkg("a" * 40)
+    target, source = st.rollback_target({"rollback_target": "nope", "parent": ""})
+    assert target == "a" * 40 and "last_known_good" in source
+
+
+def test_the_26_commit_regression(tmp_path):
+    """2026-09-06, verbatim. LKG settled at 14:24 and never moved; a promotion
+    landed six hours later on top of a day of human commits. Reverting to the
+    LKG took the whole evening with it — the voice work, the alert fan-out, a
+    dashboard fix and an IDE fix, none of which the loop had any business
+    judging."""
+    st = gstate.SelfModState(tmp_path)
+    st.set_lkg("9a0a1d84" + "0" * 32)                      # 14:24, stale
+    current = {"commit": "5cc8618a" + "0" * 32,            # the promotion
+               "parent": "90b6a2d7" + "0" * 32,           # 20:00, evening work
+               "rollback_target": "90b6a2d7" + "0" * 32}
+    target, _ = st.rollback_target(current)
+    assert target == "90b6a2d7" + "0" * 32
+    assert target != st.lkg()["commit"]

@@ -93,6 +93,8 @@ class Guardian:
         self.cursor = logtail.LogCursor(self.gdir / "logcursors.json")
 
         self.tick_n = 0
+        self._tick_events: list[dict] = []
+        self._tick_overflow = False
         self.probe_fail: dict[str, int] = {p: 0 for p in self.programs}
         self.probe_timeout: dict[str, int] = {p: 0 for p in self.programs}
         self.start_history: dict[str, list[float]] = {p: [] for p in self.programs}
@@ -212,9 +214,24 @@ class Guardian:
         self._chronic_loaded = True
         log(f"chronic signature set: {len(self.chronic)} entries (never trigger)")
 
-    def evaluate_errors(self, current: dict) -> tuple[bool, str]:
-        self.ensure_chronic()
-        changed = current.get("changed_paths") or []
+    def drain_logs(self) -> None:
+        """Advance the log cursor and buffer this tick's error events.
+
+        Called on EVERY tick, whatever state the guardian is in, and that is
+        the whole point. Reading used to happen inside `evaluate_errors`,
+        which only runs while a promotion is under observation — so between
+        rounds the cursor stood still and the first tick of a new observation
+        window read *everything since the last one*.
+
+        On 2026-09-06 that reverted a healthy promotion four seconds after it
+        landed, on nine `ConnectError` lines from 11:47–11:56 that morning:
+        eight hours stale, produced by an unrelated incident, and attributed
+        to a commit that had existed for four seconds. A window that observes
+        a commit must only ever see errors that happened while it was open.
+
+        Errors are still *judged* only during an observation window. What
+        changed is that the tape always moves.
+        """
         events: list[dict] = []
         overflowed = False
         for path in policy.LOG_FILES:
@@ -223,6 +240,14 @@ class Guardian:
             if text:
                 events.extend(detect.extract_events(text))
         self.cursor.save()
+        self._tick_events = events
+        self._tick_overflow = overflowed
+
+    def evaluate_errors(self, current: dict) -> tuple[bool, str]:
+        self.ensure_chronic()
+        changed = current.get("changed_paths") or []
+        events = self._tick_events
+        overflowed = self._tick_overflow
         if overflowed:
             return True, "log overflow: >4MiB of stderr in one tick"
         if not events:
@@ -251,7 +276,7 @@ class Guardian:
 
     # ── rollback ───────────────────────────────────────────────────────
     def do_rollback(self, trigger: str, reason: str) -> bool:
-        target, source = self.state.rollback_target()
+        target, source = self.state.rollback_target(self.state.current())
         head = rb.head_commit(self.repo)
         floor = self.state.floor()
 
@@ -451,6 +476,9 @@ class Guardian:
     def tick(self) -> str:
         self.tick_n += 1
         snap = self.collect()
+        # Before any early return below. Every `return` in this method that
+        # skips this would re-create the staleness bug it exists to prevent.
+        self.drain_logs()
 
         if snap["supervisord"] == "unreachable":
             self.sup_down_streak += 1
@@ -476,6 +504,14 @@ class Guardian:
         if paused > 0:
             if live_down:
                 log(f"[paused {paused:.0f}s] would have fired: {live_reason}")
+            # Discard, do not merely skip. The promoter holds this pause across
+            # its own supervisord restart, so what is in the buffer right now
+            # is the deploy's own connection failures — and the observation
+            # window for that very deploy opens seconds later. Leaving them
+            # buffered would hand the new commit the noise its own landing
+            # made. The cursor has already advanced past them.
+            self._tick_events = []
+            self._tick_overflow = False
             return "paused"
 
         current = self.state.current()

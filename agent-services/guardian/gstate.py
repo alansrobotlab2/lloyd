@@ -83,7 +83,30 @@ class SelfModState:
         self.broken_dir = self.dir / "broken"
 
     # ── rollback target ────────────────────────────────────────────────
-    def rollback_target(self) -> tuple[str | None, str]:
+    def rollback_target(self, current: dict | None = None) -> tuple[str | None, str]:
+        """Where to restore to, most specific source first.
+
+        When a promotion is under observation, its own recorded
+        `rollback_target` wins. The promoter computes that at landing time and
+        it means exactly one thing: the tree as it stood immediately before
+        this change. That is the only commit a rollback of *this* promotion is
+        entitled to reach.
+
+        The LKG pointer is the fallback, and it is a far blunter instrument,
+        because it advances only when a promotion SETTLES. Two rollbacks in a
+        row leave it stranded wherever it last settled while HEAD keeps moving
+        with ordinary human commits — so reverting to it discards everything
+        landed in between. On 2026-09-06 that turned a single false positive
+        into 26 commits of lost work: LKG had sat at 14:24 all day, so a
+        rollback of a promotion whose parent was six hours newer took the
+        whole evening with it.
+
+        `current.json` recorded the right answer that day and nothing read it.
+        """
+        if current and _is_sha(current.get("rollback_target")):
+            return current["rollback_target"], "current.json rollback_target"
+        if current and _is_sha(current.get("parent")):
+            return current["parent"], "current.json parent"
         lkg = read_json(self.lkg_path)
         if lkg and _is_sha(lkg.get("commit")):
             return lkg["commit"], "last_known_good.json"
