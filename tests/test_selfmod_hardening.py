@@ -611,3 +611,86 @@ def test_the_skill_says_to_stop_after_landing():
         pytest.skip("vault skill not present")
     text = skill.read_text()
     assert "End your turn" in text or "end your turn" in text
+
+
+# ===========================================================================
+# 10. The promoter's refusals, exercised rather than grepped
+# ===========================================================================
+
+@pytest.fixture()
+def candidate(tmp_path):
+    """A throwaway repo standing in for a round worktree."""
+    r = tmp_path / "wt"
+    r.mkdir()
+    git(r.parent, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@example.com")
+    git(r, "config", "user.name", "t")
+    (r / "f.py").write_text("A = 1\n", encoding="utf-8")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "base")
+    base = git(r, "rev-parse", "HEAD").stdout.strip()
+    (r / "f.py").write_text("A = 2\n", encoding="utf-8")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "gated")
+    gated = git(r, "rev-parse", "HEAD").stdout.strip()
+    return {"path": r, "base": base, "gated": gated}
+
+
+def test_promote_refuses_a_commit_made_after_the_gate_passed(isolated_state, candidate,
+                                                             monkeypatch):
+    """`land` passed the base along, but the candidate HEAD was re-read from
+    the worktree — so a commit made after a passing gate landed ungated."""
+    from scripts.selfmod import promote as P
+    r = candidate["path"]
+    (r / "f.py").write_text("A = 3  # snuck in after the gate\n", encoding="utf-8")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "ungated")
+
+    monkeypatch.setattr(P.S, "read_current", lambda: None)
+    with pytest.raises(P.PromoteError) as exc:
+        P.promote("SM_TEST", r, candidate["base"],
+                  gate_report={"head": candidate["gated"]}, dry_run=True)
+    assert "re-gate before landing" in str(exc.value)
+
+
+def test_promote_allows_exactly_the_gated_commit(isolated_state, candidate, monkeypatch):
+    """The same guard must not block the normal case.
+
+    Asserted narrowly: the promotion still fails here, because the live tree in
+    a unit test is not this scratch repo. What matters is that it does not fail
+    on the gate-head check — over-mocking `subprocess` to get further patches
+    the module for `worktree.git` too, which makes `W.head` return the wrong
+    commit and the test pass for the wrong reason.
+    """
+    from scripts.selfmod import promote as P
+    monkeypatch.setattr(P.S, "read_current", lambda: None)
+    try:
+        P.promote("SM_TEST", candidate["path"], candidate["base"],
+                  gate_report={"head": candidate["gated"]}, dry_run=True)
+    except P.PromoteError as exc:
+        assert "re-gate before landing" not in str(exc), (
+            "the gated commit itself was rejected as ungated")
+
+
+def test_promote_refuses_while_another_promotion_is_observed(isolated_state, candidate,
+                                                             monkeypatch):
+    """A second landing overwrote current.json: the first never settled, and
+    the new rollback target had never survived a window."""
+    from scripts.selfmod import promote as P
+    monkeypatch.setattr(P.S, "read_current", lambda: {
+        "commit": "c" * 40, "state": "observing",
+        "errors_until_ts": time.time() + 600})
+    with pytest.raises(P.PromoteError) as exc:
+        P.promote("SM_TEST", candidate["path"], candidate["base"],
+                  gate_report={"head": candidate["gated"]}, dry_run=True)
+    msg = str(exc.value)
+    assert "under observation" in msg and "min left" in msg
+
+
+def test_promote_refuses_a_change_denied_by_content(isolated_state, candidate, monkeypatch):
+    """Re-deriving a reverted change under a new SHA must not walk past."""
+    from scripts.selfmod import promote as P
+    monkeypatch.setattr(P.S, "read_current", lambda: None)
+    tree_hash = S.changed_tree_hash(candidate["path"], candidate["gated"], ["f.py"])
+    S.deny("does-not-matter", tree_hash=tree_hash)
+    with pytest.raises(P.PromoteError) as exc:
+        P.promote("SM_TEST", candidate["path"], candidate["base"],
+                  gate_report={"head": candidate["gated"]}, dry_run=True)
+    assert "denylist" in str(exc.value)
