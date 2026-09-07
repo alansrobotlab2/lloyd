@@ -20,7 +20,15 @@ rtc:
   # itself at this IP through the local tailscale0 interface, so browsers on
   # the host machine still work. Trade-off: LAN-only clients (no Tailscale)
   # can't use voice — that's intentional for now.
-  node_ip: 100.72.151.100
+  #
+  # DO NOT HARDCODE THIS. The Tailscale address is reassigned (it changed
+  # 100.72.151.100 -> 100.105.113.88 at the 08-22 box migration, which
+  # silently killed all voice: LiveKit advertised an address the host no
+  # longer owns, every ICE negotiation failed with `wait_pc_connection timed
+  # out`, the agent never joined a room, and no audio ever reached ASR).
+  # start-livekit-server.sh resolves ${LIVEKIT_NODE_IP} at boot from
+  # `tailscale ip -4`, falling back to the default-route source address.
+  node_ip: ${LIVEKIT_NODE_IP}
   use_external_ip: false
 
 keys:

@@ -47,9 +47,32 @@ if [[ -z "${LIVEKIT_API_KEY:-}" || -z "${LIVEKIT_API_SECRET:-}" ]]; then
     exit 1
 fi
 
+# Resolve the RTC ICE node_ip at boot — never hardcode it in livekit.yaml.
+# LiveKit binds its UDP media ports (50000-50100) to node_ip, so a stale
+# address means the bind silently fails: no media sockets, every ICE
+# negotiation fails, and clients die in `wait_pc_connection timed out`
+# before audio ever reaches the agent/ASR. That is exactly what happened
+# when the tailnet reassigned the address at the 08-22 box migration.
+# Prefer the Tailscale IPv4 (all clients reach the host there); fall back to
+# the default-route address so local voice still works with tailscale down.
+if [[ -z "${LIVEKIT_NODE_IP:-}" ]]; then
+    LIVEKIT_NODE_IP="$(tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]')"
+fi
+if [[ -z "$LIVEKIT_NODE_IP" ]]; then
+    LIVEKIT_NODE_IP="$(ip route get 1.1.1.1 2>/dev/null \
+        | sed -n 's/.* src \([0-9.]\{7,\}\).*/\1/p' | head -n1)"
+fi
+if [[ -z "$LIVEKIT_NODE_IP" ]]; then
+    echo "[start-livekit-server] could not resolve an ICE node_ip" >&2
+    echo "[start-livekit-server] set LIVEKIT_NODE_IP in $ENV_FILE to override" >&2
+    exit 1
+fi
+export LIVEKIT_NODE_IP
+echo "[start-livekit-server] rtc node_ip=$LIVEKIT_NODE_IP" >&2
+
 # Render the runtime config — only ${LIVEKIT_*} placeholders are substituted,
 # leaving any other unrelated $vars intact.
-envsubst '$LIVEKIT_API_KEY $LIVEKIT_API_SECRET' < "$TEMPLATE" > "$RUNTIME"
+envsubst '$LIVEKIT_API_KEY $LIVEKIT_API_SECRET $LIVEKIT_NODE_IP' < "$TEMPLATE" > "$RUNTIME"
 chmod 600 "$RUNTIME"
 
 exec "$LIVEKIT_BIN" --config "$RUNTIME"
