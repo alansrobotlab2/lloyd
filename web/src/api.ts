@@ -505,6 +505,10 @@ export interface AutonomyTask {
   stale_bypass_hours: number | null;
   expected_error_patterns: string[] | null;
   tags?: string[];
+  /** Why the scheduler will not dispatch this task right now, computed
+   *  server-side by `autonomy.hold_reason` — "paused", "waiting on #42",
+   *  "outside hours 00-04,23". Null means nothing is holding it. */
+  blocked?: string | null;
 }
 
 export interface AutonomyHealthTask {
@@ -1768,17 +1772,30 @@ export interface AutonomyTaskRow {
   frequency: string
   next_run: string
   last_run: string
+  /** Why the scheduler will not dispatch this task right now — "paused",
+   *  "outside hours 00-04,23", "waiting on #42". Null means nothing is
+   *  holding it, so a past-due task really is late. */
+  blocked: string | null
 }
 
 export interface AutonomyState {
   total: number
   by_status: Record<string, number>
+  /** Past due with nothing holding them back. These are the real misses. */
   overdue: AutonomyTaskRow[]
   overdue_count: number
+  /** Past due, but deliberately held — paused, outside their hours, waiting
+   *  on a dependency. Normal, and separated so it cannot drown `overdue`. */
+  held: AutonomyTaskRow[]
+  held_count: number
   upcoming: AutonomyTaskRow[]
   failing: AutonomyTaskRow[]
   running: Array<{ job_id: string; kind: string; started_at: string; elapsed_s: number | null }>
   running_count: number
+  /** "autonomy" when the split used the scheduler's own predicates,
+   *  "naive" when it could not be imported and everything past due is
+   *  reported as overdue. A downgrade must never look like success. */
+  classifier?: 'autonomy' | 'naive'
 }
 
 export interface BacklogState {

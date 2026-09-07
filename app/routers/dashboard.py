@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -68,23 +69,56 @@ def _cached(key: str, ttl: float, fn) -> Any:
     return value
 
 
-def _frontmatter(path, limit: int = 3000) -> dict:
-    """First YAML block of a markdown file, or {} if there isn't one."""
+# The closing delimiter of a YAML front-matter block: `---` alone on its
+# own line. Anchored, because `str.split("---")` also fires on a `---` in
+# prose or inside a quoted activity-log entry, which truncates the block
+# at the wrong place and yields either a parse error or, worse, a partial
+# dict that looks fine.
+_FM_END_RE = re.compile(r"^---[ \t]*$", re.M)
+_FM_CHUNK = 4096
+
+
+def _frontmatter(path, limit: int = 65536) -> dict:
+    """First YAML block of a markdown file, or {} if there isn't one.
+
+    `limit` bounds the **front matter**, not the prefix we are willing to
+    look at, and the file is read a chunk at a time so the ordinary case
+    still costs one small read. The distinction is not academic. At a flat
+    3000-byte prefix this silently dropped five backlog items, and the
+    selection was not random: an item accumulates `activity_log` entries
+    precisely by being worked on, so the two it hid were the two that were
+    `in_progress`. A board that loses whatever is most active is worse than
+    no board. Anything past `limit` with no closing `---` is malformed
+    rather than large, and still yields {}.
+    """
     import yaml
 
     try:
-        head = path.read_text(encoding="utf-8")[:limit]
-    except OSError:
+        with open(path, encoding="utf-8") as f:
+            head = f.read(_FM_CHUNK)
+            if not head.startswith("---"):
+                return {}
+            while (m := _FM_END_RE.search(head, 3)) is None and len(head) < limit:
+                chunk = f.read(_FM_CHUNK)
+                if not chunk:
+                    break
+                head += chunk
+    # A file that will not decode is not front matter either, and it must not
+    # take the whole section down with it.
+    except (OSError, UnicodeError):
         return {}
-    if not head.startswith("---"):
+    if m is None:
         return {}
-    parts = head.split("---", 2)
-    if len(parts) < 3:
+    opening = head.find("\n")
+    if opening < 0 or opening > m.start():
         return {}
     try:
-        return yaml.safe_load(parts[1]) or {}
+        fm = yaml.safe_load(head[opening + 1:m.start()])
     except Exception:
         return {}
+    # A block that parses to a list or a bare string is not front matter;
+    # returning it would blow up on the caller's first `.get`.
+    return fm if isinstance(fm, dict) else {}
 
 
 # ── Sections ───────────────────────────────────────────────────────────
@@ -370,6 +404,8 @@ def _autonomy() -> dict[str, Any]:
         by_status: dict[str, int] = {}
         upcoming: list[dict[str, Any]] = []
         failing: list[dict[str, Any]] = []
+        scheduled: list[tuple[dict[str, Any], dict]] = []
+        all_fm: list[dict] = []
         total = 0
         for path in autonomy_dir.glob("*.md"):
             # Only NN-name.md task files — skip _config.md, reports, notes.
@@ -379,6 +415,7 @@ def _autonomy() -> dict[str, Any]:
             if not fm:
                 continue
             total += 1
+            all_fm.append(fm)
             status = str(fm.get("status") or "draft")
             by_status[status] = by_status.get(status, 0) + 1
             row = {
@@ -387,29 +424,59 @@ def _autonomy() -> dict[str, Any]:
                 "frequency": str(fm.get("frequency") or ""),
                 "next_run": _iso(fm.get("next_run")),
                 "last_run": _iso(fm.get("last_run")),
+                "blocked": None,
             }
             if status == "failed":
                 failing.append(row)
             elif row["next_run"]:
                 upcoming.append(row)
+                scheduled.append((row, fm))
+
+        # Ask the scheduler, not the clock, why each past-due task has not
+        # run. `blocked` stays None if the classification itself fails, which
+        # lands the row in `overdue` — the direction that surfaces a task
+        # rather than hiding one.
+        classifier = "naive"
+        try:
+            import autonomy
+
+            for row, fm in scheduled:
+                try:
+                    row["blocked"] = autonomy.hold_reason(fm, all_fm)
+                except Exception:
+                    row["blocked"] = None
+            classifier = "autonomy"
+        except Exception as exc:
+            logger.warning("autonomy hold classification unavailable: %s", exc)
 
         # Split overdue from genuinely-upcoming. Sorting them together and
         # calling the result "next up" is how 23 tasks whose next_run is
         # months in the past read as a healthy schedule: the soonest-first
         # sort puts the most overdue at the top, labelled as if it were
         # the next thing to run.
+        #
+        # `held` is the same trap one level in. A paused task, or a nightly
+        # one at midday, is past its next_run for most of every day; calling
+        # that overdue keeps the counter permanently lit and buries the task
+        # that really did miss its window.
         now_iso = datetime.now(timezone.utc).isoformat()
-        overdue = [r for r in upcoming if (r["next_run"] or "") < now_iso]
+        past_due = [r for r in upcoming if (r["next_run"] or "") < now_iso]
+        overdue = [r for r in past_due if not r["blocked"]]
+        held = [r for r in past_due if r["blocked"]]
         pending = [r for r in upcoming if (r["next_run"] or "") >= now_iso]
         overdue.sort(key=lambda r: r["next_run"] or "")        # worst first
+        held.sort(key=lambda r: r["next_run"] or "")           # worst first
         pending.sort(key=lambda r: r["next_run"] or "")        # soonest first
         return {
             "total": total,
             "by_status": by_status,
             "overdue": overdue[:5],
             "overdue_count": len(overdue),
+            "held": held[:5],
+            "held_count": len(held),
             "upcoming": pending[:5],
             "failing": failing[:5],
+            "classifier": classifier,
         }
 
     out = _cached("autonomy", _VAULT_SCAN_TTL_S, _scan)

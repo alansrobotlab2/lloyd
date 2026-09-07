@@ -171,6 +171,12 @@ function formatLastRun(lastRun: string | null): string {
   return `${Math.round(diffMin / 1440)}d ago`;
 }
 
+// Elapsed time as a multiple of the task's own interval. This is only half
+// of "is it late": a task can sit at 3x while the scheduler is holding it
+// perfectly deliberately — outside its preferred_hours, waiting on an
+// upstream task, serving a failure cooldown. `task.blocked` carries that
+// reason from `autonomy.hold_reason`, and the badge below defers to it
+// rather than restating the gates here in a second language.
 function calculateOverdueRatio(task: AutonomyTask): number | null {
   if (!task.runs_per_day || !task.last_run) return null;
   const now = Date.now();
@@ -851,10 +857,18 @@ function TaskCard({
           {task.status === "up_next" && (() => {
             const ratio = calculateOverdueRatio(task);
             if (ratio === null) return null;
-            const color = ratio > 1 ? 'text-red-400 bg-red-400/10' : 'text-emerald-400 bg-emerald-400/10';
+            const held = ratio > 1 ? task.blocked : null;
+            const color = held
+              ? 'text-muted-foreground bg-muted-foreground/10'
+              : ratio > 1
+                ? 'text-red-400 bg-red-400/10'
+                : 'text-emerald-400 bg-emerald-400/10';
             return (
-              <span className={`inline-flex items-center gap-0.5 text-[10px] ${color} px-1.5 py-0.5 rounded`}>
-                {ratio.toFixed(1)}x {(ratio > 1 ? 'overdue' : 'ok')}
+              <span
+                title={held ? `Held: ${held}` : undefined}
+                className={`inline-flex items-center gap-0.5 text-[10px] ${color} px-1.5 py-0.5 rounded`}
+              >
+                {ratio.toFixed(1)}x {held ? 'held' : ratio > 1 ? 'overdue' : 'ok'}
               </span>
             );
           })()}

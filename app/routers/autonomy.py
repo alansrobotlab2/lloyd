@@ -185,18 +185,39 @@ async def autonomy_tasks(status: str = "", tag: str = ""):
     """List autonomy tasks from ~/obsidian/autonomy/."""
     if not _AUTONOMY_DIR.exists():
         return JSONResponse({"tasks": []})
-    tasks = []
+    tasks, everything = [], []
     for path in _AUTONOMY_DIR.glob("*.md"):
         if not re.match(r"\d+-", path.name):
             continue  # only NN-name.md task files; skip _config.md, reports, notes
         task = _autonomy_parse(path)
         if task is None:
             continue
+        # The dependency gate resolves `depends_on` by id, and an unresolved
+        # id counts as met — so it has to search the WHOLE board, not the
+        # filtered view. Filtering to status=up_next would otherwise report
+        # every dependency satisfied, since the upstream task is usually the
+        # one that just moved out of that status.
+        everything.append(task)
         if status and task.get("status") != status:
             continue
         if tag and tag not in (task.get("tags") or []):
             continue
         tasks.append(task)
+    # Why the scheduler is holding each task, from the scheduler itself. The
+    # board used to derive "overdue" from elapsed/interval alone, which paints
+    # a nightly job red for the eighteen hours a day it is not allowed to run.
+    try:
+        import autonomy as _a
+
+        for task in tasks:
+            try:
+                task["blocked"] = _a.hold_reason(task, everything)
+            except Exception:
+                task["blocked"] = None
+    except Exception as e:
+        logger.warning("autonomy hold_reason unavailable: %s", e)
+        for task in tasks:
+            task["blocked"] = None
     return JSONResponse({"tasks": tasks})
 
 

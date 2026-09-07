@@ -44,7 +44,14 @@ def _iso(**delta) -> str:
 
 
 def _task(vault, name, **fm):
-    """Write one autonomy task file. Only NN-*.md files are tasks."""
+    """Write one autonomy task file. Only NN-*.md files are tasks.
+
+    `skill_name` and `frequency` default to something runnable because
+    `hold_reason` refuses a task that has neither — a task with no skill can
+    never dispatch, so without these every fixture would classify as *held*
+    and the overdue tests would pass while testing nothing.
+    """
+    fm = {"skill_name": "demo", "frequency": "daily", **fm}
     body = "\n".join(f"{k}: {v}" for k, v in fm.items())
     path = vault / "obsidian" / "autonomy" / f"{len(list((vault / 'obsidian' / 'autonomy').glob('*.md'))) + 1:02d}-{name}.md"
     path.write_text(f"---\nname: {name}\n{body}\n---\n\nbody\n")
@@ -118,6 +125,134 @@ def test_missing_autonomy_directory_is_empty_not_an_error(vault, monkeypatch):
     out = dash._autonomy()
     assert out["total"] == 0
     assert out["by_status"] == {}
+
+
+# ── Held is not overdue ────────────────────────────────────────────────
+#
+# The second half of the "overdue is not next up" lesson. A task can be
+# past its next_run for a wholly deliberate reason — paused, outside its
+# preferred_hours, waiting on an upstream task — and calling that overdue
+# keeps the counter permanently lit, which buries the one task that really
+# did miss. On 2026-09-06 the panel showed six overdue while the scheduler
+# considered none of them late.
+
+
+def test_a_paused_task_is_held_not_overdue(vault):
+    _task(vault, "paused-job", status="paused", next_run=_iso(days=-3))
+    out = dash._autonomy()
+    assert out["overdue"] == [] and out["overdue_count"] == 0
+    assert [t["name"] for t in out["held"]] == ["paused-job"]
+    assert out["held"][0]["blocked"] == "paused"
+
+
+def test_a_nightly_task_outside_its_window_is_held(vault, monkeypatch):
+    """A daily job pinned to 03:00 is past due for most of every day."""
+    import autonomy
+
+    monkeypatch.setattr(autonomy, "_local_hour", lambda: 14)
+    _task(vault, "nightly", status="up_next", next_run=_iso(hours=-9),
+          preferred_hours="[3]")
+
+    out = dash._autonomy()
+    assert out["overdue_count"] == 0
+    assert out["held"][0]["blocked"] == "outside hours 03"
+
+    monkeypatch.setattr(autonomy, "_local_hour", lambda: 3)
+    dash._cache.clear()
+    out = dash._autonomy()
+    assert [t["name"] for t in out["overdue"]] == ["nightly"]
+    assert out["held"] == []
+
+
+def test_a_task_waiting_on_a_dependency_is_held(vault):
+    _task(vault, "upstream", status="up_next", next_run=_iso(hours=4))
+    _task(vault, "downstream", status="up_next", next_run=_iso(hours=-2),
+          depends_on=1, last_run=_iso(days=-1))
+    # `_task` numbers files in creation order, so upstream is id-less in the
+    # frontmatter; give it the id the dependency names.
+    up = sorted((vault / "obsidian" / "autonomy").glob("*.md"))[0]
+    up.write_text(up.read_text().replace("name: upstream", "name: upstream\nid: 1"))
+
+    out = dash._autonomy()
+    assert out["overdue_count"] == 0
+    assert out["held"][0]["blocked"] == "waiting on #1"
+
+
+def test_a_task_with_no_skill_can_never_run_and_says_so(vault):
+    """`_is_task_due` warns once and skips forever; the board is where
+    that silence should end."""
+    _task(vault, "orphan", status="up_next", next_run=_iso(days=-5), skill_name="")
+    out = dash._autonomy()
+    assert out["held"][0]["blocked"] == "no skill"
+
+
+def test_an_unheld_past_due_task_is_still_overdue(vault):
+    """The classification must not swallow real misses."""
+    _task(vault, "genuinely-late", status="up_next", next_run=_iso(days=-2))
+    out = dash._autonomy()
+    assert [t["name"] for t in out["overdue"]] == ["genuinely-late"]
+    assert out["held"] == []
+    assert out["overdue"][0]["blocked"] is None
+
+
+def test_the_classifier_names_itself(vault):
+    """A downgrade that looks like success is the failure mode here: with
+    no classifier every held task reappears as overdue, and the panel has
+    to say so rather than quietly mis-colouring six rows."""
+    _task(vault, "paused-job", status="paused", next_run=_iso(days=-3))
+    assert dash._autonomy()["classifier"] == "autonomy"
+
+
+def test_hold_windows_collapse_runs_but_keep_gaps():
+    import autonomy
+
+    assert autonomy._hour_windows([23, 0, 1, 2, 3, 4]) == "00-04,23"
+    assert autonomy._hour_windows([6]) == "06"
+    assert autonomy._hour_windows([1, 5, 6, 7, 20]) == "01,05-07,20"
+    assert autonomy._hour_windows([]) == ""
+
+
+# ── Front matter ───────────────────────────────────────────────────────
+
+
+def test_long_front_matter_is_not_truncated(vault):
+    """A byte-capped prefix scan dropped five backlog items, and the bias
+    was causal rather than random: an item grows its `activity_log` by
+    being worked on, so the ones that vanished were the `in_progress`
+    ones. A board that hides whatever is most active is worse than none."""
+    log = "\n".join(f"  - '2026-09-06 entry {i} " + "x" * 120 + "'" for i in range(80))
+    path = vault / "obsidian" / "backlog" / "363-busy.md"
+    path.write_text(
+        f"---\nname: busy\nboard: lloyd\nstatus: in_progress\n"
+        f"activity_log:\n{log}\n---\n\n# busy\n")
+    assert len(path.read_text()) > 10000
+
+    out = dash._backlog()
+    assert out["total"] == 1
+    assert out["by_status"] == {"in_progress": 1}
+
+
+def test_a_horizontal_rule_in_the_body_does_not_close_the_block(vault):
+    """`split("---")` also fires on prose. The closing delimiter is a
+    line of its own, and only that."""
+    path = vault / "obsidian" / "backlog" / "1-ruled.md"
+    path.write_text("---\nname: ruled\nstatus: up_next\nboard: lloyd\n"
+                    "note: 'see A---B for context'\n---\n\n# ruled\n\n---\n\ntext\n")
+    out = dash._backlog()
+    assert out["by_status"] == {"up_next": 1}
+
+
+def test_front_matter_with_no_closing_delimiter_is_not_front_matter(vault):
+    path = vault / "obsidian" / "backlog" / "2-broken.md"
+    path.write_text("---\nname: broken\nstatus: up_next\n" + "filler: x\n" * 200)
+    assert dash._backlog()["total"] == 0
+
+
+def test_a_yaml_list_is_not_front_matter(vault):
+    """A block that parses to a list would blow up on the caller's .get."""
+    path = vault / "obsidian" / "backlog" / "3-listy.md"
+    path.write_text("---\n- one\n- two\n---\n\n# listy\n")
+    assert dash._backlog()["total"] == 0
 
 
 # ── Backlog ────────────────────────────────────────────────────────────

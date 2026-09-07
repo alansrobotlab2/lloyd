@@ -385,6 +385,38 @@ task lands exactly where the soonest one belongs. Likewise `completed`
 is excluded from worker "open" counts (`_OPEN_STATES`): it dominates the
 depth table and would bury the handful of items actually waiting.
 
+**And overdue is not "held."** The clock is only one of five gates the
+scheduler applies. A task also needs a skill, `up_next` status, no failure
+cooldown, a satisfied `depends_on`, and the current hour inside its
+`preferred_hours`. `autonomy.hold_reason` mirrors `_is_task_due`'s gates in
+order and returns the first one that bites (`"paused"`, `"waiting on #42"`,
+`"outside hours 00-04,23"`, `"no skill"`) or `None`; the panel calls a
+past-due task **overdue** only when nothing holds it, and **held** otherwise.
+Both `_autonomy` and `GET /api/autonomy/tasks` call that one function rather
+than restating the gates — a second private definition of "due" is what this
+fixed. On 2026-09-06 the dashboard showed six overdue while the scheduler
+considered none of them late: four nightly jobs outside their window and two
+paused. A nightly task is past due for the eighteen hours a day it is not
+allowed to run, so the counter was never zero and therefore said nothing.
+The `classifier` field reports `naive` when `autonomy` could not be imported
+and every past-due task is being called overdue, because a downgrade that
+looks like success is the failure this whole split exists to prevent. Note
+that the dependency gate resolves `depends_on` by id and treats an
+unresolvable id as *met*, so it must always be handed the **whole** board —
+`/api/autonomy/tasks?status=up_next` classified against its own filtered list
+would report every dependency satisfied.
+
+**Front matter is bounded by its closing `---`, not by a byte count.**
+`_frontmatter` reads in 4 KB chunks up to a 64 KB ceiling and stops at a
+line-anchored `^---$`. The previous flat 3000-byte prefix silently dropped
+five backlog items, and the selection was causal rather than random: an item
+grows its `activity_log` precisely by being worked on, so the two it hid were
+the two that were `in_progress` — the board reported zero. A cap that hides
+whatever is most active is the worst possible reading of "bounded". Splitting
+on bare `"---"` is the matching trap: it also fires inside quoted log prose
+and truncates the block somewhere plausible. A block that parses to a list or
+a string returns `{}`, since the caller's first move is `.get`.
+
 **Subagents and background bash tasks live in the lloyd-mcp process, not
 the backend.** The aggregator owns the `Task` tool and spawns
 `Bash(run_in_background=true)` children, so the backend has no handle on

@@ -583,18 +583,23 @@ function relativeTime(iso: string | null | undefined): string {
 }
 
 function TaskLine({
-  task, tone, when,
+  task, tone, when, showReason = false,
 }: {
   task: AutonomyTaskRow
   tone: Tone
   when: string
+  /** Show why the scheduler is holding this task instead of its frequency.
+   *  On a held row the reason is the only thing worth the space — the
+   *  frequency is what made it look late in the first place. */
+  showReason?: boolean
 }) {
+  const note = showReason && task.blocked ? task.blocked : task.frequency
   return (
     <div className="flex items-center gap-2 text-[10px]">
       <CalendarClock className={cn('h-3 w-3 flex-shrink-0', TONE_TEXT[tone])} />
       <span className="truncate text-foreground">{task.name}</span>
-      {task.frequency && (
-        <span className="flex-shrink-0 text-muted-foreground/60">{task.frequency}</span>
+      {note && (
+        <span className="flex-shrink-0 whitespace-nowrap text-muted-foreground/60">{note}</span>
       )}
       <span className={cn('ml-auto flex-shrink-0 font-mono tabular-nums', TONE_TEXT[tone])}>
         {relativeTime(when)}
@@ -635,9 +640,28 @@ function AutonomyPanel({ autonomy }: { autonomy: AutonomyState }) {
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">
           <div className="text-[10px] uppercase tracking-wider text-amber-400">
             Overdue ({autonomy.overdue_count})
+            {autonomy.classifier === 'naive' && (
+              <span className="ml-1 normal-case tracking-normal text-muted-foreground/60">
+                unclassified
+              </span>
+            )}
           </div>
           {autonomy.overdue.map(t => (
             <TaskLine key={t.name} task={t} tone="warn" when={t.next_run} />
+          ))}
+        </div>
+      )}
+
+      {/* Past due on the clock, but the scheduler is holding them on
+          purpose. Kept visible — a task paused for three days is worth
+          seeing — but never coloured as a miss. */}
+      {(autonomy.held?.length ?? 0) > 0 && (
+        <div className="mt-2.5 space-y-1 border-t border-border pt-2">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Held ({autonomy.held_count})
+          </div>
+          {autonomy.held.map(t => (
+            <TaskLine key={t.name} task={t} tone="idle" when={t.next_run} showReason />
           ))}
         </div>
       )}

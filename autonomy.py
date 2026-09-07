@@ -443,6 +443,62 @@ def _is_task_due(task: dict, all_tasks: list[dict]) -> bool:
     return True
 
 
+def _hour_windows(hours) -> str:
+    """[23,0,1,2,3,4] -> "00-04,23". Contiguous runs collapse; gaps survive."""
+    try:
+        hs = sorted({int(h) % 24 for h in hours})
+    except (TypeError, ValueError):
+        return ""
+    out: list[str] = []
+    start = prev = None
+    for h in hs:
+        if start is None or h != prev + 1:
+            if start is not None:
+                out.append(f"{start:02d}" if start == prev else f"{start:02d}-{prev:02d}")
+            start = h
+        prev = h
+    if start is not None:
+        out.append(f"{start:02d}" if start == prev else f"{start:02d}-{prev:02d}")
+    return ",".join(out)
+
+
+def hold_reason(task: dict, all_tasks: list[dict]) -> Optional[str]:
+    """Why this task will not dispatch right now, or None if nothing holds it.
+
+    Mirrors `autonomy._is_task_due`'s gates in its order and calls the very
+    same predicates, because a second private definition of "due" is exactly
+    how the Mission Control panel came to report six tasks overdue on a night
+    when this scheduler considered none of them late. Four were nightly jobs
+    sitting outside their `preferred_hours` window and two were `paused` — all
+    six behaving precisely as configured. A nightly task is "late" for the
+    eighteen hours a day it is not allowed to run, so `overdue_count` was
+    never zero and therefore said nothing.
+
+    The distinction any display has to draw is between *held* (something is
+    deliberately keeping this task from running) and *overdue* (nothing is,
+    and it still has not run). Only the second is worth a colour.
+    """
+    if (not str(task.get("skill_name") or "").strip()
+            and not str(task.get("skill_path") or "").strip()):
+        # `_is_task_due` warns once and skips forever. A task that can never
+        # run is the one thing here that always deserves a human.
+        return "no skill"
+    status = str(task.get("status") or "").strip()
+    if status != "up_next":
+        return status or "no status"
+    if _frequency_interval_seconds(task) is None:
+        return "no frequency"
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if _in_failure_cooldown(task, now):
+        return "failure cooldown"
+    if not _is_dependency_met(task, all_tasks):
+        return f"waiting on #{task.get('depends_on')}"
+    if not _is_preferred_hour(task):
+        window = _hour_windows(_effective_preferred_hours(task) or [])
+        return f"outside hours {window}" if window else "outside hours"
+    return None
+
+
 def _priority_key(task: dict) -> tuple:
     prio_map = {"critical": 4, "high": 3, "medium": 2, "low": 1, "background": 0}
     prio = prio_map.get(str(task.get("priority", "medium")).lower(), 2)
