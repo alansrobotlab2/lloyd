@@ -53,6 +53,14 @@ PROBE_HTTP_ERROR_STREAK = 36     # 36 x 5s = 3 minutes of answering, badly
 # try to restart the unit. Never a code-rollback trigger.
 SUPERVISORD_DOWN_STREAK = 3
 
+# Consecutive ticks an aggregator verdict must hold before it reverts code.
+# `mcp_degraded_is_fatal` fires on a body reporting zero tools, and an
+# aggregator answering mid-restart parses to exactly that — so without a
+# streak a single bad response reverts a promotion on its own. Every other
+# detector here confirms across ticks; this one reached that verdict only
+# via a 503, which hid how sharp it was.
+MCP_FATAL_STREAK = 3
+
 # A crash loop that never reaches FATAL: the spawn timestamp advancing N times
 # inside a window means the process is cycling even if every individual sample
 # says RUNNING. This is the predicate that catches what `autorestart=true`

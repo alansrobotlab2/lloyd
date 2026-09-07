@@ -363,9 +363,14 @@ in both directions. The aggregator returns 503 whenever *any* module is
 degraded — a closed Thunderbird bridge — so three ticks of an ordinary,
 expected condition read as a dead aggregator, while the careful
 newly-degraded-since-LKG check sat *after* the down predicate and never got a
-vote. The aggregator's 503 is now judged only by `mcp_degraded_is_fatal`. The
-backend's own 503 is real (a router that failed to mount, a startup event that
-never completed) and gets its own much wider budget: 36 ticks.
+vote. The aggregator's 503 is now judged only by `mcp_degraded_is_fatal`, and that
+verdict is itself **confirmed across 3 ticks** — it fires on a body reporting
+zero tools, and an aggregator answering mid-restart parses to exactly that, so
+one bad response would otherwise revert a promotion on its own. Every other
+detector here confirms across ticks; this one used to be reached only via a
+503, which hid how sharp it was. The backend's own 503 is real (a router that
+failed to mount, a startup event that never completed) and gets its own much
+wider budget: 36 ticks.
 
 **A deliberate stop is not an outage.** `STOPPED` and `EXITED` shared a branch,
 so when flap protection quarantined the backend — the guardian stopping it on

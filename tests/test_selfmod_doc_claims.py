@@ -231,3 +231,8 @@ def test_the_new_state_files_exist_where_the_doc_says():
     assert S.LAST_SETTLED_PATH.name == "last_settled.json"
     assert S.ROLLBACK_REQUEST_PATH.name == "rollback_request.json"
     assert S.EVAL_LAST_PATH.name == "eval_last.json"
+
+
+def test_the_aggregator_verdict_streak_matches_the_doc():
+    """§7.2: the aggregator's verdict is confirmed across ticks."""
+    assert policy.MCP_FATAL_STREAK >= 2

@@ -741,3 +741,45 @@ def test_a_code_only_change_touches_no_service_machinery(monkeypatch, tmp_path):
     monkeypatch.setattr(P, "SYSTEMD_USER_DIR", tmp_path / "systemd")
     notes = P._apply_service_changes(["app/inner_voice/guards.py", "tests/test_x.py"])
     assert calls == [] and notes == []
+
+
+def test_an_aggregator_verdict_is_confirmed_across_ticks(tmp_path):
+    """`mcp_degraded_is_fatal` fires on a body reporting zero tools.
+
+    An aggregator answering 500 mid-restart parses to exactly that, so without
+    a streak one bad response reverts a promotion on its own. Every other
+    detector here confirms across ticks; this one was reached only via a 503,
+    which hid how sharp it was.
+    """
+    import guardian as G
+
+    args = G.build_parser().parse_args([
+        "--repo", str(ROOT),
+        "--state", str(tmp_path / "selfmod"),
+        "--guardian-state", str(tmp_path / "guardian"),
+        "--supervisor-sock", str(tmp_path / "no-such.sock"),
+        "--no-external-alerts",
+    ])
+    g = G.Guardian(args)
+    mcp = "lloyd-mc:lloyd-mcp"
+    g.programs = (mcp,)
+    g.probe_fail = {mcp: 0}
+    g.probe_timeout = {mcp: 0}
+    g.probe_http = {mcp: 0}
+
+    snap = {
+        "now": time.time(),
+        "procs": {mcp: {"statename": "RUNNING", "start": 1}},
+        "probes": {mcp: {"ok": False, "status": 500, "kind": "http_error",
+                         "body": None, "error": None}},
+    }
+    seen = [g.evaluate_liveness(snap)[0] for _ in range(policy.MCP_FATAL_STREAK)]
+    assert seen[:-1] == [False] * (policy.MCP_FATAL_STREAK - 1), \
+        "a single bad response must not revert code"
+    assert seen[-1] is True, "a persistent zero-tool aggregator must still fire"
+
+    # ...and one good answer clears it.
+    snap["probes"][mcp] = {"ok": True, "status": 200, "kind": "ok",
+                           "body": {"tools": 130, "degraded_modules": []}}
+    assert g.evaluate_liveness(snap)[0] is False
+    assert g.mcp_fatal_streak == 0

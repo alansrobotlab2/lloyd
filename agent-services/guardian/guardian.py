@@ -98,6 +98,7 @@ class Guardian:
         self.probe_fail: dict[str, int] = {p: 0 for p in self.programs}
         self.probe_timeout: dict[str, int] = {p: 0 for p in self.programs}
         self.probe_http: dict[str, int] = {p: 0 for p in self.programs}
+        self.mcp_fatal_streak = 0
         self.start_history: dict[str, list[float]] = {p: [] for p in self.programs}
         self.sup_down_streak = 0
         self.quiet_until = 0.0
@@ -235,7 +236,22 @@ class Guardian:
                 baseline = ((self.state.lkg() or {}).get("health") or {}).get("mcp_degraded_modules")
                 fatal, why = detect.mcp_degraded_is_fatal(body, baseline)
                 if fatal:
-                    return True, f"{program}: {why}"
+                    # Confirm across ticks before acting. This verdict fires on
+                    # a body reporting zero tools, and an aggregator answering
+                    # 500 mid-restart parses to exactly that — so a single bad
+                    # response would have reverted code on its own. Every other
+                    # detector here requires a streak; this one was reached
+                    # only on a 503 before, which hid how sharp it was.
+                    self.mcp_fatal_streak += 1
+                    if self.mcp_fatal_streak >= policy.MCP_FATAL_STREAK:
+                        return True, (f"{program}: {why} "
+                                      f"({self.mcp_fatal_streak} consecutive ticks)")
+                    log(f"{program}: {why} — {self.mcp_fatal_streak}/"
+                        f"{policy.MCP_FATAL_STREAK}, waiting for confirmation")
+                else:
+                    self.mcp_fatal_streak = 0
+            elif is_mcp:
+                self.mcp_fatal_streak = 0
         return False, "all watched processes healthy"
 
     # ── error-rate ─────────────────────────────────────────────────────
