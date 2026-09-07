@@ -161,6 +161,30 @@ reason indistinguishable from "states no checkable claim". It is now recorded
 as `incomplete`, the item comes back, and only a second exhaustion retires it —
 with evidence that says exactly that and names the transcript.
 
+Two more were found by the first unattended run itself (#229, 2026-09-07:
+`stale`, closed, 9 of 90 iterations), which is what a dry run is for:
+
+- **A worker session is not the user's session.** 77 seconds after the
+  triage turn ended, the morning brief — a MockBOT meeting that night — was
+  injected into that session and answered there, to nobody.
+  `session_inject_context` with no target asks `GET /api/sessions/active`,
+  whose first rule is "the last session to receive a user turn", and a worker
+  turn arrives through the chat path precisely so that it gets Inner Voice.
+  `sessions_io.NON_USER_PLATFORMS` now excludes `worker` beside `autonomy` in
+  both resolution rules, and `/inject` refuses such a session with **409**
+  rather than a 200 "skipped", so the producer's `ok` is false and nothing
+  records the brief as delivered. It is a deny-list on purpose: a client the
+  list has never heard of must keep receiving its briefs.
+  `tests/test_active_session_resolution.py` pins both.
+- **The verdict template taught its own placeholder.** The prompt spelled the
+  not-confirmed case as `ACCEPTANCE: <… else: ->` and the model copied the
+  template's closing bracket verbatim, so the ledger read `acceptance: "->"`.
+  `select_confirmed`'s guard stripped the `-` and was left with `>` — truthy —
+  so a `confirmed` written the same way would have handed the implementer `>`
+  as its contract. `backlog.acceptance_text` is now the one definition of
+  blank (no alphanumerics, or a lone placeholder word), the parser records
+  `""`, and the prompt says "otherwise the word none".
+
 ### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the

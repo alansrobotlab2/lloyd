@@ -244,6 +244,27 @@ def test_only_confirmed_items_with_an_acceptance_check_are_implementable(isolate
     assert ev["acceptance"] == "the check no longer reproduces"
 
 
+def test_a_placeholder_acceptance_is_no_contract(isolated):
+    """#229 was recorded with acceptance `->`: the model copied the prompt
+    template's own `else: ->`. The old guard's `.strip("-")` left `>`, which
+    is truthy, so a `confirmed` written the same way would have handed the
+    implementer `>` as its contract."""
+    for value in ("->", ">", "<none>", "none", "N/A", "(none)", "\u2014", "", None):
+        assert B.acceptance_text(value) == "", repr(value)
+    assert B.acceptance_text("  pytest  tests/test_x.py   passes ") == "pytest tests/test_x.py passes"
+    write_item(isolated, 1, days_old=50)
+    _confirm(1, acceptance="->")
+    assert B.select_confirmed(S.LEDGER_PATH) is None
+
+
+def test_parse_verdict_never_records_a_placeholder_acceptance():
+    from workers.sources import backlog_selfmod as _M
+    text = "prose\nVERDICT: stale\nCHECK: ls\nEVIDENCE: gone\nACCEPTANCE: ->\n"
+    assert _M.parse_verdict(text)["acceptance"] == ""
+    assert "else: ->" not in _M.PROMPT, "the template taught the placeholder"
+    assert "otherwise the word none" in _M.PROMPT
+
+
 def test_one_attempt_per_item_unattended(isolated):
     write_item(isolated, 2)
     _confirm(2)

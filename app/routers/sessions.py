@@ -742,6 +742,20 @@ async def inject_ambient_turn(session_id: str, request: Request):
     text = (data.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
+
+    # A worker or autonomy session is not a place to tell the user anything;
+    # 409 rather than a 200 "skipped" so `session_inject_context` reports
+    # ok=false and no producer records the notification as delivered.
+    from app.sessions_io import is_user_session
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    try:
+        meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    except (OSError, ValueError):
+        meta = {}
+    if not is_user_session(meta):
+        raise HTTPException(status_code=409, detail=(
+            f"session {session_id} is a {meta.get('platform')} session; "
+            "ambient turns are not delivered where nobody reads them"))
     dedup_key = (data.get("dedup_key") or "").strip() or None
     priority = (data.get("priority") or "notable").strip().lower()
     if priority not in ("notable", "urgent"):

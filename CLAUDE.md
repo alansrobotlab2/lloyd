@@ -219,6 +219,16 @@ off by default and both run **in a real session** via `run_prompt_in_session`,
 which is the only way a worker turn gets Inner Voice and a transcript — never
 `run_prompt_on_primary` for anything that judges or changes this code. Budget
 exhaustion records `incomplete`, not a verdict; the item comes back once.
+
+Two things the first unattended run (#229) taught, both pinned by tests:
+a worker session is **never the user's session** — worker turns arrive
+through the chat path, so "the last session to receive a user turn" was one
+nobody reads, and the morning brief was delivered there.
+`sessions_io.NON_USER_PLATFORMS` (`autonomy`, `worker`) is the one definition
+of that, and `/inject` refuses such a session with 409 so no producer counts
+it delivered. And a verdict's `ACCEPTANCE` is a contract only if
+`backlog.acceptance_text` says so: the old template's `else: ->` was copied
+verbatim, and `strip("-")` left a truthy `>`.
 `architecture/self-modification.md` §3.2.
 
 ### Development happens in ~/lloyd-sandbox
@@ -281,7 +291,14 @@ authority — these keys are not the OpenAI wire names):
 - `system` — `{type, session_id, model}` — turn opened
 - `text_delta` — `{type, text}` — streaming text chunk
 - `thinking_delta` — `{type, text}` — reasoning content chunk
-- `thinking_done` — `{type, text}` — reasoning phase complete
+- `thinking_done` — `{type, text, duration_ms}` — reasoning phase
+  complete. `duration_ms` spans the first reasoning chunk to the last,
+  not the iteration's wall clock, which also covers prefill and the
+  answer written afterwards. It reaches the chat's collapsed thinking
+  panel as `reasoning_ms` on the persisted assistant message, so the
+  header reads the same on reload as it did live — the event lands
+  *after* that iteration's text, so the browser measures the delta
+  timestamps itself until the real number arrives.
 - `tool_call` — `{type, call_id, name, args_json, args_dict, summary}` — tool
   invocation. `summary` is the model's own one-liner for the transcript;
   it is absent from `args_json`/`args_dict` (see "Tool-call summaries").

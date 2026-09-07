@@ -81,6 +81,22 @@ _session_queues: dict[str, SessionQueue] = {}
 
 _last_user_session_id: Optional[str] = None
 
+# Sessions that exist so a machine can run a turn in them, not so a human can
+# read them. Neither is ever "the user's session": an ambient producer that
+# resolves to one delivers its notification to nobody. `autonomy` was excluded
+# from the start. `worker` joined it on 2026-09-07, when the morning brief
+# (MockBOT meeting that night) was injected into a backlog-triage session that
+# had finished 77 seconds earlier — worker turns go through the chat path, so
+# it was the last session to receive a user-source turn — and answered there.
+# A deny-list on purpose: a client this list has never heard of must keep
+# receiving its briefs rather than silently losing them.
+NON_USER_PLATFORMS = frozenset({"autonomy", "worker"})
+
+
+def is_user_session(data: dict) -> bool:
+    """True if a human reads this session. Missing platform means the web UI."""
+    return (data.get("platform") or "mission-control") not in NON_USER_PLATFORMS
+
 
 def set_last_user_session(session_id: str) -> None:
     """Record that a user turn just enqueued for this session. Called from
@@ -95,10 +111,13 @@ def get_active_session_id(max_age_hours: float = 24.0) -> Optional[str]:
     """Best-effort "current user session" for ambient producers.
 
     Resolution:
-      1. `_last_user_session_id` if set AND the session JSON still exists.
-      2. Most-recent `platform: mission-control` session by mtime within
-         `max_age_hours`. Explicitly excludes `platform: autonomy` so an
-         autonomy task's own session never receives its own injection.
+      1. `_last_user_session_id` if set, the session JSON still exists, AND
+         it is a user session. Worker turns arrive through the chat path and
+         set this too, which is how a brief once went to a triage session.
+      2. Most-recent user session by mtime within `max_age_hours`.
+
+    Both rules apply `is_user_session`: an `autonomy` or `worker` session
+    never receives an injection, its own or anyone else's.
 
     Returns None if nothing qualifies — producers should treat this as a
     no-op (the user simply has no active chat session to notify).
@@ -108,7 +127,12 @@ def get_active_session_id(max_age_hours: float = 24.0) -> Optional[str]:
     if _last_user_session_id:
         p = SESSIONS_DIR / f"{_last_user_session_id}.json"
         if p.exists():
-            return _last_user_session_id
+            try:
+                data = json.loads(p.read_text())
+            except (OSError, ValueError):
+                data = None          # mid-write: keep the old answer
+            if data is None or is_user_session(data):
+                return _last_user_session_id
 
     if not SESSIONS_DIR.exists():
         return None
@@ -121,8 +145,7 @@ def get_active_session_id(max_age_hours: float = 24.0) -> Optional[str]:
             if mtime < cutoff:
                 continue
             data = json.loads(sf.read_text())
-            platform = data.get("platform", "mission-control")
-            if platform == "autonomy":
+            if not is_user_session(data):
                 continue
             if best is None or mtime > best[0]:
                 best = (mtime, data.get("session_id", sf.stem))

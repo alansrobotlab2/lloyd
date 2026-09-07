@@ -155,6 +155,28 @@ def _ledger_events(ledger: Path, event: str) -> list[dict]:
     return out
 
 
+_ACCEPTANCE_PLACEHOLDERS = {"none", "n/a", "na", "not applicable", "null", "nil", "no"}
+
+
+def acceptance_text(value) -> str:
+    """The acceptance check as recorded, or "" when the model wrote a placeholder.
+
+    The first cut of the verdict prompt spelled the not-confirmed case as
+    `else: ->`, and the model copied the template's own closing bracket
+    verbatim: #229 was recorded with acceptance `->`. The guard in
+    `select_confirmed` did `.strip("-")`, which leaves `>` — truthy — so a
+    `confirmed` verdict written the same way would have handed the
+    implementer `>` as its contract. A check is only a check if it has words
+    in it, and a lone placeholder word is not a check either.
+    """
+    s = " ".join(str(value or "").split()).strip()
+    if not re.search(r"[A-Za-z0-9]", s):
+        return ""
+    if s.strip(" -<>()[].:'\"").lower() in _ACCEPTANCE_PLACEHOLDERS:
+        return ""
+    return s
+
+
 def triaged_ids(ledger: Path) -> dict[int, str]:
     """{item_id: verdict} for items with a TERMINAL verdict.
 
@@ -226,7 +248,7 @@ def select_confirmed(ledger: Path,
         ev = confirmed.get(item.id)
         if not ev or item.id in done:
             continue
-        if not (ev.get("acceptance") or "").strip().strip("-"):
+        if not acceptance_text(ev.get("acceptance")):
             continue
         ready.append((item, ev))
     if not ready:

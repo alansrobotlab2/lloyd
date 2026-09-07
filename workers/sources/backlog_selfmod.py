@@ -101,8 +101,13 @@ Finish with exactly this block and nothing after it:
 VERDICT: <one of confirmed|already_done|stale|unverifiable|not_code>
 CHECK: <the command or method you ran, one line>
 EVIDENCE: <2-4 sentences citing what you actually observed>
-ACCEPTANCE: <if confirmed: what must become true for this to be done. else: ->
+ACCEPTANCE: <if confirmed: what must become true for this to be done; otherwise the word none>
 """
+
+def _acceptance_text(value: str) -> str:
+    from scripts.selfmod.backlog import acceptance_text
+    return acceptance_text(value)
+
 
 _FIELD = re.compile(r"^(VERDICT|CHECK|EVIDENCE|ACCEPTANCE):\s*(.*)$", re.I)
 
@@ -145,7 +150,7 @@ def parse_verdict(text: str) -> dict | None:
         "verdict": verdict,
         "check": " ".join(joined("CHECK", 4000).split())[:400],
         "evidence": joined("EVIDENCE", 2000),
-        "acceptance": " ".join(joined("ACCEPTANCE", 4000).split())[:600],
+        "acceptance": _acceptance_text(joined("ACCEPTANCE", 4000))[:600],
     }
 
 
