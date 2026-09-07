@@ -154,7 +154,147 @@ def test_edge_type_weights_order_neighbours(world):
     assert [n for n, _ in ranked] == ["Typed", "Weak"]
 
 
-# ── get_facts_sync temporal filters ──────────────────────────────────────────
+# ── directed traversal (backlog #396) ────────────────────────────────────────
+#
+# Direction has lived on every edge since the SQLite rewrite; both traversal
+# sites read it only to pick "the other end", so the retrieval path could never
+# answer "what depends on X" / "what did X supersede" even where the data
+# supports it. These tests pin the direction argument and, just as importantly,
+# the default: everything above and every existing caller (vault_recall → the
+# nightly retrieval eval) must keep walking symmetrically.
+
+def _names(pairs):
+    return [n for n, _ in pairs]
+
+
+def test_weighted_neighbors_out_follows_source_to_target(world):
+    """A →(depends_on) B. `out` from A reaches B; `out` from B reaches nothing,
+    because the arrow does not point out of B."""
+    _, st = world
+    st.edges.add({"source": "A", "target": "B", "type": "depends_on", "confidence": 1.0}, origin="t")
+
+    assert _names(retrieval.graph_weighted_neighbors(["A"], top_k=5, direction="out")) == ["B"]
+    assert retrieval.graph_weighted_neighbors(["B"], top_k=5, direction="out") == []
+
+
+def test_weighted_neighbors_in_is_the_mirror_of_out(world):
+    """Same edge, opposite query: `in` from B reaches A, `in` from A is empty.
+    This is the "what depends on X" shape that was unanswerable before #396."""
+    _, st = world
+    st.edges.add({"source": "A", "target": "B", "type": "depends_on", "confidence": 1.0}, origin="t")
+
+    assert _names(retrieval.graph_weighted_neighbors(["B"], top_k=5, direction="in")) == ["A"]
+    assert retrieval.graph_weighted_neighbors(["A"], top_k=5, direction="in") == []
+
+
+def test_graph_expand_entities_honours_direction(world):
+    _, st = world
+    st.edges.add({"source": "A", "target": "B", "type": "uses", "confidence": 1.0}, origin="t")
+
+    assert retrieval.graph_expand_entities(["A"], direction="out") == ["B"]
+    assert retrieval.graph_expand_entities(["B"], direction="out") == []
+    assert retrieval.graph_expand_entities(["B"], direction="in") == ["A"]
+    assert retrieval.graph_expand_entities(["A"], direction="in") == []
+
+
+def test_direction_is_consistent_across_hops(world):
+    """A → B → C. A directed multi-hop walk never reverses mid-path: `out` from
+    A gets both, `out` from B gets only C (not back to A), `in` from C gets
+    both walking backwards."""
+    _, st = world
+    st.edges.add({"source": "A", "target": "B", "type": "uses", "confidence": 1.0}, origin="t")
+    st.edges.add({"source": "B", "target": "C", "type": "uses", "confidence": 1.0}, origin="t")
+
+    assert sorted(_names(retrieval.graph_weighted_neighbors(["A"], top_k=5, hops=2, direction="out"))) == ["B", "C"]
+    assert _names(retrieval.graph_weighted_neighbors(["B"], top_k=5, hops=2, direction="out")) == ["C"]
+    assert _names(retrieval.graph_weighted_neighbors(["A"], top_k=5, hops=2, direction="in")) == []
+    assert sorted(_names(retrieval.graph_weighted_neighbors(["C"], top_k=5, hops=2, direction="in"))) == ["A", "B"]
+
+
+SYMMETRIC_TYPES = ("mentions", "related_to", "discusses", "competes_with",
+                   "co_mentioned", "wiki_link_co_occurrence", "some_unknown_type")
+
+
+def test_symmetric_types_are_excluded_from_a_directed_query(world):
+    """34% of live edges are directional; the other 66% (mentions, related_to,
+    discusses, competes_with, cooccurrence) have endpoint order as an
+    extraction artefact. Honouring direction over the whole graph would be
+    two-thirds noise, so a directed query is a *typed* query. That treatment is
+    specified in `_directed_neighbor`'s docstring, not incidental — this test is
+    the other half of the contract."""
+    _, st = world
+    directional = sorted(retrieval.DIRECTIONAL_EDGE_TYPES)
+    for i, etype in enumerate(directional):
+        st.edges.add({"source": f"Dir_{i}", "target": "Hub", "type": etype,
+                      "confidence": 1.0}, origin="t")
+    for i, etype in enumerate(SYMMETRIC_TYPES):
+        st.edges.add({"source": f"Sym_{i}", "target": "Hub", "type": etype,
+                      "confidence": 1.0}, origin="t")
+
+    got = set(_names(retrieval.graph_weighted_neighbors(["Hub"], top_k=50, direction="in")))
+    assert got == {f"Dir_{i}" for i in range(len(directional))}, (
+        "a directed query must return only directional sources, got "
+        f"{sorted(got)}"
+    )
+    assert set(_names(retrieval.graph_weighted_neighbors(["Hub"], top_k=50, direction="out"))) == set()
+
+    # ... and the symmetric neighbours are still reachable the default way.
+    both = set(_names(retrieval.graph_weighted_neighbors(["Hub"], top_k=50)))
+    assert both == {f"Dir_{i}" for i in range(len(directional))} | {
+        f"Sym_{i}" for i in range(len(SYMMETRIC_TYPES))
+    }
+    assert set(retrieval.graph_expand_entities(["Hub"], direction="in")) == {
+        f"Dir_{i}" for i in range(len(directional))
+    }
+
+
+def test_symmetric_neighbours_survive_under_the_default(world):
+    """Guardrail for the acceptance criterion that matters most: `both` is the
+    default and must still return the symmetric neighbourhood, because that is
+    what vault_recall asks for and what the nightly eval measures."""
+    _, st = world
+    st.edges.add({"source": "A", "target": "Symmetric", "type": "mentions", "confidence": 1.0}, origin="t")
+    st.edges.add({"source": "A", "target": "Directional", "type": "uses", "confidence": 1.0}, origin="t")
+
+    default = retrieval.graph_weighted_neighbors(["A"], top_k=5)
+    assert set(_names(default)) == {"Symmetric", "Directional"}
+    assert default == retrieval.graph_weighted_neighbors(["A"], top_k=5, direction="both")
+    assert set(retrieval.graph_expand_entities(["A"])) == {"Symmetric", "Directional"}
+    assert retrieval.graph_expand_entities(["A"], direction="both") == retrieval.graph_expand_entities(["A"])
+
+
+def test_direction_filters_edges_but_not_scoring(world):
+    """Direction selects which edges are traversable; it must not silently
+    rescore the ones that are. Same edge, same weight under both and out."""
+    _, st = world
+    st.edges.add({"source": "A", "target": "B", "type": "uses", "confidence": 0.8}, origin="t")
+
+    both = dict(retrieval.graph_weighted_neighbors(["A"], top_k=5, direction="both"))
+    out = dict(retrieval.graph_weighted_neighbors(["A"], top_k=5, direction="out"))
+    assert out == both
+
+
+def test_bad_direction_raises_instead_of_going_symmetric(world):
+    """`_fact_relationships` ignores an unrecognised direction. Here a typo
+    would have returned a symmetric walk to a caller that asked for a directed
+    one — a confident wrong answer to exactly the question the parameter is
+    for."""
+    _, st = world
+    st.edges.add({"source": "A", "target": "B", "type": "uses", "confidence": 1.0}, origin="t")
+    with pytest.raises(ValueError):
+        retrieval.graph_weighted_neighbors(["A"], direction="incoming")
+    with pytest.raises(ValueError):
+        retrieval.graph_expand_entities(["A"], direction="sideways")
+
+
+def test_direction_case_is_normalised(world):
+    _, st = world
+    st.edges.add({"source": "A", "target": "B", "type": "uses", "confidence": 1.0}, origin="t")
+    assert _names(retrieval.graph_weighted_neighbors(["A"], top_k=5, direction=" OUT ")) == ["B"]
+    assert _names(retrieval.graph_weighted_neighbors(["A"], top_k=5, direction=None)) == ["B"]
+
+
+
 
 def test_get_facts_sync_temporal_filters(world):
     root, _ = world

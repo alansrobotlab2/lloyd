@@ -21,7 +21,7 @@ their signatures as cross-module breaking changes.
 
 import math
 import re
-from typing import Optional
+from typing import Literal, Optional
 
 from app.entity_naming import _GENERIC_SINGLE
 from app.kg_store import StoreUnavailable, store
@@ -66,6 +66,30 @@ EDGE_TYPE_WEIGHTS = {
     "mentions": 0.3,
 }
 _DEFAULT_EDGE_WEIGHT = 0.3  # unknown types fall back to same weight as mentions
+
+# Edge types whose source→target ordering actually means something, i.e. the
+# ones where "A uses B" is not the same claim as "B uses A". Measured on the
+# live store 2026-09-06 (backlog #396): these are 1,370 of 4,029 active edges
+# — 34% of the graph. Everything else (`mentions` 1,379, `related_to` 998,
+# `discusses` 216, `competes_with` 66, plus the cooccurrence types) is either
+# genuinely symmetric or ordered by whatever the extractor happened to see
+# first, so its endpoint order carries no signal to honour.
+#
+# Used by `_directed_neighbor()` to decide which edges a directed query may
+# filter on. Traversal never filters on this set by itself — see the `direction`
+# docstrings on `graph_expand_entities` / `graph_weighted_neighbors`.
+DIRECTIONAL_EDGE_TYPES: frozenset[str] = frozenset({
+    "uses",
+    "part_of",
+    "created_by",
+    "supersedes",
+    "depends_on",
+    "implements",
+    "built_on",
+    "describes",
+})
+
+_DIRCTIONS = ("both", "out", "in")
 
 # Task-ID extractor. Matches "Task #299", "Task 299", "#299", "task_310",
 # "backlog_120", "backlog_item_18", "backlog_task_41". Captures the numeric
@@ -397,10 +421,76 @@ def invalidate_relationships_cache() -> None:
 
 # ── Graph expansion ──────────────────────────────────────────────────────────
 
-def graph_expand_entities(seed_entities: list[str], hops: int = 1) -> list[str]:
-    """Expand a set of seed entities via relationship graph traversal."""
+def _check_direction(direction: str) -> str:
+    """Normalise a direction argument, rejecting anything meaningless.
+
+    Silent fallback to `both` was the alternative (that is what
+    `_fact_relationships` does), but here a wrong string would return a
+    symmetric walk from a caller that explicitly asked for a directed one —
+    a confidently wrong answer to exactly the queries ("what depends on X")
+    this parameter exists to answer.
+    """
+    if direction is None:
+        return "both"
+    if not isinstance(direction, str):
+        raise ValueError(f"direction must be one of {_DIRCTIONS}, got {direction!r}")
+    norm = direction.strip().lower() or "both"
+    if norm not in _DIRCTIONS:
+        raise ValueError(
+            f"direction must be one of {_DIRCTIONS}, got {direction!r}"
+        )
+    return norm
+
+
+def _directed_neighbor(entity: str, edge: dict, direction: str) -> Optional[str]:
+    """The node `entity` reaches via `edge` under `direction`; None if it
+    reaches nothing.
+
+    `both` — the default, and the behaviour every existing caller relies on
+    (vault_recall, and through it the nightly retrieval eval) — walks the edge
+    whichever end it is attached to.
+
+    `out` walks source→target only, `in` walks target→source only, and each of
+    those restricts the walk to `DIRECTIONAL_EDGE_TYPES`.
+
+    **Symmetric types are EXCLUDED from directed queries, deliberately.**
+    For `mentions` / `related_to` / `discusses` / `competes_with` and the
+    cooccurrence types, endpoint order is an extraction artefact, not a claim.
+    Including them under `out`/`in` would admit 2,659 of the 4,029 live edges
+    as if they were directional evidence and bury the 1,370 that carry real
+    direction — so "what depends on X" would still come back with co-mentions.
+    Unknown types are excluded on the same reasoning: absent evidence of
+    direction, don't pretend to filter on it. A directed query is therefore a
+    *typed* query, not a symmetric query with a filter bolted on; ask for
+    `both` (the default) to get the whole neighbourhood.
+    """
+    src, tgt = edge["source"], edge["target"]
+    if direction == "both":
+        return tgt if src == entity else src
+    if edge["type"] not in DIRECTIONAL_EDGE_TYPES:
+        return None
+    if direction == "out":
+        return tgt if src == entity else None
+    return src if tgt == entity else None
+
+
+def graph_expand_entities(
+    seed_entities: list[str],
+    hops: int = 1,
+    direction: Literal["both", "out", "in"] = "both",
+) -> list[str]:
+    """Expand a set of seed entities via relationship graph traversal.
+
+    `direction` ("both" default | "out" | "in") selects which edges the walk
+    may cross; see `_directed_neighbor` for the exact contract, including the
+    deliberate exclusion of symmetric edge types from directed walks.
+    Direction is applied per hop, consistently: `out` follows source→target at
+    every hop, never reversing mid-path. `hops` and the seed-exclusion rule
+    are unaffected.
+    """
     if not seed_entities:
         return []
+    direction = _check_direction(direction)
     try:
         adj = store().edges.adjacency()
     except StoreUnavailable:
@@ -412,7 +502,9 @@ def graph_expand_entities(seed_entities: list[str], hops: int = 1) -> list[str]:
         next_layer = set()
         for entity in current:
             for edge in adj.get(entity, ()):
-                neighbor = edge["target"] if edge["source"] == entity else edge["source"]
+                neighbor = _directed_neighbor(entity, edge, direction)
+                if neighbor is None:
+                    continue
                 if neighbor not in seed_set and neighbor not in expanded:
                     next_layer.add(neighbor)
         expanded.update(next_layer)
@@ -421,7 +513,10 @@ def graph_expand_entities(seed_entities: list[str], hops: int = 1) -> list[str]:
 
 
 def graph_weighted_neighbors(
-    seed_entities: list[str], top_k: int = 3, hops: int = 1
+    seed_entities: list[str],
+    top_k: int = 3,
+    hops: int = 1,
+    direction: Literal["both", "out", "in"] = "both",
 ) -> list[tuple[str, float]]:
     """Weighted graph expansion: return top-k neighbors scored by
     edge confidence × EDGE_TYPE_WEIGHTS[type].
@@ -430,10 +525,23 @@ def graph_weighted_neighbors(
     connected by multiple typed relationships rise to the top. Seed entities
     are excluded from results.
 
+    `direction` ("both" default | "out" | "in") restricts which edges the walk
+    may cross — "what depends on X" is `direction="in"`, "what does X supersede"
+    is `direction="out"`. Under `out`/`in` only `DIRECTIONAL_EDGE_TYPES` are
+    traversable, and symmetric types (mentions / related_to / cooccurrence) are
+    EXCLUDED rather than folded into both directions; that choice and its
+    rationale are spelled out in `_directed_neighbor`. Direction holds at every
+    hop of a multi-hop walk.
+
+    The god-node penalty divides by the neighbour's *total* active degree,
+    regardless of direction — it measures how generic a node is, not how it is
+    connected, so it stays direction-blind by design.
+
     Returns [(entity, weight)] sorted by weight desc.
     """
     if not seed_entities:
         return []
+    direction = _check_direction(direction)
     try:
         adj = store().edges.adjacency()
     except StoreUnavailable:
@@ -449,7 +557,9 @@ def graph_weighted_neighbors(
         next_layer = set()
         for entity in current:
             for edge in adj.get(entity, ()):
-                neighbor = edge["target"] if edge["source"] == entity else edge["source"]
+                neighbor = _directed_neighbor(entity, edge, direction)
+                if neighbor is None:
+                    continue
                 if neighbor in seed_set:
                     continue
                 w = (EDGE_TYPE_WEIGHTS.get(edge["type"], _DEFAULT_EDGE_WEIGHT)
