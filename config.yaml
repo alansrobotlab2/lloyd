@@ -498,7 +498,7 @@ workers:
     # implements anything — confirmed items go through the selfmod gate as a
     # separate, explicit act. 30min interval works ~53 open items in a day.
     backlog-selfmod:
-      enabled: false
+      enabled: true
       interval_seconds: 1800
       max_inflight: 1
       # Runs as a real session through /api/message/stream, so it has Inner
@@ -516,7 +516,7 @@ workers:
     # hard: refuses while a promotion is under observation, while halted or
     # broken, or while a round is open. One item per run, oldest first.
     backlog-implement:
-      enabled: false
+      enabled: true
       interval_seconds: 14400
       max_inflight: 1
       max_duration_seconds: 3600
