@@ -1,5 +1,10 @@
 agent:
   max_turns: 60
+  # Upper bound on a per-request `max_turns` to POST /api/message/stream.
+  # Worker-driven turns ask for more room than a chat turn (the unattended
+  # backlog triage needs ~90; three hand-driven ones used 45, 65 and 76). The
+  # ceiling is what stops a tailnet client asking for an unbounded turn.
+  max_turns_ceiling: 120
   permission_mode: bypassPermissions
 # Authoritative switch for the secondary LLM slot (:8091, Qwen3.6-35B-A3B
 # UD-Q3_K_XL on GPU 2's RTX 3090). server.py reconciles the supervisord process
@@ -496,7 +501,26 @@ workers:
       enabled: false
       interval_seconds: 1800
       max_inflight: 1
-      max_duration_seconds: 1200
+      # Runs as a real session through /api/message/stream, so it has Inner
+      # Voice and a transcript. Budgets are measured, not guessed: the three
+      # hand-driven triages took 45, 65 and 76 iterations and 8-30 minutes.
+      max_duration_seconds: 3600
+      max_turns: 90
+      # The item body is truncated from the END, which is where appended triage
+      # sections live, so the original content survives. 6000 cut more than
+      # half of the oldest item on the board.
+      body_chars: 30000
+    # Picks up items triage has CONFIRMED (with an acceptance check) and runs
+    # one selfmod round on each through the normal gate. This is the only
+    # automated path from a backlog item to landed code, and it is gated
+    # hard: refuses while a promotion is under observation, while halted or
+    # broken, or while a round is open. One item per run, oldest first.
+    backlog-implement:
+      enabled: false
+      interval_seconds: 14400
+      max_inflight: 1
+      max_duration_seconds: 3600
+      max_turns: 100
     bench-mine:
       enabled: true
       interval_seconds: 7200

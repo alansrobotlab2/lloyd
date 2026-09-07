@@ -52,6 +52,17 @@ VERDICTS = ("confirmed", "already_done", "stale", "unverifiable", "not_code")
 # Verdicts that retire an item rather than producing work. Both are wins.
 RETIRING = {"already_done", "stale"}
 
+# Not a verdict: the triage turn ran out of iteration budget before reaching
+# one. Recorded so the attempt is visible, but it is NOT terminal — the item
+# comes back for another pass with more room. Before this existed, running out
+# of budget produced no verdict block, which was recorded as `unverifiable`,
+# and `unverifiable` is terminal: the hardest items on the board were being
+# retired permanently on first contact, for a reason indistinguishable from
+# "states no checkable claim". The three triages driven by hand used 45, 65 and
+# 76 iterations against the worker's budget of 30; all three would have been.
+INCOMPLETE = "incomplete"
+MAX_INCOMPLETE_ATTEMPTS = 2
+
 
 @dataclass
 class Item:
@@ -125,11 +136,10 @@ def open_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:
     return out
 
 
-def triaged_ids(ledger: Path) -> dict[int, str]:
-    """{item_id: verdict} from prior triage runs, so nothing is re-checked."""
-    seen: dict[int, str] = {}
+def _ledger_events(ledger: Path, event: str) -> list[dict]:
+    out: list[dict] = []
     if not ledger.exists():
-        return seen
+        return out
     try:
         for line in ledger.read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -138,11 +148,50 @@ def triaged_ids(ledger: Path) -> dict[int, str]:
                 d = json.loads(line)
             except ValueError:
                 continue
-            if d.get("event") == "backlog_triage" and d.get("item_id") is not None:
-                seen[int(d["item_id"])] = d.get("verdict", "")
+            if d.get("event") == event and d.get("item_id") is not None:
+                out.append(d)
     except OSError:
         pass
+    return out
+
+
+def triaged_ids(ledger: Path) -> dict[int, str]:
+    """{item_id: verdict} for items with a TERMINAL verdict.
+
+    `incomplete` is deliberately not one: an item whose triage ran out of
+    budget is not triaged, it is waiting for a bigger budget.
+    """
+    seen: dict[int, str] = {}
+    for d in _ledger_events(ledger, "backlog_triage"):
+        verdict = d.get("verdict", "")
+        if verdict in VERDICTS:
+            seen[int(d["item_id"])] = verdict
     return seen
+
+
+def incomplete_counts(ledger: Path) -> dict[int, int]:
+    """How many times each item's triage has run out of budget."""
+    counts: dict[int, int] = {}
+    for d in _ledger_events(ledger, "backlog_triage"):
+        if d.get("verdict") == INCOMPLETE:
+            i = int(d["item_id"])
+            counts[i] = counts.get(i, 0) + 1
+    return counts
+
+
+def confirmed_verdicts(ledger: Path) -> dict[int, dict]:
+    """{item_id: latest `confirmed` triage event}. The event carries the
+    ACCEPTANCE the implementer is held to."""
+    out: dict[int, dict] = {}
+    for d in _ledger_events(ledger, "backlog_triage"):
+        if d.get("verdict") == "confirmed":
+            out[int(d["item_id"])] = d
+    return out
+
+
+def implemented_ids(ledger: Path) -> set[int]:
+    """Items an implementation turn has already been run for, whatever it did."""
+    return {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
 
 
 def select_candidate(ledger: Path,
@@ -159,6 +208,30 @@ def select_candidate(ledger: Path,
     if not candidates:
         return None
     return sorted(candidates, key=lambda i: (i.created or "9999", i.id))[0]
+
+
+def select_confirmed(ledger: Path,
+                     boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> tuple[Item, dict] | None:
+    """Oldest still-open `confirmed` item that no implementation turn has run for.
+
+    Returns (item, triage_event) — the event, not just the id, because the
+    ACCEPTANCE recorded at triage is the contract the implementer is held to.
+    An item confirmed with no acceptance check is not ready to implement
+    unattended; it is skipped here rather than guessed at.
+    """
+    confirmed = confirmed_verdicts(ledger)
+    done = implemented_ids(ledger)
+    ready = []
+    for item in open_items(boards):
+        ev = confirmed.get(item.id)
+        if not ev or item.id in done:
+            continue
+        if not (ev.get("acceptance") or "").strip().strip("-"):
+            continue
+        ready.append((item, ev))
+    if not ready:
+        return None
+    return sorted(ready, key=lambda pair: (pair[0].created or "9999", pair[0].id))[0]
 
 
 def record_verdict(item: Item, verdict: str, evidence: str, *,

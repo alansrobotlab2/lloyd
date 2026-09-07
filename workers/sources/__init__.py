@@ -45,6 +45,7 @@ from workers.sources import scheduled_task as _scheduled_task  # noqa: E402,F401
 from workers.sources import autoresearch as _autoresearch  # noqa: E402,F401
 from workers.sources import selfmod_regression as _selfmod_regression  # noqa: E402,F401
 from workers.sources import backlog_selfmod as _backlog_selfmod  # noqa: E402,F401
+from workers.sources import backlog_implement as _backlog_implement  # noqa: E402,F401
 from workers.sources import gap_fill as _gap_fill  # noqa: E402,F401
 from workers.sources import session_distill as _session_distill  # noqa: E402,F401
 from workers.sources import domain_research as _domain_research  # noqa: E402,F401
@@ -54,6 +55,7 @@ register(_scheduled_task)
 register(_autoresearch)
 register(_selfmod_regression)
 register(_backlog_selfmod)
+register(_backlog_implement)
 register(_gap_fill)
 register(_session_distill)
 register(_domain_research)

@@ -120,7 +120,48 @@ Or the same four steps as MCP tools: `selfmod_start`, `selfmod_gate`,
 `selfmod_rollback`). Every mutating tool refuses while `selfmod.enabled` is
 false, which is the default.
 
-### 3.2 For humans (this repo's development)
+### 3.2 Unattended
+
+Two worker sources, off by default, chained so that implementation can never
+start from an unverified premise:
+
+- **`backlog-selfmod`** triages one open item per run, oldest first, and
+  records a verdict with evidence. `stale` and `already_done` close the item;
+  `confirmed` records an acceptance check and stops. It never opens a round.
+- **`backlog-implement`** takes the oldest still-open `confirmed` item that
+  has an acceptance check, and runs one round on it through the normal gate.
+  It refuses while the loop is anything but free — disabled, halted, BROKEN,
+  a promotion under observation, a rollback pending, a round open — and checks
+  that twice, once before queueing and again before spending the turn. **One
+  attempt per item.** The attempt is recorded before the turn starts, so a
+  crash cannot put the item back on the pile; a second try is a human's call.
+
+Both run **in a real session through `POST /api/message/stream`**, not through
+`run_query` directly. That is the only turn path that attaches the Inner Voice
+observer, and it is what leaves a transcript in the Inner Voice tab — the same
+way the three hand-driven rounds ran. `run_prompt_in_session` in
+`workers/sources/_common.py` is that path; `run_prompt_on_primary` is the
+session-less one, and it must not be used for anything that judges or changes
+this code.
+
+Three things were measured to be in the way before this was safe to leave
+alone, each now pinned by a test:
+
+| | was | measured need | now |
+|---|---|---|---|
+| iteration budget | 30 | 45, 65, 76 on the three hand-driven triages | 90, per-request via `max_turns`, ceiling 120 |
+| item body | 6,000 chars | next item 12,279; largest 21,300 | 30,000, cut from the end |
+| observer | none | — | attached, transcript kept |
+
+**Running out of budget is not a conclusion.** The loop stops cleanly at
+`max_turns` with whatever text it has, which for a triage means no verdict
+block. That used to be recorded as `unverifiable`, a *terminal* verdict, so
+the hardest items on the board were retired for good on first contact for a
+reason indistinguishable from "states no checkable claim". It is now recorded
+as `incomplete`, the item comes back, and only a second exhaustion retires it —
+with evidence that says exactly that and names the transcript.
+
+### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the
 **`~/lloyd-sandbox` clone** and reaches main as a PR:

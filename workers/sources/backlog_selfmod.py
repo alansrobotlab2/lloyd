@@ -19,7 +19,6 @@ stale backlog into a pile of unnecessary changes.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
@@ -61,6 +60,28 @@ edit, write, or commit anything. Do not start a selfmod round.
    - `stale` — the premise no longer describes this system
    - `unverifiable` — the item states no claim that can be checked
    - `not_code` — not about Lloyd's own code
+
+What good triage looks like — learned from the three items closed on \
+2026-09-07, each of which turned on one of these:
+
+- **Check the item's own numbers against the live system before anything \
+else.** Spring items quote entity and edge counts that are now 5-30x off. An \
+item whose headline figures no longer describe the system is usually `stale` \
+before you read its proposal.
+- **`git log -S'<symbol>'` and `git log --oneline -- <path>`** are how you tell \
+`already_done` (a commit fixed it) from `stale` (the area was rewritten or \
+removed). Name the commit.
+- **Ask whether the surface the item targets has any traffic.** Grep \
+`sessions/*.json` for the tool it improves. Work aimed at a surface with zero \
+calls is `stale` whatever its premise says.
+- **If it proposes a retrieval or graph change, name the metric in \
+`eval/run_eval.py` that would move.** Edge-only changes move nothing there \
+(measured); such an item is `unverifiable` until a harness exists, and you \
+should say which harness.
+- **Check for a newer item that already covers it.** Superseded is `stale`, \
+and the evidence is the newer item's number.
+- **An item making several claims gets a verdict per claim.** Splitting it \
+into smaller items is a legitimate outcome; say so in EVIDENCE.
 
 Rules that matter:
 
@@ -128,9 +149,17 @@ def parse_verdict(text: str) -> dict | None:
     }
 
 
+DEFAULT_MAX_TURNS = 90
+DEFAULT_BODY_CHARS = 30_000
+
+
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+    # Budgets ride in the payload so `execute` sees the config that was live
+    # when the item was queued, not whatever it is by the time it runs.
     new_id = queue.enqueue(
-        source=NAME, kind="triage", payload={},
+        source=NAME, kind="triage",
+        payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
+                 "body_chars": int(src_cfg.get("body_chars", DEFAULT_BODY_CHARS))},
         priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
         dedup_key=DEDUP_KEY,
     )
@@ -139,37 +168,82 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
+    """Triage one item in a real session, and never mistake running out of
+    room for a conclusion.
+
+    Session-backed (see `run_prompt_in_session`) because a verdict on Lloyd's
+    own code is something a human has to be able to review afterwards, and the
+    direct `run_query` path leaves no transcript and attaches no observer.
+
+    The budget check is the important part. A turn that hits `max_turns`
+    stops cleanly with whatever text it had, which for a triage means no
+    verdict block. That used to be recorded as `unverifiable` — a TERMINAL
+    verdict — so the hardest items on the board were retired for good on first
+    contact, for a reason indistinguishable from "states no checkable claim".
+    Now it is recorded as `incomplete`, the item comes back, and only a second
+    exhaustion retires it, with evidence that says exactly that.
+    """
     from scripts.selfmod import backlog as B, state as S
-    from workers.sources._common import run_prompt_on_primary
+    from workers.sources._common import DrainActive, run_prompt_in_session
 
     candidate = B.select_candidate(S.LEDGER_PATH)
     if candidate is None:
-        return {"skipped": "every open backlog item has been triaged"}
+        return {"status": "skipped", "summary": "every open backlog item has been triaged"}
 
-    logger.info("triaging backlog #%s (%s days old): %s",
-                candidate.id, candidate.age_days, candidate.name[:70])
+    budget = int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
+    body_chars = int((item.payload or {}).get("body_chars") or DEFAULT_BODY_CHARS)
+    logger.info("triaging backlog #%s (%s days old, budget %d): %s",
+                candidate.id, candidate.age_days, budget, candidate.name[:70])
 
     prompt = PROMPT.format(
         item_id=candidate.id, status=candidate.status, priority=candidate.priority,
-        name=candidate.name, body=candidate.body[:6000], age=candidate.age_days,
+        name=candidate.name, body=candidate.body[:body_chars], age=candidate.age_days,
     )
-    text = await run_prompt_on_primary(prompt, max_turns=30)
-    parsed = parse_verdict(text)
+    try:
+        run = await run_prompt_in_session(
+            prompt, title=f"backlog triage #{candidate.id}: {candidate.name[:48]}",
+            source=NAME, max_turns=budget, priority=1)
+    except DrainActive as exc:
+        # A landing owns the backend right now. Not a result; try next tick.
+        return {"status": "skipped", "summary": f"landing in progress: {exc}"}
+
+    session_id = run["session_id"]
+    stop_reason = run.get("stop_reason")
+    parsed = parse_verdict(run["text"])
 
     if not parsed:
-        # No usable verdict is itself a result: record it so the item is not
-        # re-triaged forever, but do not touch its status.
+        if stop_reason == "max_turns":
+            attempt = B.incomplete_counts(S.LEDGER_PATH).get(candidate.id, 0) + 1
+            if attempt < B.MAX_INCOMPLETE_ATTEMPTS:
+                S.append_event({"event": "backlog_triage", "item_id": candidate.id,
+                                "verdict": B.INCOMPLETE, "attempt": attempt,
+                                "budget": budget, "session_id": session_id,
+                                "num_turns": run.get("num_turns")})
+                logger.warning("backlog #%s: out of budget (%d) on attempt %d — will retry",
+                               candidate.id, budget, attempt)
+                return {"status": "skipped", "item_id": candidate.id,
+                        "verdict": B.INCOMPLETE, "attempt": attempt,
+                        "session_id": session_id,
+                        "summary": f"#{candidate.id} ran out of budget ({budget}); retrying later"}
+            evidence = (f"ran out of iteration budget ({budget}) on {attempt} consecutive "
+                        f"attempts without reaching a verdict; transcript in session "
+                        f"{session_id}")
+        else:
+            evidence = (f"triage turn ended ({stop_reason}) with no parseable verdict "
+                        f"block; transcript in session {session_id}")
+        # Terminal, ledger only: the item's status is not touched, but the
+        # reason is honest and the transcript is named.
         S.append_event({"event": "backlog_triage", "item_id": candidate.id,
-                        "verdict": "unverifiable", "check": "",
-                        "evidence": "triage turn produced no parseable verdict block",
-                        "auto": True})
-        logger.warning("backlog #%s: no verdict block in the response", candidate.id)
-        return {"item_id": candidate.id, "verdict": "unverifiable",
-                "note": "no parseable verdict block"}
+                        "verdict": "unverifiable", "check": "", "evidence": evidence,
+                        "auto": True, "session_id": session_id,
+                        "stop_reason": stop_reason})
+        logger.warning("backlog #%s: %s", candidate.id, evidence)
+        return {"status": "success", "item_id": candidate.id, "verdict": "unverifiable",
+                "session_id": session_id, "summary": evidence[:200]}
 
     # Retiring verdicts close the item; everything else only annotates it.
-    # `confirmed` deliberately does NOT open a round — implementation goes
-    # through the selfmod gate as a separate, explicit act.
+    # `confirmed` deliberately does NOT open a round — implementation is the
+    # `backlog-implement` source's job, and it is gated separately.
     close = parsed["verdict"] in B.RETIRING
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
                      check=parsed["check"], close=close)
@@ -178,11 +252,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "name": candidate.name[:200], "age_days": candidate.age_days,
                     "verdict": parsed["verdict"], "check": parsed["check"],
                     "evidence": parsed["evidence"][:1000],
-                    "acceptance": parsed["acceptance"], "closed": close})
+                    "acceptance": parsed["acceptance"], "closed": close,
+                    "session_id": session_id, "stop_reason": stop_reason,
+                    "num_turns": run.get("num_turns"), "budget": budget})
 
-    logger.info("backlog #%s → %s%s", candidate.id, parsed["verdict"],
-                " (closed)" if close else "")
-    return {"item_id": candidate.id, "name": candidate.name,
-            "age_days": candidate.age_days, "verdict": parsed["verdict"],
-            "closed": close, "acceptance": parsed["acceptance"],
-            "summary": B.summarize(S.LEDGER_PATH)}
+    logger.info("backlog #%s → %s%s (session %s)", candidate.id, parsed["verdict"],
+                " (closed)" if close else "", session_id)
+    return {"status": "success", "item_id": candidate.id, "name": candidate.name,
+            "verdict": parsed["verdict"], "closed": close, "session_id": session_id,
+            "summary": f"#{candidate.id} → {parsed['verdict']}"
+                       f"{' (closed)' if close else ''}"}

@@ -211,6 +211,16 @@ dir at stage time (the guardian has no yaml, and must not read the repo on a
 critical path). If it never runs, `speak.py`'s built-in defaults still sound
 right — the sync only stops the two drifting after a voice *change*.
 
+### Unattended: triage, then implement
+
+`backlog-selfmod` triages; `backlog-implement` runs one round per `confirmed`
+item with an acceptance check, behind every gate the loop enforces. Both are
+off by default and both run **in a real session** via `run_prompt_in_session`,
+which is the only way a worker turn gets Inner Voice and a transcript — never
+`run_prompt_on_primary` for anything that judges or changes this code. Budget
+exhaustion records `incomplete`, not a verdict; the item comes back once.
+`architecture/self-modification.md` §3.2.
+
 ### Development happens in ~/lloyd-sandbox
 
 `/home/alansrobotlab/lloyd` is production: a saved file is a deploy. Non-trivial
