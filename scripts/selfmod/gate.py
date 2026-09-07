@@ -1,4 +1,4 @@
-"""The promotion gate: seven rungs, cheapest first, every one fails closed.
+"""The promotion gate: eight rungs, cheapest first, every one fails closed.
 
 "Fails closed" is not a slogan here — it is the reason `_rung` catches every
 exception and records it as a FAILED rung. With no human review tier, a rung
@@ -22,8 +22,10 @@ cost 3 seconds, not a full canary boot.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+from collections import Counter
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -95,6 +97,41 @@ def _pyflakes(python: Path, root: Path, files: list[str]) -> set[str]:
         elif line.strip():
             out.add(line.strip())
     return out
+
+
+def _parse_tsc(text: str) -> Counter:
+    """`path(LINE,COL): error TSnnnn: message` → `path: error TSnnnn: message`,
+    counted. A multiset rather than a set: a second copy of an existing error
+    in the same file is a new error, and a set would hide it."""
+    out: Counter = Counter()
+    for line in text.splitlines():
+        m = re.match(r"^(.*?)\(\d+,\d+\):\s*(error TS\d+:.*)$", line.strip())
+        if m:
+            out[f"{m.group(1)}: {m.group(2)}"] += 1
+    return out
+
+
+def _node_env() -> dict:
+    env = dict(os.environ)
+    env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+    env.pop("NODE_OPTIONS", None)
+    return env
+
+
+def _tsc_findings(web: Path, timeout: float = 300) -> Counter:
+    web = web.resolve()
+    tsc = web / "node_modules" / ".bin" / "tsc"
+    r = _run([str(tsc), "--noEmit", "-p", "."], cwd=web, env=_node_env(), timeout=timeout)
+    return _parse_tsc(r.stdout + r.stderr)
+
+
+def _vite_build(web: Path, out_dir: Path, timeout: float = 600) -> tuple[bool, str]:
+    web = web.resolve()
+    vite = web / "node_modules" / ".bin" / "vite"
+    r = _run([str(vite), "build", "--outDir", str(out_dir), "--emptyOutDir",
+              "--logLevel", "error"], cwd=web, env=_node_env(), timeout=timeout)
+    text = (r.stdout + r.stderr).strip()
+    return r.returncode == 0, text[-900:]
 
 
 def _parse_pytest_summary(text: str) -> dict:
@@ -172,6 +209,7 @@ class Gate:
 
     def run(self) -> GateReport:
         ladder = [("preflight", self.rung_preflight), ("static", self.rung_static),
+                  ("frontend", self.rung_frontend),
                   ("tests", self.rung_tests), ("venv", self.rung_venv),
                   ("canary_boot", self.rung_canary_boot)]
         if not self.skip_smoke:
@@ -275,6 +313,55 @@ class Gate:
             return False, f"{len(new)} new pyflakes finding(s): {sorted(new)[:5]}", {
                 "new": sorted(new)}
         return True, f"compiled; imports clean; no new pyflakes ({len(head_findings)} pre-existing)", {}
+
+    def rung_frontend(self):
+        """Type-check and build the frontend when the diff touches it.
+
+        Two checks, and neither alone is enough. `tsc --noEmit` sees type
+        regressions that a bundler happily ships; `vite build` sees what tsc
+        does not — a missing asset, an unresolvable import, a plugin that
+        rejects the tree. Both run from the worktree against the LIVE tree's
+        `node_modules` (636 MB, gitignored, and identical by construction
+        because `package.json` and the lockfile are denied paths).
+
+        tsc is judged as a delta, like pyflakes in rung `static`: the tree
+        carried three pre-existing errors on the day this rung was written, and
+        an absolute bar would have been switched off within the hour. The
+        build is absolute — it passes on the live tree today and must keep
+        passing.
+
+        There is deliberately no runtime probe to pair this with. A broken
+        `src` change is a browser-side error the Vite dev server serves with a
+        200, so a guardian probe of :5173 would measure liveness of a process
+        the change cannot kill and nothing the change can break. The build is
+        where a frontend change can be verified, so the build is the gate.
+        """
+        changed_web = [p for p in self.report.changed_paths if p.startswith("web/")]
+        if not changed_web:
+            return True, "no frontend changed", {}
+        web = self.worktree / "web"
+        live_web = self.live / "web"
+        nm = web / "node_modules"
+        if not nm.exists():
+            if not (live_web / "node_modules" / ".bin" / "vite").exists():
+                return False, "live web/node_modules has no vite — run npm install in ~/lloyd/web", {}
+            nm.symlink_to(live_web / "node_modules")
+        head = _tsc_findings(web)
+        base = _tsc_findings(live_web)
+        new = head - base
+        if new:
+            return False, (f"{sum(new.values())} new tsc error(s): "
+                           f"{sorted(new)[:4]}"), {"new": sorted(new)}
+        out_dir = Path(_run(["mktemp", "-d"]).stdout.strip())
+        try:
+            ok, tail = _vite_build(web, out_dir)
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+        if not ok:
+            return False, f"vite build failed: {tail}", {}
+        return True, (f"tsc: no new errors ({sum(head.values())} pre-existing); "
+                      f"vite build ok; {len(changed_web)} frontend file(s)"), {
+                          "changed_web": changed_web}
 
     def rung_tests(self):
         r = _run([str(self.python), "-m", "pytest", "-q"], cwd=self.worktree,

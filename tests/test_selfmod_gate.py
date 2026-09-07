@@ -65,7 +65,7 @@ class _StubGate(G.Gate):
         return rung
 
     def run(self):
-        for name in ("preflight", "static", "tests", "venv",
+        for name in ("preflight", "static", "frontend", "tests", "venv",
                      "canary_boot", "canary_smoke", "drill"):
             if not self._rung(name, self._make(name)):
                 self.report.ok = False
@@ -75,14 +75,15 @@ class _StubGate(G.Gate):
 
 
 ALL_PASS = {n: (True, "ok", {}) for n in
-            ("preflight", "static", "tests", "venv", "canary_boot", "canary_smoke", "drill")}
+            ("preflight", "static", "frontend", "tests", "venv", "canary_boot",
+             "canary_smoke", "drill")}
 
 
 def test_all_rungs_passing_is_a_pass(monkeypatch, tmp_path):
     monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
     g = _StubGate(dict(ALL_PASS))
     assert g.run().ok
-    assert len(g.called) == 7
+    assert len(g.called) == 8
 
 
 def test_a_failing_rung_short_circuits_the_expensive_ones(monkeypatch):
@@ -116,7 +117,7 @@ def test_every_rung_result_is_recorded_even_on_success(monkeypatch):
     g = _StubGate(dict(ALL_PASS))
     report = g.run()
     assert [r.name for r in report.rungs] == [
-        "preflight", "static", "tests", "venv", "canary_boot", "canary_smoke", "drill"]
+        "preflight", "static", "frontend", "tests", "venv", "canary_boot", "canary_smoke", "drill"]
     assert all(r.seconds >= 0 for r in report.rungs)
 
 
@@ -124,7 +125,7 @@ def test_the_report_serializes_for_the_round_log(monkeypatch):
     monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
     g = _StubGate(dict(ALL_PASS))
     d = g.run().to_dict()
-    assert d["ok"] is True and len(d["rungs"]) == 7
+    assert d["ok"] is True and len(d["rungs"]) == 8
     assert set(d) >= {"round_id", "base", "head", "ok", "rungs", "changed_paths"}
 
 
@@ -268,3 +269,98 @@ def test_the_collected_floor_is_a_real_constant():
     """`pytest -q` exits 0 if a round deletes the test that was failing, so the
     floor is not decoration."""
     assert G.PYTEST_MIN_COLLECTED >= 1000
+
+
+# ---------------------------------------------------------------------------
+# Rung `frontend`: tsc as a delta, vite build as a bar
+# ---------------------------------------------------------------------------
+
+from collections import Counter
+
+
+def _frontend_gate(live_repo, tmp_path, monkeypatch, *, changed, head, base, build=(True, "")):
+    """A gate over a real worktree with the node tooling replaced: `head` and
+    `base` are the tsc findings for the worktree and the live tree."""
+    base_sha = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = tmp_path / "wt"
+    git(live_repo, "worktree", "add", "-q", "-b", "selfmod/fe", str(wt), base_sha)
+    (live_repo / "web" / "node_modules" / ".bin").mkdir(parents=True, exist_ok=True)
+    (live_repo / "web" / "node_modules" / ".bin" / "vite").write_text("#!/bin/sh\n")
+    (wt / "web").mkdir(exist_ok=True)
+    g = _gate_for(live_repo, wt, base_sha, monkeypatch)
+    g.report.changed_paths = list(changed)
+    monkeypatch.setattr(G, "_tsc_findings",
+                        lambda web, timeout=300: Counter(head if "wt" in str(web) else base))
+    monkeypatch.setattr(G, "_vite_build", lambda web, out_dir, timeout=600: build)
+    return g, wt
+
+
+def test_parse_tsc_normalises_positions_and_counts_duplicates():
+    text = ("src/a.tsx(10,2): error TS6133: 'x' is declared but its value is never read.\n"
+            "src/a.tsx(40,2): error TS6133: 'x' is declared but its value is never read.\n"
+            "Found 2 errors in the same file.\n")
+    assert G._parse_tsc(text) == Counter({
+        "src/a.tsx: error TS6133: 'x' is declared but its value is never read.": 2})
+
+
+def test_frontend_rung_is_skipped_when_no_frontend_changed(live_repo, tmp_path, monkeypatch):
+    g, _ = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["app/m.py"],
+                          head={"boom": 1}, base={})
+    ok, reason, _ = g.rung_frontend()
+    assert ok and "no frontend changed" in reason
+
+
+def test_frontend_rung_tolerates_pre_existing_tsc_errors(live_repo, tmp_path, monkeypatch):
+    """The tree carried three tsc errors the day this rung was written. An
+    absolute bar would have been switched off within the hour."""
+    old = {"src/EntityGraph.tsx: error TS2322: bad type": 1}
+    g, _ = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/x.tsx"],
+                          head=old, base=old)
+    ok, reason, _ = g.rung_frontend()
+    assert ok and "no new errors (1 pre-existing)" in reason and "vite build ok" in reason
+
+
+def test_frontend_rung_fails_on_a_new_tsc_error(live_repo, tmp_path, monkeypatch):
+    old = {"src/EntityGraph.tsx: error TS2322: bad type": 1}
+    new = dict(old, **{"src/x.tsx: error TS2304: Cannot find name 'foo'.": 1})
+    g, _ = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/x.tsx"],
+                          head=new, base=old)
+    ok, reason, detail = g.rung_frontend()
+    assert not ok and "1 new tsc error" in reason and "TS2304" in reason
+    assert detail["new"] == ["src/x.tsx: error TS2304: Cannot find name 'foo'."]
+
+
+def test_a_second_copy_of_an_existing_error_is_a_new_error(live_repo, tmp_path, monkeypatch):
+    key = "src/a.tsx: error TS6133: 'x' is declared but its value is never read."
+    g, _ = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/a.tsx"],
+                          head={key: 2}, base={key: 1})
+    ok, reason, _ = g.rung_frontend()
+    assert not ok and "1 new tsc error" in reason
+
+
+def test_frontend_rung_fails_when_the_build_fails(live_repo, tmp_path, monkeypatch):
+    g, _ = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/x.tsx"],
+                          head={}, base={}, build=(False, "Could not resolve './missing'"))
+    ok, reason, _ = g.rung_frontend()
+    assert not ok and "vite build failed" in reason and "missing" in reason
+
+
+def test_frontend_rung_links_the_live_node_modules_into_the_worktree(live_repo, tmp_path, monkeypatch):
+    """636 MB, gitignored, and identical by construction because package.json
+    and the lockfile are denied — so the live install is the candidate's."""
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/x.tsx"],
+                           head={}, base={})
+    assert not (wt / "web" / "node_modules").exists()
+    ok, _, _ = g.rung_frontend()
+    assert ok
+    link = wt / "web" / "node_modules"
+    assert link.is_symlink() and link.resolve() == (live_repo / "web" / "node_modules").resolve()
+
+
+def test_frontend_rung_refuses_when_the_live_tree_has_no_install(live_repo, tmp_path, monkeypatch):
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/x.tsx"],
+                           head={}, base={})
+    import shutil
+    shutil.rmtree(live_repo / "web" / "node_modules")
+    ok, reason, _ = g.rung_frontend()
+    assert not ok and "npm install" in reason

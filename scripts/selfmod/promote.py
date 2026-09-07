@@ -53,10 +53,40 @@ SUPERVISORD_CONF = LIVE_ROOT / "agent-services" / "supervisor" / "supervisord.co
 
 BACKEND = "http://127.0.0.1:8080"
 MCP_HEALTH = "http://127.0.0.1:8500/health"
+# Vite dev server, serving the live tree over HTTPS with a private cert. Not
+# restarted by a landing: HMR picks the fast-forward up on its own.
+FRONTEND_URL = "https://127.0.0.1:5173/"
 
 
 class PromoteError(RuntimeError):
     pass
+
+
+def _frontend_alive(url: str = FRONTEND_URL, budget: float = 30.0) -> tuple[bool, str]:
+    """Does the Vite dev server still answer after a frontend landing?
+
+    Liveness only, and deliberately so: a broken `src` change is a
+    browser-side error the dev server serves with a 200. The gate's `vite
+    build` is what verifies the change; this catches the one thing the
+    landing itself could do to the frontend — leave it unreachable."""
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    deadline = time.time() + budget
+    last = ""
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5.0, context=ctx) as resp:
+                if 200 <= resp.status < 400:
+                    return True, f"HTTP {resp.status}"
+                last = f"HTTP {resp.status}"
+        except urllib.error.HTTPError as exc:
+            last = f"HTTP {exc.code}"
+        except Exception as exc:  # refused, TLS, timeout
+            last = type(exc).__name__
+        time.sleep(2.0)
+    return False, last or "no answer"
 
 
 def _get(url: str, timeout: float = 5.0):
@@ -389,6 +419,11 @@ def promote(round_id: str, worktree: Path, base: str, *,
                                "— the restart did not pick up the new code")
         if current.get("boot_id") and (body or {}).get("boot_id") == current["boot_id"]:
             raise PromoteError("backend boot_id unchanged — the process was never replaced")
+
+        if any(p.startswith("web/") for p in changed):
+            alive, note = _frontend_alive()
+            if not alive:
+                raise PromoteError(f"frontend unreachable after landing ({note}) at {FRONTEND_URL}")
 
         # The code is live and verified: start the clock now.
         landed = time.time()

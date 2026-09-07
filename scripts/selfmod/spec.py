@@ -14,8 +14,19 @@ three tiers rather than two:
     `config.yaml` and `data/tool_overrides.yaml` because a round could disable
     the agent's own Bash/Edit tools and lock itself out with no Python change
     at all; `pytest.ini` and `.gitignore` because they define what the gate
-    even sees; `.env*` because secrets; `web/**` because the gate does not
-    build the frontend and therefore cannot verify it.
+    even sees; `.env*` because secrets. Under `web/`, the dependency set and
+    the build configuration (`package.json`, the lockfile, `node_modules`,
+    `vite.config.*`, `tsconfig*.json`) — the frontend rung type-checks and
+    builds the candidate against the LIVE tree's `node_modules`, which is only
+    the candidate's dependency set if a round cannot change it.
+
+`web/src/**`, `web/index.html` and `web/public/**` are *allowed* since
+2026-09-07, for the same reason `requirements.txt` is: gate rung `frontend`
+runs `tsc --noEmit` (new errors only — the tree carries pre-existing ones) and
+a full `vite build` from the worktree. Before that rung existed `web/**` was
+denied outright, and the first unattended implement round (#278) spent nine
+iterations discovering that its contract needed a Browser page it could not
+touch.
 
 Note `requirements.txt` / `requirements.lock` are *allowed*, but only because
 gate rung 3 builds a throwaway venv from them (btrfs reflink clone + `uv pip
@@ -45,6 +56,9 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     "requirements.lock",
     "CLAUDE.md",
     "README.md",
+    "web/src/**",
+    "web/index.html",
+    "web/public/**",
 )
 
 PROTECTED_GLOBS: tuple[str, ...] = (
@@ -67,7 +81,14 @@ DENIED_GLOBS: tuple[str, ...] = (
     "data/**",
     ".env",
     ".env.*",
-    "web/**",
+    "web/package.json",
+    "web/package-lock.json",
+    "web/node_modules/**",
+    "web/dist/**",
+    "web/vite.config.*",
+    "web/tsconfig*.json",
+    "web/.env",
+    "web/.env.*",
     ".git/**",
     ".venvs/**",
 )

@@ -39,7 +39,7 @@ booting.
 ## 2. Shape
 
 ```
- propose ──► WORKTREE ──► GATE (7 rungs) ──► PROMOTER ──► live tree
+ propose ──► WORKTREE ──► GATE (8 rungs) ──► PROMOTER ──► live tree
                               │                  │
                               └── fail ──────────┤
                                                  ▼
@@ -111,7 +111,7 @@ selfmod tools rather than trusted with a prompt that says not to.
 ```bash
 python -m scripts.selfmod.round start "make X faster"   # cuts a worktree
 #   ...edit that worktree, commit inside it...
-python -m scripts.selfmod.round gate  SM_<id>           # 7 rungs, ~2 min
+python -m scripts.selfmod.round gate  SM_<id>           # 8 rungs, ~2.5 min
 python -m scripts.selfmod.round land  SM_<id>           # idle-gated, verified
 ```
 
@@ -244,7 +244,7 @@ which is also the natural home for dependency changes and guardian edits.
 
 ## 4. The gate
 
-Seven rungs, cheapest first, short-circuiting. **Every rung fails closed** —
+Eight rungs, cheapest first, short-circuiting. **Every rung fails closed** —
 `_rung` catches exceptions and records them as failures, because with no human
 review tier a rung that errors and reads as "didn't fail" silently removes a
 check.
@@ -806,8 +806,11 @@ than the one this prevents.
 
 - **denied** — `config.yaml` and `data/tool_overrides.yaml` (a round could
   disable Bash and Edit and lock itself out with no Python change at all — a
-  soft brick no test would catch), `.env*`, `pytest.ini`, `.gitignore`,
-  `web/**` (the gate does not build the frontend).
+  soft brick no test would catch), `.env*`, `pytest.ini`, `.gitignore`, and
+  under `web/` the build inputs — `package.json`, the lockfile,
+  `node_modules`, `dist`, `vite.config.*`, `tsconfig*.json` — because the
+  frontend rung builds the candidate against the live tree's install, which
+  is only the candidate's dependency set if a round cannot change it.
 - **protected** — the gate itself, the guardian, the supervisor confs, and the
   health/restart path the rollback depends on. Allowed, but only with a
   passing drill.
@@ -897,7 +900,16 @@ from `denied.json` first).
 - **Post-landing detection fails open by construction.** The code is live and
   has already executed tool calls while you measure. Quality belongs in the
   gate, where it can be slow and fail closed.
-- **Frontend changes** are out of scope; `web/**` is denied.
+- **Frontend changes are gated by the build, not by a probe.** `web/src/**`,
+  `web/index.html` and `web/public/**` are allowed since 2026-09-07; rung
+  `frontend` runs `tsc --noEmit` as a delta (the tree carried three
+  pre-existing errors that day; an absolute bar would have been switched off
+  within the hour) and a full `vite build`, both from the worktree against the
+  live `node_modules`. After a landing that touched `web/`, the promoter
+  checks the Vite dev server still answers. There is deliberately no guardian
+  probe of :5173: a broken `src` change is a browser-side error the dev
+  server serves with a 200, so a probe would measure the liveness of a
+  process the change cannot kill and nothing the change can break.
 - **`eval/baselines/`, the Thunderbird bridge, and `.env` are gitignored**, so
   they are absent from every worktree and clone. The bridge contributes ~40 of
   ~124 tools, which is why tool-count assertions exclude

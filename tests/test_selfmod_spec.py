@@ -42,7 +42,9 @@ def test_the_rollback_path_is_protected(path):
 
 @pytest.mark.parametrize("path", [
     "config.yaml", "data/tool_overrides.yaml", ".env", ".env.local",
-    "pytest.ini", ".gitignore", "web/src/App.tsx", ".venvs/lloyd/bin/python",
+    "pytest.ini", ".gitignore", ".venvs/lloyd/bin/python",
+    "web/package.json", "web/package-lock.json", "web/node_modules/vite/index.js",
+    "web/vite.config.ts", "web/tsconfig.app.json", "web/dist/index.html", "web/.env",
 ])
 def test_denied_paths(path):
     assert spec.classify(path) == "denied"
@@ -174,3 +176,16 @@ def test_the_denylist_is_not_overridable_by_a_spec():
     ok, reason, _ = spec.check_scope(["config.yaml"])
     assert not ok, "an explicit ask must not unlock a denied path"
     assert spec.classify("config.yaml") == "denied"
+
+
+@pytest.mark.parametrize("path", ["web/src/App.tsx", "web/src/components/pages/BrowserPage.tsx",
+                                  "web/index.html", "web/public/favicon.svg"])
+def test_frontend_sources_are_allowed_because_the_frontend_rung_builds_them(path):
+    """`web/**` was denied outright until 2026-09-07 because the gate did not
+    build the frontend. It does now (rung `frontend`: tsc delta + vite build),
+    so the sources are ordinary code; only the build inputs stay denied."""
+    assert spec.classify(path) == "allowed"
+
+
+def test_frontend_tooling_outside_src_is_unlisted_not_allowed():
+    assert spec.classify("web/eslint.config.js") == "unlisted"

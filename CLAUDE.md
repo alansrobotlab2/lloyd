@@ -47,7 +47,7 @@ Lloyd can change his own code through a gated loop with automatic rollback.
 ```bash
 python -m scripts.selfmod.round status              # state + ledger + guardian
 python -m scripts.selfmod.round start "goal"        # cuts a worktree
-python -m scripts.selfmod.round gate  SM_<id>       # 7 rungs, ~2 min
+python -m scripts.selfmod.round gate  SM_<id>       # 8 rungs, ~2.5 min
 python -m scripts.selfmod.round land  SM_<id>       # idle-gated, verified
 python -m scripts.selfmod.round bless               # HEAD becomes last-known-good
 python -m scripts.selfmod.round recover             # clear BROKEN, restart the stack
