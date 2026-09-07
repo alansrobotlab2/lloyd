@@ -147,7 +147,7 @@ candidate that weakens the gate is judged by the old gate.
 |---|---|---|
 | preflight | ~0s | dirty tree, moved base, merge commits, out-of-scope paths |
 | static | ~2s | syntax errors, **import failures**, new pyflakes findings |
-| tests | ~30-40s | the full suite, plus a collected-count floor |
+| tests | ~30-40s | the full suite, plus floors on collected AND passed |
 | venv | 3s–5m | only when `requirements*` changed |
 | canary_boot | ~2-30s | a build that will not start |
 | canary_smoke | ~5-15s | a build that starts but cannot dispatch a tool |
@@ -755,3 +755,7 @@ from `denied.json` first).
 - **The quality check is one measurement per promotion**, on a corpus that
   drifts between promotions. It answers "did this commit make retrieval
   worse", not "is retrieval good".
+- **`POST /api/backlog/task-create` is still unauthenticated** on the tailnet
+  when no client fingerprint is forwarded. The guardian files rollback tasks
+  through it over loopback; `/api/selfmod/drain` was restricted because it can
+  silence every user turn for ten minutes, this one can only create a note.
