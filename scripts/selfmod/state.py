@@ -29,8 +29,10 @@ later refactors them together.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +44,23 @@ STATE_DIR = Path(
 
 LKG_PATH = STATE_DIR / "last_known_good.json"
 CURRENT_PATH = STATE_DIR / "current.json"
+# Written by the guardian when a promotion settles. `current.json` is DELETED
+# at settle, so anything that wants to ask "what landed recently, and what did
+# it replace?" after the 15-minute window has nothing to read. That is not
+# hypothetical: the nightly regression check keyed on `current.json` and a
+# 24-hour job therefore found a promotion under observation essentially never.
+LAST_SETTLED_PATH = STATE_DIR / "last_settled.json"
+# A rollback the guardian should perform on someone else's behalf. Nothing in
+# the backend or the aggregator may roll back inline: both are stopped by the
+# rollback itself, so the process doing it dies partway through. The guardian
+# is the one component outside that failure domain, and it already owns
+# evidence preservation, retry, the denylist and flap protection.
+ROLLBACK_REQUEST_PATH = STATE_DIR / "rollback_request.json"
+# Last measured quality baseline, written by the selfmod-regression worker and
+# READ (never written) by the guardian, which folds it into the LKG record at
+# settle. Keeps "the guardian is the only writer of last_known_good.json"
+# true while still letting a venv-only measurement reach it.
+EVAL_LAST_PATH = STATE_DIR / "eval_last.json"
 LEDGER_PATH = STATE_DIR / "promotions.jsonl"
 LOCK_PATH = STATE_DIR / "lock"
 PAUSE_PATH = STATE_DIR / "pause"
@@ -189,6 +208,70 @@ def clear_current() -> None:
         pass
 
 
+def read_last_settled() -> dict | None:
+    """The most recent promotion that survived its observation window.
+
+    Carries the promotion's own `parent`, which is what a post-landing quality
+    check must compare against — by the time it runs, the LKG pointer has
+    already advanced to the promoted commit, so comparing against the LKG
+    would compare a commit with itself.
+    """
+    return read_json(LAST_SETTLED_PATH)
+
+
+def read_eval_last() -> dict | None:
+    return read_json(EVAL_LAST_PATH)
+
+
+def write_eval_last(payload: dict) -> None:
+    write_json(EVAL_LAST_PATH, payload)
+
+
+# ---------------------------------------------------------------------------
+# Rollback requests — the only way a process inside the blast radius asks for
+# a revert
+# ---------------------------------------------------------------------------
+
+def request_rollback(*, reason: str, trigger: str, target: str | None = None,
+                     commit: str | None = None,
+                     changed_paths: list | None = None) -> dict:
+    """Ask the guardian to roll back. Returns the request as written.
+
+    `target` is optional: omitted, the guardian resolves it the way it would
+    for a crash (the promotion's own recorded rollback_target first). Passing
+    one is for a manual revert to a specific commit, and the guardian still
+    validates it against the floor and the object store before acting.
+    """
+    payload = {
+        "requested_at": now_iso(),
+        "ts": time.time(),
+        "reason": str(reason)[:2000],
+        "trigger": str(trigger)[:100],
+        "target": target,
+        "commit": commit,
+        # Carried so a request about an ALREADY-SETTLED promotion can still be
+        # reverted surgically: by then `current.json` is gone, and without the
+        # bad commit the guardian can only reset bluntly to the target.
+        "changed_paths": list(changed_paths or []),
+        "pid": os.getpid(),
+    }
+    write_json(ROLLBACK_REQUEST_PATH, payload)
+    append_event({"event": "rollback_requested", "trigger": trigger,
+                  "reason": str(reason)[:1000], "target": target, "commit": commit})
+    return payload
+
+
+def read_rollback_request() -> dict | None:
+    return read_json(ROLLBACK_REQUEST_PATH)
+
+
+def clear_rollback_request() -> None:
+    try:
+        ROLLBACK_REQUEST_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Flags
 # ---------------------------------------------------------------------------
@@ -265,6 +348,104 @@ def deny(commit: str, tree_hash: str | None = None) -> None:
 def is_denied(commit: str | None = None, tree_hash: str | None = None) -> bool:
     d = read_denied()
     return bool((commit and commit in d["commits"]) or (tree_hash and tree_hash in d["trees"]))
+
+
+def changed_tree_hash(repo, commit: str, paths: list[str]) -> str | None:
+    """Content hash of `paths` as they stand at `commit`.
+
+    This is the half of the denylist that makes it mean something. Keying only
+    on the SHA catches re-landing the *same commit*, which nothing was ever
+    going to do — a round that is re-cut produces a new SHA for identical
+    content and sails straight past. Hashing the blob ids of the paths the
+    promotion touched catches the change however it is re-derived.
+
+    Returns None when git cannot answer, and callers must treat that as "not
+    denied" rather than as a denial: refusing to promote because git hiccuped
+    would be a worse failure than the one this prevents.
+    """
+    if not paths:
+        return None
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo), "ls-tree", "-r", "--full-tree", commit, "--", *paths],
+            capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    return hashlib.sha1(r.stdout.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Detached execution
+# ---------------------------------------------------------------------------
+
+def spawn_detached(argv: list[str], log_path: Path, cwd=None) -> int:
+    """Run `argv` in its own session, and return its pid.
+
+    A landing restarts `lloyd-mcp` and `lloyd-backend`. When it is driven from
+    an MCP tool the promoter is running *inside* `lloyd-mcp`, and both confs
+    set `stopasgroup`/`killasgroup` — so supervisord signals the whole process
+    group and kills the promoter mid-flight. What that leaves behind is the
+    worst of all the states: the tree fast-forwarded onto the new commit, the
+    aggregator stopped (an intentional stop is not auto-restarted), the backend
+    still serving old code with no tools, and `current.json` frozen at
+    `landing`, which the guardian is specifically told to ignore. Nothing is
+    watching, and nothing rolls back.
+
+    `start_new_session=True` puts the child in a new session and therefore a
+    new process group, which is exactly what a group signal cannot reach. The
+    CLI path survived this by accident, because the Bash tool already spawns
+    its children that way.
+    """
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(log_path, "ab", buffering=0)
+    try:
+        proc = subprocess.Popen(
+            [str(a) for a in argv],
+            cwd=str(cwd) if cwd else None,
+            stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT,
+            start_new_session=True, close_fds=True,
+        )
+    finally:
+        fh.close()
+    return proc.pid
+
+
+# ---------------------------------------------------------------------------
+# The master switch
+# ---------------------------------------------------------------------------
+
+class SelfmodDisabled(RuntimeError):
+    """`selfmod.enabled` is false in config.yaml."""
+
+
+def is_enabled(repo=None) -> bool:
+    """Read `selfmod.enabled` straight from config.yaml.
+
+    Read raw rather than through `app.config` so this works from a stdlib-ish
+    context and cannot be affected by overlay expansion. It is an interlock
+    against accident, not a sandbox: anything holding the Bash tool can edit
+    config.yaml. Its value is that neither the MCP tools NOR the CLI can be
+    invoked into a live promotion without a deliberate human edit — before,
+    only the tool wrapper checked, and the CLI is what the skill's own worked
+    examples use.
+    """
+    root = Path(repo) if repo else Path(__file__).resolve().parent.parent.parent
+    try:
+        import yaml
+        raw = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        return False
+    return bool((raw.get("selfmod") or {}).get("enabled", False))
+
+
+def require_enabled(action: str, repo=None) -> None:
+    if not is_enabled(repo):
+        raise SelfmodDisabled(
+            f"selfmod.enabled is false in config.yaml — refusing to {action}. "
+            "The loop ships inert; enabling it is a deliberate human decision.")
 
 
 # ---------------------------------------------------------------------------

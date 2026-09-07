@@ -40,8 +40,7 @@ def test_a_landing_record_has_no_observation_window_yet():
     now = time.time()
     record = {"schema": 1, "round_id": "SM_X", "commit": "b" * 40, "parent": "a" * 40,
               "rollback_target": "a" * 40, "state": "landing",
-              "landed_at": None, "landed_ts": None,
-              "liveness_until_ts": None, "errors_until_ts": None}
+              "landed_at": None, "landed_ts": None, "errors_until_ts": None}
     S.write_verified(S.CURRENT_PATH, record)
     back = S.read_current()
     assert back["state"] == "landing"
@@ -53,11 +52,13 @@ def test_the_window_starts_only_once_the_build_is_verified():
     now = time.time()
     record = {"schema": 1, "commit": "b" * 40, "parent": "a" * 40,
               "rollback_target": "a" * 40, "state": "landing",
-              "errors_until_ts": None, "liveness_until_ts": None}
+              "errors_until_ts": None}
     S.write_verified(S.CURRENT_PATH, record)
     landed = time.time()
+    # Liveness deliberately has no separate, shorter window: it applies for
+    # the WHOLE observation window, because a build that crashes at minute ten
+    # is exactly as bad as one that crashes at minute one.
     record.update({"state": "observing", "landed_ts": landed,
-                   "liveness_until_ts": landed + P.LIVENESS_WINDOW,
                    "errors_until_ts": landed + P.ERRORS_WINDOW})
     S.write_verified(S.CURRENT_PATH, record)
     back = S.read_current()

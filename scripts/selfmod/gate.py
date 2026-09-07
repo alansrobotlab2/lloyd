@@ -34,6 +34,13 @@ from scripts.selfmod import spec, state as S, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 PYTEST_MIN_COLLECTED = 1000
+# Collected is not the same as run. `pytest -q` exits 0 having collected 1632
+# items and executed none of them if a conftest import fails into a
+# module-level skip, or if a round adds a broad `skipif`. Both counts have to
+# hold, or the rung's own guarantee ("the suite still passes") is satisfied by
+# a suite that did nothing.
+PYTEST_MIN_PASSED = 1000
+PYTEST_MAX_SKIPPED = 40
 UV_BIN = Path.home() / ".local" / "bin" / "uv"
 
 
@@ -92,17 +99,20 @@ def _pyflakes(python: Path, root: Path, files: list[str]) -> set[str]:
 
 def _parse_pytest_summary(text: str) -> dict:
     """Pull counts out of pytest's summary line."""
-    out: dict = {"passed": 0, "failed": 0, "errors": 0, "xfailed": 0, "collected": 0}
+    out: dict = {"passed": 0, "failed": 0, "errors": 0, "xfailed": 0,
+                 "skipped": 0, "collected": 0}
     m = re.search(r"collected (\d+) item", text)
     if m:
         out["collected"] = int(m.group(1))
     for key, pattern in (("passed", r"(\d+) passed"), ("failed", r"(\d+) failed"),
-                         ("errors", r"(\d+) error"), ("xfailed", r"(\d+) xfailed")):
+                         ("errors", r"(\d+) error"), ("xfailed", r"(\d+) xfailed"),
+                         ("skipped", r"(\d+) skipped")):
         m = re.search(pattern, text)
         if m:
             out[key] = int(m.group(1))
     if not out["collected"]:
-        out["collected"] = out["passed"] + out["failed"] + out["xfailed"] + out["errors"]
+        out["collected"] = (out["passed"] + out["failed"] + out["xfailed"]
+                            + out["errors"] + out["skipped"])
     return out
 
 
@@ -117,6 +127,31 @@ class Gate:
         self.python = self.live / ".venvs" / "lloyd" / "bin" / "python"
         self.report = GateReport(round_id=round_id, base=base,
                                  head=W.head(self.worktree) or "")
+
+    def _child_env(self) -> dict:
+        """Environment for rungs that execute CANDIDATE code outside the canary.
+
+        Only the canary redirected the self-modification state dir. The static,
+        tests and venv rungs ran candidate code against the LIVE
+        `~/.local/state/lloyd-selfmod/`, so a candidate test that forgot its
+        isolation fixture could write a real `BROKEN` or `promotions-halted`
+        flag, or append to the production audit trail — from inside the very
+        gate that is supposed to be read-only judgment. Point them at scratch.
+
+        `LLOYD_VOICE_ALERTS=0` for the same class of reason: `tests/conftest.py`
+        sets it precisely because a test process that outlives itself will
+        otherwise talk to the room.
+        """
+        scratch = W.round_dir(self.round_id) / "gate-state"
+        (scratch / "selfmod").mkdir(parents=True, exist_ok=True)
+        (scratch / "guardian").mkdir(parents=True, exist_ok=True)
+        return {
+            "PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
+            "PYTHONPATH": str(self.worktree),
+            "LLOYD_SELFMOD_STATE": str(scratch / "selfmod"),
+            "LLOYD_GUARDIAN_STATE": str(scratch / "guardian"),
+            "LLOYD_VOICE_ALERTS": "0",
+        }
 
     # ── driver ─────────────────────────────────────────────────────────
     def _rung(self, name: str, fn) -> bool:
@@ -208,8 +243,7 @@ class Gate:
         # The single highest-value cheap check: an import-time failure is the
         # number one way a self-modification bricks the boot, and this catches
         # it in seconds without binding a port or running a startup hook.
-        env = {"PYTHONPATH": str(self.worktree), "PATH": "/usr/bin:/bin",
-               "HOME": str(Path.home())}
+        env = self._child_env()
         imp = _run([str(self.python), "-c", "import server, agent_mcp.main"],
                    cwd=self.worktree, env=env, timeout=180)
         if imp.returncode != 0:
@@ -243,10 +277,8 @@ class Gate:
         return True, f"compiled; imports clean; no new pyflakes ({len(head_findings)} pre-existing)", {}
 
     def rung_tests(self):
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
-               "PYTHONPATH": str(self.worktree)}
         r = _run([str(self.python), "-m", "pytest", "-q"], cwd=self.worktree,
-                 env=env, timeout=1800)
+                 env=self._child_env(), timeout=1800)
         text = r.stdout + r.stderr
         counts = _parse_pytest_summary(text)
         if r.returncode != 0:
@@ -258,11 +290,24 @@ class Gate:
         if counts["collected"] < PYTEST_MIN_COLLECTED:
             return False, (f"only {counts['collected']} tests collected "
                            f"(floor {PYTEST_MIN_COLLECTED}) — did the round delete tests?"), counts
+        # ...and it exits 0 just as happily having collected everything and RUN
+        # nothing. A collected-count floor alone is satisfied by a suite that
+        # skipped itself wholesale, which is a one-line conftest change away.
+        if counts["passed"] < PYTEST_MIN_PASSED:
+            return False, (f"only {counts['passed']} tests passed "
+                           f"(floor {PYTEST_MIN_PASSED}) of {counts['collected']} "
+                           f"collected, {counts['skipped']} skipped — the suite "
+                           "was collected but not run"), counts
+        if counts["skipped"] > PYTEST_MAX_SKIPPED:
+            return False, (f"{counts['skipped']} tests skipped "
+                           f"(limit {PYTEST_MAX_SKIPPED}) — a round that skips its way "
+                           "to green is not a round that passed"), counts
         removed = [p for p in self.report.changed_paths
                    if p.startswith("tests/") and not (self.worktree / p).exists()]
         if removed:
             return False, f"test files removed: {removed}", counts
-        return True, f"{counts['passed']} passed, {counts['xfailed']} xfailed", counts
+        return True, (f"{counts['passed']} passed, {counts['xfailed']} xfailed, "
+                      f"{counts['skipped']} skipped"), counts
 
     def rung_venv(self):
         if not spec.touches_requirements(self.report.changed_paths):
@@ -296,10 +341,8 @@ class Gate:
         if inst.returncode != 0:
             return False, f"uv pip install failed: {(inst.stdout + inst.stderr)[-800:]}", {}
 
-        env = {"PYTHONPATH": str(self.worktree), "PATH": "/usr/bin:/bin",
-               "HOME": str(Path.home())}
         imp = _run([str(clone / "bin" / "python"), "-c", "import server, agent_mcp.main"],
-                   cwd=self.worktree, env=env, timeout=300)
+                   cwd=self.worktree, env=self._child_env(), timeout=300)
         if imp.returncode != 0:
             return False, f"candidate venv cannot import the app: {(imp.stdout + imp.stderr)[-600:]}", {}
 

@@ -81,6 +81,17 @@ class SelfModState:
         self.broken = self.dir / "BROKEN"
         self.denied = self.dir / "denied.json"
         self.broken_dir = self.dir / "broken"
+        # Written here at settle. `current.json` is deleted at that moment, so
+        # without this nothing can answer "what landed recently, and what did
+        # it replace?" once the window closes — which is why the nightly
+        # quality check, keyed on current.json, could essentially never run.
+        self.last_settled = self.dir / "last_settled.json"
+        # Read-only from the guardian's side: the quality worker writes it and
+        # the guardian folds it into the LKG record at settle. Keeps "only the
+        # guardian writes last_known_good.json" true.
+        self.eval_last = self.dir / "eval_last.json"
+        # A rollback someone inside the blast radius asked for.
+        self.rollback_request = self.dir / "rollback_request.json"
 
     # ── rollback target ────────────────────────────────────────────────
     def rollback_target(self, current: dict | None = None) -> tuple[str | None, str]:
@@ -143,6 +154,22 @@ class SelfModState:
         except FileNotFoundError:
             pass
 
+    def write_last_settled(self, payload: dict) -> None:
+        write_json_atomic(self.last_settled, payload)
+
+    def read_eval_last(self) -> dict | None:
+        return read_json(self.eval_last)
+
+    # ── rollback requests ──────────────────────────────────────────────
+    def read_rollback_request(self) -> dict | None:
+        return read_json(self.rollback_request)
+
+    def clear_rollback_request(self) -> None:
+        try:
+            self.rollback_request.unlink()
+        except FileNotFoundError:
+            pass
+
     # ── flags ──────────────────────────────────────────────────────────
     def pause_remaining(self, cap: float) -> float:
         try:
@@ -165,10 +192,19 @@ class SelfModState:
         self.halted.parent.mkdir(parents=True, exist_ok=True)
         self.halted.write_text(f"{now_iso()} {reason}\n", encoding="utf-8")
 
-    def deny(self, commit: str) -> None:
+    def deny(self, commit: str, tree_hash: str | None = None) -> None:
+        """Record a reverted change by SHA *and* by content.
+
+        The SHA alone was never going to catch anything: a round that is
+        re-cut produces a new SHA for identical content and walks straight
+        past the denylist. The tree hash of the paths the promotion touched is
+        the half that actually implements "do not re-land this change".
+        """
         d = read_json(self.denied) or {"commits": [], "trees": []}
         if commit and commit not in d["commits"]:
             d["commits"].append(commit)
+        if tree_hash and tree_hash not in d.setdefault("trees", []):
+            d["trees"].append(tree_hash)
         write_json_atomic(self.denied, d)
 
     def recent_rollbacks(self, window_seconds: float) -> int:

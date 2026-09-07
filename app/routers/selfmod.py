@@ -49,8 +49,20 @@ def set_drain(on: bool, ttl_s: float = 180.0) -> float:
     return _drain_until
 
 
+def _is_loopback(request: Request) -> bool:
+    host = getattr(getattr(request, "client", None), "host", "") or ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
 @router.post("/api/selfmod/drain")
 async def post_drain(request: Request):
+    # Loopback only. `server.py`'s auth middleware enforces the client-cert
+    # allowlist for /api/* routes only when a fingerprint is actually
+    # forwarded, so on the tailnet this endpoint was an unauthenticated way to
+    # make the backend refuse every user turn for up to 10 minutes. Its only
+    # legitimate caller is the promoter, which runs on this box.
+    if not _is_loopback(request):
+        return JSONResponse({"error": "drain is loopback-only"}, status_code=403)
     data = await request.json()
     on = bool(data.get("on", True))
     ttl = float(data.get("ttl_s", 180.0))

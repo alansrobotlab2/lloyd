@@ -34,8 +34,20 @@ DEFAULT_BOOT_GRACE = 30.0
 # 11:29:18 made /health miss three consecutive 2s probes, and the guardian
 # reverted a perfectly good promotion at 11:30:39. A watchdog that reverts
 # good code every time the machine gets busy is worse than no watchdog.
-PROBE_FAIL_STREAK = 3            # refused / http-error
-PROBE_TIMEOUT_STREAK = 24        # 24 x 5s = 2 minutes of no answer
+# Three causes, three budgets. Collapsing them is how a busy box gets its
+# code reverted (see the 2026-09-06 incident) and how a merely *degraded*
+# aggregator gets read as a dead one.
+PROBE_FAIL_STREAK = 3            # REFUSED: nothing is listening. 3 x 5s = 15s.
+PROBE_TIMEOUT_STREAK = 24        # TIMEOUT: accepted but busy. 24 x 5s = 2 min.
+# HTTP_ERROR: the socket answered with a non-200. The process is demonstrably
+# alive and serving, so this is never death — but a backend parked in
+# `degraded` (a router that failed to mount, startup that never completed) is
+# a real failure a promotion can cause, so it gets its own, wider budget.
+# For the AGGREGATOR this counter is not consulted at all: a 503 there means
+# "some module is degraded", which `mcp_degraded_is_fatal` judges properly
+# against the last-known-good baseline. Counting it here instead reverted on
+# any three consecutive ticks of a Thunderbird bridge being closed.
+PROBE_HTTP_ERROR_STREAK = 36     # 36 x 5s = 3 minutes of answering, badly
 
 # supervisord itself unreachable for this many consecutive ticks before we
 # try to restart the unit. Never a code-rollback trigger.
@@ -51,9 +63,11 @@ CRASH_LOOP_WINDOW_SECONDS = 180.0
 # ── Watched processes ──────────────────────────────────────────────────────
 # Group-qualified, because supervisord's XML-RPC rejects bare names for
 # grouped programs (Fault 10 BAD_NAME).
+# `lloyd-frontend` is deliberately absent and stays absent: a dead Vite dev
+# server does not justify rewriting history, and there was an `ADVISORY` tuple
+# here that named it and that nothing ever read — a knob an operator would
+# reasonably think was doing something.
 WATCHED = ("lloyd-mc:lloyd-backend", "lloyd-mc:lloyd-mcp")
-# Warn-only: a dead Vite dev server does not justify rewriting history.
-ADVISORY = ("lloyd-mc:lloyd-frontend",)
 
 RESTART_ORDER = ("lloyd-mc:lloyd-mcp", "lloyd-mc:lloyd-backend")
 
@@ -105,18 +119,22 @@ LOG_FILES = (
 # nothing forever.
 LOG_READ_CAP_BYTES = 4 * 1024 * 1024
 CHRONIC_MIN_DISTINCT_HOURS = 3
-CHRONIC_LOOKBACK_DAYS = 7
+# The chronic set is learned from a bounded backward scan and CACHED. Without
+# an expiry it is learned exactly once, on the first boot after the state dir
+# is created, and every steady-state error that starts happening afterwards is
+# "novel" forever — so the next promotion is reverted for a recurring failure
+# it did not cause. Re-learn daily.
+CHRONIC_REFRESH_SECONDS = 24 * 3600.0
 NOVEL_SIGNATURE_THRESHOLD = 5           # one novel signature this many times
 NOVEL_FATAL_DISTINCT_THRESHOLD = 3      # distinct novel tracebacks
 NOVEL_IN_CHANGED_PATH_THRESHOLD = 2     # novel + names a file the promo touched
-ERROR_RATE_FLOOR_PER_MIN = 20.0
-ERROR_RATE_MULTIPLIER = 8.0
 
-# ── Worker failure CUSUM ───────────────────────────────────────────────────
-WORKERS_DB = "/home/alansrobotlab/lloyd/workers.db"
-CUSUM_P1 = 0.30
-CUSUM_THRESHOLD = 4.6                   # ~1% false alarm
-CUSUM_P0_FLOOR = 0.01
+# ── Rollback requests ──────────────────────────────────────────────────────
+# A process inside the blast radius (the backend, the aggregator) cannot roll
+# back inline — the rollback stops it partway through. It writes a request and
+# the guardian performs it. Stale requests are discarded rather than obeyed:
+# the state they were reasoning about is long gone.
+ROLLBACK_REQUEST_MAX_AGE_SECONDS = 900.0
 
 # ── Data-damage tripwire ───────────────────────────────────────────────────
 # The one failure class `git reset --hard` structurally cannot undo: the KG

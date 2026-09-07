@@ -144,6 +144,18 @@ async def _task(args: dict[str, Any]) -> str:
     if "Task" not in disallowed:
         disallowed.append("Task")
 
+    # ...and never the self-modification loop. A subagent is spawned to do a
+    # bounded piece of research or editing and reports back through a summary;
+    # nothing about that shape suits opening a round, gating it, or landing
+    # code on production. Landing from inside a Task would also restart the
+    # aggregator the Task is running in. Same reasoning as the Task recursion
+    # cap: the constraint belongs here, not in a prompt.
+    for name in ("selfmod_start", "selfmod_gate", "selfmod_land",
+                 "selfmod_abort", "selfmod_rollback"):
+        if name not in disallowed:
+            disallowed.append(name)
+            disallowed.append(f"mcp__lloyd-mcp__{name}")
+
     # Subagents ran with `hooks=None`, which meant the harness's default
     # destructive-Bash gate never installed inside a Task — the one place
     # with no human watching the stream. `safety.py` is documented as

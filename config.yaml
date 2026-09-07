@@ -457,8 +457,15 @@ workers:
     # the loop itself is enabled — it is a no-op without a promotion under
     # observation, but there is no reason to schedule it before then.
     selfmod-regression:
-      enabled: false
-      interval_seconds: 86400
+      # Enabled as a POST-LANDING check, not a gate rung. The gate's canary is
+      # deliberately data-isolated (its own empty scratch vault), so a quality
+      # eval run there would score an empty corpus and measure nothing. This
+      # has to run against live data in a separate worktree, which is what the
+      # paired A/B does. It measures once per promotion and dedups on the
+      # commit, so an hourly interval means "shortly after a landing", not
+      # hourly evals.
+      enabled: true
+      interval_seconds: 3600
       max_inflight: 1
       max_duration_seconds: 1800
     # Re-checks one backlog item per run against the system as it is today.

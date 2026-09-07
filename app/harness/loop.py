@@ -105,6 +105,7 @@ async def run_query(
     event with `stop_reason="cancelled"`.
     """
     started_at = time.perf_counter()
+    _run_started()
 
     # Prepend system prompt as a system message so vLLM sees it. We do
     # this here so callers don't have to worry about it; if they already
@@ -509,7 +510,45 @@ async def run_query(
             await options.hooks.fire_on_event(result_done_evt)
     finally:
         # Pool is shared across turns — see comment above _build_pool call.
-        pass
+        _run_finished()
+
+
+# ---------------------------------------------------------------------------
+# In-flight accounting
+# ---------------------------------------------------------------------------
+#
+# Process-wide count of agent loops currently running, for the ONE consumer
+# that needs it: the self-modification promoter's idle gate.
+#
+# `sessions_io.active_turn_summary()` walks `_session_queues`, which is the
+# right answer for chat turns and blind to every other caller of `run_query` —
+# worker jobs (`workers/sources/_common.py::run_prompt_on_primary`), the IDE
+# routes, post-session capture. Those turns can run for minutes, and a landing
+# that restarts the backend underneath one kills it mid-flight; the connection
+# errors it then logs land squarely in the window the error-rate detector is
+# watching, so the promotion is blamed for the damage its own landing did.
+# That is the exact signature of the 2026-09-06 20:14 false positive:
+# `failed domain-research/research: ConnectError` x9.
+#
+# Deliberately a plain int, not a lock or a registry: it is read by a health
+# endpoint polled every 2 seconds, and a torn read costs the promoter one more
+# poll. asyncio runs these in one thread anyway.
+_active_runs = 0
+
+
+def _run_started() -> None:
+    global _active_runs
+    _active_runs += 1
+
+
+def _run_finished() -> None:
+    global _active_runs
+    _active_runs = max(0, _active_runs - 1)
+
+
+def active_run_count() -> int:
+    """Agent loops in flight in this process, by any caller."""
+    return _active_runs
 
 
 # ---------------------------------------------------------------------------

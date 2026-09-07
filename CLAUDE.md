@@ -49,10 +49,23 @@ python -m scripts.selfmod.round status              # state + ledger + guardian
 python -m scripts.selfmod.round start "goal"        # cuts a worktree
 python -m scripts.selfmod.round gate  SM_<id>       # 7 rungs, ~2 min
 python -m scripts.selfmod.round land  SM_<id>       # idle-gated, verified
+python -m scripts.selfmod.round bless               # HEAD becomes last-known-good
+python -m scripts.selfmod.round recover             # clear BROKEN, restart the stack
 python -m scripts.selfmod.rehearse --yes-i-mean-it  # prove rollback still works
 ```
 
-Four things worth knowing before touching any of it:
+**Nothing inside the blast radius performs a rollback, and a landing runs
+detached.** A rollback stops the backend and the aggregator, so code doing one
+from inside either process issues the stop that kills its own caller and never
+reaches `git reset` — the stack goes down and the tree does not move. They
+write `rollback_request.json` and the guardian performs it. Likewise the
+promoter restarts `lloyd-mcp`, which is where the MCP tool calling it lives,
+so `selfmod_land` spawns it in a new session (`state.spawn_detached`) — a
+process group signal cannot reach that. Before this, the CLI path worked only
+because the Bash tool already spawns that way, so the loop worked when a human
+drove it and would have failed the first time Lloyd did.
+
+Things worth knowing before touching any of it:
 
 - **The guardian is a systemd unit, not a supervisord program.**
   `agent-supervisord.service` sets `KillMode=control-group`, so a
@@ -67,6 +80,12 @@ Four things worth knowing before touching any of it:
   the guardian must read its rollback target while the repo is being rewritten.
 - **`HEAD == last-known-good` never rolls back.** Everything broken with
   nothing promoted is infrastructure, not a bad change.
+- **A rollback reverts in place when HEAD has moved past the promotion.**
+  `reset --hard` to the parent is right only while HEAD *is* the promotion.
+  Nightly jobs commit straight to live `main`, so a 15-minute window can close
+  over work the loop never touched, and resetting past it destroys commits
+  nobody asked the guardian to judge. The route is chosen per rollback; a
+  conflicting revert escalates rather than guessing.
 - **A rollback restores the promotion's own `rollback_target`, not the LKG.**
   `gstate.rollback_target(current)` prefers what `current.json` recorded at
   landing time, then its `parent`, and only then the LKG pointer. The LKG is
@@ -94,6 +113,20 @@ Four things worth knowing before touching any of it:
 Errors are read from `logs/server.err`, never `server.log` — `basicConfig`
 writes to stderr, so `server.log` is uvicorn's access log and holds zero
 error-shaped lines.
+
+- **The idle gate counts `harness_runs`, not just session queues.** Worker
+  jobs call `run_query` directly and never enter a queue, so a ten-minute
+  research job was invisible to the gate that exists to avoid killing it. The
+  landing then restarted the backend underneath it, and the `ConnectError`
+  lines it logged on the way down landed inside the observation window — so
+  the promotion was reverted for damage its own landing caused. That is the
+  2026-09-06 20:14 rollback exactly.
+- **An answered non-200 is not a refused connection.** Three probe classes,
+  three budgets: refused 3 ticks, timeout 24, http-error 36. The aggregator's
+  503 (any degraded module, e.g. a closed Thunderbird) is excluded from the
+  down predicate entirely and judged by `mcp_degraded_is_fatal` instead.
+- **Every rollback this loop has performed has been a false positive.** The
+  failure mode to design against is inventing a bad build, not missing one.
 
 ### Alerts: one fan-out, six channels
 

@@ -59,10 +59,13 @@ def is_ancestor(repo: str, ancestor: str, descendant: str) -> bool:
     return _git(repo, "merge-base", "--is-ancestor", ancestor, descendant).returncode == 0
 
 
-def _wait_for_index_lock(repo: str, stale_seconds: float, budget: float = 10.0) -> None:
+def _wait_for_index_lock(repo: str, stale_seconds: float, budget: float = 10.0,
+                         heartbeat=None) -> None:
     lock = Path(repo) / ".git" / "index.lock"
     deadline = time.time() + budget
     while time.time() < deadline:
+        if heartbeat:
+            heartbeat()
         if not lock.exists():
             return
         try:
@@ -80,30 +83,86 @@ def _wait_for_index_lock(repo: str, stale_seconds: float, budget: float = 10.0) 
         time.sleep(0.5)
 
 
-def _drain_writers(repo: str, budget: float) -> list[int]:
-    """Wait for processes holding write fds under `repo` to exit. Best-effort."""
-    deadline = time.time() + budget
-    holders: list[int] = []
-    repo_real = os.path.realpath(repo)
-    while time.time() < deadline:
-        holders = []
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            pid = int(entry.name)
-            if pid == os.getpid():
-                continue
+def _fd_is_writable(fdinfo: Path) -> bool:
+    """True when /proc/<pid>/fdinfo/<fd> reports the fd was opened for writing."""
+    try:
+        text = fdinfo.read_text()
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if line.startswith("flags:"):
             try:
-                cwd = os.readlink(entry / "cwd")
+                flags = int(line.split()[1], 8)
+            except (IndexError, ValueError):
+                return False
+            return (flags & os.O_ACCMODE) in (os.O_WRONLY, os.O_RDWR)
+    return False
+
+
+def repo_write_holders(repo: str, watch_paths: tuple[str, ...],
+                       skip_pids: tuple[int, ...] | None = None) -> list[int]:
+    """Pids holding a WRITE fd on something this rollback is about to rewrite.
+
+    The predicate used to be "this process's cwd is somewhere under the repo",
+    which on a developer box is every shell, every editor and the agent itself.
+    It was therefore never empty, so the drain burned its full budget on every
+    single rollback and logged a 44-pid warning that meant nothing — and the
+    one thing it was supposed to detect, a process actually writing source
+    while `git reset --hard` runs, was invisible inside the noise.
+
+    Two narrowings make it mean something. Only WRITE fds count: a reader
+    cannot corrupt a checkout. And only paths the restore will actually
+    touch count — the code directories and `.git`. Scoping matters more than
+    it looks: supervisord itself holds `logs/server.err` open for append
+    forever, so an unscoped fd check would have swapped one permanently-true
+    predicate for another.
+    """
+    repo_real = os.path.realpath(repo)
+    roots = tuple(f"{repo_real}/{p.strip('/')}/" for p in watch_paths)
+    holders: list[int] = []
+    # The guardian excludes itself: it opens the repo to tag, stash and reset,
+    # and waiting for itself to let go would never terminate. Overridable so a
+    # test can be its own subject.
+    skip = set(skip_pids) if skip_pids is not None else {os.getpid()}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid in skip:
+            continue
+        fd_dir = entry / "fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue                      # gone, or not ours to inspect
+        for fd in fds:
+            try:
+                target = os.readlink(fd_dir / fd)
             except OSError:
                 continue
-            if not cwd.startswith(repo_real):
+            if not target.startswith(roots):
                 continue
-            holders.append(pid)
+            if _fd_is_writable(entry / "fdinfo" / fd):
+                holders.append(pid)
+                break
+    return holders
+
+
+def _drain_writers(repo: str, budget: float, watch_paths: tuple[str, ...] = (),
+                   heartbeat=None) -> list[int]:
+    """Wait for write-fd holders on the code tree to go away. Best-effort."""
+    watch_paths = watch_paths or ("app", "agent_mcp", "workers", "scripts", ".git")
+    deadline = time.time() + budget
+    holders: list[int] = []
+    while True:
+        if heartbeat:
+            heartbeat()
+        holders = repo_write_holders(repo, watch_paths)
         if not holders:
             return []
+        if time.time() >= deadline:
+            return holders
         time.sleep(1.0)
-    return holders
 
 
 def preserve_evidence(repo: str, broken_dir: Path, tag: str) -> dict:
@@ -167,6 +226,60 @@ def restore_tree(repo: str, target: str, clean_paths: tuple[str, ...],
             continue
         for cache in base.rglob("__pycache__"):
             shutil.rmtree(cache, ignore_errors=True)
+
+
+def changed_tree_hash(repo: str, commit: str, paths: list) -> str | None:
+    """Content hash of `paths` at `commit`. Mirrors scripts/selfmod/state.py."""
+    if not paths:
+        return None
+    r = _git(repo, "ls-tree", "-r", "--full-tree", commit, "--", *paths, timeout=30)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    import hashlib
+    return hashlib.sha1(r.stdout.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def commits_between(repo: str, base: str, head: str) -> int:
+    r = _git(repo, "rev-list", "--count", f"{base}..{head}")
+    try:
+        return int(r.stdout.strip())
+    except ValueError:
+        return 0
+
+
+def revert_commit(repo: str, sha: str, *, reason: str = "") -> str:
+    """Revert exactly `sha`, leaving every later commit in place. Returns the new HEAD.
+
+    `reset --hard` to the promotion's parent is correct only while HEAD *is*
+    the promotion. Nightly jobs commit straight to live `main`, so by the time
+    a 15-minute observation window closes the tree may legitimately carry work
+    the loop never touched — and resetting past it discards commits nobody
+    asked the guardian to judge. That is the 26-commit incident of 2026-09-06
+    one level down: there the wrong TARGET was chosen, here the right target is
+    reached by the wrong ROUTE.
+
+    A conflict means the later work and the revert genuinely overlap. There is
+    no safe automatic answer to that, so it raises and the caller escalates.
+    """
+    _git(repo, "revert", "--abort", timeout=30)      # clear any prior attempt
+    r = _git(repo, "-c", "user.name=lloyd-guardian",
+             "-c", "user.email=guardian@localhost",
+             "revert", "--no-edit", sha, timeout=120)
+    if r.returncode != 0:
+        _git(repo, "revert", "--abort", timeout=30)
+        raise RollbackError(
+            f"git revert {sha[:8]} failed (conflicts with later work): "
+            f"{(r.stdout + r.stderr).strip()[:300]}")
+    head = head_commit(repo)
+    if not head or head == sha:
+        raise RollbackError(f"revert of {sha[:8]} produced no new commit")
+    status = _git(repo, "status", "--porcelain")
+    if status.stdout.strip():
+        raise RollbackError(f"tree is dirty after reverting {sha[:8]}")
+    branch = head_branch(repo)
+    if branch != "refs/heads/main":
+        raise RollbackError(f"HEAD is {branch!r} after revert, expected refs/heads/main")
+    return head
 
 
 def verify_tree(repo: str, target: str, expected_branch: str = "main") -> None:

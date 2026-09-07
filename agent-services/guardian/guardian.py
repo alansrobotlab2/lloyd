@@ -97,14 +97,30 @@ class Guardian:
         self._tick_overflow = False
         self.probe_fail: dict[str, int] = {p: 0 for p in self.programs}
         self.probe_timeout: dict[str, int] = {p: 0 for p in self.programs}
+        self.probe_http: dict[str, int] = {p: 0 for p in self.programs}
         self.start_history: dict[str, list[float]] = {p: [] for p in self.programs}
         self.sup_down_streak = 0
         self.quiet_until = 0.0
         self.last_selftest = 0.0
         self.selftest_ok: bool | None = None
         self.chronic: set[str] = set()
-        self._chronic_loaded = False
+        self._chronic_built_ts = 0.0
         self.last_alert = ""
+
+    def _beat(self) -> None:
+        """Ping systemd's watchdog from inside a long-running step.
+
+        `WATCHDOG=1` is otherwise sent once per loop iteration, and a rollback
+        is one iteration: two blocking stops (stopwaitsecs=15 each), a writer
+        drain, and up to 90s waiting for the backend to come back. That is
+        comfortably past the unit's WatchdogSec=90, so systemd killed the
+        guardian partway through the rescue, restarted it, and the resume path
+        began the same rollback again — a loop that can never reach BROKEN, in
+        precisely the case BROKEN exists to report. The beat stays tied to
+        real progress rather than a background thread, so a genuinely *hung*
+        guardian is still caught.
+        """
+        sd_notify("WATCHDOG=1")
 
     # ── heartbeat ──────────────────────────────────────────────────────
     def heartbeat(self, state: str, extra: dict | None = None) -> None:
@@ -157,16 +173,36 @@ class Guardian:
         for program in self.programs:
             info = snap["procs"].get(program)
             result = snap["probes"].get(program)
+            is_mcp = program.endswith("lloyd-mcp")
             if result is not None:
+                kind = result.get("kind")
                 if result["ok"]:
                     self.probe_fail[program] = 0
                     self.probe_timeout[program] = 0
-                elif result.get("kind") == "timeout":
+                    self.probe_http[program] = 0
+                elif kind == "timeout":
                     # Alive but slow. Counted, but on its own long budget.
                     self.probe_timeout[program] = self.probe_timeout.get(program, 0) + 1
                     self.probe_fail[program] = 0
+                    self.probe_http[program] = 0
+                elif kind == "http_error":
+                    # It ANSWERED. That is not "nothing is listening", and
+                    # counting it as one is how a merely degraded aggregator
+                    # got three ticks to look like a dead one — the careful
+                    # newly-degraded-since-LKG check below sits *after* the
+                    # down predicate and so never got a vote. The aggregator's
+                    # 503 is judged there instead, and contributes nothing
+                    # here; the backend's own 503 (a router that failed to
+                    # mount, a startup that never completed) is real, and gets
+                    # its own much wider budget.
+                    self.probe_fail[program] = 0
+                    self.probe_timeout[program] = 0
+                    if not is_mcp:
+                        self.probe_http[program] = self.probe_http.get(program, 0) + 1
                 else:
                     self.probe_fail[program] = self.probe_fail.get(program, 0) + 1
+                    self.probe_timeout[program] = 0
+                    self.probe_http[program] = 0
 
             grace = policy.BOOT_GRACE.get(program, policy.DEFAULT_BOOT_GRACE)
             down, reason = detect.process_down(
@@ -177,16 +213,24 @@ class Guardian:
                 probe_threshold=policy.PROBE_FAIL_STREAK,
                 probe_timeout_streak=self.probe_timeout.get(program, 0),
                 probe_timeout_threshold=policy.PROBE_TIMEOUT_STREAK,
+                probe_http_streak=self.probe_http.get(program, 0),
+                probe_http_threshold=policy.PROBE_HTTP_ERROR_STREAK,
                 start_history=self.start_history.get(program, []),
                 crash_loop_starts=policy.CRASH_LOOP_STARTS,
                 crash_loop_window=policy.CRASH_LOOP_WINDOW_SECONDS,
+                # A STOPPED process while promotions are halted is one WE
+                # stopped: flap protection quarantines the backend by design.
+                # Reading our own deliberate stop as death produced a "service
+                # down" alert every 15 minutes for as long as the quarantine
+                # lasted. EXITED is never excused this way.
+                intentional_stop=self.state.is_halted(),
             )
             if down:
                 return True, f"{program}: {reason}"
 
             # A degraded aggregator is usually an external-app bridge being
             # absent, not a bad promotion. Only newly-degraded modules count.
-            if program.endswith("lloyd-mcp") and result and result["status"] == 503:
+            if is_mcp and result and result.get("kind") == "http_error":
                 body = result.get("body") or {}
                 baseline = ((self.state.lkg() or {}).get("health") or {}).get("mcp_degraded_modules")
                 fatal, why = detect.mcp_degraded_is_fatal(body, baseline)
@@ -196,11 +240,25 @@ class Guardian:
 
     # ── error-rate ─────────────────────────────────────────────────────
     def ensure_chronic(self) -> None:
-        if self._chronic_loaded:
+        # In-process expiry as well as on-disk: the guardian runs for weeks at
+        # a time, so a load-once guard would pin the set for the life of the
+        # process and make the on-disk TTL unreachable.
+        if self._chronic_built_ts and (
+                time.time() - self._chronic_built_ts) < policy.CHRONIC_REFRESH_SECONDS:
             return
         cache = self.gdir / "signatures.json"
         cached = gstate.read_json(cache)
-        if cached and isinstance(cached.get("chronic"), list):
+        # The cache EXPIRES, and that is not housekeeping. Learned once and
+        # kept forever, the chronic set describes the box as it was on the
+        # first boot after the state dir was created — so every recurring
+        # error that starts happening *later* stays "novel" indefinitely, and
+        # the next promotion is reverted for a steady-state failure it had
+        # nothing to do with. That is the same shape as the stale log cursor:
+        # a detector quietly judging a new commit by old evidence.
+        age = time.time() - float((cached or {}).get("built_ts") or 0)
+        fresh = bool(cached and isinstance(cached.get("chronic"), list)
+                     and age < policy.CHRONIC_REFRESH_SECONDS)
+        if fresh:
             self.chronic = set(cached["chronic"])
         else:
             self.chronic = logtail.bootstrap_chronic(
@@ -210,9 +268,11 @@ class Guardian:
             )
             gstate.write_json_atomic(cache, {
                 "chronic": sorted(self.chronic), "built_at": gstate.now_iso(),
+                "built_ts": time.time(),
             })
-        self._chronic_loaded = True
-        log(f"chronic signature set: {len(self.chronic)} entries (never trigger)")
+        self._chronic_built_ts = float((cached or {}).get("built_ts") or 0) if fresh else time.time()
+        log(f"chronic signature set: {len(self.chronic)} entries (never trigger)"
+            f"{'' if fresh else ' — rebuilt'}")
 
     def drain_logs(self) -> None:
         """Advance the log cursor and buffer this tick's error events.
@@ -275,13 +335,45 @@ class Guardian:
         return False, "data intact"
 
     # ── rollback ───────────────────────────────────────────────────────
-    def do_rollback(self, trigger: str, reason: str) -> bool:
-        target, source = self.state.rollback_target(self.state.current())
+    def do_rollback(self, trigger: str, reason: str, *,
+                    explicit_target: str | None = None,
+                    explicit_commit: str | None = None,
+                    explicit_changed: list | None = None) -> bool:
+        current = self.state.current() or {}
+        if not current and explicit_commit:
+            # A request about a promotion that has already SETTLED — the
+            # quality check runs long after `current.json` is gone. Without
+            # the bad commit, route selection below would fall back to a blunt
+            # reset to the target and take any later work with it; with it,
+            # the revert stays surgical.
+            current = {"commit": explicit_commit,
+                       "rollback_target": explicit_target,
+                       "changed_paths": list(explicit_changed or [])}
+        if explicit_target and gstate._is_sha(explicit_target):
+            target, source = explicit_target, "explicit rollback request"
+        else:
+            target, source = self.state.rollback_target(current)
         head = rb.head_commit(self.repo)
         floor = self.state.floor()
 
         if not target:
             self.escalate("no rollback target", f"{reason}\n\n{source}")
+            return False
+
+        # The promotion may already be gone — reverted by hand, or by a
+        # promoter that failed after its merge and undid itself inline. Its
+        # `rollback_target` still points somewhere real, so every check below
+        # passes and the guardian would happily rewind the tree a second time,
+        # discarding whatever landed since. Absence from history is the tell.
+        promoted = current.get("commit")
+        if promoted and head and promoted != head and not rb.is_ancestor(
+                self.repo, promoted, head):
+            self.alert("error", "Promotion is no longer in this history",
+                       f"{reason}\n\n{promoted[:8]} is not an ancestor of HEAD "
+                       f"({head[:8]}), so it has already been reverted or was never "
+                       "landed here. Not rewinding again — that would discard work "
+                       "this loop never touched.")
+            self.state.clear_current()
             return False
         if target == head:
             # Invariant 1. Nothing was promoted; this is infrastructure.
@@ -305,12 +397,19 @@ class Guardian:
 
         for attempt in range(1, policy.ROLLBACK_MAX_ATTEMPTS + 1):
             try:
-                self._rollback_once(target, stamp, trigger, reason)
+                self._rollback_once(target, stamp, trigger, reason, current)
                 return True
             except Exception as exc:
                 log(f"rollback attempt {attempt} failed: {exc}")
                 if attempt < policy.ROLLBACK_MAX_ATTEMPTS:
-                    time.sleep(policy.ROLLBACK_RETRY_SECONDS)
+                    # Beat through the wait. A bare sleep here is 60s of
+                    # silence against a 90s watchdog, immediately after a
+                    # failed attempt has already spent most of the budget.
+                    waited = 0.0
+                    while waited < policy.ROLLBACK_RETRY_SECONDS:
+                        self._beat()
+                        time.sleep(min(5.0, policy.ROLLBACK_RETRY_SECONDS - waited))
+                        waited += 5.0
 
         gstate.append_event(self.state.ledger, {
             "event": "rollback_failed", "trigger": trigger, "to": target,
@@ -318,28 +417,52 @@ class Guardian:
         self.escalate("ROLLBACK FAILED", reason)
         return False
 
-    def _rollback_once(self, target: str, stamp: str, trigger: str, reason: str) -> None:
+    def _rollback_once(self, target: str, stamp: str, trigger: str, reason: str,
+                       current: dict | None = None) -> None:
         head_before = rb.head_commit(self.repo)
-        current = self.state.current() or {}
+        current = current if current is not None else (self.state.current() or {})
         boot_before = current.get("boot_id")
+        promoted = current.get("commit")
+        changed = list(current.get("changed_paths") or [])
+
+        # Which ROUTE back. `reset --hard` to the promotion's parent is only
+        # correct while HEAD still *is* the promotion. Nightly jobs commit
+        # straight to live `main`, so a 15-minute window can legitimately close
+        # over work the loop never touched — and resetting past it destroys
+        # commits nobody asked the guardian to judge. When the tree has moved
+        # on, revert exactly the promoted commit and leave the rest standing.
+        surgical = bool(promoted and head_before and head_before != promoted)
 
         # 3. Stop the writers first — see the module docstring.
         for program in reversed(policy.RESTART_ORDER):
             ok, msg = self.sup.stop(program, wait=True)
             log(f"stop {program}: {msg}")
-        holders = rb._drain_writers(self.repo, policy.WRITER_DRAIN_SECONDS)
+            self._beat()
+        holders = rb._drain_writers(self.repo, policy.WRITER_DRAIN_SECONDS,
+                                    watch_paths=policy.CLEAN_PATHS + (".git",),
+                                    heartbeat=self._beat)
         if holders:
-            log(f"warning: pids still in the repo after stop: {holders}")
+            log(f"warning: pids still holding write fds on the code tree: {holders}")
 
         # 4-5. Quiesce, then preserve the evidence before destroying it.
-        rb._wait_for_index_lock(self.repo, policy.INDEX_LOCK_STALE_SECONDS)
+        rb._wait_for_index_lock(self.repo, policy.INDEX_LOCK_STALE_SECONDS,
+                                heartbeat=self._beat)
         tag = f"guardian-broken-{stamp}"
         evidence = rb.preserve_evidence(self.repo, self.state.broken_dir / stamp, tag)
         log(f"preserved: tag={evidence['tag']} stash={evidence['stash']}")
+        self._beat()
 
         # 6-8. Move the tree, verify it, undo any venv swap.
-        rb.restore_tree(self.repo, target, policy.CLEAN_PATHS, policy.PYCACHE_PATHS)
-        rb.verify_tree(self.repo, target)
+        if surgical:
+            kept = rb.commits_between(self.repo, promoted, head_before)
+            expected = rb.revert_commit(self.repo, promoted, reason=reason)
+            log(f"reverted {promoted[:8]} in place → {expected[:8]}, "
+                f"keeping {kept} later commit(s)")
+        else:
+            rb.restore_tree(self.repo, target, policy.CLEAN_PATHS, policy.PYCACHE_PATHS)
+            rb.verify_tree(self.repo, target)
+            expected = target
+        self._beat()
         if current.get("venv_swapped"):
             failed = rb.swap_venv_back(self.repo)
             log(f"venv reverted, failed clone kept at {failed}")
@@ -352,7 +475,8 @@ class Guardian:
             budget = (policy.HEALTH_WAIT_MCP if program.endswith("lloyd-mcp")
                       else policy.HEALTH_WAIT_BACKEND)
             if url:
-                healthy, last = probes.wait_healthy(url, budget, policy.PROBE_TIMEOUT_SECONDS)
+                healthy, last = probes.wait_healthy(url, budget, policy.PROBE_TIMEOUT_SECONDS,
+                                                    on_tick=self._beat)
                 if not healthy:
                     raise rb.RollbackError(
                         f"{program} unhealthy after restart: "
@@ -360,20 +484,27 @@ class Guardian:
 
         final = probes.probe(self.backend_url, policy.PROBE_TIMEOUT_SECONDS)
         body = final.get("body") or {}
-        if body.get("commit") and body["commit"] != target:
+        if body.get("commit") and body["commit"] != expected:
             raise rb.RollbackError(
-                f"backend reports commit {body['commit'][:8]}, expected {target[:8]} "
+                f"backend reports commit {body['commit'][:8]}, expected {expected[:8]} "
                 "— the restart did not pick up the reverted code")
         if boot_before and body.get("boot_id") == boot_before:
             raise rb.RollbackError("backend boot_id unchanged — process was never replaced")
 
         # 11-12. Record, denylist, re-arm quiet.
-        if head_before:
-            self.state.deny(head_before)
+        # Deny the PROMOTED commit, not whatever HEAD happened to be: on the
+        # surgical route HEAD was a later human commit, and denying that would
+        # blocklist work the loop never made. Content hash alongside the SHA,
+        # so the same change re-derived under a new SHA is caught too.
+        bad = promoted or head_before
+        if bad:
+            self.state.deny(bad, tree_hash=rb.changed_tree_hash(self.repo, bad, changed))
         self.state.clear_current()
         gstate.append_event(self.state.ledger, {
-            "event": "rollback_succeeded", "trigger": trigger, "commit": head_before,
-            "restored": target, "tag": tag, "stash": evidence.get("stash"),
+            "event": "rollback_succeeded", "trigger": trigger, "commit": bad,
+            "restored": expected, "target": target,
+            "route": "revert" if surgical else "reset",
+            "head_before": head_before, "tag": tag, "stash": evidence.get("stash"),
         })
         self.quiet_until = time.time() + policy.POST_ROLLBACK_QUIET_SECONDS
         for program in self.programs:
@@ -394,12 +525,14 @@ class Guardian:
                      "running on known-good code but cannot land more changes until you clear "
                      f"{self.state.halted}.")
 
+        route = (f"Reverted in place, keeping later commits."
+                 if surgical else "Reset to the pre-promotion tree.")
         self.alert(
             "critical" if extra else "warn",
-            f"Rolled back {(head_before or '?')[:8]} → {target[:8]}",
-            f"Trigger: {trigger}\n{reason}{extra}",
+            f"Rolled back {(bad or '?')[:8]} → {expected[:8]}",
+            f"Trigger: {trigger}\n{reason}\n{route}{extra}",
             evidence=json.dumps(evidence, indent=2),
-            commit=head_before or "", trigger=trigger, tag=tag,
+            commit=bad or "", trigger=trigger, tag=tag,
         )
 
     def escalate(self, title: str, body: str) -> None:
@@ -447,7 +580,34 @@ class Guardian:
             return
         mcp = probes.probe(self.mcp_url, policy.PROBE_TIMEOUT_SECONDS)
         degraded = ((mcp.get("body") or {}).get("degraded_modules") or [])
-        self.state.set_lkg(commit, health={"mcp_degraded_modules": degraded})
+
+        # Fold in the last quality measurement, if one was taken for exactly
+        # this commit. The LKG record has carried an empty `eval` slot since it
+        # was designed; the guardian cannot run the eval itself (it is stdlib
+        # only, on the system python) so the worker measures and leaves the
+        # result here. Reading rather than letting the worker write LKG keeps
+        # "the guardian is the only writer of last_known_good.json" true, which
+        # is what makes LKG mean *observed healthy in production*.
+        eval_baseline = None
+        measured = self.state.read_eval_last()
+        if measured and measured.get("commit") == commit:
+            eval_baseline = measured
+
+        self.state.set_lkg(commit, health={"mcp_degraded_modules": degraded},
+                           eval_baseline=eval_baseline)
+        # Record what settled BEFORE dropping current.json — a post-landing
+        # check running hours later needs the promotion's own parent, and by
+        # now the LKG pointer has advanced to the promoted commit itself.
+        self.state.write_last_settled({
+            "schema": 1,
+            "commit": commit,
+            "parent": current.get("parent") or current.get("rollback_target"),
+            "round_id": current.get("round_id"),
+            "changed_paths": current.get("changed_paths") or [],
+            "landed_ts": current.get("landed_ts"),
+            "settled_ts": time.time(),
+            "settled_at": gstate.now_iso(),
+        })
         self.state.clear_current()
         prev = Path(self.repo) / ".venvs" / "lloyd.prev"
         if current.get("venv_swapped") and prev.exists():
@@ -513,6 +673,34 @@ class Guardian:
             self._tick_events = []
             self._tick_overflow = False
             return "paused"
+
+        # A rollback somebody else needs performed. The backend and the
+        # aggregator are both inside the blast radius of a rollback — it stops
+        # them — so neither can carry one out inline without dying partway
+        # through. They write a request; this is the one process that survives
+        # the operation, and it already owns evidence preservation, retries,
+        # the denylist and flap protection.
+        request = self.state.read_rollback_request()
+        if request:
+            self.state.clear_rollback_request()
+            age = time.time() - float(request.get("ts") or 0)
+            if age > policy.ROLLBACK_REQUEST_MAX_AGE_SECONDS:
+                # Obeying a stale request means acting on state that has moved
+                # on since it was written. Say so rather than silently dropping.
+                log(f"discarding rollback request {age:.0f}s old")
+                self.alert("warn", "Stale rollback request discarded",
+                           f"A rollback request written {age:.0f}s ago was not acted on "
+                           f"(limit {policy.ROLLBACK_REQUEST_MAX_AGE_SECONDS:.0f}s).\n"
+                           f"Trigger: {request.get('trigger')}\n{request.get('reason')}")
+            else:
+                log(f"rollback requested by pid {request.get('pid')}: "
+                    f"{request.get('trigger')}")
+                self.do_rollback(request.get("trigger") or "requested",
+                                 request.get("reason") or "(no reason given)",
+                                 explicit_target=request.get("target"),
+                                 explicit_commit=request.get("commit"),
+                                 explicit_changed=request.get("changed_paths"))
+                return "rolling_back"
 
         current = self.state.current()
         # A record still in `landing` means the promoter is mid-flight (it may

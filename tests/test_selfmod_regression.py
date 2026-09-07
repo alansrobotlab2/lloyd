@@ -103,28 +103,122 @@ class _Item:
     payload: dict = {}
 
 
-async def test_no_promotion_under_observation_is_a_noop(monkeypatch):
+def _observing(**over):
+    import time
+    d = {"commit": "b" * 40, "parent": "a" * 40, "state": "observing",
+         "landed_ts": time.time(), "changed_paths": ["app/x.py"]}
+    d.update(over)
+    return d
+
+
+async def test_nothing_recent_to_check_is_a_noop(monkeypatch):
     import scripts.selfmod.state as S
     monkeypatch.setattr(S, "read_current", lambda: None)
+    monkeypatch.setattr(S, "read_last_settled", lambda: None)
     out = await R.execute(_Item())
     assert "skipped" in out
 
 
-async def test_an_old_promotion_is_skipped(monkeypatch):
-    import time
+async def test_a_settled_promotion_is_still_checked(monkeypatch, tmp_path):
+    """The window is 15 minutes and this job runs hourly at best.
+
+    Keying on `current.json` alone meant the subject was gone before the check
+    ever ran — which is why this source has never produced a single run.
+    """
     import scripts.selfmod.state as S
-    monkeypatch.setattr(S, "read_current",
-                        lambda: {"commit": "a" * 40, "landed_ts": time.time() - 90000})
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    monkeypatch.setattr(S, "read_last_settled", lambda: _observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
+    monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
+    monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "absent.json")
     out = await R.execute(_Item())
-    assert "older than 24h" in out["skipped"]
+    # Got past subject selection: it failed on the noise floor, not on
+    # "nothing to check".
+    assert "no measured noise floor" in out["skipped"]
+
+
+async def test_the_baseline_is_the_parent_not_the_lkg(monkeypatch, tmp_path):
+    """After settling, the LKG pointer IS the promoted commit.
+
+    Comparing against it would check out the same code in both arms and be
+    structurally incapable of finding anything.
+    """
+    import scripts.selfmod.state as S
+    seen = {}
+    noise = tmp_path / "noise.json"
+    noise.write_text(json.dumps(ZERO_NOISE))
+    monkeypatch.setattr(R, "NOISE_PATH", noise)
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
+    monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
+    monkeypatch.setattr(S, "read_lkg", lambda: {"commit": "b" * 40})   # == promoted
+    monkeypatch.setattr(R, "_run_eval_paired",
+                        lambda commit: seen.setdefault("baseline", commit) and None)
+    await R.execute(_Item())
+    assert seen["baseline"] == "a" * 40, "must compare against the parent"
+
+
+async def test_one_measurement_per_promotion(monkeypatch, tmp_path):
+    """Both arms are full evals plus a worktree; the answer cannot change."""
+    import scripts.selfmod.state as S
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_last_settled", lambda: None)
+    monkeypatch.setattr(S, "read_events", lambda **k: [
+        {"event": "regression_check", "commit": "b" * 40}])
+    out = await R.execute(_Item())
+    assert "already checked" in out["skipped"]
+
+
+async def test_an_empty_corpus_arm_cannot_evaluate(monkeypatch, tmp_path):
+    """An empty graph is not a low score, it is a measurement that did not happen.
+
+    And it does not look like one: with the graph deleted, mrr_doc, ndcg10 and
+    doc_hit_rate come back identical to a real run.
+    """
+    import scripts.selfmod.state as S
+    noise = tmp_path / "noise.json"
+    noise.write_text(json.dumps(ZERO_NOISE))
+    monkeypatch.setattr(R, "NOISE_PATH", noise)
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
+    monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
+    monkeypatch.setattr(R, "_run_eval_paired", lambda commit: {
+        "overall": base(), "corpus_ok": True, "corpus": {}})
+    monkeypatch.setattr(R, "_run_eval", lambda label: {
+        "overall": base(), "corpus_ok": False, "corpus": {"entities": 0}})
+    out = await R.execute(_Item())
+    assert "empty corpus" in out["skipped"]
+
+
+async def test_a_regression_is_handed_to_the_guardian(monkeypatch, tmp_path):
+    """Never rolled back inline: the rollback stops the process doing it."""
+    import scripts.selfmod.state as S
+    captured = {}
+    noise = tmp_path / "noise.json"
+    noise.write_text(json.dumps(ZERO_NOISE))
+    monkeypatch.setattr(R, "NOISE_PATH", noise)
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
+    monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
+    monkeypatch.setattr(S, "write_eval_last", lambda payload: None)
+    monkeypatch.setattr(S, "request_rollback", lambda **kw: captured.update(kw) or kw)
+    monkeypatch.setattr(R, "_run_eval_paired", lambda commit: {
+        "overall": base(), "corpus_ok": True, "corpus": {}})
+    monkeypatch.setattr(R, "_run_eval", lambda label: {
+        "overall": base(entity_hit_rate=0.1), "corpus_ok": True, "corpus": {}})
+    out = await R.execute(_Item())
+    assert out["regressed"] is True
+    assert captured["trigger"] == "regression"
+    assert captured["target"] == "a" * 40 and captured["commit"] == "b" * 40
+    assert out["graph_side_reasons"], "an entity-side drop must be reported as graph-side"
 
 
 async def test_a_missing_noise_file_means_cannot_evaluate(monkeypatch, tmp_path):
     """Never 'no regression'. `eval/baselines/` is gitignored and can be absent."""
     import time
     import scripts.selfmod.state as S
-    monkeypatch.setattr(S, "read_current",
-                        lambda: {"commit": "a" * 40, "landed_ts": time.time()})
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
     monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "absent.json")
     out = await R.execute(_Item())
@@ -137,8 +231,8 @@ async def test_a_failed_paired_baseline_does_not_silently_pass(monkeypatch, tmp_
     noise = tmp_path / "noise.json"
     noise.write_text(json.dumps(ZERO_NOISE))
     monkeypatch.setattr(R, "NOISE_PATH", noise)
-    monkeypatch.setattr(S, "read_current",
-                        lambda: {"commit": "b" * 40, "landed_ts": time.time()})
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
     monkeypatch.setattr(S, "read_lkg", lambda: {"commit": "a" * 40})
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
     monkeypatch.setattr(R, "_run_eval_paired", lambda commit: None)

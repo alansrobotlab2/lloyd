@@ -37,6 +37,53 @@ def _err(message: str) -> str:
     return json.dumps({"error": message})
 
 
+def _land_detached(round_id: str) -> dict:
+    """Start the landing in its own session and return immediately.
+
+    THE reason this tool cannot just call `promote()`. A landing restarts
+    `lloyd-mcp` and `lloyd-backend`, and this module runs *inside* lloyd-mcp.
+    Both confs set `stopasgroup`/`killasgroup`, so supervisord signals the
+    whole process group and kills the promoter partway through its own
+    restart sequence. What that leaves is worse than a failed landing: the
+    tree already fast-forwarded onto the new commit, the aggregator stopped
+    (an intentional stop is not auto-restarted), the backend still serving
+    the old code with no tools at all, and `current.json` frozen in `landing`
+    — the one state the guardian is explicitly told not to observe. Nothing
+    watches it and nothing rolls it back.
+
+    `spawn_detached` puts the promoter in a new session, which is exactly what
+    a process-group signal cannot reach. The CLI path survived this only by
+    accident, because the Bash tool already spawns that way — so the loop
+    worked when a human drove it and would have failed the first time Lloyd
+    did, which is the case it exists for.
+    """
+    from scripts.selfmod import state as S, worktree as W
+
+    gate_path = S.ROUNDS_DIR / round_id / "gate.json"
+    if not gate_path.exists():
+        return {"error": f"{round_id} has no gate report — run selfmod_gate first"}
+    report = json.loads(gate_path.read_text())
+    if not report.get("ok"):
+        failed = [r["name"] for r in report.get("rungs", []) if not r["ok"]]
+        return {"error": f"gate did not pass (failed: {failed})"}
+    if not W.worktree_path(round_id).exists():
+        return {"error": f"no worktree for {round_id}"}
+
+    log = S.ROUNDS_DIR / round_id / "land.log"
+    python = W.LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
+    pid = S.spawn_detached(
+        [python, "-m", "scripts.selfmod.round", "land", round_id],
+        log, cwd=W.LIVE_ROOT)
+    return {
+        "landing": round_id, "pid": pid, "log": str(log),
+        "note": ("Detached: this restarts lloyd-mcp, which would otherwise kill the "
+                 "promoter mid-flight. It takes a minute or two, and can wait up to "
+                 "15 for the backend to go idle. Poll selfmod_status — `current.state` "
+                 "goes landing -> observing, and the guardian settles it 15 minutes "
+                 "later. Do not start another round until it settles."),
+    }
+
+
 async def list_tools() -> list[Tool]:
     return [
         Tool(
@@ -76,10 +123,12 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="selfmod_land",
             description=(
-                "Promote a round whose gate passed: waits for the backend to go idle, "
-                "fast-forwards the live tree, restarts MCP then backend, and verifies the "
-                "running commit changed. Refuses if the gate did not pass. The guardian "
-                "then watches for 15 minutes before the commit becomes last-known-good."
+                "Promote a round whose gate passed. Returns IMMEDIATELY: the landing "
+                "runs detached, because it restarts this very process. It waits for the "
+                "backend to go idle (up to 15 min), fast-forwards, restarts MCP then "
+                "backend, and verifies the running commit changed. Poll selfmod_status "
+                "to follow it. The guardian then watches for 15 minutes before the "
+                "commit becomes last-known-good."
             ),
             inputSchema={
                 "type": "object",
@@ -112,9 +161,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="selfmod_rollback",
-            description=("Manually revert the live tree to the last known good commit and "
-                         "restart. Normally the guardian does this automatically; use this "
-                         "only when you need to force it."),
+            description=("Ask the guardian to revert the live tree and restart. Returns "
+                         "immediately; the guardian acts within seconds and picks the "
+                         "target the same way it would for a crash. Normally it does "
+                         "this on its own — use this only when you need to force it."),
             inputSchema={
                 "type": "object",
                 "properties": {"reason": {"type": "string",
@@ -153,25 +203,31 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         if name == "selfmod_land":
             rid = arguments.get("round_id") or ""
-            return text_result(json.dumps(
-                R.land(rid, dry_run=bool(arguments.get("dry_run"))), indent=2))
+            if bool(arguments.get("dry_run")):
+                return text_result(json.dumps(R.land(rid, dry_run=True), indent=2))
+            return text_result(json.dumps(_land_detached(rid), indent=2))
 
         if name == "selfmod_abort":
             return text_result(json.dumps(R.abort(arguments.get("round_id") or ""), indent=2))
 
         if name == "selfmod_rollback":
             reason = arguments.get("reason") or "manual"
-            target, source = None, ""
-            lkg = S.read_lkg()
-            if lkg:
-                target = lkg.get("commit")
-            if not target:
-                return text_result(_err("no last-known-good commit recorded — refusing to guess"))
-            from scripts.selfmod.promote import _rollback_inline, LIVE_ROOT
-            _rollback_inline(LIVE_ROOT, target)
-            S.append_event({"event": "rollback_succeeded", "trigger": "manual",
-                            "restored": target, "reason": reason})
-            return text_result(f"rolled back to {target[:8]} ({reason})")
+            # Handed to the guardian, never performed here. A rollback stops
+            # lloyd-mcp — this process — so doing it inline meant issuing the
+            # stop that kills the caller and then never reaching `git reset`.
+            # The stack went down and the tree did not move: the one outcome
+            # worse than either doing it or not. The guardian is outside that
+            # blast radius and already owns evidence preservation, retries,
+            # the denylist and flap protection.
+            req = S.request_rollback(reason=str(reason)[:1000], trigger="manual")
+            return text_result(json.dumps({
+                "requested": True,
+                "note": ("The guardian performs this within a few seconds. It picks the "
+                         "target the same way it would for a crash: the promotion's own "
+                         "recorded rollback_target first, never a stranded pointer. "
+                         "Poll selfmod_status for the outcome."),
+                "request": req,
+            }, indent=2))
 
         return text_result(_err(f"Unknown tool: {name}"))
 

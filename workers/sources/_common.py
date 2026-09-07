@@ -60,6 +60,20 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
     from prompt_builder import build_system_prompt
     from autonomy import _get_model_env
 
+    # The landing drain applies to worker turns too. The promoter idles the
+    # backend and then restarts it; a worker job that starts in that gap is
+    # killed mid-flight, and the connection errors it logs on the way down
+    # land inside the observation window and are blamed on the promotion. That
+    # is the exact shape of the 2026-09-06 20:14 false positive.
+    try:
+        from app.routers.selfmod import drain_active, drain_remaining
+        if drain_active():
+            raise RuntimeError(
+                f"lloyd is landing a code update; not starting a worker turn "
+                f"(retry in {drain_remaining():.0f}s)")
+    except ImportError:
+        pass
+
     system_prompt = build_system_prompt()
     cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
 
@@ -67,6 +81,17 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
     for name, sc in cfg.get("mcp_servers", {}).items():
         for tname in sc.get("disabled_tools", []):
             disallowed.append(f"mcp__{name}__{tname}")
+
+    # A worker job may not drive the self-modification loop. These tools were
+    # advertised to every worker prompt, `domain-research` included — and that
+    # one reads arbitrary web pages into its context, so the machinery that
+    # rewrites production sat one prompt injection away from a source whose
+    # entire job is ingesting untrusted text. The backlog triage worker was
+    # told not to start a round IN ITS PROMPT, which is not a control.
+    for tname in ("selfmod_start", "selfmod_gate", "selfmod_land",
+                  "selfmod_abort", "selfmod_rollback"):
+        disallowed.append(tname)
+        disallowed.append(f"mcp__lloyd-mcp__{tname}")
 
     model_env = _get_model_env("primary")
 

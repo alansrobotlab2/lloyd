@@ -21,12 +21,14 @@ full window.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+from app.supervisor_client import restart_process, stop_process
 from scripts.selfmod import state as S, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -35,9 +37,19 @@ IDLE_POLL_SECONDS = 2.0
 IDLE_QUIET_POLLS = 3
 IDLE_MAX_WAIT = 900.0
 DRAIN_TTL = 180.0
-LIVENESS_WINDOW = 120.0     # guardian watches for a crash this long
-ERRORS_WINDOW = 900.0       # ...and for an error spike this long
+# The observation window. Liveness is watched for ALL of it, not for some
+# shorter sub-window: a build that crashes at minute ten is exactly as bad as
+# one that crashes at minute one. There was a `LIVENESS_WINDOW = 120.0` here
+# and a `liveness_until_ts` written into every promotion record, and nothing
+# ever read either — the guardian applies liveness whenever a promotion is
+# under observation. A constant that looks like a bound and bounds nothing is
+# worse than no constant.
+ERRORS_WINDOW = 900.0
 RESTART_LEASE = 120.0
+
+SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+SUPERVISORCTL = Path.home() / ".local/share/uv/tools/supervisor/bin/supervisorctl"
+SUPERVISORD_CONF = LIVE_ROOT / "agent-services" / "supervisor" / "supervisord.conf"
 
 BACKEND = "http://127.0.0.1:8080"
 MCP_HEALTH = "http://127.0.0.1:8500/health"
@@ -77,23 +89,37 @@ def set_drain(on: bool, ttl: float = DRAIN_TTL) -> bool:
 
 
 def wait_idle(max_wait: float = IDLE_MAX_WAIT) -> tuple[bool, str]:
-    """Require N consecutive quiet polls before touching anything."""
+    """Require N consecutive quiet polls before touching anything.
+
+    "Quiet" means all three counters are zero. `harness_runs` is the one that
+    was missing: it counts agent loops in flight by ANY caller, and worker jobs
+    never enter a session queue. A landing that restarts the backend during a
+    ten-minute research job kills it, and the connection failures it logs on
+    the way down land inside the window the error-rate detector is watching —
+    so the promotion is reverted for the damage its own landing caused.
+    """
     deadline = time.time() + max_wait
     quiet = 0
+    busiest = ""
     while time.time() < deadline:
         status, body = _get(f"{BACKEND}/health")
         if status == 200 and body:
             turns = body.get("turns") or {}
-            if turns.get("active", 1) == 0 and turns.get("queued", 1) == 0:
+            busy = (turns.get("active", 1) or turns.get("queued", 1)
+                    or turns.get("harness_runs", 0))
+            if not busy:
                 quiet += 1
                 if quiet >= IDLE_QUIET_POLLS:
                     return True, f"idle for {quiet} consecutive polls"
             else:
                 quiet = 0  # a turn appearing resets the counter
+                busiest = (f"active={turns.get('active')} queued={turns.get('queued')} "
+                           f"harness_runs={turns.get('harness_runs')}")
         else:
             quiet = 0
         time.sleep(IDLE_POLL_SECONDS)
-    return False, f"backend never went idle within {max_wait:.0f}s"
+    return False, (f"backend never went idle within {max_wait:.0f}s"
+                   + (f" (last: {busiest})" if busiest else ""))
 
 
 def count_kg_rows() -> int | None:
@@ -123,11 +149,63 @@ def count_vault_files() -> int | None:
         return None
 
 
-def _err_size() -> int:
-    try:
-        return (LIVE_ROOT / "logs" / "server.err").stat().st_size
-    except OSError:
-        return 0
+def _run(argv: list, timeout: float = 60.0) -> subprocess.CompletedProcess:
+    return subprocess.run([str(a) for a in argv], capture_output=True, text=True,
+                          timeout=timeout, check=False)
+
+
+def _apply_service_changes(changed: list[str]) -> list[str]:
+    """Make changed service DEFINITIONS take effect. Returns human-readable notes.
+
+    `spec.py` calls the supervisor confs, the systemd units and the guardian
+    "protected" — allowed to change, provided the drill passes. But nothing
+    ever *applied* such a change: supervisord includes conf.d straight out of
+    the repo and needs `reread`/`update` to notice, systemd units are copies
+    under ~/.config and the repo edit reached nothing at all, and the guardian
+    runs from a pinned snapshot that is only re-staged on a unit restart. So a
+    round could pass a full drill, land, be marked healthy, and leave the
+    running system on the old definition indefinitely — the change looked
+    delivered and was not.
+
+    Never fatal to the promotion: the code is already live and verified by the
+    time this runs, and a failure to reload a conf is worth an alert, not a
+    revert.
+    """
+    notes: list[str] = []
+    touched_supervisor = any(p.startswith("agent-services/supervisor/") for p in changed)
+    touched_units = [p for p in changed if p.startswith("agent-services/systemd/")]
+    touched_guardian = any(p.startswith("agent-services/guardian/") for p in changed)
+
+    if touched_supervisor and SUPERVISORCTL.exists():
+        for verb in ("reread", "update"):
+            r = _run([SUPERVISORCTL, "-c", SUPERVISORD_CONF, verb], timeout=120)
+            notes.append(f"supervisorctl {verb}: "
+                         f"{'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
+
+    for rel in touched_units:
+        src = LIVE_ROOT / rel
+        if not src.is_file():
+            continue
+        try:
+            SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, SYSTEMD_USER_DIR / src.name)
+            notes.append(f"installed {src.name}")
+        except OSError as exc:
+            notes.append(f"FAILED to install {src.name}: {exc}")
+    if touched_units:
+        r = _run(["systemctl", "--user", "daemon-reload"])
+        notes.append("daemon-reload: "
+                     f"{'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
+
+    # The guardian runs a pinned snapshot, re-staged by ExecStartPre. Without
+    # this a landed guardian change is inert until something else restarts the
+    # unit. Staging declines a candidate that does not compile or fails its own
+    # selftest, so the worst case is that the previous snapshot keeps running.
+    if touched_guardian or any(p.endswith("lloyd-guardian.service") for p in touched_units):
+        r = _run(["systemctl", "--user", "restart", "lloyd-guardian"], timeout=120)
+        notes.append("guardian restarted: "
+                     f"{'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
+    return notes
 
 
 def _announce_promoted(round_id: str, commit: str, changed: list) -> None:
@@ -179,8 +257,40 @@ def promote(round_id: str, worktree: Path, base: str, *,
         raise PromoteError(f"promotions are halted: {S.HALTED_PATH}")
     if S.is_broken():
         raise PromoteError(f"guardian is in a BROKEN state: {S.BROKEN_PATH}")
-    if S.is_denied(commit=head):
-        raise PromoteError(f"{head[:8]} is on the rollback denylist")
+
+    # The gate judged a specific commit. Anything committed into the worktree
+    # afterwards would land completely ungated: `land` passes the base along
+    # but the candidate HEAD was re-read from the worktree here, so an extra
+    # commit made after a passing gate was indistinguishable from the one that
+    # passed it.
+    gate_head = (gate_report or {}).get("head")
+    if gate_head and gate_head != head:
+        raise PromoteError(
+            f"worktree HEAD moved since the gate ran ({head[:8]} != gated "
+            f"{gate_head[:8]}) — re-gate before landing")
+
+    # One promotion under observation at a time. A second landing overwrote
+    # `current.json`, so the first promotion never settled, never advanced the
+    # LKG, and — worse — the new record's rollback target became a commit that
+    # had never survived a window, quietly breaking the invariant the whole
+    # promoter/guardian split exists to guarantee.
+    observed = S.read_current()
+    if observed and observed.get("state") in ("landing", "observing"):
+        until = float(observed.get("errors_until_ts") or 0)
+        left = max(0.0, until - time.time())
+        raise PromoteError(
+            f"{str(observed.get('commit'))[:8]} is still under observation "
+            f"({observed.get('state')}, {left / 60:.1f} min left) — a promotion must "
+            "settle before the next one lands")
+
+    changed_preview = W.changed_paths(Path(worktree), base)
+    tree_hash = S.changed_tree_hash(worktree, head, changed_preview)
+    if S.is_denied(commit=head, tree_hash=tree_hash):
+        raise PromoteError(
+            f"{head[:8]} is on the rollback denylist"
+            + (" (matched by content, not SHA — this change was reverted before "
+               "and has been re-derived)" if tree_hash and not S.is_denied(commit=head)
+               else ""))
     if not W.is_clean(live):
         raise PromoteError("live tree is dirty — refusing to land onto uncommitted work")
 
@@ -213,12 +323,11 @@ def promote(round_id: str, worktree: Path, base: str, *,
         # here would burn most of the window before the code is even live —
         # the guardian would then settle a promotion it had barely watched.
         # Both are set after the restart verifies, below.
-        "liveness_until_ts": None,
         "errors_until_ts": None,
         "changed_paths": changed,
+        "tree_hash": tree_hash,
         "venv_swapped": False,
         "touched_guardian": any(p.startswith("agent-services/guardian/") for p in changed),
-        "err_offset": _err_size(),
         "kg_rows": count_kg_rows(),
         "vault_files": count_vault_files(),
         "gate": (gate_report or {}).get("rungs"),
@@ -236,8 +345,8 @@ def promote(round_id: str, worktree: Path, base: str, *,
     try:
         status, body = _get(f"{BACKEND}/health")
         turns = (body or {}).get("turns") or {}
-        if turns.get("active") or turns.get("queued"):
-            raise PromoteError("a turn started during the drain handshake")
+        if turns.get("active") or turns.get("queued") or turns.get("harness_runs"):
+            raise PromoteError(f"a turn started during the drain handshake: {turns}")
 
         # ── land ───────────────────────────────────────────────────────
         S.set_pause(RESTART_LEASE)   # the guardian must not read our own restart as a crash
@@ -256,9 +365,17 @@ def promote(round_id: str, worktree: Path, base: str, *,
             current["venv_swapped"] = True
             S.write_verified(S.CURRENT_PATH, current)
 
+        # Service definitions the diff changed must reach the running system
+        # BEFORE the restart, or the restart re-reads the old ones.
+        service_notes = _apply_service_changes(changed)
+
         # ── restart, MCP first ─────────────────────────────────────────
-        from app.supervisor_client import restart_process
         for program, health in (("lloyd-mcp", MCP_HEALTH), ("lloyd-backend", f"{BACKEND}/health")):
+            # Refresh the lease before each leg. The lease is 120s and this
+            # loop can legitimately spend 90s per service waiting on health,
+            # so a single lease taken before the merge could expire mid-restart
+            # and hand the guardian its own deploy to judge.
+            S.set_pause(RESTART_LEASE)
             ok, msg = restart_process(program)
             if not ok:
                 raise PromoteError(f"restart {program} failed: {msg}")
@@ -279,15 +396,14 @@ def promote(round_id: str, worktree: Path, base: str, *,
         current["state"] = "observing"
         current["landed_at"] = S.now_iso()
         current["landed_ts"] = landed
-        current["liveness_until_ts"] = landed + LIVENESS_WINDOW
         current["errors_until_ts"] = landed + ERRORS_WINDOW
         current["boot_id"] = (body or {}).get("boot_id")
-        # Re-baseline the error cursor too: everything logged while we waited
-        # for idle belongs to the OLD build and must not be attributed here.
-        current["err_offset"] = _err_size()
+        current["service_changes"] = service_notes
         S.write_verified(S.CURRENT_PATH, current)
+        result["service_changes"] = service_notes
         S.append_event({"event": "promoted", "round_id": round_id, "commit": head,
                         "parent": live_head, "changed_paths": changed,
+                        "tree_hash": tree_hash, "service_changes": service_notes,
                         "errors_until": current["errors_until_ts"]})
         _announce_promoted(round_id, head, changed)
         result["promoted"] = True
@@ -329,7 +445,6 @@ def _rollback_inline(live: Path, target: str) -> None:
     mod = importlib.util.module_from_spec(spec_)
     spec_.loader.exec_module(mod)
 
-    from app.supervisor_client import restart_process, stop_process
     for program in ("lloyd-backend", "lloyd-mcp"):
         stop_process(program, wait=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")

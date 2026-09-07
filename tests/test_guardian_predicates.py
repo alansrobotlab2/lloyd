@@ -255,43 +255,6 @@ def test_one_traceback_is_one_event_not_one_per_frame():
 # CUSUM
 # ---------------------------------------------------------------------------
 
-def test_cusum_fires_on_two_failures_for_a_source_that_never_fails():
-    """session-distill / autoresearch measured p0 ≈ 0.011 and 0.000.
-
-    Two consecutive failures there is decisive: neither source has failed
-    twice in a row across 322 recorded runs.
-    """
-    score = 0.0
-    for _ in range(2):
-        score = detect.cusum_update(score, True, p0=0.011, p1=0.30, floor=0.01)
-    assert score > 4.6
-
-
-def test_cusum_tolerates_the_measured_baseline_for_a_flaky_source():
-    """scheduled-task measured p0 = 0.129 over 1700 runs — one failure is normal."""
-    score = detect.cusum_update(0.0, True, p0=0.129, p1=0.30, floor=0.01)
-    assert score < 4.6
-
-
-def test_cusum_never_goes_negative():
-    score = 0.0
-    for _ in range(50):
-        score = detect.cusum_update(score, False, p0=0.129, p1=0.30, floor=0.01)
-    assert score == 0.0
-
-
-def test_cusum_eventually_fires_on_a_sustained_failure_run():
-    score = 0.0
-    fired_at = None
-    for i in range(1, 15):
-        score = detect.cusum_update(score, True, p0=0.129, p1=0.30, floor=0.01)
-        if score > 4.6 and fired_at is None:
-            fired_at = i
-    assert fired_at is not None and 5 <= fired_at <= 12
-
-
-# ---------------------------------------------------------------------------
-# Data damage — the class git reset cannot undo
 # ---------------------------------------------------------------------------
 
 def test_a_large_row_drop_is_damage():

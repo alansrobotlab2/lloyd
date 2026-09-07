@@ -66,12 +66,24 @@ def probe(url: str, timeout: float) -> dict:
 
 
 def wait_healthy(url: str, timeout_total: float, probe_timeout: float,
-                 interval: float = 1.0) -> tuple[bool, dict]:
-    """Poll until `url` is healthy or the budget expires."""
+                 interval: float = 1.0, on_tick=None) -> tuple[bool, dict]:
+    """Poll until `url` is healthy or the budget expires.
+
+    `on_tick` is called once per poll. The guardian passes its systemd
+    watchdog ping: this loop runs inside a rollback, its budget is 90s for the
+    backend, and the unit's `WatchdogSec` is 90s against a 5s tick. Without a
+    ping from in here, the one path that legitimately blocks for longer than a
+    tick — the rescue itself — is also the one systemd kills the guardian in
+    the middle of. It would then restart, find an unfinished rollback in the
+    ledger, resume it, and be killed again at the same place, forever, which
+    puts BROKEN out of reach in exactly the situation BROKEN exists for.
+    """
     import time as _t
     deadline = _t.monotonic() + timeout_total
     last: dict = {}
     while _t.monotonic() < deadline:
+        if on_tick:
+            on_tick()
         last = probe(url, probe_timeout)
         if last["ok"]:
             return True, last

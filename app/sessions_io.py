@@ -277,7 +277,21 @@ def active_turn_summary() -> dict:
         queued += pending
         if running or pending:
             busy_sessions.append(sid)
-    return {"active": active, "queued": queued, "sessions": sorted(busy_sessions)}
+
+    # Session queues are not the whole story. Worker jobs, the IDE routes and
+    # post-session capture all call `run_query` directly and never appear in
+    # `_session_queues`, so an idle gate built on the queues alone reads a box
+    # running a ten-minute research job as perfectly quiet — and restarts the
+    # backend out from under it. `harness_runs` is the process-wide count of
+    # agent loops actually in flight, whoever started them.
+    try:
+        from app.harness.loop import active_run_count
+        harness_runs = active_run_count()
+    except Exception:
+        harness_runs = 0
+
+    return {"active": active, "queued": queued, "harness_runs": harness_runs,
+            "sessions": sorted(busy_sessions)}
 
 
 def get_cancel_event(session_id: str) -> Optional[asyncio.Event]:

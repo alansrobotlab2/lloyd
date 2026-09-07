@@ -34,6 +34,48 @@ from agent_mcp.vault import (
     _vault_recall,
 )
 from agent_mcp.facts import _extract_entities_from_query
+from app.kg_store import StoreUnavailable, store
+from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
+
+
+def _corpus_provenance() -> dict:
+    """What was actually scored, not just how it was scored.
+
+    Every knob this run used is already recorded; the data underneath it was
+    not. That gap is invisible in the headline numbers: with graph re-ranking
+    off the graph never reorders documents, and the document leg queries the
+    qmd daemon over the network, so an entirely empty fact tree and store
+    still produce identical mrr_doc / ndcg10 / doc_hit_rate and `errors: 0`.
+    Only the three entity metrics collapse. Recording the resolved paths (they
+    honour LLOYD_FACTS_ROOT / LLOYD_KG_DB) plus the store's own counts is what
+    lets a later reader tell the two runs apart.
+
+    Raises StoreUnavailable if the store cannot be opened — that is a
+    different failure from "opened and empty" and the caller must not
+    collapse the two.
+    """
+    facts_root = Path(VAULT_FACTS_ROOT)
+    entity_dirs = 0
+    if facts_root.is_dir():
+        entity_dirs = sum(1 for child in facts_root.iterdir() if child.is_dir())
+    stats = store().stats()
+    return {
+        "facts_root": str(facts_root),
+        "kg_db": str(VAULT_KG_DB),
+        "entity_dirs": entity_dirs,
+        "edges_total": int(stats.get("edges_total", 0)),
+        "edges_active": int(stats.get("edges_active", 0)),
+        "aliases": int(stats.get("aliases", 0)),
+        "entities": int(stats.get("entities", 0)),
+        "facts": int(stats.get("facts", 0)),
+    }
+
+
+def _corpus_line(corpus: dict) -> str:
+    return (f"[info] corpus facts_root={corpus['facts_root']} "
+            f"entity_dirs={corpus['entity_dirs']} kg_db={corpus['kg_db']} "
+            f"entities={corpus['entities']} edges_active={corpus['edges_active']} "
+            f"aliases={corpus['aliases']} facts={corpus['facts']}")
 
 
 def _entities_in_result(result: dict, seeds: list[str] | None = None) -> list[str]:
@@ -280,12 +322,52 @@ def main() -> int:
                     help=f"Graph expansion breadth (production {RECALL_GRAPH_TOP_K})")
     ap.add_argument("--graph-hops", type=int, default=RECALL_GRAPH_HOPS,
                     help=f"Graph expansion depth (production {RECALL_GRAPH_HOPS})")
+    # Measuring the no-graph baseline on purpose is legitimate — it is how the
+    # blind spot above was found. Everything else that reaches an empty corpus
+    # got there by accident and must not be handed a well-formed score sheet.
+    ap.add_argument("--allow-empty-corpus", action="store_true",
+                    help="Score even when the fact tree / graph store is empty "
+                         "(records corpus_ok: false)")
     args = ap.parse_args()
 
     spec_file = Path(args.queries)
     spec = yaml.safe_load(spec_file.read_text())
     queries = spec.get("queries") or []
     print(f"[info] loaded {len(queries)} queries from {spec_file}")
+
+    try:
+        corpus = _corpus_provenance()
+    except StoreUnavailable as exc:
+        # Distinct from the empty case on purpose, and deliberately NOT
+        # bypassable by --allow-empty-corpus: "I could not read the store" and
+        # "the store is empty" are different facts about the world, and a flag
+        # that means the second must never silently excuse the first.
+        sys.stdout.flush()   # keep the fatal line after the context it follows
+        print(f"[fatal] knowledge-graph store unreadable: {exc}", file=sys.stderr)
+        print(f"        kg_db      = {VAULT_KG_DB}", file=sys.stderr)
+        print(f"        facts_root = {VAULT_FACTS_ROOT}", file=sys.stderr)
+        print("        --allow-empty-corpus does not apply: this store did not "
+              "open at all.", file=sys.stderr)
+        return 3
+
+    corpus_ok = bool(corpus["edges_active"]) and bool(corpus["entities"])
+    if not corpus_ok:
+        if not args.allow_empty_corpus:
+            sys.stdout.flush()
+            print("[fatal] empty corpus — refusing to score. An empty graph "
+                  "scores identically to a healthy one on mrr_doc, ndcg10 and "
+                  "doc_hit_rate, so the result would be indistinguishable from "
+                  "a real run.", file=sys.stderr)
+            print(f"        facts_root = {VAULT_FACTS_ROOT}  "
+                  f"(entity_dirs={corpus['entity_dirs']})", file=sys.stderr)
+            print(f"        kg_db      = {VAULT_KG_DB}  "
+                  f"(entities={corpus['entities']}, "
+                  f"edges_active={corpus['edges_active']})", file=sys.stderr)
+            print("        Pass --allow-empty-corpus to measure the no-graph "
+                  "baseline deliberately.", file=sys.stderr)
+            return 2
+        print("[warn] empty corpus, proceeding under --allow-empty-corpus; "
+              "this run records corpus_ok: false")
 
     records = run_eval(
         queries, limit=args.limit,
@@ -316,8 +398,8 @@ def main() -> int:
             and args.graph_hops == RECALL_GRAPH_HOPS
             and not args.no_graph
         ),
-        "graph_top_k": args.graph_top_k,
-        "graph_hops": args.graph_hops,
+        "corpus": corpus,
+        "corpus_ok": corpus_ok,
         "summary": summary,
         "records": records,
     }
@@ -325,6 +407,7 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2, default=str))
     print(f"[info] wrote {out_path}")
+    print(_corpus_line(corpus))
 
     print_table(records, summary)
     return 0

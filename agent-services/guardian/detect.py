@@ -55,6 +55,8 @@ def process_down(
     intentional_stop: bool = False,
     probe_timeout_streak: int = 0,
     probe_timeout_threshold: int = 10**9,
+    probe_http_streak: int = 0,
+    probe_http_threshold: int = 10**9,
 ) -> tuple[bool, str]:
     """Return (down, reason). See the module docstring for the ordering rule."""
     if info is None:
@@ -65,8 +67,19 @@ def process_down(
     # 1. supervisord state first. FATAL is decisive and needs no corroboration.
     if state == "FATAL":
         return True, f"FATAL: {info.get('spawnerr') or 'no spawnerr'}"
-    if state in STOPPED_STATES and not intentional_stop:
-        return True, f"{state} without an intentional stop"
+    # STOPPED and EXITED are not the same fact and must not share a branch.
+    # STOPPED is somebody's deliberate `stopProcess` — and the guardian itself
+    # issues one when flap protection quarantines the backend, so treating it
+    # as death made the watchdog alert every 15 minutes about a stop it had
+    # performed on purpose. EXITED means the process ended on its own and
+    # supervisord did not bring it back, which is death however you got there
+    # and is never excused by an intentional stop.
+    if state == "STOPPED":
+        if intentional_stop:
+            return False, "stopped intentionally"
+        return True, "STOPPED without an intentional stop"
+    if state == "EXITED":
+        return True, "EXITED — the process ended and was not restarted"
 
     # 2. A crash loop that never reaches FATAL.
     if crash_looping(start_history, starts=crash_loop_starts,
@@ -87,6 +100,15 @@ def process_down(
         if probe_timeout_streak >= probe_timeout_threshold:
             return True, (f"health probe timed out {probe_timeout_streak} consecutive "
                           f"times — unresponsive, not merely busy")
+        # An answered non-200 is the third case and it is neither of the other
+        # two: the process is demonstrably alive and serving. It still counts
+        # eventually, because a backend parked in `degraded` (a router that
+        # failed to mount, a startup event that never completed) is exactly
+        # what a bad promotion produces. The caller withholds this counter for
+        # the aggregator, whose 503 means something else entirely.
+        if probe_http_streak >= probe_http_threshold:
+            return True, (f"health endpoint answered non-200 {probe_http_streak} "
+                          f"consecutive times — serving, but not healthy")
         return False, "running"
 
     if state in ("STARTING", "BACKOFF"):
@@ -250,22 +272,6 @@ def error_spike(
         return True, f"{len(distinct_fatal)} distinct novel fatal signatures"
 
     return False, f"{len(novel)} novel events below threshold"
-
-
-def cusum_update(score: float, failed: bool, p0: float, p1: float, floor: float) -> float:
-    """One-sided CUSUM step. Returns the updated score, clamped at 0.
-
-    Rate comparison is unusable here: ~14 worker runs/hour means a 30-minute
-    window holds about 7 samples. CUSUM fires as fast as the evidence allows
-    and self-calibrates per source — at the measured p0=0.011 for
-    `session-distill` two consecutive failures are already decisive, which is
-    right, because that source has never failed twice in a row in 322 runs.
-    """
-    import math
-    p0 = max(float(p0), floor)
-    p1 = max(float(p1), p0 + 1e-6)
-    step = math.log(p1 / p0) if failed else math.log((1.0 - p1) / (1.0 - p0))
-    return max(0.0, score + step)
 
 
 def data_damage(before: int | None, after: int | None, fraction: float) -> tuple[bool, str]:

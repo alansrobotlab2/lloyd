@@ -55,14 +55,25 @@ write what.
 | Component | Lives in | May write |
 |---|---|---|
 | Round | `scripts/selfmod/round.py` | its worktree |
-| Gate | `scripts/selfmod/gate.py` | nothing (read-only judgment) |
+| Gate | `scripts/selfmod/gate.py` | nothing in the live tree |
 | Promoter | `scripts/selfmod/promote.py` | live tree, `current.json` |
-| Guardian | `agent-services/guardian/` | live tree, `last_known_good.json` |
+| Guardian | `agent-services/guardian/` | live tree, `last_known_good.json`, `last_settled.json` |
 
 **The promoter never advances last-known-good and the guardian never
 promotes.** That split is what makes LKG mean *observed healthy in
 production* rather than *passed a pre-flight*, and it guarantees a rollback
 always targets a commit that already survived a full observation window.
+
+**Nothing inside the blast radius rolls back inline.** A rollback stops the
+backend and the aggregator, so any code performing one from inside either
+process issues the stop that kills its own caller and never reaches `git
+reset` — the stack goes down and the tree does not move, which is worse than
+both doing it and not doing it. The backend, the aggregator and the quality
+worker all *request* a rollback (`rollback_request.json`); the guardian is the
+one component outside that radius and it performs every one. For the same
+reason a **landing runs detached** (`state.spawn_detached`, a new session,
+which is what supervisord's `stopasgroup` signal cannot reach): the promoter
+restarts the very process it is usually called from.
 
 **The round is a wrapper, not a code generator.** `selfmod_start` returns a
 worktree path; Lloyd edits it with the ordinary Edit/Write/Bash tools and
@@ -164,13 +175,29 @@ The tree carries 69 pre-existing findings. An absolute rule would be switched
 off within a day, so the rung compares changed files against the same files at
 the merge base and fails only on *new* findings.
 
-### 4.2 The collected-count floor
+### 4.2 The collected-count floor is not enough on its own
 
 `pytest -q` exits 0 if a round deletes the test that was failing. Under
-auto-landing that is not hypothetical, so the rung also asserts a minimum
+auto-landing that is not hypothetical, so the rung asserts a minimum
 collected count and refuses a diff that removes files under `tests/`.
 
-### 4.3 The canary smoke asserts only what is deterministic
+It exits 0 just as happily having **collected everything and run none of it** —
+one broad `skipif`, or a conftest import that degrades to a module-level skip.
+A collected floor alone is satisfied by a suite that did nothing, so the rung
+also floors `passed` and caps `skipped`. Three numbers, because the failure
+being prevented is a round that reaches green by removing the question rather
+than by answering it.
+
+### 4.3 Rungs that run candidate code run it against scratch state
+
+Only the canary redirected `LLOYD_SELFMOD_STATE`. The static, tests and venv
+rungs executed candidate code against the **live** state directory, so a
+candidate test that forgot its isolation fixture could write a real `BROKEN`
+or `promotions-halted` flag, or append to the production audit trail — from
+inside the gate whose entire contract is read-only judgment. `Gate._child_env`
+points all three at a per-round scratch dir and sets `LLOYD_VOICE_ALERTS=0`.
+
+### 4.4 The canary smoke asserts only what is deterministic
 
 It requires: a `Bash` tool_start, a sentinel round-tripping through a real
 tool result, a terminating `done` with non-empty content, and no error events.
@@ -211,8 +238,16 @@ that reconcile is a no-op by construction.
 
 ## 6. Landing
 
-`scripts/selfmod/promote.py`, in this order:
+`scripts/selfmod/promote.py`, **in a detached session**, in this order:
 
+0. **Refuse unless the candidate is the commit the gate judged, and unless
+   nothing else is under observation.** `land` passed the base along but the
+   candidate HEAD was re-read from the worktree, so a commit made after a
+   passing gate landed completely ungated. And a second landing simply
+   overwrote `current.json`: the first promotion never settled, never advanced
+   the LKG, and the new record's rollback target became a commit that had
+   never survived a window — quietly breaking the one invariant the
+   promoter/guardian split exists to provide.
 1. **Write the rollback point and read it back.** Nothing is mutated until
    `current.json` round-trips. This is the strict analogue of the xfail at
    `tests/test_autoresearch_promotion.py:362`, where
@@ -224,10 +259,28 @@ that reconcile is a no-op by construction.
    the last poll and the restart gets a 503 instead of being cancelled
    mid-flight. The TTL is mandatory: a promoter that dies here cannot wedge
    the endpoint, and the flag is in-memory so the restart clears it anyway.
+   "Idle" counts `harness_runs` as well as the session queues — worker jobs
+   call `run_query` directly and never enter a queue, so a ten-minute research
+   job was invisible to the gate that exists to avoid killing it.
 3. `git merge --ff-only`, swap the venv if one was built.
-4. Restart MCP then backend, and **verify `/health.commit` and `boot_id` both
-   changed** — the only proof the restart picked up new code rather than a
-   stale process still serving.
+4. **Apply changed service definitions**, then restart MCP then backend, and
+   **verify `/health.commit` and `boot_id` both changed** — the only proof the
+   restart picked up new code rather than a stale process still serving. The
+   restart lease is refreshed before each leg: it is 120s and each leg may
+   legitimately spend 90s waiting on health, so one lease taken before the
+   merge could expire mid-restart and hand the guardian its own deploy to
+   judge.
+
+**Landing a *definition* is not the same as landing code.** `spec.py` calls
+the supervisor confs, the systemd units and the guardian "protected" — allowed
+to change, provided the drill passes — but nothing ever *applied* such a
+change. supervisord includes `conf.d` straight out of the repo and needs
+`reread`/`update` to notice; systemd reads `~/.config/systemd/user`, so a unit
+edit in the repo reached nothing at all; and the guardian runs from a pinned
+snapshot re-staged only on a unit restart. A round could pass a full drill,
+land, be marked healthy, and leave the running system on the old definition
+indefinitely. `_apply_service_changes` closes all three, and
+`round status` reports `unit_drift` from any other cause.
 
 Any failure between 3 and 4 reverts inline rather than waiting for the
 guardian's next tick.
@@ -291,10 +344,25 @@ only *add* failure. It also catches the crash loop that never reaches FATAL —
 sample says RUNNING — by watching distinct spawn timestamps rather than
 `statename`.
 
-**Probe failures are classified by cause.** A refused connection means nothing
-is listening: 3 ticks. A timeout means the socket accepted but the app was
-busy: 24 ticks (2 minutes). See §9 for why this distinction cost a false
-rollback to learn.
+**Probe failures are classified by cause**, and there are three causes, not
+two. A refused connection means nothing is listening: 3 ticks. A timeout means
+the socket accepted but the app was busy: 24 ticks (2 minutes). See §9 for why
+that distinction cost a false rollback to learn.
+
+The third is an **answered non-200**, and folding it into "refused" was wrong
+in both directions. The aggregator returns 503 whenever *any* module is
+degraded — a closed Thunderbird bridge — so three ticks of an ordinary,
+expected condition read as a dead aggregator, while the careful
+newly-degraded-since-LKG check sat *after* the down predicate and never got a
+vote. The aggregator's 503 is now judged only by `mcp_degraded_is_fatal`. The
+backend's own 503 is real (a router that failed to mount, a startup event that
+never completed) and gets its own much wider budget: 36 ticks.
+
+**A deliberate stop is not an outage.** `STOPPED` and `EXITED` shared a branch,
+so when flap protection quarantined the backend — the guardian stopping it on
+purpose — the watchdog then alerted about the outage it had itself created,
+every 15 minutes for as long as the quarantine lasted. `STOPPED` while
+promotions are halted is excused; `EXITED` never is.
 
 ### 7.3 Three invariants
 
@@ -304,14 +372,49 @@ rollback to learn.
    differs from LKG most of the time — a human commit, a nightly job.
    Reverting then destroys work nobody asked the guardian to judge.
 3. **Unreachable supervisord restarts the unit**, never reverts code.
+4. **A promotion that is no longer in history is never re-reverted.** It may
+   have been undone by hand, or by a promoter that failed after its merge and
+   reverted itself inline. Its recorded `rollback_target` still points
+   somewhere real, so every other check passes and the guardian would happily
+   rewind the tree a second time, discarding whatever landed since. Absence
+   from `git merge-base --is-ancestor` is the tell.
 
 ### 7.4 Rollback order
+
+**Reset when HEAD is still the promotion; revert in place when it is not.**
+`reset --hard` to the promotion's parent is only correct while HEAD *is* the
+promotion. Nightly jobs commit straight to live `main`, so a 15-minute window
+can legitimately close over work the loop never touched, and resetting past it
+destroys commits nobody asked the guardian to judge. That is the 26-commit
+incident one level down: there the wrong *target* was chosen, here the right
+target is reached by the wrong *route*. When HEAD has moved on, the guardian
+reverts exactly the promoted commit and leaves the rest standing; a conflict
+has no safe automatic answer, so it escalates instead of guessing.
 
 Stop the writers *before* moving the floor. The agent is what writes into this
 repo, and `git reset --hard` during an `Edit` produces a half-applied revert —
 strictly worse than either version. This is why both supervisor confs gained
 `stopasgroup`/`killasgroup`: without them a Bash tool's child outlives the
 stop.
+
+**"Writer" means a write fd on the code tree**, not a process whose cwd is
+somewhere under the repo. The cwd predicate was true of every shell, editor
+and agent on the box, so the drain was never empty: it burned its full 20s on
+every rollback and logged 44 pids that meant nothing, hiding the one case it
+existed to detect. Scoping matters as much as the fd check — supervisord holds
+`logs/server.err` open for append forever, so an unscoped fd scan just swaps
+one always-true predicate for another. Only `.git` and the code directories
+count.
+
+**The rescue must not outlive the watchdog.** `WATCHDOG=1` was sent once per
+loop iteration and a rollback *is* one iteration: two blocking stops at
+`stopwaitsecs=15`, a writer drain, and up to 90s waiting for the backend —
+comfortably past `WatchdogSec=90`. systemd killed the guardian mid-rescue, it
+restarted, the resume path began the same rollback again, and it was killed at
+the same place: a loop that can never reach `BROKEN`, in exactly the situation
+`BROKEN` exists to report. Every slow step now beats. Deliberately *not* from
+a background thread — that would keep the watchdog satisfied for a genuinely
+hung guardian, which is the whole thing `WatchdogSec` is there to catch.
 
 The XML-RPC client timeout must exceed `stopwaitsecs`, or a blocking stop that
 is working reports failure and the rollback proceeds without knowing whether
@@ -356,6 +459,14 @@ fire. Production has emitted `autonomy scheduler may be stalled` hourly for
 days; a detector that counted it would revert on its first tick. Ten such
 signatures were learned on first boot.
 
+**The chronic set expires after 24 hours**, in the cache *and* in the process.
+Learned once and kept forever, it describes the box as it was on the first
+boot after the state dir was created — so every recurring error that starts
+happening afterwards stays "novel" indefinitely and the next promotion is
+reverted for a steady-state failure it had nothing to do with. That is the
+same shape as the stale log cursor: a detector quietly judging a new commit by
+old evidence.
+
 **Data damage is the class `git reset` cannot undo.** The KG and the vault are
 gitignored, so a change that deletes rows or notes boots fine, logs nothing,
 passes every eval, and *survives* the revert. Two counts cover it.
@@ -381,6 +492,48 @@ rebuilds, used here in reverse (old code, current data). Both arms run in the
 same window, so drift cancels.
 
 A missing noise file means "cannot evaluate", never "no regression".
+
+**It runs after landing, not as a gate rung, and that is forced.** The canary
+is deliberately data-isolated — `HOME` redirection gives a candidate build an
+empty scratch vault, which is what stops a bad promotion touching live
+sessions, `workers.db` and the autonomy dir. A quality eval run there scores
+an empty corpus and measures nothing. The check has to see live data in a
+separate worktree, which is exactly what the paired A/B does.
+
+Three things had to be fixed before it could ever fire:
+
+- **It keyed on `current.json`, which is deleted at settle.** A once-a-day job
+  therefore found "no promotion under observation" essentially always — this
+  source has zero runs in its entire history. The guardian now writes
+  `last_settled.json` at settle, carrying the promotion's own parent.
+- **It compared against the LKG commit, which by then *is* the promoted
+  commit.** Both arms would have checked out the same code: a comparison
+  structurally incapable of finding anything. The baseline is the parent.
+- **An empty corpus was indistinguishable from a healthy one.** See below.
+
+**Not every armed metric can see the graph.** Measured 2026-09-06 against an
+empty `LLOYD_FACTS_ROOT`/`LLOYD_KG_DB`: with the graph deleted entirely,
+`mrr_doc` (0.468), `ndcg10` (0.563), `doc_hit_rate` (0.90) and every
+per-category `mrr_doc` came back **identical** to the real run. Two reasons —
+`RECALL_GRAPH_RERANK` is `False`, so the graph never reorders documents, and
+the document leg queries the qmd daemon over an absolute URL that keeps
+working regardless. Only `entity_hit_rate`, `entity_recall_avg` and
+`fact_entity_recall_avg` moved, to zero.
+
+All seven stay armed, but the graph-sensitive three are named
+(`GRAPH_SENSITIVE_METRICS`) and reported separately, because a detector built
+on `mrr_doc` would look perfectly healthy while being incapable of seeing a
+graph regression. That is the same failure class as the 3000-byte front-matter
+cap and the stale log cursor, and it is why `eval/run_eval.py` now records
+**which corpus it scored** (`corpus_ok`, the resolved paths, entity and edge
+counts) and refuses an empty one unless `--allow-empty-corpus` is passed. An
+arm that scored an empty corpus is not a low score, it is a measurement that
+did not happen, and the worker treats it as "cannot evaluate".
+
+The measurement is handed to the guardian in `eval_last.json` and folded into
+the LKG record's long-empty `eval` slot at settle. Read, never written, by the
+guardian: `last_known_good.json` has exactly one writer, and that is what
+makes it mean *observed healthy in production*.
 
 ---
 
@@ -422,6 +575,37 @@ detection rate. A missed detection costs one bad build; a false positive that
 fires hourly costs trust in the whole mechanism, and a mechanism nobody trusts
 gets disabled.
 
+## 9.1 Incident: the second false positive, same day, 20:14
+
+```
+20:14:21  promoted 5cc8618a (backlog #396, directed graph traversal)
+20:14:25  error_rate: novel signature x9: failed domain-research/research:
+          ConnectError: All connection attempts failed
+20:14:25  rolled back 5cc8618a → 9a0a1d84
+```
+
+Four seconds after landing. Three separate defects lined up, and each is now
+fixed and pinned:
+
+- **The log cursor only advanced during an observation window**, so the first
+  tick of a new window read *everything since the last one*. The nine
+  `ConnectError` lines were from 11:47–11:56 that morning, eight hours stale,
+  produced by the earlier incident. Fixed by draining on every tick.
+- **The rollback used the LKG pointer rather than the promotion's own
+  recorded target.** LKG had sat at 14:24 all day because it advances only
+  when a promotion *settles*, and the day's promotions had not. So reverting a
+  promotion whose parent was six hours newer took the whole evening with it:
+  **26 commits of human work**. `current.json` had recorded the correct target
+  and nothing read it.
+- **The errors were not even the promotion's fault.** They were worker jobs
+  killed by the landing's own restart — the idle gate could not see them
+  because workers never enter a session queue. The promotion was reverted for
+  damage its own landing caused.
+
+Every rollback this loop has ever performed has been a false positive. That is
+the number to keep in view: the mechanism's failure mode is not missing a bad
+build, it is inventing one.
+
 ---
 
 ## 10. What Lloyd may change
@@ -429,6 +613,14 @@ gets disabled.
 `scripts/selfmod/spec.py`. **Denied beats protected beats allowed**, and a run
 spec cannot widen its own permissions by naming a denied path in
 `writable_paths`.
+
+A reverted change is denied **by content as well as by SHA**. The SHA alone
+was never going to catch anything: a round that is re-cut produces a new SHA
+for identical content and walks straight past the denylist. The stored tree
+hash is `git ls-tree` over the paths the promotion touched, so the same change
+re-derived under any SHA is caught. A hash git cannot produce is treated as
+*not denied* — refusing to promote because git hiccuped is a worse failure
+than the one this prevents.
 
 - **denied** — `config.yaml` and `data/tool_overrides.yaml` (a round could
   disable Bash and Edit and lock itself out with no Python change at all — a
@@ -453,8 +645,11 @@ not do: gitignored but still inside the tree.
 
 | File | Written by | Purpose |
 |---|---|---|
-| `last_known_good.json` | guardian only | rollback target + floor |
+| `last_known_good.json` | guardian only | rollback target + floor + eval baseline |
 | `current.json` | promoter only | the promotion under observation |
+| `last_settled.json` | guardian only | what last settled, and its parent — `current.json` is deleted at settle, so this is the only way to ask afterwards |
+| `rollback_request.json` | anyone | a rollback asked of the guardian by a process that cannot perform one itself |
+| `eval_last.json` | quality worker | the measurement the guardian folds into LKG at settle. Guardian reads it, never writes it |
 | `promotions.jsonl` | both | append-only audit trail, fsynced, **raises** |
 | `lock` | all | one round / promotion / rollback at a time |
 | `pause` | promoter | maintenance lease, capped in the pinned policy |
@@ -475,11 +670,29 @@ nobody refactors them together.
 
 ```bash
 python -m scripts.selfmod.round status              # state + ledger + guardian
+python -m scripts.selfmod.round bless               # record HEAD as last-known-good
+python -m scripts.selfmod.round recover             # clear BROKEN/halted, start the stack
 python -m scripts.selfmod.rehearse --yes-i-mean-it  # prove rollback still works
 systemctl --user status lloyd-guardian
 /usr/bin/python3 agent-services/guardian/guardian.py --selftest
 journalctl --user -u lloyd-guardian -f
 ```
+
+`bless` is how an LKG pointer comes to exist at all, and how it is put right
+after a manual recovery — both were being done by hand with a note pasted into
+the ledger, and a stranded pointer is what turned one false positive into 26
+lost commits. It verifies against the **running** `/health.commit`, not the
+working tree: `git rev-parse` proves the filesystem, only `/health` proves the
+service.
+
+`recover` is the other half of escalation. The guardian deliberately leaves
+services stopped when it writes `BROKEN` — an honestly-dead system beats a
+half-reverted one — and the documented recovery was "clear the flag", which
+leaves the box down.
+
+`status` also reports `unit_drift`: systemd reads `~/.config/systemd/user`, so
+a unit edited in the repo and never installed is a change that looks landed
+and does nothing.
 
 Recovering from a rollback: the reverted commit is on the
 `guardian-broken-<ts>` tag and your uncommitted work is in the matching named
@@ -515,3 +728,16 @@ from `denied.json` first).
 - **`/health` shares an event loop with agent work.** §9's fix widens the
   budget; it does not remove the coupling. A genuinely wedged event loop and a
   very busy one still look alike for two minutes.
+- **Worker failure rates are not a detector.** There was a CUSUM
+  implementation and four policy constants for one, wired to nothing; they are
+  gone rather than left looking operable. If it comes back it needs its own
+  false-positive budget, measured.
+- **The master switch is an interlock, not a sandbox.** `selfmod.enabled`
+  now gates the CLI as well as the MCP tools, and worker jobs and subagents
+  cannot call `selfmod_*` at all. None of that constrains anything holding the
+  Bash tool, which can edit `config.yaml` directly. It stops accidents and
+  stops a prompt-injected worker; it is not a boundary against a misaligned
+  agent with a shell.
+- **The quality check is one measurement per promotion**, on a corpus that
+  drifts between promotions. It answers "did this commit make retrieval
+  worse", not "is retrieval good".

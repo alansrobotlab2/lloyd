@@ -71,6 +71,24 @@ NOISE_PATH = Path(os.environ.get(
 ARMED_METRICS = ("entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg",
                  "ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg")
 REPORT_ONLY = ("latency_ms_avg", "n_queries")
+
+# Of the seven armed metrics, only these three can see the knowledge graph.
+#
+# Measured 2026-09-06 against an empty LLOYD_FACTS_ROOT/LLOYD_KG_DB: with the
+# graph deleted entirely, mrr_doc (0.468), ndcg10 (0.563), doc_hit_rate (0.90)
+# and every per-category mrr_doc came back IDENTICAL to the real run. Two
+# reasons — `RECALL_GRAPH_RERANK` is False, so the graph never reorders
+# documents, and the document leg queries the qmd daemon over an absolute URL
+# that keeps working regardless. The doc-side numbers are real measurements of
+# the document retriever and say nothing whatsoever about graph quality.
+#
+# This is recorded because the failure it invites is the one this file's own
+# docstring warns about in a different form: a detector that looks healthy and
+# is structurally incapable of firing. A change that halved graph recall would
+# move only the three below. They stay armed, they are reported separately,
+# and `test_selfmod_doc_claims` pins the split so nobody "simplifies" it away.
+GRAPH_SENSITIVE_METRICS = ("entity_hit_rate", "entity_recall_avg",
+                           "fact_entity_recall_avg")
 # A floor, not a measurement: the eval contributes zero variance, so this only
 # absorbs float representation wobble. Real tolerance comes from the paired
 # comparison, which removes vault drift rather than budgeting for it.
@@ -88,6 +106,28 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         logger.info("Enqueued selfmod regression check id=%d", new_id)
 
 
+def _load_run(baselines: Path, label: str) -> dict | None:
+    """Newest run record for `label` as {overall, corpus_ok, corpus}.
+
+    `corpus_ok` is what `eval/run_eval.py` records about the DATA it scored.
+    An arm that measured an empty graph is not a low score, it is a
+    measurement that did not happen — and because the doc-side metrics read
+    identically with the graph deleted, it looks like a perfectly ordinary
+    result. Older records predate the field; absent is treated as unknown
+    rather than as False, so a stale baseline cannot fabricate a regression.
+    """
+    runs = sorted(Path(baselines).glob(f"*{label}*.json"), key=lambda p: p.stat().st_mtime)
+    if not runs:
+        return None
+    try:
+        blob = json.loads(runs[-1].read_text())
+        return {"overall": blob["summary"]["overall"],
+                "corpus_ok": blob.get("corpus_ok"),
+                "corpus": blob.get("corpus") or {}}
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def _run_eval(label: str, timeout: float = 600.0) -> dict | None:
     """Run the deterministic vault-recall eval and return its overall summary."""
     python = LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
@@ -98,14 +138,7 @@ def _run_eval(label: str, timeout: float = 600.0) -> dict | None:
     if r.returncode != 0:
         logger.error("run_eval failed: %s", (r.stdout + r.stderr)[-500:])
         return None
-    runs = sorted((LIVE_ROOT / "eval" / "baselines").glob(f"*{label}*.json"),
-                  key=lambda p: p.stat().st_mtime)
-    if not runs:
-        return None
-    try:
-        return json.loads(runs[-1].read_text())["summary"]["overall"]
-    except (OSError, ValueError, KeyError):
-        return None
+    return _load_run(LIVE_ROOT / "eval" / "baselines", label)
 
 
 
@@ -147,11 +180,7 @@ def _run_eval_paired(lkg_commit: str, timeout: float = 900.0) -> dict | None:
         if r.returncode != 0:
             logger.error("paired eval run failed: %s", (r.stdout + r.stderr)[-500:])
             return None
-        runs = sorted((wt / "eval" / "baselines").glob(f"*{label}*.json"),
-                      key=lambda p: p.stat().st_mtime)
-        if not runs:
-            return None
-        return json.loads(runs[-1].read_text())["summary"]["overall"]
+        return _load_run(wt / "eval" / "baselines", label)
     except Exception as exc:
         logger.error("paired eval error: %s", exc)
         return None
@@ -220,14 +249,45 @@ def evaluate(current: dict, baseline: dict, noise: dict) -> tuple[bool, list[str
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
+    """Compare quality against the promotion's PARENT, on live data, paired.
+
+    Two things had to change before this could ever run.
+
+    It keyed on `current.json`, which the guardian DELETES the moment a
+    promotion settles — fifteen minutes after landing. A once-a-day job
+    therefore found "no promotion under observation" essentially always, which
+    is why this source has zero runs in its history. It now also accepts
+    `last_settled.json`, written at settle for exactly this reason.
+
+    And it compared against the LKG commit, which by then IS the promoted
+    commit — the checked-out baseline arm and the live arm would have been the
+    same code, so the comparison was guaranteed to find nothing. The baseline
+    is the promotion's own parent.
+    """
     from scripts.selfmod import state as S
 
-    current_promo = S.read_current()
-    if not current_promo:
-        return {"skipped": "no promotion under observation"}
-    landed = float(current_promo.get("landed_ts") or 0)
-    if time.time() - landed > 24 * 3600:
+    promo = S.read_current()
+    if promo and promo.get("state") == "observing":
+        subject, stage = promo, "observing"
+    else:
+        subject, stage = S.read_last_settled(), "settled"
+    if not subject or not subject.get("commit"):
+        return {"skipped": "no recent promotion to check"}
+
+    commit = subject["commit"]
+    landed = float(subject.get("landed_ts") or 0)
+    if not landed or time.time() - landed > 24 * 3600:
         return {"skipped": "last promotion is older than 24h"}
+
+    # One measurement per promotion. Both arms are full evals plus a worktree,
+    # and the answer cannot change while the commit does not.
+    for ev in S.read_events(limit=200):
+        if ev.get("event") == "regression_check" and ev.get("commit") == commit:
+            return {"skipped": f"{commit[:8]} already checked"}
+
+    baseline_commit = subject.get("parent") or subject.get("rollback_target")
+    if not baseline_commit:
+        return {"skipped": "promotion record carries no parent to compare against"}
 
     noise = None
     if NOISE_PATH.exists():
@@ -243,14 +303,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         S.append_event({"event": "regression_skipped", "reason": msg})
         return {"skipped": msg}
 
-    lkg = S.read_lkg() or {}
-    lkg_commit = lkg.get("commit")
-    if not lkg_commit:
-        return {"skipped": "no last-known-good commit to compare against"}
-
     # Paired, same-window, same-data. A recorded baseline from the last
     # promotion would measure vault drift instead of the code change.
-    baseline = _run_eval_paired(lkg_commit)
+    baseline = _run_eval_paired(baseline_commit)
     if not baseline:
         S.append_event({"event": "regression_skipped",
                         "reason": "paired baseline run failed — cannot evaluate"})
@@ -261,23 +316,50 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         S.append_event({"event": "regression_skipped", "reason": "eval run failed"})
         return {"skipped": "eval run failed"}
 
-    regressed, reasons, detail = evaluate(current, baseline, noise)
+    # An arm that scored an EMPTY corpus is not a low score, it is a
+    # measurement that did not happen — and the doc-side metrics read
+    # identically with the graph deleted, so it looks like an ordinary result.
+    # Treating that as data would compare two numbers neither of which
+    # describes the code. `corpus_ok` absent means an older record with no
+    # provenance: unknown, not false.
+    for arm, blob in (("baseline", baseline), ("current", current)):
+        if blob.get("corpus_ok") is False:
+            msg = (f"{arm} arm scored an empty corpus "
+                   f"({blob.get('corpus')}) — cannot evaluate")
+            logger.error(msg)
+            S.append_event({"event": "regression_skipped", "reason": msg})
+            return {"skipped": msg}
+
+    regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], noise)
+    graph_side = [r for r in reasons if r.split()[0] in GRAPH_SENSITIVE_METRICS]
+
+    # Hand the measurement to the guardian, which folds it into the LKG record
+    # when this promotion settles. Written here rather than into
+    # last_known_good.json directly: that file has exactly one writer, and
+    # that is what makes "last known good" mean observed-healthy.
+    S.write_eval_last({
+        "commit": commit, "measured_at": S.now_iso(),
+        "baseline_commit": baseline_commit, "stage": stage,
+        "overall": current["overall"], "corpus": current.get("corpus") or {},
+        "regressed": regressed, "reasons": reasons,
+    })
     S.append_event({"event": "regression_check", "regressed": regressed,
-                    "reasons": reasons, "detail": detail,
-                    "commit": current_promo.get("commit")})
+                    "reasons": reasons, "graph_side_reasons": graph_side,
+                    "stage": stage, "baseline_commit": baseline_commit,
+                    "detail": detail, "commit": commit})
     if not regressed:
-        return {"regressed": False, "detail": detail}
+        return {"regressed": False, "stage": stage, "detail": detail}
 
-    logger.error("behavioural regression after %s: %s",
-                 str(current_promo.get("commit"))[:8], "; ".join(reasons))
-    target = lkg.get("commit")
-    if not target:
-        return {"regressed": True, "reasons": reasons,
-                "action": "none — no last-known-good to revert to"}
+    logger.error("behavioural regression after %s: %s", commit[:8], "; ".join(reasons))
 
-    from scripts.selfmod.promote import _rollback_inline
-    _rollback_inline(LIVE_ROOT, target)
-    S.append_event({"event": "rollback_succeeded", "trigger": "regression",
-                    "commit": current_promo.get("commit"), "restored": target,
-                    "reasons": reasons})
-    return {"regressed": True, "reasons": reasons, "rolled_back_to": target}
+    # Requested, never performed here. A rollback stops the backend — this
+    # process — so an inline `_rollback_inline` call issued the stop that kills
+    # its own caller and then never reached `git reset`. The guardian is
+    # outside that blast radius, and it also brings evidence preservation,
+    # retries, the denylist and flap protection that an inline revert skipped.
+    S.request_rollback(
+        reason=f"behavioural regression after {commit[:8]}: " + "; ".join(reasons),
+        trigger="regression", target=baseline_commit, commit=commit,
+        changed_paths=subject.get("changed_paths") or [])
+    return {"regressed": True, "reasons": reasons, "graph_side_reasons": graph_side,
+            "rollback_requested_to": baseline_commit}

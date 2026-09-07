@@ -147,3 +147,87 @@ def test_the_ledger_raises_where_autoresearchs_swallows(tmp_path):
     blocker.write_text("not a dir", encoding="utf-8")
     with pytest.raises(OSError):
         S.append_event({"event": "x"}, path=blocker / "nested" / "l.jsonl")
+
+
+# ── §7.2 the third probe class ──────────────────────────────────────────────
+
+def test_the_http_error_budget_matches_the_doc():
+    """§7.2: "The backend's own 503 ... gets its own much wider budget: 36 ticks"."""
+    assert policy.PROBE_HTTP_ERROR_STREAK == 36
+    assert (policy.PROBE_FAIL_STREAK < policy.PROBE_TIMEOUT_STREAK
+            < policy.PROBE_HTTP_ERROR_STREAK)
+
+
+# ── §8 the chronic set expires ──────────────────────────────────────────────
+
+def test_the_chronic_set_expires_daily():
+    """§8: "The chronic set expires after 24 hours, in the cache and in the
+    process"."""
+    assert policy.CHRONIC_REFRESH_SECONDS == 24 * 3600
+
+
+# ── §8.1 which metrics can actually see the graph ───────────────────────────
+
+def test_the_graph_sensitive_metrics_are_the_three_entity_side_ones():
+    """§8.1: with the graph deleted, mrr_doc / ndcg10 / doc_hit_rate came back
+    IDENTICAL. A detector built on them cannot see a graph regression."""
+    from workers.sources import selfmod_regression as R
+    assert set(R.GRAPH_SENSITIVE_METRICS) == {
+        "entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg"}
+    # ...and they are a subset of what is armed, not a replacement for it.
+    assert set(R.GRAPH_SENSITIVE_METRICS) <= set(R.ARMED_METRICS)
+    for doc_side in ("mrr_doc", "ndcg10", "doc_hit_rate"):
+        assert doc_side not in R.GRAPH_SENSITIVE_METRICS
+
+
+def test_the_eval_refuses_an_empty_corpus_by_default():
+    """§8.1: "refuses an empty one unless --allow-empty-corpus is passed"."""
+    src = (ROOT / "eval" / "run_eval.py").read_text()
+    assert "--allow-empty-corpus" in src
+    assert "corpus_ok" in src
+
+
+def test_the_quality_check_compares_against_the_parent_not_the_lkg():
+    """§8.1: after settling the LKG pointer IS the promoted commit."""
+    src = (ROOT / "workers" / "sources" / "selfmod_regression.py").read_text()
+    assert 'subject.get("parent")' in src
+
+
+# ── §6 landing ──────────────────────────────────────────────────────────────
+
+def test_the_landing_is_detached():
+    """§2/§6: the promoter restarts the process it is usually called from."""
+    assert "spawn_detached" in (ROOT / "agent_mcp" / "selfmod.py").read_text()
+    assert "start_new_session=True" in (ROOT / "scripts" / "selfmod" / "state.py").read_text()
+
+
+def test_only_one_promotion_may_be_under_observation():
+    """§6 step 0: a second landing overwrote current.json, so the first never
+    settled and the new rollback target had never survived a window."""
+    src = (ROOT / "scripts" / "selfmod" / "promote.py").read_text()
+    assert "still under observation" in src
+
+
+def test_the_promoter_refuses_a_commit_the_gate_did_not_judge():
+    """§6 step 0."""
+    src = (ROOT / "scripts" / "selfmod" / "promote.py").read_text()
+    assert "gate_head" in src and "re-gate before landing" in src
+
+
+# ── §7.4 route selection ────────────────────────────────────────────────────
+
+def test_a_rollback_can_revert_in_place():
+    """§7.4: "Reset when HEAD is still the promotion; revert in place when it
+    is not" — nightly jobs commit straight to live main."""
+    import rollback as rb
+    assert hasattr(rb, "revert_commit")
+    assert "surgical" in (ROOT / "agent-services" / "guardian" / "guardian.py").read_text()
+
+
+# ── §11 state ───────────────────────────────────────────────────────────────
+
+def test_the_new_state_files_exist_where_the_doc_says():
+    from scripts.selfmod import state as S
+    assert S.LAST_SETTLED_PATH.name == "last_settled.json"
+    assert S.ROLLBACK_REQUEST_PATH.name == "rollback_request.json"
+    assert S.EVAL_LAST_PATH.name == "eval_last.json"
