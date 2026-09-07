@@ -694,3 +694,50 @@ def test_promote_refuses_a_change_denied_by_content(isolated_state, candidate, m
         P.promote("SM_TEST", candidate["path"], candidate["base"],
                   gate_report={"head": candidate["gated"]}, dry_run=True)
     assert "denylist" in str(exc.value)
+
+
+# ===========================================================================
+# 11. Applying changed service definitions
+# ===========================================================================
+
+def test_service_definition_changes_are_applied_by_kind(monkeypatch, tmp_path):
+    """Each kind needs a different action, and none of them happened before.
+
+    supervisord includes conf.d straight out of the repo and needs
+    reread/update; systemd reads ~/.config/systemd/user, so a unit edited in
+    the repo reached nothing at all; and the guardian runs a pinned snapshot
+    re-staged only when its unit restarts. A round could pass the drill, land,
+    look healthy, and leave the running system on the old definition.
+    """
+    from scripts.selfmod import promote as P
+    calls = []
+    monkeypatch.setattr(P, "_run", lambda argv, timeout=60.0: calls.append(
+        [str(a) for a in argv]) or type("R", (), {"returncode": 0, "stdout": "",
+                                                  "stderr": ""})())
+    monkeypatch.setattr(P, "SYSTEMD_USER_DIR", tmp_path / "systemd")
+
+    notes = P._apply_service_changes([
+        "agent-services/supervisor/conf.d/lloyd-backend.conf",
+        "agent-services/systemd/lloyd-guardian.service",
+        "agent-services/guardian/policy.py",
+    ])
+    flat = [" ".join(c) for c in calls]
+    assert any("reread" in c for c in flat), "supervisord never re-read conf.d"
+    assert any("update" in c for c in flat), "supervisord never applied the change"
+    assert any("daemon-reload" in c for c in flat), "systemd never reloaded"
+    assert any("restart lloyd-guardian" in c for c in flat), \
+        "a landed guardian change stays inert until its unit restarts"
+    # The unit must actually be copied to where systemd reads it.
+    assert (tmp_path / "systemd" / "lloyd-guardian.service").exists()
+    assert any("installed lloyd-guardian.service" in n for n in notes)
+
+
+def test_a_code_only_change_touches_no_service_machinery(monkeypatch, tmp_path):
+    """The common case must not restart the watchdog for nothing."""
+    from scripts.selfmod import promote as P
+    calls = []
+    monkeypatch.setattr(P, "_run", lambda argv, timeout=60.0: calls.append(argv)
+                        or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(P, "SYSTEMD_USER_DIR", tmp_path / "systemd")
+    notes = P._apply_service_changes(["app/inner_voice/guards.py", "tests/test_x.py"])
+    assert calls == [] and notes == []
