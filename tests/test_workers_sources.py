@@ -261,11 +261,15 @@ async def test_a_distilled_session_is_marked_done_on_success(tmp_path, monkeypat
     assert "done:20260901_x.json" in q.wm_keys(SD.NAME)
 
 
-async def test_a_session_the_queue_is_about_to_poison_is_given_up_on(tmp_path, monkeypatch, q):
-    """Otherwise the failure is a cycle, not a retry.
+async def test_repeated_failure_gives_up_instead_of_cycling(tmp_path, monkeypatch, q):
+    """The regression, and why the count cannot come from the queue item.
 
-    Poisoning releases the `dedup_key`, and the next scan — with no marker to
-    go on — offers the same session again.
+    This first counted `item.attempts`, on the belief that a returned
+    `{"status": "failed"}` goes through the queue's retry path. It does not —
+    `workers/pool.py` records the failed run and completes the item anyway, so
+    `item.attempts` is 1 on every failed distill. The give-up branch never
+    fired, no marker was written, and the next scan offered the same session
+    again: 39 failed runs in eight hours, one session enqueued 21 times.
     """
     monkeypatch.setattr(
         SD, "run_prompt_on_primary",
@@ -273,10 +277,14 @@ async def test_a_session_the_queue_is_about_to_poison_is_given_up_on(tmp_path, m
     import workers.queue as Q
     monkeypatch.setattr(Q, "_queue_instance", q, raising=False)
 
-    item = _item({"session_path": str(tmp_path / "doomed.json")}, attempts=3)
-    result = await SD.execute(item)
-    assert result["status"] == "failed"
-    assert "done:doomed.json" in q.wm_keys(SD.NAME)
+    # Every attempt arrives with attempts=1, exactly as the pool delivers it.
+    for _ in range(3):
+        result = await SD.execute(
+            _item({"session_path": str(tmp_path / "doomed.json")}, attempts=1))
+        assert result["status"] == "failed"
+
+    assert "done:doomed.json" in q.wm_keys(SD.NAME), "gave up on nothing"
+    assert "fail:doomed.json" not in q.wm_keys(SD.NAME), "the counter is cleaned up"
 
 
 async def test_a_first_failure_leaves_the_session_retryable(tmp_path, monkeypatch, q):
@@ -287,7 +295,30 @@ async def test_a_first_failure_leaves_the_session_retryable(tmp_path, monkeypatc
     monkeypatch.setattr(Q, "_queue_instance", q, raising=False)
 
     await SD.execute(_item({"session_path": str(tmp_path / "flaky.json")}, attempts=1))
-    assert q.wm_keys(SD.NAME) == []
+    keys = q.wm_keys(SD.NAME)
+    assert "done:flaky.json" not in keys, "one bad turn is not a verdict"
+    assert q.wm_get(SD.NAME, "fail:flaky.json") == "1"
+
+
+async def test_a_session_that_finally_works_forgets_its_failures(
+        tmp_path, monkeypatch, q):
+    """Otherwise an intermittent session accumulates toward a give-up across
+    unrelated weeks."""
+    import workers.queue as Q
+    monkeypatch.setattr(Q, "_queue_instance", q, raising=False)
+    monkeypatch.setattr(SD, "write_staging_note", lambda **kw: tmp_path / "n.md")
+    monkeypatch.setattr(
+        SD, "run_prompt_on_primary",
+        lambda *a, **k: _async(C.TurnResult(text="", stop_reason="stop")))
+    await SD.execute(_item({"session_path": str(tmp_path / "flaky.json")}, attempts=1))
+    assert q.wm_get(SD.NAME, "fail:flaky.json") == "1"
+
+    monkeypatch.setattr(
+        SD, "run_prompt_on_primary",
+        lambda *a, **k: _async(C.TurnResult(text="## Gaps\n- something", stop_reason="stop")))
+    await SD.execute(_item({"session_path": str(tmp_path / "flaky.json")}, attempts=1))
+    assert "done:flaky.json" in q.wm_keys(SD.NAME)
+    assert q.wm_get(SD.NAME, "fail:flaky.json") is None
 
 
 # ---------------------------------------------------------------------------

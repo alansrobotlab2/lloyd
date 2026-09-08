@@ -204,8 +204,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     turn = await run_prompt_on_primary(prompt, max_turns=15)
     if not turn.ok:
         # 135 of this source's 356 notes have the body "(no response)". An
-        # empty turn is a failed run: the queue backs it off and retries, and
-        # only a run that produced something marks the session done.
+        # empty turn is a failed run, and the retry is this source's own: the
+        # pool completes an in-band failure rather than requeueing it, so the
+        # next scan is what tries again, and `_mark_done_if_exhausted` is what
+        # stops that being a cycle.
         logger.warning("session-distill %s: %s", session_name, turn.failure_summary())
         _mark_done_if_exhausted(item)
         return {"status": "failed",
@@ -223,6 +225,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         source_refs=[session_path],
     )
     _mark_done(Path(session_path).name, "distilled")
+    _clear_failures(Path(session_path).name)
     return {
         "status": "success",
         "summary": f"distilled {session_name}",
@@ -230,6 +233,15 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "artifact_path": str(path),
         "meta": {"stop_reason": turn.stop_reason, "num_turns": turn.num_turns},
     }
+
+
+def _clear_failures(file_name: str) -> None:
+    """Forget earlier failed attempts once a session finally distils."""
+    try:
+        from workers.queue import get_queue
+        get_queue().wm_delete(NAME, _fail_key(file_name))
+    except Exception:
+        pass
 
 
 def _mark_done(file_name: str, why: str) -> None:
@@ -243,16 +255,41 @@ def _mark_done(file_name: str, why: str) -> None:
                        file_name, exc)
 
 
-def _mark_done_if_exhausted(item: QueueItem) -> None:
-    """Give up on a session the queue is about to poison.
+def _fail_key(name: str) -> str:
+    return f"fail:{name}"
 
-    Without this the failure is a cycle rather than a retry: the pool poisons
-    the item after `max_attempts`, poisoning releases the `dedup_key`, and the
-    next scan — which has no marker to go on — offers the same session again.
+
+def _mark_done_if_exhausted(item: QueueItem) -> None:
+    """Count a failed attempt, and give up once there have been enough.
+
+    **The count cannot come from the queue item.** This reads `item.attempts`
+    in its first cut, on the belief that a returned `{"status": "failed"}`
+    goes back through the queue's retry path and increments it. It does not:
+    `workers/pool.py` records the failed run and then calls `mark_completed`
+    on the item regardless, so only a *raised* exception ever reaches
+    `mark_failed`. `item.attempts` is therefore 1 on every failed distill, the
+    give-up branch never fired, and the session came back on the next tick
+    with no marker to stop it — 39 failed runs in the eight hours after that
+    shipped, one session enqueued 21 times.
+
+    So the attempt count is a watermark of this source's own, beside the
+    `done:` markers, and it is cleared when a session finally succeeds.
     """
     from app.config import CONFIG
 
+    name = Path(item.payload.get("session_path", "")).name
+    if not name:
+        return
     max_attempts = int((CONFIG.get("workers") or {}).get("max_attempts", 3))
-    if item.attempts >= max_attempts:
-        _mark_done(Path(item.payload.get("session_path", "")).name,
-                   f"abandoned after {item.attempts} failed attempts")
+    try:
+        from workers.queue import get_queue
+        queue = get_queue()
+        attempts = int(queue.wm_get(NAME, _fail_key(name)) or 0) + 1
+        if attempts >= max_attempts:
+            _mark_done(name, f"abandoned after {attempts} failed attempts")
+            queue.wm_delete(NAME, _fail_key(name))
+        else:
+            queue.wm_set(NAME, _fail_key(name), str(attempts))
+    except Exception as exc:
+        logger.warning("could not record a session-distill attempt for %s: %s",
+                       name, exc)
