@@ -122,7 +122,29 @@ def _merge_tool_overrides(config: dict) -> dict:
             cfg["disabled_tools"] = list(o["disabled_tools"] or [])
     ts = (overrides.get("harness") or {}).get("tool_search")
     if isinstance(ts, dict):
-        config.setdefault("harness", {}).setdefault("tool_search", {}).update(ts)
+        live = config.setdefault("harness", {}).setdefault("tool_search", {})
+        # Same reasoning as the disabled_tools warning above, and this half
+        # went without one for longer. `tool_search.enabled` decides whether
+        # the model is handed all 131 tools or a baseline plus ToolSearch —
+        # about as load-bearing as a flag gets — and a bare `.update()` let
+        # config.yaml claim `enabled: true` while the override served
+        # `false`, with nothing logged either way. Anyone reading the tracked
+        # file to find out how tools are advertised got the wrong answer, and
+        # the only way to discover it was to evaluate the merge by hand
+        # (2026-09-07).
+        shadowed = [
+            f"{k}: {live[k]!r} -> {ts[k]!r}"
+            for k in sorted(ts)
+            if k in live and live[k] != ts[k]
+        ]
+        if shadowed:
+            logger.warning(
+                "tool_overrides.yaml shadows harness.tool_search (%s). The "
+                "override wins. Reconcile the two files, or the tracked "
+                "config keeps describing a state that is not being served.",
+                "; ".join(shadowed),
+            )
+        live.update(ts)
     return config
 
 

@@ -222,7 +222,7 @@ harness:
   # UI falls back to the bare tool name.
   tool_call_summaries: true
   tool_search:
-    enabled: true
+    enabled: false
     threshold_tools: 30
     baseline_tools:
     - Read

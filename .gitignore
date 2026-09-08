@@ -94,3 +94,16 @@ eval/baselines/
 
 # ad-hoc experiments; must not dirty the tree the selfmod gate refuses to gate against
 _scratch/
+
+# UI tool toggles. Runtime state, not source: the Tools page rewrites this
+# file on every toggle, and it was tracked — so flipping one switch in
+# Mission Control left `git status` dirty, which is refused by both
+# scripts/selfmod/gate.py and promote.py. A toggle in the UI silently
+# stopped the self-modification loop until someone hand-committed the
+# result (see 4fb1ccd, 2ef86c7). The whole point of writing overrides here
+# instead of back over config.yaml was to keep the tracked tree clean, and
+# tracking the escape hatch defeated it. SETUP.md has always described this
+# file as gitignored and tells you to restore it from backup; a fresh clone
+# without it falls back to config.yaml's defaults, which is why config.yaml
+# must keep describing the state actually being served.
+/data/tool_overrides.yaml
