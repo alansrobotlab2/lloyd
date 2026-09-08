@@ -52,6 +52,7 @@ from starlette.routing import Route
 from agent_mcp import (
     _subagent_registry,
     _task_registry,
+    _tsc_runner,
     annotations as tool_annotations,
     ambient,
     autonomy,
@@ -439,6 +440,7 @@ async def state(request):
             # so a failure three seconds in looked like it never ran.
             "recent": recent_tasks,
         },
+        "tsc": _tsc_runner.stats(),
         "tools": len(_dispatch),
     })
 
@@ -446,9 +448,20 @@ async def state(request):
 @asynccontextmanager
 async def lifespan(app):
     await discord_bot.start_bot_task()
+    # Seed the tsc baseline a little after boot. Without a baseline the
+    # first run attributes every pre-existing error in the tree to whoever
+    # edited first, so the first `.tsx` edit after every restart would be the
+    # one that gets a wrong answer. Detached and failure-tolerant: this must
+    # never delay or block startup.
+    warm = asyncio.create_task(_tsc_runner.warm_baseline(), name="tsc-warm-baseline")
     try:
         yield
     finally:
+        warm.cancel()
+        try:
+            await _tsc_runner.shutdown()
+        except Exception:
+            logger.exception("lifespan: tsc runner shutdown failed")
         try:
             await discord_bot.stop_bot()
         finally:

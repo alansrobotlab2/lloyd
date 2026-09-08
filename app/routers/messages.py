@@ -334,14 +334,32 @@ def _build_notification_drain(session_id: str, turn_id: str):
             if not xml:
                 continue
             harness_msgs.append({"role": "user", "content": xml})
+            # Two kinds ride this queue: a finished background bash command
+            # and an out-of-band diagnostics result (tsc). The body is
+            # already formatted by the aggregator either way; only the
+            # persisted label and the event differ, so the UI can style them
+            # apart and a transcript says which is which.
+            is_diag = n.get("kind") == "diagnostics"
             persist_msgs.append({
                 "id": uuid.uuid4().hex[:8],
                 "role": "user",
                 "content": [{"type": "text", "text": xml}],
                 "timestamp": now_iso,
-                "source": "bg_task_notification",
+                "source": "diagnostics_notification" if is_diag else "bg_task_notification",
                 "task_id": n.get("task_id", ""),
             })
+            if is_diag:
+                _event_log.log_event(
+                    session_id,
+                    "brain1.diagnostics_ready",
+                    {
+                        "diagnostics_kind": n.get("diagnostics_kind"),
+                        "status": n.get("status"),
+                        "files": n.get("files"),
+                    },
+                    turn_id=turn_id,
+                )
+                continue
             _event_log.log_event(
                 session_id,
                 "brain1.bg_task_completed",

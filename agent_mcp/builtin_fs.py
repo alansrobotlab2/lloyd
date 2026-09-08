@@ -647,6 +647,23 @@ def _append_diagnostics(text: str, mut: _Mutation) -> str:
     return text
 
 
+async def _append_tsc_hint(text: str, mut: _Mutation) -> str:
+    """Queue a debounced whole-project tsc and say so.
+
+    Saying so is not decoration. tsc is whole-project (`include: ["src"]`)
+    and ~5 s, so it cannot ride back on the edit — and a model told nothing
+    assumes nothing is coming and either re-checks by hand or moves on.
+    """
+    try:
+        from agent_mcp import _tsc_runner
+        hint = await _tsc_runner.note_edit(mut.session_id, mut.real)
+        if hint:
+            return f"{text}\n{hint}"
+    except Exception:
+        logger.warning("tsc check could not be queued for %s", mut.path, exc_info=True)
+    return text
+
+
 async def call_tool(name: str, arguments: dict):
     # Sync handlers run in a worker thread — this loop also serves SSE chat,
     # voice, and the inner-voice observer; a slow disk read must not stall it.
@@ -668,6 +685,7 @@ async def call_tool(name: str, arguments: dict):
             # Write or Edit by the same session is allowed without re-Reading.
             _record_seen(mut.session_id, mut.real, mut.post_stat)
             text = _append_diagnostics(text, mut)
+            text = await _append_tsc_hint(text, mut)
     elif name == "Grep":
         text = await _grep(arguments)
     elif name == "Glob":

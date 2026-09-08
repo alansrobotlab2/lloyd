@@ -515,6 +515,46 @@ boot and stop meaning anything.
 
 Disabled tools are enforced via `RunOptions.disallowed_tools` as `mcp__<server>__<tool>`. The harness's bare-name aliasing in `tool_schema.py` blocks both the bare and namespaced form at advertise + dispatch time, so disabling `Bash` via `mcp_servers.lloyd-mcp.disabled_tools: [Bash]` blocks the model from calling either `Bash` or `mcp__lloyd-mcp__Bash`.
 
+### TypeScript diagnostics arrive later, on purpose
+
+pyflakes on one file is milliseconds, so Python diagnostics ride back on the
+Edit. tsc cannot: `web/tsconfig.json` includes only `src` and there is no
+per-file mode that resolves imports, so it is whole-project and ~5 s. Paying
+that on every `.tsx` edit taxes the common case to serve the rare one.
+
+`agent_mcp/_tsc_runner.py` debounces 1.5 s, runs one type-check at a time
+process-wide, and delivers the result on a later iteration through the same
+drain the background-Bash tool uses. The Edit result says a check was queued
+— a model told nothing assumes nothing is coming and either re-checks by hand
+or moves on.
+
+- **Cold start seeds, it does not report.** With no baseline the first run
+  attributes every pre-existing error in the tree to whoever edited first, so
+  `main.lifespan` schedules `warm_baseline()` a few seconds after boot.
+  Without that the first `.tsx` edit of every restart is the one with the
+  wrong answer. The baseline persists to `_pipeline/tsc/baseline.json`.
+- **A whole-project run becomes a per-session answer** by keeping the
+  previous run's per-file counts and reporting `run[f] - baseline[f]` only
+  for the files *that session* edited. Somebody else's breakage is somebody
+  else's news.
+- **The root is derived from the edited path**, not from `LLOYD_HOME`: a
+  selfmod round edits under `~/lloyd-work/…` and the live tree's tsc would
+  say nothing about it. No `web/node_modules/.bin/tsc` under that root means
+  no run *and no hint* — promising a check that cannot happen is worse than
+  silence.
+- **Delivery is a `DiagnosticsRecord`, not a `TaskRecord`.** That dataclass
+  carries a `process` and a `log_fd`, and `format_notification`, `_task_row`
+  and `list_active` are all specific to a background bash child. It rides the
+  per-session drain queue and never enters `_records`, so `/state`'s task
+  rows are untouched.
+- **A `task:*` session's result goes to the parent.** Nothing reads a
+  subagent's drain queue once its Task has returned
+  (`_subagent_registry.parent_scope`).
+- A failed or timed-out run is still reported, for the same reason the hint
+  exists.
+
+`/state.tsc` shows the last run and what is pending.
+
 ### Read-before-edit and stale-file gates
 
 `Edit` used to be exact-match against whatever is on disk right now, with no

@@ -71,11 +71,65 @@ class TaskRecord:
     waiter_task: asyncio.Task | None = field(default=None, repr=False)
 
 
+@dataclass
+class DiagnosticsRecord:
+    """An out-of-band diagnostics result waiting to reach a session.
+
+    Deliberately NOT a TaskRecord. That dataclass carries a `process` and a
+    `log_fd`, and `format_notification`, `_task_row`, `list_active` and
+    `terminate_all` are all specific to a background *bash* child. A
+    diagnostics run has no subprocess to kill, no output file for the model
+    to Read, and no place on the dashboard's background-task rows — it rides
+    the same per-session drain queue and nothing else.
+
+    It never enters `_records`, so `/state`'s task rows are untouched.
+    """
+
+    session_id: str
+    kind: str = "typescript"
+    files: list[str] = field(default_factory=list)
+    lines: list[str] = field(default_factory=list)
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    status: str = "ok"                  # ok | failed | timeout
+    detail: str = ""
+    notified: bool = False
+
+
 # task_id -> record. Module-level singleton.
 _records: dict[str, TaskRecord] = {}
-# Per-session FIFO of completed-but-not-yet-drained records.
-_pending_by_session: dict[str, list[TaskRecord]] = {}
+# Per-session FIFO of completed-but-not-yet-drained records. Holds both
+# TaskRecord and DiagnosticsRecord; the drain tool branches on the type.
+_pending_by_session: dict[str, list[Any]] = {}
 _lock = asyncio.Lock()
+
+
+async def enqueue_diagnostics(record: DiagnosticsRecord) -> None:
+    """Queue a diagnostics result for its session's next drain."""
+    async with _lock:
+        _pending_by_session.setdefault(record.session_id, []).append(record)
+
+
+def format_diagnostics_notification(record: DiagnosticsRecord) -> str:
+    """XML the model sees as a user message on a later iteration."""
+    elapsed = max(0.0, record.finished_at - record.started_at)
+    files = ", ".join(record.files) or "(none)"
+    if record.status == "ok":
+        summary = (f"tsc: {len(record.lines)} new error(s) in file(s) you "
+                   f"edited this session ({elapsed:.1f}s)")
+    else:
+        # Say so rather than staying silent: a model that was told a check
+        # was queued and never hears back waits for it.
+        summary = f"tsc check {record.status}: {record.detail}"[:300]
+    body = "\n".join(record.lines)
+    return (
+        f"<diagnostics_notification>\n"
+        f"<kind>{record.kind}</kind>\n"
+        f"<files>{files}</files>\n"
+        f"<summary>{summary}</summary>\n"
+        f"<errors>\n{body}\n</errors>\n"
+        f"</diagnostics_notification>"
+    )
 
 
 def new_task_id() -> str:
@@ -202,7 +256,7 @@ def list_recent(limit: int = 10) -> list[TaskRecord]:
     return done[:limit]
 
 
-async def drain_completed_for_session(session_id: str) -> list[TaskRecord]:
+async def drain_completed_for_session(session_id: str) -> list[Any]:
     """Pop all pending completion records for a session.
 
     Marks each as `notified=True` so re-draining (e.g. on session

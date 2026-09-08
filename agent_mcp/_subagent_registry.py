@@ -44,6 +44,11 @@ class SubagentRecord:
     description: str
     prompt_preview: str
     parent_session_id: str
+    # The parent's turn id, when the spawning call carried one. A subagent's
+    # own drain queue is never read after Task returns, so anything that
+    # arrives late — a tsc result, a change-ledger entry — has to reach the
+    # parent instead.
+    parent_turn_id: str
     session_id: str
     model: str
     max_turns: int
@@ -79,6 +84,7 @@ class SubagentRecord:
             "description": self.description,
             "prompt_preview": self.prompt_preview,
             "parent_session_id": self.parent_session_id,
+            "parent_turn_id": self.parent_turn_id,
             "session_id": self.session_id,
             "model": self.model,
             "max_turns": self.max_turns,
@@ -111,6 +117,7 @@ def register(
     session_id: str,
     model: str,
     max_turns: int,
+    parent_turn_id: str = "",
 ) -> SubagentRecord:
     """Open a row for a Task run that is about to start."""
     record = SubagentRecord(
@@ -119,6 +126,7 @@ def register(
         description=description,
         prompt_preview=prompt[:200],
         parent_session_id=parent_session_id,
+        parent_turn_id=parent_turn_id,
         session_id=session_id,
         model=model,
         max_turns=max_turns,
@@ -172,6 +180,24 @@ def snapshot() -> dict[str, Any]:
         "active_count": len(active),
         "recent": list_recent(),
     }
+
+
+def parent_scope(session_id: str) -> tuple[str, str] | None:
+    """The (session, turn) a `task:*` subagent session belongs to.
+
+    Anything produced by a subagent that arrives *after* its Task returns
+    has nowhere to go: nothing reads a subagent's drain queue once the run
+    is over. Attributing it to the parent is the only delivery that reaches
+    a reader. Active runs are searched first, then the recent ring, because
+    a result can land in the seconds after the run closed.
+    """
+    for record in _active.values():
+        if record.session_id == session_id:
+            return record.parent_session_id, record.parent_turn_id
+    for record in _recent:
+        if record.session_id == session_id:
+            return record.parent_session_id, record.parent_turn_id
+    return None
 
 
 def reset() -> None:

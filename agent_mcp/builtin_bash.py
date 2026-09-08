@@ -288,18 +288,29 @@ async def _bg_task_drain(args: dict[str, Any]) -> str:
     """
     session_id = get_bound_session()
     records = await _task_registry.drain_completed_for_session(session_id)
-    return json.dumps({
-        "notifications": [
-            {
-                "task_id": r.task_id,
+    notifications = []
+    for r in records:
+        # The queue carries two kinds now. A DiagnosticsRecord has no
+        # subprocess, no exit code and no output file for the model to Read,
+        # so it cannot be squeezed into the background-task shape.
+        if isinstance(r, _task_registry.DiagnosticsRecord):
+            notifications.append({
+                "kind": "diagnostics",
+                "diagnostics_kind": r.kind,
                 "status": r.status,
-                "exit_code": r.exit_code,
-                "output_file": str(r.output_path),
-                "xml": _task_registry.format_notification(r),
-            }
-            for r in records
-        ]
-    })
+                "files": list(r.files),
+                "xml": _task_registry.format_diagnostics_notification(r),
+            })
+            continue
+        notifications.append({
+            "kind": "bg_task",
+            "task_id": r.task_id,
+            "status": r.status,
+            "exit_code": r.exit_code,
+            "output_file": str(r.output_path),
+            "xml": _task_registry.format_notification(r),
+        })
+    return json.dumps({"notifications": notifications})
 
 
 async def list_tools():
