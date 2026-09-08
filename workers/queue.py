@@ -1,7 +1,9 @@
 """SQLite-backed work queue for Lloyd.
 
-Schema defined in docs/21-unified-work-queue.md. WAL mode for concurrent readers.
-Atomic claim via `UPDATE ... RETURNING` in a single transaction.
+See `architecture/workers.md`. WAL mode, so the backend (which owns the pool)
+and the MCP aggregator (which enqueues autoresearch rounds) can share the file.
+A claim is an `UPDATE ... WHERE state='queued'` guarded by a re-read, which is
+what makes it safe across those two processes.
 """
 
 from __future__ import annotations
@@ -210,10 +212,20 @@ class WorkQueue:
         worker_id: str,
         max_inflight_per_source: dict[str, int] | None = None,
     ) -> Optional[QueueItem]:
-        """Claim the highest-priority queued item. Atomic under the queue lock.
+        """Claim the highest-priority claimable item. Atomic under the queue lock.
 
-        If max_inflight_per_source is given, skip items whose source is at
-        or above its inflight quota (claimed + running).
+        If max_inflight_per_source is given, sources at or above their inflight
+        quota (claimed + running) are excluded.
+
+        **The quota is applied in SQL, not to a window of results.** This used
+        to `SELECT ... LIMIT 50` and then skip over-quota rows in Python, which
+        is a different thing whenever the candidate set is larger than the
+        window: fifty queued rows belonging to one saturated source, all at a
+        lower priority number, fill the window completely and the loop returns
+        None with claimable work sitting behind them. The pool then reads that
+        as an empty queue and sleeps. Filtering the saturated sources out of
+        the query means the ordering picks the first *claimable* row, whatever
+        the depth of what it skipped, and `LIMIT 1` is then enough.
         """
         max_inflight_per_source = max_inflight_per_source or {}
         with self._lock, self._connect() as conn:
@@ -224,17 +236,26 @@ class WorkQueue:
                     "WHERE state IN ('claimed','running') GROUP BY source"
                 ).fetchall()
             }
-            rows = conn.execute(
-                "SELECT * FROM queue WHERE state='queued' "
-                "AND (not_before IS NULL OR not_before <= ?) "
-                "ORDER BY priority ASC, enqueued_at ASC LIMIT 50",
-                (_now_iso(),),
-            ).fetchall()
-            for row in rows:
-                src = row["source"]
-                quota = max_inflight_per_source.get(src)
-                if quota is not None and inflight_counts.get(src, 0) >= quota:
-                    continue
+            saturated = [
+                src for src, quota in max_inflight_per_source.items()
+                if quota is not None and inflight_counts.get(src, 0) >= int(quota)
+            ]
+            sql = ("SELECT * FROM queue WHERE state='queued' "
+                   "AND (not_before IS NULL OR not_before <= ?)")
+            args: list[Any] = [_now_iso()]
+            if saturated:
+                sql += f" AND source NOT IN ({','.join('?' * len(saturated))})"
+                args.extend(saturated)
+            sql += " ORDER BY priority ASC, enqueued_at ASC LIMIT 1"
+
+            # Re-read after the UPDATE rather than trusting rowcount: the lock
+            # is per-process and the aggregator writes to the same file, so a
+            # row can be claimed out from under this SELECT. A lost race is a
+            # retry, not an empty queue.
+            for _ in range(5):
+                row = conn.execute(sql, args).fetchone()
+                if not row:
+                    return None
                 conn.execute(
                     "UPDATE queue SET state='claimed', claimed_at=?, claimed_by=?, attempts=attempts+1 "
                     "WHERE id=? AND state='queued'",
@@ -244,7 +265,8 @@ class WorkQueue:
                 refreshed = conn.execute(
                     "SELECT * FROM queue WHERE id=?", (row["id"],)
                 ).fetchone()
-                if refreshed and refreshed["state"] == "claimed":
+                if refreshed and refreshed["state"] == "claimed" \
+                        and refreshed["claimed_by"] == worker_id:
                     return QueueItem.from_row(refreshed)
         return None
 
@@ -323,6 +345,17 @@ class WorkQueue:
 
         If worker_ids given, only reset items claimed by those workers
         (useful when a single worker dies but others keep running).
+
+        **The pool calls this with no ids**, and the difference matters.
+        Worker ids are positional (`worker-0` … `worker-{slots-1}`), so
+        recovering only the current slot names strands every row claimed by a
+        slot that no longer exists the moment `workers.slots` is reduced.
+        Those rows sit in `running` forever, and because `claim_next` counts
+        `claimed|running` toward the inflight quota, a source with
+        `max_inflight: 1` is then silently switched off for good. Nothing is
+        in flight when a pool starts, so the unfiltered sweep is the correct
+        one; the filtered form stays for a caller that really is retiring one
+        live worker among others.
         """
         with self._lock, self._connect() as conn:
             if worker_ids:
@@ -456,6 +489,20 @@ class WorkQueue:
             ).fetchone()
             return row["value"] if row else None
 
+    def wm_keys(self, source: str) -> list[str]:
+        """Every watermark key this source has recorded.
+
+        Sources that must remember a *set* — session-distill's "already
+        distilled" markers — read it in one query rather than one `wm_get`
+        per candidate.
+        """
+        with self._connect() as conn:
+            return [
+                r["key"] for r in conn.execute(
+                    "SELECT key FROM watermarks WHERE source=?", (source,)
+                ).fetchall()
+            ]
+
     def wm_set(self, source: str, key: str, value: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -471,8 +518,33 @@ class WorkQueue:
 _queue_instance: Optional[WorkQueue] = None
 
 
+def configured_db_path() -> Path:
+    """The `workers.db_path` the live config names, expanded.
+
+    This lives here rather than in each caller because **the aggregator is a
+    different process from the backend**. Only the backend runs
+    `start_worker_pool`, so nothing initialises the singleton on the
+    aggregator side and a bare `get_queue()` there raises — which is how the
+    `autoresearch_run` MCP tool came to answer "work queue not available" for
+    its entire life. Not one queue row in `workers.db` carries the `targets`
+    payload that tool sends, because not one of its enqueues ever reached the
+    database. A process that wants the shared queue asks for the configured
+    path instead of inventing one, and WAL makes the sharing safe.
+    """
+    from app.config import CONFIG
+    raw = (CONFIG.get("workers") or {}).get("db_path") or "~/lloyd/workers.db"
+    return Path(str(raw)).expanduser()
+
+
 def get_queue(db_path: str | Path | None = None) -> WorkQueue:
-    """Get or create the process-wide WorkQueue singleton."""
+    """Get or create the process-wide WorkQueue singleton.
+
+    Raising when no path has ever been supplied is deliberate and load-bearing:
+    the routers use it to tell "workers are switched off" from "workers are
+    running and empty", and auto-creating the database here would make a
+    disabled pool report itself initialised. Callers outside the backend pass
+    `configured_db_path()`.
+    """
     global _queue_instance
     if _queue_instance is None:
         if db_path is None:

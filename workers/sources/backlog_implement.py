@@ -246,7 +246,7 @@ def _round_opened_since(events: list[dict], since_ts: float) -> str | None:
 
 async def execute(item: QueueItem) -> dict[str, Any]:
     from scripts.selfmod import backlog as B, state as S
-    from workers.sources._common import DrainActive, run_prompt_in_session
+    from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
 
     free, why = _loop_is_free()
     if not free:
@@ -285,6 +285,18 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                         "phase": "skipped", "reason": f"landing in progress: {exc}"})
         return {"status": "skipped", "summary": f"landing in progress: {exc}"}
+    except TurnTimeout as exc:
+        # `finished` rather than a bare failure, so `reap_abandoned_rounds`
+        # can still find and close a round this turn opened. In-band, so the
+        # queue does not retry: the `started` event above already means one
+        # attempt per item, and a retry would only re-discover that.
+        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
+                        "phase": "finished", "reason": str(exc),
+                        "round_id": _round_opened_since(S.read_events(limit=200), started),
+                        "stop_reason": "turn_timeout"})
+        logger.warning("backlog #%s: %s", candidate.id, exc)
+        return {"status": "failed", "item_id": candidate.id,
+                "summary": f"#{candidate.id}: {exc}"}
 
     events = S.read_events(limit=200)
     round_id = _round_opened_since(events, started)

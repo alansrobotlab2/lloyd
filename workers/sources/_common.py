@@ -9,17 +9,55 @@ All these sources follow the same pattern:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import uuid
 import yaml
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from app.paths import LLOYD_HOME, SESSIONS_DIR, VAULT_PENDING_RESEARCH_DIR as STAGING_ROOT
+from app.paths import SESSIONS_DIR, VAULT_PENDING_RESEARCH_DIR as STAGING_ROOT
 
 logger = logging.getLogger("lloyd-workers.common")
+
+# How far under the pool's `max_duration_seconds` a turn's own timer sits, so
+# the turn always loses its own race rather than being cancelled from outside.
+# Larger than `autonomy._POOL_TIMEOUT_MARGIN` (30s) because this path has more
+# to do on the way out: it has to reach the backend over HTTP and ask it to
+# stop the turn, and then let it finish persisting the transcript.
+POOL_TIMEOUT_MARGIN_SECONDS = 60
+
+
+def parse_confidence(response: str, default: float = 0.5) -> float:
+    """Pull `## Confidence\\n<0.0-1.0>` out of a research response.
+
+    One copy. It was pasted into four sources with three subtly different
+    bodies, which is three chances for the staging note's confidence field to
+    start meaning different things depending on which source wrote it.
+    """
+    m = re.search(r"confidence[^0-9]*([0-1](?:\.\d+)?)", response, re.IGNORECASE)
+    if not m:
+        return default
+    try:
+        return max(0.0, min(1.0, float(m.group(1))))
+    except ValueError:
+        return default
+
+
+def turn_timeout_for(source: str, default: float = 3600.0) -> float:
+    """A turn's own wall-clock budget, strictly under this source's pool cap."""
+    try:
+        from workers.sources import get_sources_config
+        cap = int(get_sources_config().get(source, {}).get("max_duration_seconds") or 0)
+    except Exception:
+        cap = 0
+    if cap <= 0:
+        return float(default)
+    return float(max(60, cap - POOL_TIMEOUT_MARGIN_SECONDS))
 
 
 def staging_dir(source: str) -> Path:
@@ -55,7 +93,35 @@ def write_staging_note(
     return path
 
 
-async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
+@dataclass
+class TurnResult:
+    """What a worker turn produced, and how it ended.
+
+    `text` alone was the old return value, and losing the rest of this is what
+    let 225 of the 498 notes under `pending-research/` be written with the body
+    `(no response)`. A turn that ends at `max_turns`, or on a tool call, or
+    against a wedged engine yields no text — and an empty string is
+    indistinguishable from a short answer once the stop reason has been thrown
+    away. domain-research then wrote the empty note, ticked the topic off in
+    `research-queue.md` so it could never be retried, and returned success.
+    Nothing anywhere said a research job had failed.
+    """
+    text: str = ""
+    stop_reason: Optional[str] = None
+    num_turns: Optional[int] = None
+    usage: dict = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        """True when the model actually said something."""
+        return bool(self.text.strip())
+
+    def failure_summary(self) -> str:
+        return (f"empty response (stop_reason={self.stop_reason}, "
+                f"turns={self.num_turns}) — nothing written")
+
+
+async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
     """Dispatch a prompt to the primary model at low vLLM priority.
 
     **No session, therefore no Inner Voice.** `app/routers/messages.py` is the
@@ -91,11 +157,19 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
         pass
 
     system_prompt = build_system_prompt()
-    cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
+
+    # `app.config.CONFIG`, not a fresh `yaml.safe_load` of config.yaml. Reading
+    # the file directly skips all three things the loader does: `${VAR}`
+    # expansion, the `LLOYD_CONFIG_OVERLAY` a canary boots with, and the
+    # `data/tool_overrides.yaml` merge. That last one is the live authority for
+    # what is switched off — so a tool disabled from the Tools page stayed
+    # advertised to every worker turn, which is exactly the drift the override
+    # file's warning machinery exists to make impossible.
+    from app.config import CONFIG
 
     disallowed: list[str] = []
-    for name, sc in cfg.get("mcp_servers", {}).items():
-        for tname in sc.get("disabled_tools", []):
+    for name, sc in (CONFIG.get("mcp_servers") or {}).items():
+        for tname in (sc.get("disabled_tools") or []):
             disallowed.append(f"mcp__{name}__{tname}")
 
     # A worker job may not drive the self-modification loop. These tools were
@@ -125,11 +199,21 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
     )
 
     messages = [{"role": "user", "content": prompt}]
-    final = ""
+    out = TurnResult()
+    chunks: list[str] = []
     async for evt in run_query(messages, options):
         if evt["type"] == "text_delta":
-            final += evt.get("text", "")
-    return final
+            chunks.append(evt.get("text", ""))
+        elif evt["type"] == "result":
+            # The turn's own account of how it ended. Dropping this event is
+            # what made an empty answer look like a successful one.
+            out.stop_reason = evt.get("stop_reason")
+            out.num_turns = evt.get("num_turns")
+            out.usage = evt.get("usage") or {}
+            if not chunks and evt.get("response_text"):
+                chunks.append(str(evt["response_text"]))
+    out.text = "".join(chunks)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +222,10 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> str:
 
 class DrainActive(RuntimeError):
     """The backend refused the turn because a landing is in progress."""
+
+
+class TurnTimeout(RuntimeError):
+    """The turn outlived its own budget and was cancelled in the backend."""
 
 
 class _SSEParser:
@@ -211,10 +299,26 @@ def new_worker_session(*, title: str, source: str, model: str = "primary",
     return session_id
 
 
+async def _cancel_session_turn(backend: str, session_id: str) -> bool:
+    """Ask the backend to stop the turn running in `session_id`.
+
+    Best effort and never raises: this runs on a path that is already
+    failing, and the caller's error is the one worth reporting.
+    """
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            r = await client.post(f"{backend}/api/sessions/{session_id}/cancel", json={})
+        return r.status_code < 400
+    except Exception as exc:
+        logger.warning("could not cancel worker turn in %s: %s", session_id, exc)
+        return False
+
+
 async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                                 max_turns: int = 60, priority: int = 1,
                                 inner_voice: bool = True,
-                                timeout_seconds: float = 3600.0) -> dict:
+                                timeout_seconds: float | None = None) -> dict:
     """Run one turn through the backend's own chat path, in a real session.
 
     This is the counterpart to `run_prompt_on_primary`, and the difference is
@@ -238,34 +342,64 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     room, and its final text is not a conclusion however finished it reads.
     Raises `DrainActive` if a landing has the backend draining; the caller
     should skip this run rather than count it.
+
+    **The budget is wall-clock, and it has to be smaller than the pool's.**
+    `timeout_seconds` used to be handed straight to `httpx.Timeout`, where it
+    becomes a *per-read* deadline — a stream that produces a token a minute
+    never trips it, however long the turn runs. So the only real bound was
+    `pool.py`'s `asyncio.wait_for`, and that one cancels the HTTP request
+    rather than the turn. The chat path is explicitly built to survive a
+    client disconnect ("the consumer keeps running"), which is right for a
+    browser tab and wrong here: the pool would record a failure, back off, and
+    re-enqueue, and for `backlog-selfmod` the retry re-selects the same item
+    because no verdict was ever written — a second 90-iteration triage racing
+    the first one that never stopped. Defaulting to `turn_timeout_for(source)`
+    puts this timer strictly inside the pool's, and expiring it cancels the
+    turn in the backend before reporting, the same shape `autonomy.run_task`
+    uses against the same pool cap.
     """
     import httpx
     from app.config import service_url
 
     backend = service_url("backend", "http://127.0.0.1:8080").rstrip("/")
+    if timeout_seconds is None:
+        timeout_seconds = turn_timeout_for(source)
     session_id = new_worker_session(title=title, source=source, inner_voice=inner_voice)
     payload = {"session_id": session_id, "text": prompt, "model": "primary",
                "priority": int(priority), "max_turns": int(max_turns)}
 
     out: dict = {"text": "", "session_id": session_id, "stop_reason": None,
                  "num_turns": None, "errors": []}
-    timeout = httpx.Timeout(timeout_seconds, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", f"{backend}/api/message/stream",
-                                 json=payload,
-                                 headers={"Accept": "text/event-stream"}) as resp:
-            if resp.status_code == 503:
-                body = (await resp.aread()).decode("utf-8", "replace")[:300]
-                raise DrainActive(body)
-            if resp.status_code >= 400:
-                body = (await resp.aread()).decode("utf-8", "replace")[:300]
-                raise RuntimeError(f"stream endpoint returned {resp.status_code}: {body}")
-            async for event, data in _aiter_sse(resp):
-                if event == "error":
-                    out["errors"].append(str(data)[:400])
-                elif event == "done":
-                    out["text"] = str(data.get("response") or "")
-                    out["stop_reason"] = data.get("stop_reason")
-                    out["num_turns"] = data.get("num_turns")
-                    break
+
+    async def _stream() -> None:
+        # Generous per-read timeout: a long tool call legitimately produces no
+        # bytes for minutes. The real bound is the wall-clock one below.
+        timeout = httpx.Timeout(float(timeout_seconds), connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", f"{backend}/api/message/stream",
+                                     json=payload,
+                                     headers={"Accept": "text/event-stream"}) as resp:
+                if resp.status_code == 503:
+                    body = (await resp.aread()).decode("utf-8", "replace")[:300]
+                    raise DrainActive(body)
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode("utf-8", "replace")[:300]
+                    raise RuntimeError(
+                        f"stream endpoint returned {resp.status_code}: {body}")
+                async for event, data in _aiter_sse(resp):
+                    if event == "error":
+                        out["errors"].append(str(data)[:400])
+                    elif event == "done":
+                        out["text"] = str(data.get("response") or "")
+                        out["stop_reason"] = data.get("stop_reason")
+                        out["num_turns"] = data.get("num_turns")
+                        break
+
+    try:
+        await asyncio.wait_for(_stream(), timeout=float(timeout_seconds))
+    except asyncio.TimeoutError:
+        cancelled = await _cancel_session_turn(backend, session_id)
+        raise TurnTimeout(
+            f"worker turn in {session_id} exceeded {timeout_seconds:.0f}s; "
+            f"backend cancel {'accepted' if cancelled else 'FAILED'}") from None
     return out

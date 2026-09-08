@@ -84,9 +84,9 @@ def _merge_tool_overrides(config: dict) -> dict:
     """Overlay data/tool_overrides.yaml onto the boot config.
 
     Only the UI-mutable keys are honored: per-server `enabled` /
-    `disabled_tools` and the `harness.tool_search` block. Anything else in
-    the overrides file is ignored, so a stray write can't shadow hand-edited
-    config. Missing or unparseable file → config unchanged.
+    `disabled_tools`, the `harness.tool_search` block, and `workers.enabled`.
+    Anything else in the overrides file is ignored, so a stray write can't
+    shadow hand-edited config. Missing or unparseable file → config unchanged.
     """
     if not TOOL_OVERRIDES_PATH.exists():
         return config
@@ -145,6 +145,24 @@ def _merge_tool_overrides(config: dict) -> dict:
                 "; ".join(shadowed),
             )
         live.update(ts)
+
+    # `workers.enabled` — the master switch for the whole worker pool, moved
+    # here when `POST /api/workers/enable` stopped rewriting config.yaml.
+    # Same shape and same warning as the two above: the override wins, and a
+    # disagreement is logged rather than allowed to make the tracked file lie
+    # about whether the pool runs on a fresh clone.
+    wk = overrides.get("workers")
+    if isinstance(wk, dict) and "enabled" in wk:
+        live_wk = config.setdefault("workers", {})
+        want = bool(wk["enabled"])
+        if "enabled" in live_wk and bool(live_wk["enabled"]) != want:
+            logger.warning(
+                "tool_overrides.yaml sets workers.enabled: %r where config.yaml "
+                "says %r. The override wins. Reconcile the two files, or the "
+                "tracked config keeps describing a state that is not being "
+                "served.", want, bool(live_wk["enabled"]),
+            )
+        live_wk["enabled"] = want
     return config
 
 
@@ -152,7 +170,12 @@ def save_tool_overrides() -> None:
     """Persist the UI-mutable slice of CONFIG to data/tool_overrides.yaml.
 
     Replaces the old behavior of yaml.dump-ing the entire CONFIG back over
-    config.yaml on every toggle.
+    config.yaml on every toggle. `workers.enabled` rides along because
+    `POST /api/workers/enable` had kept that old behavior — expanded secrets,
+    stripped comments, dirty tree and all — right up until it was moved here.
+
+    One writer for the whole file: every caller rebuilds it from CONFIG, so
+    two endpoints writing different slices cannot clobber each other's.
     """
     out: dict = {"mcp_servers": {}}
     for name, cfg in (CONFIG.get("mcp_servers") or {}).items():
@@ -163,6 +186,9 @@ def save_tool_overrides() -> None:
     ts = (CONFIG.get("harness") or {}).get("tool_search")
     if isinstance(ts, dict):
         out["harness"] = {"tool_search": ts}
+    workers = CONFIG.get("workers")
+    if isinstance(workers, dict) and "enabled" in workers:
+        out["workers"] = {"enabled": bool(workers["enabled"])}
     TOOL_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         TOOL_OVERRIDES_PATH,

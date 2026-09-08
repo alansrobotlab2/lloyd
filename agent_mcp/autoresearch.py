@@ -166,9 +166,14 @@ def _handle_round(params: dict) -> str:
     max_parallel = int(params.get("max_parallel") or 4)
 
     try:
-        from workers.queue import get_queue
-        q = get_queue()
-    except (RuntimeError, ImportError) as e:
+        # The configured path, because this is the AGGREGATOR process: nothing
+        # here runs `start_worker_pool`, so the singleton is never initialised
+        # and a bare `get_queue()` raises. This tool answered "work queue not
+        # available" for its entire life — no row in workers.db carries the
+        # `targets` payload it sends, because none of its enqueues ever landed.
+        from workers.queue import configured_db_path, get_queue
+        q = get_queue(configured_db_path())
+    except (RuntimeError, ImportError, OSError) as e:
         return json.dumps({"error": f"work queue not available: {e}"})
 
     new_id = q.enqueue(
@@ -211,13 +216,13 @@ def _handle_status(params: dict) -> str:
     queue_items: list[dict] = []
     recent_runs: list[dict] = []
     try:
-        from workers.queue import get_queue
-        q = get_queue()
+        from workers.queue import configured_db_path, get_queue
+        q = get_queue(configured_db_path())
         queue_items = [
             i.to_dict() for i in q.list_items(source="autoresearch", limit=10)
         ]
         recent_runs = q.list_runs(source="autoresearch", limit=5)
-    except (RuntimeError, ImportError):
+    except (RuntimeError, ImportError, OSError):
         pass
 
     return json.dumps({

@@ -336,6 +336,40 @@ def evaluate(current: dict, baseline: dict, noise: dict) -> tuple[bool, list[str
 async def execute(item: QueueItem) -> dict[str, Any]:
     """Compare quality against the promotion's PARENT, on live data, paired.
 
+    Async only at the edge: the whole comparison is blocking, so it runs on a
+    thread. See `_execute_blocking` for why that is not a detail.
+    """
+    import asyncio
+    return await asyncio.to_thread(_execute_blocking)
+
+
+def _skipped(reason: str) -> dict[str, Any]:
+    """A measurement that did not happen, said so that a reader can see it.
+
+    `{"skipped": reason}` alone was the old shape, and `pool.normalize_result`
+    is now able to read it — but the run record still deserves a real status
+    and a summary, because all 22 of this source's runs to date are rows
+    marked `success` with an empty summary. For a detector whose entire
+    premise is "a missing noise floor means cannot evaluate, never no
+    regression", recording a skip as a success is the one failure mode it
+    cannot afford.
+    """
+    return {"status": "skipped", "skipped": reason, "summary": reason[:500]}
+
+
+def _execute_blocking() -> dict[str, Any]:
+    """Compare quality against the promotion's PARENT, on live data, paired.
+
+    **Nothing in here may run on the event loop.** Both arms are
+    `subprocess.run` with a 900-second timeout, on either side of a `git
+    worktree add`, and this used to be awaited directly from `pool.py` — so a
+    single check froze the backend for as long as it took. That is the shared
+    loop which serves every HTTP request and streams every chat turn; the
+    109-second run in the history is 109 seconds during which Lloyd answered
+    nothing. Every other source that touches the disk hard already hops onto a
+    thread and says why (`gap_fill`, `bench_mine`); this one, the heaviest of
+    them by an order of magnitude, was the one that did not.
+
     Two things had to change before this could ever run.
 
     It keyed on `current.json`, which the guardian DELETES the moment a
@@ -357,22 +391,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     else:
         subject, stage = S.read_last_settled(), "settled"
     if not subject or not subject.get("commit"):
-        return {"skipped": "no recent promotion to check"}
+        return _skipped("no recent promotion to check")
 
     commit = subject["commit"]
     landed = float(subject.get("landed_ts") or 0)
     if not landed or time.time() - landed > 24 * 3600:
-        return {"skipped": "last promotion is older than 24h"}
+        return _skipped("last promotion is older than 24h")
 
     # One measurement per promotion. Both arms are full evals plus a worktree,
     # and the answer cannot change while the commit does not.
     for ev in S.read_events(limit=200):
         if ev.get("event") == "regression_check" and ev.get("commit") == commit:
-            return {"skipped": f"{commit[:8]} already checked"}
+            return _skipped(f"{commit[:8]} already checked")
 
     baseline_commit = subject.get("parent") or subject.get("rollback_target")
     if not baseline_commit:
-        return {"skipped": "promotion record carries no parent to compare against"}
+        return _skipped("promotion record carries no parent to compare against")
 
     noise = None
     if NOISE_PATH.exists():
@@ -386,7 +420,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                f"`selfmod_regression.measure_noise()` once on an unchanged tree")
         logger.warning(msg)
         S.append_event({"event": "regression_skipped", "reason": msg})
-        return {"skipped": msg}
+        return _skipped(msg)
 
     # Both arms run inside ONE pinned corpus: a frozen qmd snapshot plus a
     # single grep root. Without that the comparison measures the corpus as
@@ -401,7 +435,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                 if wt is None:
                     S.append_event({"event": "regression_skipped",
                                     "reason": "baseline worktree failed — cannot evaluate"})
-                    return {"skipped": "baseline worktree failed"}
+                    return _skipped("baseline worktree failed")
                 # The baseline tree is the shared grep corpus for BOTH arms.
                 env = pin.env_for(code_root=wt)
                 baseline = _run_arm(wt, "selfmod-paired-lkg", env)
@@ -413,17 +447,17 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         msg = f"pinned corpus unavailable: {exc}"
         logger.error(msg)
         S.append_event({"event": "regression_skipped", "reason": msg})
-        return {"skipped": msg}
+        return _skipped(msg)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
     if not baseline:
         S.append_event({"event": "regression_skipped",
                         "reason": "paired baseline run failed — cannot evaluate"})
-        return {"skipped": "paired baseline run failed"}
+        return _skipped("paired baseline run failed")
     if not current:
         S.append_event({"event": "regression_skipped", "reason": "eval run failed"})
-        return {"skipped": "eval run failed"}
+        return _skipped("eval run failed")
 
     # An arm that scored an EMPTY corpus is not a low score, it is a
     # measurement that did not happen — and the doc-side metrics read
@@ -434,7 +468,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                    f"({blob.get('corpus')}) — cannot evaluate")
             logger.error(msg)
             S.append_event({"event": "regression_skipped", "reason": msg})
-            return {"skipped": msg}
+            return _skipped(msg)
 
     # Provenance, not a gate. Under a pinned corpus every armed metric is
     # deterministic, so the measured stdev is 0.0 and the tolerance falls back
@@ -463,8 +497,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "pin": pin_provenance, "noise_floor_stale": stale_floor,
                     "detail": detail, "commit": commit})
     if not regressed:
-        return {"regressed": False, "stage": stage, "detail": detail,
-                "noise_floor_stale": stale_floor}
+        return {"status": "success", "regressed": False, "stage": stage,
+                "summary": f"no regression after {commit[:8]} vs "
+                           f"{baseline_commit[:8]} ({len(ARMED_METRICS)} armed metrics)",
+                "detail": detail, "noise_floor_stale": stale_floor}
 
     logger.error("behavioural regression after %s: %s", commit[:8], "; ".join(reasons))
 
@@ -477,5 +513,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         reason=f"behavioural regression after {commit[:8]}: " + "; ".join(reasons),
         trigger="regression", target=baseline_commit, commit=commit,
         changed_paths=subject.get("changed_paths") or [])
-    return {"regressed": True, "reasons": reasons, "fact_side_reasons": fact_side,
+    return {"status": "failed", "regressed": True, "reasons": reasons,
+            "summary": f"REGRESSION after {commit[:8]}: " + "; ".join(reasons),
+            "fact_side_reasons": fact_side,
             "rollback_requested_to": baseline_commit}

@@ -1,7 +1,7 @@
 """Lloyd autonomy helpers — task-file I/O and single-task execution.
 
 Scheduling, KG pipeline dispatch, and worker orchestration now all live in
-the unified work queue (see workers/ and docs/21-unified-work-queue.md).
+the unified work queue (see workers/ and architecture/workers.md).
 This module provides the task-file CRUD + `run_task()` that the
 `scheduled-task` source and the `/api/autonomy/run` endpoint both call.
 """

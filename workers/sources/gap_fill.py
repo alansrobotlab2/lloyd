@@ -27,7 +27,9 @@ except ImportError:  # pragma: no cover - libyaml not built
     from yaml import SafeLoader as _FastYamlLoader
 
 from workers.queue import WorkQueue, QueueItem
-from workers.sources._common import write_staging_note, run_prompt_on_primary
+from workers.sources._common import (
+    parse_confidence, run_prompt_on_primary, write_staging_note,
+)
 from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT
 
 logger = logging.getLogger("lloyd-workers.gap_fill")
@@ -131,7 +133,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     # Advance the watermark only after a successful scan+enqueue, so a crash
     # mid-scan re-does the work rather than skipping files.
     if highwater > last_mtime:
-        queue.wm_set(NAME, "last_scan_mtime", f"{highwater:.6f}")
+        queue.wm_set(NAME, "last_scan_mtime", repr(highwater))
     if enqueued:
         logger.info("Enqueued %d gap-fill items (found %d in changed files)",
                     enqueued, len(gaps))
@@ -153,33 +155,29 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         f"## Sources\n- ref 1\n- ref 2\n\n"
         f"## Confidence\n<0.0-1.0>: <one-line justification>\n"
     )
-    response = await run_prompt_on_primary(prompt, max_turns=12)
-    if not response:
-        response = "(no response)"
+    turn = await run_prompt_on_primary(prompt, max_turns=12)
+    if not turn.ok:
+        # An empty turn is a failed run, not a resolved gap. See
+        # `domain_research.execute` for what writing the note anyway cost.
+        logger.warning("gap-fill %s: %s", entity, turn.failure_summary())
+        return {"status": "failed", "summary": f"gap-fill {entity}: {turn.failure_summary()}",
+                "meta": {"empty_response": True, "stop_reason": turn.stop_reason,
+                         "num_turns": turn.num_turns}}
 
     slug = re.sub(r"[^a-z0-9]+", "-", f"{entity}-{gap.get('fact_id', '')}".lower())[:50].strip("-")
-    conf = _parse_confidence(response)
+    conf = parse_confidence(turn.text)
     path = write_staging_note(
         source=NAME,
         slug=slug or "gap",
-        body=response,
+        body=turn.text,
         confidence=conf,
         rationale=text[:200],
         source_refs=[gap.get("source_file", "")],
     )
     return {
+        "status": "success",
         "summary": f"gap-fill {entity}: conf={conf:.2f}",
-        "response": response,
+        "response": turn.text,
         "artifact_path": str(path),
+        "meta": {"stop_reason": turn.stop_reason, "num_turns": turn.num_turns},
     }
-
-
-def _parse_confidence(response: str) -> float:
-    m = re.search(r"confidence[^0-9]*([0-1](?:\.\d+)?)", response, re.IGNORECASE)
-    if not m:
-        return 0.5
-    try:
-        val = float(m.group(1))
-        return max(0.0, min(1.0, val))
-    except ValueError:
-        return 0.5

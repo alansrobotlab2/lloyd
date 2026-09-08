@@ -2,7 +2,7 @@
 
 Replaces the time-based autonomy scheduler, the vault-change KG pipeline,
 and the standalone autoresearch loop with a single persistent queue drained
-by N concurrent asyncio workers (see docs/21-unified-work-queue.md).
+by N concurrent asyncio workers (see architecture/workers.md).
 """
 
 from workers.queue import WorkQueue, QueueItem

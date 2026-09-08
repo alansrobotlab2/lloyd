@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from workers.queue import WorkQueue, QueueItem
-from workers.sources._common import write_staging_note, run_prompt_on_primary
+from workers.sources._common import run_prompt_on_primary, write_staging_note
 
 logger = logging.getLogger("lloyd-workers.bench_mine")
 
@@ -71,10 +71,23 @@ def _recent_ledger_losers(days: int = 7, limit: int = 5) -> list[dict]:
 
 
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+    # Cheap mtime gate before the expensive parse. The ledger is 11 MB and is
+    # fully json-parsed line by line; it is appended to only by an autoresearch
+    # round, which is far rarer than this source's two-hour tick, so almost
+    # every wakeup was re-reading a file that had not changed. A stat is not a
+    # correctness fix, it is 11 MB of parsing this source now does not do.
+    try:
+        mtime = LEDGER_PATH.stat().st_mtime
+    except OSError:
+        return
+    if float(queue.wm_get(NAME, "ledger_mtime") or 0.0) >= mtime:
+        return
+
     # _recent_ledger_losers reads and json-parses the full ledger.jsonl
     # (tens of MB) line by line — blocking I/O + CPU. Keep it off the shared
     # event loop so it can't stall HTTP/UI. See [[project_gap_fill_event_loop_freeze]].
     losers = await asyncio.to_thread(_recent_ledger_losers)
+    queue.wm_set(NAME, "ledger_mtime", repr(mtime))
     if not losers:
         return
     enqueued = 0
@@ -121,21 +134,26 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         f"## Expected Behavior\n<what success looks like>\n"
         f"```\n"
     )
-    response = await run_prompt_on_primary(prompt, max_turns=8)
-    if not response:
-        response = "(no response)"
+    turn = await run_prompt_on_primary(prompt, max_turns=8)
+    if not turn.ok:
+        logger.warning("bench-mine %s: %s", loser, turn.failure_summary())
+        return {"status": "failed", "summary": f"bench-mine {loser}: {turn.failure_summary()}",
+                "meta": {"empty_response": True, "stop_reason": turn.stop_reason,
+                         "num_turns": turn.num_turns}}
 
     slug = re.sub(r"[^a-z0-9]+", "-", f"mined-from-{loser}".lower())[:50].strip("-")
     path = write_staging_note(
         source=NAME,
         slug=slug,
-        body=response,
+        body=turn.text,
         confidence=0.5,
         rationale=f"derived from baseline loss on {loser} (score={score})",
         source_refs=[f"~/obsidian/lloyd/bench/{loser}.md"],
     )
     return {
+        "status": "success",
         "summary": f"bench-mine from {loser}",
-        "response": response,
+        "response": turn.text,
         "artifact_path": str(path),
+        "meta": {"stop_reason": turn.stop_reason, "num_turns": turn.num_turns},
     }

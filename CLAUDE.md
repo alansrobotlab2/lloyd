@@ -869,6 +869,64 @@ for spoken alerts and `sync-voice-config.py` pushes `livekit.tts` across at
 stage time — see "The spoken channel" above. Neither restart is required for
 the voice to *work*, only for a change to reach that consumer.
 
+## Workers: one queue, everything unasked
+
+Scheduled autonomy tasks, research, session mining, backlog triage and the
+selfmod round that implements a confirmed item all run through one SQLite
+queue drained by `workers.slots` asyncio workers **inside the backend
+process**. `architecture/workers.md` is the long version.
+
+- **`priority ASC` — a lower number runs sooner.** Read backwards once
+  already: `backlog-implement` sat at 80, behind research jobs at 70 that
+  arrive every few minutes, and the rarest, most valuable job in the pool had
+  no path to a slot.
+- **`max_inflight` is applied in the SQL, not to a window of rows.**
+  `claim_next` used to select 50 and skip over-quota rows in Python, so fifty
+  queued items from one saturated source hid every claimable row behind them
+  and the pool read the queue as empty.
+- **A raised failure retries; a returned `{"status": "failed"}` does not.**
+  That is the whole difference between "infrastructure hiccuped" and "the job
+  failed and re-running it will not help". Raising for the latter is what made
+  one timed-out autonomy task re-run three times at 600 s before the
+  scheduler's own cooldown was consulted.
+- **`skipped` is a third outcome and must be said as a status.**
+  `selfmod-regression` signalled "I could not measure anything" by returning
+  `{"skipped": reason}` — a key where a status belongs — so all 22 of its runs
+  read as successes with an empty summary. `pool.normalize_result` is the
+  contract now, and it reads that shape.
+- **Nothing in a source may block the event loop.** It is the loop that serves
+  every HTTP request and streams every chat turn, so a `subprocess.run` inside
+  `execute` does not slow the pool, it stops Lloyd answering.
+  `selfmod_regression` ran two 900-second eval arms there.
+  `tests/test_workers_pool.py` greps for the pattern.
+- **An empty turn is a failed turn.** `run_prompt_on_primary` returns a
+  `TurnResult`, not a string, because a turn that dies at `max_turns` yields
+  no text and an empty string is indistinguishable from a short answer. It
+  used to return just the text: **225 of the 498 notes under
+  `pending-research/` have the body `(no response)`**, and domain-research
+  ticked each topic off in `research-queue.md` on the way, so none can be
+  retried.
+- **A session-backed turn's own timer must beat the pool's.**
+  `run_prompt_in_session` bounds itself at `max_duration_seconds` minus 60 s
+  and cancels the turn in the backend on expiry. If the pool's `wait_for`
+  wins, it cancels the HTTP request — and the chat path deliberately keeps
+  running when its client disconnects, so the turn is orphaned while the pool
+  requeues and re-selects the same item.
+- **`session-distill` distils a session once, quiet, and only if a user wrote
+  it.** Its watermark moved with each new message, so an active chat re-
+  qualified on every tick — one was distilled 44 times — and worker sessions
+  were mined back in as observations about the user.
+- **`workers.enabled` is UI-mutable, so it lives in the override file.**
+  `POST /api/workers/enable` used to `yaml.dump(CONFIG)` over the tracked
+  `config.yaml`, which would have written expanded secrets into the tree,
+  flattened its comments, and dirtied it — stopping the selfmod loop. Same
+  route as the Tools page now.
+
+Pause and drain the pool before restarting the backend
+(`POST /api/workers/pause`): a worker turn killed mid-flight logs connection
+errors that land in the guardian's observation window and get blamed on
+whatever just landed.
+
 ## Knowledge graph
 
 Two layers, and the distinction matters:

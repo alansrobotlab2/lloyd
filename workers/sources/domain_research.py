@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from workers.queue import WorkQueue, QueueItem
-from workers.sources._common import write_staging_note, run_prompt_on_primary
+from workers.sources._common import (
+    parse_confidence, run_prompt_on_primary, write_staging_note,
+)
 
 logger = logging.getLogger("lloyd-workers.domain_research")
 
@@ -77,24 +79,35 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         f"## Sources\n- ref 1\n- ref 2\n\n"
         f"## Confidence\n<0.0-1.0>: <justification>\n"
     )
-    response = await run_prompt_on_primary(prompt, max_turns=20)
-    if not response:
-        response = "(no response)"
+    turn = await run_prompt_on_primary(prompt, max_turns=20)
+    if not turn.ok:
+        # Write nothing, and above all do NOT tick the topic off. A note whose
+        # whole body was the string "(no response)" used to be written here and
+        # the queue line marked `[x]` in the same breath, which retired the
+        # topic permanently on the strength of a turn that said nothing: 90 of
+        # this source's 142 notes are that. An empty answer is a failed run, so
+        # the queue backs it off and retries, and the topic stays open.
+        logger.warning("domain-research %r: %s", topic[:60], turn.failure_summary())
+        return {"status": "failed", "summary": f"{topic[:60]}: {turn.failure_summary()}",
+                "meta": {"empty_response": True, "stop_reason": turn.stop_reason,
+                         "num_turns": turn.num_turns}}
 
-    conf = _parse_confidence(response)
+    conf = parse_confidence(turn.text)
     path = write_staging_note(
         source=NAME,
         slug=slug,
-        body=response,
+        body=turn.text,
         confidence=conf,
         rationale=topic[:200],
         source_refs=[],
     )
     _mark_done_in_queue_file(topic)
     return {
+        "status": "success",
         "summary": f"researched {topic[:60]}",
-        "response": response,
+        "response": turn.text,
         "artifact_path": str(path),
+        "meta": {"stop_reason": turn.stop_reason, "num_turns": turn.num_turns},
     }
 
 
@@ -116,13 +129,3 @@ def _mark_done_in_queue_file(topic: str) -> None:
             QUEUE_FILE.write_text(new_content, encoding="utf-8")
     except Exception as e:
         logger.warning("Could not mark topic done in queue file: %s", e)
-
-
-def _parse_confidence(response: str) -> float:
-    m = re.search(r"confidence[^0-9]*([0-1](?:\.\d+)?)", response, re.IGNORECASE)
-    if not m:
-        return 0.5
-    try:
-        return max(0.0, min(1.0, float(m.group(1))))
-    except ValueError:
-        return 0.5

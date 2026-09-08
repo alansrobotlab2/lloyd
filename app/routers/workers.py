@@ -25,8 +25,8 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.config import CONFIG
-from app.paths import LLOYD_HOME, VAULT_ROOT, VAULT_PENDING_RESEARCH_DIR as PENDING_ROOT
+from app.config import CONFIG, save_tool_overrides
+from app.paths import VAULT_ROOT, VAULT_PENDING_RESEARCH_DIR as PENDING_ROOT
 from workers.queue import get_queue
 from workers.pool import get_pool
 
@@ -138,15 +138,43 @@ async def workers_pause(request: Request):
 
 @router.post("/api/workers/enable")
 async def workers_enable(request: Request):
+    """Turn the pool on or off, and make it stick across a restart.
+
+    This used to `yaml.dump(CONFIG)` over `config.yaml`, and each of the three
+    things wrong with that was serious on its own. `CONFIG` is the *loaded*
+    config, so the dump wrote the expanded values back: `${LIVEKIT_API_SECRET}`
+    would have been replaced by the secret itself, in a tracked file. It
+    flattened every comment in a 600-line file that is mostly comments. And it
+    dirtied the live tree, which `scripts/selfmod/gate.py` and `promote.py`
+    both refuse — so one click here silently stopped the self-modification
+    loop until a human committed the damage. That is the identical defect the
+    Tools page was moved off `config.yaml` to avoid; this endpoint kept it
+    because nothing in the frontend calls it yet.
+
+    So it takes the same route the Tools page does: the UI-mutable slice goes
+    to the untracked overrides file, which `app.config` merges at boot.
+    """
     data = await request.json() if (await request.body()) else {}
     enabled = bool(data.get("enabled", True))
     CONFIG.setdefault("workers", {})["enabled"] = enabled
     try:
-        cfg_path = LLOYD_HOME / "config.yaml"
-        cfg_path.write_text(yaml.dump(CONFIG, default_flow_style=False, allow_unicode=True))
+        save_tool_overrides()
     except Exception as e:
         logger.warning("Failed to persist workers.enabled: %s", e)
-    return JSONResponse({"enabled": enabled})
+
+    # And make it true now, not only after the next restart. A flag that says
+    # "off" beside a pool that is still draining the queue is worse than no
+    # flag at all.
+    pool = get_pool()
+    started = False
+    if enabled and (pool is None or not pool.status().get("running")):
+        await start_worker_pool()
+        started = True
+    elif not enabled and pool is not None and pool.status().get("running"):
+        await pool.stop()
+
+    return JSONResponse({"enabled": enabled, "started": started,
+                         "pool": (get_pool().status() if get_pool() else {"running": False})})
 
 
 # ── Pending-research review surface ──────────────────────────────────────
@@ -337,19 +365,16 @@ async def start_worker_pool() -> None:
         logger.info("Worker pool disabled in config — not starting")
         return
 
-    db_path = Path(cfg.get("db_path", "~/lloyd/workers.db")).expanduser()
-    slots = int(cfg.get("slots", 8))
+    from workers.queue import configured_db_path, get_queue
+
+    db_path = configured_db_path()
+    # Same default as `WorkerPool.__init__`. They disagreed (8 here, 4 there),
+    # so "what happens with no `workers.slots` in config" had two answers
+    # depending on which one you read.
+    slots = int(cfg.get("slots", 4))
     max_attempts = int(cfg.get("max_attempts", 3))
 
-    # Instantiate queue singleton with this db path.
-    from workers.queue import get_queue, _queue_instance  # noqa: F401
-    try:
-        q = get_queue()
-    except RuntimeError:
-        from workers.queue import WorkQueue
-        import workers.queue as _q
-        _q._queue_instance = WorkQueue(db_path)
-        q = get_queue()
+    q = get_queue(db_path)
 
     # Importing sources registers them into SOURCE_REGISTRY.
     import workers.sources  # noqa: F401

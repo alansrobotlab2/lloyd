@@ -233,7 +233,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     exhaustion retires it, with evidence that says exactly that.
     """
     from scripts.selfmod import backlog as B, state as S
-    from workers.sources._common import DrainActive, run_prompt_in_session
+    from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
 
     candidate = B.select_candidate(S.LEDGER_PATH)
     if candidate is None:
@@ -255,6 +255,17 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     except DrainActive as exc:
         # A landing owns the backend right now. Not a result; try next tick.
         return {"status": "skipped", "summary": f"landing in progress: {exc}"}
+    except TurnTimeout as exc:
+        # In-band, so the queue does not retry. Raising would send the item
+        # back through the retry path, and since no verdict was recorded the
+        # retry re-selects this same item — a second full triage of the item
+        # that has already proved it does not finish in the time allowed.
+        S.append_event({"event": "backlog_triage", "item_id": candidate.id,
+                        "verdict": B.INCOMPLETE, "reason": "turn timeout",
+                        "budget": budget, "auto": True})
+        logger.warning("backlog #%s: %s", candidate.id, exc)
+        return {"status": "failed", "item_id": candidate.id,
+                "summary": f"#{candidate.id}: {exc}"}
 
     session_id = run["session_id"]
     stop_reason = run.get("stop_reason")

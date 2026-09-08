@@ -30,9 +30,13 @@ def register(source) -> None:
 
 
 def get_sources_config() -> dict[str, dict]:
-    """Re-read per-source config from config.yaml each call.
+    """Re-read per-source config from CONFIG on each call.
 
-    CONFIG is mutated in place by /api/config/save — we want live updates.
+    CONFIG is mutated in place by the endpoints that toggle runtime state
+    (`/api/workers/enable`, the Tools page), so reading it per call rather
+    than caching a snapshot is what makes those toggles take effect without a
+    restart. There has never been a `/api/config/save`, which is what the
+    previous version of this docstring cited.
     """
     return CONFIG.get("workers", {}).get("sources", {}) or {}
 
