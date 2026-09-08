@@ -230,6 +230,18 @@ denied to session-less worker turns. `not_code` is now reserved for
 `external` — hardware, robots, third-party services — and vault items get
 real verdicts.
 
+**Drain first, then wait for idle.** The promoter used to poll for three
+consecutive quiet ticks and only *then* arm the drain — the one moment it is
+no longer needed. Against a worker pool that starts a research or distill job
+every few minutes, three quiet polls in a row never arrive: the first landing
+of the unattended era (SM_20260907_233449, the frontend rung's proof round)
+spent its entire 900 s budget watching `harness_runs` flicker between 1 and 2
+and never drained at all. The hand-driven rounds only ever landed because
+the pool was quieter then. `wait_idle` now arms the drain before its first
+poll (chat turns and worker jobs both honour it, so nothing new starts and
+what is in flight finishes), re-arms it inside its 180 s TTL, and releases it
+on give-up so a failed landing does not leave the backend refusing turns.
+
 **Human-only.** Some paths the loop may never touch remain: `config.yaml`,
 `data/**`, `.env*`, `pytest.ini`, `.gitignore`, and the frontend's build
 inputs. A triage whose fix needs one records `confirmed` with an acceptance

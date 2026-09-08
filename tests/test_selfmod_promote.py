@@ -160,3 +160,89 @@ def test_idle_gate_gives_up_rather_than_landing_into_a_busy_backend(monkeypatch)
     monkeypatch.setattr(P.time, "sleep", lambda s: None)
     ok, why = P.wait_idle(max_wait=0.01)
     assert not ok and "never went idle" in why
+
+
+
+def test_the_idle_wait_drains_first_and_keeps_the_drain_armed(monkeypatch):
+    """SM_20260907_233449 spent its whole 900 s budget watching harness_runs
+    flicker while the worker pool kept starting jobs, and never drained: the
+    drain was armed only after idle. Now it is armed before the first poll,
+    refreshed inside its TTL, and released on give-up."""
+    monkeypatch.setattr(P, "pool_paused", lambda: True)   # a human's pause: untouched
+    calls: list[tuple] = []
+    monkeypatch.setattr(P, "set_drain", lambda on, ttl=P.DRAIN_TTL: calls.append(("drain", on)) or True)
+    polls = iter([{"active": 0, "queued": 0, "harness_runs": 1}] * 2
+                 + [{"active": 0, "queued": 0, "harness_runs": 0}] * 3)
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (calls.append(("poll",)) or (200, {"turns": next(polls)})))
+    monkeypatch.setattr(P, "IDLE_POLL_SECONDS", 0.0)
+    ok, why = P.wait_idle(max_wait=30)
+    assert ok, why
+    assert calls[0] == ("drain", True), "armed before the first poll"
+    assert ("drain", False) not in calls, "success leaves the drain to the landing"
+
+
+def test_the_idle_wait_releases_the_drain_when_it_gives_up(monkeypatch):
+    monkeypatch.setattr(P, "pool_paused", lambda: True)   # a human's pause: untouched
+    calls: list = []
+    monkeypatch.setattr(P, "set_drain", lambda on, ttl=P.DRAIN_TTL: calls.append(on) or True)
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, {"turns": {"active": 1, "queued": 0, "harness_runs": 0}}))
+    monkeypatch.setattr(P, "IDLE_POLL_SECONDS", 0.0)
+    ok, why = P.wait_idle(max_wait=0.05)
+    assert not ok and calls[0] is True and calls[-1] is False
+
+
+def test_the_drain_is_refreshed_inside_its_ttl(monkeypatch):
+    monkeypatch.setattr(P, "pool_paused", lambda: True)   # a human's pause: untouched
+    armed: list[float] = []
+    monkeypatch.setattr(P, "set_drain", lambda on, ttl=P.DRAIN_TTL: armed.append(time.time()) or True)
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, {"turns": {"active": 0, "queued": 0, "harness_runs": 1}}))
+    monkeypatch.setattr(P, "IDLE_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(P, "DRAIN_REFRESH_SECONDS", 0.02)
+    P.wait_idle(max_wait=0.1)
+    assert len(armed) >= 3, "re-armed repeatedly while waiting"
+
+
+
+def _pool_spies(monkeypatch, *, paused_now):
+    calls: list = []
+    monkeypatch.setattr(P, "pool_paused", lambda: paused_now)
+    monkeypatch.setattr(P, "set_pool_paused", lambda p: calls.append(p) or True)
+    monkeypatch.setattr(P, "set_drain", lambda on, ttl=P.DRAIN_TTL: True)
+    monkeypatch.setattr(P, "IDLE_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(P, "_POOL_PAUSED_BY_US", False)
+    return calls
+
+
+def test_the_idle_wait_pauses_the_pool_and_resumes_it_only_on_give_up(monkeypatch):
+    """A drained job FAILS on dispatch and three failures poison it; a paused
+    pool simply starts nothing. So the promoter pauses, and releases only its
+    own pause."""
+    calls = _pool_spies(monkeypatch, paused_now=False)
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, {"turns": {"active": 1, "queued": 0, "harness_runs": 0}}))
+    ok, _ = P.wait_idle(max_wait=0.05)
+    assert not ok and calls == [True, False]
+
+
+def test_a_pause_a_human_set_is_never_released(monkeypatch):
+    calls = _pool_spies(monkeypatch, paused_now=True)
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, {"turns": {"active": 1, "queued": 0, "harness_runs": 0}}))
+    ok, _ = P.wait_idle(max_wait=0.05)
+    assert not ok and calls == [], "Alan paused it; the promoter must not undo him"
+    P.release_pool_pause()
+    assert calls == []
+
+
+def test_success_leaves_the_pool_paused_for_the_landing(monkeypatch):
+    calls = _pool_spies(monkeypatch, paused_now=False)
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, {"turns": {"active": 0, "queued": 0, "harness_runs": 0}}))
+    ok, _ = P.wait_idle(max_wait=5)
+    assert ok and calls == [True]
+    P.release_pool_pause()      # what promote()'s finally does on every exit
+    assert calls == [True, False]
+
+
+def test_pool_paused_reads_the_nested_status_shape(monkeypatch):
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, {"initialized": True, "pool": {"paused": True}}))
+    assert P.pool_paused() is True
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (503, None))
+    assert P.pool_paused() is None

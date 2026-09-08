@@ -114,6 +114,13 @@ Errors are read from `logs/server.err`, never `server.log` — `basicConfig`
 writes to stderr, so `server.log` is uvicorn's access log and holds zero
 error-shaped lines.
 
+- **The idle gate drains first, then waits.** `wait_idle` used to arm the
+  drain only *after* three quiet polls — the one moment it is no longer
+  needed. Against a worker pool that starts a research job every few minutes
+  that is a lottery, and the first landing of the unattended era
+  (SM_20260907_233449) lost it: 900 s watching `harness_runs` flicker, never
+  drained. Now the drain is armed before the first poll, refreshed inside its
+  TTL, and released on give-up.
 - **The idle gate counts `harness_runs`, not just session queues.** Worker
   jobs call `run_query` directly and never enter a queue, so a ten-minute
   research job was invisible to the gate that exists to avoid killing it. The

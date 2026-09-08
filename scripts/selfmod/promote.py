@@ -37,6 +37,7 @@ IDLE_POLL_SECONDS = 2.0
 IDLE_QUIET_POLLS = 3
 IDLE_MAX_WAIT = 900.0
 DRAIN_TTL = 180.0
+DRAIN_REFRESH_SECONDS = 60.0   # re-arm well inside the TTL while waiting for idle
 # The observation window. Liveness is watched for ALL of it, not for some
 # shorter sub-window: a build that crashes at minute ten is exactly as bad as
 # one that crashes at minute one. There was a `LIVENESS_WINDOW = 120.0` here
@@ -118,8 +119,39 @@ def set_drain(on: bool, ttl: float = DRAIN_TTL) -> bool:
     return _post(f"{BACKEND}/api/selfmod/drain", {"on": on, "ttl_s": ttl})
 
 
-def wait_idle(max_wait: float = IDLE_MAX_WAIT) -> tuple[bool, str]:
-    """Require N consecutive quiet polls before touching anything.
+def pool_paused() -> bool | None:
+    """The worker pool's pause flag, or None if the backend cannot say."""
+    status, body = _get(f"{BACKEND}/api/workers/status")
+    if status != 200 or not isinstance(body, dict):
+        return None
+    pool = body.get("pool") if isinstance(body.get("pool"), dict) else body
+    value = pool.get("paused")
+    return None if value is None else bool(value)
+
+
+def set_pool_paused(paused: bool) -> bool:
+    return _post(f"{BACKEND}/api/workers/pause", {"paused": paused})
+
+
+# True while a pause THIS promoter set is in force. The pause is in-memory in
+# the backend, so a successful landing's restart clears it; the paths that
+# matter are the ones that never restart — give-up, and every PromoteError
+# before the restart — where a pause we set must be released. A pause a human
+# set is never touched: Alan pauses the queue by hand before restarts, and a
+# promoter that silently resumed it would be undoing him.
+_POOL_PAUSED_BY_US = False
+
+
+def release_pool_pause() -> None:
+    global _POOL_PAUSED_BY_US
+    if _POOL_PAUSED_BY_US:
+        set_pool_paused(False)
+        _POOL_PAUSED_BY_US = False
+
+
+def wait_idle(max_wait: float = IDLE_MAX_WAIT, *, drain: bool = True,
+              pause_pool: bool = True) -> tuple[bool, str]:
+    """Drain, then require N consecutive quiet polls before touching anything.
 
     "Quiet" means all three counters are zero. `harness_runs` is the one that
     was missing: it counts agent loops in flight by ANY caller, and worker jobs
@@ -127,11 +159,35 @@ def wait_idle(max_wait: float = IDLE_MAX_WAIT) -> tuple[bool, str]:
     ten-minute research job kills it, and the connection failures it logs on
     the way down land inside the window the error-rate detector is watching —
     so the promotion is reverted for the damage its own landing caused.
+
+    **The drain comes first.** Without it, idle is a lottery against the worker
+    pool: a research or distill job starts every few minutes, three quiet
+    polls in a row never arrive, and the budget runs out. The first landing of
+    the unattended era (SM_20260907_233449) spent its whole 900 s watching
+    `harness_runs` flicker between 1 and 2 and never drained at all — the
+    drain used to be armed only AFTER idle, which is the one moment it is no
+    longer needed. Armed here, nothing new starts (chat turns and worker jobs
+    both honour it), what is in flight finishes, and zero arrives. It is
+    re-armed every `DRAIN_REFRESH_SECONDS` because its TTL is shorter than this
+    wait, and released on give-up so a failed landing does not leave the
+    backend refusing turns for another three minutes.
+
+    **And the worker pool is paused, not merely drained.** The drain makes a
+    dispatched worker job *fail* — each refusal counts an attempt, and three
+    attempts poison the job — whereas a paused pool simply starts nothing and
+    what is in flight finishes. Only a pause this promoter set is released.
     """
+    global _POOL_PAUSED_BY_US
+    if pause_pool and pool_paused() is False and set_pool_paused(True):
+        _POOL_PAUSED_BY_US = True
     deadline = time.time() + max_wait
     quiet = 0
     busiest = ""
+    armed_at = 0.0
     while time.time() < deadline:
+        if drain and time.time() - armed_at >= DRAIN_REFRESH_SECONDS:
+            set_drain(True, DRAIN_TTL)
+            armed_at = time.time()
         status, body = _get(f"{BACKEND}/health")
         if status == 200 and body:
             turns = body.get("turns") or {}
@@ -148,6 +204,9 @@ def wait_idle(max_wait: float = IDLE_MAX_WAIT) -> tuple[bool, str]:
         else:
             quiet = 0
         time.sleep(IDLE_POLL_SECONDS)
+    if drain:
+        set_drain(False)
+    release_pool_pause()
     return False, (f"backend never went idle within {max_wait:.0f}s"
                    + (f" (last: {busiest})" if busiest else ""))
 
@@ -458,6 +517,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         raise
     finally:
         set_drain(False)
+        release_pool_pause()
         S.clear_pause()
 
 

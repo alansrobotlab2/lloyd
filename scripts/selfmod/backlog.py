@@ -279,8 +279,49 @@ def human_only_ids(ledger: Path) -> dict[int, str]:
 
 
 def implemented_ids(ledger: Path) -> set[int]:
-    """Items an implementation turn has already been run for, whatever it did."""
-    return {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
+    """Items an implementation turn has already been run for, whatever it did —
+    unless a human has since reopened them (`reopen_item`), in which case the
+    latest event is `reopened` and the item is eligible for exactly one more
+    attempt. One attempt per item is the rule; a second is a human's call, and
+    this is how the human makes it."""
+    latest: dict[int, str] = {}
+    for d in _ledger_events(ledger, "backlog_implement"):
+        latest[int(d["item_id"])] = str(d.get("phase") or "")
+    return {i for i, phase in latest.items() if phase != "reopened"}
+
+
+def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dict:
+    """Grant an item another unattended implement attempt. Records why, in the
+    ledger and on the item, so the second attempt is auditable as a decision
+    rather than a retry loop."""
+    reason = " ".join(str(reason or "").split()).strip()
+    if not reason:
+        raise ValueError("a reason is required — a reopen is a decision, and decisions are recorded")
+    ledger = ledger or LEDGER_DEFAULT()
+    if int(item_id) not in {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}:
+        raise ValueError(f"#{item_id} has no implement attempt on record; nothing to reopen")
+    from scripts.selfmod import state as S
+    S.append_event({"event": "backlog_implement", "item_id": int(item_id), "phase": "reopened",
+                    "reason": reason}, path=ledger)
+    for item in open_items(None):
+        if item.id == int(item_id):
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+            text = item.path.read_text(encoding="utf-8")
+            fm, body = _split_frontmatter(text)
+            log = list(fm.get("activity_log") or [])
+            log.append(f"**{stamp}** — reopened for a second selfmod implement attempt: {reason}")
+            fm["activity_log"] = log
+            fm["updated"] = stamp
+            item.path.write_text(
+                f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
+                f"---\n{body}", encoding="utf-8")
+            break
+    return {"item_id": int(item_id), "reopened": True, "reason": reason}
+
+
+def LEDGER_DEFAULT() -> Path:
+    from scripts.selfmod import state as S
+    return S.LEDGER_PATH
 
 
 def select_candidate(ledger: Path,

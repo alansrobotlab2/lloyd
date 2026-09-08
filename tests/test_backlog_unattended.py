@@ -510,3 +510,25 @@ def test_the_implementer_prompt_has_a_vault_route_and_renders_the_surface(isolat
           if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
     assert ev["vault_commits"] == ["abc1234def"] and ev["surface"] == "vault"
     assert out["summary"].endswith("vault commit abc1234d")
+
+
+def test_a_human_can_grant_a_second_attempt_and_only_one(isolated):
+    """#278's first attempt found web/** denied; the block was lifted the same
+    evening. A second attempt is a human's call — and once made, it is one
+    attempt again, not an open door."""
+    write_item(isolated, 2)
+    _confirm(2)
+    S.append_event({"event": "backlog_implement", "item_id": 2, "phase": "started"}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 2, "phase": "finished"}, path=S.LEDGER_PATH)
+    assert B.select_confirmed(S.LEDGER_PATH) is None
+    with pytest.raises(ValueError, match="reason"):
+        B.reopen_item(2, "", ledger=S.LEDGER_PATH)
+    out = B.reopen_item(2, "web/src is in scope now", ledger=S.LEDGER_PATH)
+    assert out["reopened"]
+    item, _ = B.select_confirmed(S.LEDGER_PATH)
+    assert item.id == 2
+    assert "reopened for a second selfmod implement attempt" in item.path.read_text()
+    S.append_event({"event": "backlog_implement", "item_id": 2, "phase": "started"}, path=S.LEDGER_PATH)
+    assert B.select_confirmed(S.LEDGER_PATH) is None, "one more attempt, not unlimited"
+    with pytest.raises(ValueError, match="no implement attempt"):
+        B.reopen_item(99, "never attempted", ledger=S.LEDGER_PATH)
