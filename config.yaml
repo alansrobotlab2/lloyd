@@ -526,6 +526,22 @@ workers:
       interval_seconds: 7200
       max_inflight: 1
       max_duration_seconds: 1800
+    # Researches one registry topic per run through the deep-dive-research
+    # skill, and records the outcome back on the topic. Replaces
+    # `domain-research`, whose prompt never told the model to search the web:
+    # 142 notes, 90 of them empty, none ever promoted. Left disabled until the
+    # legacy import has run — an empty registry makes it a no-op either way.
+    deep-research:
+      enabled: false
+      interval_seconds: 3600
+      max_inflight: 1
+      # The turn's own budget is this minus POOL_TIMEOUT_MARGIN_SECONDS, so it
+      # cancels itself in the backend rather than being cancelled from outside.
+      max_duration_seconds: 1800
+      max_turns: 60
+      # A hard ceiling on GPU spent researching per day. The registry can hold
+      # 40 topics; without this, one night's proposals become one day's work.
+      daily_max: 3
     domain-research:
       enabled: true
       interval_seconds: 600
