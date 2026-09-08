@@ -187,6 +187,20 @@ class RunOptions:
     #
     # Inert when unset, which is every caller but the worker sources that
     # want a machine-readable verdict.
+    # Concurrent tool dispatch, for READ-ONLY batches only. A batch runs
+    # concurrently when every call in it is annotated `readOnlyHint` (or is a
+    # parse error, or ToolSearch); anything that can write — Bash, Edit,
+    # Write, a mutating MCP tool — makes the whole batch sequential.
+    #
+    # Read-only-only is not caution, it is the only classification available
+    # that is not a guess. `agent_mcp/annotations.py` is the declared table
+    # and a server that sets no hints qualifies nothing, which is that file's
+    # contract. A deny-list is the pattern it was written to replace, and
+    # `Bash(cat ...)` is exactly the shell-command classification the safety
+    # hook deliberately refuses to play at.
+    parallel_tool_calls_enabled: bool = False
+    parallel_tool_calls_max_concurrency: int = 4
+
     final_schema: dict[str, Any] | None = None
     final_schema_prompt: str = ""
     finalizer_max_tokens: int = 1024

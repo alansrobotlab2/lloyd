@@ -275,6 +275,18 @@ harness:
   finalizer:
     max_tokens: 1024
     timeout_seconds: 180
+  # Concurrent tool dispatch, for READ-ONLY batches only. A batch runs
+  # concurrently when EVERY call in it is annotated readOnlyHint (or is a
+  # parse error, or ToolSearch); any Bash, Edit, Write or mutating MCP tool
+  # in the batch makes the whole batch sequential. Read-only-only because
+  # that is the only classification available that is not a guess — see
+  # agent_mcp/annotations.py, and note that `Bash(cat ...)` is exactly the
+  # shell-command classification the safety hook refuses to attempt.
+  # Off until soaked: watch `mcp_pool:` warnings, `[iv.observer] inject`
+  # placement in transcripts, and harness.empty_terminal_iteration counts.
+  parallel_tool_calls:
+    enabled: false
+    max_concurrency: 4
   tool_search:
     enabled: false
     threshold_tools: 30

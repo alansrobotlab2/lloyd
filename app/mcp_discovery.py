@@ -225,6 +225,11 @@ def _get_harness_kwargs() -> dict:
         out["tool_search_max_results_cap"] = int(cfg["max_results_cap"])
     # Finalizer budgets. `final_schema` itself is never config — it is a
     # per-caller contract — so only the two knobs come from here.
+    par = harness.get("parallel_tool_calls") or {}
+    if "enabled" in par:
+        out["parallel_tool_calls_enabled"] = bool(par["enabled"])
+    if "max_concurrency" in par:
+        out["parallel_tool_calls_max_concurrency"] = max(1, int(par["max_concurrency"]))
     fin = harness.get("finalizer") or {}
     if "max_tokens" in fin:
         out["finalizer_max_tokens"] = int(fin["max_tokens"])

@@ -499,7 +499,121 @@ async def run_query(
             # any engine accepts. `_reorder_batch_messages` below puts the
             # slice back in wire order once the batch is done.
             batch_base = len(chat_messages)
-            for tc in tool_calls_committed:
+
+            run_parallel = (
+                getattr(options, "parallel_tool_calls_enabled", False)
+                and len(tool_calls_committed) > 1
+                and _batch_is_read_only(tool_calls_committed, _read_only_names(pool))
+            )
+
+            if run_parallel:
+                # Phase 1, wire order: announce every call and run the gates
+                # that must stay ordered (ToolSearch's mark_loaded mutates the
+                # shared LoadedToolSet; a hook deny is a decision the model
+                # must see in the order it made the calls).
+                early: dict[str, NormalizedEvent] = {}
+                for tc in tool_calls_committed:
+                    tc_evt = events.tool_call(
+                        call_id=tc["id"],
+                        name=tc["function"]["name"],
+                        args_json=tc["function"]["arguments"],
+                        args_dict=tc["_args_dict"],
+                        summary=tc.get("_summary", ""),
+                    )
+                    yield tc_evt
+                    if options.hooks is not None:
+                        await options.hooks.fire_on_event(tc_evt)
+                    pre = await _pre_dispatch(
+                        tc=tc, options=options, session_id=session_id,
+                        loaded_set=loaded_set,
+                        runtime_disallowed=current_disallowed,
+                    )
+                    if pre is not None:
+                        early[tc["id"]] = pre
+
+                caption_total, caption_present, caption_nudged, nudge_id = \
+                    _account_captions(tool_calls_committed, summary_tools,
+                                      caption_total, caption_present,
+                                      caption_nudged, session_id, num_turns)
+
+                pending = [tc for tc in tool_calls_committed
+                           if tc["id"] not in early]
+                results: dict[str, NormalizedEvent] = dict(early)
+
+                # Phase 2: overlap the MCP calls. No TaskGroup — it cancels
+                # siblings on the first exception, and one tool failing is a
+                # tool_result, not a reason to abandon the batch.
+                sem = asyncio.Semaphore(
+                    max(1, int(getattr(
+                        options, "parallel_tool_calls_max_concurrency", 4))))
+
+                async def _run_one(call: dict[str, Any]) -> NormalizedEvent:
+                    async with sem:
+                        try:
+                            return await _execute_tool_call(
+                                tc=call, pool=pool, options=options,
+                                session_id=session_id,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:      # pragma: no cover
+                            logger.exception(
+                                "loop: parallel dispatch failed on %s",
+                                call["function"]["name"])
+                            return events.tool_result(
+                                call_id=call["id"],
+                                name=call["function"]["name"],
+                                content=f"Tool dispatch failed: {exc}",
+                                is_error=True,
+                            )
+
+                tasks = [asyncio.create_task(_run_one(tc)) for tc in pending]
+                try:
+                    for evt_id in early:
+                        out = early[evt_id]
+                        if evt_id == nudge_id:
+                            out = _with_caption_nudge(out)
+                        yield out
+                        if options.hooks is not None:
+                            await options.hooks.fire_on_event(out)
+                    # Yielded as they land: the frontend and messages.py key
+                    # on call_id, so completion order costs nothing there and
+                    # buys the user seeing the first answer sooner.
+                    for fut in asyncio.as_completed(tasks):
+                        result_evt = await fut
+                        results[result_evt["call_id"]] = result_evt
+                        if result_evt["call_id"] == nudge_id:
+                            result_evt = _with_caption_nudge(result_evt)
+                            results[result_evt["call_id"]] = result_evt
+                        yield result_evt
+                        if options.hooks is not None:
+                            await options.hooks.fire_on_event(result_evt)
+                finally:
+                    # The consumer can close this generator mid-batch (a Stop
+                    # click, a disconnect). Leaving these running would keep
+                    # dispatching tools for a turn nobody is reading.
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+
+                # Phase 3: history in WIRE order regardless of who finished
+                # first, so the replayed conversation matches the assistant
+                # message's own tool_calls array.
+                for tc in tool_calls_committed:
+                    evt = results.get(tc["id"])
+                    if evt is None:
+                        continue
+                    chat_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": evt["content"],
+                    })
+                _reorder_batch_messages(chat_messages, batch_base)
+                tool_calls_committed_done = True
+            else:
+                tool_calls_committed_done = False
+
+            for tc in ([] if tool_calls_committed_done else tool_calls_committed):
                 tc_evt = events.tool_call(
                     call_id=tc["id"],
                     name=tc["function"]["name"],
@@ -553,7 +667,8 @@ async def run_query(
                     "content": result_evt["content"],
                 })
 
-            _reorder_batch_messages(chat_messages, batch_base)
+            if not tool_calls_committed_done:
+                _reorder_batch_messages(chat_messages, batch_base)
 
             # Mid-turn microcompaction. After this iteration's tool calls
             # land, clear stale tool results IF the prompt is actually
@@ -1126,6 +1241,74 @@ def _prune_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) -> None:
         if seen > keep:
             msg.pop("reasoning", None)
             msg.pop("reasoning_content", None)
+
+
+def _account_captions(tool_calls: list[dict[str, Any]], summary_tools: set[str],
+                      total: int, present: int, nudged: bool,
+                      session_id: str, iteration: int
+                      ) -> tuple[int, int, bool, str]:
+    """Caption bookkeeping for a batch, in WIRE order.
+
+    The ratchet is about the FIRST miss, not the first to come back:
+    `arguments` is replayed as history, so an uncaptioned call becomes the
+    model's own most recent example of calling that tool. In a concurrent
+    batch the first *completed* call is arbitrary, so this walks the calls in
+    the order the model made them and returns which id should carry the
+    nudge. See `events.result`.
+    """
+    nudge_id = ""
+    for tc in tool_calls:
+        if tc["function"]["name"] not in summary_tools:
+            continue
+        total += 1
+        if tc.get("_summary"):
+            present += 1
+        elif not nudged:
+            nudged = True
+            nudge_id = tc["id"]
+            logger.info(
+                "loop: %s dispatched with no summary — nudged once "
+                "(session=%s, iteration=%d)",
+                tc["function"]["name"], session_id, iteration,
+            )
+    return total, present, nudged, nudge_id
+
+
+def _read_only_names(pool: MCPPool) -> set[str]:
+    """Every discovered tool whose server declares `readOnlyHint`.
+
+    Asked of the server, not of a list kept here. `agent_mcp/annotations.py`
+    is the declared table for lloyd-mcp and a server that sets no hints
+    contributes nothing — which is that file's stated contract, and the
+    reason this is a safe default rather than a permissive one.
+    """
+    names: set[str] = set()
+    for _server, tools in pool.discovered:
+        for tool in tools:
+            ann = tool.get("annotations") or {}
+            if ann.get("readOnlyHint"):
+                names.add(tool["name"])
+    return names
+
+
+def _batch_is_read_only(tool_calls: list[dict[str, Any]],
+                        read_only: set[str]) -> bool:
+    """True when every call in the batch is safe to overlap with the others.
+
+    A parse error never dispatches, and ToolSearch is intercepted in-process
+    and touches only the LoadedToolSet, which `_pre_dispatch` mutates in wire
+    order anyway. Everything else must carry the hint. One writer makes the
+    whole batch sequential: two Edits to one file, or an Edit racing the Read
+    that justifies it, is not a reordering anybody asked for.
+    """
+    for tc in tool_calls:
+        if tc["_args_dict"].get("__parse_error__"):
+            continue
+        name = tc["function"]["name"]
+        if name == TOOLSEARCH_TOOL_NAME or name in read_only:
+            continue
+        return False
+    return True
 
 
 def _reorder_batch_messages(chat_messages: list[dict[str, Any]], base: int) -> None:

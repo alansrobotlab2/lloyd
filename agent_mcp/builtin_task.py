@@ -241,6 +241,18 @@ async def _task(args: dict[str, Any]) -> str:
         stream_chunk_timeout_s=float(
             (CONFIG.get("harness") or {}).get("stream_chunk_timeout_seconds", 0)
         ),
+        # A subagent is the fan-out case parallel dispatch exists for — it
+        # reads far more than it writes — and it constructs its own
+        # RunOptions, so without this the flag would be on for every chat
+        # turn and off for exactly the runs it helps most.
+        parallel_tool_calls_enabled=bool(
+            ((CONFIG.get("harness") or {}).get("parallel_tool_calls") or {})
+            .get("enabled", False)
+        ),
+        parallel_tool_calls_max_concurrency=max(1, int(
+            ((CONFIG.get("harness") or {}).get("parallel_tool_calls") or {})
+            .get("max_concurrency", 4)
+        )),
     )
 
     # On a resume the follow-up is appended to the STORED list, which is then

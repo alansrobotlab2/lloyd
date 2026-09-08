@@ -456,6 +456,53 @@ silently. See `_assistant_message_for_history`.
 
 **Tool naming**: Built-in tools (Bash, Read, Write, Edit, Grep, Glob, Task) are advertised to vLLM under bare names. This keeps session JSON, SOUL.md deny rules, and Inner Voice `pretooluse_deny` patterns working unchanged.
 
+## Concurrent tool dispatch (read-only batches only)
+
+`harness.parallel_tool_calls.enabled` lets one iteration's tool calls overlap.
+A batch qualifies only when **every** call in it is annotated `readOnlyHint`
+(or is a parse error, or ToolSearch). One `Bash`, `Edit`, `Write` or mutating
+MCP tool makes the whole batch sequential, byte-for-byte the old path.
+
+Read-only-only is not caution, it is the only classification available that is
+not a guess. `mcp_pool._list_tools` now carries `annotations` through, so
+qualification comes from the server's own hint rather than a second private
+list of names — the pattern `agent_mcp/annotations.py` was written to replace.
+A server that sets no hints qualifies nothing, which is that file's contract.
+`Bash(cat …)` serialises its batch: classifying shell commands as read-only is
+the guessing game the safety hook deliberately refuses to play.
+
+Three phases, and each one exists for a reason:
+
+- **Phase 1 runs in wire order and stays sequential.** `_pre_dispatch` covers
+  the parse error, the disabled-tool gate, the ToolSearch intercept (which
+  mutates the shared `LoadedToolSet`) and the hook deny. Every `tool_call`
+  event is yielded here, which is why both frames reach the UI before the
+  first result.
+- **Phase 2 overlaps only `_execute_tool_call`,** under a
+  `Semaphore(max_concurrency)`. No `TaskGroup`: it cancels its siblings on
+  the first exception, and one tool failing is a `tool_result`, not a reason
+  to abandon the batch. Results are yielded as they land — the frontend and
+  `messages.py` key on `call_id` — and a `finally` cancels outstanding tasks
+  if the generator is closed mid-batch.
+- **Phase 3 writes history in wire order** regardless of who finished first,
+  so the replayed conversation matches the assistant message's own
+  `tool_calls` array.
+
+Caption bookkeeping also runs in wire order (`_account_captions`): the ratchet
+is about the *first miss*, and the first call to come back is arbitrary.
+
+`MCPPool._invoke` takes a per-server lock on the stdio path — one
+`ClientSession` over one pair of pipes, and two concurrent `call_tool`s
+interleave their JSON-RPC frames. The HTTP path opens a session per call and
+is unlocked. The lock map outlives `_reopen`.
+
+Subagents read the same config keys (`builtin_task`), since a Task is the
+fan-out case this exists for and constructs its own `RunOptions`.
+
+Ships **off**. Soak checklist before flipping it: `mcp_pool:` warnings,
+`[iv.observer] inject` placement in transcripts, and
+`harness.empty_terminal_iteration` counts.
+
 ## Tools
 
 Every tool lives inside an MCP server — built-ins (Bash/Read/Write/Edit/Grep/Glob/Task) live inside the lloyd-mcp aggregator. Tool enable/disable state:
