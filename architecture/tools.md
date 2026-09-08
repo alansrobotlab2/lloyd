@@ -138,6 +138,11 @@ the public web, the `http_*` tools are the answer — see the `web-search-and-fe
 
 `config.yaml` holds hand-edited defaults and is read-only at boot; the Tools
 page writes `data/tool_overrides.yaml`, which is merged over it
-(`app/config.py:_merge_tool_overrides`). Resolve the effective set through
+(`app/config.py:_merge_tool_overrides`). That file is gitignored on purpose
+and must stay that way: the Tools page rewrites it on every toggle, and while
+it was tracked a single click left the live tree dirty, which the selfmod
+gate and promoter both refuse. A fresh clone therefore has no override file
+and boots on `config.yaml`, so the tracked defaults must describe the state
+actually being served — the merge warns when they disagree. Resolve the effective set through
 `app.mcp_discovery._get_disallowed_tools()` / `_get_tool_search_kwargs()` —
 reading `config.yaml` directly misses both the overrides and `${VAR}` expansion.

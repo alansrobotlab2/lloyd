@@ -433,6 +433,29 @@ Every tool lives inside an MCP server — built-ins (Bash/Read/Write/Edit/Grep/G
 
 config.yaml holds the hand-edited defaults and is **read-only at boot**; UI toggles (`/api/tool-toggle`, `/api/tool-discovery`) persist to `data/tool_overrides.yaml` (gitignored), which is merged over config.yaml at load (`app/config.py:_merge_tool_overrides`). To change tool state by hand, edit config.yaml and check `data/tool_overrides.yaml` isn't shadowing the same key.
 
+**The override file must stay untracked, and that is the whole reason it
+exists.** `save_tool_overrides` replaced dumping the entire CONFIG back over
+config.yaml on every toggle, because config.yaml is tracked and a tracked
+file rewritten by a UI click leaves the live tree dirty — which
+`scripts/selfmod/gate.py` and `promote.py` both refuse. Until 2026-09-07 the
+override file was tracked too, so the escape hatch had the defect it was
+built to avoid: one click on the Tools page dirtied the tree and silently
+stopped the self-modification loop until someone hand-committed the result
+(`4fb1ccd`, `2ef86c7` are that happening). Untracked alone is not enough —
+`git status --porcelain` lists new files as well — so it needs the
+`.gitignore` rule beside it. `tests/test_tool_overrides.py` pins both halves.
+
+Because a fresh clone has no override file, **config.yaml is the state a
+rebuild boots into**, so it has to keep describing what is actually served.
+It claimed `tool_search.enabled: true` for an unknown stretch while the
+override served `false`. The merge now warns on a key whose override differs
+from the tracked value — the `disabled_tools` half has warned since the
+2026-09-04 `browser_screenshot` incident, but `harness.tool_search` was a
+bare `.update()`, and `enabled` decides whether the model is handed all 131
+tools or a baseline plus ToolSearch. Agreement stays silent: the Tools page
+rewrites the whole block on every toggle, so warning on it would fire each
+boot and stop meaning anything.
+
 Disabled tools are enforced via `RunOptions.disallowed_tools` as `mcp__<server>__<tool>`. The harness's bare-name aliasing in `tool_schema.py` blocks both the bare and namespaced form at advertise + dispatch time, so disabling `Bash` via `mcp_servers.lloyd-mcp.disabled_tools: [Bash]` blocks the model from calling either `Bash` or `mcp__lloyd-mcp__Bash`.
 
 ### Tool-call summaries
