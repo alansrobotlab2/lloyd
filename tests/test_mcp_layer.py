@@ -174,6 +174,8 @@ async def test_dispatch_never_observed_empty_during_rebuild():
     ("Bash", {"command": "pwd", "cwd": "not-absolute"}),
     ("fact_get", {}),
     ("vault_read", {}),
+    ("research_propose", {}),
+    ("research_complete", {}),
 ])
 async def test_failures_set_is_error(tool, args):
     result = await M.call_tool(tool, args)
@@ -302,12 +304,14 @@ def test_plan_mode_blocks_actuators_and_spares_controls(names):
     blocked = set(A.plan_mode_blocked_tools(names))
     for actuator in ("Bash", "Write", "Edit", "Task", "email_send", "vault_write",
                      "fact_add", "discord_send", "browser_click", "memory_add",
-                     "autonomy_write_task", "http_request"):
+                     "autonomy_write_task", "http_request", "research_propose",
+                     "research_complete"):
         if actuator not in names:
             continue  # its module is degraded here (see _unverifiable_names)
         assert actuator in blocked, f"{actuator} should be blocked in plan mode"
     for control in ("ExitPlanMode", "EnterPlanMode", "TodoWrite", "Read", "Grep",
-                    "vault_search", "fact_get", "skills_search", "mc_navigate"):
+                    "vault_search", "fact_get", "skills_search", "mc_navigate",
+                    "research_list", "research_stats", "research_next"):
         assert control not in blocked, f"{control} must stay usable in plan mode"
 
 

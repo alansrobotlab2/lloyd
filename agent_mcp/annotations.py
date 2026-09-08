@@ -46,6 +46,8 @@ READ_ONLY: frozenset[str] = frozenset({
     "autonomy_tasks", "autonomy_get_task", "autonomy_config", "autonomy_health",
     "backlog_boards", "backlog_tasks", "backlog_get_task",
     "autoresearch_status", "autoresearch_bench_list", "autoresearch_ledger_query",
+    # research_next is read-only by construction: it peeks, the worker claims.
+    "research_list", "research_stats", "research_next",
     # Mission control
     "mc_get_state",
     # Web + browser observation
@@ -91,6 +93,7 @@ IDEMPOTENT: frozenset[str] = frozenset({
     "calendar_delete_event", "calendar_update_event",
     "contacts_delete", "contacts_update",
     "tasks_update", "fact_invalidate",
+    "research_complete",
     "ide_open_file", "ide_open_folder", "ide_close_tab",
     "mc_navigate", "mc_close_modal",
 })
