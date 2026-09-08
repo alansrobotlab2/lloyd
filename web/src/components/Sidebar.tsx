@@ -15,6 +15,7 @@ import {
   BrainCircuit,
   FileCode2,
   LayoutDashboard,
+  Globe,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -26,7 +27,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 
-export type Page = 'dashboard' | 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'ide'
+export type Page = 'dashboard' | 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'ide' | 'browser'
 
 interface NavItem {
   id: Page
@@ -44,6 +45,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'memory', label: 'Memory', icon: Brain },
   { id: 'architecture', label: 'Architecture', icon: Code2 },
   { id: 'ide', label: 'IDE', icon: FileCode2 },
+  { id: 'browser', label: 'Browser', icon: Globe },
   { id: 'skills', label: 'Skills', icon: Sparkles },
   { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'services', label: 'Services', icon: LayoutList },

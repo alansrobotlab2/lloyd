@@ -1,0 +1,346 @@
+"""Backlog #278 — MC Browser Panel contract.
+
+Pins exactly what the item's acceptance check names, plus the two regression
+guards it names:
+
+  * Chromium's headless flag is env/config-driven and defaults to True
+    (it used to be the literal ``headless=False``, which made the whole
+    feature depend on a live display).
+  * A browser-state frame (screenshot + annotated accessibility snapshot)
+    is pushed after every browser tool call.
+  * A route under ``/api/browser`` serves ``text/event-stream``, mirroring
+    the one SSE channel MC already had (``/api/mc/events``).
+  * Mission Control has a Browser page wired into the ``Page`` union and
+    the Layout render path.
+
+  * Guard: still 14 ``browser_*`` tools, no signature changes.
+  * Guard: the SSRF host check still refuses loopback/private targets.
+
+The SSE route is exercised by driving the streaming generator directly
+rather than through ``httpx.ASGITransport`` — that transport buffers the
+whole response body before returning, so an endless stream would hang the
+suite instead of proving anything.
+"""
+import asyncio
+import base64
+import json
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import server  # noqa: E402
+from app.routers import browser as browser_router  # noqa: E402
+from agent_mcp import browser as browser_module  # noqa: E402
+
+WEB = ROOT / "web" / "src"
+
+
+def _sidebar_page_union() -> str:
+    src = (WEB / "components" / "Sidebar.tsx").read_text(encoding="utf-8")
+    m = re.search(r"export type Page\s*=\s*([^\n]+)", src)
+    assert m, "no `export type Page` union in Sidebar.tsx"
+    return m.group(1)
+
+
+# ── Headless default ──────────────────────────────────────────────────────────
+
+def test_headless_defaults_to_true_without_env_or_config(monkeypatch):
+    monkeypatch.delenv("LLOYD_BROWSER_HEADLESS", raising=False)
+    monkeypatch.setattr(browser_module, "CONFIG", {}, raising=False)
+    assert browser_module._resolve_headless() is True
+
+
+def test_headless_env_var_overrides_in_both_directions(monkeypatch):
+    monkeypatch.setattr(browser_module, "CONFIG", {}, raising=False)
+    for raw, want in (("1", True), ("true", True), ("0", False), ("false", False)):
+        monkeypatch.setenv("LLOYD_BROWSER_HEADLESS", raw)
+        assert browser_module._resolve_headless() is want, raw
+
+
+def test_headless_reads_config_when_env_is_unset(monkeypatch):
+    monkeypatch.delenv("LLOYD_BROWSER_HEADLESS", raising=False)
+    monkeypatch.setattr(browser_module, "CONFIG", {"browser": {"headless": False}},
+                        raising=False)
+    assert browser_module._resolve_headless() is False
+    monkeypatch.setattr(browser_module, "CONFIG", {"browser": {"headless": True}},
+                        raising=False)
+    assert browser_module._resolve_headless() is True
+
+
+def test_launch_no_longer_carries_a_hardcoded_headless_literal():
+    src = (ROOT / "agent_mcp" / "browser.py").read_text(encoding="utf-8")
+    m = re.search(r"chromium\.launch\((.*?)\n    \)", src, re.DOTALL)
+    assert m, "could not find the chromium.launch( call"
+    launch_args = m.group(1)
+    assert "headless=_resolve_headless()" in launch_args, \
+        "chromium.launch must resolve headless from env/config"
+    assert "headless=False" not in launch_args
+
+
+# ── State frame ───────────────────────────────────────────────────────────────
+
+class _FakePage:
+    url = "https://example.test/page"
+
+    class _Locator:
+        async def aria_snapshot(self):
+            return '- webpage "Example"\n  - button "Submit" [e1]'
+
+    def locator(self, _selector):
+        return _FakePage._Locator()
+
+    async def title(self):
+        return "Example Title"
+
+    async def screenshot(self, **kwargs):
+        assert kwargs.get("type") == "jpeg", "streamed frames must not be PNG"
+        return b"\xff\xd8jpeg-bytes\xff\xd9"
+
+
+async def test_capture_state_builds_a_screenshot_plus_snapshot_frame(monkeypatch):
+    async def fake_get_page():
+        return _FakePage()
+
+    monkeypatch.setattr(browser_module, "_get_page", fake_get_page)
+    monkeypatch.setattr(browser_module, "_ref_map",
+                        {"e1": {"role": "button", "name": "Submit", "occurrence": 0}},
+                        raising=False)
+
+    frame = await browser_module._capture_state("browser_navigate")
+
+    assert frame["tool"] == "browser_navigate"
+    assert frame["url"] == "https://example.test/page"
+    assert frame["title"] == "Example Title"
+    assert 'button "Submit" [e1]' in frame["snapshot"]
+    assert frame["refs"] == [{"ref": "e1", "role": "button", "name": "Submit"}]
+    # Screenshot travels base64-encoded so the SSE frame stays text-safe.
+    assert base64.b64decode(frame["screenshot_b64"]) == b"\xff\xd8jpeg-bytes\xff\xd9"
+    assert frame["mime"] == "image/jpeg"
+
+
+async def test_capture_state_returns_none_without_a_page(monkeypatch):
+    async def fake_get_page():
+        return None
+
+    monkeypatch.setattr(browser_module, "_get_page", fake_get_page)
+    assert await browser_module._capture_state("browser_navigate") is None
+
+
+async def test_state_push_fires_after_every_tool_call(monkeypatch):
+    """The dispatcher, not just the helper: a tool call must emit a push.
+
+    The push is fire-and-forget (the tool result is already computed and the
+    agent's turn should not pay for the frontend's round-trip), so the loop
+    is yielded a few times before asserting rather than checking immediately.
+    """
+    pushed = []
+
+    def fake_schedule(tool_name):          # sync, like the real one
+        pushed.append(tool_name)
+
+    async def fake_snapshot(_full):
+        return json.dumps({"ok": True})
+
+    monkeypatch.setattr(browser_module, "_schedule_state_push", fake_schedule, raising=False)
+    monkeypatch.setattr(browser_module, "_browser_snapshot", fake_snapshot, raising=False)
+
+    await browser_module.call_tool("browser_snapshot", {})
+
+    assert pushed == ["browser_snapshot"]
+
+
+async def test_schedule_state_push_survives_garbage_collection(monkeypatch):
+    """create_task alone is not enough — asyncio weak-references tasks."""
+    started = []
+
+    async def fake_push(tool_name):
+        started.append(tool_name)
+
+    monkeypatch.setattr(browser_module, "_push_browser_state", fake_push, raising=False)
+    monkeypatch.setattr(browser_module, "_pending_pushes", set(), raising=False)
+
+    browser_module._schedule_state_push("browser_navigate")
+
+    assert browser_module._pending_pushes, "the task handle must be retained"
+    await asyncio.gather(*browser_module._pending_pushes)
+    assert started == ["browser_navigate"]
+
+
+async def test_push_sends_the_frame_to_the_backend_state_route(monkeypatch):
+    sent = {}
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None):
+            sent["url"] = url
+            sent["json"] = json
+
+            class _R:
+                status_code = 200
+
+            return _R()
+
+    async def fake_capture(tool_name):
+        return {"tool": tool_name, "url": "https://example.test"}
+
+    import httpx
+
+    monkeypatch.setattr(browser_module, "_capture_state", fake_capture, raising=False)
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(browser_module, "LLOYD_API", "http://127.0.0.1:8080", raising=False)
+
+    await browser_module._push_browser_state("browser_navigate")
+
+    assert sent["url"].endswith("/api/browser/state")
+    assert sent["json"]["url"] == "https://example.test"
+
+
+async def test_push_failures_never_break_the_tool_call(monkeypatch):
+    """Mission Control being down is not a reason for browser_navigate to fail."""
+    async def fake_capture(tool_name):
+        raise RuntimeError("no page")
+
+    monkeypatch.setattr(browser_module, "_capture_state", fake_capture, raising=False)
+    await browser_module._push_browser_state("browser_navigate")  # must not raise
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            raise OSError("backend down")
+
+        async def __aexit__(self, *a):
+            return False
+
+    async def fake_capture_ok(tool_name):
+        return {"tool": tool_name}
+
+    import httpx
+
+    monkeypatch.setattr(browser_module, "_capture_state", fake_capture_ok, raising=False)
+    monkeypatch.setattr(httpx, "AsyncClient", _Boom)
+    monkeypatch.setattr(browser_module, "LLOYD_API", "http://127.0.0.1:8080", raising=False)
+    await browser_module._push_browser_state("browser_navigate")  # must not raise
+
+
+# ── Backend route ─────────────────────────────────────────────────────────────
+
+class _FakeRequest:
+    async def is_disconnected(self):
+        return False
+
+
+@pytest.fixture
+def _clean_state(monkeypatch):
+    monkeypatch.setattr(browser_router, "_latest", None, raising=False)
+
+
+async def test_post_state_route_accepts_a_frame(_clean_state):
+    import httpx
+
+    transport = httpx.ASGITransport(app=server.app, client=("127.0.0.1", 9999))
+    async with httpx.AsyncClient(transport=transport, base_url="http://lloyd-test") as client:
+        r = await client.post("/api/browser/state", json={"url": "https://a.test", "tool": "browser_navigate"})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        r2 = await client.post("/api/browser/state", json={"url": "https://b.test"})
+        assert r2.status_code == 200
+
+
+async def test_get_state_route_streams_pushed_frames_to_subscribers(_clean_state):
+    resp = await browser_router.get_browser_state(_FakeRequest())
+    assert isinstance(resp, browser_router.StreamingResponse)
+    assert resp.media_type == "text/event-stream"
+
+    gen = resp.body_iterator
+    hello = await asyncio.wait_for(gen.__anext__(), 5)
+    await browser_router.post_browser_state(
+        {"url": "https://a.test", "tool": "browser_navigate", "snapshot": "- webpage"}
+    )
+    state = await asyncio.wait_for(gen.__anext__(), 5)
+    await gen.aclose()
+
+    body = "".join(x.decode() if isinstance(x, bytes) else x for x in (hello, state))
+    assert "event: hello" in body
+    assert "event: state" in body
+    assert "https://a.test" in body
+
+
+async def test_pushed_frame_fans_out_to_a_subscribed_sse_client(_clean_state):
+    q = browser_router.subscribe()
+    try:
+        await browser_router.post_browser_state({"url": "https://fan.test"})
+        evt = await asyncio.wait_for(q.get(), 5)
+        assert evt["url"] == "https://fan.test"
+    finally:
+        browser_router.unsubscribe(q)
+
+
+# ── Frontend wiring ───────────────────────────────────────────────────────────
+
+def test_browser_page_component_exists():
+    hits = list(WEB.rglob("*[Bb]rowser*"))
+    assert hits, "no browser page component under web/src"
+    assert any(h.name == "BrowserPage.tsx" for h in hits)
+
+
+def test_browser_is_a_member_of_the_page_union():
+    assert "'browser'" in _sidebar_page_union()
+
+
+def test_browser_page_is_imported_and_rendered_by_layout():
+    src = (WEB / "components" / "Layout.tsx").read_text(encoding="utf-8")
+    assert re.search(r"import\s+BrowserPage|BrowserPage\s*=", src), \
+        "Layout.tsx must import the Browser page"
+    assert re.search(r"^\s*browser:\s*", src, re.MULTILINE), \
+        "Layout.tsx must map the 'browser' page to its component"
+
+
+def test_browser_page_subscribes_to_the_state_stream():
+    page = next(WEB.rglob("BrowserPage.tsx"))
+    src = page.read_text(encoding="utf-8")
+    assert "/api/browser/state" in src
+    assert "EventSource" in src
+    assert "<img" in src, "the frame must render as an image"
+
+
+# ── Regression guards named by the item ───────────────────────────────────────
+
+def test_still_fourteen_browser_tools_with_unchanged_names():
+    src = (ROOT / "agent_mcp" / "browser.py").read_text(encoding="utf-8")
+    assert src.count('Tool(name="browser_') == 14
+
+
+async def test_tool_schemas_still_expose_the_same_fourteen_tools():
+    tools = await browser_module.list_tools()
+    assert len(tools) == 14
+    assert {t.name for t in tools} == {
+        "browser_navigate", "browser_snapshot", "browser_click", "browser_type",
+        "browser_scroll", "browser_press", "browser_tabs", "browser_screenshot",
+        "browser_evaluate", "browser_fill", "browser_wait", "browser_select",
+        "browser_drag", "browser_cookies",
+    }
+
+
+def test_ssrf_host_check_is_intact():
+    assert browser_module._is_private_host("localhost") is True
+    assert browser_module._is_private_host("127.0.0.1") is True
+    assert browser_module._is_private_host("10.1.2.3") is True
+    assert browser_module._is_private_host("192.168.0.7") is True
+    assert browser_module._is_private_host("169.254.1.1") is True
+    assert browser_module._is_private_host("::1") is True
+    assert browser_module._is_private_host("example.com") is False

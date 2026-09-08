@@ -12,11 +12,13 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import time
 import urllib.parse
 from pathlib import Path
 
+import httpx
 from mcp.types import Tool
 
 from agent_mcp._shared import text_result
@@ -26,9 +28,42 @@ logger = logging.getLogger("lloyd-browser")
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 CHROMIUM_EXECUTABLE = "/usr/bin/chromium"
-from app.paths import SCREENSHOTS_DIR  # was an absolute literal
+from app.config import CONFIG, service_url  # noqa: E402
+from app.paths import SCREENSHOTS_DIR  # noqa: E402  (was an absolute literal)
 MAX_SNAPSHOT_CHARS = 8000
 MAX_TABS = 10
+
+# Where to publish post-call browser state (Mission Control's Browser tab).
+LLOYD_API = os.environ.get("LLOYD_API_URL") or service_url("backend", "http://127.0.0.1:8080")
+
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
+
+
+def _resolve_headless() -> bool:
+    """Whether to launch Chromium without a UI. Defaults to headless.
+
+    Headed mode needs a live display, and the agent-worker unit carries no
+    DISPLAY of its own (backlog #402), so a literal headed default meant the
+    whole browser surface came up only when someone happened to be logged in
+    at the desktop. Opt back in for debugging with `browser.headless: false`
+    in config.yaml, or LLOYD_BROWSER_HEADLESS=0 in the environment — the env
+    wins, so a one-off debug doesn't need a config edit.
+    """
+    raw = os.environ.get("LLOYD_BROWSER_HEADLESS")
+    if raw is None or not raw.strip():
+        configured = (CONFIG.get("browser") or {}).get("headless")
+        if configured is None:
+            return True
+        raw = str(configured)
+    val = raw.strip().lower()
+    if val in _TRUTHY:
+        return True
+    if val in _FALSY:
+        return False
+    logger.warning("browser: unparseable headless value %r — staying headless", raw)
+    return True
+
 
 # ── SSRF protection ────────────────────────────────────────────────────────────
 
@@ -108,7 +143,7 @@ async def _launch_browser_locked():
     _pw = await async_playwright().start()
     _browser = await _pw.chromium.launch(
         executable_path=CHROMIUM_EXECUTABLE,
-        headless=False,
+        headless=_resolve_headless(),
         args=[
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -373,6 +408,69 @@ async def _browser_screenshot() -> str:
         return json.dumps({"ok": True, "path": str(path), "size_bytes": len(data), "data_base64": b64})
     except Exception as exc:
         return json.dumps({"error": f"Screenshot failed: {exc}"})
+
+
+# ── Live state for Mission Control (#278) ─────────────────────────────────────
+
+async def _capture_state(tool_name: str) -> dict | None:
+    """Build one Browser-tab frame: the current view plus its a11y refs.
+
+    Returns None when no page exists — asking for state right after a tab
+    was closed is normal, not an error worth pushing.
+
+    JPEG rather than PNG because this travels on every single tool call: the
+    same 1280x800 frame measured ~190 KB as PNG against ~15-25 KB here, and
+    the frame is only ever displayed scaled down in the browser tab.
+    """
+    page = await _get_page()
+    if page is None:
+        return None
+    try:
+        shot = await page.screenshot(type="jpeg", quality=72, full_page=False)
+    except Exception as exc:
+        logger.debug("browser state: screenshot failed: %s", exc)
+        return None
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    snapshot = ""
+    refs: dict[str, dict] = {}
+    try:
+        raw = await page.locator("body").aria_snapshot()
+        snapshot, _ = _parse_aria_snapshot(raw, refs)
+    except Exception as exc:
+        logger.debug("browser state: aria_snapshot failed: %s", exc)
+    return {
+        "tool": tool_name,
+        "url": page.url,
+        "title": title,
+        "ts": time.time(),
+        "mime": "image/jpeg",
+        "screenshot_b64": base64.b64encode(shot).decode(),
+        "snapshot": snapshot[:MAX_SNAPSHOT_CHARS],
+        "refs": [
+            {"ref": rid, "role": info.get("role", ""), "name": info.get("name", "")}
+            for rid, info in refs.items()
+        ],
+    }
+
+
+async def _push_browser_state(tool_name: str) -> None:
+    """Publish the current browser view to the backend's /api/browser/state.
+
+    Deliberately cannot raise. The browser tools have exactly one caller —
+    the agent turn — and Mission Control not listening (or being down entirely)
+    must never turn a successful navigation into a failed tool call.
+    """
+    try:
+        frame = await _capture_state(tool_name)
+        if frame is None:
+            return
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(f"{LLOYD_API}/api/browser/state", json=frame)
+    except Exception as exc:
+        logger.debug("browser state push failed: %s", exc)
 
 
 async def _browser_evaluate(script: str) -> str:
@@ -747,7 +845,27 @@ async def call_tool(name: str, arguments: dict):
     if not handler:
         return text_result(json.dumps({"error": f"Unknown tool: {name}"}))
     result = await handler()
+    # Mission Control's Browser tab mirrors what the agent is looking at, so
+    # every call that can change the view republishes it. Fire-and-forget on
+    # purpose: the tool result is already computed, and awaiting the push
+    # would charge every browser call a loopback round-trip and make the
+    # frontend's uptime everyone else's problem.
+    _schedule_state_push(name)
     return text_result(result)
+
+
+_pending_pushes: set[asyncio.Task] = set()
+
+
+def _schedule_state_push(tool_name: str) -> None:
+    """Fire a state push without making the tool call wait for it.
+
+    The task handle is kept for its lifetime — asyncio only weak-references
+    tasks, so a bare create_task can be garbage-collected before it runs.
+    """
+    task = asyncio.create_task(_push_browser_state(tool_name))
+    _pending_pushes.add(task)
+    task.add_done_callback(_pending_pushes.discard)
 
 
 async def shutdown() -> None:

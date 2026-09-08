@@ -267,6 +267,38 @@ export interface ServicesData {
   timestamp: string
 }
 
+/**
+ * One frame of the agent's live browser session (backlog #278).
+ *
+ * `refs` carries the accessibility refs the agent sees (`e1`, `e2`, …).
+ * `x`/`y`/`w`/`h` are optional because the MCP server only knows geometry
+ * when Playwright reported a bounding box; a frame with no geometry is still
+ * a valid frame — the overlay just has nothing to draw.
+ */
+export interface BrowserRef {
+  ref: string
+  role: string
+  name: string
+  x?: number
+  y?: number
+  w?: number
+  h?: number
+}
+
+export interface BrowserFrame {
+  /** Frame JSON as delivered by GET /api/browser/frame carries `active`; the
+   *  SSE `state` event does not. Both shapes arrive here. */
+  active?: boolean
+  tool?: string
+  url?: string
+  title?: string
+  ts?: number
+  mime?: string
+  snapshot?: string
+  screenshot_b64?: string
+  refs?: BrowserRef[]
+}
+
 export interface ServiceDetail {
   id: string
   name: string
@@ -1146,6 +1178,12 @@ export const api = {
     }).then(r => r.json()),
 
   // Active SDK session subprocesses
+  // Live browser session mirror (#278) — the frame that was current when the
+  // agent last touched the browser. SSE /api/browser/state delivers the
+  // updates; this is the cold-start read so a fresh tab isn't blank.
+  getBrowserFrame: (): Promise<BrowserFrame> =>
+    fetch(`${API_BASE}/browser/frame`).then(r => r.json()),
+
   getActiveProcs: (): Promise<{ procs: ActiveProc[] }> =>
     fetch(`${API_BASE}/sessions/active-procs`).then(r => r.json()),
   killSessionProc: (sessionId: string): Promise<{ killed: boolean; session_id: string }> =>
