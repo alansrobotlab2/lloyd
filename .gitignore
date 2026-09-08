@@ -3,7 +3,14 @@
 .venvs/
 __pycache__/
 *.pyc
-/web/node_modules/
+# No trailing slash: a trailing-slash pattern is directory-only, and
+# `gate.py`'s frontend rung puts a *symlink* named `node_modules` into every
+# worktree it type-checks (pointing at the live tree's 636 MB copy). Git does
+# not treat a symlink as a directory, so `/web/node_modules/` left that entry
+# untracked in the worktree — the same shape as the graphify-out problem
+# below. Both cleanliness checks look at the live tree today, so nothing has
+# broken yet; this closes it before something does.
+/web/node_modules
 
 # ─── Build output ───────────────────────────────────
 /web/dist/

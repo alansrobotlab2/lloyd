@@ -1,3 +1,23 @@
+/** One file a turn wrote, as recorded by the aggregator's change ledger. */
+export interface ChangedFile {
+  path: string
+  op: 'edit' | 'write' | 'create' | string
+  /** Epoch seconds when this file was put back, or null. */
+  reverted_at: number | null
+}
+
+export interface FilesChanged {
+  turn_id: string
+  files: ChangedFile[]
+}
+
+export interface RevertResult {
+  path: string
+  op: string
+  status: 'restored' | 'deleted' | 'refused' | 'skipped' | string
+  reason?: string
+}
+
 export interface TurnStats {
   input_tokens: number
   output_tokens: number
@@ -12,6 +32,8 @@ export interface TurnStats {
   // `{ result_chars, is_error }`. Keeping these optional avoids a union split.
   is_error?: boolean
   result_chars?: number
+  /** Present when this turn wrote files. Persisted, so a reload keeps it. */
+  files_changed?: FilesChanged
 }
 
 export interface QueueState {
@@ -835,6 +857,26 @@ export const api = {
       `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/cancel${qs}`,
       { method: 'POST' },
     )
+    return response.json()
+  },
+
+  /** Put back the files a turn wrote. Omit `paths` for all of them. */
+  async revertTurn(
+    sessionId: string,
+    turnId: string,
+    paths?: string[],
+  ): Promise<{ session_id: string; turn_id: string; results: RevertResult[] }> {
+    const response = await fetch(
+      `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/revert`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(paths ? { paths } : {}),
+      },
+    )
+    if (!response.ok) {
+      throw new Error(`revert failed: ${response.status} ${await response.text()}`)
+    }
     return response.json()
   },
 

@@ -4,7 +4,7 @@ import {
   Wrench, Square, Sparkles,
 } from 'lucide-react'
 import { Streamdown } from 'streamdown'
-import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState, type InnerVoiceObservation } from '../api'
+import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState, type InnerVoiceObservation, type ChangedFile, type RevertResult } from '../api'
 import TodoList from './TodoList'
 import PlanHeader from './PlanHeader'
 import GoalHeader from './GoalHeader'
@@ -74,6 +74,89 @@ interface MessageRowProps {
   /** Compact mode: drop avatars, full-width bubbles. Used by the right
    *  chat sidebar to reclaim horizontal space in narrow layouts. */
   compact?: boolean
+  /** The session this row belongs to. Only the changed-files footer needs
+   *  it — reverting is addressed by (session, turn). */
+  sessionId?: string
+}
+
+/** "changed 2 files: a.py, b.tsx · revert", with the undo behind a confirm.
+ *
+ *  `~/lloyd` is production: a saved file is a deploy, and until the change
+ *  ledger existed a turn that edited three files said nothing about which
+ *  three. The revert is per-file on the server, and a file something else
+ *  wrote since is REFUSED rather than clobbered — so the outcome has to be
+ *  rendered per file, not as a single success. */
+function ChangedFilesFooter({ sessionId, turnId, files }: {
+  sessionId: string
+  turnId: string
+  files: ChangedFile[]
+}) {
+  const [results, setResults] = useState<RevertResult[] | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const outcomes = useMemo(() => {
+    const map = new Map<string, RevertResult>()
+    for (const r of results ?? []) map.set(r.path, r)
+    return map
+  }, [results])
+
+  const allReverted = files.length > 0 && files.every(
+    f => f.reverted_at != null || ['restored', 'deleted'].includes(
+      outcomes.get(f.path)?.status ?? ''))
+
+  const doRevert = useCallback(async () => {
+    if (!window.confirm(
+      `Put back ${files.length} file${files.length === 1 ? '' : 's'} this turn wrote?\n\n`
+      + files.map(f => f.path).join('\n')
+      + `\n\nA file that changed since will be refused, not overwritten.`
+    )) return
+    setBusy(true)
+    try {
+      const res = await api.revertTurn(sessionId, turnId)
+      setResults(res.results)
+    } catch (e) {
+      setResults(files.map(f => ({
+        path: f.path, op: f.op, status: 'refused', reason: String(e),
+      })))
+    } finally {
+      setBusy(false)
+    }
+  }, [sessionId, turnId, files])
+
+  return (
+    <span className="flex flex-wrap items-center gap-x-1.5">
+      <span className={allReverted ? 'text-muted-foreground/60' : 'text-amber-600'}>
+        changed {files.length} file{files.length === 1 ? '' : 's'}:
+      </span>
+      {files.map(f => {
+        const outcome = outcomes.get(f.path)
+        const done = f.reverted_at != null
+          || ['restored', 'deleted'].includes(outcome?.status ?? '')
+        return (
+          <span key={f.path} title={f.path} className={done ? 'line-through opacity-60' : ''}>
+            {f.path.split('/').pop()}
+            {outcome?.status === 'refused' && (
+              <span className="text-destructive ml-1">
+                (refused: {outcome.reason ?? 'changed since'})
+              </span>
+            )}
+          </span>
+        )
+      })}
+      {allReverted ? (
+        <span className="text-muted-foreground/60">(reverted)</span>
+      ) : (
+        <button
+          type="button"
+          onClick={doRevert}
+          disabled={busy}
+          className="underline underline-offset-2 hover:text-foreground disabled:opacity-50"
+        >
+          {busy ? 'reverting…' : 'revert'}
+        </button>
+      )}
+    </span>
+  )
 }
 
 const MessageRow = memo(function MessageRow({
@@ -84,6 +167,7 @@ const MessageRow = memo(function MessageRow({
   toolCallIndex,
   forceLeftAlign = false,
   compact = false,
+  sessionId = '',
 }: MessageRowProps) {
   const hasContent = msg.content?.some(c => c.text?.trim())
   if (!hasContent) return null
@@ -268,6 +352,13 @@ const MessageRow = memo(function MessageRow({
               {s.cache_create > 0 && <span className="text-amber-700">cache✎: {s.cache_create.toLocaleString()}</span>}
               {s.duration_ms != null && <span>time: {(s.duration_ms / 1000).toFixed(1)}s</span>}
               {s.num_turns != null && s.num_turns > 1 && <span>turns: {s.num_turns}</span>}
+              {s.files_changed && s.files_changed.files.length > 0 && sessionId && (
+                <ChangedFilesFooter
+                  sessionId={sessionId}
+                  turnId={s.files_changed.turn_id}
+                  files={s.files_changed.files}
+                />
+              )}
             </>)
           })()}
           {msg.context_tokens != null && msg.context_tokens > 0 && isTool && (() => {
@@ -1200,6 +1291,7 @@ export default function ChatPanel({
             isMobile={isMobile}
             toolCallIndex={toolCallIndex}
             compact={compact}
+            sessionId={sessionKey ?? ''}
           />
         ))}
 

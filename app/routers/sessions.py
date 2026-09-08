@@ -708,6 +708,65 @@ async def cancel_session(session_id: str, request: Request):
     return JSONResponse({"cancelled": True, "drained": drained})
 
 
+@router.post("/api/sessions/{session_id}/turns/{turn_id}/revert")
+async def revert_turn(session_id: str, turn_id: str, request: Request):
+    """Put back the files a turn wrote.
+
+    Proxies to the aggregator, which owns the change ledger because it owns
+    the filesystem tools. Then stamps `reverted_at` onto the matching
+    assistant message's persisted `stats.files_changed`, so a reload shows
+    the footer in its reverted state rather than offering the button again.
+
+    Per-file outcomes are returned as they came back: a file something else
+    has written since is `refused`, by name, because restoring the pre-image
+    there would destroy that write. Partial success is the normal case and
+    the caller has to see which half.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    paths = body.get("paths")
+    paths = [str(p) for p in paths] if isinstance(paths, list) else None
+
+    import httpx
+    from app.config import service_url
+
+    base = service_url("lloyd_mcp", "http://127.0.0.1:8500/mcp").rstrip("/")
+    if base.endswith("/mcp"):
+        base = base[: -len("/mcp")]
+    payload = {"session": session_id, "turn": turn_id}
+    if paths:
+        payload["paths"] = paths
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cli:
+            resp = await cli.post(f"{base}/changes/revert", json=payload)
+    except Exception as exc:
+        raise HTTPException(status_code=503,
+                            detail=f"change ledger unreachable: {exc}") from None
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code,
+                            detail=resp.text[:300])
+    results = resp.json().get("results") or []
+
+    reverted = {r["path"] for r in results
+                if r.get("status") in ("restored", "deleted")}
+    if reverted:
+        def _stamp(data: dict) -> None:
+            now = time.time()
+            for msg in data.get("messages") or []:
+                fc = (msg.get("stats") or {}).get("files_changed") or {}
+                if fc.get("turn_id") != turn_id:
+                    continue
+                for f in fc.get("files") or []:
+                    if f.get("path") in reverted:
+                        f["reverted_at"] = now
+        await mutate_session(session_id, _stamp)
+
+    return JSONResponse({"session_id": session_id, "turn_id": turn_id,
+                         "results": results})
+
+
 @router.get("/api/sessions/{session_id}/queue")
 async def get_session_queue(session_id: str):
     """Return a snapshot of the session's turn queue."""

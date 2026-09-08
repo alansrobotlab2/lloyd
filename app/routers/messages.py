@@ -294,6 +294,46 @@ def _load_session_goal(session_id: str) -> dict:
         return {}
 
 
+async def _fetch_files_changed(session_id: str, turn_id: str) -> dict | None:
+    """What this turn wrote, from the aggregator's change ledger.
+
+    Over loopback, because the ledger lives in the lloyd-mcp process — the
+    aggregator owns the filesystem tools, so the backend has no handle on
+    what they wrote. Resolved through `service_url` rather than a literal
+    port: `dashboard.py` hardcodes 8500 and that is the bug this route does
+    not need to inherit.
+
+    Any failure returns None. A footer is worth having and not worth failing
+    a turn for.
+    """
+    if not session_id or not turn_id:
+        return None
+    try:
+        import httpx
+        from app.config import service_url
+        base = service_url("lloyd_mcp", "http://127.0.0.1:8500/mcp")
+        base = base.rstrip("/")
+        if base.endswith("/mcp"):
+            base = base[: -len("/mcp")]
+        async with httpx.AsyncClient(timeout=2.0) as cli:
+            resp = await cli.get(f"{base}/changes",
+                                 params={"session": session_id, "turn": turn_id})
+        if resp.status_code != 200:
+            return None
+        files = resp.json().get("files") or []
+    except Exception as exc:
+        logger.warning("files_changed: could not read the ledger: %s", exc)
+        return None
+    if not files:
+        return None
+    return {
+        "turn_id": turn_id,
+        "files": [{"path": f.get("path", ""), "op": f.get("op", ""),
+                   "reverted_at": f.get("reverted_at")}
+                  for f in files],
+    }
+
+
 def _final_schema_for(session_id: str, data: dict) -> dict | None:
     """The JSON schema a caller wants the finished turn restated under.
 
@@ -534,6 +574,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # (they're not available when options is built in post_message_stream).
     options.cancel_event = cancel_event
     options.session_id = session_id
+    # The turn the change ledger records file writes against. Set here rather
+    # than at construction because it is the SessionTurn's id, and one
+    # RunOptions can be reused across the user, ambient and voice paths that
+    # all run through this function.
+    options.turn_id = turn.turn_id
 
     # Inner Voice (#345) — sampled stream-event capture. K=50 deltas; each
     # firing captures position + delta length so we can reconstruct the
@@ -916,6 +961,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 if options.final_schema:
                     stream_stats["structured"] = evt.get("structured")
                     stream_stats["structured_error"] = evt.get("structured_error", "")
+                # What this turn wrote. On `stream_stats` for the same reason
+                # `structured` is: that dict object is both persisted on the
+                # final assistant message and sent in every `done` branch, so
+                # the footer survives a reload without a second code path.
+                files_changed = await _fetch_files_changed(session_id, turn.turn_id)
+                if files_changed:
+                    stream_stats["files_changed"] = files_changed
                 stats_dict = stream_stats
 
                 result_text = full_response
