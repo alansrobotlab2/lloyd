@@ -31,6 +31,38 @@ logger = logging.getLogger("lloyd-workers.common")
 # stop the turn, and then let it finish persisting the transcript.
 POOL_TIMEOUT_MARGIN_SECONDS = 60
 
+#: The self-modification loop is not a worker's to drive. Named here rather
+#: than inline because two turn paths need it now: `run_prompt_on_primary`
+#: bakes it in, and a session-backed source passes it as `extra_disallowed`.
+#: `tests/test_selfmod_hardening.py::test_worker_turns_cannot_drive_the_loop`
+#: greps this file for these names, so this is where they live.
+WORKER_SELFMOD_BAN: tuple[str, ...] = (
+    "selfmod_start", "selfmod_gate", "selfmod_land",
+    "selfmod_abort", "selfmod_rollback",
+    "selfmod_vault_land", "selfmod_vault_revert",
+)
+
+
+def build_skill_prompt(skill_text: str, *, job: str, task_block: str) -> str:
+    """Render a vault skill plus its concrete task into one worker prompt.
+
+    The sibling of `autonomy._build_task_prompt`, and separate from it for two
+    reasons. That one announces "You are executing autonomy task #N", which is
+    a lie from a worker source and the kind of lie a model reasons from. And it
+    prepends the `[SILENT]` hint, which exists so a scheduled task can decline
+    to notify the user — a worker reports through its run record instead, and
+    a turn that answers `[SILENT]` here would read as an empty turn.
+    """
+    return "\n".join([
+        f'[SYSTEM: You are running the "{job}" worker job. Follow the skill '
+        f'below, applied to the task at the end. Work autonomously and do not '
+        f'ask for confirmation.]',
+        "",
+        skill_text,
+        "",
+        task_block,
+    ])
+
 
 def parse_confidence(response: str, default: float = 0.5) -> float:
     """Pull `## Confidence\\n<0.0-1.0>` out of a research response.
@@ -178,9 +210,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
     # rewrites production sat one prompt injection away from a source whose
     # entire job is ingesting untrusted text. The backlog triage worker was
     # told not to start a round IN ITS PROMPT, which is not a control.
-    for tname in ("selfmod_start", "selfmod_gate", "selfmod_land",
-                  "selfmod_abort", "selfmod_rollback",
-                  "selfmod_vault_land", "selfmod_vault_revert"):
+    for tname in WORKER_SELFMOD_BAN:
         disallowed.append(tname)
         disallowed.append(f"mcp__lloyd-mcp__{tname}")
 
@@ -318,7 +348,8 @@ async def _cancel_session_turn(backend: str, session_id: str) -> bool:
 async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                                 max_turns: int = 60, priority: int = 1,
                                 inner_voice: bool = True,
-                                timeout_seconds: float | None = None) -> dict:
+                                timeout_seconds: float | None = None,
+                                extra_disallowed: list[str] | None = None) -> dict:
     """Run one turn through the backend's own chat path, in a real session.
 
     This is the counterpart to `run_prompt_on_primary`, and the difference is
@@ -342,6 +373,16 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     room, and its final text is not a conclusion however finished it reads.
     Raises `DrainActive` if a landing has the backend draining; the caller
     should skip this run rather than count it.
+
+    **`extra_disallowed` is the only tool control this path has**, and until a
+    caller passes it there was none. `run_prompt_on_primary` bakes the selfmod
+    ban into its own `RunOptions`; this path posts to `/api/message/stream`,
+    which builds `disallowed_tools` from config plus whatever the body names
+    (`app/routers/messages.py::_refresh_disallowed_for_session`). Nothing in
+    that endpoint reads `platform`, so a worker session is handed exactly the
+    toolbox a chat gets. That is tolerable for backlog triage, which reads only
+    this repo, and not for a research turn that fetches arbitrary web pages
+    into its context.
 
     **The budget is wall-clock, and it has to be smaller than the pool's.**
     `timeout_seconds` used to be handed straight to `httpx.Timeout`, where it
@@ -367,6 +408,8 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     session_id = new_worker_session(title=title, source=source, inner_voice=inner_voice)
     payload = {"session_id": session_id, "text": prompt, "model": "primary",
                "priority": int(priority), "max_turns": int(max_turns)}
+    if extra_disallowed:
+        payload["extra_disallowed"] = list(extra_disallowed)
 
     out: dict = {"text": "", "session_id": session_id, "stop_reason": None,
                  "num_turns": None, "errors": []}
