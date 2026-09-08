@@ -1482,6 +1482,31 @@ clarify channels — and a subagent has none of those. A subagent-shaped observe
 (terminal-only, no ambient) is plausible if runaway subagent loops become a
 real pattern.
 
+## Inject placement inside a tool batch
+
+`_apply_inject` appends a `user` message directly to
+`state.chat_messages_handle`, which is the harness's live buffer. When the
+primary made SEVERAL tool calls in one iteration and the inject fired between
+two of them, that left
+
+    assistant(tool_calls) -> user -> tool
+
+for every call after the first — a shape no engine accepts. It was rare enough
+to go unnoticed (the inject has to land mid-batch) and its failure surfaces as
+a stream error rather than as anything naming Inner Voice.
+
+`app/harness/loop.py::_reorder_batch_messages` fixes it at the harness end
+rather than here: it snapshots where the batch's messages begin and, once the
+batch is done, moves the tool messages ahead of anything a hook appended
+during it. Tool messages keep their order and so do the injects; only the
+boundary moves, and it mutates the list in place so this module's handle stays
+valid.
+
+The fix is at the harness end on purpose. The observer is not the only thing
+that can append mid-batch, and a rule enforced where the messages are
+assembled holds for the next appender too. Concurrent tool dispatch
+(`harness.parallel_tool_calls`) would have made this routine rather than rare.
+
 ## Known defects
 
 Open as of 2026-09-05. Each is reachable on the current default config. The

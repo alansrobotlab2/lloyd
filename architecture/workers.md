@@ -274,6 +274,42 @@ user session**.
 
 ---
 
+## 5.1 Structured verdicts
+
+`backlog-selfmod`'s verdict was parsed out of `VERDICT:` / `SURFACE:` lines by
+regex. That works until a turn words it slightly differently, and then a
+`confirmed` is recorded as `unverifiable` and an item is retired for a
+formatting reason.
+
+`run_prompt_in_session(..., final_schema=...)` asks the harness for one extra
+completion after the turn ends, restating its conclusion under a JSON schema
+(`app/harness/finalizer.py`). It returns `structured` and `structured_error`
+beside `text` and `stop_reason`.
+
+- `scripts/selfmod/backlog.TRIAGE_VERDICT_SCHEMA` is built from
+  `VERDICTS`/`SURFACES`, not restated — one list, or a new verdict lands in the
+  grammar and not the validator. It carries no `maxLength`: that is enforced by
+  the guided decoder, so the model would stop mid-sentence at the limit rather
+  than write something shorter. The clamps stay in `parse_verdict`.
+- **The regex stays and the `VERDICT:` block stays in the prompt.** The
+  finalizer is *skipped* whenever the turn did not end of its own accord —
+  forcing a verdict out of a `max_turns` turn recreates exactly the failure
+  `INCOMPLETE` was added to fix — and it can also fail. A verdict pipeline with
+  no fallback turns a transient engine error into a lost triage.
+- The ledger event carries `verdict_source` (`structured` | `regex` | `none`)
+  and `structured_error`, because a finalizer that quietly stopped working
+  otherwise looks exactly like one that is working. Watch the fallback rate,
+  not the feature flag.
+- The router honours a schema only for a session whose platform is in
+  `sessions_io.NON_USER_PLATFORMS`. A chat turn that quietly ran a second
+  completion under a grammar would be paying tokens for something nobody reads.
+- Kill switch `workers.sources.backlog-selfmod.structured_verdict`, carried in
+  the queue payload like the budgets so a queued item runs under the config
+  that was live when it was enqueued.
+
+Follow-ups, not done: schemas for `deep_research.parse_result` and
+`backlog_implement.parse_spawned_line`.
+
 ## 6. Configuration
 
 ```yaml

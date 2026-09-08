@@ -347,6 +347,31 @@ which is also the natural home for dependency changes and guardian edits.
 
 ---
 
+## 3.3 Map the blast radius before editing
+
+Both the `selfmod-change-own-code` skill and `backlog_implement`'s PROMPT now
+put one step between opening a round and doing the work: `graph_refresh`, then
+`graph_affected` for each symbol about to change and `graph_explain` for its
+callers (`agent_mcp/code_graph.py`, an AST extraction with no LLM calls). The
+round report names the depth-1 callers and the file list, and quality gate 4
+requires it.
+
+Two things about it that are easy to get wrong:
+
+- **Pass `root=<worktree>` on every call.** The default is `LLOYD_HOME`, the
+  live checkout — an implementer that omits it reads confidently about a tree
+  it is not editing. `root` is never inferred from the session: nothing on disk
+  links a chat session to an open round, since `round_start` ledger rows carry
+  no session id.
+- **The graph is blind across process seams.** There is no edge from
+  `run_prompt_in_session` to `run_query` (HTTP), and none from `run_query` into
+  a tool handler (MCP). Grep is still the right tool for string keys, route
+  paths and config names.
+
+`graphify-out/` is gitignored unanchored so a worktree inherits the rule; a
+build there would otherwise dirty the tree, and both `gate.py` and
+`promote.py` refuse a dirty tree — the round would abort on its own map.
+
 ## 4. The gate
 
 Eight rungs, cheapest first, short-circuiting. **Every rung fails closed** —
