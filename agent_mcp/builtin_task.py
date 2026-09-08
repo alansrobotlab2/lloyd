@@ -238,6 +238,10 @@ async def _task(args: dict[str, Any]) -> str:
         description=description,
         prompt=prompt,
         parent_session_id=get_bound_session(),
+        # A subagent has no turn of its own, and nothing ever reads its
+        # ledger or its drain queue once Task returns. The parent's turn is
+        # where a human looks for "what did this turn change".
+        parent_turn_id=_task_registry.current_turn_id.get(),
         session_id=sub_session_id,
         model=model,
         max_turns=profile["max_turns"],

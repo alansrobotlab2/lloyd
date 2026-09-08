@@ -555,6 +555,48 @@ or moves on.
 
 `/state.tsc` shows the last run and what is pending.
 
+### The per-turn change ledger
+
+`~/lloyd` is production: a saved file is a deploy. The self-modification loop
+has a worktree, a gate and an automatic rollback; an ordinary chat turn that
+edits three files had none of that, no line saying which three, and no undo.
+
+`agent_mcp/_change_ledger.py` writes one record per (session, turn) under
+`sessions/<sid>.changes/<turn_id>/` — an `index.json` naming every file the
+turn wrote and a `<sha1(realpath)>.pre` beside it. The layout follows
+`tool_result_spill.py` for the same reason: per-turn side data that has to
+survive an aggregator restart and be findable from a session id alone.
+
+- **First writer per realpath per turn wins.** The pre-image is what the file
+  looked like when *this turn* first touched it, so a turn that edits one file
+  ten times reverts to where it came in. `begin` loads the on-disk index on a
+  miss, so an aggregator restart mid-turn does not restart the rule.
+- **Revert refuses a file that moved since.** If the current sha does not match
+  what the turn wrote, something else has written and restoring the pre-image
+  would destroy *that* — the exact damage this exists to prevent. Refused by
+  name and reported, never silently skipped. Same for a `create` whose file
+  was edited afterwards.
+- **`turn_id` and `call_id` ride in `_meta`**, like the session id and the
+  caption, because `args` is validated against each tool's inputSchema and is
+  what the repetition guard hashes. `RunOptions.turn_id` is empty for workers
+  and direct `run_query` callers, which turns the ledger off for them — the
+  footer and the revert button are chat surfaces and a worker turn has no
+  reader.
+- **A subagent's writes land on the parent's turn.** `ledger.scope()` redirects
+  a `task:*` session through `_subagent_registry.parent_scope`; the entry
+  carries `via_session` so the row can still say it came from a Task. The
+  read-before-edit gate keeps using the raw `task:*` session — the subagent
+  must still Read what it edits — and only attribution moves.
+- **`prune` only ever walks `*.changes/`.** The sessions directory also holds
+  the transcripts and the spilled tool results, and a prune that reached those
+  would be deleting the record it exists to protect.
+- Known imperfection, documented: a create made *through* a dangling symlink
+  reverts by unlinking the symlink path, not the target it pointed at.
+
+`GET /changes?session=&turn=` and `POST /changes/revert` on the aggregator;
+`/state.changes` for the dashboard. `harness.change_ledger.enabled: false`
+turns it off.
+
 ### Read-before-edit and stale-file gates
 
 `Edit` used to be exact-match against whatever is on disk right now, with no

@@ -53,6 +53,18 @@ current_call_summary: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_call_summary", default=""
 )
 
+# The chat turn and the individual tool call this dispatch belongs to, lifted
+# out of `_meta` by `main.call_tool` beside the session id. Read by the change
+# ledger, which records a file write against (session, turn) so a chat can say
+# what a turn changed and offer to undo it. Both are "" for a worker turn or a
+# direct `run_query` caller, and an empty turn id turns the ledger off.
+current_turn_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_turn_id", default=""
+)
+current_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_call_id", default=""
+)
+
 
 @dataclass
 class TaskRecord:

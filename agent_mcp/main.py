@@ -50,6 +50,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from agent_mcp import (
+    _change_ledger,
     _subagent_registry,
     _task_registry,
     _tsc_runner,
@@ -199,6 +200,13 @@ META_BASE_URL = "lloyd/base_url"
 # app.harness.mcp_pool.META_SUMMARY.
 META_SUMMARY = "lloyd/summary"
 
+# `_meta` keys identifying the chat turn and the individual tool call. The
+# change ledger records a file write against (session, turn) so a chat can
+# show what a turn changed and offer a revert. Must match
+# app.harness.mcp_pool.META_TURN_ID / META_CALL_ID.
+META_TURN_ID = "lloyd/turn_id"
+META_CALL_ID = "lloyd/call_id"
+
 # OpenAI's spec caps tool names at 64 chars. Enforced here at registration
 # so a bad name fails loudly on the first list_tools() instead of
 # mid-conversation in the harness translator (tool_schema.py keeps its own
@@ -319,6 +327,8 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     parent_model = meta.get(META_MODEL, "") if isinstance(meta, dict) else ""
     parent_base_url = meta.get(META_BASE_URL, "") if isinstance(meta, dict) else ""
     call_summary = meta.get(META_SUMMARY, "") if isinstance(meta, dict) else ""
+    turn_id = meta.get(META_TURN_ID, "") if isinstance(meta, dict) else ""
+    call_id = meta.get(META_CALL_ID, "") if isinstance(meta, dict) else ""
 
     token = _task_registry.current_session_id.set(sid)
     stok = _task_registry.current_call_summary.set(
@@ -330,11 +340,19 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     btok = builtin_task.current_parent_base_url.set(
         parent_base_url if isinstance(parent_base_url, str) else ""
     )
+    ttok = _task_registry.current_turn_id.set(
+        turn_id if isinstance(turn_id, str) else ""
+    )
+    ctok = _task_registry.current_call_id.set(
+        call_id if isinstance(call_id, str) else ""
+    )
     try:
         return await mod.call_tool(name, arguments)
     finally:
         _task_registry.current_session_id.reset(token)
         _task_registry.current_call_summary.reset(stok)
+        _task_registry.current_turn_id.reset(ttok)
+        _task_registry.current_call_id.reset(ctok)
         builtin_task.current_parent_model.reset(mtok)
         builtin_task.current_parent_base_url.reset(btok)
 
@@ -441,7 +459,48 @@ async def state(request):
             "recent": recent_tasks,
         },
         "tsc": _tsc_runner.stats(),
+        "changes": _change_ledger.stats(),
         "tools": len(_dispatch),
+    })
+
+
+async def changes(request):
+    """What a turn wrote. `GET /changes?session=<sid>&turn=<turn_id>`."""
+    session = request.query_params.get("session") or ""
+    turn = request.query_params.get("turn") or ""
+    if not session or not turn:
+        return JSONResponse({"error": "session and turn are required"},
+                            status_code=400)
+    return JSONResponse({
+        "session_id": session,
+        "turn_id": turn,
+        "files": _change_ledger.list_changes(session, turn),
+    })
+
+
+async def changes_revert(request):
+    """Undo a turn's writes. `POST /changes/revert {session, turn, paths?}`.
+
+    Per file, and never silently: a file something else has written since is
+    refused by name rather than skipped, because restoring the pre-image
+    there would destroy that other write — the exact damage this exists to
+    prevent.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session = str(body.get("session") or "")
+    turn = str(body.get("turn") or "")
+    if not session or not turn:
+        return JSONResponse({"error": "session and turn are required"},
+                            status_code=400)
+    paths = body.get("paths")
+    paths = [str(p) for p in paths] if isinstance(paths, list) else None
+    return JSONResponse({
+        "session_id": session,
+        "turn_id": turn,
+        "results": _change_ledger.revert(session, turn, paths),
     })
 
 
@@ -454,6 +513,13 @@ async def lifespan(app):
     # one that gets a wrong answer. Detached and failure-tolerant: this must
     # never delay or block startup.
     warm = asyncio.create_task(_tsc_runner.warm_baseline(), name="tsc-warm-baseline")
+    # Retention for the change ledger. On a thread because it stats every
+    # snapshot under `sessions/*.changes/`, and this loop serves every tool
+    # call in the process.
+    try:
+        await asyncio.to_thread(_change_ledger.prune)
+    except Exception:
+        logger.exception("lifespan: change-ledger prune failed")
     try:
         yield
     finally:
@@ -520,6 +586,8 @@ starlette_app = combined.streamable_http_app(
     custom_starlette_routes=[
         Route("/health", health, methods=["GET"]),
         Route("/state", state, methods=["GET"]),
+        Route("/changes", changes, methods=["GET"]),
+        Route("/changes/revert", changes_revert, methods=["POST"]),
     ],
 )
 

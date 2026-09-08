@@ -85,6 +85,16 @@ META_BASE_URL = "lloyd/base_url"
 # only background tasks read. Must match agent_mcp.main.META_SUMMARY.
 META_SUMMARY = "lloyd/summary"
 
+# `_meta` keys identifying the chat turn and the individual tool call. The
+# change ledger records a file write against (session, turn) so a chat can
+# show "changed 2 files" and offer a revert; `call_id` is what ties an entry
+# back to the Edit that made it. They ride in `_meta` for the same reason
+# everything else here does — `args` is validated against each tool's real
+# inputSchema, and is what the repetition guard hashes. Must match
+# agent_mcp.main.META_TURN_ID / META_CALL_ID.
+META_TURN_ID = "lloyd/turn_id"
+META_CALL_ID = "lloyd/call_id"
+
 # Ceiling on a single tools/call round trip. Sits above the Bash tool's own
 # 600s hard cap so a legitimately long command finishes on its own terms and
 # this only fires when something is genuinely wedged. Without it a hung tool
@@ -346,6 +356,8 @@ class MCPPool:
         model: str = "",
         base_url: str = "",
         summary: str = "",
+        turn_id: str = "",
+        call_id: str = "",
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Dispatch a tool call to the right server.
@@ -399,6 +411,10 @@ class MCPPool:
             meta[META_BASE_URL] = base_url
         if summary:
             meta[META_SUMMARY] = summary
+        if turn_id:
+            meta[META_TURN_ID] = turn_id
+        if call_id:
+            meta[META_CALL_ID] = call_id
         budget = timeout_seconds if timeout_seconds is not None else CALL_TIMEOUT_SECONDS
 
         try:

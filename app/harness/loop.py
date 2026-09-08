@@ -1244,6 +1244,11 @@ async def _dispatch_one_tool_call(
             "model": options.model,
             "base_url": options.base_url,
             "summary": tc.get("_summary", ""),
+            # Which turn and which call this write belongs to, for the
+            # change ledger on the far side. Empty for a worker or a direct
+            # run_query caller, which is what turns the ledger off for them.
+            "turn_id": getattr(options, "turn_id", "") or "",
+            "call_id": tc.get("id", "") or "",
         }
         if cancel_event is None:
             result = await pool.call_tool(name, dispatch_args, **call_kw)

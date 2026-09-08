@@ -248,6 +248,15 @@ harness:
   # false keeps the read records but stops refusing.
   edit_gates:
     enabled: true
+  # Per-turn record of what a chat turn wrote, with the pre-image beside it,
+  # so the chat can say "changed 2 files" and offer to put them back.
+  # `~/lloyd` is production — a saved file is a deploy — and until this
+  # existed an ordinary turn had no such line and no undo. Off for workers
+  # and direct run_query callers: they have no turn id and no reader.
+  change_ledger:
+    enabled: true
+    retention_days: 7
+    max_total_mb: 256
   # Diagnostics appended to a successful Edit/Write result, so the model
   # learns about a broken edit at the edit rather than at the gate minutes
   # later. Delta only: the tree carries ~69 tolerated pyflakes findings and

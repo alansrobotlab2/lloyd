@@ -114,6 +114,26 @@ def _gates_enabled() -> bool:
         return True
 
 
+def _current_call_id() -> str:
+    try:
+        from agent_mcp import _task_registry
+        return _task_registry.current_call_id.get()
+    except Exception:
+        return ""
+
+
+def _ledger_scope(session_id: str):
+    """(session, turn) this mutation belongs to, or None for no ledger."""
+    try:
+        from agent_mcp import _change_ledger, _task_registry
+        if not _change_ledger.enabled():
+            return None
+        return _change_ledger.scope(session_id, _task_registry.current_turn_id.get())
+    except Exception:
+        logger.warning("change ledger: scope lookup failed", exc_info=True)
+        return None
+
+
 @dataclass
 class _Mutation:
     """One in-flight Write or Edit, built on the loop and filled by the thread.
@@ -135,6 +155,46 @@ class _Mutation:
     post_text: str = ""
     post_stat: tuple[int, int] | None = None
     ok: bool = False
+    # Change-ledger scope and entry, resolved on the loop side and carried
+    # through the thread so the snapshot is taken from the same bytes the
+    # edit read — re-reading the file here would race whoever writes next.
+    scope: tuple[str, str] | None = None
+    call_id: str = ""
+    ledger_entry: object | None = None
+
+
+def _ledger_begin(mut: _Mutation, *, op: str) -> None:
+    """Open this turn's entry and snapshot the pre-image, before the write.
+
+    Failures are logged and swallowed. An edit that fails because the undo
+    bookkeeping failed is strictly worse than an edit with no undo.
+    """
+    if mut.scope is None:
+        return
+    try:
+        from agent_mcp import _change_ledger
+        entry = _change_ledger.begin(
+            mut.scope, real=mut.real, path=mut.path, op=op,
+            call_id=mut.call_id,
+            # Set only when a subagent made the change, so a footer can say
+            # which of a turn's writes came from a Task rather than the turn.
+            via_session=mut.session_id if mut.session_id.startswith("task:") else "",
+        )
+        _change_ledger.snapshot_pre(mut.scope, entry, mut.pre_bytes)
+        mut.ledger_entry = entry
+    except Exception:
+        logger.warning("change ledger: begin failed for %s", mut.path, exc_info=True)
+
+
+def _ledger_commit(mut: _Mutation) -> None:
+    if mut.scope is None or mut.ledger_entry is None:
+        return
+    try:
+        from agent_mcp import _change_ledger
+        post = _change_ledger.sha256_bytes(mut.post_text.encode("utf-8", "replace"))
+        _change_ledger.commit(mut.scope, mut.ledger_entry, post)
+    except Exception:
+        logger.warning("change ledger: commit failed for %s", mut.path, exc_info=True)
 
 
 def _gate_check(mut: _Mutation) -> str | None:
@@ -279,6 +339,8 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
         except OSError:
             mut.pre_bytes = None
 
+    _ledger_begin(mut, op="write" if mut.existed else "create")
+
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -288,6 +350,7 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
     mut.post_text = content
     mut.post_stat = _stat_key(mut.real)
     mut.ok = True
+    _ledger_commit(mut)
     return f"File written: {file_path} ({len(content)} chars)"
 
 
@@ -353,6 +416,7 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
         replaced = 1
 
     mut.pre_bytes = pre_bytes
+    _ledger_begin(mut, op="edit")
 
     try:
         p.write_text(updated, encoding="utf-8")
@@ -362,6 +426,7 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
     mut.post_text = updated
     mut.post_stat = _stat_key(mut.real)
     mut.ok = True
+    _ledger_commit(mut)
     return f"Edited {file_path} ({replaced} replacement{'s' if replaced != 1 else ''})"
 
 
@@ -677,6 +742,8 @@ async def call_tool(name: str, arguments: dict):
             # No bound session means no gate: unit tests and legacy callers
             # dispatch straight in, and refusing them protects nothing.
             gate_on=bool(session_id) and _gates_enabled(),
+            scope=_ledger_scope(session_id),
+            call_id=_current_call_id(),
         )
         handler = _write if name == "Write" else _edit
         text = await asyncio.to_thread(handler, arguments, mut)

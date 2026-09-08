@@ -86,6 +86,13 @@ class RunOptions:
     # heuristics/intra_turn write to the right event log file.
     session_id: str = ""
 
+    # The chat turn this run belongs to. Travels to the aggregator in the
+    # request `_meta` so the change ledger can record file writes against the
+    # turn a human will look at. Empty for workers and direct `run_query`
+    # callers, which turns the ledger off for them — the footer and the revert
+    # button are chat surfaces, and a worker turn has no reader.
+    turn_id: str = ""
+
     # Background-task notification drain. When set, the loop calls this
     # at the top of each iteration; the callable returns a list of
     # OpenAI-format messages (typically role: "user" with a
