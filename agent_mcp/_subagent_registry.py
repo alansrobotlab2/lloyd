@@ -23,7 +23,7 @@ the durable record.
 from __future__ import annotations
 
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,11 +35,15 @@ _active: dict[str, "SubagentRecord"] = {}
 _recent: deque["SubagentRecord"] = deque(maxlen=_RECENT_LIMIT)
 
 _counter = 0
+_task_counter = 0
 
 
 @dataclass
 class SubagentRecord:
     run_id: str
+    # Stable across continuations, unlike `run_id` — one dashboard row per
+    # RUN, one task_id per line of work. A caller resumes by task_id.
+    task_id: str
     subagent_type: str
     description: str
     prompt_preview: str
@@ -60,6 +64,8 @@ class SubagentRecord:
     error: str = ""
     response_chars: int = 0
     tool_calls: list[str] = field(default_factory=list)
+    # The run_id this one continues, when it is a resume.
+    continuation_of: str = ""
 
     @property
     def elapsed_s(self) -> float:
@@ -80,6 +86,8 @@ class SubagentRecord:
             counts[name] = counts.get(name, 0) + 1
         return {
             "run_id": self.run_id,
+            "task_id": self.task_id,
+            "continuation_of": self.continuation_of,
             "subagent_type": self.subagent_type,
             "description": self.description,
             "prompt_preview": self.prompt_preview,
@@ -108,6 +116,12 @@ def _new_run_id() -> str:
     return f"sub-{time.strftime('%H%M%S')}-{_counter:03d}"
 
 
+def _new_task_id() -> str:
+    global _task_counter
+    _task_counter += 1
+    return f"sub-{time.strftime('%H%M%S')}-t{_task_counter:03d}"
+
+
 def register(
     *,
     subagent_type: str,
@@ -118,10 +132,19 @@ def register(
     model: str,
     max_turns: int,
     parent_turn_id: str = "",
+    task_id: str = "",
+    continuation_of: str = "",
 ) -> SubagentRecord:
-    """Open a row for a Task run that is about to start."""
+    """Open a row for a Task run that is about to start.
+
+    `task_id` is carried in on a resume so the continuation keeps the same
+    identity; a fresh Task mints one. `run_id` stays per-run either way —
+    the dashboard shows runs, and a resume is a new run of the same task.
+    """
     record = SubagentRecord(
         run_id=_new_run_id(),
+        task_id=task_id or _new_task_id(),
+        continuation_of=continuation_of,
         subagent_type=subagent_type,
         description=description,
         prompt_preview=prompt[:200],
@@ -182,6 +205,139 @@ def snapshot() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Resumable history
+# ---------------------------------------------------------------------------
+#
+# A Task used to start from nothing every call. That is right for a
+# fire-and-forget fan-out and wrong for the case that keeps recurring: a
+# subagent burns its budget mid-investigation, the caller reads the partial
+# answer, and the only way to ask a follow-up is to pay for the whole
+# investigation again — a fresh prompt, a cold KV cache, and no memory of the
+# forty tool results it just collected.
+#
+# The store is a *bounded* one, and deliberately process-scoped. After an
+# aggregator restart every task_id reads as `unknown or evicted`, which is
+# honest: the conversation it would have continued is gone with the process.
+
+
+class HistoryUnavailable(Exception):
+    """A resume that cannot happen, with a reason the model can act on."""
+
+
+@dataclass
+class SubagentHistory:
+    task_id: str
+    subagent_type: str
+    profile: dict
+    model: str
+    base_url: str
+    # The `task:<type>:<hex8>` id. Reused on resume so the continuation keeps
+    # its tool_search LoadedToolSet and its spill directory.
+    session_id: str
+    description: str
+    # THE list the loop mutated, sanitised. Passed back as
+    # `chat_messages_handle`, which is why the follow-up user message is
+    # appended to it rather than sent as `messages` — `run_query` ignores
+    # `messages` entirely when the handle is non-empty.
+    chat_messages: list[dict]
+    last_run_id: str
+    runs: int
+    finished_at: float
+    chars: int
+    active: bool = False
+
+
+_HISTORY_KEEP = 8
+_HISTORY_TTL_S = 1800
+_HISTORY_MAX_CHARS = 3_000_000
+
+_history: "OrderedDict[str, SubagentHistory]" = OrderedDict()
+
+
+def _sanitise(messages: list[dict]) -> list[dict]:
+    """Drop a trailing assistant message whose tool calls were never answered.
+
+    That is the only invalid shape the loop can leave behind: a cancel or an
+    exception between the stream ending and the dispatch completing
+    (`loop.py` around the tool-dispatch block). Replaying it would send vLLM
+    an assistant `tool_calls` with no matching `tool` messages, which every
+    engine rejects.
+    """
+    out = list(messages)
+    while out:
+        last = out[-1]
+        if last.get("role") == "assistant" and last.get("tool_calls"):
+            out.pop()
+            continue
+        break
+    return out
+
+
+def _sizeof(messages: list[dict]) -> int:
+    total = 0
+    for m in messages:
+        c = m.get("content")
+        total += len(c) if isinstance(c, str) else len(str(c))
+    return total
+
+
+def store_history(*, task_id: str, subagent_type: str, profile: dict, model: str,
+                  base_url: str, session_id: str, description: str,
+                  chat_messages: list[dict], run_id: str, runs: int) -> None:
+    """Keep a finished run's conversation so a follow-up can continue it."""
+    messages = _sanitise(chat_messages)
+    if not messages:
+        return
+    now = time.time()
+    # TTL sweep first, then oldest-first until both caps hold.
+    for key in [k for k, h in _history.items()
+                if now - h.finished_at > _HISTORY_TTL_S and not h.active]:
+        _history.pop(key, None)
+
+    entry = SubagentHistory(
+        task_id=task_id, subagent_type=subagent_type, profile=dict(profile),
+        model=model, base_url=base_url, session_id=session_id,
+        description=description, chat_messages=messages, last_run_id=run_id,
+        runs=runs, finished_at=now, chars=_sizeof(messages), active=False,
+    )
+    _history[task_id] = entry
+    _history.move_to_end(task_id)
+
+    while len(_history) > _HISTORY_KEEP:
+        _history.popitem(last=False)
+    while sum(h.chars for h in _history.values()) > _HISTORY_MAX_CHARS and len(_history) > 1:
+        _history.popitem(last=False)
+
+
+def claim_history(task_id: str) -> SubagentHistory:
+    """Take a stored conversation for a resume, or say exactly why not."""
+    entry = _history.get(task_id)
+    if entry is None:
+        raise HistoryUnavailable("unknown or evicted")
+    if entry.active:
+        raise HistoryUnavailable("still running")
+    if time.time() - entry.finished_at > _HISTORY_TTL_S:
+        _history.pop(task_id, None)
+        raise HistoryUnavailable("expired")
+    entry.active = True
+    _history.move_to_end(task_id)
+    return entry
+
+
+def release_history(task_id: str) -> None:
+    """Un-claim a resume whose run raised before it produced anything."""
+    entry = _history.get(task_id)
+    if entry is not None:
+        entry.active = False
+
+
+def history_stats() -> dict:
+    return {"tasks": len(_history),
+            "chars": sum(h.chars for h in _history.values()),
+            "ids": list(_history)}
+
+
 def parent_scope(session_id: str) -> tuple[str, str] | None:
     """The (session, turn) a `task:*` subagent session belongs to.
 
@@ -204,3 +360,4 @@ def reset() -> None:
     """Drop all state. Tests only."""
     _active.clear()
     _recent.clear()
+    _history.clear()

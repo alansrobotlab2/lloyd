@@ -106,6 +106,7 @@ async def _task(args: dict[str, Any]) -> str:
     description = (args.get("description") or "").strip() or _call_summary()
     prompt = args.get("prompt", "")
     subagent_type = args.get("subagent_type", "general-purpose")
+    resume_id = (args.get("task_id") or "").strip()
 
     if not prompt:
         return json.dumps({"error": "prompt is required"})
@@ -116,7 +117,28 @@ async def _task(args: dict[str, Any]) -> str:
             "error": f"Task recursion limit ({MAX_TASK_DEPTH}) reached — nested Task calls are not allowed."
         })
 
-    profile = _load_subagent_profile(subagent_type)
+    history = None
+    if resume_id:
+        try:
+            history = _subagent_registry.claim_history(resume_id)
+        except _subagent_registry.HistoryUnavailable as exc:
+            return json.dumps({
+                "error": f"Cannot resume task {resume_id!r}: {exc}",
+                "task_id": resume_id,
+            })
+
+    if history is not None:
+        # The stored run's identity wins. A `subagent_type` passed beside a
+        # `task_id` would silently change the profile of a conversation
+        # already half-done under the old one.
+        if args.get("subagent_type") and args["subagent_type"] != history.subagent_type:
+            logger.info("Task resume %s: ignoring subagent_type=%r (stored: %r)",
+                        resume_id, args["subagent_type"], history.subagent_type)
+        subagent_type = history.subagent_type
+        profile = dict(history.profile)
+        description = description or history.description
+    else:
+        profile = _load_subagent_profile(subagent_type)
 
     # Import here to avoid circular import at module load time.
     from app.harness.hooks import HookRegistry
@@ -138,8 +160,15 @@ async def _task(args: dict[str, Any]) -> str:
     # endpoint: a profile pinned to `model: secondary` with an empty
     # `base_url` used to send "secondary" to the primary's port, where the
     # engine does not serve that name.
-    model = profile["model"] or current_parent_model.get("") or "primary"
-    base_url = profile["base_url"] or _base_url_for(model)
+    if history is not None:
+        # Keep the continuation where its KV cache already is. Consulting
+        # `current_parent_model` here would move a half-finished conversation
+        # to another engine and re-prefill all of it.
+        model = history.model
+        base_url = history.base_url
+    else:
+        model = profile["model"] or current_parent_model.get("") or "primary"
+        base_url = profile["base_url"] or _base_url_for(model)
 
     # Config-level tool disables apply to subagents too. They did not
     # before: `disallowed` came from the profile alone, so any tool
@@ -186,7 +215,10 @@ async def _task(args: dict[str, Any]) -> str:
     # tool_search LoadedToolSet — different disallowed_tools profiles
     # would otherwise share one cache entry. Bound here rather than
     # inline so the registry row and the harness agree on the id.
-    sub_session_id = f"task:{subagent_type}:{uuid.uuid4().hex[:8]}"
+    # Reused on a resume so the continuation keeps its tool_search
+    # LoadedToolSet and its spill directory.
+    sub_session_id = (history.session_id if history is not None
+                      else f"task:{subagent_type}:{uuid.uuid4().hex[:8]}")
 
     options = RunOptions(
         model=model,
@@ -211,7 +243,19 @@ async def _task(args: dict[str, Any]) -> str:
         ),
     )
 
-    messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+    # On a resume the follow-up is appended to the STORED list, which is then
+    # handed back as `chat_messages_handle` — `run_query` ignores `messages`
+    # entirely when the handle is non-empty (loop.py), so passing the
+    # follow-up as `messages` would silently drop it.
+    if history is not None:
+        chat_messages = history.chat_messages
+        chat_messages.append({"role": "user", "content": prompt})
+        options.chat_messages_handle = chat_messages
+        messages: list[dict[str, Any]] = []
+    else:
+        chat_messages = [{"role": "user", "content": prompt}]
+        options.chat_messages_handle = chat_messages
+        messages = list(chat_messages)
 
     # The subagent's answer is the text of its TERMINATING iteration —
     # the one that stopped without calling a tool. Accumulating every
@@ -245,7 +289,30 @@ async def _task(args: dict[str, Any]) -> str:
         session_id=sub_session_id,
         model=model,
         max_turns=profile["max_turns"],
+        task_id=history.task_id if history is not None else "",
+        continuation_of=history.last_run_id if history is not None else "",
     )
+    runs_so_far = (history.runs if history is not None else 0) + 1
+
+    def _close(status: str, **kw) -> None:
+        """Close the row AND store the conversation, on every exit path.
+
+        One helper because there are five exits and each one has to do both:
+        a run that closed its row but stored nothing is a task_id the model
+        is told about and cannot resume.
+        """
+        _subagent_registry.finish(record, status=status, **kw)
+        try:
+            _subagent_registry.store_history(
+                task_id=record.task_id, subagent_type=subagent_type,
+                profile=profile, model=model, base_url=base_url,
+                session_id=sub_session_id, description=description,
+                chat_messages=chat_messages, run_id=record.run_id,
+                runs=runs_so_far,
+            )
+        except Exception:
+            logger.warning("Task: could not store history for %s",
+                           record.task_id, exc_info=True)
 
     token = _task_depth.set(depth + 1)
     try:
@@ -267,12 +334,13 @@ async def _task(args: dict[str, Any]) -> str:
         # success paths below, and `finish` is idempotent, so a blanket
         # close there would stamp every completed run "cancelled" and
         # make the real status a no-op.
-        _subagent_registry.finish(record, status="cancelled", stop_reason="cancelled")
+        _close("cancelled", stop_reason="cancelled")
         raise
     except Exception as exc:
         logger.exception("Task subagent error for prompt=%r", prompt[:120])
-        _subagent_registry.finish(record, status="error", error=str(exc))
-        return json.dumps({"error": f"Subagent failed: {exc}"})
+        _close("error", error=str(exc))
+        return json.dumps({"error": f"Subagent failed: {exc}",
+                           "task_id": record.task_id})
     finally:
         _task_depth.reset(token)
 
@@ -308,9 +376,8 @@ async def _task(args: dict[str, Any]) -> str:
             err["partial_text"] = last_iter_text[:500]
         if description:
             err["description"] = description
-        _subagent_registry.finish(
-            record, status="failed", stop_reason=stop_reason, error=reason,
-        )
+        err["task_id"] = record.task_id
+        _close("failed", stop_reason=stop_reason, error=reason)
         return json.dumps(err)
 
     result: dict[str, Any] = {"response": final_text}
@@ -325,12 +392,8 @@ async def _task(args: dict[str, Any]) -> str:
         result["tools_used"] = tool_calls_summary
     if description:
         result["description"] = description
-    _subagent_registry.finish(
-        record,
-        status="completed",
-        stop_reason=stop_reason,
-        response_chars=len(final_text),
-    )
+    result["task_id"] = record.task_id
+    _close("completed", stop_reason=stop_reason, response_chars=len(final_text))
     return json.dumps(result)
 
 
@@ -354,7 +417,11 @@ async def list_tools():
             description=(
                 "Spawn a subagent to complete a task. The subagent runs in the "
                 "same process with the full lloyd-mcp tool pool (minus Task). "
-                "Returns the subagent's final response and a list of tools used. "
+                "Returns the subagent's final response, the tools it used, and a "
+                "`task_id`. Pass that `task_id` back with a follow-up `prompt` to "
+                "CONTINUE the same subagent instead of starting over — it keeps "
+                "its conversation, its tool results and its warm cache, which is "
+                "what you want when one ran out of turns mid-investigation. "
                 "Nested Task calls are not allowed (recursion cap = 1)."
             ),
             inputSchema={
@@ -362,12 +429,24 @@ async def list_tools():
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": "The task prompt for the subagent",
+                        "description": "The task prompt for the subagent, or the "
+                                       "follow-up when continuing one",
                     },
                     "subagent_type": {
                         "type": "string",
                         "description": "Profile name from config.yaml subagents section (default: general-purpose)",
                         "default": "general-purpose",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": (
+                            "Continue a previous Task instead of starting fresh. "
+                            "Use the `task_id` it returned. The last few finished "
+                            "subagents are kept for about 30 minutes and only "
+                            "within this process, so an id from before an "
+                            "aggregator restart is refused as 'unknown or "
+                            "evicted'. `subagent_type` is ignored when this is set."
+                        ),
                     },
                 },
                 "required": ["prompt"],

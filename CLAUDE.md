@@ -834,6 +834,47 @@ tools: `graph_explain`, `graph_affected`, `graph_path`, `graph_hubs`,
   `mcp_servers.lloyd-mcp.disabled_tools`; an `enabled: false` that emptied
   `list_tools()` would break the annotation-staleness test.
 
+## Resumable Task subagents
+
+`Task` started from nothing on every call. That is right for a
+fire-and-forget fan-out and wrong for the case that keeps recurring: a
+subagent burns its budget mid-investigation, the caller reads the partial
+answer, and the only way to ask a follow-up is to pay for the whole
+investigation again — a fresh prompt, a cold KV cache, and no memory of the
+forty tool results it just collected.
+
+Every Task result now carries a `task_id`; passing it back with a follow-up
+`prompt` continues that subagent.
+
+- **`run_query` ignores `messages` when `chat_messages_handle` is non-empty**
+  (`loop.py`). So a resume appends the follow-up to the *stored list* and
+  passes that as the handle. Sending it as `messages` would drop it silently.
+- **The stored run's identity wins**: `subagent_type`, profile, model,
+  `base_url` and the `task:*` session id all come from the history.
+  `current_parent_model` is deliberately not consulted — moving a
+  half-finished conversation to another engine re-prefills all of it. The
+  session id is reused so the continuation keeps its `tool_search`
+  LoadedToolSet and its spill directory. `disallowed_tools` is the one thing
+  merged live, so a tool switched off since the first run is honoured.
+- **`task_id` is stable across continuations; `run_id` is not.** The
+  dashboard shows one row per *run*, and a resume is a new run of the same
+  task, linked by `continuation_of`.
+- **Every exit path stores as well as closes.** One `_close` helper, because
+  there are five exits and a run that closed its row without storing is a
+  `task_id` the model was told about and cannot use. `CancelledError` stores
+  and re-raises.
+- **The sanitiser drops a trailing assistant message with unanswered tool
+  calls.** That is the only invalid shape the loop can leave behind — a
+  cancel or an exception between the stream ending and the dispatch
+  completing — and replaying it makes every engine reject the request.
+- Bounded and process-scoped: 8 tasks, 30 minutes, 3M chars. After an
+  aggregator restart every id reads `unknown or evicted`, which is honest —
+  the conversation is gone with the process. The three refusal reasons
+  (`unknown or evicted`, `expired`, `still running`) are distinct because
+  they call for different next moves.
+- `SubagentRecord.to_dict` never exposes `chat_messages`; the dashboard row
+  gets `task_id` and `continuation_of` only.
+
 ## Mission Control dashboard
 
 The `dashboard` tab (first in the sidebar, desktop landing tab) polls one
