@@ -5,7 +5,9 @@ every run record said `success`:
 
   * A turn that produced no text had its empty output written to the vault as
     a research note and its input retired. 225 of the 498 notes under
-    `pending-research/` have the body `(no response)`.
+    `pending-research/` have the body `(no response)`. The source that did the
+    retiring, `domain-research`, is gone; the two remaining sources on this
+    turn path are pinned here.
   * `session-distill` re-mined live chats on every tick — 44 runs against one
     session — and mined Lloyd's own worker transcripts back in as observations
     about the user.
@@ -26,7 +28,6 @@ import pytest
 from workers.queue import QueueItem, WorkQueue
 from workers.sources import _common as C
 from workers.sources import bench_mine as BM
-from workers.sources import domain_research as DR
 from workers.sources import gap_fill as GF
 from workers.sources import session_distill as SD
 
@@ -67,7 +68,6 @@ def test_the_failure_summary_names_why_the_turn_ended():
 
 
 @pytest.mark.parametrize("mod,payload", [
-    (DR, {"topic": "some topic", "slug": "some-topic"}),
     (GF, {"entity": "E", "text": "a gap", "fact_id": "f1"}),
     (SD, {"session_path": "/tmp/nope.json"}),
     (BM, {"loser_task_id": "bench_1", "composite_score": 0.2}),
@@ -93,39 +93,6 @@ async def _async(value):
     return value
 
 
-async def test_an_empty_research_turn_leaves_the_topic_unticked(monkeypatch, tmp_path):
-    """The compounding half of the bug.
-
-    domain-research ticked the queue line to `[x]` in the same breath as
-    writing the empty note, so the topic could never be retried. 90 of its 142
-    notes are empty, and every one of those topics is now closed on disk.
-    """
-    queue_file = tmp_path / "research-queue.md"
-    queue_file.write_text("- [ ] Direct Preference Optimization\n", encoding="utf-8")
-    monkeypatch.setattr(DR, "QUEUE_FILE", queue_file)
-    monkeypatch.setattr(
-        DR, "run_prompt_on_primary",
-        lambda *a, **k: _async(C.TurnResult(text="", stop_reason="stop")))
-
-    await DR.execute(_item({"topic": "Direct Preference Optimization", "slug": "dpo"}))
-    assert "- [ ]" in queue_file.read_text(), "an empty turn retired its own topic"
-
-
-async def test_a_real_research_turn_writes_the_note_and_ticks_the_topic(monkeypatch, tmp_path):
-    queue_file = tmp_path / "research-queue.md"
-    queue_file.write_text("- [ ] Direct Preference Optimization\n", encoding="utf-8")
-    monkeypatch.setattr(DR, "QUEUE_FILE", queue_file)
-    monkeypatch.setattr(DR, "write_staging_note", lambda **kw: tmp_path / "note.md")
-    monkeypatch.setattr(
-        DR, "run_prompt_on_primary",
-        lambda *a, **k: _async(C.TurnResult(text="## Summary\nreal\n## Confidence\n0.8: ok",
-                                            stop_reason="stop")))
-
-    result = await DR.execute(_item({"topic": "Direct Preference Optimization", "slug": "dpo"}))
-    assert result["status"] == "success"
-    assert "- [x]" in queue_file.read_text()
-
-
 def test_confidence_parsing_has_one_definition():
     """It was pasted into four sources with three subtly different bodies."""
     assert C.parse_confidence("## Confidence\n0.85: because") == 0.85
@@ -135,7 +102,7 @@ def test_confidence_parsing_has_one_definition():
     # The pattern only matches a leading 0 or 1, so a number outside the range
     # is not read as an over-confident score — it is not read at all.
     assert C.parse_confidence("confidence: 4.2") == 0.5
-    for mod in (DR, GF, SD):
+    for mod in (GF, SD):
         assert not hasattr(mod, "_parse_confidence"), \
             f"{mod.NAME} still carries its own copy"
 

@@ -48,6 +48,7 @@ Lloyd is a voice-first AI assistant built on a **custom harness** with local vLL
 | Backlog System | SQLite kanban. 4 tools: boards,tasks,get_task,write_task. | [[backlog]] |
 | Skill System | 34 skills in `~/obsidian/skills/`. Loaded on-demand via SKILL.md. ClawhHub catalog integration. | [[skills]] |
 | Usage Tracking | Token and cost tracking across agents and models. | [[usage-tracking]] |
+| Research Pipeline | Topic registry at `~/lloyd/research.db`,proposed into nightly by task #65 and drained by the `deep-research` worker. Replaced a 3,690-line markdown checklist. | [[research-pipeline]] |
 | Work Queue + Worker Pool | Everything Lloyd does unasked: one SQLite queue (`~/lloyd/workers.db`) drained by N asyncio workers in the backend. Nine sources — autonomy tasks,backlog triage and implementation,research,session mining. | [[workers]] |
 | Groundskeeper | Vault health scanner + enrichment. 11 scan categories,fix loop (every 15min),research loop (hourly). | [[groundskeeper]] |
 

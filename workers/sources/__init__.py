@@ -52,7 +52,6 @@ from workers.sources import backlog_selfmod as _backlog_selfmod  # noqa: E402,F4
 from workers.sources import backlog_implement as _backlog_implement  # noqa: E402,F401
 from workers.sources import gap_fill as _gap_fill  # noqa: E402,F401
 from workers.sources import session_distill as _session_distill  # noqa: E402,F401
-from workers.sources import domain_research as _domain_research  # noqa: E402,F401
 from workers.sources import bench_mine as _bench_mine  # noqa: E402,F401
 from workers.sources import deep_research as _deep_research  # noqa: E402,F401
 
@@ -63,6 +62,5 @@ register(_backlog_selfmod)
 register(_backlog_implement)
 register(_gap_fill)
 register(_session_distill)
-register(_domain_research)
 register(_bench_mine)
 register(_deep_research)

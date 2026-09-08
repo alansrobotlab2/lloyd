@@ -194,8 +194,9 @@ indistinguishable from a short answer once the stop reason has been thrown
 away.
 
 What that cost: **225 of the 498 notes under `pending-research/` have the body
-`(no response)`.** domain-research wrote the empty note, ticked its topic off
-in `research-queue.md` so it could never be retried, and returned success.
+`(no response)`.** The source responsible, `domain-research`, wrote the empty
+note, ticked its topic off in the queue file so it could never be retried, and
+returned success. It has since been retired for that whole class of reason.
 Nothing anywhere said a research job had failed. Sources now check
 `turn.ok` and write nothing when it is false.
 
@@ -230,10 +231,19 @@ bounds nothing on a stream that keeps producing.
 | `backlog-implement` | one gated selfmod round per confirmed item | session |
 | `selfmod-regression` | paired A/B eval after a promotion | none (subprocess) |
 | `autoresearch` | one prompt-optimisation round | its own |
-| `domain-research` | topics from `~/obsidian/lloyd/research-queue.md` | direct |
+| `deep-research` | one registry topic, through the deep-dive-research skill | session, IV off |
 | `session-distill` | mines finished chats for gaps and patterns | direct |
 | `gap-fill` | resolves `label: gap` facts | direct |
 | `bench-mine` | new bench tasks from baseline losses | direct |
+
+**`deep-research` owns its own retries, and that is not a preference.** The
+pool records an in-band `{"status": "failed"}` and then calls `mark_completed`
+on the item regardless — only a *raised* exception reaches `mark_failed` and
+the queue's backoff. So a source that returns `failed` and expects to be tried
+again is simply not. That source puts the topic back in its own registry with
+a `not_before`, and its `interval_seconds` is the retry cadence.
+`architecture/research-pipeline.md` is the long version, including why the
+markdown checklist it replaced could not hold an outcome.
 
 `scheduled-task` carries the most traffic by far, and two of its behaviours
 are load-bearing. It gates on the health of **the model each task pins**, not

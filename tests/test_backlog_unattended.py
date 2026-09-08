@@ -453,10 +453,10 @@ def test_selfmod_jobs_are_not_queued_behind_routine_research():
     """The pool dequeues `priority ASC`. At 80 the first implement round sat
     behind four research/distill jobs at 70 with more arriving every few
     minutes, and never reached a slot."""
-    from workers.sources import domain_research, session_distill
+    from workers.sources import deep_research, session_distill
     from workers import queue as Q
     assert "ORDER BY priority ASC" in Path(Q.__file__).read_text(), "the assumption this test rests on"
-    routine = min(domain_research.DEFAULT_PRIORITY, session_distill.DEFAULT_PRIORITY)
+    routine = min(deep_research.DEFAULT_PRIORITY, session_distill.DEFAULT_PRIORITY)
     assert I.DEFAULT_PRIORITY < M.DEFAULT_PRIORITY < routine
 
 

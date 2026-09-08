@@ -903,9 +903,17 @@ process**. `architecture/workers.md` is the long version.
   `TurnResult`, not a string, because a turn that dies at `max_turns` yields
   no text and an empty string is indistinguishable from a short answer. It
   used to return just the text: **225 of the 498 notes under
-  `pending-research/` have the body `(no response)`**, and domain-research
-  ticked each topic off in `research-queue.md` on the way, so none can be
-  retried.
+  `pending-research/` have the body `(no response)`**, and the source
+  responsible ticked each topic off on the way, so none can be retried. That
+  source, `domain-research`, has since been retired — see
+  `architecture/research-pipeline.md`.
+- **Research runs off a registry now, not a checklist.** `research.db`
+  (`app/research_store.py`) holds topics with a lifecycle; task #65 proposes
+  into it through `research_propose` and the `deep-research` source drains it
+  through the deep-dive skill. The checklist it replaced held 2,839 items of
+  which 314 were unique, and reading it cost 1.02M tokens a night.
+  **Retries live in the registry**, because the pool completes an in-band
+  `failed` item and never retries it.
 - **A session-backed turn's own timer must beat the pool's.**
   `run_prompt_in_session` bounds itself at `max_duration_seconds` minus 60 s
   and cancels the turn in the backend on expiry. If the pool's `wait_for`
