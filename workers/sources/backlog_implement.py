@@ -48,6 +48,13 @@ NAME = "backlog-implement"
 # is the rarest and most valuable job in this pool; it goes first.
 DEFAULT_PRIORITY = 40
 DEDUP_KEY = "backlog-implement:round"
+
+# Same cap and the same reason as backlog_selfmod.SPAWN_CAP. An implement
+# round ran hotter than triage did — 17 items over 6 runs, and the three
+# that aborted at the gate on 2026-09-08 filed 3, 6 and 5 while landing
+# nothing. A round that cannot make its own change true is the last one
+# that should be growing the board.
+SPAWN_CAP = 3
 DEFAULT_MAX_TURNS = 100
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -90,6 +97,14 @@ written as a handoff a fresh session can execute alone: what is wrong, where \
 contract. One change per round is what makes a rollback mean something. Do not \
 fold the discovery into this change, and do not leave it in your report — the \
 report is read once; the backlog is read until the item is done.
+
+**File at most {spawn_cap}.** If the round turned up more than that, file the \
+{spawn_cap} that block or change the next piece of work, and put the rest in \
+**one** item titled "Further findings from implementing #{item_id}" with the \
+same per-finding detail. Nothing is dropped; the fan-out is. If you are about \
+to file more than {spawn_cap} while *not* landing a change, that is the signal \
+to stop and report instead — a round that aborts and files six items has \
+converted one problem into six and solved none.
 
 Procedure when the surface is `code` or `frontend`:
 1. Re-read the item and the triage evidence. If anything has changed since the \
@@ -276,6 +291,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         check=triage.get("check") or "(none recorded)",
         evidence=(triage.get("evidence") or "(none recorded)")[:2000],
         acceptance=triage.get("acceptance") or "",
+        spawn_cap=SPAWN_CAP,
     )
     try:
         run = await run_prompt_in_session(
@@ -306,8 +322,17 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                      and float(e.get("ts") or 0) >= started]
     claimed = B.parse_spawned_line(run.get("text") or "")
     spawned = B.existing_ids(claimed)
+    # Recorded, not enforced — the items are on disk before this line runs.
+    # Worth a warning of its own when the round landed nothing: that is the
+    # shape that converts one problem into six and solves none.
+    over_cap = max(0, len(spawned) - (SPAWN_CAP + 1))
+    if over_cap:
+        logger.warning("backlog #%s filed %d item(s) over the cap of %d(+1)%s",
+                       candidate.id, over_cap, SPAWN_CAP,
+                       " while landing nothing" if not (round_id or vault_commits) else "")
     S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                     "phase": "finished", "session_id": run["session_id"],
+                    "spawn_cap": SPAWN_CAP, "spawned_over_cap": over_cap,
                     "round_id": round_id, "vault_commits": vault_commits,
                     "surface": triage.get("surface") or "code",
                     "stop_reason": run.get("stop_reason"),

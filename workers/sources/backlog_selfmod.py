@@ -33,6 +33,14 @@ NAME = "backlog-selfmod"
 DEFAULT_PRIORITY = 55
 DEDUP_KEY = "backlog-selfmod:triage"
 
+# How many separate items one triage may file. Measured: the first 40 runs
+# filed 78, averaging 1.95 with a tail to 6. The quarantine in
+# `backlog.is_quarantined` is what stops the queue feeding itself; this cap
+# is about the board a human has to read afterwards. Overflow is folded into
+# a single further-findings item rather than dropped, because a finding that
+# lives only in EVIDENCE is still lost — see #229.
+SPAWN_CAP = 3
+
 PROMPT = """\
 You are triaging one item from Lloyd's own backlog. It was written {age} days \
 ago, and the system has changed since. Your job is to find out whether it is \
@@ -83,6 +91,15 @@ is lost**: nobody reads this transcript for to-dos, and the item you are \
 triaging is about to be closed. Filing nothing is fine when there is nothing — \
 say `none` — but "those belong in two new items" with no items filed is the \
 one outcome this step exists to prevent.
+
+   **File at most {spawn_cap} separate items.** If more than {spawn_cap} real \
+findings survive, file the {spawn_cap} that would change what someone does \
+next, and put the remainder in **one** further item titled "Further findings \
+from triage of #{item_id}", each with its own paths, line numbers and check. \
+That is a cap on fan-out, not on honesty: nothing is dropped, and the \
+remainder item is still a real handoff. The board is read by a human, and a \
+pass that files six items per item read stops being a triage and becomes a \
+second backlog.
 
 What good triage looks like — learned from the three items closed on \
 2026-09-07, each of which turned on one of these:
@@ -235,9 +252,20 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     from scripts.selfmod import backlog as B, state as S
     from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
 
+    candidates, held = B.triage_pool(S.LEDGER_PATH)
     candidate = B.select_candidate(S.LEDGER_PATH)
     if candidate is None:
-        return {"status": "skipped", "summary": "every open backlog item has been triaged"}
+        # Say which empty this is. A queue drained of real work and a queue
+        # holding 106 of this loop's own drafts look identical from here, and
+        # only one of them means the pass is finished.
+        summary = "every open backlog item has been triaged"
+        if held:
+            summary = (f"{summary}; {held} self-filed item(s) held until they are "
+                       f"{B.SPAWN_TRIAGE_MIN_AGE_DAYS} days old")
+        return {"status": "skipped", "summary": summary}
+    if held:
+        logger.info("triage pool: %d candidate(s), %d self-filed item(s) quarantined",
+                    len(candidates), held)
 
     budget = int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
     body_chars = int((item.payload or {}).get("body_chars") or DEFAULT_BODY_CHARS)
@@ -247,6 +275,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     prompt = PROMPT.format(
         item_id=candidate.id, status=candidate.status, priority=candidate.priority,
         name=candidate.name, body=candidate.body[:body_chars], age=candidate.age_days,
+        spawn_cap=SPAWN_CAP,
     )
     try:
         run = await run_prompt_in_session(
@@ -317,8 +346,18 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                      check=parsed["check"], close=close, spawned=spawned,
                      acceptance=parsed["acceptance"])
 
+    # The cap is a prompt instruction, and the items exist on disk by the time
+    # we read SPAWNED — unfiling them would destroy real findings. So it is
+    # recorded rather than enforced: a number that can be watched, on the one
+    # metric that told us the pass had inverted.
+    over_cap = max(0, len(spawned) - (SPAWN_CAP + 1))
+    if over_cap:
+        logger.warning("backlog #%s filed %d item(s) over the cap of %d(+1)",
+                       candidate.id, over_cap, SPAWN_CAP)
+
     S.append_event({"event": "backlog_triage", "item_id": candidate.id,
                     "name": candidate.name[:200], "age_days": candidate.age_days,
+                    "spawn_cap": SPAWN_CAP, "spawned_over_cap": over_cap,
                     "verdict": parsed["verdict"], "surface": parsed["surface"],
                     "check": parsed["check"],
                     "evidence": parsed["evidence"][:1000],

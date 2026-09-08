@@ -39,6 +39,17 @@ import yaml
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 OPEN_STATUSES = {"up_next", "draft", "in_progress"}
 
+# Tags `backlog_write_task` puts on items this loop files for itself —
+# `spawned-by-triage` from a verdict turn, `spawned-by-selfmod` from an
+# implement round. They are how a self-filed item is told from a human one,
+# and `draft` alone cannot do it: that is the status of half the board.
+SPAWN_TAGS = frozenset({"spawned-by-triage", "spawned-by-selfmod"})
+
+# How old a self-filed item must be before triage may judge it. Long enough
+# that 'is this still true?' is a real question about a claim nobody acted
+# on, rather than a re-run of the check that produced it.
+SPAWN_TRIAGE_MIN_AGE_DAYS = 30
+
 # Only Lloyd's own board. The backlog is shared: of 52 open items, 3 are Alfie
 # (robot firmware) and 1 is on an Architecture board. Those are legitimately
 # out of scope for a self-modification pass, and the `board` field says so for
@@ -329,17 +340,73 @@ def LEDGER_DEFAULT() -> Path:
     return S.LEDGER_PATH
 
 
+def is_self_spawned(item: Item) -> bool:
+    """Did this loop write this item? `backlog_write_task` tags what it files."""
+    return any(t in SPAWN_TAGS for t in item.tags)
+
+
+def is_quarantined(item: Item) -> bool:
+    """A freshly self-filed item is not a triage candidate.
+
+    Triage asks one question: does this old claim still describe the system?
+    An item this loop filed minutes ago, from a check it just ran against
+    live code with file paths and line numbers, cannot answer it — it is not
+    stale, by construction. Re-asking costs a 90-turn session to re-confirm
+    what the previous session proved.
+
+    That waste is not the reason for this gate, though. The reason is that
+    `select_candidate` reads open items and `OPEN_STATUSES` includes `draft`,
+    which is the status `backlog_write_task` writes — so every item triage
+    filed re-entered the queue it came out of. Measured over the loop's first
+    48 hours: 40 triage runs closed 28 items and filed 78, a reproduction
+    number of 1.95. Each run replaced itself with two, and at a 30-minute
+    cadence that is +46 open items a day, diverging regardless of how long it
+    runs or how good the verdicts are. The open board went 19 -> 122 and 110
+    of those 122 were the loop's own output. No cap on spawns per run fixes
+    that shape; only cutting the edge does.
+
+    Quarantine, not exclusion: a spawned item that nobody implements really
+    can go stale, so it becomes a candidate again once it is old enough for
+    that to be a real question. Until then the pass has nothing to tell us
+    about it.
+    """
+    return is_self_spawned(item) and item.age_days < SPAWN_TRIAGE_MIN_AGE_DAYS
+
+
+def triage_pool(ledger: Path,
+                boards: tuple[str, ...] | None = DEFAULT_BOARDS
+                ) -> tuple[list[Item], int]:
+    """Untriaged open items, and how many were held back by quarantine.
+
+    The count is returned rather than logged so the caller can say *why* it
+    has nothing to do. "Every open backlog item has been triaged" and "there
+    are 106 items I filed myself and may not re-triage yet" are different
+    states, and a pass that reports the first while in the second is how you
+    stop noticing that the board is growing.
+    """
+    seen = triaged_ids(ledger)
+    untriaged = [i for i in open_items(boards) if i.id not in seen]
+    fresh = [i for i in untriaged if not is_quarantined(i)]
+    return fresh, len(untriaged) - len(fresh)
+
+
 def select_candidate(ledger: Path,
                      boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> Item | None:
-    """Oldest untriaged open item first.
+    """Oldest untriaged open item first, skipping this loop's own fresh output.
 
     Oldest-first deliberately: age is the best available proxy for staleness,
     and the point of this pipeline is to find out which old items are still
     real. Priority ordering would front-load the items most likely to be
     genuine, which is exactly backwards for a first pass over a stale backlog.
+
+    Oldest-first also means the quarantine in `is_quarantined` is not merely
+    a throttle. Self-filed items sort to the back, so without it the pass
+    works the real backlog first and only then starts eating its own tail —
+    which reads as healthy right up to the moment there is nothing else left.
+    On 2026-09-08 that moment was three hours away: 6 of the 112 untriaged
+    open items predated the loop.
     """
-    seen = triaged_ids(ledger)
-    candidates = [i for i in open_items(boards) if i.id not in seen]
+    candidates, _held = triage_pool(ledger, boards)
     if not candidates:
         return None
     return sorted(candidates, key=lambda i: (i.created or "9999", i.id))[0]

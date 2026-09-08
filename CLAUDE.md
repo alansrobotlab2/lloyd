@@ -247,6 +247,38 @@ none, in a turn told to write nothing. Both prompts now require filing whatever
 the in-focus item does not cover, via `backlog_write_task`, and report it under
 `SPAWNED:`; ids are verified on disk before the ledger links them.
 
+**But the pass may not eat what it files.** That filing requirement met
+`select_candidate`, which takes the oldest untriaged *open* item, and
+`OPEN_STATUSES` includes `draft` — the status `backlog_write_task` writes. So
+every item triage filed re-entered the queue it came out of. Over the loop's
+first 48 hours: 40 triage runs closed 28 items and filed 78, a reproduction
+number of **1.95**, or +46 open items a day at the then-cadence of one run per
+30 minutes. The open board went **19 → 122**, and 110 of the 122 were the
+loop's own output. R > 1 is the entire bug: the queue doubles rather than
+drains, however good the verdicts are. Oldest-first ordering hid it, because
+self-filed items sort to the back and the pass reads as healthy right up to
+the moment the real backlog runs out — which was 6 items away when this
+landed. `backlog.is_quarantined` holds a self-filed item (tagged
+`spawned-by-triage` or `spawned-by-selfmod`) out of the candidate pool until
+it is `SPAWN_TRIAGE_MIN_AGE_DAYS` old. Quarantine, not exclusion: an item
+nobody implements really can go stale, and then the question is real again.
+The gate keys on those tags and **not** on `draft`, which is the status of
+most of a stale backlog — a rule that skipped drafts would switch the pass
+off rather than bound it.
+
+An exhausted queue therefore has two meanings, and `triage_pool` returns the
+held count so the skip summary can say which one it is. "Every open backlog
+item has been triaged" was true, and misleading, on a board of 122 where 106
+were this loop's own drafts.
+
+`SPAWN_CAP` (3, both sources) bounds fan-out per run; overflow goes into one
+"Further findings from…" item rather than being dropped, since #229's lesson
+still holds. It is **recorded, not enforced** — the items exist on disk before
+`SPAWNED:` is parsed, so unfiling them would destroy real findings — and the
+ledger carries `spawn_cap`/`spawned_over_cap` on both event types.
+`tests/test_backlog_spawn_loop.py` pins all of it, including the
+counterfactual: with the window set to zero the same run grows the queue.
+
 The verdict's `SURFACE:` picks the implementer's route. `code` and `frontend`
 run a worktree round through the gate — `web/src/**` is in scope since the
 `frontend` rung (tsc delta + `vite build`) exists. `vault` runs
@@ -444,6 +476,31 @@ stopped the self-modification loop until someone hand-committed the result
 (`4fb1ccd`, `2ef86c7` are that happening). Untracked alone is not enough —
 `git status --porcelain` lists new files as well — so it needs the
 `.gitignore` rule beside it. `tests/test_tool_overrides.py` pins both halves.
+
+**A test about untracked state may not require that state to be present.**
+The end-to-end test asserted `(ROOT / "data/tool_overrides.yaml").exists()`
+with `ROOT` resolved from `__file__` — so in a selfmod worktree it demanded a
+file that is, by design, never checked out. `data/` has no tracked contents at
+all, so it failed for **every round from `d11ad8c` onward, whatever the diff
+under test**, and the `tests` rung is a hard rung: three rounds aborted on it
+in fifteen hours while filing fourteen new backlog items and landing nothing.
+The loop's only drain was blocked by a test asserting that a deliberately
+untracked file had been checked out. It now *writes* the file through the real
+writer — `app.paths.LLOYD_HOME` resolves from `__file__` too, so the writer and
+the test address the same tree in a worktree — and asserts git never sees it,
+which is also the stronger check: the old form could only observe a file
+somebody else had already written and reverted. The `.<pid>.tmp` sibling
+`atomic_write_text` lands before renaming is now ignored and asserted too; a
+write killed in between leaves a stray that dirties the tree exactly as the
+tracked file used to, one filename over.
+
+**And a gate rung must not depend on the wall clock.** Two
+`tests/test_guardian_speak.py` tests asserted that an alert dispatches voice,
+while `speak.dispatch` consults `in_quiet_hours` against the real clock and a
+23→07 default window — so they failed whenever the gate ran overnight, which
+is when the unattended loop runs. Rounds gated at 23:52 and 04:07 failed;
+the same code at 08:13 did not. They pin the policy off explicitly now
+(`_AWAKE`), as the tests that are *about* quiet hours already pinned it on.
 
 Because a fresh clone has no override file, **config.yaml is the state a
 rebuild boots into**, so it has to keep describing what is actually served.

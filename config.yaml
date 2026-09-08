@@ -496,10 +496,21 @@ workers:
     # Re-checks one backlog item per run against the system as it is today.
     # Read-only: it reaches a verdict and retires stale items, and never
     # implements anything — confirmed items go through the selfmod gate as a
-    # separate, explicit act. 30min interval works ~53 open items in a day.
+    # separate, explicit act.
+    #
+    # 1800 -> 3600 on 2026-09-08. At 30 minutes this pass is a net PRODUCER of
+    # backlog: its first 40 runs closed 28 items and filed 78 (R = 1.95), and
+    # because spawned items are written `draft` — an OPEN status — every one
+    # re-entered the queue it came from. The open board went 19 -> 122 in 48
+    # hours with 110 of the 122 self-filed. `backlog.is_quarantined` is the
+    # actual fix; this interval is the second half of it. Triage is a pass
+    # over a finite stale backlog, not a service, and once it has worked
+    # through that backlog the right cadence is "occasionally", not "twice an
+    # hour" — it now reports how many items it is holding rather than
+    # claiming the board is clear.
     backlog-selfmod:
       enabled: true
-      interval_seconds: 1800
+      interval_seconds: 3600
       max_inflight: 1
       # Runs as a real session through /api/message/stream, so it has Inner
       # Voice and a transcript. Budgets are measured, not guessed: the three
@@ -515,9 +526,18 @@ workers:
     # automated path from a backlog item to landed code, and it is gated
     # hard: refuses while a promotion is under observation, while halted or
     # broken, or while a round is open. One item per run, oldest first.
+    #
+    # 14400 -> 3600 on 2026-09-08. Four hours made the only drain in this
+    # system eight times rarer than the pass that fills it, which is the wrong
+    # way round whatever the spawn rate is. It cannot actually run hourly —
+    # `_loop_is_free` refuses while a round is open or a promotion is under
+    # observation, and a round plus its 15-minute window is most of an hour —
+    # so this is "try as soon as the loop is free", with the gates doing the
+    # throttling. That is the correct place for it: they know whether a round
+    # is safe to start and a clock does not.
     backlog-implement:
       enabled: true
-      interval_seconds: 14400
+      interval_seconds: 3600
       max_inflight: 1
       max_duration_seconds: 3600
       max_turns: 100
