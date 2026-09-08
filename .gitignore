@@ -107,3 +107,7 @@ _scratch/
 # without it falls back to config.yaml's defaults, which is why config.yaml
 # must keep describing the state actually being served.
 /data/tool_overrides.yaml
+# atomic_write_text lands a sibling `.<pid>.tmp` before renaming. A write
+# killed in between leaves one behind, and an unignored stray dirties the
+# tree exactly as the tracked file used to.
+/data/tool_overrides.yaml.*.tmp

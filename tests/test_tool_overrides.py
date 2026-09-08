@@ -24,7 +24,9 @@ advertised was to evaluate the merge by hand.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -76,11 +78,63 @@ def test_the_override_file_is_ignored():
 
 
 def test_a_written_override_leaves_the_live_tree_clean():
-    """The end-to-end property the other two exist to guarantee."""
-    assert (ROOT / OVERRIDES).exists(), "expected the live override file present"
-    assert not _git("status", "--porcelain", OVERRIDES).stdout.strip(), (
-        "writing the override file must not register in `git status` at all"
+    """The end-to-end property the other two exist to guarantee.
+
+    This *writes* the file, through the real writer, into whatever tree the
+    suite is running in, and asserts git never sees it. It used to assert
+    only that the live file was already `.exists()` — which is not a property
+    of this repo at all: `data/` has no tracked contents, so a fresh worktree
+    contains no `data/` and the assertion failed for every self-modification
+    round from `d11ad8c` onward, whatever the diff under test. For fifteen
+    hours the loop's only drain was blocked by a test asserting that a
+    deliberately-untracked file had been checked out, and three rounds
+    aborted on it while filing fourteen new backlog items about other things.
+    A test about untracked state may not require that state to be present.
+
+    Writing is also the stronger check. The old assertion could only observe
+    a file somebody else had already written and reverted; it could not have
+    caught a writer that dirtied the tree, which is the entire failure this
+    module exists to prevent. `app.paths.LLOYD_HOME` resolves from `__file__`,
+    so the writer and this test address the same tree in a worktree too —
+    asserted below rather than assumed, because that is the coupling that
+    makes writing here safe.
+    """
+    from app.config import TOOL_OVERRIDES_PATH, save_tool_overrides
+
+    assert TOOL_OVERRIDES_PATH == ROOT / OVERRIDES, (
+        f"the writer targets {TOOL_OVERRIDES_PATH} but this test guards "
+        f"{ROOT / OVERRIDES}; a worktree would be checked against the live tree"
     )
+    existed = TOOL_OVERRIDES_PATH.exists()
+    before = TOOL_OVERRIDES_PATH.read_bytes() if existed else None
+    try:
+        save_tool_overrides()
+        assert TOOL_OVERRIDES_PATH.exists(), "the writer produced no file"
+        assert not _git("status", "--porcelain", OVERRIDES).stdout.strip(), (
+            "writing the override file must not register in `git status` at all"
+        )
+
+        # The atomic writer lands a sibling `.<pid>.tmp` and renames it. A
+        # write killed in between leaves that behind, and an unignored stray
+        # dirties the tree exactly as the tracked file used to — same outage,
+        # one filename over.
+        stray = TOOL_OVERRIDES_PATH.with_name(
+            f"{TOOL_OVERRIDES_PATH.name}.{os.getpid()}.tmp")
+        stray.write_text("", encoding="utf-8")
+        try:
+            assert not _git("status", "--porcelain",
+                            str(stray.relative_to(ROOT))).stdout.strip(), (
+                "a half-written override temp file dirties the tree"
+            )
+        finally:
+            stray.unlink()
+    finally:
+        if before is None:
+            TOOL_OVERRIDES_PATH.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                TOOL_OVERRIDES_PATH.parent.rmdir()
+        else:
+            TOOL_OVERRIDES_PATH.write_bytes(before)
 
 
 # ---------------------------------------------------------------------------

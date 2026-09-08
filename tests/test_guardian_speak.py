@@ -167,6 +167,23 @@ def test_missing_shaping_module_is_survivable(tmp_path):
     assert "unavailable" in (tmp_path / speak.LOG_NAME).read_text()
 
 
+def _AWAKE(cfg, now=None):
+    """Quiet hours, forced off, for tests that are not about quiet hours.
+
+    `speak.dispatch` consults `in_quiet_hours(cfg)` with no `now`, so it reads
+    the real clock against a 23->07 default window. Three tests below assert
+    that a dispatch *happens*, and between 23:00 and 07:00 local they were
+    asserting against a system that had correctly decided to stay quiet.
+
+    That is not academic: the unattended selfmod loop gates overnight, and the
+    gate's `tests` rung is a hard rung. Rounds SM_20260908_065238 (23:52) and
+    SM_20260908_105946 (04:07) both failed here and aborted; the same code at
+    08:13 did not. The tests that *are* about the policy hold the real
+    function and pin it themselves at every hour of the window.
+    """
+    return False
+
+
 # ── dispatch ──────────────────────────────────────────────────────────
 
 def test_dispatch_is_muted_by_the_env_switch(tmp_path, monkeypatch):
@@ -181,6 +198,9 @@ def test_dispatch_spawns_detached_and_returns_immediately(tmp_path, monkeypatch)
     """The unit watchdogs the loop at 90s against a 5s tick, so the channel
     must hand off rather than synthesise inline."""
     monkeypatch.setenv("LLOYD_VOICE_ALERTS", "1")
+    # Quiet hours are wall-clock, so without this the assertion below
+    # depends on what time the suite runs. See _AWAKE.
+    monkeypatch.setattr(speak, "in_quiet_hours", _AWAKE)
     seen = {}
 
     def fake_popen(cmd, **kw):
@@ -206,6 +226,9 @@ def test_dispatch_spawns_detached_and_returns_immediately(tmp_path, monkeypatch)
 def test_dispatch_never_raises(tmp_path, monkeypatch):
     """Same contract as every other channel in notify.py."""
     monkeypatch.setenv("LLOYD_VOICE_ALERTS", "1")
+    # Quiet hours are wall-clock, so without this the assertion below
+    # depends on what time the suite runs. See _AWAKE.
+    monkeypatch.setattr(speak, "in_quiet_hours", _AWAKE)
 
     def boom(*a, **k):
         raise OSError("no fork for you")
@@ -264,6 +287,9 @@ def test_voice_is_below_the_external_gate(tmp_path):
 
 def test_alert_dispatches_voice_by_default(tmp_path, monkeypatch):
     monkeypatch.setenv("LLOYD_VOICE_ALERTS", "1")
+    # Quiet hours are wall-clock, so without this the assertion below
+    # depends on what time the suite runs. See _AWAKE.
+    monkeypatch.setattr(speak, "in_quiet_hours", _AWAKE)
     monkeypatch.setattr(speak.subprocess, "Popen", lambda *a, **k: object())
     res = _notifier(tmp_path).alert("warn", "real rollback", "body")
     assert res["voice"] is True
