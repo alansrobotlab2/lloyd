@@ -412,6 +412,24 @@ async def _browser_screenshot() -> str:
 
 # ── Live state for Mission Control (#278) ─────────────────────────────────────
 
+def _existing_page():
+    """The focused page, or None — never launches a browser to find one.
+
+    `_get_page()` launches Chromium if the session is gone, and this runs
+    after *every* tool call including `browser_cookies`, which is a perfectly
+    reasonable thing to ask about with no page open. A state mirror must not
+    be able to resurrect a browser the agent shut down.
+    """
+    if _context is None or _active_page is None:
+        return None
+    try:
+        if _active_page.is_closed() or _active_page not in _context.pages:
+            return None
+    except Exception:
+        return None
+    return _active_page
+
+
 async def _capture_state(tool_name: str) -> dict | None:
     """Build one Browser-tab frame: the current view plus its a11y refs.
 
@@ -422,7 +440,7 @@ async def _capture_state(tool_name: str) -> dict | None:
     same 1280x800 frame measured ~190 KB as PNG against ~15-25 KB here, and
     the frame is only ever displayed scaled down in the browser tab.
     """
-    page = await _get_page()
+    page = _existing_page()
     if page is None:
         return None
     try:

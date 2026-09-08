@@ -102,11 +102,24 @@ class _FakePage:
         return b"\xff\xd8jpeg-bytes\xff\xd9"
 
 
-async def test_capture_state_builds_a_screenshot_plus_snapshot_frame(monkeypatch):
-    async def fake_get_page():
-        return _FakePage()
+def test_existing_page_never_launches_a_browser(monkeypatch):
+    """A cookies call with no page open must not spin up Chromium."""
+    launched = []
 
-    monkeypatch.setattr(browser_module, "_get_page", fake_get_page)
+    async def boom():
+        launched.append(1)
+        raise AssertionError("_capture_state must not launch a browser")
+
+    monkeypatch.setattr(browser_module, "_get_page", boom, raising=False)
+    monkeypatch.setattr(browser_module, "_context", None, raising=False)
+    monkeypatch.setattr(browser_module, "_active_page", None, raising=False)
+
+    assert browser_module._existing_page() is None
+    assert launched == []
+
+
+async def test_capture_state_builds_a_screenshot_plus_snapshot_frame(monkeypatch):
+    monkeypatch.setattr(browser_module, "_existing_page", lambda: _FakePage(), raising=False)
     monkeypatch.setattr(browser_module, "_ref_map",
                         {"e1": {"role": "button", "name": "Submit", "occurrence": 0}},
                         raising=False)
@@ -124,10 +137,7 @@ async def test_capture_state_builds_a_screenshot_plus_snapshot_frame(monkeypatch
 
 
 async def test_capture_state_returns_none_without_a_page(monkeypatch):
-    async def fake_get_page():
-        return None
-
-    monkeypatch.setattr(browser_module, "_get_page", fake_get_page)
+    monkeypatch.setattr(browser_module, "_existing_page", lambda: None, raising=False)
     assert await browser_module._capture_state("browser_navigate") is None
 
 
