@@ -1,90 +1,143 @@
----
-segment: architecture
-tags: [architecture,lloyd]
-relations:
-  related-to:
-  - architecture/autonomy-system.md
-  - architecture/evaluation-engine.md
-  - projects/lloyd/plans/discord-voice-integration.md
-  - projects/lloyd/plans/voice-async-protocol.md
-  - projects/lloyd/plans/document-relations-retrieval.md
-  - architecture/agents.md
-  - architecture/backlog.md
-  - architecture/index.md
-  - architecture/infrastructure.md
-  - architecture/morning-briefing.md
-  - architecture/nightly-reflection.md
-  - architecture/nightly-skills-management.md
-  - architecture/nightly-vault-maintenance.md
-  - architecture/skills.md
-  - architecture/tools.md
-  - architecture/voice.md
-  - architecture/memory.md
-tags: [architecture]
-summary: 'Three-layer memory architecture: source documents (Layer 1),extracted fact files (Layer 2),derived indexes and profiles (Layer 3). Includes next-gen Facts/Relations/Profiles system,subliminal context injection,13-collection QMD search,and 3-tier capture/nightly/real-time pipeline.'
-type: reference
-updated: 2026-04-15
+# Memory: the `improve` loop and the four-verb surface
 
----
+Backlog #376. Written while implementing it, so the numbers below are measured,
+not proposed. Where the item's assumption did not survive contact with the
+store, that is recorded rather than smoothed over.
 
-# Memory System Architecture
+## 1. What the surface looked like, and what it is now
 
-Lloyd uses a **three-layer memory architecture** that combines automated capture,structured fact extraction,semantic search,and nightly analysis. The system writes to and reads from the [[index|Obsidian Vault]] and is built on QMD v2.0.1 for hybrid BM25+vector search.
+Before: 19 memory-family tools at three abstraction levels — 10 `fact_*`
+(`agent_mcp/facts.py`), 5 `vault_*`, 4 `memory_*`. Two prior consolidation
+efforts (#174 "17→7", #340 the module split) moved the count **up**.
 
-## Three-Layer Model
+Now: four verbs in `agent_mcp/memory_ops.py`, and the 19 unchanged underneath.
 
-```
-Layer 1: Source Documents
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │  daily notes  │  knowledge/  │  projects/  │  sessions/  │  people/ │
-  │  (human-written,captured by periodic cron or manually authored)    │
-  └──────────────────────────────────────────────────────────────────────┘
-           │ nightly extraction + add_fact calls
-           ▼
-Layer 2: Fact Files + Entity Relationship Graph
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │  _pipeline/vault-derived/facts/{entity}/{entity}-{category}.md       │
-  │  (23,571 entity dirs, 61,394 fact files — YAML frontmatter)          │
-  │  _pipeline/vault-derived/kg.sqlite  (edges, aliases, entities,       │
-  │   facts_idx — behind app.kg_store; see [[knowledge-graph]])          │
-  └──────────────────────────────────────────────────────────────────────┘
-           │ rebuild_index
-           ▼
-Layer 3: Derived Indexes
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │  ~/lloyd/_pipeline/relations-index.json  (12,879 relationships)      │
-  │  people/{name}/profile.md               (30 synthesized profiles)   │
-  └──────────────────────────────────────────────────────────────────────┘
-```
+| verb | delegates to | the one thing it adds |
+|---|---|---|
+| `remember` | `fact_add` | refuses to re-add a fact the entity already carries verbatim |
+| `recall` | `vault_recall` | documents + facts + graph in one call; `grep_code` off by default |
+| `forget` | `fact_invalidate` | refuses an unscoped "forget everything about X" |
+| `improve` | `fact_improvement.run_improvement` | the feedback loop, dry-run by default |
 
-Layer 3 is a **rebuildable cache** — it can be regenerated at any time from Layer 1+2 via `rebuild_index`. This design ensures no permanent data loss if derived indexes become stale.
+**Routers, not replacements.** This deliberately does not shrink the tool count.
+A caller that wants `fact_neighbors(min_confidence=0.7)` still calls it; hiding
+parameters behind a facade would trade the actual complaint (no obvious entry
+point) for a worse one (the escape hatch is gone). Each verb exists because it
+adds a guard its underlying tool lacks, not because it renames it.
 
-### Knowledge Wiki Layer
+`forget`'s refusal is the interesting one: naming an entity is not a decision
+about its entire history, and the same reasoning made `fact_resolve`
+stop defaulting to `auto_resolve=true`.
 
-`~/obsidian/knowledge/` is Lloyd's **persistent,compounding wiki** — 172 LLM-maintained synthesis pages across 26 domain directories. Follows the [LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). All pages carry `source_type: primary|synthesized|captured` for provenance tracking.
+## 2. `improve`: the detector is evidence, never a verdict
 
-**Three core operations** (detailed in [[knowledge-graph]]):
+`_detect_contradictions_sync` (`agent_mcp/facts.py:104`) fires when two of an
+entity's facts share >0.6 token overlap. That is *phrased alike*, not
+*disagrees* — measured on `Lloyd`: 32,857 "contradictions" from 5,489 facts,
+and the scan is O(n²). So the loop requires an independent reason per action:
 
-1. **Ingest** — source-driven: user drops a URL/path → immutable source summary → update 3-10 existing wiki pages → extract facts → log. Skill: `~/obsidian/skills/ingest/SKILL.md`.
+| evidence | action | why it is admissible |
+|---|---|---|
+| confidences differ | expire the lower-confidence side | the graph already says which claim was believed harder |
+| one written ≥1 day after the other | expire the older | a later write about the same contradiction supersedes |
+| same confidence, same day | **nothing** | no basis; this is the false-positive class |
 
-2. **Query → Write-back** — the compounding mechanism: every research answer filed back as a knowledge page. Enforced in `quick-research` (when synthesis > 200 words or ≥3 facts),`medium-research` (always),`deep-research` (always). Nightly Phase 6 catches unfiled research.
+A second, stricter filter turned out to be load-bearing. The detector's
+*triggers* are opposing terms **or** `_token_overlap > 0.6` — the second one
+labels two facts that say nearly the same thing a contradiction, and on this
+tree that is its dominant mode (the auto-capture pipeline writes the same event
+twice with different confidence numbers). Acting on those pairs is not
+correction, it is dedupe decided by whoever lost a coin flip, and it is exactly
+what ate useful facts. So `REQUIRE_OPPOSING_TERMS = True`: only polarity flips
+(working/broken, enabled/disabled, true/false) are actionable. Near-duplicate
+pairs are counted in the record as `near_duplicates` and left alone. On a wide
+pass this changed 749 candidate actions into 17.
 
-3. **Lint** — automated health: Knowledge Health Report (daily 03:30),Unfiled Research Scan (Phase 6),Knowledge Gap Harvest (Phase 7,dispatches research for recurring gaps),Entity Synthesis Generation (Phase 8,auto-generates overview pages from source docs for entities with >5 facts).
+Signal sources, both real, neither invented:
+- **corrections** — entities named in `~/obsidian/memory/corrections.md`, the
+  user's own log of things gotten wrong. Consumed before this only by the
+  behaviour/prompt loops; nothing routed it into fact quality. An entry is
+  credited to an entity only if a token in its heading is a **registered
+  entity**, so a heading can never invent an entity to delete facts about.
+- **drift** — entities with a fact file written inside N days. Uses fact-file
+  mtime, not `facts_idx.created_at`: the 09-03 rebuild rewrote every row's
+  date, and directory mtimes don't move when a file is edited in place.
 
-**Five ingestion pipelines** feed the wiki: ingest skill (real-time,source-driven),research skills (question-driven),nightly entity synthesis (automated),daily note extraction,and project status updates.
+Writers are the existing tools called as functions. Three writers of
+`expired_at` would be the drift bug `fact_profile` and the router already had
+(`agent_mcp/facts.py:71-82`). Every run writes a JSON record under
+`_pipeline/improvement/` with before/after active-fact counts and one reason
+string per action.
 
-**Schema:** `knowledge/KNOWLEDGE_SCHEMA.md` — 8 page types,required frontmatter,naming conventions.
-**Operations log:** `knowledge/_log.md` — append-only,grep-parseable.
+## 3. Why it does not call `fact_resolve`, even though that is the right verb
 
-## Vault Structure
+`fact_resolve(auto_resolve=true)` selects losers by **fact id**, and fact ids
+are per-file counters: `Assistant/state-001` and `Assistant/usage-001` are
+different facts with the same id (19 facts in that entity share `fact-001`).
+Measured on a copy of the live store, one plan of 2 actions invalidated **25
+facts** — `Assistant` went from 29 active facts to 4 — because each id lookup
+hit every fact sharing the loser's id across all category files.
 
-The vault has 16 top-level directories. Most are QMD-indexed; some are utility-only.
+So `apply_action` aims `fact_invalidate` at a substring verified to match
+**exactly one** stored fact (growing 60 → 120 → full text, dropped if still
+ambiguous), and the run records it as an error and stops that entity if a
+writer ever expires more than one fact for one action. The `confidence` vs
+`superseded` distinction is preserved in the reason string so the fields can be
+re-tagged (`invalid_at` rather than `expired_at`) once ids are entity-unique.
+Filed as its own item.
 
-| Directory | Purpose | QMD Collection | File Count |
-|-----------|---------|----------------|------------|
-| `memory/` | Agent experience — daily notes,reflections,pipeline data | `memory` (ignores `_pipeline/**`) | 1,231 |
-| `knowledge/` | Compounding wiki — research,synthesis,docs,how-tos (schema: `KNOWLEDGE_SCHEMA.md`) | `knowledge` | 172 |
-| `projects/` | Project notes — plans,architecture,backlogs | `projects` | 185 |
-| `agents/` | Agent identity — SOUL,TOOLS,MEMORY,HEARTBEAT | `agents` | 151 |
-| `personal/` | Alan's personal notes | `personal` | 30 |
-| `work/` | Alan's work
+## 4. What it did to the metric it is required to move
+
+`fact_entity_recall` from `eval/run_eval.py`, measured on **copies** of the live
+fact tree and `kg.sqlite` via `LLOYD_FACTS_ROOT`/`LLOYD_KG_DB`; the live store
+was never opened. Production knobs passed explicitly — `run_eval()`'s
+*signature* defaults are the pre-#322 configuration (`graph_rerank=False`,
+`alpha=0.5`) while only the *argparse* defaults come from `agent_mcp.vault`, so
+calling `run_eval(queries)` measures a configuration nothing serves. That trap
+is in `eval/run_eval.py:306-309` and `fact_improvement._fact_entity_recall`
+fell into it on the first version.
+
+| pass | facts expired | active facts | `fact_entity_recall` |
+|---|---|---|---|
+| baseline | — | 205,738 | **0.375** |
+| default nightly, guarded (drift ≤3d, 40 entities) | 3 | — (dry run) | 0.375 |
+| wide backfill, guarded (drift ≤120d, 2,000 entities) | 17 | 205,738 → 205,721 | **0.375** (Δ 0.000) |
+| *unguarded wide pass, for contrast* | 649 | 205,738 → 205,087 | 0.375 |
+| *before the one-fact-per-action guard* | 33, **25 of them collateral** | `Assistant` 29 → 4 | 0.375 |
+
+An intermediate unguarded pass over the four entities that dominate the
+queries' fact pools moved the metric **0.35 → 0.30** — a regression, and the
+clearest evidence in this whole change that "delete more" is not "improve".
+
+**The honest result: the loop runs correctly and does not move the metric.**
+#376's acceptance says "a change that cannot move that metric is not this
+feature". Two findings say the criterion is mis-aimed rather than the code dead:
+
+1. **The metric is pool-composition-bound.** `_rank` in `agent_mcp/vault.py`
+   caps the returned fact list at `FACT_RANK_CAP_SEED=10` across *all* seed
+   entities — the per-entity cap applies only to god-nodes. So
+   `fact_entity_recall` records which entities won 10 slots, and expiring
+   individual facts only changes that when it shifts the score ordering.
+   Removing the *lowest-scoring* facts of an entity changes nothing; removing
+   its best facts ejects the entity from the pool (measured: expiring the
+   highest-scoring claim of `Assistant`, `Autonomy System`, `Backlog System`
+   and `Data Pipeline` moved the metric **0.35 → 0.30**). Movement is available
+   and it is mostly downward.
+2. **The headroom is capped.** Of 30 unmet expected-entity slots, **8 name
+   entities with no fact directory at all** — no fact-side change can reach
+   them; only ingestion can, which #376 explicitly puts out of scope.
+
+So the nightly consumer is shipped in **plan mode**: it reads the signals,
+pairs, explains, logs counts, and writes nothing. Applying is an explicit act.
+The apply-mode policy decision, with the numbers above, is filed as its own
+item rather than being taken quietly at 3am by a scheduler.
+
+## 5. Files
+
+| path | role |
+|---|---|
+| `agent_mcp/fact_improvement.py` | the loop: signals → plan → apply → record |
+| `agent_mcp/memory_ops.py` | `remember` / `recall` / `forget` / `improve` |
+| `scripts/memory/fact-improvement.py` | CLI; exits 2 on failure, 3 on blast-radius overrun |
+| `tests/test_memory_improvement.py` | 25 tests, incl. the one-fact-per-action and near-duplicate guards |
+| `skills/fact-improvement/SKILL.md` + `autonomy/84-fact-improvement.md` | the scheduled consumer |

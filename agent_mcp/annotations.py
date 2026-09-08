@@ -40,6 +40,9 @@ READ_ONLY: frozenset[str] = frozenset({
     # Vault + memory + sessions
     "vault_read", "vault_overview", "vault_search", "vault_recall",
     "memory_read", "session_recall", "chat_list_sessions", "chat_get_session",
+    # Unified memory verbs (#376) — the read half. `remember`/`forget`/`improve`
+    # are actuators and are not listed here.
+    "recall",
     # Skills
     "skills_search", "skills_read",
     # Autonomy / backlog / research — inspection halves
@@ -78,6 +81,8 @@ DESTRUCTIVE: frozenset[str] = frozenset({
     "Bash",                       # arbitrary command execution
     "fact_invalidate",
     "memory_remove",
+    # #376: `forget` expires facts; `improve` expires/invalidates them in bulk.
+    "forget", "improve",
     "autonomy_delete_task",
     "autoresearch_rollback",
     "email_delete", "email_delete_filter", "email_delete_folder",
@@ -101,6 +106,8 @@ IDEMPOTENT: frozenset[str] = frozenset({
     "contacts_delete", "contacts_update",
     "tasks_update", "fact_invalidate",
     "research_complete",
+    # `remember` dedupes, so repeating it adds nothing further (#376).
+    "remember",
     "ide_open_file", "ide_open_folder", "ide_close_tab",
     "mc_navigate", "mc_close_modal",
     # Rebuilding an up-to-date graph writes the same graph again.
