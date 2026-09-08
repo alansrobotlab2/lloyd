@@ -31,6 +31,7 @@ from agent_mcp._shared import _ENTITY_STOPWORDS
 from agent_mcp.facts import _extract_entities_from_query, _get_facts_sync
 from agent_mcp.session import _load_session_index, _score_session
 from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords
+from prompt_builder import PROMPT_BUDGET_CHARS
 
 logger = logging.getLogger("lloyd.prefetch")
 
@@ -1196,6 +1197,40 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
         return text
 
     return context + "\n\n" + text
+
+
+def log_turn_prompt_budget(injected: str, *, session_id: str | None = None,
+                           system_prompt_chars: int | None = None) -> dict:
+    """Log this turn's injected-context size against the shared prompt budget.
+
+    `build_system_prompt` logs the system half with its component breakdown
+    (#466); this is the other half. Skills/vault/fact injection is where a turn
+    actually grows — a 40 KB system prompt with a 60 KB `<context>` block is
+    still 100 KB before the conversation starts, and until now neither half was
+    ever measured. `system_prompt_chars` is optional so the two halves can be
+    totalled by whoever has both.
+    """
+    from prompt_builder import prompt_token_estimate
+
+    chars = len(injected or "")
+    total = chars + (system_prompt_chars or 0)
+    report = {
+        "context_chars": chars,
+        "context_est_tokens": prompt_token_estimate(chars),
+        "system_chars": system_prompt_chars or 0,
+        "turn_total_chars": total,
+        "turn_total_est_tokens": prompt_token_estimate(total),
+        "budget_chars": PROMPT_BUDGET_CHARS,
+        "over_budget": total > PROMPT_BUDGET_CHARS,
+    }
+    logger.info(
+        "PROMPT_BUDGET session=%s context=%dc/%dt  system=%dc  turn_total=%dc/%dt"
+        "  budget=%dc  over_budget=%s",
+        session_id or "-", chars, report["context_est_tokens"],
+        report["system_chars"], total, report["turn_total_est_tokens"],
+        PROMPT_BUDGET_CHARS, report["over_budget"],
+    )
+    return report
 
 
 def prefetch_context(text: str, session_id: str | None = None,

@@ -9,26 +9,90 @@ Combines:
 """
 
 import datetime
+import logging
 import os
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Anti-compliance directive — injected FIRST in the prompt so it has primacy.
-# Prevents the model from becoming a yes-man that agrees to everything.
-# ---------------------------------------------------------------------------
-ANTICOMPLIANCE_DIRECTIVE = """## BEHAVIORAL FRAME (before everything else)
-Before processing the user's request,ask yourself: "Is this a good idea?" If not,say so directly.
+logger = logging.getLogger("lloyd.prompt")
 
-**You are NOT a compliance engine.** Your job is to be useful,not agreeable. Specific rules:
+# ---------------------------------------------------------------------------
+# Prompt-size budget (#466).
+#
+# Item #110 set ~13K as the target for the identity surface; by 2026-09-08 the
+# identity+memory files alone measured ~21.4K tokens and nothing in the code
+# could see it — the MEMORY.md clobber (#464) added ~4.4K duplicate tokens per
+# turn and sat unnoticed for a day because no number was ever computed. The
+# budget is a growth tripwire, deliberately above the size measured the day it
+# shipped (65,783 chars: SOUL 6.1K + memories 52.5K + skills index 4K + harness
+# paragraphs), so a hit means "something grew", not "you are already over". The
+# response to a hit is the component breakdown on the same line, which names the
+# component that grew — USER.md at 48K was invisible before this existed.
+#
+# Nothing is truncated here. Silently cutting an identity file to fit a number
+# is the same failure as never measuring it.
+#
+# The token figure is an estimate at ~4 chars/token, the right order for the
+# Qwen tokenizer on this English/Markdown mix. Chars are the exact measurement;
+# the estimate is labelled, never presented as a count.
+# ---------------------------------------------------------------------------
+PROMPT_BUDGET_CHARS = 80_000
+CHARS_PER_TOKEN = 4
 
-1. **NO automatic agreement**: Never begin with "Yes,of course","Certainly","Absolutely","I can certainly help" or any variant signaling blanket acceptance. Evaluate first,respond second.
-2. **Challenge bad ideas**: If a request would produce garbage,waste time,or create debt — say "this is a bad idea because X" before executing. Offer a better alternative.
-3. **Push back on scope**: Don't blindly agree to audit everything or rewrite 800 lines. Suggest scoped alternatives.
-4. **Disagree directly**: No sycophantic language ("great question","excellent point","you're absolutely right"). If wrong,say so: "That won't work because..."
-5. **Silence on obvious no**: If the answer is no,say no. Don't hedge with "While X has merit,perhaps Y..."
-6. **Refuse politely**: "I can do that, but here's why it's not worth it: ..." beats blind compliance."""
+# A memory file that repeats this many consecutive contract lines has been
+# pasted into, not annotated. Two quoted lines in a correction note is normal;
+# a verbatim run of 40 is the #464 shape.
+_MIN_DUPLICATED_CONTRACT_LINES = 40
+
+
+def prompt_token_estimate(chars: int) -> int:
+    """Rough token count from character count. Label it as an estimate."""
+    return max(0, int(chars)) // CHARS_PER_TOKEN
+
+
+def measure_prompt(components: dict[str, str]) -> dict:
+    """Per-component char + estimated-token sizes and the total vs budget.
+
+    `components` is ordered and named by what it is (SOUL.md, MEMORY.md,
+    skills_index, …) so a log line or a dashboard can say which half of the
+    prompt grew. Nothing is trimmed here — measuring is not enforcing.
+    """
+    parts = {
+        name: {"chars": len(text or ""), "est_tokens": prompt_token_estimate(len(text or ""))}
+        for name, text in components.items()
+    }
+    total = sum(p["chars"] for p in parts.values())
+    return {
+        "components": parts,
+        "total_chars": total,
+        "total_est_tokens": prompt_token_estimate(total),
+        "budget_chars": PROMPT_BUDGET_CHARS,
+        "over_budget": total > PROMPT_BUDGET_CHARS,
+    }
+
+
+def log_prompt_size(components: dict[str, str], *, session_id: str = "") -> dict:
+    """One INFO line per build: the component breakdown #466 never had."""
+    report = measure_prompt(components)
+    breakdown = "  ".join(
+        f"{name}={size['chars']}c/{size['est_tokens']}t"
+        for name, size in report["components"].items()
+    )
+    logger.info(
+        "PROMPT_BUDGET session=%s %s  total=%dc/%dt  budget=%dc  over_budget=%s",
+        session_id or "-", breakdown, report["total_chars"],
+        report["total_est_tokens"], PROMPT_BUDGET_CHARS, report["over_budget"],
+    )
+    return report
+
+
+# The anti-compliance rules used to be duplicated here as
+# ANTICOMPLIANCE_DIRECTIVE and injected ahead of SOUL.md while SOUL.md carried
+# its own near-verbatim copy — two wordings of the same six rules every turn,
+# already diverged, and only the vault one reachable by the promotion path
+# (#465). They now live in one place: `## Anti-Compliance Directive` in SOUL.md.
 
 LLOYD_HOME = Path(__file__).parent
+
 # Anchor paths to the repo location rather than Path.home() so they resolve
 # regardless of who/where the process runs as.
 _CANON_SOUL_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "SOUL.md"
@@ -205,6 +269,7 @@ def build_system_prompt(
     todos: list[dict] | None = None,
     plan: dict | None = None,
     goal: dict | None = None,
+    session_id: str = "",
 ) -> str:
     """Build the full system prompt for a Lloyd session.
 
@@ -225,40 +290,49 @@ def build_system_prompt(
     `goal` (the /goal target) — session-level persistent goal. When set,
     renders a `<goal>` block above plan + todos so primary stays anchored
     on the user's end condition. Pass `session.goal` straight from disk.
+
+    `session_id` — when non-empty, emit one `PROMPT_BUDGET` INFO line holding
+    the per-component char/token breakdown for this build (#466). Pass the live
+    session id from the chat/ambient/sync handler so there is one line per turn.
+    Logging never changes the returned string.
     """
     overlay = _resolve_overlay(overlay_dir)
-    parts = []
+    components: dict[str, str] = {}
 
-    # Pre-identity frame: inject before SOUL.md so it has primacy in the prompt.
-    # This is the anti-compliance directive — a behavioral guardrail that runs
-    # before the operating contract. Placed first because LLMs overweight early
-    # instructions.
-    parts.append(ANTICOMPLIANCE_DIRECTIVE)
-
+    # SOUL.md is the whole identity frame. The anti-compliance rules used to be
+    # prepended from a Python constant on top of SOUL.md's own copy, so the same
+    # six rules arrived twice per turn in two wordings that had already diverged,
+    # and only the vault copy was reachable by the promotion path (#465).
     soul = _load_soul(overlay)
     if soul:
-        parts.append(soul)
+        components["SOUL.md"] = soul
 
-    memory = _load_memories(overlay)
-    if memory:
-        parts.append(f"<memory>\n{memory}\n</memory>")
+    memories = _load_memories(overlay, soul=soul)
+    if memories:
+        components["memories"] = f"<memory>\n{memories}\n</memory>"
 
     if include_skills_index:
         skills = _load_skills_index(overlay)
         if skills:
-            parts.append(f"<available_skills>\n{skills}\n</available_skills>\nNote: relevant skill content is automatically injected into each user message as <context> when matched.")
+            components["skills_index"] = (
+                f"<available_skills>\n{skills}\n</available_skills>\n"
+                "Note: relevant skill content is automatically injected into each "
+                "user message as <context> when matched."
+            )
 
     goal_block = _format_goal_block(goal)
     if goal_block:
-        parts.append(goal_block)
+        components["goal"] = goal_block
 
     plan_block = _format_plan_block(plan)
     if plan_block:
-        parts.append(plan_block)
+        components["plan"] = plan_block
 
     todos_block = _format_active_todos(todos)
     if todos_block:
-        parts.append(todos_block)
+        components["todos"] = todos_block
+
+    parts: list[str] = list(components.values())
 
     # Platform hints — NOTE: no timestamp here; a per-minute timestamp busts
     # vLLM's prefix cache, forcing full re-prefill of the system prompt every turn.
@@ -313,6 +387,12 @@ def build_system_prompt(
     )
     parts.append(turn_discipline)
 
+    # The four harness paragraphs are grouped as one measured component: they
+    # are the instructions prompt_builder itself owns, as distinct from the
+    # vault files it reads. Grouping them cannot change the joined string.
+    components["harness_hints"] = "\n\n".join(parts[len(components):])
+    if session_id:
+        log_prompt_size(components, session_id=session_id)
     return "\n\n".join(parts)
 
 
@@ -329,8 +409,67 @@ def _load_soul(overlay: Path | None = None) -> str | None:
     return content or None
 
 
-def _load_memories(overlay: Path | None = None) -> str | None:
-    """Load MEMORY.md and USER.md — overlay dir takes priority, canonical as fallback."""
+def _longest_soul_run(text: str, soul: str) -> tuple[int, int]:
+    """Raw line span [start, end) of the longest run of lines shared with `soul`.
+
+    Blank lines do not break a run — the contract is markdown with a blank line
+    between every paragraph, so a run measured over raw lines would never be
+    longer than one paragraph and a real paste would slip through the guard.
+    Returns (-1, -1) when there is no shared line.
+    """
+    soul_lines = {ln.strip() for ln in soul.split("\n") if ln.strip()}
+    lines = text.split("\n")
+    nonblank = [(i, ln.strip()) for i, ln in enumerate(lines) if ln.strip()]
+    best = (0, 0, (-1, -1))  # (length, span_start_position, raw span)
+    start = 0
+    for pos in range(len(nonblank) + 1):
+        shared = pos < len(nonblank) and nonblank[pos][1] in soul_lines
+        if not shared:
+            length = pos - start
+            if length > best[0]:
+                raw_start = nonblank[start][0] if start < len(nonblank) else len(lines)
+                raw_end = nonblank[pos][0] if pos < len(nonblank) else len(lines)
+                best = (length, start, (raw_start, raw_end))
+            start = pos
+    return best[2]
+
+
+def _memory_duplicate_share(text: str, soul: str) -> tuple[float, int, int]:
+    """(share of nonblank lines inside the longest shared run, run length, total).
+
+    Longest-run, not total count: a memory file quoting the contract in a dozen
+    one-line corrections has runs of 1, while a file pasted over with it has a
+    run of the whole contract. That distinction is the difference between a note
+    and a clobber.
+    """
+    start, end = _longest_soul_run(text, soul)
+    if start == -1:
+        return 0.0, 0, sum(1 for ln in text.split("\n") if ln.strip())
+    run = sum(1 for ln in text.split("\n")[start:end] if ln.strip())
+    total = sum(1 for ln in text.split("\n") if ln.strip())
+    return (run / total if total else 0.0), run, total
+
+
+def _drop_longest_duplicate_run(text: str, soul: str) -> str:
+    start, end = _longest_soul_run(text, soul)
+    if start == -1:
+        return text
+    lines = text.split("\n")
+    return "\n".join(lines[:start] + lines[end:]).strip()
+
+
+def _load_memories(overlay: Path | None = None, *, soul: str | None = None) -> str | None:
+    """Load MEMORY.md and USER.md — overlay dir takes priority, canonical as fallback.
+
+    When `soul` is supplied, a memory file that is a paste of the operating
+    contract has the pasted run dropped rather than injected a second time.
+    On 2026-09-08 MEMORY.md was overwritten with a verbatim copy of SOUL.md
+    (#464): 17.6 KB of the file was the contract, so every turn carried it
+    twice, and because nothing compared the two files it took a human audit to
+    notice. Dropping the duplicate is safe — the identical text already reached
+    the prompt from SOUL.md — but it is loud, because silently rewriting the
+    memory surface is the same class of failure as the clobber itself.
+    """
     parts = []
     for filename in ("MEMORY.md", "USER.md"):
         content = None
@@ -338,8 +477,25 @@ def _load_memories(overlay: Path | None = None) -> str | None:
             content = (overlay / filename).read_text(encoding="utf-8").strip()
         elif (_CANON_MEMORIES_DIR / filename).exists():
             content = (_CANON_MEMORIES_DIR / filename).read_text(encoding="utf-8").strip()
-        if content:
-            parts.append(f"## {filename}\n{content}")
+        if not content:
+            continue
+        if soul:
+            share, run, total = _memory_duplicate_share(content, soul)
+            if run >= _MIN_DUPLICATED_CONTRACT_LINES:
+                logger.warning(
+                    "PROMPT_BUDGET dropping %d of %d lines from %s (longest run "
+                    "verbatim from SOUL.md, %.0f%% of the file) — the operating "
+                    "contract was pasted into a memory file and is injected once "
+                    "already (#464)", run, total, filename, share * 100,
+                )
+                content = _drop_longest_duplicate_run(content, soul)
+                if not content:
+                    logger.warning(
+                        "PROMPT_BUDGET %s held nothing but the pasted contract; "
+                        "nothing left to inject", filename,
+                    )
+                    continue
+        parts.append(f"## {filename}\n{content}")
     return "\n\n".join(parts) if parts else None
 
 

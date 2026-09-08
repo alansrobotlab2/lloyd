@@ -54,7 +54,7 @@ from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_harn
 from app.post_capture import _post_session_capture, _maybe_extract_focus
 from app.session_titles import maybe_title_session
 from prompt_builder import build_system_prompt
-from prefetch import prefetch_context_async
+from prefetch import prefetch_context_async, log_turn_prompt_budget
 from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
 
@@ -1422,6 +1422,7 @@ async def post_message_stream(request: Request):
 
     system_prompt = build_system_prompt(
         todos=session_todos, plan=session_plan, goal=session_goal,
+        session_id=session_id,
     )
     t_prompt = time.perf_counter()
 
@@ -1434,6 +1435,13 @@ async def post_message_stream(request: Request):
         text, session_id=session_id, plan_mode=plan_mode_active,
     )
     t_prefetch = time.perf_counter()
+    # One PROMPT_BUDGET line per turn: the system half is logged by
+    # build_system_prompt above, this adds the injected half and the total
+    # against the shared budget (#466).
+    log_turn_prompt_budget(
+        prefetched_text, session_id=session_id,
+        system_prompt_chars=len(system_prompt),
+    )
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     session_turn_count = 0
@@ -1563,6 +1571,7 @@ async def build_ambient_turn(
     plan_mode_active = bool(plan.get("plan_mode"))
     system_prompt = build_system_prompt(
         todos=existing.get("todos") or [], plan=plan, goal=goal,
+        session_id=session_id,
     )
 
     def _ambient_refresh_disallowed() -> list[str]:
@@ -1674,6 +1683,7 @@ async def post_message(request: Request):
     sync_plan_mode_active = bool(sync_session_plan.get("plan_mode"))
     system_prompt = build_system_prompt(
         todos=_load_session_todos(session_id), plan=sync_session_plan,
+        session_id=session_id,
     )
     prefetched_text = await prefetch_context_async(
         text, session_id=session_id, plan_mode=sync_plan_mode_active,

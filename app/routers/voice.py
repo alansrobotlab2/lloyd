@@ -102,6 +102,7 @@ async def voice_inject(request: Request):
     voice_plan = existing.get("plan") or {}
     voice_plan_mode = bool(voice_plan.get("plan_mode"))
     system_prompt = build_system_prompt(
+        session_id=session_id,
         todos=existing.get("todos") or [], plan=voice_plan,
     )
 
