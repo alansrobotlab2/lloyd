@@ -50,6 +50,22 @@ MAX_ERROR_LEN = 200
 # Keys whose values are likely to contain file content (truncate aggressively)
 CONTENT_ARG_KEYS = {"content", "text", "body", "data", "message"}
 
+# Keys whose value is a shell command. For these, truncation keeps the leading
+# program token instead of dropping the whole string.
+#
+# The placeholder used to replace the entire value (`[truncated: 900 chars]`),
+# and the miner groups on the first whitespace token of the value — so every
+# over-long command in the corpus, whatever it did, landed in one bucket. It
+# became the #2 skill candidate by occurrences (625, across 70 sessions) and an
+# unsorted union of transcript extraction, awk, nvidia-smi and git calls, i.e. a
+# description of this extractor rather than of any procedure. Backlog #391.
+#
+# The verb costs ~10 chars and is the only part of the string that says what the
+# call was. Bound it: a first token can itself be enormous (an inline heredoc,
+# a 2 KB path).
+COMMAND_ARG_KEYS = {"command", "cmd"}
+COMMAND_HEAD_KEEP = 60
+
 
 # ── Error categorization ──────────────────────────────────────────────────────
 
@@ -200,6 +216,18 @@ def mask_sensitive(value: str) -> str:
     return value
 
 
+def _command_verb(value: str) -> str:
+    """The leading program token of a shell command, bounded.
+
+    Deliberately the *first* token and nothing cleverer: `cd x && python3 y`
+    keys on `cd`, which is what the miner already keyed on before the command
+    was ever truncated. Picking a better token than the one the un-truncated
+    path picks is a separate change (`Bash/cd_signature`, backlog #391).
+    """
+    parts = value.split(None, 1)
+    return parts[0][:COMMAND_HEAD_KEEP] if parts else ""
+
+
 def scrub_value(key: str, value) -> object:
     """Scrub a single argument value."""
     if not isinstance(value, str):
@@ -214,6 +242,10 @@ def scrub_value(key: str, value) -> object:
 
     # Large strings — truncate
     if len(value) > MAX_STRING_LEN:
+        if key.lower() in COMMAND_ARG_KEYS:
+            verb = _command_verb(value)
+            if verb:
+                return f"{verb} [truncated: {len(value)} chars]"
         return f"[truncated: {len(value)} chars]"
 
     return value

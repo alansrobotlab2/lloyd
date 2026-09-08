@@ -146,14 +146,42 @@ def normalize_tool_name(tool: dict) -> str:
 
 # ── Pattern matching ─────────────────────────────────────────────────────────
 
+# A scrubbed value that says "there was something here" and nothing else:
+# `[truncated: 900 chars]`, `[MASKED]`, or an extraction artefact of the same
+# shape. The prefix is what both writers emit, so a leading `[` is the test.
+KEY_ARTIFACT_PREFIX = "["
+
+
+def _command_key(cmd: str) -> str:
+    """Grouping key for a shell call: the program it ran.
+
+    Rows written before backlog #391 hold a bare `[truncated: N chars]` where
+    the command was, and that placeholder was being taken as the program name —
+    which is how 625 unrelated calls (transcript extraction, awk, nvidia-smi,
+    git) became the single #2-ranked pattern in the corpus. Such a call has no
+    recoverable key, so it returns "" and the caller drops it rather than
+    filing it into one shared bucket.
+    """
+    parts = cmd.split()
+    if not parts:
+        return ""
+    head = parts[0].rsplit("/", 1)[-1]
+    if not head or head.startswith(KEY_ARTIFACT_PREFIX):
+        return ""
+    return f"cmd:{head}"
+
+
 def normalize_params_signature(params_summary: dict) -> str:
     """
     Create a normalized signature from params_summary for grouping.
     Uses tool name + key parameter patterns.
+
+    "" means the call cannot be keyed and must be dropped from signature mining,
+    not filed under a shared fallback bucket.
     """
     if not params_summary:
         return ""
-    
+
     # For run_bash, extract command pattern
     if "command" in params_summary:
         cmd = params_summary["command"]
@@ -162,12 +190,9 @@ def normalize_params_signature(params_summary: dict) -> str:
             cmd = re.sub(r'/home/[^\s]+', '/home/USER', cmd)
             cmd = re.sub(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', 'DATE', cmd)
             cmd = re.sub(r'[0-9]{2}:[0-9]{2}:[0-9]{2}', 'TIME', cmd)
-            # Extract command type
-            parts = cmd.split()
-            if parts:
-                return f"{parts[0]}_signature"
+            return _command_key(cmd)
         return "run_bash_signature"
-    
+
     # For file operations, extract operation + pattern
     if "path" in params_summary:
         path = str(params_summary["path"])
@@ -176,13 +201,64 @@ def normalize_params_signature(params_summary: dict) -> str:
         if ext_match:
             return f"file_{ext_match.group(1)}_signature"
         return "file_signature"
-    
+
     if "pattern" in params_summary:
         return f"pattern_{str(params_summary['pattern'])[:20]}_signature"
-    
+
     # Generic signature based on keys
     keys = sorted(params_summary.keys())
     return f"{'_'.join(keys)}_signature"
+
+
+# ── Candidate emission ───────────────────────────────────────────────────────
+
+def is_emittable(pattern: dict) -> bool:
+    """Whether a mined pattern is worth a candidate file.
+
+    A `*_signature` key names the tool plus the *set of argument names* the call
+    carried — `Read/file_path_limit_offset_signature` means "Read was called
+    with file_path, limit and offset" — and the body is a frequency count of
+    successful calls. There is no failure, no mitigation and no decision in it,
+    which authoring rule 5 forbids as skill content; 11 skills were archived
+    2026-09-04 for exactly that class and one of them was re-mined within the
+    week. On 2026-09-08 the class was 93 of 103 candidate keys and all 20 of the
+    top 20 by occurrences, so the gate was selecting for it (#391).
+
+    A bare program name (`cmd:cd`, `cmd:ls`) is the same non-skill wearing a
+    better key, so it goes too: `Bash/cd_signature` was the #1 pattern that day
+    at 1,129 occurrences. What survives is a key that names a parameter *value*
+    shape carrying a decision — `read_limit_on_files_over_2000_lines` — which
+    nothing currently produces, so success candidates are suppressed wholesale
+    until a producer for that class exists.
+
+    Error and sequence patterns are untouched: they key on (tool, error_type)
+    and on the tool n-gram, and losing those would mean losing failures.
+    """
+    if pattern.get("type") != "success":
+        return True
+    sig = (pattern.get("params_signature") or "").strip()
+    if not sig or sig == "generic":
+        return False
+    if sig.startswith("cmd:") or sig.endswith("_signature"):
+        return False
+    return True
+
+
+def emit_candidates(patterns: list[dict], output_dir: Path) -> list[Path]:
+    """Write every emittable pattern; return the files written.
+
+    The filter lives here and in `write_candidate_file`, not in the three
+    miners: the pattern tables are still complete telemetry (`--stats` and a
+    re-ranked corpus need to see what the extractor is producing), but nothing
+    in the non-skill class reaches skill authoring.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for pattern in patterns:
+        path = write_candidate_file(pattern, output_dir)
+        if path:
+            written.append(Path(path))
+    return written
 
 
 def slugify(text: str) -> str:
@@ -395,7 +471,10 @@ def mine_error_patterns(trajectories: list[dict], threshold: int = 2) -> list[di
             tool_name = error_tool.get("name", "unknown")
             error_type = error_tool.get("error_type", "logic")
             params_summary = error_tool.get("params_summary", {})
-            params_sig = normalize_params_signature(params_summary) if params_summary else "generic"
+            # An un-keyable call keeps the error: error candidates are filed on
+            # (tool, error_type) and the signature only splits variants, so
+            # dropping it here would delete failures over a grouping nuisance.
+            params_sig = normalize_params_signature(params_summary) or "generic"
             
             key = (tool_name, error_type, params_sig)
             pattern_data[key]["sessions"].add(session_key)
@@ -470,6 +549,13 @@ def mine_success_patterns(trajectories: list[dict], threshold: int = 2) -> list[
             is_error = tool.get("is_error", False)
             params_summary = tool.get("params_summary", {})
             params_sig = normalize_params_signature(params_summary) if params_summary else "generic"
+            if params_sig == "":
+                # Nothing identifiable about this call — a command that was
+                # scrubbed before #391 preserved the verb. It used to land in
+                # one shared bucket keyed on the scrub placeholder, which is how
+                # an unrelated 625-call union got mined as a single skill. Drop
+                # it: a signature-mining input with no key is not evidence.
+                continue
             
             key = (tool_name, params_sig)
             pattern_data[key]["sessions"].add(session_key)
@@ -687,8 +773,13 @@ def generate_title(pattern: dict) -> str:
         return f"Pattern: {tool_name} usage"
 
 
-def write_candidate_file(pattern: dict, output_dir: Path) -> str:
-    """Write a single candidate markdown file. Returns the file path."""
+def write_candidate_file(pattern: dict, output_dir: Path) -> str | None:
+    """Write a single candidate markdown file. Returns the file path, or None
+    if the pattern is not a skill candidate at all (`is_emittable`). The check
+    is here as well as in `emit_candidates` so no caller can re-open the hole."""
+    if not is_emittable(pattern):
+        return None
+
     # Generate filename
     if pattern["type"] == "error":
         pattern_slug = f"{pattern['tool_name']}/{pattern['error_type']}"
@@ -1042,15 +1133,19 @@ def main() -> None:
     sequence_patterns = mine_sequence_patterns(trajectories, threshold=seq_threshold)
     print(f"  Found {len(sequence_patterns)} qualifying sequence pattern(s)", file=sys.stderr)
 
-    # Write candidates
+    # Write candidates. `emit_candidates` applies `is_emittable`, so the
+    # parameter-key-set class is counted as mined but never reaches skill
+    # authoring — the runbook used to dispose of it by hand, one
+    # `review_reason` at a time.
     all_patterns = error_patterns + success_patterns + sequence_patterns
-    candidate_files = []
-    
-    for pattern in all_patterns:
-        filepath = write_candidate_file(pattern, output_dir)
-        candidate_files.append(os.path.basename(filepath))
+    written = emit_candidates(all_patterns, output_dir)
+    candidate_files = [os.path.basename(p) for p in written]
+    suppressed = len(all_patterns) - len(written)
+
+    for filepath in written:
         print(f"  Written: {filepath}", file=sys.stderr)
-    
+    print(f"  Suppressed as non-skill candidates: {suppressed}", file=sys.stderr)
+
     # Write index
     write_index(candidate_files, output_dir)
     print(f"  Updated: {output_dir / 'INDEX.md'}", file=sys.stderr)
@@ -1065,6 +1160,7 @@ def main() -> None:
     print(f"  Success patterns:     {len(success_patterns)}")
     print(f"  Sequence patterns:    {len(sequence_patterns)}")
     print(f"  Candidates written:   {len(candidate_files)}")
+    print(f"  Suppressed (non-skill): {suppressed}")
     print(f"  Output directory:     {output_dir}")
     print("=" * 60)
 

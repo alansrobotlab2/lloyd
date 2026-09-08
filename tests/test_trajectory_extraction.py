@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -740,3 +741,199 @@ def test_success_mining_does_not_count_a_keyword_only_step_as_a_failure(tmp_path
         assert len(patterns) == 1
         assert patterns[0]["error_count"] == 0
         assert patterns[0]["error_rate"] == 0.0
+
+
+# ── signature keys and candidate emission (backlog #391) ─────────────────────
+#
+# `scrub_value` replaced an over-long `command` string with a bare
+# `[truncated: N chars]` placeholder, and `normalize_params_signature` took the
+# first whitespace token of what was left — so every long command in the corpus,
+# whatever it did, keyed as `Bash/[truncated:_signature`: the #2 pattern in the
+# 2026-09-08 set by occurrences (625) over 70 sessions, an unsorted union of
+# youtube-transcript-api calls, awk, nvidia-smi and git. A skill mined from it
+# describes the extractor.
+#
+# The second defect is the class those keys belong to. `*_signature` names the
+# tool plus the *set of argument names* a call carried
+# (`Read/file_path_limit_offset_signature` = "Read called with file_path, limit
+# and offset"), and its body is a frequency count of successful calls. That is a
+# parameter contract restated, which authoring rule 5 forbids; 11 skills were
+# archived 2026-09-04 for exactly that content and one of them was re-mined this
+# month. On 2026-09-08 the class was 93 of 103 candidate keys and all 20 of the
+# top 20 by occurrences, topped by `Bash/cd_signature` (1,129) — the shell
+# chaining artefact.
+
+TRUNC = "[truncated: 900 chars]"
+LONG = "y" * (et.MAX_STRING_LEN + 1)
+
+
+def test_a_truncated_bash_command_keeps_its_leading_verb():
+    out = et.scrub_value("command", "nvidia-smi " + LONG)
+    assert out.startswith("nvidia-smi ")
+    assert "[truncated:" in out
+
+
+def test_only_command_arguments_keep_a_verb():
+    """The verb is worth preserving because it is the grouping key of a shell
+    call; a path or a url has no equivalent, and inventing one there would be a
+    new key class nobody asked for."""
+    assert et.scrub_value("file_path", LONG).startswith("[truncated:")
+
+
+def test_a_command_that_needs_no_truncation_is_untouched():
+    assert et.scrub_value("command", "ls -la") == "ls -la"
+
+
+def test_the_verb_survives_the_end_to_end_scrub(tmp_path):
+    traj = first_tool(tmp_path, [
+        ("Bash", {"command": "awk '{print $1}' " + LONG}, "ok", False),
+    ])
+    assert traj["tools"][0]["params_summary"]["command"].startswith("awk ")
+
+
+def test_unrelated_long_commands_no_longer_share_one_key():
+    a = et.scrub_value("command", "youtube-transcript-api " + "u" * 3000)
+    b = et.scrub_value("command", "nvidia-smi " + "v" * 3000)
+    assert mt.normalize_params_signature({"command": a}) == "cmd:youtube-transcript-api"
+    assert mt.normalize_params_signature({"command": b}) == "cmd:nvidia-smi"
+
+
+def test_the_program_is_keyed_by_basename():
+    assert mt.normalize_params_signature(
+        {"command": f"/usr/bin/python3 {TRUNC}"}) == "cmd:python3"
+
+
+def test_a_command_scrubbed_before_the_fix_is_dropped_from_signature_mining():
+    """Rows already on disk have no recoverable verb. The item's other option —
+    drop the call from signature mining — is what the empty key means to the
+    miner; it must not fall back into one bucket."""
+    assert mt.normalize_params_signature({"command": TRUNC}) == ""
+    assert mt.normalize_params_signature({"command": "[MASKED] something"}) == ""
+
+
+def unkeyed_traj(session_key):
+    """One un-keyable Bash call and one normal Read call, both successful."""
+    return {
+        "session_key": session_key,
+        "timestamp": "2026-09-08T18:00:00Z",
+        "tool_count": 2,
+        "error_count": 0,
+        "has_errors": False,
+        "tools": [
+            {"name": "Bash", "is_error": False, "sequence": 0,
+             "params_summary": {"command": TRUNC}, "result_summary": "ok"},
+            {"name": "Read", "is_error": False, "sequence": 1,
+             "params_summary": {"file_path": "/x", "limit": 100},
+             "result_summary": "ok"},
+        ],
+        "error_tools": [],
+        "signals": [],
+    }
+
+
+def test_an_unkeyable_command_is_dropped_not_bucketed():
+    rows = [unkeyed_traj(f"s{i}") for i in (1, 2)]
+    patterns = mt.mine_success_patterns(rows, threshold=2)
+    assert [(p["tool_name"], p["params_signature"]) for p in patterns] == [
+        ("Read", "file_path_limit_signature")]
+
+
+def test_an_unkeyable_command_error_keeps_its_error_signal():
+    """Dropping is a *signature-mining* rule. Error mining groups on
+    (tool, error_type, signature) and emits (tool, error_type), so an
+    un-keyable command still belongs in the error table — dropping it there
+    would lose the failure, which is the opposite of what #389 was for."""
+    traj = [error_traj(f"s{i}", "Bash", "not_found", "protocol",
+                       params={"command": TRUNC}) for i in (1, 2)]
+    patterns = mt.mine_error_patterns(traj, threshold=2)
+    assert len(patterns) == 1
+    assert patterns[0]["params_signature"] == "generic"
+
+
+def success_pattern(sig, tool="Read", occ=9):
+    return {
+        "type": "success", "tool_name": tool, "params_signature": sig,
+        "sessions": {"s1", "s2"}, "examples": [], "dates": {"2026-09-08"},
+        "total_calls": occ, "error_count": 0, "error_rate": 0.0,
+        "first_seen": "2026-09-08", "last_seen": "2026-09-08",
+    }
+
+
+def test_a_parameter_key_set_is_not_emittable():
+    """The key names which arguments a call carried, and the body is a count of
+    successes. Nothing in it is a decision, so the candidate cannot be authored
+    as a skill (authoring rule 5)."""
+    assert mt.is_emittable(success_pattern("file_path_limit_offset_signature")) is False
+    assert mt.is_emittable(success_pattern("file_path_signature")) is False
+
+
+def test_a_bare_program_name_is_not_emittable_either():
+    """`cmd:` is a better grouping key than a truncation placeholder, but a
+    candidate that says "Bash was called with cd" is the same non-skill, and
+    `Bash/cd_signature` was the #1 pattern today at 1,129 occurrences."""
+    assert mt.is_emittable(success_pattern("cmd:cd", tool="Bash")) is False
+    assert mt.is_emittable(success_pattern("cmd:ls", tool="Bash")) is False
+
+
+def test_a_candidate_with_no_key_at_all_is_not_emittable():
+    assert mt.is_emittable(success_pattern("")) is False
+    assert mt.is_emittable(success_pattern("generic")) is False
+
+
+def test_the_emission_gate_leaves_room_for_a_value_shape_key():
+    """The item's alternative to stopping emission is redefining the class onto
+    a parameter *value* shape that carries a decision — `Read` always passing
+    `limit` on a >2,000-line file. Such a key must pass, or the gate would be a
+    way of deleting the class rather than a way of holding it to rule 5."""
+    assert mt.is_emittable(
+        success_pattern("read_limit_on_files_over_2000_lines")) is True
+
+
+def test_error_and_sequence_candidates_are_unaffected():
+    assert mt.is_emittable(
+        {"type": "error", "tool_name": "Bash", "error_type": "not_found"}) is True
+    assert mt.is_emittable({"type": "sequence", "ngram_size": 3}) is True
+
+
+def test_write_candidate_file_writes_nothing_for_the_key_set_class(tmp_path):
+    """The guarantee lives in the writer, so no caller can re-open the hole."""
+    out = tmp_path / "cands"
+    out.mkdir()
+    assert mt.write_candidate_file(
+        success_pattern("file_path_limit_signature"), out) is None
+    assert list(out.iterdir()) == []
+
+
+def test_a_day_of_emission_carries_neither_defect(tmp_path):
+    """The acceptance check, end to end: after mining, no written candidate
+    file has a `pattern:` key containing `truncated`, and none ends in
+    `_signature` (93 of 103 keys, and 20 of the top 20, on 2026-09-08)."""
+    rows = [unkeyed_traj(f"s{i}") for i in (1, 2)]
+    for i in (1, 2):
+        rows.append({
+            "session_key": f"b{i}", "timestamp": "2026-09-08T18:00:00Z",
+            "tool_count": 2, "error_count": 2, "has_errors": True,
+            "tools": [
+                {"name": "Bash", "is_error": True, "error_source": "protocol",
+                 "sequence": 0, "params_summary": {"command": "pytest tests/"},
+                 "result_summary": "boom"},
+                {"name": "Read", "is_error": False, "sequence": 1,
+                 "params_summary": {"file_path": "/x", "limit": 100},
+                 "result_summary": "ok"},
+            ],
+            "error_tools": [{"name": "Bash", "sequence": 0, "error_type": "not_found",
+                             "error_source": "protocol",
+                             "params_summary": {"command": "pytest tests/"}}],
+            "signals": [],
+        })
+    patterns = (mt.mine_error_patterns(rows, threshold=2)
+                + mt.mine_success_patterns(rows, threshold=2)
+                + mt.mine_sequence_patterns(rows, threshold=2))
+    written = mt.emit_candidates(patterns, tmp_path)
+    keys = []
+    for path in written:
+        body = path.read_text(encoding="utf-8")
+        keys.append(re.search(r"^pattern: (.+)$", body, re.MULTILINE).group(1))
+    assert keys, "the run emitted nothing, so the assertions below are vacuous"
+    assert not [k for k in keys if "truncated" in k.lower()]
+    assert not [k for k in keys if k.endswith("_signature")]
