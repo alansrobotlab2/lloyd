@@ -622,6 +622,31 @@ async def list_tools():
     ]
 
 
+def _append_diagnostics(text: str, mut: _Mutation) -> str:
+    """Append the post-edit `<diagnostics>` block to a successful result.
+
+    Appended only to a success string. `_shared.text_result` sets `isError`
+    by sniffing a leading JSON object with an "error" key, so appending to an
+    error payload would both break the JSON and flip the flag — a lint
+    finding would start reading as a failed edit.
+
+    Never raises: the model would rather have an edit with no diagnostics
+    than an edit that failed because the linter did.
+    """
+    try:
+        from agent_mcp import _edit_diagnostics as diag
+        cfg = diag.config()
+        if not cfg.get("python", True):
+            return text
+        block = diag.python_block(mut.path, mut.pre_bytes, mut.post_text,
+                                  int(cfg.get("max_lines", diag.DEFAULT_MAX_LINES)))
+        if block:
+            return f"{text}\n\n{block}"
+    except Exception:
+        logger.warning("edit diagnostics failed for %s", mut.path, exc_info=True)
+    return text
+
+
 async def call_tool(name: str, arguments: dict):
     # Sync handlers run in a worker thread — this loop also serves SSE chat,
     # voice, and the inner-voice observer; a slow disk read must not stall it.
@@ -642,6 +667,7 @@ async def call_tool(name: str, arguments: dict):
             # The writer updates the record, so an Edit immediately after a
             # Write or Edit by the same session is allowed without re-Reading.
             _record_seen(mut.session_id, mut.real, mut.post_stat)
+            text = _append_diagnostics(text, mut)
     elif name == "Grep":
         text = await _grep(arguments)
     elif name == "Glob":

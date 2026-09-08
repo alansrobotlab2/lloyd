@@ -558,6 +558,43 @@ pulls the whole self-modification package behind every tool call — and two
 private definitions of "is this finding new?" is exactly how the gate and the
 model would come to disagree about the same edit.
 
+### Diagnostics on the edit, not on the gate
+
+A successful `Edit`/`Write` on a `.py` file carries a `<diagnostics>` block
+listing what it *introduced*. Before this, the model learned about a broken
+edit at the selfmod gate — minutes later, with ten more edits built on top.
+`agent_mcp/_edit_diagnostics.py` runs pyflakes in-process against the
+pre-image and post-image and reports the difference.
+
+Delta, and the three rules the delta needs, all inherited from the gate:
+
+- **Never absolute.** The tree carries ~69 tolerated pyflakes findings.
+  Reporting them on every edit trains the model to skip the block, which is
+  worse than not having one.
+- **Position is not identity.** `lint_findings.normalize_pyflakes_line` drops
+  line and column, so inserting a line at the top does not report the whole
+  file as new. Display still uses post-image positions — that is what the
+  model can act on.
+- **A multiset, not a set.** A second normalised-identical finding is a second
+  finding, and `Counter(post) - Counter(pre)` keeps it visible.
+
+Two asymmetries in pyflakes decide the rest. `check()` calls `syntaxError` and
+returns *without* running the checker, so flakes and a syntax error are never
+both present; a post-image syntax error is therefore always reported (tagged
+`pre_existing="true"` when the pre-image was broken too). And when only the
+*pre*-image failed to parse there is no flake baseline at all — reporting the
+post-image's findings there would dump every tolerated finding in the file
+onto the edit that just *fixed* the syntax, so that case reports nothing.
+
+The block is appended only to a **success** string. `_shared.text_result` sets
+`isError` by sniffing a leading JSON object with an `"error"` key, so appending
+to an error payload would break the JSON and make a lint finding read as a
+failed edit. Nothing in this path may raise: `_append_diagnostics` swallows
+everything, because an edit with no diagnostics beats an edit that failed
+because the linter did.
+
+`harness.edit_diagnostics.python: false` removes it.
+
 ### Tool-call summaries
 
 Every advertised tool carries one extra string parameter, `summary`: a

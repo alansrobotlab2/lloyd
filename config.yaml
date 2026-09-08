@@ -248,6 +248,16 @@ harness:
   # false keeps the read records but stops refusing.
   edit_gates:
     enabled: true
+  # Diagnostics appended to a successful Edit/Write result, so the model
+  # learns about a broken edit at the edit rather than at the gate minutes
+  # later. Delta only: the tree carries ~69 tolerated pyflakes findings and
+  # reporting them every time would train the model to skip the block.
+  # `python` runs pyflakes in-process; `typescript` queues a debounced tsc
+  # whose new errors arrive as a notification on a later iteration.
+  edit_diagnostics:
+    python: true
+    typescript: true
+    max_lines: 30
   tool_search:
     enabled: false
     threshold_tools: 30
