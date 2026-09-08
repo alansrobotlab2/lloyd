@@ -40,7 +40,7 @@ def notes(tmp_path, monkeypatch) -> Path:
     d.mkdir(parents=True)
     monkeypatch.setattr(D, "NOTES_DIR", d)
     monkeypatch.setattr(D, "VAULT_ROOT", tmp_path / "obsidian")
-    monkeypatch.setattr(D, "_unexpected_vault_writes", lambda: [])
+    monkeypatch.setattr(D, "_vault_dirty_paths", lambda: set())
     return d
 
 
@@ -443,13 +443,36 @@ async def test_the_prompt_gives_the_topic_the_path_and_the_date(
 async def test_a_vault_write_outside_knowledge_is_flagged(
         registry, queue, notes, monkeypatch):
     payload, topic_id, path = _payload(registry, notes)
-    monkeypatch.setattr(D, "_unexpected_vault_writes", lambda: ["SOUL.md", "skills/x/SKILL.md"])
+    # Dirty before: pre-existing scheduler churn. Dirty after: that, plus two
+    # files the turn touched. Only the difference is the turn's.
+    seen = iter([{"autonomy/60-x.md"},
+                 {"autonomy/60-x.md", "SOUL.md", "skills/x/SKILL.md",
+                  "knowledge/research/2026-09-08-a.md"}])
+    monkeypatch.setattr(D, "_vault_dirty_paths", lambda: next(seen))
     monkeypatch.setattr(D, "run_prompt_in_session", _turn(
         f"RESULT: written\nNOTE: {path}\n", writes=path))
 
     out = await D.execute(_item(payload))
-    assert out["meta"]["unexpected_vault_writes"] == ["SOUL.md", "skills/x/SKILL.md"]
+    assert out["meta"]["unexpected_vault_writes"] == ["SOUL.md", "skills/x/SKILL.md"], (
+        "a note under knowledge/ is the job, and churn that predates the turn "
+        "is not the turn's")
     assert registry.get(topic_id)["extra"]["unexpected_vault_writes"]
+
+
+async def test_pre_existing_vault_churn_is_not_blamed_on_the_turn(
+        registry, queue, notes, monkeypatch):
+    """The first real research turn reported twenty "unexpected writes", every
+    one of them a scheduler-rewritten task file the turn never touched. The
+    vault is never clean, so the check has to be a diff, not a snapshot."""
+    payload, topic_id, path = _payload(registry, notes)
+    dirty = {"autonomy/60-x.md", "backlog/370-y.md", ".obsidian/workspace.json"}
+    monkeypatch.setattr(D, "_vault_dirty_paths", lambda: set(dirty))
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        f"RESULT: written\nNOTE: {path}\n", writes=path))
+
+    out = await D.execute(_item(payload))
+    assert "unexpected_vault_writes" not in out["meta"]
+    assert "unexpected_vault_writes" not in registry.get(topic_id)["extra"]
 
 
 def test_the_source_yields_to_the_selfmod_workers():

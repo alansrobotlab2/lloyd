@@ -158,27 +158,37 @@ def _note_is_real(path: Path) -> bool:
         return False
 
 
-def _unexpected_vault_writes() -> list[str]:
-    """Paths this turn changed in the vault outside `knowledge/`.
-
-    The turn holds `vault_write` because writing the note is its job, and a
-    fetched page could aim that somewhere else — SOUL.md, a skill, an autonomy
-    task. The vault is a git repo, so a diff after the turn is a cheap way to
-    turn a silent edit into a visible one. Reported, never reverted: this is a
-    detector, and undoing a human's concurrent edit would be worse.
-    """
+def _vault_dirty_paths() -> set[str]:
+    """Every path git currently reports as changed in the vault."""
     try:
         out = subprocess.run(
             ["git", "-C", str(VAULT_ROOT), "status", "--porcelain"],
             capture_output=True, text=True, timeout=30, check=False).stdout
     except (OSError, subprocess.SubprocessError):
-        return []
-    changed = []
-    for line in out.splitlines():
-        path = line[3:].strip().strip('"')
-        if path and not path.startswith("knowledge/"):
-            changed.append(path)
-    return changed
+        return set()
+    return {line[3:].strip().strip('"') for line in out.splitlines() if line[3:].strip()}
+
+
+def _unexpected_vault_writes(before: set[str]) -> list[str]:
+    """Paths *this turn* changed in the vault outside `knowledge/`.
+
+    The turn holds `vault_write` because writing the note is its job, and a
+    fetched page could aim that somewhere else — SOUL.md, a skill, an autonomy
+    task. The vault is a git repo, so a diff is a cheap way to turn a silent
+    edit into a visible one. Reported, never reverted: this is a detector, and
+    undoing a human's concurrent edit would be worse.
+
+    **It must be a diff against a baseline, not a snapshot.** The first cut
+    read `git status` only afterwards and called everything it found
+    unexpected. The vault is never clean — the autonomy scheduler rewrites a
+    task file on every run — so the first real research turn reported twenty
+    "unexpected writes", every one of them pre-existing churn the turn had
+    never touched. A detector that fires on every run is one nobody reads,
+    which is the state the autonomy stall alarm reached at 100 alerts in six
+    days.
+    """
+    changed = _vault_dirty_paths() - set(before)
+    return sorted(p for p in changed if not p.startswith("knowledge/"))
 
 
 # ── Scheduling ───────────────────────────────────────────────────────────────
@@ -300,6 +310,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     ])
     prompt = build_skill_prompt(skill, job=NAME, task_block=task_block)
 
+    # Baseline before the turn: anything already dirty is not this turn's.
+    vault_before = await asyncio.to_thread(_vault_dirty_paths)
+
     try:
         run = await run_prompt_in_session(
             prompt, title=f"deep research #{topic_id}: {topic[:48]}",
@@ -315,7 +328,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     session_id = run["session_id"]
     parsed = parse_result(run.get("text") or "")
     on_disk = await asyncio.to_thread(_note_is_real, path)
-    strays = await asyncio.to_thread(_unexpected_vault_writes)
+    strays = await asyncio.to_thread(_unexpected_vault_writes, vault_before)
     if strays:
         logger.warning("deep-research #%s changed vault paths outside knowledge/: %s",
                        topic_id, strays[:10])
