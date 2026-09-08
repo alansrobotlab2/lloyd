@@ -267,6 +267,38 @@ def normalize_tool_name(tool: dict) -> str:
     return label
 
 
+# ── Error corroboration (backlog #389) ───────────────────────────────────────
+#
+# The extractor flags a step as failed only on corroborated signals, and records
+# which one in `error_source`. The miner must not re-widen that: it used to read
+# `is_error` alone, which is how keyword-matched tool *output* reached skill
+# authoring — 188 of 234 flagged steps in the 2026-09-06→08 window had nothing
+# behind them, and the `>= 2 pending error candidates` branch in
+# `skills/trajectory-skill-mining/SKILL.md` would have emitted the miner's own
+# mitigation strings as skills.
+#
+# Rows written before the extractor fix carry `error_source: "semantic"`, and
+# rows written before `error_source` existed carry nothing — both are treated as
+# uncorroborated rather than trusted.
+CORROBORATED_ERROR_SOURCES = {"protocol", "exit_code"}
+
+
+def is_corroborated_error(step: dict) -> bool:
+    """True if this step's failure is backed by something other than the words
+    in its own output: the harness's dispatch-time flag, a non-zero exit state,
+    or a structured error body."""
+    # `tools[]` rows carry an explicit `is_error`; `error_tools[]` rows are by
+    # construction errors and omit the key.
+    if step.get("is_error") is False:
+        return False
+    source = step.get("error_source")
+    if source is None:
+        # Legacy row with no `error_source`: accept only an explicit non-zero
+        # exit state, which is itself a corroborating field.
+        return step.get("exit_code") not in (None, 0)
+    return source in CORROBORATED_ERROR_SOURCES
+
+
 # ── Data loading ─────────────────────────────────────────────────────────────
 
 def load_trajectories(days: int = 7, agent_filter: str = "worker") -> list[dict]:
@@ -358,6 +390,8 @@ def mine_error_patterns(trajectories: list[dict], threshold: int = 2) -> list[di
         
         # Process error_tools
         for error_tool in traj.get("error_tools", []):
+            if not is_corroborated_error(error_tool):
+                continue
             tool_name = error_tool.get("name", "unknown")
             error_type = error_tool.get("error_type", "logic")
             params_summary = error_tool.get("params_summary", {})
@@ -442,7 +476,7 @@ def mine_success_patterns(trajectories: list[dict], threshold: int = 2) -> list[
             pattern_data[key]["dates"].add(date_str)
             pattern_data[key]["total_calls"] += 1
             
-            if is_error:
+            if is_error and is_corroborated_error(tool):
                 pattern_data[key]["error_count"] += 1
             
             # Store example (limit per pattern)

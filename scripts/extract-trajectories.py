@@ -63,10 +63,16 @@ ERROR_CATEGORIES = [
 ]
 
 
-# Semantic error patterns — detect errors in result content even when isError=False
-SEMANTIC_ERROR_PATTERNS = [
-    # Non-zero exit codes from run_bash
-    re.compile(r"\bexit\s+(?!0\b)([1-9]\d*)\b", re.IGNORECASE),
+# Failure *vocabulary* a tool result might contain. This is a descriptive
+# signal only — it promotes nothing. It used to be the semantic error detector
+# and set `is_error` on its own, which is what made the trajectory error signal
+# unreadable: it matched the text a tool *returned*, not whether the call
+# failed. Measured over the 2026-09-06→08 window, 196 of 234 flagged steps were
+# flagged by these patterns alone and 188 of the 234 had nothing behind them
+# (`_pipeline/skills/candidates/REVIEW-LOG.md`); a `Read/timeout` skill
+# candidate was even filed for a tool with no timeout path, because the word
+# came from the file being read. See backlog #389.
+MENTION_ERROR_PATTERNS = [
     # Python exceptions
     re.compile(r"Traceback \(most recent call last\)", re.IGNORECASE),
     re.compile(r"(?:Error|Exception|Warning):\s+\S", re.IGNORECASE),
@@ -80,12 +86,101 @@ SEMANTIC_ERROR_PATTERNS = [
     re.compile(r"\bfatal error\b", re.IGNORECASE),
 ]
 
+# Kept as an alias: `has_semantic_error` still answers "does this text use
+# failure vocabulary", which is what the mention flag below is.
+SEMANTIC_ERROR_PATTERNS = MENTION_ERROR_PATTERNS
+
+# The Bash tool reports its exit state as a trailer, e.g. "...output\n\n[exit
+# code: 1]". The trailer is the last thing in the body, so it is gone before
+# `result_summary()` runs (MAX_ERROR_LEN keeps a 200-char *prefix*) — 44 of the
+# 67 non-zero exits in the 09-06→08 window are invisible in the persisted
+# preview (backlog #492). It is therefore read from the full result here and
+# persisted as `exit_code`. A negative value is a signal death (SIGTERM = -15),
+# which is a failure too.
+EXIT_CODE_RE = re.compile(r"\[exit code:\s*(-?\d+)\]\s*$")
+
+# The exit trailer is tool output, not data; it is not failure vocabulary.
+MENTION_EXCLUDE_EXIT_TRAILER = re.compile(r"\s*\[exit code:\s*-?\d+\]\s*$")
+
+# Content-returning tools. Their result is the thing asked for, so the words in
+# it carry zero information about whether the call failed: reading a source file
+# that contains `except Exception as e:` is a success, and a grep that returns
+# `AssertionError` did its job. These tools are flagged only when the harness
+# says the call failed.
+READ_ONLY_TOOL_PATTERNS = [
+    re.compile(r"(?:^|_)(?:read|glob|grep|ls|list|search|recall|snapshot|overview|status|profile|neighbors|relationships|path)(?:$|_)"),
+]
+
+# Tools whose read-only-ness is worth pinning explicitly, so the suffix rule
+# above cannot silently claim a writer by accident.
+READ_ONLY_TOOL_NAMES = {"LS", "NotebookRead"}
+
+
+def is_read_only_tool(name: str) -> bool:
+    """True for tools whose result is content, and whose result text therefore
+    cannot evidence a failure."""
+    if name in READ_ONLY_TOOL_NAMES:
+        return True
+    # MCP tools arrive as `mcp____<server>_<tool>`; test each meaningful token
+    # so `vault_read`, `memory_read`, `backlog_get_task` all resolve.
+    return any(pat.search(name.lower()) for pat in READ_ONLY_TOOL_PATTERNS)
+
+
+def output_mentions_errors(tool_name: str, content_text: str) -> bool:
+    """True if the result text uses failure vocabulary. Descriptive only —
+    never promotes `is_error`.
+
+    Always False for content-returning tools: for those, arbitrary text *is* the
+    expected result, so the field would be true for most calls and would teach a
+    reader to distrust it.
+    """
+    if is_read_only_tool(tool_name):
+        return False
+    body = MENTION_EXCLUDE_EXIT_TRAILER.sub("", content_text)
+    for pat in MENTION_ERROR_PATTERNS:
+        if pat.search(body):
+            return True
+    return False
+
 
 def has_semantic_error(content_text: str) -> bool:
-    """Return True if result content suggests an error even without isError=True."""
-    for pat in SEMANTIC_ERROR_PATTERNS:
-        if pat.search(content_text):
-            return True
+    """Legacy accessor for the mention sweep (see MENTION_ERROR_PATTERNS)."""
+    return output_mentions_errors("", content_text)
+
+
+def parse_exit_code(content_text: str) -> int | None:
+    """Exit state a tool reported in its result body, or None if it reported
+    none. Absence is not corroboration in either direction."""
+    match = EXIT_CODE_RE.search(content_text.rstrip())
+    return int(match.group(1)) if match else None
+
+
+def structured_error_body(content_text: str) -> bool:
+    """True if the whole result body is a JSON object reporting failure: a
+    truthy `error`, or a `code` that is not a zero. Fallback corroboration for
+    sessions that predate the `stats` field on tool messages; it reads
+    structure, never prose.
+
+    A zero `code` is a success and must not promote — `{"code": 0}` appears in
+    tool bodies that returned data fine."""
+    try:
+        parsed = json.loads(content_text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("error"):
+        return True
+    code = parsed.get("code")
+    if code is None or isinstance(code, bool):
+        return False
+    if isinstance(code, (int, float)):
+        return code != 0
+    if isinstance(code, str):
+        try:
+            return int(code) != 0
+        except ValueError:
+            return bool(code.strip())
     return False
 
 
@@ -219,16 +314,18 @@ def parse_session(path: Path) -> dict | None:
             content = msg.get("content", "")
             # Normalize content to string (lloyd sessions use [{type,text}] blocks)
             content_text = extract_result_text(content)
-            is_error = False
-            try:
-                parsed = json.loads(content_text)
-                if isinstance(parsed, dict) and parsed.get("error"):
-                    is_error = True
-            except (json.JSONDecodeError, TypeError):
-                pass
+            # `stats.is_error` is set by the harness at dispatch time — it is
+            # the authoritative answer to "did this call fail", present on every
+            # tool message in the current session format. It used to be ignored
+            # and re-derived by parsing the result body for an `error` key,
+            # which only reconstructs it for the minority of tools that return
+            # a JSON object (backlog #392).
+            stats = msg.get("stats")
+            stats_error = stats.get("is_error") if isinstance(stats, dict) else None
             result_map[call_id] = {
                 "content": content_text,
-                "isError": is_error,
+                "stats_error": stats_error,
+                "structured_error": structured_error_body(content_text),
             }
 
     if not call_map:
@@ -245,16 +342,32 @@ def parse_session(path: Path) -> dict | None:
 
         result = result_map.get(call_id)
         if result is not None:
-            protocol_error = bool(result.get("isError", False))
-            content_text = extract_result_text(result.get("content"))
-            semantic_err = has_semantic_error(content_text) if not protocol_error else False
-            is_error = protocol_error or semantic_err
-            res_summary = result_summary(result.get("content"), is_error)
-            error_source = "protocol" if protocol_error else ("semantic" if semantic_err else None)
+            content_text = result.get("content") or ""
+            exit_code = parse_exit_code(content_text)
+            mentions = output_mentions_errors(name, content_text)
+            stats_error = result.get("stats_error")
+            if stats_error is None:
+                # Session predates the `stats` field: fall back to the
+                # structured-body reading, which is still structure, not prose.
+                stats_error = bool(result.get("structured_error"))
+            protocol_error = bool(stats_error)
+            exit_error = exit_code is not None and exit_code != 0
+            # Corroboration only. Whether the output *reads* like a failure is
+            # `output_mentions_errors`, recorded but never promoted (#389).
+            is_error = protocol_error or exit_error
+            res_summary = result_summary(content_text, is_error)
+            if protocol_error:
+                error_source = "protocol"
+            elif exit_error:
+                error_source = "exit_code"
+            else:
+                error_source = None
         else:
             is_error = False
             res_summary = "OK: no result recorded"
             error_source = None
+            exit_code = None
+            mentions = False
             content_text = ""
 
         seq = call_sequence[call_id]
@@ -264,6 +377,8 @@ def parse_session(path: Path) -> dict | None:
             "result_summary": res_summary,
             "is_error": is_error,
             "error_source": error_source,
+            "output_mentions_errors": mentions,
+            "exit_code": exit_code,
             "call_id": call_id,
             "sequence": seq,
         }
@@ -275,6 +390,7 @@ def parse_session(path: Path) -> dict | None:
                 "sequence": seq,
                 "error_type": categorize_error(content_text),
                 "error_source": error_source,
+                "exit_code": exit_code,
                 "params_summary": params,
             })
 

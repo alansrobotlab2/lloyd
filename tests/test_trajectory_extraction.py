@@ -35,6 +35,14 @@ _spec = importlib.util.spec_from_file_location(
 et = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(et)
 
+# The miner consumes the extractor's error flag, so the corroboration contract
+# is pinned on both sides of the boundary in this one file.
+_mspec = importlib.util.spec_from_file_location(
+    "mine_trajectories", _ROOT / "scripts" / "mine-trajectories.py"
+)
+mt = importlib.util.module_from_spec(_mspec)
+_mspec.loader.exec_module(mt)
+
 LOCAL_TZ = et.LOCAL_TZ
 
 # Dedup-on-write landed 2026-09-01 (commit 9b9450c). Bucket files dated on or
@@ -369,12 +377,20 @@ def test_category_precedence_follows_the_declared_order():
 
 
 @pytest.mark.parametrize("text", [
-    "exit 1", "Traceback (most recent call last):", "ValueError: bad input",
+    "Traceback (most recent call last):", "ValueError: bad input",
     "bash: foo: command not found", "No such file or directory",
     "npm ERR! code ELIFECYCLE", "FAILED tests/test_x.py", "fatal error: oops",
 ])
 def test_semantic_errors_are_detected_without_an_is_error_flag(text):
     assert et.has_semantic_error(text) is True
+
+
+def test_a_bare_exit_n_in_prose_is_no_longer_sweep_vocabulary():
+    """#389 fix step 3: `exit [1-9]` was dropped from the sweep. It matched
+    prose like "the script exit 1 on bad input" and, worse, duplicated what the
+    Bash tool already reports as a structured trailer — see EXIT_CODE_RE."""
+    assert et.has_semantic_error("exit 1") is False
+    assert et.parse_exit_code("boom\n\n[exit code: 1]") == 1
 
 
 @pytest.mark.parametrize("text", [
@@ -445,3 +461,282 @@ def test_corrupt_watermark_falls_back_to_the_default(isolated_output):
     assert et.load_watermark() == {
         "last_run": None, "sessions_processed": 0, "last_session_mtime": None,
     }
+
+
+# ── error corroboration (backlog #389) ───────────────────────────────────────
+#
+# `is_error` is the input to skill authoring: `trajectory-skill-mining` opens a
+# skill-writing branch on ">= 2 pending error candidates". Keyword-matching the
+# *text a tool returned* made that counter fiction — in the 2026-09-06→08 window
+# 234 steps were flagged and 188 had nothing behind them (review verdicts:
+# `_pipeline/skills/candidates/REVIEW-LOG.md`), including a `Read/timeout`
+# candidate for a tool with no timeout path, where the word came from the file
+# being read. Authoring off those would have emitted the miner's own hardcoded
+# mitigation strings as skills, the damage class that got 11 skills archived on
+# 2026-09-04.
+#
+# So: a step is an error only if something other than its own output says so —
+# the harness's `stats.is_error`, a non-zero exit state, or a structured
+# error body. The keyword sweep survives as `output_mentions_errors`, which
+# promotes nothing.
+
+def write_session(tmp_path, calls, name="sess-corroboration"):
+    """Write a session file in the shape `parse_session` consumes.
+
+    `calls` is a list of (tool_name, arguments, result_text, stats_is_error);
+    pass stats_is_error=None to simulate a session written before tool
+    messages carried `stats`.
+    """
+    messages = []
+    for i, (tool_name, args, result, stats_error) in enumerate(calls):
+        messages.append({
+            "role": "assistant",
+            "tool_calls": [{"id": f"call_{i}",
+                            "function": {"name": tool_name,
+                                         "arguments": json.dumps(args)}}],
+        })
+        message = {
+            "role": "tool",
+            "tool_call_id": f"call_{i}",
+            "content": [{"type": "text", "text": result}],
+        }
+        if stats_error is not None:
+            message["stats"] = {"result_chars": len(result), "is_error": stats_error}
+        messages.append(message)
+    path = tmp_path / f"{name}.json"
+    path.write_text(json.dumps({
+        "session_id": name,
+        "session_start": "2026-09-08T18:00:00Z",
+        "messages": messages,
+    }), encoding="utf-8")
+    return path
+
+
+def first_tool(tmp_path, calls, **kw):
+    traj = et.parse_session(write_session(tmp_path, calls, **kw))
+    assert traj is not None
+    return traj
+
+
+def test_reading_a_file_that_mentions_exceptions_does_not_flag_is_error(tmp_path):
+    """The regression that produced the phantom `Read/timeout` candidate: read
+    tooling returns file content, and file content says 'Exception'."""
+    body = ("def handler(x):\n"
+            "    try:\n"
+            "        return x.run()\n"
+            "    except Exception as e:\n"
+            "        raise ValueError(f'Error: {e}') from e\n")
+    traj = first_tool(tmp_path, [("Read", {"file_path": "/x/handler.py"}, body, False)])
+    tool = traj["tools"][0]
+    assert tool["is_error"] is False
+    assert tool["error_source"] is None
+    assert traj["error_count"] == 0
+    # Content-returning tools report the mention flag as False by design: their
+    # result *is* arbitrary text, so the field would be true for most reads.
+    assert tool["output_mentions_errors"] is False
+
+
+def test_a_grep_whose_output_contains_assertionerror_does_not_flag(tmp_path):
+    traj = first_tool(tmp_path, [
+        ("Grep", {"pattern": "AssertionError", "path": "~/lloyd/tests"},
+         "tests/test_x.py:12:    raise AssertionError('boom')\n", False),
+    ])
+    assert traj["tools"][0]["is_error"] is False
+    assert traj["error_count"] == 0
+
+
+@pytest.mark.parametrize("tool_name", [
+    "Read", "Grep", "Glob", "LS", "NotebookRead",
+    "mcp____vault_read", "mcp____memory_read", "mcp____skills_read",
+])
+def test_read_only_tools_are_never_flagged_from_result_text(tmp_path, tool_name):
+    """Content-returning tools carry zero failure information in their result,
+    whatever the content says."""
+    traj = first_tool(tmp_path, [
+        (tool_name, {"path": "/x/y"},
+         "Traceback (most recent call last):\n    ValueError: Error: no such file\n",
+         False),
+    ])
+    tool = traj["tools"][0]
+    assert tool["is_error"] is False
+    assert tool["output_mentions_errors"] is False
+    assert traj["error_count"] == 0
+
+
+@pytest.mark.parametrize("tool_name,expected", [
+    ("Read", True), ("Grep", True), ("Glob", True), ("LS", True),
+    ("NotebookRead", True),
+    ("mcp____vault_read", True), ("mcp____vault_write", False),
+    ("mcp____memory_read", True), ("mcp____browser_snapshot", True),
+    ("mcp____autonomy_run_task", False),
+    ("Bash", False), ("Edit", False), ("Write", False),
+    ("mcp____backlog_write_task", False), ("mcp____email_delete", False),
+])
+def test_read_only_classification_names_content_tools_and_no_writers(tool_name, expected):
+    """The suffix rule must not quietly claim a writer — a write tool treated as
+    read-only would stop reporting content-corroborated failures."""
+    assert et.is_read_only_tool(tool_name) is expected
+
+
+def test_read_only_tools_are_still_flagged_when_the_harness_said_so(tmp_path):
+    """The read-only rule demotes keyword matching, not the authoritative flag:
+    a Read of a path that does not exist really did fail."""
+    traj = first_tool(tmp_path, [
+        ("Read", {"file_path": "/x/missing.py"}, "File does not exist.", True),
+    ])
+    tool = traj["tools"][0]
+    assert tool["is_error"] is True
+    assert tool["error_source"] == "protocol"
+    # Characterized: `categorize_error` matches the phrase "no such file", not
+    # the harness's wording "File does not exist", so this lands in `logic`.
+    # Retyping it is a categorization change, outside #389.
+    assert traj["error_tools"][0]["error_type"] == "logic"
+
+
+def test_bash_output_that_merely_prints_the_word_error_is_not_an_error(tmp_path):
+    """The 153 semantic-only Bash flags in the 09-06→08 window."""
+    traj = first_tool(tmp_path, [
+        ("Bash", {"command": "pytest -q"}, "Error: plugin warning emitted\n755 passed\n", False),
+    ])
+    tool = traj["tools"][0]
+    assert tool["is_error"] is False
+    assert tool["output_mentions_errors"] is True
+    assert tool["error_source"] is None
+
+
+def test_a_nonzero_exit_state_is_a_corroborated_error(tmp_path):
+    traj = first_tool(tmp_path, [
+        ("Bash", {"command": "grep -rn foo ~/lloyd"},
+         "grep: no match\n\n[exit code: 1]", False),
+    ])
+    tool = traj["tools"][0]
+    assert tool["exit_code"] == 1
+    assert tool["is_error"] is True
+    assert tool["error_source"] == "exit_code"
+    assert traj["error_tools"][0]["name"] == "Bash"
+
+
+def test_a_zero_exit_code_corroborates_nothing(tmp_path):
+    traj = first_tool(tmp_path, [
+        ("Bash", {"command": "echo hi"}, "hi\n\n[exit code: 0]", False),
+    ])
+    assert traj["tools"][0]["is_error"] is False
+    assert traj["tools"][0]["exit_code"] == 0
+
+
+def test_the_exit_state_is_read_from_full_output_not_the_truncated_preview(tmp_path):
+    """#492: `result_summary()` keeps a 200-char prefix and the Bash marker sits
+    at the end of the output, so corroboration cannot be recovered from the
+    persisted preview — 44 of the 67 non-zero exits in the 09-06→08 window lose
+    their marker there. It is parsed from the whole result and persisted as a
+    field instead."""
+    body = "x" * 4000 + "\n\n[exit code: 2]"
+    traj = first_tool(tmp_path, [("Bash", {"command": "long"}, body, False)])
+    tool = traj["tools"][0]
+    assert "[exit code: 2]" not in tool["result_summary"]
+    assert tool["exit_code"] == 2
+    assert tool["is_error"] is True
+
+
+def test_a_structured_error_body_corroborates_when_stats_is_absent(tmp_path):
+    """Sessions predating tool-message `stats` keep the old fallback: a body
+    that opens with an error field."""
+    traj = first_tool(tmp_path, [
+        ("Bash", {"command": "true"}, '{"error": "no server claims tool \'name\'"}', None),
+    ])
+    tool = traj["tools"][0]
+    assert tool["is_error"] is True
+    assert tool["error_source"] == "protocol"
+
+
+def test_a_zero_code_in_a_structured_body_corroborates_nothing(tmp_path):
+    traj = first_tool(tmp_path, [
+        ("Bash", {"command": "true"}, '{"code": 0, "stdout": "fine"}', None),
+    ])
+    assert traj["tools"][0]["is_error"] is False
+
+
+def test_the_harness_error_flag_is_authoritative_over_a_benign_looking_body(tmp_path):
+    traj = first_tool(tmp_path, [("Edit", {"path": "/x/y"}, "ok", True)])
+    tool = traj["tools"][0]
+    assert tool["is_error"] is True
+    assert tool["error_source"] == "protocol"
+    assert tool["output_mentions_errors"] is False
+
+
+def test_error_count_counts_only_corroborated_failures(tmp_path):
+    traj = first_tool(tmp_path, [
+        ("Read", {"file_path": "/a"}, "except Exception as e:", False),
+        ("Grep", {"pattern": "x"}, "AssertionError in output", False),
+        ("Bash", {"command": "false"}, "boom\n\n[exit code: 1]", True),
+    ])
+    assert [t["is_error"] for t in traj["tools"]] == [False, False, True]
+    assert traj["error_count"] == 1
+    assert traj["has_errors"] is True
+
+
+# ── the miner must inherit the same contract ─────────────────────────────────
+
+def error_traj(session_key, name, error_type, source, params=None):
+    return {
+        "session_key": session_key,
+        "timestamp": "2026-09-08T18:00:00Z",
+        "tool_count": 1,
+        "error_count": 1,
+        "has_errors": True,
+        "tools": [{"name": name, "is_error": True, "error_source": source,
+                   "params_summary": params or {"path": "/x"}, "sequence": 0}],
+        "error_tools": [{"name": name, "sequence": 0, "error_type": error_type,
+                         "error_source": source,
+                         "params_summary": params or {"path": "/x"}}],
+        "signals": [],
+    }
+
+
+def test_mining_ignores_a_keyword_only_error():
+    """Rows written before #389 carry `error_source: "semantic"`; they must not
+    reach skill authoring either."""
+    traj = [error_traj(f"s{i}", "Read", "timeout", "semantic") for i in (1, 2)]
+    assert mt.mine_error_patterns(traj, threshold=2) == []
+
+
+def test_mining_keeps_a_corroborated_error():
+    traj = [error_traj(f"s{i}", "Bash", "timeout", "protocol") for i in (1, 2)]
+    patterns = mt.mine_error_patterns(traj, threshold=2)
+    assert len(patterns) == 1
+    assert patterns[0]["tool_name"] == "Bash"
+    assert patterns[0]["error_type"] == "timeout"
+
+
+def test_mining_treats_a_persisted_nonzero_exit_code_as_corroborating():
+    traj = []
+    for i in (1, 2):
+        row = error_traj(f"s{i}", "Bash", "logic", None)
+        row["error_tools"][0]["exit_code"] = 1
+        traj.append(row)
+    assert len(mt.mine_error_patterns(traj, threshold=2)) == 1
+
+
+def test_a_read_timeout_candidate_cannot_be_emitted(tmp_path):
+    """The concrete phantom from the 09-06 window: `Read` has no timeout path,
+    the word came from the file. End to end — extract, then mine."""
+    out = []
+    for i in (1, 2):
+        path = write_session(
+            tmp_path,
+            [("Read", {"file_path": f"/x/{i}.py"}, "request timed out after 30s", False)],
+            name=f"read-timeout-{i}",
+        )
+        out.append(et.parse_session(path))
+    assert mt.mine_error_patterns(out, threshold=2) == []
+
+
+def test_success_mining_does_not_count_a_keyword_only_step_as_a_failure(tmp_path):
+    calls = [("Bash", {"command": "pytest"}, "Error: 0 warnings\n755 passed\n", False)]
+    new = [et.parse_session(write_session(tmp_path, calls, name=f"ok{i}")) for i in (1, 2)]
+    legacy = [error_traj(f"legacy{i}", "Bash", "validation", "semantic") for i in (1, 2)]
+    for rows in (new, legacy):
+        patterns = mt.mine_success_patterns(rows, threshold=2)
+        assert len(patterns) == 1
+        assert patterns[0]["error_count"] == 0
+        assert patterns[0]["error_rate"] == 0.0
