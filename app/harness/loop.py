@@ -204,6 +204,10 @@ async def run_query(
         context_overflow_recoveries = 0
         max_context_overflow_recoveries = 2
         echo_guard_reprompts = 0
+        # Initialised before the loop: a turn that breaks on its first check
+        # (cancelled, max_turns=0) never assigns it, and the finalizer below
+        # runs on every exit path.
+        last_visible_tools: list[dict[str, Any]] = []
 
         while True:
             num_turns += 1
@@ -281,12 +285,19 @@ async def run_query(
             tool_calls_acc: dict[int, dict[str, Any]] = {}
             finish_reason: str | None = None
 
+            # Held so the finalizer can send the IDENTICAL array. Qwen's
+            # template renders `tools` inside the system message, so a
+            # different (or absent) list changes the rendered prompt from the
+            # first token and vLLM re-prefills the whole conversation.
+            last_visible_tools = loaded_set.visible_tools(
+                extra_disallowed=current_disallowed)
+
             try:
                 async for chunk in stream_chat(
                     base_url=options.base_url,
                     model=options.model,
                     messages=chat_messages,
-                    tools=loaded_set.visible_tools(extra_disallowed=current_disallowed),
+                    tools=last_visible_tools,
                     extra_body=options.extra_body,
                     cancel_event=options.cancel_event,
                     timeout_s=options.request_timeout_s,
@@ -560,6 +571,14 @@ async def run_query(
                         iteration=num_turns,
                     )
 
+        structured, structured_error = await _maybe_finalize(
+            options=options,
+            stop_reason=stop_reason,
+            chat_messages=chat_messages,
+            tools=last_visible_tools,
+            total_usage=total_usage,
+        )
+
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         if caption_total:
             logger.info(
@@ -575,6 +594,8 @@ async def run_query(
             response_text=accumulated_text,
             tool_calls_total=caption_total,
             tool_calls_captioned=caption_present,
+            structured=structured,
+            structured_error=structured_error,
         )
         yield result_done_evt
         if options.hooks is not None:
@@ -582,6 +603,59 @@ async def run_query(
     finally:
         # Pool is shared across turns — see comment above _build_pool call.
         _run_finished()
+
+
+async def _maybe_finalize(
+    *,
+    options: RunOptions,
+    stop_reason: str,
+    chat_messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    total_usage: dict[str, int],
+) -> tuple[dict | None, str]:
+    """Restate the finished turn under `options.final_schema`, if asked.
+
+    Lives inside `run_query` rather than in the router because with Inner
+    Voice off, `chat_messages` is private to this function — and the exact
+    `tools` array that was last sent is too. Both are required: see
+    `app/harness/finalizer.py` on why a different tools array re-prefills
+    the whole conversation.
+
+    Never raises. A caller asking for structure keeps whatever fallback it
+    had; a turn is not worth failing over its transcription.
+    """
+    from app.harness.finalizer import run_finalizer, should_finalize
+
+    run, skip_reason = should_finalize(stop_reason, options.final_schema)
+    if not run:
+        return None, skip_reason
+
+    try:
+        parsed, error, usage = await run_finalizer(
+            base_url=options.base_url,
+            model=options.model,
+            chat_messages=chat_messages,
+            tools=tools,
+            schema=options.final_schema,
+            prompt=options.final_schema_prompt,
+            api_key=options.api_key,
+            max_tokens=options.finalizer_max_tokens,
+            timeout_s=options.finalizer_timeout_s,
+            priority=options.priority,
+            cancel_event=options.cancel_event,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("loop: finalizer raised: %s", exc)
+        return None, f"finalizer failed: {type(exc).__name__}: {exc}"
+
+    # The extra completion's tokens are real tokens; fold them in so usage
+    # accounting does not quietly under-report every worker verdict.
+    for key in ("output_tokens", "total_tokens"):
+        if usage.get(key):
+            total_usage[key] = total_usage.get(key, 0) + usage[key]
+    return parsed, error
 
 
 # ---------------------------------------------------------------------------

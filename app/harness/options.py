@@ -166,3 +166,21 @@ class RunOptions:
     intra_turn_microcompact_trigger_fraction: float = 0.8
     intra_turn_microcompact_target_fraction: float = 0.6
     intra_turn_microcompact_min_chars: int = 2_000
+
+    # Structured final answer. When `final_schema` is set and the turn ends
+    # of its own accord, the loop runs ONE extra completion that restates the
+    # answer as a JSON object matching this schema, and reports it on the
+    # `result` event as `structured`.
+    #
+    # It cannot be applied to the turn itself: a guided-decoding grammar
+    # constrains `content`, and during the loop the model has to be free to
+    # emit qwen3_xml tool calls. See app/harness/finalizer.py — in particular
+    # why the extra request must send the identical `tools` list with
+    # `tool_choice: "none"` rather than dropping tools.
+    #
+    # Inert when unset, which is every caller but the worker sources that
+    # want a machine-readable verdict.
+    final_schema: dict[str, Any] | None = None
+    final_schema_prompt: str = ""
+    finalizer_max_tokens: int = 1024
+    finalizer_timeout_s: float = 180.0

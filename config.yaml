@@ -258,6 +258,14 @@ harness:
     python: true
     typescript: true
     max_lines: 30
+  # Structured final answer. When a caller passes RunOptions.final_schema
+  # (today: the backlog triage worker), the loop runs one extra completion
+  # after the turn ends that restates the verdict as a JSON object. These
+  # bound that request; the schema itself is a per-caller contract, never
+  # config. Inert for every caller that sends no schema.
+  finalizer:
+    max_tokens: 1024
+    timeout_seconds: 180
   tool_search:
     enabled: false
     threshold_tools: 30

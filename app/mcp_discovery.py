@@ -223,6 +223,13 @@ def _get_harness_kwargs() -> dict:
         out["tool_search_max_results_default"] = int(cfg["max_results_default"])
     if "max_results_cap" in cfg:
         out["tool_search_max_results_cap"] = int(cfg["max_results_cap"])
+    # Finalizer budgets. `final_schema` itself is never config — it is a
+    # per-caller contract — so only the two knobs come from here.
+    fin = harness.get("finalizer") or {}
+    if "max_tokens" in fin:
+        out["finalizer_max_tokens"] = int(fin["max_tokens"])
+    if "timeout_seconds" in fin:
+        out["finalizer_timeout_s"] = float(fin["timeout_seconds"])
     return out
 
 

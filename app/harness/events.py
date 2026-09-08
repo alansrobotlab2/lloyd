@@ -80,6 +80,10 @@ class NormalizedEvent(TypedDict, total=False):
     usage: dict[str, int]
     num_turns: int
     response_text: str
+    tool_calls_total: int
+    tool_calls_captioned: int
+    structured: dict[str, Any] | None
+    structured_error: str
 
     # stream_raw
     raw: str
@@ -197,6 +201,8 @@ def result(
     response_text: str = "",
     tool_calls_total: int = 0,
     tool_calls_captioned: int = 0,
+    structured: dict | None = None,
+    structured_error: str = "",
 ) -> NormalizedEvent:
     """`tool_calls_*` count only tools whose schema carried the injected
     `summary` parameter — the caption rate for this turn. It is reported
@@ -216,6 +222,12 @@ def result(
         "response_text": response_text,
         "tool_calls_total": tool_calls_total,
         "tool_calls_captioned": tool_calls_captioned,
+        # Present only when RunOptions.final_schema was set. `structured` is
+        # the parsed object; `structured_error` says why there is none —
+        # including the deliberate skips, so a caller can tell "the model
+        # refused" from "the turn died at its budget and has no verdict".
+        "structured": structured,
+        "structured_error": structured_error,
     }
 
 
