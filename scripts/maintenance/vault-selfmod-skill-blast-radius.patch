@@ -1,0 +1,63 @@
+diff --git i/skills/selfmod-change-own-code/SKILL.md w/skills/selfmod-change-own-code/SKILL.md
+index 141428ba..7cad23a7 100644
+--- i/skills/selfmod-change-own-code/SKILL.md
++++ w/skills/selfmod-change-own-code/SKILL.md
+@@ -48,30 +48,38 @@ reversible. Triage after something goes wrong is `selfmod-guardian-triage`.
+ 1. **Open a round.** `selfmod_start(goal)` returns a worktree path under
+    `~/lloyd-work/<round_id>/home/lloyd`. Every edit goes there. Never edit
+    `~/lloyd` directly to make the change.
+-2. **Do the work normally.** Ordinary Read/Edit/Write/Bash inside that worktree,
++2. **Map the blast radius.** `graph_refresh(root=<worktree>)`, then
++   `graph_affected(symbol, root=<worktree>)` for every symbol you are about to
++   change and `graph_explain(symbol, root=<worktree>)` for its callers. Pass
++   `root=` on every call — the default is the live checkout, not your worktree,
++   and an answer about the wrong tree is worse than no answer. Record the
++   depth-1 callers and the file list in your round report. The graph is an AST
++   extraction, so it is blind across HTTP and MCP seams: keep Grep for string
++   keys, route names and config keys.
++3. **Do the work normally.** Ordinary Read/Edit/Write/Bash inside that worktree,
+    then commit inside it. There is no special "write code" tool and the round does
+    not generate anything — it only gives the work somewhere safe to happen.
+-3. **Write the test first when the change is a fix.** The gate runs the whole
++4. **Write the test first when the change is a fix.** The gate runs the whole
+    suite; a fix with no test passes the gate and proves nothing.
+-4. **Gate it.** `selfmod_gate(round_id)` — two to three minutes. Eight rungs, and it
++5. **Gate it.** `selfmod_gate(round_id)` — two to three minutes. Eight rungs, and it
+    stops at the first failure. Read the failing rung's `detail`; it names the
+    cause.
+-5. **Land it.** `selfmod_land(round_id)` **returns immediately** — the landing
++6. **Land it.** `selfmod_land(round_id)` **returns immediately** — the landing
+    runs detached, because it restarts the very process the tool runs in. It
+    waits for the backend to go idle (up to 15 minutes — a busy backend is
+    normal, not a fault), fast-forwards, restarts MCP then backend, and verifies
+    the running commit actually changed.
+-6. **Then stop. End your turn.** This is the step that is easy to get wrong.
++7. **Then stop. End your turn.** This is the step that is easy to get wrong.
+    The landing waits for the backend to be *idle*, and your own turn is what is
+    keeping it busy — polling `selfmod_status` in a loop starves the very gate
+    the landing is waiting on, and after 15 minutes it gives up. Landing also
+    restarts the backend, which ends your turn regardless. Say what you did and
+    finish.
+-7. **Check on your next turn.** `selfmod_status` shows `current.state`
++8. **Check on your next turn.** `selfmod_status` shows `current.state`
+    `landing` -> `observing`; `observing` means the code is live and the running
+    commit was verified to have changed. If the landing failed it reverted
+    itself and `current` is null again — the reason is in the round's `land.log`.
+-8. **Leave it alone for 15 minutes.** The guardian watches liveness, error rate
++9. **Leave it alone for 15 minutes.** The guardian watches liveness, error rate
+    and data-loss counters, then promotes the commit to last-known-good. Landing
+    a second round inside that window is now refused, not merely discouraged —
+    it would leave the first promotion unsettled and point the rollback at a
+@@ -148,7 +156,11 @@ obviously-correct changes. Reach for it less often than you can.
+ 1. The diff does what the goal said, and nothing else.
+ 2. The change has a test that would fail without it.
+ 3. All eight rungs passed — quote the gate line rather than saying "it passed".
+-4. After landing, `/health` reports the new commit and `round status` shows it
++4. The report names the blast radius: the depth-1 callers `graph_affected`
++   returned and the files they live in. "I grepped and it looked local" is not
++   that — a grep for a symbol's spelling misses every caller that renamed it on
++   import and invents every one that shares a name.
++5. After landing, `/health` reports the new commit and `round status` shows it
+    under observation.
+ 
+ ## Related skills

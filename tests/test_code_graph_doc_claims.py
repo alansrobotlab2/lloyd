@@ -115,21 +115,44 @@ def test_implement_prompt_steps_stay_numbered_in_order():
     assert nums == [1, 2, 3, 4, 5, 6], nums
 
 
+PATCH = "scripts/maintenance/vault-selfmod-skill-blast-radius.patch"
+APPLY = f"git -C ~/obsidian apply {PATCH}"
+
+
 @pytest.mark.live_vault
 @pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present")
 def test_selfmod_skill_maps_the_radius_between_opening_and_working():
+    """The vault half of this change, and the reason it is a separate step.
+
+    The vault is a live shared tree with no PR path, so editing it lands
+    immediately — while the `graph_*` tools it names only exist after this
+    branch merges and lloyd-mcp restarts. An edited skill therefore tells
+    every selfmod round in the gap to call a tool that returns "Unknown
+    tool", and makes quality gate 4 unsatisfiable. So the edit is held as a
+    patch and applied at merge time, and THIS test is the reminder.
+
+    `live_vault` keeps it off the selfmod gate's hard rung (`-m "not
+    live_vault"`), where a vault someone else rewrote would fail an
+    unrelated round.
+    """
     body = VAULT_SKILL.read_text()
     proc = body[body.find("## Procedure"):body.find("## What the gate rejects")]
     open_at = proc.find("**Open a round.**")
     map_at = proc.find("**Map the blast radius.**")
     work_at = proc.find("**Do the work normally.**")
-    assert -1 not in (open_at, map_at, work_at), proc[:200]
+    assert -1 not in (open_at, map_at, work_at), (
+        f"the vault skill has no blast-radius step yet — apply it with:\n"
+        f"    {APPLY}\n"
+        f"Do this AFTER lloyd-mcp restarts with code_graph, not before: the "
+        f"step names tools that do not exist until then."
+    )
     assert open_at < map_at < work_at
 
 
 @pytest.mark.live_vault
 @pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present")
 def test_selfmod_skill_procedure_stays_numbered_in_order():
+    """Holds before and after the patch — the insertion renumbers 6-8 to 7-9."""
     body = VAULT_SKILL.read_text()
     proc = body[body.find("## Procedure"):body.find("## What the gate rejects")]
     nums = [int(m) for m in re.findall(r"^(\d+)\. \*\*", proc, re.M)]

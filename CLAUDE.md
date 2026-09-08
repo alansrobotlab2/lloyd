@@ -836,6 +836,24 @@ model ever starts spending its tool-call budget on the caption.
 
 ## Code graph
 
+**Vault half, held as a patch.** The `selfmod-change-own-code` skill's
+blast-radius step lives at
+`scripts/maintenance/vault-selfmod-skill-blast-radius.patch`, not in the vault,
+until `code_graph` is actually deployed. The vault is a live shared tree with
+no PR path, so editing it lands *immediately* — while the `graph_*` tools it
+names only exist after lloyd-mcp restarts on the merged code. An edited skill
+in that gap tells every selfmod round to call a tool that returns "Unknown
+tool" and makes its own quality gate 4 unsatisfiable. Apply it after the
+restart:
+
+    git -C ~/obsidian apply scripts/maintenance/vault-selfmod-skill-blast-radius.patch
+
+`tests/test_code_graph_doc_claims.py::test_selfmod_skill_maps_the_radius_between_opening_and_working`
+fails with that command until it is applied. It carries `live_vault`, so the
+selfmod gate (`-m "not live_vault"`) excludes it and no round is failed by a
+vault someone else has not updated yet.
+
+
 `agent_mcp/code_graph.py` answers "who calls this" and "what breaks if I
 change it" from graphify's deterministic AST extraction of a tree
 (`<root>/graphify-out/graph.json`, ~15 s to build, zero LLM calls). Six
