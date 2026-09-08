@@ -35,6 +35,14 @@ VAULT_FACTS_ROOT = Path(os.environ["LLOYD_FACTS_ROOT"]) if os.environ.get("LLOYD
 VAULT_KG_DB = Path(os.environ["LLOYD_KG_DB"]) if os.environ.get("LLOYD_KG_DB") \
     else VAULT_DERIVED_ROOT / "kg.sqlite"
 
+# The research topic registry: what to research, what came of it, and the
+# feedback that keeps a generator from re-proposing it (app.research_store).
+# Anchored to LLOYD_HOME for the reason in the block above — a canary booting
+# from a worktree must get its own empty registry, not claim the live one's
+# topics. LLOYD_RESEARCH_DB overrides it for tests and rebuilds.
+RESEARCH_DB = Path(os.environ["LLOYD_RESEARCH_DB"]) if os.environ.get("LLOYD_RESEARCH_DB") \
+    else LLOYD_HOME / "research.db"
+
 # Legacy alias map. Since the 2026-09 store migration this is only an export
 # target (backups, diffs) — readers and writers go through app.kg_store.
 VAULT_FACTS_ALIASES = VAULT_FACTS_ROOT / "entity-aliases.json"

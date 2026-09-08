@@ -86,3 +86,21 @@ def _isolate_default_store(request, tmp_path_factory):
     yield
     kg_store.reset()
     kg_store._default_path = original
+
+
+@pytest.fixture(autouse=True)
+def _isolate_research_store(tmp_path_factory):
+    """No test writes to the live research registry.
+
+    Same shape and same reason as `_isolate_default_store` above: the default
+    must never resolve to `~/lloyd/research.db`, because a test that proposes
+    a topic would otherwise put it in front of the deep-research worker. Tests
+    that want a registry call `research_store.configure(...)` themselves.
+    """
+    from app import research_store
+    original = research_store._default_path
+    research_store.reset()
+    research_store._default_path = tmp_path_factory.mktemp("research") / "research.db"
+    yield
+    research_store.reset()
+    research_store._default_path = original
