@@ -251,6 +251,37 @@ def test_the_platform_is_read_from_the_head_of_the_file(tmp_path):
     assert is_user_session({"platform": ""}) is True
 
 
+async def test_the_old_cursor_is_migrated_rather_than_dropped(tmp_path, monkeypatch, q):
+    """Otherwise the fix is a regression on its own history.
+
+    The `last_mtime` cursor was the only record that a session had been
+    considered. Replacing it with per-session markers and simply forgetting it
+    makes every session below it eligible again — 143 files on this box, most
+    already distilled, re-offered three per tick.
+    """
+    monkeypatch.setattr(SD, "SESSIONS_DIR", tmp_path)
+    old = _session(tmp_path, "20260801_already_done", age_seconds=99999)
+    new = _session(tmp_path, "20260906_not_yet", age_seconds=7200)
+    q.wm_set(SD.NAME, "last_mtime", repr(old.stat().st_mtime))
+
+    await SD.enqueue_if_due(q, {})
+
+    assert f"done:{old.name}" in q.wm_keys(SD.NAME), "an already-distilled session came back"
+    assert "last_mtime" not in q.wm_keys(SD.NAME), \
+        "the retired cursor is still there for a session to be stranded behind"
+    queued = [i.payload["session_path"] for i in q.list_items(source=SD.NAME)]
+    assert queued == [str(new)], "only the unconsidered session should be enqueued"
+
+
+async def test_the_migration_runs_once_and_is_then_inert(tmp_path, monkeypatch, q):
+    monkeypatch.setattr(SD, "SESSIONS_DIR", tmp_path)
+    _session(tmp_path, "20260801_done", age_seconds=99999)
+    q.wm_set(SD.NAME, "last_mtime", repr(time.time()))
+
+    assert SD._migrate_legacy_cursor(q) == 1
+    assert SD._migrate_legacy_cursor(q) == 0
+
+
 async def test_a_distilled_session_is_marked_done_on_success(tmp_path, monkeypatch, q):
     monkeypatch.setattr(SD, "write_staging_note", lambda **kw: tmp_path / "n.md")
     monkeypatch.setattr(

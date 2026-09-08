@@ -503,6 +503,13 @@ class WorkQueue:
                 ).fetchall()
             ]
 
+    def wm_delete(self, source: str, key: str) -> None:
+        """Drop one watermark. Used to retire a cursor a source has outgrown."""
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM watermarks WHERE source=? AND key=?",
+                         (source, key))
+            conn.commit()
+
     def wm_set(self, source: str, key: str, value: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(

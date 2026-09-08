@@ -375,6 +375,15 @@ def test_a_watermark_round_trips_and_overwrites(q):
     assert q.wm_get("s", "cursor") == "2"
 
 
+def test_a_watermark_can_be_retired(q):
+    """A source that outgrows a cursor has to be able to delete it, or the
+    stale key keeps deciding what gets skipped."""
+    q.wm_set("s", "last_mtime", "123")
+    q.wm_delete("s", "last_mtime")
+    assert q.wm_get("s", "last_mtime") is None
+    q.wm_delete("s", "never-existed")  # idempotent
+
+
 def test_watermark_keys_are_listed_per_source(q):
     q.wm_set("s", "done:a.json", "1")
     q.wm_set("s", "done:b.json", "1")

@@ -104,11 +104,53 @@ def _scan(now: float, already_done: set[str]) -> list[tuple[float, Path]]:
     return out
 
 
+_LEGACY_CURSOR = "last_mtime"
+
+
+def _migrate_legacy_cursor(queue: WorkQueue) -> int:
+    """Convert the old `last_mtime` cursor into per-session markers, once.
+
+    Without this the fix is a regression on its own history: the old cursor
+    was the only record that a session had been considered, so dropping it
+    makes every session below it eligible again — 143 files here, most of
+    them already distilled, re-offered three per tick.
+
+    A session at or below the cursor was enqueued at some point, because the
+    cursor only ever advanced over items that were. The key is deleted after,
+    so the markers are the sole authority from here on and no cursor is left
+    for a session to be stranded behind.
+    """
+    cursor = queue.wm_get(NAME, _LEGACY_CURSOR)
+    if cursor is None:
+        return 0
+    try:
+        cutoff = float(cursor)
+    except ValueError:
+        cutoff = 0.0
+    seeded = 0
+    for p in SESSIONS_DIR.glob("*.json"):
+        try:
+            if p.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        if queue.wm_get(NAME, _done_key(p.name)) is None:
+            queue.wm_set(NAME, _done_key(p.name),
+                         json.dumps({"why": "migrated from last_mtime cursor",
+                                     "at": time.time()}))
+            seeded += 1
+    queue.wm_delete(NAME, _LEGACY_CURSOR)
+    logger.info("session-distill: migrated the last_mtime cursor into %d markers", seeded)
+    return seeded
+
+
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     import asyncio
 
     if not SESSIONS_DIR.exists():
         return
+
+    await asyncio.to_thread(_migrate_legacy_cursor, queue)
 
     # One watermark row per session already handled. Read whole rather than
     # queried per candidate: it is a few hundred rows against one connection.
