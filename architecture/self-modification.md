@@ -128,6 +128,8 @@ start from an unverified premise:
 - **`backlog-selfmod`** triages one open item per run, oldest first, and
   records a verdict with evidence. `stale` and `already_done` close the item;
   `confirmed` records an acceptance check and stops. It never opens a round.
+  Items this loop filed itself are held out of its candidate pool while they
+  are fresh — see "The pass may not eat what it files" below.
 - **`backlog-implement`** takes the oldest still-open `confirmed` item that
   has an acceptance check, and runs one round on it through the normal gate.
   It refuses while the loop is anything but free — disabled, halted, BROKEN,
@@ -198,6 +200,42 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   file is the fact: `backlog.existing_ids` checks each id on disk, the ledger
   records `spawned` and `spawned_unverified` separately, and the closed item's
   activity log names the ids so the split is followable from either end.
+
+  **The pass may not eat what it files.** That required filing step met
+  `select_candidate`, which takes the oldest untriaged *open* item, and
+  `OPEN_STATUSES` contains `draft` — the status `backlog_write_task` writes.
+  So every item triage filed re-entered the queue it came out of, and the
+  pass became its own supplier. Measured over the loop's first 48 hours
+  (2026-09-06 to 09-08): **40 triage runs closed 28 items and filed 78**, a
+  reproduction number of **1.95**, or +46 open items a day at the then-cadence
+  of one run per 30 minutes. The open board went **19 → 122**, with 110 of the
+  122 written by the loop. R > 1 is the whole defect — the queue doubles
+  rather than drains, however good the verdicts are, and no cap on spawns per
+  run changes that shape. Only cutting the edge does.
+
+  Oldest-first ordering is what hid it. Self-filed items sort to the back, so
+  the pass works the real backlog first and reads as healthy right up to the
+  moment there is nothing else left; on 2026-09-08 that moment was three hours
+  and 6 items away. `backlog.is_quarantined` holds an item tagged
+  `spawned-by-triage` or `spawned-by-selfmod` out of the pool until it is
+  `SPAWN_TRIAGE_MIN_AGE_DAYS` (30) old. Quarantine rather than exclusion: an
+  item nobody implements really can go stale, and then the question triage
+  asks is real again. The gate keys on those tags and **not** on `draft`,
+  which is the status of most of a stale backlog — a rule that skipped drafts
+  would switch the pass off rather than bound it.
+
+  An exhausted queue therefore has two meanings. `backlog.triage_pool` returns
+  the held count beside the candidates so the skip summary can say which one:
+  "every open backlog item has been triaged" was true, and misleading, on a
+  board of 122 where 106 were this loop's own drafts. `SPAWN_CAP` (3, both
+  sources) bounds fan-out per run, with the remainder folded into a single
+  "Further findings from…" item rather than dropped — #229's lesson still
+  holds, and the answer to too many findings is one more item, not fewer
+  findings. It is **recorded, not enforced**: the items are on disk before
+  `SPAWNED:` is parsed, so unfiling them would destroy real work. Both event
+  types carry `spawn_cap` and `spawned_over_cap`.
+  `tests/test_backlog_spawn_loop.py` pins it, including the counterfactual —
+  with the window set to zero the same run grows the queue.
   The proving run on #278 (`confirmed`, 16 iterations) filed #402 and #403
   before its verdict, after checking `backlog_tasks` for duplicates — and
   exposed that the acceptance check, the implementer's contract, was cut at
