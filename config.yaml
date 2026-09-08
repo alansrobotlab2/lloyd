@@ -473,8 +473,23 @@ workers:
   max_attempts: 3
   slots: 2
   sources:
+    # OFF since 2026-09-08. This source promoted generated prompt variants
+    # straight over the live `lloyd/SOUL.md` / `MEMORY.md` every hour with no
+    # gate, no test, no review and no revert. It is what produced the #464
+    # MEMORY.md clobber, and at 09:54 on 2026-09-08 it overwrote the operating
+    # contract *during* the round that was trimming it — re-inflating the gate
+    # stack to 64% ninety minutes after #377 cut it to 48%, with a variant
+    # whose own hypothesis was "add negative constraints to fix the shape
+    # benchmarks", the technique #377 was filed against.
+    #
+    # `promote()` now refuses a variant that breaks the prompt-surface
+    # invariants and commits what it does apply through `selfmod_vault_land`,
+    # so the writer is bounded rather than removed. It stays off until backlog
+    # #506 closes the rest — `variant.json` written with `json.dump`, and the
+    # snapshot directory wired up as a real rollback target. Flip `enabled` to
+    # re-arm; nothing else needs changing.
     autoresearch:
-      enabled: true
+      enabled: false
       interval_seconds: 3600
       max_inflight: 1
       max_duration_seconds: 1800

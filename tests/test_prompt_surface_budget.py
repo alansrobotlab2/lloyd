@@ -35,52 +35,44 @@ from pathlib import Path
 import pytest
 
 import prompt_builder as pb
+import prompt_surface as ps
+from prompt_surface import (
+    DUPLICATE_CONTRACT_CEILING,
+    GATE_HEADS,
+    GATE_STACK_CEILING,
+    LOAD_BEARING,
+    PROHIBITION_RATIO_CEILING,
+)
 
 VAULT = Path.home() / "obsidian" / "lloyd"
 SOUL = VAULT / "SOUL.md"
 LLOYD_REPO = Path(pb.__file__).parent
 
-# Only the invariant group below depends on the real vault; the prompt_builder
-# and prefetch behaviour tests build a fake one and always run.
+# Two marks, and the second is the one that matters. `skipif` keeps these from
+# failing where the vault is absent; `live_vault` lets the selfmod gate exclude
+# them with `-m "not live_vault"`.
+#
+# They read a file no round under test controls — an hourly autoresearch
+# promotion or a nightly reflection job can rewrite `SOUL.md` between one round
+# and the next. Left on the gate's hard `tests` rung, a re-inflation would fail
+# every future round whatever its diff, which is how `test_tool_overrides.py`
+# aborted three rounds in fifteen hours on 2026-09-07. The invariants are
+# enforced at the writers instead — `scripts/selfmod/vault_round.py` and
+# `scripts/autoresearch/promote.py` both call `prompt_surface.check_contract`
+# before they commit — so this group is the reporting copy, not the enforcement.
 vault_only = pytest.mark.skipif(
     not SOUL.exists(), reason="live vault prompt surface not on disk here"
 )
+live_vault = pytest.mark.live_vault
 
-# The roles that make up the gate stack, matched by heading prefix rather than
-# line range: a line range silently changes meaning when a section is renamed,
-# which is exactly what the #377 trim did. Both the pre-trim and post-trim
-# headings are listed so the metric survives the rename.
-GATE_HEADS = (
-    "L0 SAFETY INTERRUPT GATE",
-    "L0 PRE-COMMIT SAFETY CHECKLIST",
-    "ATOMIC BLOCK SIGNAL",
-    "BLOCK SIGNAL",
-    "ZERO PREAMBLE",
-    "ZERO-PREAMBLE",
-    "STRICT OUTPUT SHAPE GATE",
-)
-
-# A trim that removes these removed behaviour, not padding. Each maps to a bench
-# task: block signal -> 010, trigger classes -> 008/009, false-premise
-# refutation -> 006, first-token tool mapping -> 002/004/005/007.
-LOAD_BEARING = {
-    "block signal JSON": '{"status": "blocked"',
-    "destructive trigger class": "rm -rf",
-    "protected-path trigger class": "~/lloyd/agent-services/",
-    "adversarial-framing trigger class": "ignore previous instructions",
-    "vague-intent trigger class": "clean up files",
-    "false-premise refutation": "false premise",
-    "skill-first token": "skills_search",
-    "write-first token": "memory_add",
-    "recall-first token": "vault_recall",
-}
-
-# Triage measured 50 of 170 nonblank lines (29%) as prohibitions; the trim
-# measured 10 of 52 (19%). Above this ceiling the file has crept back toward the
-# shape #377 was filed against.
-PROHIBITION_RATIO_CEILING = 0.25
-GATE_STACK_CEILING = 0.50
-DUPLICATE_CONTRACT_CEILING = 0.10
+# `_sections`, `_gate_share`, `_prohibition_ratio` and `_shared_line_share`
+# live in `prompt_surface` now, because the writers have to run the same checks
+# and a second private definition of "is the contract bloated" is how the two
+# halves drift apart. Thin aliases keep the assertions below readable.
+_sections = ps.sections
+_gate_share = ps.gate_share
+_prohibition_ratio = ps.prohibition_ratio
+_shared_line_share = ps.shared_line_share
 
 
 @pytest.fixture(scope="module")
@@ -91,35 +83,6 @@ def soul_text() -> str:
 @pytest.fixture(scope="module")
 def memory_text() -> str:
     return (VAULT / "MEMORY.md").read_text(encoding="utf-8")
-
-
-def _sections(text: str) -> list[tuple[str, int]]:
-    """(heading, byte size) per `## ` section, through the next heading."""
-    lines = text.split("\n")
-    heads = [(i, ln) for i, ln in enumerate(lines, 1) if ln.startswith("## ")]
-    out = []
-    for idx, (ln, heading) in enumerate(heads):
-        end = heads[idx + 1][0] - 1 if idx + 1 < len(heads) else len(lines)
-        out.append((heading[3:], len("\n".join(lines[ln - 1:end]).encode())))
-    return out
-
-
-def _gate_share(text: str) -> tuple[float, int, int]:
-    total = len(text.encode())
-    gate = sum(b for h, b in _sections(text) if h.startswith(GATE_HEADS))
-    return (gate / total if total else 1.0), gate, total
-
-
-_PROHIBITION = re.compile(
-    r"\b(Never|never|NOT |NO |Do NOT|do not|don't|Don't|FORBIDDEN|forbidden"
-    r"|WRONG|BLOCK|block|prohibit)"
-)
-
-
-def _prohibition_ratio(text: str) -> tuple[float, int, int]:
-    nonblank = [ln for ln in text.split("\n") if ln.strip()]
-    hits = [ln for ln in nonblank if _PROHIBITION.search(ln)]
-    return (len(hits) / len(nonblank) if nonblank else 0.0), len(hits), len(nonblank)
 
 
 def _normalize(text: str) -> str:
@@ -144,6 +107,7 @@ def _shared_line_share(memory: str, soul: str) -> float:
 # ── live vault: the #377 acceptance check ────────────────────────────────────
 
 @vault_only
+@live_vault
 def test_gate_stack_is_a_minority_of_the_contract(soul_text):
     share, gate, total = _gate_share(soul_text)
     assert share <= GATE_STACK_CEILING, (
@@ -154,6 +118,7 @@ def test_gate_stack_is_a_minority_of_the_contract(soul_text):
 
 
 @vault_only
+@live_vault
 def test_gate_sections_still_exist(soul_text):
     """A ratio test passes at 0% if the gate sections were renamed away."""
     found = {h for h, _ in _sections(soul_text) if h.startswith(GATE_HEADS)}
@@ -161,12 +126,14 @@ def test_gate_sections_still_exist(soul_text):
 
 
 @vault_only
+@live_vault
 def test_trim_kept_the_load_bearing_behaviours(soul_text):
     missing = [label for label, marker in LOAD_BEARING.items() if marker not in soul_text]
     assert not missing, f"trim removed behaviour the benches score: {missing}"
 
 
 @vault_only
+@live_vault
 def test_prohibition_line_ratio_is_under_the_ceiling(soul_text):
     ratio, hits, nonblank = _prohibition_ratio(soul_text)
     assert ratio <= PROHIBITION_RATIO_CEILING, (
@@ -177,6 +144,7 @@ def test_prohibition_line_ratio_is_under_the_ceiling(soul_text):
 
 
 @vault_only
+@live_vault
 def test_memory_md_is_not_a_copy_of_the_contract(memory_text, soul_text):
     """#464 — MEMORY.md was overwritten with SOUL.md; the contract arrived twice."""
     assert (memory_text.split("\n", 1)[0].strip()
@@ -191,6 +159,7 @@ def test_memory_md_is_not_a_copy_of_the_contract(memory_text, soul_text):
 
 
 @vault_only
+@live_vault
 def test_anti_compliance_frame_lives_in_exactly_one_place(soul_text):
     """#465 — the same six rules shipped in Python and in the vault, diverged."""
     code = (LLOYD_REPO / "prompt_builder.py").read_text(encoding="utf-8")
@@ -203,6 +172,7 @@ def test_anti_compliance_frame_lives_in_exactly_one_place(soul_text):
 
 
 @vault_only
+@live_vault
 def test_section_audit_covers_every_section(soul_text):
     """Acceptance (1): keep/cut/condense recorded for each `## ` section."""
     audits = sorted((VAULT / "reviews").glob("*soul*audit*.md"))

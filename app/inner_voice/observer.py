@@ -2003,6 +2003,11 @@ def install_observer(
                 comparable,
                 window=repetition_window,
                 threshold=repetition_threshold,
+                # From the WHOLE ring, not the post-baseline slice. An
+                # identifier every call carries cannot discriminate between
+                # them, and after a fire `comparable` is too short to tell —
+                # which is how a selfmod round's worktree id kept matching.
+                ambient=_guards.ubiquitous_identifiers(state.recent_tool_calls),
             )
             if rep is not None:
                 state.repetition_baseline = state.tool_calls_seen

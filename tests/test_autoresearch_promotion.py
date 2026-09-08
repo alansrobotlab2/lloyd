@@ -323,15 +323,37 @@ def test_promote_dry_run_writes_nothing(isolated_prompts, tmp_path):
 
 
 def test_promote_applies_snapshots_and_records(isolated_prompts, tmp_path):
+    """Mechanics only. The overlay must be a contract the guard accepts, or the
+    promotion is refused before it applies anything — see
+    `tests/test_prompt_surface_guard.py`, which pins the refusal itself."""
+    from tests.test_prompt_surface_guard import GOOD_CONTRACT
+
+    cfg = make_cfg(tmp_path)
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "SOUL.md").write_text(GOOD_CONTRACT, encoding="utf-8")
+    result = promote.promote(cfg, VARIANT, overlay, summary(0.9), summary(0.1))
+    assert result.get("refused") is None, result.get("refused")
+    assert result["applied_files"] == ["SOUL.md"]
+    assert result["snapshot_dir"] and Path(result["snapshot_dir"]).exists()
+    assert isolated_prompts["SOUL.md"].read_text() == GOOD_CONTRACT
+    assert (snap_soul := (Path(result["snapshot_dir"]) / "SOUL.md")).read_text() == "canonical SOUL.md\n"
+    # `isolated_prompts` puts the canonical files outside `~/obsidian`, so no
+    # vault commit is attempted. That is the property that keeps this unit test
+    # from running `git add` against the live vault.
+    assert result.get("vault_commit") is None
+
+
+def test_promote_refuses_a_variant_that_breaks_the_contract(isolated_prompts, tmp_path):
+    """The stub this test used to promote is exactly what must now be refused."""
     cfg = make_cfg(tmp_path)
     overlay = tmp_path / "overlay"
     overlay.mkdir()
     (overlay / "SOUL.md").write_text("promoted soul\n", encoding="utf-8")
     result = promote.promote(cfg, VARIANT, overlay, summary(0.9), summary(0.1))
-    assert result["applied_files"] == ["SOUL.md"]
-    assert result["snapshot_dir"] and Path(result["snapshot_dir"]).exists()
-    assert isolated_prompts["SOUL.md"].read_text() == "promoted soul\n"
-    assert (snap_soul := (Path(result["snapshot_dir"]) / "SOUL.md")).read_text() == "canonical SOUL.md\n"
+    assert result["refused"]
+    assert result["applied_files"] == []
+    assert isolated_prompts["SOUL.md"].read_text() == "canonical SOUL.md\n"
 
 
 def test_experiment_fact_records_the_promotion(isolated_prompts, tmp_path):
@@ -347,23 +369,19 @@ def test_experiment_fact_records_the_promotion(isolated_prompts, tmp_path):
     assert cfg.paths.facts_experiments_dir in fact.parents
 
 
-@pytest.mark.xfail(
-    reason=(
-        "REAL DEFECT (found 2026-09-06 while writing this file): promote() calls "
-        "snapshot_current_prompts(), which mkdir()s unconditionally and never checks "
-        "that the copy landed. A snapshot that cannot be written still yields a "
-        "directory path, so promote() proceeds to overwrite live prompts with no "
-        "rollback point. The ledger shows 26 of 83 promotions with no matching "
-        "snapshot. Fix: raise if the snapshot dir holds no prompt files. "
-        "xfailed rather than skipped so it reports once the guard exists."
-    ),
-    strict=False,
-)
 def test_promote_refuses_when_the_snapshot_cannot_be_written(isolated_prompts, tmp_path, monkeypatch):
+    """Fixed 2026-09-08; xfailed since 2026-09-06.
+
+    The overlay has to be a contract the guard accepts, or the promotion is
+    refused one step earlier and this passes without touching the snapshot
+    path at all — which is exactly how it started XPASSing.
+    """
+    from tests.test_prompt_surface_guard import GOOD_CONTRACT
+
     cfg = make_cfg(tmp_path)
     overlay = tmp_path / "overlay"
     overlay.mkdir()
-    (overlay / "SOUL.md").write_text("promoted soul\n", encoding="utf-8")
+    (overlay / "SOUL.md").write_text(GOOD_CONTRACT, encoding="utf-8")
 
     real_copy2 = __import__("shutil").copy2
 
@@ -373,8 +391,10 @@ def test_promote_refuses_when_the_snapshot_cannot_be_written(isolated_prompts, t
         return real_copy2(src, dst, *a, **kw)
 
     monkeypatch.setattr(promote.shutil, "copy2", failing_copy2)
-    promote.promote(cfg, VARIANT, overlay, summary(0.9), summary(0.1))
+    result = promote.promote(cfg, VARIANT, overlay, summary(0.9), summary(0.1))
     # If snapshotting failed there must be no promotion at all.
+    assert result["refused"] and "snapshot" in result["refused"][0]
+    assert result["applied_files"] == []
     assert isolated_prompts["SOUL.md"].read_text() == "canonical SOUL.md\n"
 
 

@@ -144,6 +144,32 @@ def loader_errors(paths: list[str]) -> list[str]:
         return [f"loader produced no verdict: {(r.stdout + r.stderr).strip()[-300:]}"]
 
 
+CONTRACT_PATHS = ("lloyd/SOUL.md", "lloyd/MEMORY.md")
+
+
+def contract_errors(paths: list[str]) -> list[str]:
+    """Prompt-surface invariants, when the change touches the identity files.
+
+    The loaders below already answer "does the prompt still build". They do
+    not answer "is it still the shape #377 left it in", and that is the
+    question a writer has to answer, because the reader cannot: the gate's
+    `tests` rung judges a candidate commit and `SOUL.md` is not in it.
+
+    Scoped to a diff that names one of the contract files, like every other
+    check here — a pre-existing condition elsewhere in the vault must not
+    block an unrelated round.
+    """
+    if not any(p in CONTRACT_PATHS for p in paths):
+        return []
+    try:
+        import prompt_surface
+    except ImportError as exc:  # pragma: no cover - repo is always importable
+        return [f"prompt_surface unavailable, cannot check the contract: {exc}"]
+    errs = prompt_surface.check_paths(VAULT / "lloyd" / "SOUL.md",
+                                      VAULT / "lloyd" / "MEMORY.md")
+    return [f"prompt surface: {e}" for e in errs]
+
+
 def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     """(errors, buckets). Empty errors means the change may land."""
     ok, why, buckets = check_scope(paths)
@@ -156,6 +182,8 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
             err = frontmatter_error(f)
             if err:
                 errors.append(f"{p}: {err}")
+    if not errors:
+        errors.extend(contract_errors(paths))
     if not errors and buckets["validated"]:
         errors.extend(loader_errors(buckets["validated"]))
     return errors, buckets
@@ -223,6 +251,25 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
                     "paths": norm, "validated": buckets["validated"],
                     "message": message.strip()[:200]})
     return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"]}
+
+
+def revert_many(shas: list[str], reason: str = "rollback") -> dict:
+    """Revert several vault commits, newest first, stopping at the first failure.
+
+    Newest first because reverting an older commit before a newer one that
+    touches the same file conflicts by construction. Partial success is
+    reported rather than raised: a rollback that undid two of three commits
+    has still changed the tree, and a caller told only "it failed" would have
+    no idea which state it is now in.
+    """
+    done: list[str] = []
+    for sha in reversed([s for s in shas if s]):
+        try:
+            revert(sha, reason=reason)
+            done.append(sha)
+        except Exception as exc:
+            return {"ok": False, "reverted": done, "failed": sha, "error": str(exc)}
+    return {"ok": True, "reverted": done}
 
 
 def revert(sha: str, reason: str = "manual") -> dict:

@@ -195,6 +195,23 @@ _RECENT_CANDIDATES = 24
 _RECENT_TTL_S = 10.0
 
 
+def _caption_rate(data: dict) -> dict[str, int] | None:
+    """The newest turn's tool-caption rate, or None if no turn recorded one.
+
+    Scans backwards for the most recent assistant `stats` carrying the
+    counters, because the ratchet is per-turn: a session that captioned its
+    first turn and lost the habit on its second should read as the second.
+    Cheap — the file is already parsed for this row — and bounded by the first
+    hit rather than by the transcript length.
+    """
+    for msg in reversed(data.get("messages") or []):
+        stats = msg.get("stats")
+        if isinstance(stats, dict) and stats.get("tool_calls_total"):
+            return {"total": int(stats["tool_calls_total"]),
+                    "captioned": int(stats.get("tool_calls_captioned") or 0)}
+    return None
+
+
 def _scan_recent_sessions() -> list[dict[str, Any]]:
     """Parse the newest session files into rows, newest conversation first."""
     import json
@@ -244,6 +261,9 @@ def _scan_recent_sessions() -> list[dict[str, Any]]:
             "goal": goal.get("text", ""),
             "goal_achieved": bool(goal.get("achieved_at")),
             "todo_counts": _count_todos(data.get("todos") or []),
+            # None until a turn records it — an old session predates the
+            # counters and must not render as 0/0, which reads as a failure.
+            "captions": _caption_rate(data),
             "_ts": ts,
         })
 

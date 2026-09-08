@@ -16,6 +16,8 @@ cost 3 seconds, not a full canary boot.
   3 venv        0-300s    only when requirements changed (reflink + uv)
   4 canary boot   ~30s    both /health green, tool floor, config-follows-code
   5 canary smoke  ~30s    one real turn, sentinel through a real Bash call
+                          (recorded as SKIPPED when the engine is unreachable;
+                           `skip_smoke` is refused while it answers)
   6 drill         ~90s    only when the diff touches the rollback path
 """
 
@@ -134,6 +136,38 @@ def _vite_build(web: Path, out_dir: Path, timeout: float = 600) -> tuple[bool, s
     return r.returncode == 0, text[-900:]
 
 
+def engine_reachable(root: Path, timeout: float = 4.0) -> tuple[bool, str]:
+    """Is the default model's endpoint answering? Decides whether `skip_smoke` holds.
+
+    `skip_smoke` exists for a machine with no vLLM. It is not a discretionary
+    "this round does not need a real turn" switch, but nothing enforced that,
+    and on 2026-09-08 round SM_20260908_165950 passed it while the engine was
+    up — the same turn then ran four bench tasks and a 20-query eval through
+    that very endpoint. The gate recorded seven rungs and said nothing about
+    the eighth, so the promotion record for a 66% rewrite of the operating
+    contract showed no live turn and no gap where one should have been.
+
+    Reads `config.yaml` raw rather than `app.config.CONFIG`, for the same
+    reason `canary_config` does: the gate must not import the application it
+    is judging.
+    """
+    try:
+        import urllib.request
+
+        import yaml
+
+        raw = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")) or {}
+        alias = (raw.get("model") or {}).get("default") or "primary"
+        base = ((raw.get("models") or {}).get(alias) or {}).get("base_url") or ""
+        if not base:
+            return False, f"no base_url for model {alias!r} in config.yaml"
+        url = base.rstrip("/") + "/v1/models"
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+            return 200 <= resp.status < 300, f"{url} answered {resp.status}"
+    except Exception as exc:  # noqa: BLE001 — unreachable is the answer, not an error
+        return False, f"{type(exc).__name__}: {str(exc)[:120]}"
+
+
 def _parse_pytest_summary(text: str) -> dict:
     """Pull counts out of pytest's summary line."""
     out: dict = {"passed": 0, "failed": 0, "errors": 0, "xfailed": 0,
@@ -161,6 +195,8 @@ class Gate:
         self.base = base
         self.live = live_root or LIVE_ROOT
         self.skip_smoke = skip_smoke
+        self._smoke_skip_reason = "not requested"
+        self._smoke_skip_refused = ""
         self.python = self.live / ".venvs" / "lloyd" / "bin" / "python"
         self.report = GateReport(round_id=round_id, base=base,
                                  head=W.head(self.worktree) or "")
@@ -203,18 +239,32 @@ class Gate:
         self.report.rungs.append(res)
         S.append_event({"event": "gate", "round_id": self.round_id, "rung": name,
                         "ok": ok, "detail": res.detail[:500],
+                        "skipped": bool((res.data or {}).get("skipped")),
                         "seconds": round(res.seconds, 2)})
         print(f"[{'PASS' if ok else 'FAIL'}] {name} ({res.seconds:.1f}s) {res.detail[:160]}")
         return ok
 
     def run(self) -> GateReport:
+        # `canary_smoke` is ALWAYS on the ladder. It used to be omitted when
+        # `skip_smoke` was passed, so a skipped rung left no trace at all: the
+        # report listed seven rungs and a reader had to know the eighth existed
+        # to notice it was gone. A skip is now a recorded rung that says so.
         ladder = [("preflight", self.rung_preflight), ("static", self.rung_static),
                   ("frontend", self.rung_frontend),
                   ("tests", self.rung_tests), ("venv", self.rung_venv),
-                  ("canary_boot", self.rung_canary_boot)]
-        if not self.skip_smoke:
-            ladder.append(("canary_smoke", self.rung_canary_smoke))
-        ladder.append(("drill", self.rung_drill))
+                  ("canary_boot", self.rung_canary_boot),
+                  ("canary_smoke", self.rung_canary_smoke),
+                  ("drill", self.rung_drill)]
+
+        # And the skip is refused while the engine is answering. The flag is
+        # for a machine with no vLLM, not for a round that would rather not
+        # spend 30 seconds on a real turn.
+        if self.skip_smoke:
+            up, why = engine_reachable(self.live)
+            self._smoke_skip_reason = why
+            if up:
+                self.skip_smoke = False
+                self._smoke_skip_refused = why
 
         self._canary: C.Canary | None = None
         try:
@@ -364,8 +414,19 @@ class Gate:
                           "changed_web": changed_web}
 
     def rung_tests(self):
-        r = _run([str(self.python), "-m", "pytest", "-q"], cwd=self.worktree,
-                 env=self._child_env(), timeout=1800)
+        # `-m "not live_vault"`: this rung judges the CANDIDATE, and a test that
+        # reads the live `~/obsidian` vault judges whatever last wrote to it.
+        # An hourly autoresearch promotion or a nightly reflection job can move
+        # `SOUL.md` between one round and the next, so a live-vault assertion on
+        # a hard rung fails the next author for the previous writer's change —
+        # the `data/tool_overrides.yaml` shape that aborted three rounds in
+        # fifteen hours on 2026-09-07, where the only drain the backlog had was
+        # blocked by a test asserting something no diff under test controlled.
+        # Those invariants are enforced where the writes happen instead:
+        # `vault_round.validate` and `autoresearch.promote` both call
+        # `prompt_surface.check_contract` before committing.
+        r = _run([str(self.python), "-m", "pytest", "-q", "-m", "not live_vault"],
+                 cwd=self.worktree, env=self._child_env(), timeout=1800)
         text = r.stdout + r.stderr
         counts = _parse_pytest_summary(text)
         if r.returncode != 0:
@@ -453,6 +514,12 @@ class Gate:
             "internal_tools": rep.get("internal_tools")}
 
     def rung_canary_smoke(self):
+        if self.skip_smoke:
+            # Passes, because "no engine here" is not a defect in the candidate
+            # — but it is recorded as a skip so the promotion record shows the
+            # check did not happen, and `promoted` events can be filtered on it.
+            return True, f"SKIPPED (engine unreachable: {self._smoke_skip_reason})", {
+                "skipped": True, "reason": self._smoke_skip_reason}
         rep = self._canary.smoke(timeout=240)
         if not rep["ok"]:
             return False, "; ".join(rep["errors"])[:900], {

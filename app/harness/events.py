@@ -195,7 +195,18 @@ def result(
     num_turns: int = 0,
     duration_ms: int = 0,
     response_text: str = "",
+    tool_calls_total: int = 0,
+    tool_calls_captioned: int = 0,
 ) -> NormalizedEvent:
+    """`tool_calls_*` count only tools whose schema carried the injected
+    `summary` parameter — the caption rate for this turn. It is reported
+    because the failure mode is a ratchet, not a constant: `arguments` is
+    replayed to the engine as history, so the first call that omits the
+    caption becomes the model's own most recent example of calling that tool
+    and the session locks into omitting it. Across the 16 sessions after the
+    feature landed, every one whose first Bash call carried a caption stayed
+    above 95%; both that missed stayed below 26%. A rate is the only way to
+    see which side a session fell on."""
     return {
         "type": "result",
         "stop_reason": stop_reason,  # type: ignore[typeddict-item]
@@ -203,6 +214,8 @@ def result(
         "num_turns": num_turns,
         "duration_ms": duration_ms,
         "response_text": response_text,
+        "tool_calls_total": tool_calls_total,
+        "tool_calls_captioned": tool_calls_captioned,
     }
 
 

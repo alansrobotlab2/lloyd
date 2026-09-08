@@ -335,6 +335,44 @@ def _announce_promoted(round_id: str, commit: str, changed: list) -> None:
         pass
 
 
+def vault_commits_for(round_id: str) -> list[str]:
+    """Vault shas this round landed, newest last.
+
+    A `mixed` backlog item lands its vault half through `selfmod_vault_land`
+    and its code half through this promoter, and until now the two halves were
+    recorded in different places with nothing joining them. That matters at
+    rollback: reverting #377's code commit alone would restore the Python
+    `ANTICOMPLIANCE_DIRECTIVE` constant while `SOUL.md` kept its condensed
+    section — recreating the exact doubled-frame state (#465) the round
+    existed to remove, and doing it silently.
+
+    Joined on time rather than on an id, because `vault_land` records the
+    backlog `item_id` and not the round: the ledger's own `round_start` event
+    is the only anchor both halves share. Events are ordered, so "after this
+    round opened" is exactly the window, and a round that landed no vault
+    change returns [].
+    """
+    events = S.read_events(limit=500)
+    start_ts = None
+    start_idx = -1
+    for i, e in enumerate(events):
+        if e.get("event") == "round_start" and e.get("round_id") == round_id:
+            start_ts, start_idx = e.get("ts"), i
+    if start_ts is None:
+        return []
+    # Closed at the next round to open, not left running to now. Only one
+    # round holds the lock at a time, so the next `round_start` is this
+    # round's end whether it landed or was abandoned — without that bound an
+    # aborted round retroactively claims the next round's vault commit, which
+    # is precisely backwards for a field a rollback acts on.
+    end_ts = next((e.get("ts") for e in events[start_idx + 1:]
+                   if e.get("event") == "round_start"), None)
+    return [e["commit"] for e in events
+            if e.get("event") == "vault_land" and e.get("ok") and e.get("commit")
+            and (e.get("ts") or 0) >= start_ts
+            and (end_ts is None or (e.get("ts") or 0) < end_ts)]
+
+
 def promote(round_id: str, worktree: Path, base: str, *,
             gate_report: dict | None = None, dry_run: bool = False) -> dict:
     live = LIVE_ROOT
@@ -413,6 +451,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         # Both are set after the restart verifies, below.
         "errors_until_ts": None,
         "changed_paths": changed,
+        "vault_commits": vault_commits_for(round_id),
         "tree_hash": tree_hash,
         "venv_swapped": False,
         "touched_guardian": any(p.startswith("agent-services/guardian/") for p in changed),
@@ -496,6 +535,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         result["service_changes"] = service_notes
         S.append_event({"event": "promoted", "round_id": round_id, "commit": head,
                         "parent": live_head, "changed_paths": changed,
+                        "vault_commits": current.get("vault_commits") or [],
                         "tree_hash": tree_hash, "service_changes": service_notes,
                         "errors_until": current["errors_until_ts"]})
         _announce_promoted(round_id, head, changed)

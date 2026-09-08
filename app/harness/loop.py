@@ -195,6 +195,10 @@ async def run_query(
         #     `result` event so usage_store/UI see the whole turn.
         total_usage: dict[str, int] = {}
         last_iteration_usage: dict[str, int] = {}
+        # Caption bookkeeping — see `_CAPTION_NUDGE` and events.result.
+        caption_total = 0
+        caption_present = 0
+        caption_nudged = False
         num_turns = 0
         stop_reason = "stop"
         context_overflow_recoveries = 0
@@ -495,6 +499,30 @@ async def run_query(
                     loaded_set=loaded_set,
                     runtime_disallowed=current_disallowed,
                 )
+
+                # The caption ratchet. Only tools whose schema actually asked
+                # for a `summary` are counted; `session_inject_context` has a
+                # real one of its own and is not in `summary_tools`.
+                if tc["function"]["name"] in summary_tools:
+                    caption_total += 1
+                    if tc.get("_summary"):
+                        caption_present += 1
+                    elif not caption_nudged:
+                        # Once per turn, on the FIRST miss, because the first
+                        # miss is what decides the session: `arguments` is
+                        # replayed as history, so an uncaptioned call becomes
+                        # the model's own most recent example of calling that
+                        # tool. Session 20260907_184351_ivec8d shows the whole
+                        # arc — 5/5 captioned on first use of each tool, 0/31
+                        # after. Correcting it at call two is cheap; at call
+                        # thirty the example has been reinforced thirty times.
+                        caption_nudged = True
+                        result_evt = _with_caption_nudge(result_evt)
+                        logger.info(
+                            "loop: %s dispatched with no summary — nudged once "
+                            "(session=%s, iteration=%d)",
+                            tc["function"]["name"], session_id, num_turns,
+                        )
                 yield result_evt
                 if options.hooks is not None:
                     await options.hooks.fire_on_event(result_evt)
@@ -533,12 +561,20 @@ async def run_query(
                     )
 
         duration_ms = int((time.perf_counter() - started_at) * 1000)
+        if caption_total:
+            logger.info(
+                "loop: tool captions %d/%d (%d%%) session=%s",
+                caption_present, caption_total,
+                round(100 * caption_present / caption_total), session_id,
+            )
         result_done_evt = events.result(
             stop_reason=stop_reason,
             usage=total_usage,
             num_turns=num_turns,
             duration_ms=duration_ms,
             response_text=accumulated_text,
+            tool_calls_total=caption_total,
+            tool_calls_captioned=caption_present,
         )
         yield result_done_evt
         if options.hooks is not None:
@@ -627,6 +663,21 @@ def _merge_usage(acc: dict[str, int], chunk: dict[str, Any]) -> dict[str, int]:
         if not isinstance(v, int):
             continue
         out[_USAGE_KEY_REMAP.get(k, k)] = v
+    # Prefix-cache hits arrive NESTED, and the int-only loop above skipped the
+    # dict that carries them — so `cache_read` was absent from every usage
+    # block this harness ever produced, and `messages.py` recorded a hardcoded
+    # zero on top of that. Every session on 2026-09-08 reported `cache_read: 0`
+    # for every iteration, which is not evidence of a cold cache: nothing ever
+    # read the number. It matters because the position-0 rule (system prompt
+    # built once, loop only appends) exists precisely to keep the prefix
+    # cached across a long turn, and this is the only signal that says whether
+    # it is working.
+    details = chunk.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        if isinstance(cached := details.get("cached_tokens"), int):
+            out["cache_read"] = cached
+        if isinstance(created := details.get("created_cache_tokens"), int):
+            out["cache_create"] = created
     return out
 
 
@@ -801,6 +852,30 @@ def _parse_tool_args_tolerant(raw: str) -> tuple[dict[str, Any] | None, str | No
         return (None, None, first_err)
     repaired = raw[:end]
     return (v, repaired, None)
+
+
+# One line, appended to the result of the first uncaptioned tool call in a
+# turn. It is phrased as an instruction for the NEXT call rather than a
+# complaint about this one, because the model cannot edit a call it already
+# made — and the point is to reset the example before the ratchet sets.
+_CAPTION_NUDGE = (
+    "\n\n[harness] That call carried no `summary`. Every tool takes a short "
+    "`summary` as its first argument — a phrase like \"Reading server.py\" or "
+    "\"Restarting the backend\" — and it is what the transcript shows in place "
+    "of a bare tool name. Include one on every call from here on."
+)
+
+
+def _with_caption_nudge(result_evt: dict[str, Any]) -> dict[str, Any]:
+    """Append the caption reminder to a tool_result event's content.
+
+    A copy, not a mutation: the same dict is handed to `fire_on_event` hooks
+    and appended to history, and an in-place edit would have the nudge land in
+    the observer's view of the tool result as though the tool had said it.
+    """
+    out = dict(result_evt)
+    out["content"] = f"{out.get('content', '')}{_CAPTION_NUDGE}"
+    return out
 
 
 def _commit_tool_calls(

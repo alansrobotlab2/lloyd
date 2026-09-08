@@ -81,8 +81,20 @@ def snapshot_current_prompts(cfg: AutoresearchConfig) -> Path:
     for name, src in CANONICAL_PROMPTS.items():
         if src.exists():
             shutil.copy2(src, snap_dir / name)
+    saved = sorted(p.name for p in snap_dir.iterdir() if p.is_file())
+    # A snapshot is the only rollback point a promotion has, and `mkdir` had
+    # been the whole guarantee: a copy that raised still left a directory, so
+    # `promote` went on to overwrite the live contract with nothing to restore.
+    # 26 of the ledger's 83 promotions have no matching snapshot. Found while
+    # writing `test_promote_refuses_when_the_snapshot_cannot_be_written` on
+    # 2026-09-06 and carried as an xfail until now.
+    if not any(name in CANONICAL_PROMPTS for name in saved):
+        raise RuntimeError(
+            f"snapshot {snap_dir} holds no prompt file — refusing to promote "
+            f"with no rollback point (expected any of {sorted(CANONICAL_PROMPTS)})"
+        )
     (snap_dir / "snapshot.json").write_text(
-        json.dumps({"created_at": now_iso(), "files": sorted(p.name for p in snap_dir.iterdir() if p.is_file())}, indent=2),
+        json.dumps({"created_at": now_iso(), "files": saved}, indent=2),
         encoding="utf-8",
     )
     logger.info("snapshotted canonical prompts into %s", snap_dir)
@@ -99,6 +111,43 @@ def apply_overlay(overlay_dir: Path) -> list[str]:
             shutil.copy2(src, dest)
             applied.append(name)
     return applied
+
+
+def _prospective(overlay_dir: Path, name: str) -> str | None:
+    """What `name` would contain after this overlay is applied."""
+    src = overlay_dir / name
+    if src.exists():
+        return src.read_text(encoding="utf-8")
+    dest = CANONICAL_PROMPTS.get(name)
+    if dest and dest.exists():
+        return dest.read_text(encoding="utf-8")
+    return None
+
+
+def contract_refusals(overlay_dir: Path) -> list[str]:
+    """Why this variant must not be written over the live contract. [] = fine.
+
+    This path is what produced #464 and #465. It writes Lloyd's identity files
+    in the live vault on an hourly cadence with no gate, no test, no review and
+    no revert, and on 2026-09-08 it promoted a variant whose own hypothesis was
+    "add negative constraints to fix the shape benchmarks" — 64% gate stack,
+    28% prohibition lines — over a contract that had been trimmed to 48%/19%
+    ninety minutes earlier. A search over prompts is legitimate; landing the
+    result unchecked is not, and the search cannot be trusted to police itself
+    because bench score is exactly what it is optimising.
+
+    Checked against the *prospective* text — the overlay's file where it has
+    one, the live file where it does not — so a variant that only rewrites
+    MEMORY.md is still judged against the SOUL.md it will sit beside.
+    """
+    try:
+        import prompt_surface
+    except ImportError as exc:  # pragma: no cover - repo is always importable
+        return [f"prompt_surface unavailable, refusing to promote blind: {exc}"]
+    soul = _prospective(overlay_dir, "SOUL.md")
+    if soul is None:
+        return ["no SOUL.md to check, in the overlay or on disk"]
+    return prompt_surface.check_contract(soul, _prospective(overlay_dir, "MEMORY.md"))
 
 
 def write_experiment_fact(
@@ -172,17 +221,82 @@ def promote(
         "applied_files": [],
         "experiment_fact": None,
     }
+    refusals = contract_refusals(variant_overlay_dir)
+    if refusals:
+        # Not an exception: a refused promotion is a normal outcome of a search
+        # that proposed something out of bounds, and the round must carry on
+        # evaluating the rest. It is logged at ERROR because a variant that wins
+        # on bench score and still cannot be written is the signal that the
+        # score and the constraint disagree — which is the whole finding.
+        logger.error("REFUSED promotion of %s — %s",
+                     variant["variant_id"], "; ".join(refusals))
+        result["refused"] = refusals
+        return result
+
     if dry_run:
         logger.info("[dry-run] would promote %s", variant["variant_id"])
         return result
 
-    snap = snapshot_current_prompts(cfg)
+    try:
+        snap = snapshot_current_prompts(cfg)
+    except (OSError, RuntimeError) as exc:
+        logger.error("REFUSED promotion of %s — no rollback point: %s",
+                     variant["variant_id"], exc)
+        result["refused"] = [f"snapshot failed: {exc}"]
+        return result
     applied = apply_overlay(variant_overlay_dir)
-    fact = write_experiment_fact(cfg, variant, variant_summary, baseline_summary, snap)
     result["snapshot_dir"] = str(snap)
     result["applied_files"] = applied
+
+    # Commit through the vault route, which runs the real loaders and reverts
+    # the paths if any of them fails. Before this, a promotion was an
+    # uncommitted overwrite of a live tracked file: nothing recorded that it
+    # had happened, `selfmod_vault_revert` had no sha to undo, and the only
+    # trace was a snapshot directory nobody was told about. The sha goes in the
+    # selfmod ledger as a `vault_land` event like every other vault change.
+    try:
+        from scripts.selfmod import vault_round as VR
+
+        # Derive the vault-relative paths rather than assuming `lloyd/<name>`,
+        # and commit nothing when the canonical prompts are not in the vault at
+        # all. `CANONICAL_PROMPTS` is redirected by tests and by the variant
+        # sandbox, and a hardcoded prefix would have made this function run
+        # `git add` against the real `~/obsidian` from inside a unit test.
+        rel: list[str] = []
+        vault_root = VR.VAULT.resolve()
+        for name in applied:
+            try:
+                rel.append(str(CANONICAL_PROMPTS[name].resolve().relative_to(vault_root)))
+            except ValueError:
+                rel = []
+                break
+        if rel:
+            landed = VR.land(
+                rel,
+                f"autoresearch: promote {variant['variant_id']}\n\n"
+                f"{variant.get('description', '')}\n\n"
+                f"Snapshot of the previous contract: {snap}",
+            )
+            result["vault_commit"] = landed.get("commit")
+        else:
+            # Not an error: the overlay sandbox and the tests both point the
+            # canonical prompts somewhere that is not a git repo, and there is
+            # nothing to commit there. The fact below is still written.
+            logger.info("canonical prompts are outside %s — applied without a "
+                        "vault commit", vault_root)
+    except Exception as exc:  # VaultRoundError, or git refusing for any reason
+        # `land` reverts the paths it validated before raising, so the live
+        # contract is already back. Say so loudly and leave the snapshot.
+        logger.error("promotion of %s did not land, contract restored: %s",
+                     variant["variant_id"], exc)
+        result["refused"] = [str(exc)]
+        result["applied_files"] = []
+        return result
+
+    fact = write_experiment_fact(cfg, variant, variant_summary, baseline_summary, snap)
     result["experiment_fact"] = str(fact) if fact else None
-    logger.info("promoted %s: applied=%s snapshot=%s", variant["variant_id"], applied, snap)
+    logger.info("promoted %s: applied=%s vault_commit=%s snapshot=%s",
+                variant["variant_id"], applied, result.get("vault_commit"), snap)
     return result
 
 

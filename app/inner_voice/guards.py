@@ -432,6 +432,40 @@ def _strip_ambient(text: str) -> str:
     return out
 
 
+# `cd <somewhere> && ` — the working-directory preamble, not the subject of
+# the call. Every Bash call in a selfmod round opens with
+# `cd /home/<user>/lloyd-work/SM_<id>/home/lloyd &&`, and `SM_20260908_165950`
+# survives `_strip_ambient` (it has underscores), reaches 18 characters, and so
+# `_is_distinctive` lets it carry a near match on its own. Five injects fired in
+# round SM_20260908_165950 on five unrelated calls for exactly that reason, and
+# they exhausted the observer's deterministic budget at the moment the round
+# reached its gate. Every implement round works in a worktree, so this was
+# structural rather than bad luck.
+_CD_PREFIX_RE = re.compile(r"^\s*cd\s+(?:'[^']*'|\"[^\"]*\"|\S+)\s*(?:&&|;)\s*")
+
+
+def _strip_cd_prefix(command: str) -> str:
+    """Remove leading `cd <path> &&` hops from a shell command.
+
+    Only for identifier extraction. `exact` keeps the whole command, because
+    two calls that differ only in their `cd` are not byte-identical and should
+    not be reported as though they were.
+    """
+    out = command
+    for _ in range(4):  # `cd a && cd b && ...` — bounded, not a loop on input
+        stripped = _CD_PREFIX_RE.sub("", out, count=1)
+        if stripped == out:
+            break
+        out = stripped
+    return out
+
+
+# A term only reads as turn-ambient once there is more history than the
+# comparison window itself — see `_ubiquitous`. One more than the default
+# window, so the judgment always rests on at least one call the comparison
+# is not already looking at.
+_AMBIENT_MIN_HISTORY = 8
+
 REPETITION_WINDOW = 6
 REPETITION_MIN_OVERLAP = 2
 REPETITION_CONTAINMENT = 0.5
@@ -444,8 +478,16 @@ class ToolCallSignature:
 
     tool: str
     exact: str                    # normalized args — identical strings are exact repeats
-    idents: frozenset[str]        # code identifiers mentioned
+    idents: frozenset[str]        # what the call is ABOUT — drives matching
     preview: str                  # short human-readable form for the prompt
+    # Everything the call mentions, including the parts `idents` deliberately
+    # drops (the `cd <path> &&` preamble). Matching must not see these; the
+    # ambient detector must. A round id reaches the ring through a `cd` hop in
+    # most calls and a `W=<path>;` assignment in others, and stripping it from
+    # `idents` alone left it un-ambient — present in some calls, absent from
+    # others — so it survived in exactly the minority that used the other
+    # idiom. That is the second false fire of round SM_20260908_165950.
+    all_idents: frozenset[str] = frozenset()
 
 
 def _identifiers(text: str) -> frozenset[str]:
@@ -469,22 +511,25 @@ def tool_call_signature(tool_name: str, tool_args: Any) -> ToolCallSignature:
         items = [(k, tool_args[k]) for k in sorted(tool_args) if k != "description"]
         if tool_name == "Bash":
             raw = str(tool_args.get("command") or "")
-            value_text = raw
+            full_text = raw
+            value_text = _strip_cd_prefix(raw)
         else:
             # Sorted so key order can't make two identical calls look different.
             raw = " ".join(f"{k}={v!r}" for k, v in items)
-            value_text = " ".join(str(v) for _, v in items)
+            value_text = full_text = " ".join(str(v) for _, v in items)
     else:
         raw = str(tool_args or "")
-        value_text = raw
+        value_text = full_text = raw
     normalized = " ".join(raw.split())
     preview = normalized if len(normalized) <= 160 else normalized[:157] + "..."
     ident_src = _strip_ambient(" ".join(value_text.split())[:_IDENT_SCAN_CHARS])
+    all_src = _strip_ambient(" ".join(full_text.split())[:_IDENT_SCAN_CHARS])
     return ToolCallSignature(
         tool=tool_name or "",
         exact=normalized,
         idents=_identifiers(ident_src),
         preview=preview,
+        all_idents=_identifiers(all_src),
     )
 
 
@@ -502,6 +547,58 @@ def _containment(a: frozenset[str], b: frozenset[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / min(len(a), len(b))
+
+
+def ubiquitous_identifiers(sigs: list[ToolCallSignature]) -> frozenset[str]:
+    """Identifiers carried by every call in the compared window.
+
+    `_strip_ambient` removes the fragments that are ambient for the whole
+    *machine* — the home directory, the username. It cannot remove the ones
+    that are ambient for a single *turn*, because it does not know what the
+    turn is doing. A selfmod round is the case that matters: every Bash call
+    is prefixed `cd /home/<user>/lloyd-work/SM_<id>/home/lloyd &&`, and
+    `SM_20260908_165950` survives stripping (it has underscores), is present
+    in literally every command, and is 18 characters — so `_is_distinctive`
+    reads it as a specific symbol somebody is chasing and lets it carry a
+    match on its own.
+
+    That is what fired five times in round SM_20260908_165950, on five
+    unrelated calls, and exhausted the observer's deterministic budget at the
+    moment the round reached its gate. Every implement round works in a
+    worktree, so the failure was structural, not incidental.
+
+    A term present in *all* of the compared calls discriminates between none
+    of them, which is the same argument the frequency ordering below already
+    makes for *naming* — this applies it to matching, where it decides
+    whether the guard fires at all.
+
+    Measured over the WHOLE ring rather than the comparison window, and only
+    once the ring is longer than the window. Over the window alone this
+    reasoning eats its own guard: a primary hunting `iv_inject_queue` six
+    times running shares that symbol across every compared call, so the very
+    repetition the guard exists to catch would read as ambient and be
+    stripped. That is not hypothetical — it silenced both fires of the real
+    28-call replay in `test_iv_loop_guards`. Across a longer history the two
+    separate cleanly: a chased symbol appears in a burst, while the worktree
+    id is in the healthy exploration calls too.
+
+    Public because the caller has a longer memory than the guard does. After
+    a fire the observer compares only the calls made SINCE it last spoke
+    (`repetition_baseline`), so the slice handed to `repetition_verdict` can
+    be three calls long while `state.recent_tool_calls` still holds sixteen.
+    Judged on the slice alone the worktree id looks distinctive again, which
+    is exactly how the second false fire of round SM_20260908_165950 survived
+    the first cut of this fix. The observer passes the full ring here and the
+    truncated slice to the verdict.
+    """
+    if len(sigs) < _AMBIENT_MIN_HISTORY:
+        return frozenset()
+    common = set(sigs[0].all_idents)
+    for s in sigs[1:]:
+        common &= s.all_idents
+        if not common:
+            break
+    return frozenset(common)
 
 
 def _is_distinctive(term: str) -> bool:
@@ -528,6 +625,7 @@ def repetition_verdict(
     min_overlap: int = REPETITION_MIN_OVERLAP,
     containment: float = REPETITION_CONTAINMENT,
     threshold: int = REPETITION_THRESHOLD,
+    ambient: frozenset[str] | None = None,
 ) -> RepetitionVerdict | None:
     """Judge whether the LAST entry in `recent` re-runs earlier work.
 
@@ -549,6 +647,11 @@ def repetition_verdict(
     matches: list[ToolCallSignature] = []
     exact = False
     shared: set[str] = set()
+    # Turn-ambient identifiers carry no signal and must not carry a match.
+    # `ambient` from the caller when it has more history than `recent` holds.
+    if ambient is None:
+        ambient = ubiquitous_identifiers(recent)
+    cur_idents = current.idents - ambient
     # Path-addressed tools compare by exact repeat only — see _EXACT_ONLY_TOOLS.
     near_allowed = current.tool not in _EXACT_ONLY_TOOLS
     for p in prior:
@@ -557,11 +660,12 @@ def repetition_verdict(
         if current.exact and p.exact == current.exact:
             matches.append(p)
             exact = True
-            shared |= current.idents
+            shared |= cur_idents
             continue
         if not near_allowed:
             continue
-        overlap = current.idents & p.idents
+        p_idents = p.idents - ambient
+        overlap = cur_idents & p_idents
         if not overlap:
             continue
         # Either several shared identifiers, or one distinctive enough to
@@ -569,7 +673,7 @@ def repetition_verdict(
         enough = len(overlap) >= min_overlap or any(
             _is_distinctive(t) for t in overlap
         )
-        if enough and _containment(current.idents, p.idents) >= containment:
+        if enough and _containment(cur_idents, p_idents) >= containment:
             matches.append(p)
             shared |= overlap
     if len(matches) < threshold:

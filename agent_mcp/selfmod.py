@@ -205,8 +205,13 @@ async def list_tools() -> list[Tool]:
                     "round_id": {"type": "string",
                                   "description": "Round id returned by selfmod_start."},
                     "skip_smoke": {"type": "boolean",
-                                   "description": "Skip the live-LLM turn (rung 5). Use only "
-                                                  "when vLLM is unavailable."},
+                                   "description": "Skip the live-LLM turn (rung 5). Honoured "
+                                                  "ONLY when the model endpoint is actually "
+                                                  "unreachable — the gate probes it and runs "
+                                                  "the rung anyway if it answers. Either way "
+                                                  "the rung is recorded, so a skip is visible "
+                                                  "in the promotion record rather than absent "
+                                                  "from it."},
                 },
                 "required": ["round_id"],
             },

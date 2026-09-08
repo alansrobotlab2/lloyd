@@ -1710,6 +1710,9 @@ export interface RecentSession {
   goal: string
   goal_achieved: boolean
   todo_counts: Record<string, number>
+  /** Newest turn's tool-caption rate. `null` for a session that predates the
+   *  counters — which must not render as 0/0, since that reads as a failure. */
+  captions: { total: number; captioned: number } | null
 }
 
 export interface RecentSessions {

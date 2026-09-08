@@ -55,7 +55,13 @@ DEDUP_KEY = "backlog-implement:round"
 # nothing. A round that cannot make its own change true is the last one
 # that should be growing the board.
 SPAWN_CAP = 3
-DEFAULT_MAX_TURNS = 100
+# 150, not 100. Round SM_20260908_165950 called `selfmod_land` at iteration 91
+# of 100 — nine left for a landing that must be followed by an immediate turn
+# end, and #278 died at 101 with a gated, ready change it never landed. The
+# budget anchor fires at 75% and 90%, so a cap that is too tight spends its
+# warnings during normal work and has nothing left for the real deadline. The
+# cost of a larger cap is bounded by `max_duration_seconds` either way.
+DEFAULT_MAX_TURNS = 150
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -106,6 +112,13 @@ to file more than {spawn_cap} while *not* landing a change, that is the signal \
 to stop and report instead — a round that aborts and files six items has \
 converted one problem into six and solved none.
 
+**The triage evidence above was measured today, on this tree.** File sizes,
+line counts, git shas and grep results in it are current: read them, do not
+re-derive them. Re-measure exactly one thing — the acceptance check, which you
+must confirm fails before you start and passes when you finish. Round
+SM_20260908_165950 spent 27 of its 92 iterations re-establishing facts the
+triage had already stated before it opened its round.
+
 Procedure when the surface is `code` or `frontend`:
 1. Re-read the item and the triage evidence. If anything has changed since the \
 triage and the premise no longer holds, say so and stop — that is a result.
@@ -123,7 +136,14 @@ backend idle, and your own turn is what keeps it busy.
 Procedure when the surface is `vault`:
 1. Re-read the item and the triage evidence, as above.
 2. Edit the files directly under `~/obsidian` — the vault is a live tree and \
-has no worktree. Touch only the paths the acceptance check names.
+has no worktree. Touch only the paths the acceptance check names. **Those \
+paths are pre-authorised and you do not need to ask**: the confirmation SOUL.md \
+requires for a protected path is what the item's triage verdict already \
+recorded, and `selfmod_vault_land` supplies the rest of what confirmation is \
+for — it validates through the real loaders and commits one revertable sha. \
+Any vault path the acceptance check does NOT name is still protected, and \
+wanting to touch one is a reason to stop and file an item, not to widen the \
+round.
 3. Verify the acceptance check yourself, then \
 `selfmod_vault_land(paths, message, item_id={item_id})`. It validates exactly \
 those paths (front matter, and for skills, tasks and identity files the real \
@@ -133,6 +153,25 @@ report. Nothing restarts, so your turn continues.
 
 If the surface is `mixed`, land the vault half first, then run the code \
 procedure, and end your turn after `selfmod_land`.
+
+**If the change touches the prompt surface** — `prompt_builder.py`, \
+`prefetch.py`, or `lloyd/SOUL.md` / `lloyd/MEMORY.md` / `lloyd/USER.md` in the \
+vault — a scored behavioural check is required, and these are the commands. \
+Run them from `~/lloyd`, not from the worktree: the eval writes its baseline \
+next to the script, and a baseline written inside a worktree is deleted with \
+it (SM_20260908_165950's was).
+
+    cd ~/lloyd && .venvs/lloyd/bin/python -m scripts.autoresearch.bench_runner_sdk \
+        --task bench_006_contradiction_check --task bench_008_adversarial_gap \
+        --task bench_009_adversarial_probe --task bench_010_safety_destructive --judge
+    cd ~/lloyd && .venvs/lloyd/bin/python eval/run_tool_choice_eval.py --label {round_label}
+    cd ~/lloyd && .venvs/lloyd/bin/python eval/compare_tool_choice.py --label {round_label}
+
+`--judge` is what produces a score; without it every composite comes back \
+`null` and you are reading final text by eye. `compare_tool_choice.py` names \
+the prior run it compared against and exits non-zero on a regression — quote \
+its output. Exit 2 means it had nothing to compare against, which is not a \
+pass.
 
 Report what you did, quoting the gate line rather than saying "it passed", \
 and end with one line `SPAWNED: <ids of the items you filed, or the word none>`. \
@@ -292,6 +331,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         evidence=(triage.get("evidence") or "(none recorded)")[:2000],
         acceptance=triage.get("acceptance") or "",
         spawn_cap=SPAWN_CAP,
+        # A label the eval comparer can select on, unique per item and stable
+        # across the turn's retries. `--label item377` reads back as the run
+        # that judged item 377, months later, in a directory of bare
+        # timestamps.
+        round_label=f"item{candidate.id}",
     )
     try:
         run = await run_prompt_in_session(

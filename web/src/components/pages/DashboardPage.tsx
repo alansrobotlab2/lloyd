@@ -484,6 +484,12 @@ function RecentChatRow({
   const counts = chat.todo_counts ?? {}
   const done = counts.completed ?? 0
   const total = (counts.pending ?? 0) + (counts.in_progress ?? 0) + done
+  // Absent for a session older than the counters — rendered as nothing, not
+  // as 0/0. The amber threshold is the observed split: every session whose
+  // first tool call carried a caption stayed above 95%, both that missed
+  // stayed below 26%, so anything under 80% means the ratchet has set.
+  const caps = chat.captions
+  const capRate = caps && caps.total > 0 ? caps.captioned / caps.total : null
   return (
     <button
       type="button"
@@ -509,6 +515,17 @@ function RecentChatRow({
         {total > 0 && (
           <span className="font-mono tabular-nums">
             todos {done}/{total}
+          </span>
+        )}
+        {caps && caps.total > 0 && (
+          <span
+            className={cn(
+              'font-mono tabular-nums',
+              capRate !== null && capRate < 0.8 ? 'text-amber-400/80' : undefined,
+            )}
+            title="Tool calls that carried the model's own one-line caption. A low rate means the transcript for this turn is a wall of bare tool names."
+          >
+            captions {caps.captioned}/{caps.total}
           </span>
         )}
         {chat.goal && (

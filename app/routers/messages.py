@@ -803,6 +803,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 num_turns_val = evt.get("num_turns", 0)
                 done_text = evt.get("response_text") or full_response
                 cancelled_mid_stream = stop_reason == "cancelled"
+                # Real numbers now that `_merge_usage` reads vLLM's nested
+                # `prompt_tokens_details`. These were hardcoded zeros, so the
+                # usage table agreed with the harness for the wrong reason:
+                # both said nothing rather than both saying the same thing.
+                # The position-0 rule exists to keep the prompt prefix cached
+                # across a long turn, and this is the only number that says
+                # whether it is working.
+                cache_read_tokens = usage.get("cache_read", 0) or 0
+                cache_create_tokens = usage.get("cache_create", 0) or 0
 
                 try:
                     usage_store.record_usage(
@@ -810,8 +819,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         model=model,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
-                        cache_create=0,
-                        cache_read=0,
+                        cache_create=cache_create_tokens,
+                        cache_read=cache_read_tokens,
                         cost_usd=0.0,
                         duration_ms=duration_ms,
                         duration_api_ms=None,
@@ -820,21 +829,34 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
 
+                caption_total = evt.get("tool_calls_total", 0) or 0
+                caption_done = evt.get("tool_calls_captioned", 0) or 0
                 _event_log.log_event(session_id, "brain1.result_message", {
-                    "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+                    "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                              "cache_read": cache_read_tokens,
+                              "cache_create": cache_create_tokens},
                     "stop_reason": stop_reason,
                     "duration_ms": duration_ms,
                     "num_turns": num_turns_val,
                     "response_chars": len(full_response),
                     "had_tool_calls": bool(tool_calls_log),
+                    "tool_calls_total": caption_total,
+                    "tool_calls_captioned": caption_done,
                 }, turn_id=turn.turn_id)
 
                 stream_stats.update({
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
+                    "cache_read": cache_read_tokens,
+                    "cache_create": cache_create_tokens,
                     "duration_ms": duration_ms,
                     "num_turns": num_turns_val,
                     "peak_input_tokens": last_turn_input,
+                    # Caption rate for the turn — see events.result. On the
+                    # turn's stats so a session's rate can be read off disk
+                    # without replaying the event log.
+                    "tool_calls_total": caption_total,
+                    "tool_calls_captioned": caption_done,
                 })
                 stats_dict = stream_stats
 
@@ -1756,11 +1778,13 @@ async def post_message(request: Request):
                 usage = evt.get("usage") or {}
                 input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens", 0)
                 output_tokens = usage.get("output_tokens") or usage.get("completion_tokens", 0)
+                cache_read_tokens = usage.get("cache_read", 0) or 0
+                cache_create_tokens = usage.get("cache_create", 0) or 0
                 turn_stats = {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
-                    "cache_create": 0,
-                    "cache_read": 0,
+                    "cache_create": cache_create_tokens,
+                    "cache_read": cache_read_tokens,
                     "cost_usd": 0.0,
                     "duration_ms": evt.get("duration_ms"),
                     "num_turns": evt.get("num_turns"),
@@ -1772,8 +1796,8 @@ async def post_message(request: Request):
                         model=model,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
-                        cache_create=0,
-                        cache_read=0,
+                        cache_create=cache_create_tokens,
+                        cache_read=cache_read_tokens,
                         cost_usd=0.0,
                         duration_ms=evt.get("duration_ms"),
                         num_turns=evt.get("num_turns"),
