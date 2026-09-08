@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from .bench_runner import run_bench
+from .bench_runner_sdk import DEFAULT_PER_TASK_TIMEOUT as SDK_PER_TASK_TIMEOUT
+from .bench_runner_sdk import run_bench_sdk
 from .common import (
+    HARNESSES,
     AutoresearchConfig,
     find_last_promoted_variant,
     ledger_append,
@@ -26,6 +29,7 @@ from .common import (
     load_config,
     now_iso,
     round_id,
+    split_tasks_by_harness,
     validate_run_spec,
     write_run_spec,
     _run_spec_from_cfg,
@@ -45,6 +49,46 @@ def _group_traces_by_variant(traces: list[dict[str, Any]]) -> dict[str, list[dic
     return grouped
 
 
+async def _run_trials(
+    cfg: AutoresearchConfig,
+    variant_pairs: list[tuple[str, Any]],
+    tasks: list[dict[str, Any]],
+    model: str,
+    harness: str,
+    max_parallel: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run the (variant × task) matrix, split by harness routing.
+
+    Returns `(direct_traces, sdk_traces)`. The second list is empty for the
+    default `--harness direct`, so today's rounds are byte-for-byte unchanged.
+
+    Both runners are awaited sequentially rather than concurrently: they share
+    the primary vLLM slot, and the direct runner's cap of 3 exists precisely
+    because vLLM does not honor client disconnects (see its docstring).
+    Overlapping an agent-loop workload on top of it would push both past their
+    timeouts.
+    """
+    direct_tasks, sdk_tasks = split_tasks_by_harness(tasks, harness)
+    direct_traces: list[dict[str, Any]] = []
+    sdk_traces: list[dict[str, Any]] = []
+
+    if direct_tasks:
+        direct_traces = await run_bench(
+            cfg, variant_pairs, direct_tasks, model=model,
+            max_parallel=max_parallel,
+            per_task_timeout=300,
+        )
+    if sdk_tasks:
+        logger.info("harness=%s: routing %d task(s) through the agent loop "
+                    "(%d variants)", harness, len(sdk_tasks), len(variant_pairs))
+        sdk_traces = await run_bench_sdk(
+            cfg, variant_pairs, sdk_tasks, model=model,
+            max_parallel=1,
+            per_task_timeout=SDK_PER_TASK_TIMEOUT,
+        )
+    return direct_traces, sdk_traces
+
+
 async def run(
     targets: list[str] | None = None,
     budget_minutes: int | None = None,
@@ -53,13 +97,14 @@ async def run(
     model: str | None = None,
     bench_limit: int | None = None,
     max_parallel: int = 4,
+    harness: str = "direct",
 ) -> dict[str, Any]:
     cfg = load_config()
     cfg.paths.ensure()
     model = model or cfg.default_model
 
     rid = round_id()
-    logger.info("=== autoresearch round %s (dry_run=%s) ===", rid, dry_run)
+    logger.info("=== autoresearch round %s (dry_run=%s harness=%s) ===", rid, dry_run, harness)
 
     # 1. Build and write run_spec.yaml
     spec = _run_spec_from_cfg(cfg, model, budget_minutes)
@@ -67,6 +112,7 @@ async def run(
     if err:
         logger.error("run_spec.yaml validation failed: %s", err)
         return {"round_id": rid, "error": f"run_spec validation: {err}"}
+    spec["evaluation"]["harness"] = harness
     spec_path = write_run_spec(rid, cfg, spec)
 
     # Log run_spec to ledger
@@ -74,6 +120,7 @@ async def run(
         "round_id": rid,
         "event": "spec",
         "spec_path": str(spec_path),
+        "harness": harness,
         "writable_paths": spec["mutation_scope"]["writable_paths"],
         "created_at": now_iso(),
     })
@@ -110,14 +157,13 @@ async def run(
         overlay = materialize(cfg, v)
         variant_pairs.append((v["variant_id"], overlay))
 
-    # Fan out (variant × task)
-    logger.info("running %d variants × %d tasks = %d trials",
-                len(variant_pairs), len(tasks), len(variant_pairs) * len(tasks))
-    traces = await run_bench(
-        cfg, variant_pairs, tasks, model=model,
-        max_parallel=max_parallel,
-        per_task_timeout=300,
+    # Fan out (variant × task), split by harness routing (#353)
+    logger.info("running %d variants × %d tasks = %d trials (harness=%s)",
+                len(variant_pairs), len(tasks), len(variant_pairs) * len(tasks), harness)
+    direct_traces, sdk_traces = await _run_trials(
+        cfg, variant_pairs, tasks, model, harness, max_parallel,
     )
+    traces = direct_traces + sdk_traces
 
     # Judge each trace
     scored_traces: list[dict[str, Any]] = []
@@ -131,9 +177,11 @@ async def run(
             "variant_id": t["variant_id"],
             "task_id": t["task_id"],
             "task_category": t.get("task_category"),
+            "harness": t.get("harness", "direct"),
             "trace_status": t["status"],
             "turns": t.get("turns"),
             "tool_call_count": len(t.get("tool_calls", [])),
+            "denied_call_count": len(t.get("denied_calls", [])),
             "duration_seconds": t.get("duration_seconds"),
             "composite_score": score["composite_score"],
             "objective_score": score["objective_score"],
@@ -186,11 +234,15 @@ async def run(
 
     # Write round summary markdown
     summary_file = cfg.paths.rounds_dir / f"{rid}.md"
+    sdk_task_ids = sorted({t["task_id"] for t in sdk_traces})
     lines = [
         f"# Autoresearch round {rid}",
         f"- started_at: {now_iso()}",
         f"- model: {model}",
+        f"- harness: {harness}",
         f"- tasks: {len(tasks)}",
+        f"- tasks on the harness runner: {len(sdk_task_ids)}"
+        + (f" ({', '.join(sdk_task_ids)})" if sdk_task_ids else ""),
         f"- variants proposed: {len(variants)}",
         f"- baseline mean composite: {baseline_summary.get('mean_composite', 0.0):.4f}",
         "",
@@ -237,10 +289,12 @@ async def run(
         "promoted": promotion_result,
         "parent_variant_id": parent_variant["variant_id"] if parent_variant else None,
         "dry_run": dry_run,
+        "harness": harness,
+        "tasks_on_harness_runner": len(sdk_task_ids),
     }
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one autoresearch round")
     parser.add_argument("--targets", nargs="*", default=["prompts"])
     parser.add_argument("--budget", type=int, default=None, help="Budget minutes (advisory; not a hard kill)")
@@ -249,8 +303,21 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--bench-limit", type=int, default=None)
     parser.add_argument("--max-parallel", type=int, default=4)
+    parser.add_argument(
+        "--harness", choices=list(HARNESSES), default="direct",
+        help="Which bench runner scores the tasks. 'direct' (default) is the "
+             "single-turn vLLM completion — unchanged history. 'auto' routes a "
+             "task to the in-process agent loop when its frontmatter sets "
+             "requires_runtime: true, so PreToolUse hooks and any other runtime "
+             "mechanism are actually live for that trial. 'sdk' forces the "
+             "agent-loop path for every task.",
+    )
     parser.add_argument("--log-level", default="INFO")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -265,6 +332,7 @@ def main() -> None:
         model=args.model,
         bench_limit=args.bench_limit,
         max_parallel=args.max_parallel,
+        harness=args.harness,
     ))
     print(json.dumps(result, indent=2, default=str))
 

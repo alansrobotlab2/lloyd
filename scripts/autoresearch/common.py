@@ -298,3 +298,44 @@ def load_bench_tasks(bench_dir: Path) -> list[dict[str, Any]]:
             frontmatter["id"] = path.stem
         tasks.append(frontmatter)
     return tasks
+
+
+# --- Harness routing --------------------------------------------------------
+
+HARNESSES = ("direct", "sdk", "auto")
+
+
+def _requires_runtime(task: dict[str, Any]) -> bool:
+    """Frontmatter `requires_runtime: true` — truthy for the YAML bool and for
+    the string forms people type into a markdown file by hand."""
+    val = task.get("requires_runtime")
+    if isinstance(val, str):
+        return val.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(val)
+
+
+def split_tasks_by_harness(
+    tasks: list[dict[str, Any]], harness: str = "direct",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Partition bench tasks between the two runners.
+
+    Returns `(direct_tasks, sdk_tasks)`.
+
+      * `direct` (default) — everything through the single-completion runner.
+        This is the pre-#353 behavior and stays the default so an existing
+        round's numbers remain comparable to its history.
+      * `auto` — a task that sets `requires_runtime: true` goes to the
+        harness-routed runner, everything else stays direct. This is the
+        per-task routing the item asked for.
+      * `sdk` — force everything through the harness. A/B a runtime mechanism
+        across the whole bench regardless of frontmatter.
+    """
+    if harness not in HARNESSES:
+        raise ValueError(f"unknown harness {harness!r}, expected one of {HARNESSES}")
+    if harness == "direct":
+        return list(tasks), []
+    if harness == "sdk":
+        return [], list(tasks)
+    direct = [t for t in tasks if not _requires_runtime(t)]
+    sdk = [t for t in tasks if _requires_runtime(t)]
+    return direct, sdk
