@@ -25,6 +25,7 @@ from app.config import default_model_base_url
 from mcp.types import Tool
 
 from agent_mcp import _subagent_registry
+from agent_mcp import _task_registry
 from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-task")
@@ -88,8 +89,21 @@ def _base_url_for(model: str) -> str:
     return url or default_model_base_url()
 
 
+def _call_summary() -> str:
+    """This call's caption, as lifted from `_meta` by ``main.call_tool``."""
+    return (_task_registry.current_call_summary.get() or "").strip()
+
+
 async def _task(args: dict[str, Any]) -> str:
-    description = args.get("description", "")
+    # The subagent row's label. Comes from the caption the model already
+    # wrote for this call (request `_meta`; see main.META_SUMMARY) rather
+    # than from a second argument asking the same question — Task's old
+    # `description` ("Short label for the task (informational)") competed
+    # with the injected `summary` display parameter for one answer, and a
+    # model that spends it on the unadvertised half leaves the transcript
+    # bubble blank. Still read from args so a session mid-drain that
+    # learned the old shape keeps its labels.
+    description = (args.get("description") or "").strip() or _call_summary()
     prompt = args.get("prompt", "")
     subagent_type = args.get("subagent_type", "general-purpose")
 
@@ -342,10 +356,6 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "description": {
-                        "type": "string",
-                        "description": "Short label for the task (informational)",
-                    },
                     "prompt": {
                         "type": "string",
                         "description": "The task prompt for the subagent",

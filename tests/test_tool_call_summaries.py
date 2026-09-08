@@ -327,3 +327,108 @@ def test_the_pretool_hook_carries_the_caption_beside_the_args_never_inside():
         "safety matching and the repetition guard read tool_input; "
         "a free-text caption must never appear there"
     )
+
+
+# ---------------------------------------------------------------------------
+# One question, one field
+# ---------------------------------------------------------------------------
+
+
+def test_no_builtin_asks_for_the_caption_a_second_time():
+    """Bash and Task must not declare a caption argument of their own.
+
+    Both used to. Bash's was ``description`` — "Short human-readable
+    description (informational only)" — and Task's was ``description``,
+    "Short label for the task (informational)". Each restated, one key
+    later in the same object, what the injected ``summary`` parameter had
+    just asked for, and a model answers that question once.
+
+    On 2026-09-07 it started answering into the wrong half. Sessions
+    ``20260907_235236_backlogs_a8fd`` and ``20260908_000804_backlogi_3828``
+    emitted ``{"command": ..., "description": "check"}`` for 49 consecutive
+    Bash calls with no ``summary`` on any of them, and the transcript
+    rendered 49 bare ``Bash`` rows. Nothing errored, because ``description``
+    was a real Bash argument: the caption was not dropped, it was filed
+    somewhere only background tasks read.
+
+    What makes it worth a test rather than a fix is the ratchet. The
+    arguments string is replayed to the engine as history, so the first
+    miss becomes the model's own most recent example of calling that tool,
+    and the session locks into it: across 16 sessions, every one whose
+    first Bash call carried a summary stayed above 95%, and both that
+    missed stayed below 26%. One ambiguous schema decides a whole session.
+    """
+    import asyncio as _asyncio
+
+    from agent_mcp import builtin_bash, builtin_task
+
+    for mod in (builtin_bash, builtin_task):
+        for tool in _asyncio.run(mod.list_tools()):
+            if tool.name not in ("Bash", "Task"):
+                continue
+            props = tool.input_schema.get("properties", {})
+            assert "description" not in props, (
+                f"{tool.name} advertises a second field asking for the "
+                f"caption the injected `summary` already asks for; the "
+                f"model will answer one of them and the transcript gets "
+                f"whichever it did not pick"
+            )
+
+
+def test_the_caption_reaches_a_tool_through_meta_not_through_args():
+    """Background Bash and Task still need the label — via `_meta`.
+
+    The caption is popped off the arguments before dispatch (the aggregator
+    validates args against each tool's real inputSchema, and the repetition
+    guard hashes them). So the two tools that open a row a human reads
+    later get it the way they already get the session id and the calling
+    turn's model: out of band.
+    """
+    from mcp import types
+
+    from app.harness.mcp_pool import (
+        DEFAULT_LLOYD_MCP_SERVERS,
+        META_SUMMARY,
+        MCPPool,
+    )
+
+    sent: dict = {}
+
+    class _Result:
+        content = [types.TextContent(type="text", text="ok")]
+        isError = False
+
+    class _Pool(MCPPool):
+        async def _invoke(self, server, tool, args, budget, meta):
+            sent["args"] = args
+            sent["meta"] = meta
+            return _Result()
+
+    pool = _Pool(DEFAULT_LLOYD_MCP_SERVERS)
+    pool._opened = True
+    pool._tool_routes = {"Bash": "lloyd-mcp"}
+    pool._http_configs = {"lloyd-mcp": {}}
+    pool._schemas = {}
+
+    asyncio.run(pool.call_tool(
+        "Bash", {"command": "ls"},
+        session_id="s1", summary="Listing the repo root",
+    ))
+
+    assert sent["meta"][META_SUMMARY] == "Listing the repo root"
+    assert SUMMARY_ARG not in sent["args"], (
+        "the caption must not reach inputSchema validation"
+    )
+
+
+def test_a_background_task_is_labelled_by_the_caption():
+    from agent_mcp import _task_registry
+    from agent_mcp.builtin_bash import _background_label
+
+    token = _task_registry.current_call_summary.set("Rebuilding the frontend")
+    try:
+        assert _background_label({"command": "bun run build"}) == "Rebuilding the frontend"
+        # A session still emitting the retired argument keeps its label.
+        assert _background_label({"description": "old shape"}) == "old shape"
+    finally:
+        _task_registry.current_call_summary.reset(token)

@@ -145,7 +145,7 @@ async def _bash(args: dict[str, Any]) -> str:
         return err
 
     if args.get("run_in_background"):
-        return await _spawn_background(command, args.get("description", ""), cwd)
+        return await _spawn_background(command, _background_label(args), cwd)
 
     try:
         # start_new_session=True puts the shell (and everything it
@@ -210,6 +210,28 @@ async def _bash(args: dict[str, Any]) -> str:
     if truncated:
         return output  # truncation marker is already inside `output`
     return output if output else "(no output)"
+
+
+def _background_label(args: dict) -> str:
+    """The human label for a background task row.
+
+    Prefers the caption the model already wrote for this call, which
+    arrives in the request's ``_meta`` (see ``main.META_SUMMARY``). Bash
+    used to ask for this separately, as a `description` argument described
+    as "Short human-readable description (informational only)" — which is
+    the same question the injected `summary` display parameter asks, one
+    key earlier in the same object. A model answers that question once.
+    When it answered into `description`, the call still validated (a real
+    Bash argument) and the transcript caption was silently empty: 49
+    consecutive Bash calls across two sessions on 2026-09-07, none of
+    which had a summary and every one of which had a `description`. The
+    argument is no longer advertised; it is still read so a session that
+    learned the old shape keeps labelling its tasks while it drains.
+    """
+    legacy = args.get("description")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy.strip()
+    return (_task_registry.current_call_summary.get() or "").strip()
 
 
 async def _spawn_background(command: str, description: str, cwd: str | None = None) -> str:
@@ -293,10 +315,6 @@ async def list_tools():
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Shell command to run"},
-                    "description": {
-                        "type": "string",
-                        "description": "Short human-readable description (informational only)",
-                    },
                     "timeout": {
                         "type": "integer",
                         "description": "Max ms before kill (default 120000, max 600000)",

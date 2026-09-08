@@ -64,6 +64,27 @@ META_SESSION_ID = "lloyd/session_id"
 META_MODEL = "lloyd/model"
 META_BASE_URL = "lloyd/base_url"
 
+# `_meta` key carrying the model's own one-line caption for THIS call (the
+# injected `summary` display parameter). It travels here rather than in
+# `args` for the same reason the session id does — the aggregator validates
+# `args` against each tool's real inputSchema — but also because a caption
+# in `args` is a caption in `tool_input`, which is what the repetition guard
+# hashes: two identical calls reworded would stop comparing equal.
+#
+# Two tools need it on the far side. `Bash(run_in_background=true)` labels
+# the row it opens in the background-task list, and `Task` labels its
+# subagent row. Both used to ask the model for that label with a *second*
+# argument of their own — Bash's `description`, Task's `description` — whose
+# wording ("Short human-readable description (informational only)") restated
+# what `summary` already asks for. The model answered the question once, and
+# on 2026-09-07 it started answering it in the wrong field: sessions
+# `..._235236_backlogs_a8fd` and `..._000804_backlogi_3828` emitted
+# `{"command": ..., "description": "check"}` for 49 consecutive Bash calls
+# and no `summary` at all. Nothing errored — `description` was a real Bash
+# argument, so the call was valid, and the caption vanished into a field
+# only background tasks read. Must match agent_mcp.main.META_SUMMARY.
+META_SUMMARY = "lloyd/summary"
+
 # Ceiling on a single tools/call round trip. Sits above the Bash tool's own
 # 600s hard cap so a legitimately long command finishes on its own terms and
 # this only fires when something is genuinely wedged. Without it a hung tool
@@ -324,6 +345,7 @@ class MCPPool:
         session_id: str = "",
         model: str = "",
         base_url: str = "",
+        summary: str = "",
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Dispatch a tool call to the right server.
@@ -335,8 +357,8 @@ class MCPPool:
         when routing or transport fails — caller maps to a tool_result
         with ``is_error=True``.
 
-        `session_id`, `model` and `base_url` travel in the request's
-        ``_meta``, not in ``args``.
+        `session_id`, `model`, `base_url` and `summary` travel in the
+        request's ``_meta``, not in ``args``.
         The MCP server validates ``args`` against the tool's inputSchema
         before its handler runs, so anything injected there is validated
         as a real parameter; ``_meta`` is the field the spec reserves for
@@ -375,6 +397,8 @@ class MCPPool:
             meta[META_MODEL] = model
         if base_url:
             meta[META_BASE_URL] = base_url
+        if summary:
+            meta[META_SUMMARY] = summary
         budget = timeout_seconds if timeout_seconds is not None else CALL_TIMEOUT_SECONDS
 
         try:

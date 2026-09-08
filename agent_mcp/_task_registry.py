@@ -37,6 +37,22 @@ current_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_session_id", default=""
 )
 
+# The model's own one-line caption for the in-flight tool call, lifted out
+# of the request's `_meta` by ``main.call_tool``. Lives beside the session
+# id because it has the same lifetime and the same source: both are
+# per-dispatch context the harness knows and a tool handler cannot derive.
+#
+# Two handlers read it, and both open a row a human reads later — the
+# background-task list (``Bash(run_in_background=true)``) and the subagent
+# list (``Task``). Each used to ask the model for that label itself, with
+# an argument whose wording restated the caption the harness had already
+# asked for; the model answered once, in whichever field it reached first,
+# and on 2026-09-07 that stopped being the right one. One question, one
+# field, and the answer arrives here.
+current_call_summary: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_call_summary", default=""
+)
+
 
 @dataclass
 class TaskRecord:

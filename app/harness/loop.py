@@ -1081,10 +1081,20 @@ async def _dispatch_one_tool_call(
         cancel_event = getattr(options, "cancel_event", None)
         # `model` / `base_url` let a Task subagent inherit the calling
         # turn's model instead of falling back to `primary`.
+        #
+        # `summary` is the model's own caption for this call, already
+        # popped off `args_dict`. It rides in `_meta` so the two tools
+        # that open a row someone later reads — background Bash and Task
+        # — can label it without asking the model for the same sentence a
+        # second time under a different key. It is deliberately absent
+        # from `dispatch_args`: `tool_input` is what the repetition guard
+        # hashes, and a reworded caption there would make two identical
+        # calls compare as different.
         call_kw = {
             "session_id": session_id,
             "model": options.model,
             "base_url": options.base_url,
+            "summary": tc.get("_summary", ""),
         }
         if cancel_event is None:
             result = await pool.call_tool(name, dispatch_args, **call_kw)

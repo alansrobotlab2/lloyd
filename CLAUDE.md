@@ -510,6 +510,37 @@ inputs, and the third exclusion is deliberate:
   matching and the repetition guard read, and it stays clean.
   `tests/test_tool_call_summaries.py` pins all three.
 
+**No tool may ask for the caption twice.** `Bash` used to declare a
+`description` argument — "Short human-readable description (informational
+only)" — and `Task` a `description`, "Short label for the task
+(informational)". Both restated, one key later in the same object, exactly
+what the injected `summary` asks for, and a model answers that question
+once. On 2026-09-07 it began answering into the wrong half: sessions
+`20260907_235236_backlogs_a8fd` and `20260908_000804_backlogi_3828` emitted
+`{"command": ..., "description": "check"}` for 49 consecutive Bash calls
+with no `summary` on any of them, and the chat rendered 49 bare `Bash`
+rows. **Nothing errored**, because `description` was a real Bash argument —
+the caption was not dropped, it was filed where only a background task
+would read it.
+
+What makes an ambiguous schema expensive here is the ratchet described
+above: `arguments` is replayed as history, so the first miss becomes the
+model's own most recent example of calling that tool and the session locks
+into it. Across the 16 sessions since the feature landed, every one whose
+*first* Bash call carried a summary stayed above 95%; both that missed
+stayed below 26%. One field decides a whole session, which is why the fix
+is to delete the competing field rather than to reword it.
+
+The two tools still need their label — a background-task row and a subagent
+row are both read by a human later — so the caption now travels the way the
+session id and the calling turn's model already do: in the request's
+`_meta`, as `lloyd/summary`, lifted into `_task_registry.current_call_summary`
+by `agent_mcp/main.py::call_tool`. It must not be handed back through `args`
+instead: that is what the aggregator validates against each tool's real
+inputSchema, and it is what the repetition guard hashes.
+`tests/test_tool_call_summaries.py` pins that Bash and Task advertise no
+second caption field, and that the caption reaches MCP through `_meta` only.
+
 `harness.tool_call_summaries: false` removes the parameter from every
 schema; the UI falls back to the bare tool name. Worth reaching for if a
 model ever starts spending its tool-call budget on the caption.

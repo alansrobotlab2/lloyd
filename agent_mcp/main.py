@@ -187,6 +187,13 @@ META_SESSION_ID = "lloyd/session_id"
 META_MODEL = "lloyd/model"
 META_BASE_URL = "lloyd/base_url"
 
+# `_meta` key carrying the model's caption for this call — the injected
+# `summary` display parameter, which the harness pops before dispatch so it
+# never reaches a tool's inputSchema validation. Consumed by the two tools
+# that label a row someone reads later (background Bash, Task). Must match
+# app.harness.mcp_pool.META_SUMMARY.
+META_SUMMARY = "lloyd/summary"
+
 # OpenAI's spec caps tool names at 64 chars. Enforced here at registration
 # so a bad name fails loudly on the first list_tools() instead of
 # mid-conversation in the harness translator (tool_schema.py keeps its own
@@ -306,8 +313,12 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
 
     parent_model = meta.get(META_MODEL, "") if isinstance(meta, dict) else ""
     parent_base_url = meta.get(META_BASE_URL, "") if isinstance(meta, dict) else ""
+    call_summary = meta.get(META_SUMMARY, "") if isinstance(meta, dict) else ""
 
     token = _task_registry.current_session_id.set(sid)
+    stok = _task_registry.current_call_summary.set(
+        call_summary if isinstance(call_summary, str) else ""
+    )
     mtok = builtin_task.current_parent_model.set(
         parent_model if isinstance(parent_model, str) else ""
     )
@@ -318,6 +329,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         return await mod.call_tool(name, arguments)
     finally:
         _task_registry.current_session_id.reset(token)
+        _task_registry.current_call_summary.reset(stok)
         builtin_task.current_parent_model.reset(mtok)
         builtin_task.current_parent_base_url.reset(btok)
 
