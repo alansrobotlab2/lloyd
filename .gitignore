@@ -111,3 +111,14 @@ _scratch/
 # killed in between leaves one behind, and an unignored stray dirties the
 # tree exactly as the tracked file used to.
 /data/tool_overrides.yaml.*.tmp
+
+# ─── Code graph (graphify) ──────────────────────────
+# `agent_mcp/code_graph.py` builds this on demand: graph.json (~10 MB), an
+# HTML viz, a markdown report, and a ~64k-file AST cache. Derived state,
+# rebuilt in ~15s from the tree itself. Unanchored so a selfmod worktree
+# inherits the rule — an unignored build there dirties the tree and both
+# scripts/selfmod/gate.py and promote.py refuse to run against a dirty
+# tree, so the round would abort on its own map. `*.json` above already
+# hides graph.json by accident; GRAPH_REPORT.md, graph.html, manifest.json,
+# .graphify_root and cache/ast/** were not covered by anything.
+graphify-out/

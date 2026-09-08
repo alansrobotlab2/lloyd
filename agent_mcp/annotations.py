@@ -50,6 +50,13 @@ READ_ONLY: frozenset[str] = frozenset({
     "research_list", "research_stats", "research_next",
     # Mission control
     "mc_get_state",
+    # Code graph. These may fill the gitignored `graphify-out/` cache on
+    # first use, which is derived state and not part of the tree — and plan
+    # mode is exactly when a blast-radius question needs answering, so
+    # classifying them as writers would put the map behind the gate that
+    # exists to let you draw one.
+    "graph_explain", "graph_affected", "graph_path", "graph_hubs",
+    "graph_status",
     # Web + browser observation
     "http_search", "http_fetch",
     "browser_snapshot", "browser_screenshot",
@@ -96,6 +103,8 @@ IDEMPOTENT: frozenset[str] = frozenset({
     "research_complete",
     "ide_open_file", "ide_open_folder", "ide_close_tab",
     "mc_navigate", "mc_close_modal",
+    # Rebuilding an up-to-date graph writes the same graph again.
+    "graph_refresh",
 })
 
 # ---------------------------------------------------------------------------

@@ -625,6 +625,53 @@ second caption field, and that the caption reaches MCP through `_meta` only.
 schema; the UI falls back to the bare tool name. Worth reaching for if a
 model ever starts spending its tool-call budget on the caption.
 
+## Code graph
+
+`agent_mcp/code_graph.py` answers "who calls this" and "what breaks if I
+change it" from graphify's deterministic AST extraction of a tree
+(`<root>/graphify-out/graph.json`, ~15 s to build, zero LLM calls). Six
+tools: `graph_explain`, `graph_affected`, `graph_path`, `graph_hubs`,
+`graph_status`, `graph_refresh`.
+
+- **It is not a second MCP server, deliberately.** graphify ships
+  `graphify-mcp` and mounting it would have been one config line, but Lloyd
+  advertises every server's tools under bare names and `build_tool_list`
+  raises on a cross-server collision; Task subagents pin
+  `DEFAULT_LLOYD_MCP_SERVERS` and would never see it;
+  `tests/test_mcp_layer.py` needs every configured server discoverable at
+  test time, including inside a worktree where no second daemon is running;
+  `agent-services/supervisor/**` is a protected selfmod path, so Lloyd could
+  never repair the program running it; and graphify-mcp has no `affected`,
+  which is the one query a change actually needs.
+- **`root` is explicit and never inferred.** Nothing on disk links a chat
+  session to an open round — `round_start` ledger rows carry no session id —
+  so a "bound session's worktree" default would silently answer about the
+  wrong checkout. Defaults to `LLOYD_HOME`; accepts an `SM_…` round id or an
+  absolute path. When the answer is about the live tree and a worktree is
+  open, the header says so.
+- **Staleness is commit mismatch OR an uncommitted source file newer than
+  `graph.json`.** The second rule is mandatory: inside a round HEAD does not
+  move while the model edits, so a commit-only rule calls the graph fresh
+  for exactly the window it is most wrong in. Auto-rebuilds from the dirty
+  rule are debounced by `min_refresh_interval_s` (30 s); a debounced query
+  still answers and says `STALE`.
+- **`graphify-out/` must stay gitignored, unanchored.** A build inside a
+  round dirties the tree, and both `scripts/selfmod/gate.py` and
+  `promote.py` refuse a dirty tree — so an unignored build would abort the
+  round on its own map. `*.json` at the top of `.gitignore` hid `graph.json`
+  by accident; `GRAPH_REPORT.md`, `graph.html`, `.graphify_root` and the
+  ~64k-file `cache/ast/**` were covered by nothing.
+- **The graph is blind across process seams.** It is an AST extraction of
+  one tree: there is no edge from `run_prompt_in_session` to `run_query`,
+  because that call crosses HTTP, and none from `run_query` into a tool
+  handler, because that crosses MCP. Keep Grep for string keys, route paths
+  and config names.
+- Ambiguity is an answer, not an error: `main` matches 88 nodes here, and a
+  listing with ids lets the model pick where an error makes it guess again.
+- There is no `enabled` flag. The kill switch is
+  `mcp_servers.lloyd-mcp.disabled_tools`; an `enabled: false` that emptied
+  `list_tools()` would break the annotation-staleness test.
+
 ## Mission Control dashboard
 
 The `dashboard` tab (first in the sidebar, desktop landing tab) polls one

@@ -147,6 +147,25 @@ display:
 # a timestamp id. Off means those surfaces fall back to the preview text.
 session_titles:
   enabled: true
+# Code graph (agent_mcp/code_graph.py). Structural navigation over
+# graphify's deterministic AST extraction — who calls this, what breaks if
+# I change it. Built on demand into the gitignored graphify-out/ of
+# whichever tree is asked about; no LLM calls, ~15s for this repo.
+# There is deliberately no `enabled` flag: the kill switch is
+# mcp_servers.lloyd-mcp.disabled_tools, and an enabled:false that emptied
+# list_tools() would break the annotation-staleness test in
+# tests/test_mcp_layer.py.
+code_graph:
+  graphify_bin: ~/.local/bin/graphify
+  # Rebuild a stale graph on first use. The dirty-file rule matters most
+  # inside a selfmod round, where HEAD does not move while the model edits.
+  auto_refresh: true
+  refresh_timeout_s: 120
+  # Floor between automatic rebuilds triggered by uncommitted edits. Below
+  # this the query answers from the existing graph and says it is stale.
+  min_refresh_interval_s: 30
+  max_cached_roots: 4
+  max_lines: 60
 mcp_servers:
   lloyd-mcp:
     disabled_tools:

@@ -108,6 +108,7 @@ a discovery round-trip, which is why `http_search`/`http_fetch` sat unused while
 | `autoresearch` | 7 | `autoresearch_round`, `autoresearch_status`, `autoresearch_bench_list`, `autoresearch_bench_add`, `autoresearch_ledger_query`, `autoresearch_promote`, `autoresearch_rollback` |
 | `backlog` | 4 | `backlog_boards`, `backlog_tasks`, `backlog_get_task`, `backlog_write_task` |
 | `browser` | 14 | `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll`, `browser_press`, `browser_tabs`, `browser_screenshot`, `browser_evaluate`, `browser_fill`, `browser_wait`, `browser_select`, `browser_drag`, `browser_cookies` |
+| `code_graph` | 6 | `graph_explain`, `graph_affected`, `graph_path`, `graph_hubs`, `graph_status`, `graph_refresh` — structural navigation over graphify's AST extraction of a tree |
 | `discord_bot` | 4 | `discord_send`, `discord_send_embed`, `discord_list_channels`, `discord_get_home_channel` |
 | `facts` | 10 | `fact_get`, `fact_add`, `fact_profile`, `fact_check`, `fact_resolve`, `fact_invalidate`, `fact_relate`, `fact_relationships`, `fact_path`, `fact_neighbors` |
 | `vault` | 5 | `vault_read`, `vault_write`, `vault_overview`, `vault_search`, `vault_recall` |
@@ -118,6 +119,43 @@ a discovery round-trip, which is why `http_search`/`http_fetch` sat unused while
 | `skills` | 2 | `skills_search`, `skills_read` |
 | `http_tools` | 3 | `http_search`, `http_fetch`, `http_request` |
 | `thunderbird` | 40 | `email_*` (24), `calendar_*` (7), `tasks_*` (3), `contacts_*` (5) — runs as an MCP stdio bridge through `MCPPool` |
+
+### Code graph (6)
+
+`agent_mcp/code_graph.py` reads `<root>/graphify-out/graph.json` — a
+deterministic AST extraction, no LLM calls — and answers structural
+questions a grep cannot: who calls this, what breaks if I change it, how
+do these two connect.
+
+| Tool | Use |
+|------|-----|
+| `graph_explain` | Inbound/outbound edges of a symbol, each with the caller's own call site |
+| `graph_affected` | Reverse-BFS blast radius, grouped by depth, with the file list |
+| `graph_path` | Shortest dependency path between two symbols (containment edges excluded) |
+| `graph_hubs` | Most-connected symbols, optionally scoped by path prefix |
+| `graph_status` | Counts, built-at commit vs HEAD, why it is stale. Never builds |
+| `graph_refresh` | Force a rebuild (~15 s on this repo) |
+
+`root` is explicit and never inferred from the calling session — nothing on
+disk links a chat session to an open selfmod round, so a "bound session's
+worktree" default would confidently answer about the wrong checkout. It
+defaults to `LLOYD_HOME`, accepts an `SM_…` round id, or an absolute path.
+
+Staleness is a commit mismatch **or** an uncommitted source file newer than
+`graph.json`. The second rule is the load-bearing one: inside a round HEAD
+does not move while the model edits, so a commit-only rule would call the
+graph fresh for exactly the window it is most wrong in. Rebuilds triggered
+that way are debounced (`code_graph.min_refresh_interval_s`); a debounced
+query still answers, and says it is stale.
+
+The graph is an extraction of one tree, so it is blind across process
+seams — an HTTP call from the backend to the aggregator, or an MCP dispatch
+from `run_query` into a tool handler, is not an edge. Grep is still the
+right tool for string keys, route paths and config names.
+
+`graphify-out/` is gitignored (unanchored, so worktrees inherit it): a
+build inside a round would otherwise dirty the tree, and both
+`scripts/selfmod/gate.py` and `promote.py` refuse a dirty tree.
 
 ### Web (3)
 
