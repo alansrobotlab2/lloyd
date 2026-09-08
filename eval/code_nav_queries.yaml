@@ -1,0 +1,112 @@
+# Evaluation set for code-navigation tool choice.
+#
+# Purpose: measure whether Lloyd reaches for the code graph (graph_explain,
+# graph_affected, graph_path, graph_hubs) or falls back to Grep/Bash-grep
+# when the question is structural. Motivated by the same asymmetry that made
+# curl the habit for web lookups (see tool_choice_queries.yaml): the tools
+# existed and nothing in the prompt named them, so the model kept doing what
+# every transcript it has seen does.
+#
+# Scored exactly like the web set: the runner stops at the FIRST tool_call
+# event, which the harness yields before dispatch. No tool ever executes —
+# nothing is built, nothing is grepped — so this is safe to run repeatedly
+# and costs one model turn per prompt.
+#
+# Run it before and after the guidance change:
+#   python eval/run_tool_choice_eval.py --queries eval/code_nav_queries.yaml \
+#       --label code-nav-pre
+#   python eval/run_tool_choice_eval.py --queries eval/code_nav_queries.yaml \
+#       --label code-nav-post
+# The metric is `by_category["code-nav"].correct_rate`; target >= 0.8 with
+# `by_category["control-*"].correct_rate` unchanged.
+#
+# Schema: id / prompt / category / expect_tools / notes.
+#
+# The control rows are the half that matters. The graph is an AST extraction
+# of one tree: it has no edge for a string key, a route path, a config name,
+# or any call that crosses HTTP or MCP. A change that moves those to graph_*
+# has overshot, not improved — and overshooting is the specific risk of
+# naming a new tool in the system prompt.
+
+queries:
+  # --- Structural questions: the graph is the answer ---
+  - id: nav-callers-run-query
+    prompt: "Who calls run_query in this codebase?"
+    category: code-nav
+    expect_tools: [graph_explain, graph_affected]
+    notes: "The canonical 'who calls this'."
+
+  - id: nav-blast-radius-text-result
+    prompt: "I want to change the signature of text_result in agent_mcp/_shared.py. What would break?"
+    category: code-nav
+    expect_tools: [graph_affected, graph_explain]
+    notes: "Blast radius, stated as a change the model is about to make."
+
+  - id: nav-impact-mcppool
+    prompt: "What depends on the MCPPool class? I need to know how far a change to it reaches."
+    category: code-nav
+    expect_tools: [graph_affected, graph_explain]
+
+  - id: nav-explain-microcompact
+    prompt: "Explain what microcompact() connects to — what calls it and what it calls."
+    category: code-nav
+    expect_tools: [graph_explain]
+
+  - id: nav-importers-sessions-io
+    prompt: "Which modules import app/sessions_io.py?"
+    category: code-nav
+    expect_tools: [graph_explain, graph_affected]
+
+  - id: nav-path-between
+    prompt: "How does run_query end up calling into MCPPool? Show me the chain."
+    category: code-nav
+    expect_tools: [graph_path, graph_explain]
+
+  - id: nav-hubs-harness
+    prompt: "I'm new to app/harness — which functions in there are the most connected?"
+    category: code-nav
+    expect_tools: [graph_hubs]
+
+  - id: nav-safe-to-delete
+    prompt: "Is _prune_reasoning used anywhere, or is it dead code I can delete?"
+    category: code-nav
+    expect_tools: [graph_explain, graph_affected]
+
+  - id: nav-rename-callers
+    prompt: "I'm renaming build_tool_list. List every call site I have to update."
+    category: code-nav
+    expect_tools: [graph_explain, graph_affected]
+
+  - id: nav-subclasses
+    prompt: "What inherits from or extends HookRegistry?"
+    category: code-nav
+    expect_tools: [graph_explain, graph_affected]
+
+  # --- Controls: Grep/Bash is right and must stay right ---
+  - id: control-config-key
+    prompt: "Where is the config key preserve_thinking_iterations read?"
+    category: control-string
+    expect_tools: [Grep, Bash]
+    notes: "A config key is a string, not a symbol. The graph has no node for it."
+
+  - id: control-route-path
+    prompt: "Find the handler for the /api/dashboard route."
+    category: control-string
+    expect_tools: [Grep, Bash, Read]
+    notes: "Route paths are strings registered at runtime; no AST edge exists."
+
+  - id: control-error-message
+    prompt: "Which file emits the error message 'old_string not found in file'?"
+    category: control-string
+    expect_tools: [Grep, Bash]
+
+  - id: control-todo-comment
+    prompt: "Are there any TODO comments left under scripts/selfmod?"
+    category: control-string
+    expect_tools: [Grep, Bash]
+
+  - id: control-read-a-file
+    prompt: "Show me the first 40 lines of agent_mcp/annotations.py."
+    category: control-read
+    expect_tools: [Read]
+    notes: "Reading a named file is not a navigation question at all."

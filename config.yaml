@@ -261,6 +261,12 @@ harness:
     - vault_recall
     - mc_get_state
     - mc_navigate
+    # Code navigation. Paired with data/tool_overrides.yaml in live — the
+    # override shadows this key wholesale, so an unpaired edit here means the
+    # baseline a fresh clone boots into differs from the one being served,
+    # which is what test_config_yaml_agrees_with_the_live_override catches.
+    - graph_explain
+    - graph_affected
     - ide_open_folder
     - ide_open_file
     - ide_close_tab

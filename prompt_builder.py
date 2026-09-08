@@ -376,6 +376,27 @@ def build_system_prompt(
     )
     parts.append(web_lookups)
 
+    # Code navigation. The graph tools exist and the model still reaches for
+    # Grep first, because Grep is what every transcript it has ever seen
+    # does — the same asymmetry that made curl the habit above. Named here,
+    # unconditionally: this module imports nothing from app.config (like the
+    # web_lookups paragraph), and no per-turn value may appear in the system
+    # prompt or vLLM re-prefills it every turn.
+    code_graph = (
+        "Code navigation: before grepping for callers, importers or blast "
+        "radius, ask the code graph. graph_explain(symbol, file=) lists who "
+        "calls a symbol and what it calls, each with the caller's own call "
+        "site; graph_affected(symbol, depth=) is the reverse blast radius "
+        "grouped by depth with the file list; graph_path, graph_hubs and "
+        "graph_status round it out. It is an AST extraction of one tree, "
+        "rebuilt on demand in seconds — accurate for symbols, and blind "
+        "across process seams, so keep using Grep for string keys, route "
+        "paths, config names and anything crossing HTTP or MCP. Inside a "
+        "self-modification round pass root=<worktree path> or you will be "
+        "reading about the live checkout instead of the one you are editing."
+    )
+    parts.append(code_graph)
+
     turn_discipline = (
         "Turn discipline: never end a turn on an unfulfilled announcement. If you "
         "say \"Let me …\", \"I'll …\", \"Now I'll …\", or end a sentence on a colon "

@@ -126,11 +126,18 @@ triage and the premise no longer holds, say so and stop — that is a result.
 worktree it returns. The frontend is in scope: `web/src/**`, `web/index.html` \
 and `web/public/**` are writable and the gate type-checks and builds them; \
 `package.json`, the lockfile and the Vite/TS config are not.
-3. Write the test that fails today. Then the smallest change that makes it \
+3. **Map the blast radius before you edit.** `graph_refresh(root=<worktree>)`, \
+then `graph_affected(symbol, root=<worktree>)` for each symbol you are about \
+to change and `graph_explain` for its callers. Pass `root=` every time — the \
+default is the live checkout, not your worktree. Record the depth-1 callers \
+and the file list in your report; they are what tells you whether this is a \
+one-file change or a five-file one, and a grep for the symbol's spelling will \
+not tell you.
+4. Write the test that fails today. Then the smallest change that makes it \
 pass. One change per round.
-4. `selfmod_gate`. If it fails twice on the same rung for the same reason, \
+5. `selfmod_gate`. If it fails twice on the same rung for the same reason, \
 `selfmod_abort` and report.
-5. `selfmod_land`. Then **end your turn immediately** — the landing needs the \
+6. `selfmod_land`. Then **end your turn immediately** — the landing needs the \
 backend idle, and your own turn is what keeps it busy.
 
 Procedure when the surface is `vault`:
