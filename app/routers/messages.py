@@ -153,8 +153,17 @@ def _load_session_todos(session_id: str) -> list[dict]:
         return []
 
 
-def _build_state_anchor(session_id: str):
+def _build_state_anchor(session_id: str, max_turns: int = 0):
     """Build the closure handed to ``RunOptions.state_anchor``.
+
+    Two anchors ride this closure. The **budget** anchor fires once at 75%
+    and once at 90% of `max_turns`: a turn cut off at the cap ends with no
+    report and lands nothing, and the model has no other way to know the cap
+    is near — the observer's `iteration_pressure` nudge is LLM-judged and
+    subject to its inject cap, which the #278 implement round exhausted on
+    repetition guards before it ever got a budget warning. It then died at
+    101 of 100 with a gated-and-ready change it had not landed. This anchor
+    is deterministic and costs nothing.
 
     Re-anchors `session.todos` inside a long turn. The `<active_todos>`
     block in the system prompt is rendered once, from the list as it
@@ -181,7 +190,29 @@ def _build_state_anchor(session_id: str):
     )
     state = {"sig": None, "last_iter": 0}
 
+    fired: set[int] = set()
+
+    def budget(iteration: int) -> list[dict[str, Any]]:
+        if not max_turns or max_turns <= 0:
+            return []
+        out = []
+        for pct in (75, 90):
+            if pct in fired or iteration * 100 < pct * max_turns:
+                continue
+            fired.add(pct)
+            left = max(0, int(max_turns) - int(iteration))
+            out.append({"role": "user", "content": (
+                f"<budget>Iteration {iteration} of {max_turns}: {left} iteration(s) "
+                "remain before this turn is stopped. A turn cut off at the budget "
+                "ends with no report and lands nothing. If a selfmod round is open, "
+                "gate and land it now (selfmod_gate, then selfmod_land) or abort it; "
+                "otherwise finish — say what is done and what is not.</budget>")})
+        return out
+
     async def anchor(iteration: int) -> list[dict[str, Any]]:
+        return budget(iteration) + await todo_anchor(iteration)
+
+    async def todo_anchor(iteration: int) -> list[dict[str, Any]]:
         if interval <= 0:
             return []
         todos = _load_session_todos(session_id)
@@ -571,7 +602,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # Re-anchor session.todos inside the turn. The system prompt's
     # <active_todos> block is frozen at turn start and cannot be refreshed
     # without invalidating the cached prefix, so this appends instead.
-    options.state_anchor = _build_state_anchor(session_id)
+    options.state_anchor = _build_state_anchor(session_id, max_turns=int(options.max_turns or 0))
 
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,

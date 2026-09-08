@@ -195,3 +195,39 @@ def test_anchor_survives_a_missing_session_file(monkeypatch, tmp_path):
     anchor = M._build_state_anchor("does-not-exist")
     for i in range(1, 10):
         assert asyncio.run(anchor(i)) == []
+
+
+# ---------------------------------------------------------------------------
+# The budget anchor: a turn cut off at max_turns lands nothing
+# ---------------------------------------------------------------------------
+
+def test_budget_anchor_fires_once_at_75_and_90_percent(monkeypatch):
+    """The #278 implement round died at 101 of 100 with a gated-and-ready
+    change it had not landed; the observer's own budget nudge had been
+    exhausted by its inject cap. This one is deterministic."""
+    from app.routers import messages as M
+    monkeypatch.setattr(M, "_load_session_todos", lambda sid: [])
+    anchor = M._build_state_anchor("sess", max_turns=100)
+    hits = {i: out for i in range(1, 101) if (out := asyncio.run(anchor(i)))}
+    assert sorted(hits) == [75, 90]
+    assert "Iteration 75 of 100" in hits[75][0]["content"] and "25 iteration" in hits[75][0]["content"]
+    assert "selfmod_land" in hits[90][0]["content"] and hits[90][0]["role"] == "user"
+
+
+def test_budget_anchor_is_silent_without_a_budget(monkeypatch):
+    from app.routers import messages as M
+    monkeypatch.setattr(M, "_load_session_todos", lambda sid: [])
+    anchor = M._build_state_anchor("sess", max_turns=0)
+    assert all(asyncio.run(anchor(i)) == [] for i in range(1, 50))
+
+
+def test_budget_and_todo_anchors_ride_the_same_closure(monkeypatch):
+    from app.routers import messages as M
+    monkeypatch.setattr(M, "_load_session_todos", lambda sid: list(TODOS))
+    monkeypatch.setitem(M.CONFIG["harness"], "todo_anchor_interval_iterations", 5)
+    anchor = M._build_state_anchor("sess", max_turns=20)
+    seen = [(i, asyncio.run(anchor(i))) for i in range(1, 21)]
+    budget_at = [i for i, out in seen if any("<budget>" in m["content"] for m in out)]
+    todo_at = [i for i, out in seen if any("<active_todos>" in m["content"] for m in out)]
+    assert budget_at == [15, 18]
+    assert todo_at, "the todo anchor still fires"

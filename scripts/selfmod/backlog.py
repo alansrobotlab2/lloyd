@@ -303,20 +303,25 @@ def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dic
     from scripts.selfmod import state as S
     S.append_event({"event": "backlog_implement", "item_id": int(item_id), "phase": "reopened",
                     "reason": reason}, path=ledger)
+    note_item(item_id, f"reopened for a second selfmod implement attempt: {reason}")
+    return {"item_id": int(item_id), "reopened": True, "reason": reason}
+
+
+def note_item(item_id: int, text: str) -> bool:
+    """Append one activity-log line to an open item. False if not found."""
     for item in open_items(None):
         if item.id == int(item_id):
             stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
-            text = item.path.read_text(encoding="utf-8")
-            fm, body = _split_frontmatter(text)
+            fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
             log = list(fm.get("activity_log") or [])
-            log.append(f"**{stamp}** — reopened for a second selfmod implement attempt: {reason}")
+            log.append(f"**{stamp}** — {text}")
             fm["activity_log"] = log
             fm["updated"] = stamp
             item.path.write_text(
                 f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
                 f"---\n{body}", encoding="utf-8")
-            break
-    return {"item_id": int(item_id), "reopened": True, "reason": reason}
+            return True
+    return False
 
 
 def LEDGER_DEFAULT() -> Path:

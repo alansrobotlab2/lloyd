@@ -532,3 +532,67 @@ def test_a_human_can_grant_a_second_attempt_and_only_one(isolated):
     assert B.select_confirmed(S.LEDGER_PATH) is None, "one more attempt, not unlimited"
     with pytest.raises(ValueError, match="no implement attempt"):
         B.reopen_item(99, "never attempted", ledger=S.LEDGER_PATH)
+
+
+# ===========================================================================
+# A round left open by a turn that died at its budget
+# ===========================================================================
+
+def _reaper_env(monkeypatch, tmp_path, *, worktree=True, busy=(), current=None):
+    from scripts.selfmod import round as R, worktree as W
+    import app.sessions_io as sio
+    aborted: list[str] = []
+    monkeypatch.setattr(R, "abort", lambda rid: aborted.append(rid) or {"aborted": rid})
+    import shutil
+    wt = tmp_path / "wt"
+    if worktree:
+        wt.mkdir(exist_ok=True)
+    else:
+        shutil.rmtree(wt, ignore_errors=True)
+    monkeypatch.setattr(W, "worktree_path", lambda rid: wt)
+    monkeypatch.setattr(sio, "active_sessions_snapshot", lambda: [{"session_id": s} for s in busy])
+    monkeypatch.setattr(S, "read_current", lambda: current)
+    return aborted
+
+
+def _finished(round_id="SM_X", session="s1", item=2):
+    S.append_event({"event": "backlog_implement", "item_id": item, "phase": "finished",
+                    "round_id": round_id, "session_id": session, "stop_reason": "max_turns"},
+                   path=S.LEDGER_PATH)
+
+
+def test_reaper_closes_a_round_left_open_after_the_grace(isolated, monkeypatch, tmp_path):
+    import time as _t
+    write_item(isolated, 2)
+    aborted = _reaper_env(monkeypatch, tmp_path)
+    _finished()
+    later = _t.time() + I.ABANDON_GRACE_SECONDS + 1
+    assert I.reap_abandoned_rounds(now=later) and aborted == ["SM_X"]
+    ev = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert ev["event"] == "round_abandoned" and ev["branch"] == "selfmod/SM_X" and ev["item_id"] == 2
+    assert "selfmod/SM_X" in next(isolated.glob("2-*.md")).read_text()
+    assert I.reap_abandoned_rounds(now=later) == [], "reaped once, not on every tick"
+
+
+def test_reaper_is_not_the_first_responder(isolated, monkeypatch, tmp_path):
+    """#278 was rescued by the observer's ambient follow-up two minutes after
+    the cut-off. Within the grace, or while its session is mid-turn, the
+    round is somebody else's to finish."""
+    import time as _t
+    write_item(isolated, 2)
+    aborted = _reaper_env(monkeypatch, tmp_path, busy=("s1",))
+    _finished()
+    assert I.reap_abandoned_rounds(now=_t.time() + 60) == [] and aborted == []
+    assert I.reap_abandoned_rounds(now=_t.time() + I.ABANDON_GRACE_SECONDS + 1) == [], "session busy"
+
+
+def test_reaper_leaves_landed_observed_and_cleaned_rounds_alone(isolated, monkeypatch, tmp_path):
+    import time as _t
+    later = _t.time() + I.ABANDON_GRACE_SECONDS + 1
+    aborted = _reaper_env(monkeypatch, tmp_path, current={"round_id": "SM_OBS", "state": "observing"})
+    _finished("SM_LANDED"); S.append_event({"event": "promoted", "round_id": "SM_LANDED"}, path=S.LEDGER_PATH)
+    _finished("SM_OBS")
+    assert I.reap_abandoned_rounds(now=later) == [] and aborted == []
+    aborted2 = _reaper_env(monkeypatch, tmp_path, worktree=False)
+    _finished("SM_GONE")
+    assert I.reap_abandoned_rounds(now=later) == [] and aborted2 == [], "already cleaned up"

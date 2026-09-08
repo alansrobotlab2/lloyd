@@ -114,6 +114,12 @@ Errors are read from `logs/server.err`, never `server.log` — `basicConfig`
 writes to stderr, so `server.log` is uvicorn's access log and holds zero
 error-shaped lines.
 
+- **A turn that dies at its budget is not the end of the round.** The
+  budget anchor (`<budget>` at 75%/90% of `max_turns`) tells the model to
+  gate-and-land or abort while it still can; the observer's ambient
+  follow-up is the first responder when it did not (that is what landed
+  #278); `backlog_implement.reap_abandoned_rounds` is the backstop, twenty
+  minutes later, branch kept. Never abort a round at turn end.
 - **The idle gate drains first, then waits.** `wait_idle` used to arm the
   drain only *after* three quiet polls — the one moment it is no longer
   needed. Against a worker pool that starts a research job every few minutes

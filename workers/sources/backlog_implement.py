@@ -125,6 +125,65 @@ Work autonomously; do not ask for confirmation.
 """
 
 
+ABANDON_GRACE_SECONDS = 20 * 60
+
+
+def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
+    """Close rounds this source opened that nobody finished — after a grace
+    period, and only while nothing is happening in their session.
+
+    Not at turn end, and the reason is #278. Its implement turn died at the
+    100-iteration cap with the change written, tested and un-gated, and the
+    ledger row said `max_turns`. Two minutes later the Inner Voice observer
+    queued an ambient follow-up into that same session — "the round ended at
+    the cap with no report; if the gate passed, land it" — and that second
+    turn gated, landed, and the whole feature was live at 17:34. A reaper
+    that aborted at turn end would have raced the rescue and thrown away
+    875 lines the gate then passed. So the observer is the first responder
+    and this is the backstop: a round the implementer opened, still open,
+    nothing under observation, its session idle, `ABANDON_GRACE_SECONDS`
+    after the turn ended. The branch is kept — it is the only record of
+    what was attempted — and the item is told where it is.
+    """
+    from scripts.selfmod import backlog as B, round as R, state as S, worktree as W
+    now = now or time.time()
+    events = S.read_events(limit=500)
+    finished = [e for e in events if e.get("event") == "backlog_implement"
+                and e.get("phase") == "finished" and e.get("round_id")]
+    closed = {e.get("round_id") for e in events
+              if e.get("event") in ("promoted", "round_aborted", "round_abandoned")}
+    try:
+        from app.sessions_io import active_sessions_snapshot
+        busy = {s.get("session_id") for s in active_sessions_snapshot()}
+    except Exception:
+        busy = set()
+    current = S.read_current() or {}
+    reaped: list[dict] = []
+    for e in finished:
+        rid = e["round_id"]
+        if rid in closed or current.get("round_id") == rid:
+            continue
+        age = now - float(e.get("ts") or 0)
+        if age < ABANDON_GRACE_SECONDS or e.get("session_id") in busy:
+            continue
+        if not W.worktree_path(rid).exists():
+            continue
+        R.abort(rid)
+        rec = {"event": "round_abandoned", "round_id": rid, "item_id": e.get("item_id"),
+               "branch": f"selfmod/{rid}",
+               "reason": (f"implement turn ended ({e.get('stop_reason')}) and the round "
+                          f"stayed open for {int(age // 60)} min with nothing running in "
+                          f"its session")}
+        S.append_event(rec)
+        if e.get("item_id") is not None:
+            B.note_item(int(e["item_id"]),
+                        f"selfmod round {rid} abandoned: {rec['reason']}. Its work is on "
+                        f"branch `selfmod/{rid}` in ~/lloyd.")
+        logger.warning("reaped abandoned round %s (%s)", rid, rec["reason"])
+        reaped.append(rec)
+    return reaped
+
+
 def _loop_is_free() -> tuple[bool, str]:
     """Every gate the loop itself enforces, checked here first so a queued
     item does not spend a full agent turn discovering it cannot proceed."""
@@ -158,6 +217,10 @@ def _age_phrase(ts: float | None) -> str:
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     from scripts.selfmod import backlog as B, state as S
 
+    try:
+        reap_abandoned_rounds()
+    except Exception as exc:  # the backstop must never take the scheduler down
+        logger.warning("reap_abandoned_rounds failed: %s", exc)
     free, why = _loop_is_free()
     if not free:
         logger.info("backlog-implement: not queueing — %s", why)

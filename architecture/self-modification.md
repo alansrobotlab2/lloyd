@@ -242,6 +242,31 @@ poll (chat turns and worker jobs both honour it, so nothing new starts and
 what is in flight finishes), re-arms it inside its 180 s TTL, and releases it
 on give-up so a failed landing does not leave the backend refusing turns.
 
+**A turn that dies at its budget is not the end of the round.** The second
+unattended implement attempt on #278 (session `20260908_000804_backlogi_3828`)
+wrote the whole feature — a headless default for Chromium, an SSE route, a
+Browser page in Mission Control, 356 lines of tests — and died at iteration
+101 of 100 without ever calling the gate. Three things now stand between
+that and a lost round, in order:
+
+1. **The budget anchor.** `_build_state_anchor` appends a `<budget>` message
+   at 75% and 90% of `max_turns`: how many iterations remain, and that a
+   round left open must be gated and landed or aborted now. Deterministic
+   and free; the observer's own `iteration_pressure` nudge is LLM-judged and
+   subject to its inject cap, which this very round exhausted on repetition
+   guards before any budget warning reached it.
+2. **The observer's ambient follow-up**, which is what actually rescued
+   #278: two minutes after the cut-off it queued "the round ended at the cap
+   with no report; if the gate passed, land it" into the same session, and
+   that turn gated, landed, and the feature was live at 17:34. The first
+   responder.
+3. **`reap_abandoned_rounds`**, the backstop, run from the implementer's
+   scheduler tick: a round this source opened, still open, nothing under
+   observation, its session idle, twenty minutes after the turn ended, is
+   aborted with its branch kept and the item told where the work is. Not at
+   turn end — that would have raced the rescue and thrown away 875 lines
+   the gate then passed.
+
 **Human-only.** Some paths the loop may never touch remain: `config.yaml`,
 `data/**`, `.env*`, `pytest.ini`, `.gitignore`, and the frontend's build
 inputs. A triage whose fix needs one records `confirmed` with an acceptance
