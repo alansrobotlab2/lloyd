@@ -1159,6 +1159,54 @@ Pause and drain the pool before restarting the backend
 errors that land in the guardian's observation window and get blamed on
 whatever just landed.
 
+## Structured verdicts
+
+Worker verdicts used to be parsed out of `VERDICT:` / `SURFACE:` lines by
+regex. That works until a turn words it slightly differently, and then a
+`confirmed` is recorded as `unverifiable` and an item is retired for a
+formatting reason.
+
+`RunOptions.final_schema` asks the loop for one extra completion after the
+turn ends, restating its conclusion as a JSON object
+(`app/harness/finalizer.py`). Three things decide whether it is worth having:
+
+- **The extra request must send the identical `tools` array with
+  `tool_choice: "none"`.** Qwen renders the tools array inside the system
+  message, so dropping it diverges the rendered prompt at token 41 of 1536 —
+  2.7% in — and everything after that is a cache miss. Measured in the
+  production shape (four tools-bearing iterations on a 180k conversation, then
+  one finalizer): keeping tools reuses 177,600 of 180,068 tokens and takes
+  1.19 s; dropping them reuses nothing and takes **25.00 s**. 21x, for one
+  object. `eval/measurements/finalizer-2026-09-08.md` has the runs, and the
+  two ways to measure this wrongly — `cached_tokens` reads 0 for the first two
+  requests of any prefix on this engine, and an alternating A/B ends up
+  caching both shapes, which is not what production does.
+- **It is skipped unless `stop_reason` is `stop`/`end_turn`.** Forcing a
+  verdict out of a turn that died at `max_turns` recreates the failure
+  `INCOMPLETE` was added to fix. The reason is reported as `structured_error`,
+  so a caller can tell "the turn never reached a verdict" from "the model
+  refused to produce one".
+- **The regex stays.** The finalizer can be skipped or can fail, and a verdict
+  pipeline with no fallback turns a transient engine error into a lost triage.
+  `parse_verdict(text, structured)` prefers the object when its verdict is
+  known and records `source`; the ledger carries `verdict_source` and
+  `structured_error` so a finalizer that quietly stopped working does not look
+  exactly like one that is working.
+
+`TRIAGE_VERDICT_SCHEMA` is built from `VERDICTS`/`SURFACES` rather than
+restated — one list, or a new verdict lands in the grammar and not the
+validator. It carries **no `maxLength`**: that is enforced by the guided
+decoder, so the model would stop mid-sentence at the limit rather than write
+something shorter. The clamps stay in Python, after the fact.
+
+The router honours `final_schema` only for a session whose platform is in
+`sessions_io.NON_USER_PLATFORMS`. A chat turn that quietly ran a second
+completion under a grammar would be paying tokens for something nobody reads.
+
+Kill switch: `workers.sources.backlog-selfmod.structured_verdict`, carried in
+the queue payload like the budgets so a queued item runs under the config that
+was live when it was enqueued.
+
 ## Knowledge graph
 
 Two layers, and the distinction matters:

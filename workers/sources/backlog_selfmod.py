@@ -166,16 +166,30 @@ def _parse_spawned(value: str) -> list[int]:
 _FIELD = re.compile(r"^(VERDICT|SURFACE|CHECK|EVIDENCE|ACCEPTANCE|SPAWNED):\s*(.*)$", re.I)
 
 
-def parse_verdict(text: str) -> dict | None:
-    """Pull the trailing verdict block out of a turn's final text.
+def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
+    """The turn's verdict, from the finalizer's object or from the text.
 
     Parsed from the LAST `VERDICT:` onward, not by one regex over the whole
     tail. A model that states a verdict, reconsiders, and restates would
     otherwise have the first verdict paired with the last evidence — a
     silently wrong record, which for this pipeline means a `confirmed` that
     nobody actually concluded.
+
+    `structured` is the harness finalizer's output (a second completion under
+    a JSON schema — see app/harness/finalizer.py). It wins when it carries a
+    known verdict, and the text block stays in the prompt regardless: the
+    finalizer is skipped whenever the turn did not end of its own accord, it
+    can fail, and a verdict pipeline with no fallback would turn a transient
+    engine error into a lost triage. The returned dict records which path
+    produced it as `source`, so the ledger can show the fallback rate rather
+    than the two being indistinguishable.
     """
     from scripts.selfmod.backlog import VERDICTS, SURFACES
+
+    if isinstance(structured, dict):
+        parsed = _from_structured(structured, VERDICTS, SURFACES)
+        if parsed is not None:
+            return parsed
 
     lines = text[-6000:].splitlines()
     start = None
@@ -212,6 +226,44 @@ def parse_verdict(text: str) -> dict | None:
         # regression guards; a contract is not the field to save bytes on.
         "acceptance": _acceptance_text(joined("ACCEPTANCE", 4000))[:3000],
         "spawned": _parse_spawned(joined("SPAWNED", 400)),
+        "source": "regex",
+    }
+
+
+def _from_structured(obj: dict, verdicts, surfaces) -> dict | None:
+    """The finalizer's object, clamped the same way the text path clamps.
+
+    The clamps live here rather than in the schema on purpose: a `maxLength`
+    is enforced by the guided decoder, so the model would stop mid-sentence
+    at the limit instead of writing something shorter. Truncating afterwards
+    costs a cut sentence; constraining the grammar costs the thought.
+    """
+    verdict = str(obj.get("verdict") or "").strip().lower()
+    if verdict not in verdicts:
+        return None
+    surface = str(obj.get("surface") or "").strip().lower()
+    if surface not in surfaces:
+        surface = "external" if verdict == "not_code" else "code"
+    spawned = obj.get("spawned")
+    if isinstance(spawned, list):
+        # Reuse the text parser per entry rather than coercing: it already
+        # knows that `#401` and `401` are the same id, and a second private
+        # notion of "an item id" is how the two paths would come to disagree
+        # about what the model filed.
+        ids: list[int] = []
+        for entry in spawned:
+            ids.extend(_parse_spawned(str(entry)))
+        spawned = ids
+    else:
+        spawned = _parse_spawned(str(spawned or ""))
+    return {
+        "verdict": verdict,
+        "surface": surface,
+        "check": " ".join(str(obj.get("check") or "").split())[:400],
+        "evidence": str(obj.get("evidence") or "").strip()[:2000],
+        "acceptance": _acceptance_text(str(obj.get("acceptance") or ""))[:3000],
+        "spawned": spawned,
+        "source": "structured",
     }
 
 
@@ -225,7 +277,8 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     new_id = queue.enqueue(
         source=NAME, kind="triage",
         payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
-                 "body_chars": int(src_cfg.get("body_chars", DEFAULT_BODY_CHARS))},
+                 "body_chars": int(src_cfg.get("body_chars", DEFAULT_BODY_CHARS)),
+                 "structured_verdict": bool(src_cfg.get("structured_verdict", True))},
         priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
         dedup_key=DEDUP_KEY,
     )
@@ -269,6 +322,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     budget = int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
     body_chars = int((item.payload or {}).get("body_chars") or DEFAULT_BODY_CHARS)
+    # Kill switch, in the payload like the budgets so a queued item runs under
+    # the config that was live when it was enqueued. With it off the turn runs
+    # identically and only the regex path reads the result — which is what
+    # makes flipping it a real rollback rather than a code path nobody has
+    # exercised. Items queued before this landed default to on.
+    want_structured = bool((item.payload or {}).get("structured_verdict", True))
     logger.info("triaging backlog #%s (%s days old, budget %d): %s",
                 candidate.id, candidate.age_days, budget, candidate.name[:70])
 
@@ -280,7 +339,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     try:
         run = await run_prompt_in_session(
             prompt, title=f"backlog triage #{candidate.id}: {candidate.name[:48]}",
-            source=NAME, max_turns=budget, priority=1)
+            source=NAME, max_turns=budget, priority=1,
+            final_schema=B.TRIAGE_VERDICT_SCHEMA if want_structured else None,
+            final_schema_prompt=(
+                "Restate the verdict block above as a single JSON object "
+                "matching the schema. Same verdict, same acceptance check, "
+                "same filed ids — this is a transcription, not a re-decision."
+            ))
     except DrainActive as exc:
         # A landing owns the backend right now. Not a result; try next tick.
         return {"status": "skipped", "summary": f"landing in progress: {exc}"}
@@ -298,7 +363,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     session_id = run["session_id"]
     stop_reason = run.get("stop_reason")
-    parsed = parse_verdict(run["text"])
+    structured = run.get("structured") if want_structured else None
+    structured_error = str(run.get("structured_error") or "")
+    parsed = parse_verdict(run["text"], structured)
 
     if not parsed:
         if stop_reason == "max_turns":
@@ -325,6 +392,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         S.append_event({"event": "backlog_triage", "item_id": candidate.id,
                         "verdict": "unverifiable", "check": "", "evidence": evidence,
                         "auto": True, "session_id": session_id,
+                        "verdict_source": "none",
+                        "structured_error": structured_error,
                         "stop_reason": stop_reason})
         logger.warning("backlog #%s: %s", candidate.id, evidence)
         return {"status": "success", "item_id": candidate.id, "verdict": "unverifiable",
@@ -363,6 +432,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "evidence": parsed["evidence"][:1000],
                     "acceptance": parsed["acceptance"], "closed": close,
                     "spawned": spawned, "spawned_unverified": unverified,
+                    # Which parser produced this verdict, and why the
+                    # structured one did not when it did not. Without both,
+                    # a finalizer that silently stopped working looks exactly
+                    # like one that is working.
+                    "verdict_source": parsed.get("source", "regex"),
+                    "structured_error": structured_error,
                     "session_id": session_id, "stop_reason": stop_reason,
                     "num_turns": run.get("num_turns"), "budget": budget})
 

@@ -587,6 +587,15 @@ workers:
       # sections live, so the original content survives. 6000 cut more than
       # half of the oldest item on the board.
       body_chars: 30000
+      # Ask the harness to restate the finished turn's verdict as a JSON
+      # object under scripts/selfmod/backlog.TRIAGE_VERDICT_SCHEMA, instead of
+      # relying on a regex over `VERDICT:` lines. The text block stays in the
+      # prompt and the regex stays as the fallback — the finalizer is skipped
+      # whenever the turn did not end of its own accord, and a verdict
+      # pipeline with no fallback turns a transient engine error into a lost
+      # triage. The ledger records `verdict_source` so the fallback rate is
+      # visible rather than the two being indistinguishable.
+      structured_verdict: true
     # Picks up items triage has CONFIRMED (with an acceptance check) and runs
     # one selfmod round on each through the normal gate. This is the only
     # automated path from a backlog item to landed code, and it is gated

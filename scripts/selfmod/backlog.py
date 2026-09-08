@@ -94,6 +94,38 @@ INCOMPLETE = "incomplete"
 MAX_INCOMPLETE_ATTEMPTS = 2
 
 
+# The same verdict, as a machine contract. Built from VERDICTS/SURFACES rather
+# than restated, so a new verdict cannot be added in one place and forgotten in
+# the other — the grammar and the validator have to be the same list.
+#
+# Length clamps stay in Python (`parse_verdict`): a `maxLength` in the schema
+# is enforced by the decoder, which would make the model stop mid-sentence at
+# the limit rather than write a shorter one. INCOMPLETE is deliberately absent:
+# it is not a verdict, it is the record of a turn that ran out of budget, and
+# the finalizer never runs on such a turn anyway.
+TRIAGE_VERDICT_SCHEMA: dict = {
+    "type": "object",
+    "title": "backlog_triage_verdict",
+    "properties": {
+        "verdict": {"type": "string", "enum": list(VERDICTS)},
+        "surface": {"type": "string", "enum": list(SURFACES)},
+        "check": {"type": "string",
+                  "description": "One concrete, runnable check that decides it."},
+        "evidence": {"type": "string",
+                     "description": "What was measured, with paths and line numbers."},
+        "acceptance": {"type": "string",
+                       "description": ("For `confirmed`: the contract the implementer "
+                                       "is held to. Prefix with 'human-only:' when the "
+                                       "fix needs a path the loop may never touch. "
+                                       "Empty otherwise.")},
+        "spawned": {"type": "array", "items": {"type": "integer"},
+                    "description": "Backlog ids filed during this triage."},
+    },
+    "required": ["verdict", "surface", "check", "evidence", "acceptance", "spawned"],
+    "additionalProperties": False,
+}
+
+
 @dataclass
 class Item:
     path: Path

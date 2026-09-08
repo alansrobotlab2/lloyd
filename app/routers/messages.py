@@ -57,6 +57,7 @@ from prompt_builder import build_system_prompt
 from prefetch import prefetch_context_async, log_turn_prompt_budget
 from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
+from app import sessions_io
 
 
 router = APIRouter()
@@ -291,6 +292,33 @@ def _load_session_goal(session_id: str) -> dict:
         return json.loads(meta_path.read_text()).get("goal") or {}
     except Exception:
         return {}
+
+
+def _final_schema_for(session_id: str, data: dict) -> dict | None:
+    """The JSON schema a caller wants the finished turn restated under.
+
+    Gated on the session's platform, not on who is asking. A structured
+    verdict is a machine contract for a worker or an autonomy run; a chat
+    turn that quietly ran a second completion and attached an object to its
+    stats would be paying tokens for something nobody reads, and would put a
+    guided-decoding grammar in front of a human conversation.
+    `sessions_io.NON_USER_PLATFORMS` is the one definition of "nobody reads
+    this session" and it is reused here rather than restated.
+    """
+    schema = data.get("final_schema")
+    if not isinstance(schema, dict) or not schema:
+        return None
+    try:
+        meta_path = SESSIONS_DIR / f"{session_id}.json"
+        platform = (json.loads(meta_path.read_text()).get("platform") or "")
+    except Exception:
+        return None
+    if platform not in sessions_io.NON_USER_PLATFORMS:
+        logger.warning(
+            "final_schema ignored for session %s: platform %r is user-facing",
+            session_id, platform or "mission-control")
+        return None
+    return schema
 
 
 def _build_notification_drain(session_id: str, turn_id: str):
@@ -876,6 +904,18 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     "tool_calls_total": caption_total,
                     "tool_calls_captioned": caption_done,
                 })
+                # Structured verdict, when this turn was given a schema.
+                # Written onto `stream_stats` because that same dict object
+                # is persisted on the final assistant message AND sent in
+                # every `done` branch — normal, cancelled, placeholder,
+                # ambient-silent — so nothing else has to be edited to keep
+                # them consistent. `structured_error` carries the deliberate
+                # skips too ("skipped: stop_reason=max_turns"), which is what
+                # lets a caller tell "no verdict was reached" from "the
+                # model refused to produce one".
+                if options.final_schema:
+                    stream_stats["structured"] = evt.get("structured")
+                    stream_stats["structured_error"] = evt.get("structured_error", "")
                 stats_dict = stream_stats
 
                 result_text = full_response
@@ -968,6 +1008,12 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
                                  "content": [{"type": "text", "text": result_text}],
                                  "timestamp": end_ts, "stats": stats_dict}
+                    if stats_dict.get("structured"):
+                        # Top level as well as in stats: this is the machine
+                        # answer for the turn, and a consumer reading the
+                        # session JSON should not have to know it rides in a
+                        # stats blob.
+                        msg_entry["structured"] = stats_dict["structured"]
                     if accumulated_thinking:
                         msg_entry["reasoning"] = accumulated_thinking
                         if accumulated_thinking_ms:
@@ -1032,6 +1078,9 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                                       # "unverifiable" for running out of room.
                                       'stop_reason': stop_reason,
                                       'num_turns': num_turns_val}
+                if options.final_schema:
+                    done_payload['structured'] = stats_dict.get("structured")
+                    done_payload['structured_error'] = stats_dict.get("structured_error", "")
                 if accumulated_thinking:
                     done_payload['reasoning'] = accumulated_thinking
                     if accumulated_thinking_ms:
@@ -1536,6 +1585,10 @@ async def post_message_stream(request: Request):
         # cancel_event and session_id wired in _run_turn at run time
         **_get_harness_kwargs(),
     )
+    final_schema = _final_schema_for(session_id, data)
+    if final_schema is not None:
+        options.final_schema = final_schema
+        options.final_schema_prompt = str(data.get("final_schema_prompt") or "")
 
     await _save_session_meta(session_id, model, preview=text)
 

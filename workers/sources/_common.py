@@ -349,7 +349,9 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                                 max_turns: int = 60, priority: int = 1,
                                 inner_voice: bool = True,
                                 timeout_seconds: float | None = None,
-                                extra_disallowed: list[str] | None = None) -> dict:
+                                extra_disallowed: list[str] | None = None,
+                                final_schema: dict | None = None,
+                                final_schema_prompt: str = "") -> dict:
     """Run one turn through the backend's own chat path, in a real session.
 
     This is the counterpart to `run_prompt_on_primary`, and the difference is
@@ -368,9 +370,16 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     `/health.turns`, and in the Inner Voice tab, and every tool call is
     persisted.
 
-    Returns {text, session_id, stop_reason, num_turns, errors}. `stop_reason`
-    is the part callers must look at: `max_turns` means the model ran out of
-    room, and its final text is not a conclusion however finished it reads.
+    Returns {text, session_id, stop_reason, num_turns, errors, structured,
+    structured_error}. `stop_reason` is the part callers must look at:
+    `max_turns` means the model ran out of room, and its final text is not a
+    conclusion however finished it reads.
+
+    `final_schema` asks the harness to restate the finished turn as a JSON
+    object matching that schema (`app/harness/finalizer.py`). It is honoured
+    only for a non-user platform, which every worker session is. `structured`
+    is None when it was skipped or failed, and `structured_error` says which —
+    a caller keeps its text parser either way.
     Raises `DrainActive` if a landing has the backend draining; the caller
     should skip this run rather than count it.
 
@@ -410,9 +419,14 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                "priority": int(priority), "max_turns": int(max_turns)}
     if extra_disallowed:
         payload["extra_disallowed"] = list(extra_disallowed)
+    if final_schema:
+        payload["final_schema"] = final_schema
+        if final_schema_prompt:
+            payload["final_schema_prompt"] = final_schema_prompt
 
     out: dict = {"text": "", "session_id": session_id, "stop_reason": None,
-                 "num_turns": None, "errors": []}
+                 "num_turns": None, "errors": [], "structured": None,
+                 "structured_error": ""}
 
     async def _stream() -> None:
         # Generous per-read timeout: a long tool call legitimately produces no
@@ -436,6 +450,8 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                         out["text"] = str(data.get("response") or "")
                         out["stop_reason"] = data.get("stop_reason")
                         out["num_turns"] = data.get("num_turns")
+                        out["structured"] = data.get("structured")
+                        out["structured_error"] = str(data.get("structured_error") or "")
                         break
 
     try:
