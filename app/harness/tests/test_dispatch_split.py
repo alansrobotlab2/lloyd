@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
-
 from app.harness import loop as L
 from app.harness.options import RunOptions
 from app.harness.tool_search import LoadedToolSet

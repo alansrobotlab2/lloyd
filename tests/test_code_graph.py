@@ -541,7 +541,7 @@ async def test_refresh_false_answers_stale_and_says_so(repo):
 
 
 async def test_dirty_rule_is_debounced(repo, monkeypatch):
-    entry = await CG.load_graph(repo)
+    await CG.load_graph(repo)
     (repo / "pkg" / "c.py").write_text("def c():\n    pass\n")
     CG._LAST_REFRESH[str(repo)] = time.time()
     calls = []

@@ -13,8 +13,6 @@ from __future__ import annotations
 import inspect
 import json
 
-import pytest
-
 from scripts.selfmod import backlog as B
 from workers.sources import backlog_selfmod as W
 
