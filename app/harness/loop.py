@@ -490,6 +490,15 @@ async def run_query(
 
             # Dispatch each tool call; accumulate results so we can
             # append them to history before looping back.
+            #
+            # Where this batch's messages begin. A hook can append to
+            # `chat_messages` while the batch is still running — Inner
+            # Voice's pretool inject does exactly that — and an append that
+            # lands between two tool messages leaves
+            # `assistant(tool_calls) → user → tool`, which is not a shape
+            # any engine accepts. `_reorder_batch_messages` below puts the
+            # slice back in wire order once the batch is done.
+            batch_base = len(chat_messages)
             for tc in tool_calls_committed:
                 tc_evt = events.tool_call(
                     call_id=tc["id"],
@@ -543,6 +552,8 @@ async def run_query(
                     "tool_call_id": tc["id"],
                     "content": result_evt["content"],
                 })
+
+            _reorder_batch_messages(chat_messages, batch_base)
 
             # Mid-turn microcompaction. After this iteration's tool calls
             # land, clear stale tool results IF the prompt is actually
@@ -1117,6 +1128,37 @@ def _prune_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) -> None:
             msg.pop("reasoning_content", None)
 
 
+def _reorder_batch_messages(chat_messages: list[dict[str, Any]], base: int) -> None:
+    """Put a batch's messages back in wire order, in place.
+
+    An `assistant` message with tool calls must be followed by ONE `tool`
+    message per call before anything else. A hook that appends mid-batch —
+    Inner Voice's pretool inject appends a `user` message
+    (`app/inner_voice/observer.py`) — breaks that for every call after the
+    first, producing `assistant(tool_calls) → user → tool`.
+
+    Nothing caught it because the inject is rare, the engine's failure is a
+    400 the loop reports as a stream error, and the sequential path only
+    produces it when an inject fires between two calls of a multi-call
+    batch. Concurrent dispatch would make it routine.
+
+    Tool messages keep their order and so do the injects; only the boundary
+    moves. In-place because `chat_messages` may be the observer's own
+    handle, and rebinding it would leave the observer holding the old list.
+    """
+    tail = chat_messages[base:]
+    if len(tail) < 2:
+        return
+    tools = [m for m in tail if m.get("role") == "tool"]
+    others = [m for m in tail if m.get("role") != "tool"]
+    if not others or not tools:
+        return
+    if tail == tools + others:
+        return
+    del chat_messages[base:]
+    chat_messages.extend(tools + others)
+
+
 async def _dispatch_one_tool_call(
     *,
     tc: dict[str, Any],
@@ -1128,13 +1170,42 @@ async def _dispatch_one_tool_call(
 ) -> NormalizedEvent:
     """Run hooks → MCP dispatch → hooks for a single tool call.
 
-    Returns a `tool_result` event ready to yield. Encapsulates the
-    deny / dispatch-error / success paths so the loop body stays flat.
+    Composed of two halves, and the split is the point: `_pre_dispatch`
+    decides whether the call happens at all (parse error, disabled tool,
+    ToolSearch intercept, hook deny) and must run in wire order for every
+    call in a batch; `_execute_tool_call` is the part that can safely run
+    concurrently with its siblings. Behaviour here is unchanged — this
+    function still does both, in order, for one call.
 
     `runtime_disallowed` (Plan B) — the loop's per-iteration disallowed
     set, computed via `options.disallowed_tools_refresh` if set. When
     None, falls back to `options.disallowed_tools` (the static turn-start
     list). Either way, this is the gate that blocks dispatch.
+    """
+    early = await _pre_dispatch(
+        tc=tc, options=options, session_id=session_id,
+        loaded_set=loaded_set, runtime_disallowed=runtime_disallowed,
+    )
+    if early is not None:
+        return early
+    return await _execute_tool_call(
+        tc=tc, pool=pool, options=options, session_id=session_id,
+    )
+
+
+async def _pre_dispatch(
+    *,
+    tc: dict[str, Any],
+    options: RunOptions,
+    session_id: str,
+    loaded_set: LoadedToolSet,
+    runtime_disallowed: set[str] | None = None,
+) -> NormalizedEvent | None:
+    """Everything before the MCP call. Returns an early result, or None.
+
+    Kept ordered and sequential even in a parallel batch: `mark_loaded`
+    mutates the shared LoadedToolSet, and a hook deny is a decision the
+    model must see in the order it made the calls.
     """
     name = tc["function"]["name"]
     args_dict = tc["_args_dict"]
@@ -1214,10 +1285,26 @@ async def _dispatch_one_tool_call(
                 content=f"Tool call denied: {reason}", is_error=True,
             )
 
-    # Dispatch. Session correlation rides in the request's `_meta` (see
-    # MCPPool.call_tool), not in the arguments — the MCP server validates
-    # arguments against the tool's inputSchema before its handler runs, so
-    # an injected argument is validated as if it were a real parameter.
+    return None
+
+
+async def _execute_tool_call(
+    *,
+    tc: dict[str, Any],
+    pool: MCPPool,
+    options: RunOptions,
+    session_id: str,
+) -> NormalizedEvent:
+    """The MCP call and everything after it. Safe to run concurrently.
+
+    Session correlation rides in the request's `_meta` (see
+    MCPPool.call_tool), not in the arguments — the MCP server validates
+    arguments against the tool's inputSchema before its handler runs, so
+    an injected argument is validated as if it were a real parameter.
+    """
+    name = tc["function"]["name"]
+    args_dict = tc["_args_dict"]
+    call_id = tc["id"]
     dispatch_args = dict(args_dict)
     try:
         # Race the MCP call against options.cancel_event so an in-flight

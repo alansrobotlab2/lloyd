@@ -172,6 +172,11 @@ class MCPPool:
         self._opened = False
         self._open_lock = asyncio.Lock()
         self._reopen_lock = asyncio.Lock()
+        # One lock per stdio server, serialising `call_tool` on its shared
+        # session. Kept in a dict that outlives `_reopen`, which replaces the
+        # sessions but not this map — a lock recreated under a waiter would
+        # let two frames onto the same pipe.
+        self._stdio_locks: dict[str, asyncio.Lock] = {}
         # Owner-task pattern: a single dedicated task holds the AsyncExitStack
         # for the SSE clients and ClientSessions. All cleanup happens in that
         # same task, avoiding anyio's "cancel scope exited in a different task"
@@ -484,19 +489,31 @@ class MCPPool:
         budget: float,
         meta: dict[str, Any] | None,
     ):
-        """One tools/call, on a fresh HTTP session or the stdio one."""
+        """One tools/call, on a fresh HTTP session or the stdio one.
+
+        The HTTP path opens a session per call and is safe to run
+        concurrently. The stdio path shares ONE `ClientSession` over one pair
+        of pipes, and two concurrent `call_tool`s on it interleave their
+        JSON-RPC frames — so it takes a per-server lock. The lock is keyed by
+        server name and kept in a dict that survives `_reopen`, which
+        replaces the sessions but not this map.
+        """
         cfg = self._http_configs.get(server_name)
         if cfg is not None:
             async with self._http_session(cfg) as session:
                 return await session.call_tool(
                     bare, args, read_timeout_seconds=budget, meta=meta,
                 )
-        session = self._sessions.get(server_name)
-        if session is None:
-            raise ToolDispatchError(bare, f"server {server_name!r} not open")
-        return await session.call_tool(
-            bare, args, read_timeout_seconds=budget, meta=meta,
-        )
+        lock = self._stdio_locks.get(server_name)
+        if lock is None:
+            lock = self._stdio_locks[server_name] = asyncio.Lock()
+        async with lock:
+            session = self._sessions.get(server_name)
+            if session is None:
+                raise ToolDispatchError(bare, f"server {server_name!r} not open")
+            return await session.call_tool(
+                bare, args, read_timeout_seconds=budget, meta=meta,
+            )
 
     async def _reopen(self) -> None:
         """Tear down and rebuild every session, in place.
@@ -586,9 +603,40 @@ class MCPPool:
                 "name": t.name,
                 "description": t.description or "",
                 "inputSchema": _input_schema(t),
+                # Carried through, not dropped. `readOnlyHint` is what lets a
+                # consumer decide whether a batch of calls can run
+                # concurrently without asking a second, private list of tool
+                # names — which is the pattern `agent_mcp/annotations.py` was
+                # written to replace. A server that sets no hints qualifies
+                # nothing, which is the contract.
+                "annotations": _annotations(t),
             }
             for t in result.tools
         ]
+
+
+def _annotations(tool: Any) -> dict[str, Any]:
+    """A tool's ToolAnnotations as a plain dict, or {} when it has none.
+
+    Both SDK naming conventions, like `_input_schema` next door: mcp 2.x
+    renamed the model fields to snake_case in Python while the wire keeps
+    camelCase, and a pool talking to a server on the other version must not
+    silently read every tool as unannotated.
+    """
+    ann = getattr(tool, "annotations", None)
+    if ann is None:
+        return {}
+    out: dict[str, Any] = {}
+    for wire, snake in (("readOnlyHint", "read_only_hint"),
+                        ("destructiveHint", "destructive_hint"),
+                        ("idempotentHint", "idempotent_hint"),
+                        ("openWorldHint", "open_world_hint")):
+        value = getattr(ann, snake, None)
+        if value is None:
+            value = getattr(ann, wire, None)
+        if value is not None:
+            out[wire] = bool(value)
+    return out
 
 
 # ---------------------------------------------------------------------------
