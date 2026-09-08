@@ -47,7 +47,7 @@ from pathlib import Path
 from app.paths import LLOYD_HOME, VAULT_FACTS_ROOT
 from agent_mcp.facts import _detect_contradictions_sync, _fact_invalidate
 from agent_mcp.retrieval import get_facts_sync as _get_facts_sync
-from app.kg_store import StoreUnavailable, store as _store
+from app.kg_store import store as _store
 
 logger = logging.getLogger("lloyd.improvement")
 
