@@ -24,7 +24,6 @@ cost 3 seconds, not a full canary boot.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 from collections import Counter
@@ -33,6 +32,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app import lint_findings
 from scripts.selfmod import canary as C
 from scripts.selfmod import spec, state as S, worktree as W
 
@@ -89,35 +89,16 @@ def _pyflakes(python: Path, root: Path, files: list[str]) -> set[str]:
     if not existing:
         return set()
     r = _run([str(python), "-m", "pyflakes", *existing], cwd=root, timeout=300)
-    out: set[str] = set()
-    for line in (r.stdout + r.stderr).splitlines():
-        # "path:LINE:COL: message" → "path: message"; a finding that merely
-        # moved down the file is not a new finding.
-        m = re.match(r"^(.*?):\d+:\d+:\s*(.*)$", line.strip())
-        if m:
-            out.add(f"{m.group(1)}: {m.group(2)}")
-        elif line.strip():
-            out.add(line.strip())
-    return out
+    return lint_findings.parse_pyflakes(r.stdout + r.stderr)
 
 
-def _parse_tsc(text: str) -> Counter:
-    """`path(LINE,COL): error TSnnnn: message` → `path: error TSnnnn: message`,
-    counted. A multiset rather than a set: a second copy of an existing error
-    in the same file is a new error, and a set would hide it."""
-    out: Counter = Counter()
-    for line in text.splitlines():
-        m = re.match(r"^(.*?)\(\d+,\d+\):\s*(error TS\d+:.*)$", line.strip())
-        if m:
-            out[f"{m.group(1)}: {m.group(2)}"] += 1
-    return out
-
-
-def _node_env() -> dict:
-    env = dict(os.environ)
-    env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
-    env.pop("NODE_OPTIONS", None)
-    return env
+# The three normalisers moved to `app/lint_findings.py` so the aggregator can
+# use them for post-edit diagnostics. It cannot import this module — that
+# would pull the whole self-modification package into every tool call — and
+# two private copies of "is this finding new?" is exactly how the gate and
+# the model would come to disagree about the same edit.
+_parse_tsc = lint_findings.parse_tsc
+_node_env = lint_findings.node_env
 
 
 def _tsc_findings(web: Path, timeout: float = 300) -> Counter:

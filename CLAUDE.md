@@ -515,6 +515,49 @@ boot and stop meaning anything.
 
 Disabled tools are enforced via `RunOptions.disallowed_tools` as `mcp__<server>__<tool>`. The harness's bare-name aliasing in `tool_schema.py` blocks both the bare and namespaced form at advertise + dispatch time, so disabling `Bash` via `mcp_servers.lloyd-mcp.disabled_tools: [Bash]` blocks the model from calling either `Bash` or `mcp__lloyd-mcp__Bash`.
 
+### Read-before-edit and stale-file gates
+
+`Edit` used to be exact-match against whatever is on disk right now, with no
+record of whether this session had ever looked at the file. The failure worth
+designing against is not the edit that fails — `old_string not found` announces
+itself — it is the edit that **succeeds**: the model Reads a file, something
+else rewrites it, the `old_string` still matches, and the edit silently reverts
+the other writer. Nothing in the transcript, the tool result or the logs says
+so.
+
+`builtin_fs._read_records` is `session_id -> realpath -> (mtime_ns, size)`,
+written by a successful Read, Write or Edit and consulted by `_gate_check`.
+
+- **The Read's stat is taken *before* the file is opened.** A write landing in
+  between then makes the recorded key older than the bytes returned, so a later
+  Edit is refused as stale — the safe direction. Stat'ing afterwards would
+  record the other writer's key and wave that Edit through.
+- **Keys are `os.path.realpath`**, so a symlink and its target are one file.
+- **A writer refreshes the record**, so consecutive edits to one file need one
+  Read; `sed -i` from Bash in between does not, and the next Edit is refused
+  until it is re-Read. That is the intended cost.
+- **Write over an existing file needs a Read too**, which is the rule most
+  likely to surprise; creating a new file (including through a dangling
+  symlink) needs nothing. Both live behind `harness.edit_gates.enabled`.
+- **No bound session means no gate.** Unit tests and legacy callers dispatch
+  straight into the handlers with no aggregator context, and refusing them
+  protects nothing while breaking `tests/test_mcp_layer.py`.
+- Records survive the kill switch: `enabled: false` stops refusing but keeps
+  accruing, so flipping it back works immediately rather than after everyone
+  re-Reads everything.
+- Containers are bounded twice (256 sessions, 2000 paths each, LRU) and
+  guarded by a `threading.Lock` — the handlers run on worker threads via
+  `asyncio.to_thread`, so two sessions genuinely race.
+
+Editing a binary file is now a normal error rather than a `UnicodeDecodeError`
+escaping the aggregator as an MCP exception with no path in it.
+
+`app/lint_findings.py` holds the pyflakes/tsc normalisers that `gate.py` used
+to own privately. The aggregator cannot import `scripts.selfmod.gate` — that
+pulls the whole self-modification package behind every tool call — and two
+private definitions of "is this finding new?" is exactly how the gate and the
+model would come to disagree about the same edit.
+
 ### Tool-call summaries
 
 Every advertised tool carries one extra string parameter, `summary`: a

@@ -240,6 +240,14 @@ harness:
   # ever receives it. false removes the parameter from every schema and the
   # UI falls back to the bare tool name.
   tool_call_summaries: true
+  # Read-before-edit and stale-file gates (agent_mcp/builtin_fs.py). An
+  # Edit against a file this session has never Read is a guess; an Edit
+  # against one that changed since the Read still matches its old_string and
+  # silently reverts whoever wrote in between. Both are refused with an error
+  # that says what to do. Creating a new file with Write needs no Read.
+  # false keeps the read records but stops refusing.
+  edit_gates:
+    enabled: true
   tool_search:
     enabled: false
     threshold_tools: 30

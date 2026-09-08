@@ -13,21 +13,171 @@ Mounted into the unified Server("lloyd") via agent_mcp/main.py MODULES.
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import json
 import logging
 import os
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 
 from mcp.types import Tool
 
-from agent_mcp._shared import text_result
+from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-fs")
 
 DEFAULT_READ_LINES = 2000
 LINE_PREFIX_FMT = "%6d\t%s"
 GREP_BIN = "rg"
+
+
+# ---------------------------------------------------------------------------
+# Read tracking — what this session has actually seen of each file
+# ---------------------------------------------------------------------------
+#
+# `Edit` was exact-match against whatever is on disk right now, with no notion
+# of whether the model had ever looked at the file. Two failures follow from
+# that, and the second is the expensive one:
+#
+#   * an edit written from memory that happens to match, which is a guess that
+#     got lucky;
+#   * an edit against content something else rewrote after the Read. The
+#     old_string still matches, so the edit *succeeds* — and silently reverts
+#     whatever the other writer did. Nothing anywhere reports it.
+#
+# Keyed by `os.path.realpath` so a symlink and its target are one file, and
+# bounded twice: this process serves every session on the box and lives for
+# days.
+_READ_SESSIONS_MAX = 256
+_READ_PATHS_MAX = 2000
+
+# session_id -> realpath -> (mtime_ns, size)
+_read_records: "OrderedDict[str, OrderedDict[str, tuple[int, int]]]" = OrderedDict()
+
+# The sync handlers below run on worker threads (`asyncio.to_thread` in
+# call_tool), so two sessions really do mutate this concurrently. Never held
+# across anything slower than a dict operation.
+_state_lock = threading.Lock()
+
+
+def _stat_key(path: str) -> tuple[int, int] | None:
+    """(mtime_ns, size) for `path`, or None if it cannot be stat'd."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _record_seen(session_id: str, real: str, key: tuple[int, int] | None) -> None:
+    if not session_id or not real or key is None:
+        return
+    with _state_lock:
+        paths = _read_records.get(session_id)
+        if paths is None:
+            paths = _read_records[session_id] = OrderedDict()
+        _read_records.move_to_end(session_id)
+        paths[real] = key
+        paths.move_to_end(real)
+        while len(paths) > _READ_PATHS_MAX:
+            paths.popitem(last=False)
+        while len(_read_records) > _READ_SESSIONS_MAX:
+            _read_records.popitem(last=False)
+
+
+def _seen(session_id: str, real: str) -> tuple[int, int] | None:
+    with _state_lock:
+        paths = _read_records.get(session_id)
+        if not paths:
+            return None
+        rec = paths.get(real)
+        if rec is not None:
+            paths.move_to_end(real)
+            _read_records.move_to_end(session_id)
+        return rec
+
+
+def reset_read_records() -> None:
+    """Drop all read tracking. Tests only."""
+    with _state_lock:
+        _read_records.clear()
+
+
+def _gates_enabled() -> bool:
+    """Read at call time so a test can monkeypatch.setitem the config."""
+    try:
+        from app.config import CONFIG
+        gates = (CONFIG.get("harness") or {}).get("edit_gates") or {}
+        return bool(gates.get("enabled", True))
+    except Exception:
+        return True
+
+
+@dataclass
+class _Mutation:
+    """One in-flight Write or Edit, built on the loop and filled by the thread.
+
+    The handler runs in a worker thread and returns a string; everything the
+    loop needs afterwards (what was written, where, whether it succeeded)
+    has nowhere else to travel. Later stages — post-edit diagnostics, the
+    change ledger — read the same record rather than re-stat'ing the file
+    and racing whoever wrote next.
+    """
+
+    kind: str                                   # "edit" | "write"
+    session_id: str = ""
+    gate_on: bool = False
+    path: str = ""                              # as the caller gave it, expanded
+    real: str = ""                              # os.path.realpath of the above
+    existed: bool = False
+    pre_bytes: bytes | None = None
+    post_text: str = ""
+    post_stat: tuple[int, int] | None = None
+    ok: bool = False
+
+
+def _gate_check(mut: _Mutation) -> str | None:
+    """The refusal, as a JSON error string, or None to proceed.
+
+    Skipped entirely when no session is bound: unit tests and legacy callers
+    dispatch straight into these handlers with no aggregator context, and a
+    gate that fired there would fail `tests/test_mcp_layer.py` rather than
+    protect anything.
+    """
+    if not mut.gate_on:
+        return None
+    if mut.kind == "write" and not mut.existed:
+        # Creating a file — including through a dangling symlink — needs no
+        # prior Read. There is nothing to clobber.
+        return None
+
+    rec = _seen(mut.session_id, mut.real)
+    if rec is None:
+        if mut.kind == "edit":
+            return json.dumps({"error": (
+                f"Edit refused: {mut.path} has not been Read in this session. "
+                f"Read it first (a partial Read with offset/limit is enough), "
+                f"then retry the Edit."
+            )})
+        return json.dumps({"error": (
+            f"Write refused: {mut.path} already exists and has not been Read "
+            f"in this session. Read it first, then Write it."
+        )})
+
+    current = _stat_key(mut.real)
+    if current is not None and current != rec:
+        if mut.kind == "edit":
+            return json.dumps({"error": (
+                f"Edit refused: {mut.path} changed on disk since you last Read "
+                f"it (size or mtime differ). Read it again, then retry with the "
+                f"current content."
+            )})
+        return json.dumps({"error": (
+            f"Write refused: {mut.path} changed on disk since you last Read it. "
+            f"Read it again, then retry."
+        )})
+    return None
 
 
 def _expand(path: str) -> str:
@@ -47,7 +197,7 @@ def _expand(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _read(args: dict) -> str:
+def _read(args: dict, session_id: str = "") -> str:
     file_path = _expand(args.get("file_path", ""))
     if not file_path:
         return json.dumps({"error": "file_path is required"})
@@ -58,6 +208,13 @@ def _read(args: dict) -> str:
         return json.dumps({"error": f"file does not exist: {file_path}"})
     if p.is_dir():
         return json.dumps({"error": f"path is a directory, not a file: {file_path}"})
+
+    # Stat BEFORE opening. A write that lands between here and the read makes
+    # the recorded key older than the bytes we return, so a later Edit is
+    # refused as stale — which is the safe direction. Stat'ing afterwards
+    # would record the writer's own key and let that Edit through.
+    real = os.path.realpath(file_path)
+    seen_key = _stat_key(real)
 
     # offset is 1-based per the schema (matches the line numbers shown in
     # the output). Default 0 means "start at line 1". Coerce 0 → 1 so the
@@ -72,6 +229,10 @@ def _read(args: dict) -> str:
             lines = f.readlines()
     except OSError as exc:
         return json.dumps({"error": f"failed to read {file_path}: {exc}"})
+
+    # A partial Read (offset/limit) records normally: the contract is "you
+    # looked at this file at this version", not "you read all of it".
+    _record_seen(session_id, real, seen_key)
 
     if not lines:
         return "<system-reminder>File exists but is empty.</system-reminder>"
@@ -93,7 +254,8 @@ def _read(args: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _write(args: dict) -> str:
+def _write(args: dict, mut: _Mutation | None = None) -> str:
+    mut = mut if mut is not None else _Mutation(kind="write")
     file_path = _expand(args.get("file_path", ""))
     content = args.get("content", "")
     if not file_path:
@@ -101,11 +263,31 @@ def _write(args: dict) -> str:
     if not os.path.isabs(file_path):
         return json.dumps({"error": f"file_path must be absolute, got {file_path!r}"})
     p = Path(file_path)
+    mut.path = file_path
+    mut.real = os.path.realpath(file_path)
+    # `exists()` follows symlinks, so a dangling symlink counts as absent and
+    # writing through it is a create.
+    mut.existed = p.exists()
+
+    refusal = _gate_check(mut)
+    if refusal is not None:
+        return refusal
+
+    if mut.existed:
+        try:
+            mut.pre_bytes = p.read_bytes()
+        except OSError:
+            mut.pre_bytes = None
+
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
     except OSError as exc:
         return json.dumps({"error": f"failed to write {file_path}: {exc}"})
+
+    mut.post_text = content
+    mut.post_stat = _stat_key(mut.real)
+    mut.ok = True
     return f"File written: {file_path} ({len(content)} chars)"
 
 
@@ -114,7 +296,8 @@ def _write(args: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _edit(args: dict) -> str:
+def _edit(args: dict, mut: _Mutation | None = None) -> str:
+    mut = mut if mut is not None else _Mutation(kind="edit")
     file_path = _expand(args.get("file_path", ""))
     old_string = args.get("old_string", "")
     new_string = args.get("new_string", "")
@@ -130,10 +313,29 @@ def _edit(args: dict) -> str:
     if not p.exists():
         return json.dumps({"error": f"file does not exist: {file_path}"})
 
+    mut.path = file_path
+    mut.real = os.path.realpath(file_path)
+    mut.existed = True
+
+    refusal = _gate_check(mut)
+    if refusal is not None:
+        return refusal
+
     try:
-        original = p.read_text(encoding="utf-8")
+        pre_bytes = p.read_bytes()
     except OSError as exc:
         return json.dumps({"error": f"failed to read {file_path}: {exc}"})
+    try:
+        original = pre_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        # Previously this escaped `read_text` as a bare UnicodeDecodeError and
+        # left the aggregator, arriving at the model as an MCP exception with
+        # no path in it. A binary file is a normal mistake and deserves a
+        # normal error.
+        return json.dumps({"error": (
+            f"Edit refused: {file_path} is not valid UTF-8 text; Edit only "
+            f"handles text files."
+        )})
 
     count = original.count(old_string)
     if count == 0:
@@ -150,10 +352,16 @@ def _edit(args: dict) -> str:
         updated = original.replace(old_string, new_string, 1)
         replaced = 1
 
+    mut.pre_bytes = pre_bytes
+
     try:
         p.write_text(updated, encoding="utf-8")
     except OSError as exc:
         return json.dumps({"error": f"failed to write {file_path}: {exc}"})
+
+    mut.post_text = updated
+    mut.post_stat = _stat_key(mut.real)
+    mut.ok = True
     return f"Edited {file_path} ({replaced} replacement{'s' if replaced != 1 else ''})"
 
 
@@ -291,8 +499,12 @@ async def list_tools():
         Tool(
             name="Write",
             description=(
-                "Write a file to the local filesystem. Overwrites if the file "
-                "exists; creates parent directories as needed."
+                "Write a file to the local filesystem. Creates parent "
+                "directories as needed. Creating a new file needs nothing "
+                "first; OVERWRITING an existing one requires that you have "
+                "Read it in this session and that it has not changed since — "
+                "otherwise the write is refused and tells you to Read it. Use "
+                "Edit for changing part of a file."
             ),
             inputSchema={
                 "type": "object",
@@ -306,8 +518,14 @@ async def list_tools():
         Tool(
             name="Edit",
             description=(
-                "Replace exact-match text in a file. Errors if `old_string` is "
-                "missing or appears multiple times (unless `replace_all=true`)."
+                "Replace exact-match text in a file. You must Read the file in "
+                "this session first — a partial Read with offset/limit counts — "
+                "and the file must not have changed since; the edit is refused "
+                "otherwise, which is what stops an edit written from memory "
+                "from silently reverting somebody else's write. Errors if "
+                "`old_string` is missing or appears multiple times (unless "
+                "`replace_all=true`). Your own Write or Edit refreshes the "
+                "record, so consecutive edits to one file need only one Read."
             ),
             inputSchema={
                 "type": "object",
@@ -407,12 +625,23 @@ async def list_tools():
 async def call_tool(name: str, arguments: dict):
     # Sync handlers run in a worker thread — this loop also serves SSE chat,
     # voice, and the inner-voice observer; a slow disk read must not stall it.
+    session_id = get_bound_session()
     if name == "Read":
-        text = await asyncio.to_thread(_read, arguments)
-    elif name == "Write":
-        text = await asyncio.to_thread(_write, arguments)
-    elif name == "Edit":
-        text = await asyncio.to_thread(_edit, arguments)
+        text = await asyncio.to_thread(_read, arguments, session_id)
+    elif name in ("Write", "Edit"):
+        mut = _Mutation(
+            kind="write" if name == "Write" else "edit",
+            session_id=session_id,
+            # No bound session means no gate: unit tests and legacy callers
+            # dispatch straight in, and refusing them protects nothing.
+            gate_on=bool(session_id) and _gates_enabled(),
+        )
+        handler = _write if name == "Write" else _edit
+        text = await asyncio.to_thread(handler, arguments, mut)
+        if mut.ok:
+            # The writer updates the record, so an Edit immediately after a
+            # Write or Edit by the same session is allowed without re-Reading.
+            _record_seen(mut.session_id, mut.real, mut.post_stat)
     elif name == "Grep":
         text = await _grep(arguments)
     elif name == "Glob":
