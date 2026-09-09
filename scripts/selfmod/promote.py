@@ -478,6 +478,13 @@ def promote(round_id: str, worktree: Path, base: str, *,
                                                      base, live_head)
         changed_preview = W.changed_paths(Path(worktree), base)
         tree_hash = S.changed_tree_hash(worktree, head, changed_preview)
+        # The denylist was checked against the head that existed before the
+        # rebase. Content is what it matches on, and a clean rebase over a
+        # same-file, non-overlapping commit changes that content — so check
+        # again against the head that will actually land.
+        if S.is_denied(commit=head, tree_hash=tree_hash):
+            _land_failed(round_id, f"{head[:8]} (rebased) is on the rollback denylist",
+                         external=False)
 
     changed = W.changed_paths(Path(worktree), base)
 
@@ -563,6 +570,9 @@ def promote(round_id: str, worktree: Path, base: str, *,
             live_head = live_now
             changed = W.changed_paths(Path(worktree), base)
             tree_hash = S.changed_tree_hash(worktree, head, changed)
+            if S.is_denied(commit=head, tree_hash=tree_hash):
+                _land_failed(round_id, f"{head[:8]} (rebased) is on the rollback denylist",
+                             external=False)
             current.update({"commit": head, "parent": live_head, "rollback_target": live_head,
                             "changed_paths": changed, "tree_hash": tree_hash,
                             "gate": gate_report.get("rungs")})
@@ -667,6 +677,64 @@ def promote(round_id: str, worktree: Path, base: str, *,
                             "commit": head, "error": str(exc)[:400]})
         S.clear_current()
         raise
+    finally:
+        set_drain(False)
+        release_pool_pause()
+        S.clear_pause()
+
+
+def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
+                  reason: str = "", max_wait: float = IDLE_MAX_WAIT,
+                  force: bool = False) -> dict:
+    """Restart the live services the way the promoter does, for a human.
+
+    A `supervisorctl restart` by hand is indistinguishable from a crash to the
+    guardian: "Service down, but no promotion to revert" fired four times on
+    2026-09-09 for four deliberate restarts, each through every channel —
+    ledger, ALERT.md, journal, toast, voice, vault note. The promoter avoids
+    that with the pause lease (`S.set_pause`), and it pauses the worker pool
+    and drains the backend first so a research job is not killed mid-flight
+    and its connection errors do not land in someone's observation window.
+    CLAUDE.md describes that procedure in prose as five manual steps. This is
+    the procedure.
+
+    Refuses while a promotion is under observation unless forced: the guardian
+    is judging that build, and restarting it underneath the window is the
+    promoter's job to avoid, not a human's to repeat. Pool and drain are
+    released whatever happens; the lease is cleared once the services are
+    healthy, so the guardian is blind for exactly the restart and nothing
+    after it.
+    """
+    observed = S.read_current()
+    if observed and observed.get("state") in ("landing", "observing") and not force:
+        raise PromoteError(
+            f"{str(observed.get('commit'))[:8]} is under observation "
+            f"({observed.get('state')}) — let it settle, or pass force=True")
+    health_for = {"lloyd-mcp": MCP_HEALTH, "lloyd-backend": f"{BACKEND}/health"}
+    unknown = [p for p in programs if p not in health_for]
+    if unknown:
+        raise PromoteError(f"no health probe for {unknown}; restart those by hand")
+
+    S.set_pause(RESTART_LEASE)   # the guardian must not read this as a crash
+    ok, why = wait_idle(max_wait)   # pauses the pool, arms the drain, waits for quiet
+    if not ok:
+        S.clear_pause()          # wait_idle already released the pool and the drain
+        raise PromoteError(why)
+    started = time.time()
+    done: list[str] = []
+    try:
+        for program in programs:
+            S.set_pause(RESTART_LEASE)   # refreshed per leg, as the promoter does
+            ok, msg = restart_process(program)
+            if not ok:
+                raise PromoteError(f"restart {program} failed: {msg}")
+            if not _wait_health(health_for[program], 90.0):
+                raise PromoteError(f"{program} never became healthy after restart")
+            done.append(program)
+        S.append_event({"event": "restart", "programs": list(done), "by": "human",
+                        "reason": reason[:300], "seconds": round(time.time() - started, 1)})
+        return {"restarted": done, "seconds": round(time.time() - started, 1),
+                "idle": why, "reason": reason}
     finally:
         set_drain(False)
         release_pool_pause()

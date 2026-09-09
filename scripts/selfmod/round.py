@@ -253,6 +253,15 @@ def main(argv=None) -> int:
     b = sub.add_parser("bless", help="record the running commit as last-known-good")
     b.add_argument("--note", default="")
     sub.add_parser("recover", help="clear BROKEN/halted and start the stack")
+    # A restart by hand looked like a crash to the guardian and fired every
+    # alert channel, and the pause-drain-restart procedure was five manual
+    # steps in CLAUDE.md. This is that procedure, with the lease the promoter
+    # uses so the guardian is blind for exactly the restart.
+    r = sub.add_parser("restart", help="pause the pool, drain, restart mcp+backend under the guardian lease")
+    r.add_argument("--reason", default="", help="recorded on the ledger")
+    r.add_argument("--only", action="append", choices=["lloyd-mcp", "lloyd-backend"],
+                   help="restart only this program (repeatable); default both, mcp first")
+    r.add_argument("--force", action="store_true", help="even while a promotion is under observation")
     args = ap.parse_args(argv)
 
     if args.cmd == "start":
@@ -272,6 +281,10 @@ def main(argv=None) -> int:
         print(json.dumps(bless(args.note), indent=2, default=str))
     elif args.cmd == "recover":
         print(json.dumps(recover(), indent=2, default=str))
+    elif args.cmd == "restart":
+        programs = tuple(args.only) if args.only else ("lloyd-mcp", "lloyd-backend")
+        print(json.dumps(P.restart_stack(programs, reason=args.reason, force=args.force),
+                         indent=2, default=str))
     return 0
 
 

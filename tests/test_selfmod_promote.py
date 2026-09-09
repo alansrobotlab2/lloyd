@@ -424,3 +424,78 @@ def test_land_failed_records_the_verdict_and_raises():
     ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "land_failed"][-1]
     assert ev["round_id"] == "SM_X" and ev["ok"] is False
     assert ev["external_blocker"] is True and ev["overlap"] == ["a"]
+
+
+# ---------------------------------------------------------------------------
+# A human restart, done the way the promoter does it
+# ---------------------------------------------------------------------------
+
+def _restart_harness(monkeypatch, *, idle=(True, "idle for 3 consecutive polls"),
+                     health=True, restart_ok=True):
+    log: list = []
+    monkeypatch.setattr(P.S, "read_current", lambda: None)
+    monkeypatch.setattr(P.S, "set_pause", lambda secs, cap=1800.0: log.append(("pause", secs)) or secs)
+    monkeypatch.setattr(P.S, "clear_pause", lambda: log.append(("clear_pause",)))
+    monkeypatch.setattr(P, "wait_idle", lambda max_wait=900.0, **k: log.append(("wait_idle",)) or idle)
+    monkeypatch.setattr(P, "restart_process", lambda program: log.append(("restart", program)) or (restart_ok, "ok"))
+    monkeypatch.setattr(P, "_wait_health", lambda url, budget: log.append(("health", url)) or health)
+    monkeypatch.setattr(P, "set_drain", lambda on, ttl=180.0: log.append(("drain", on)))
+    monkeypatch.setattr(P, "release_pool_pause", lambda: log.append(("release_pool",)))
+    return log
+
+
+def test_restart_takes_the_lease_before_touching_anything_and_clears_it_after(monkeypatch):
+    """Four deliberate restarts on 2026-09-09 fired "Service down, but no
+    promotion to revert" through every channel, because a `supervisorctl
+    restart` by hand is indistinguishable from a crash. The promoter is not
+    mistaken for one because it holds the pause lease; a human had no way to."""
+    log = _restart_harness(monkeypatch)
+    out = P.restart_stack(reason="picking up gate.py")
+
+    assert log[0] == ("pause", P.RESTART_LEASE), "the lease goes on before the idle wait"
+    assert log[1] == ("wait_idle",)
+    restarts = [e for e in log if e[0] == "restart"]
+    assert restarts == [("restart", "lloyd-mcp"), ("restart", "lloyd-backend")], "mcp first, as the promoter"
+    for i, e in enumerate(log):
+        if e[0] == "restart":
+            assert log[i - 1] == ("pause", P.RESTART_LEASE), "refreshed before each leg"
+            assert log[i + 1][0] == "health"
+    assert log[-3:] == [("drain", False), ("release_pool",), ("clear_pause",)]
+    assert out["restarted"] == ["lloyd-mcp", "lloyd-backend"]
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "restart"][-1]
+    assert ev["by"] == "human" and ev["reason"] == "picking up gate.py"
+
+
+def test_restart_refuses_under_observation_unless_forced(monkeypatch):
+    log = _restart_harness(monkeypatch)
+    monkeypatch.setattr(P.S, "read_current", lambda: {"commit": "c" * 40, "state": "observing"})
+    with pytest.raises(P.PromoteError, match="under observation"):
+        P.restart_stack()
+    assert log == [], "refused before the lease, the pool or the drain were touched"
+    P.restart_stack(force=True)
+    assert ("restart", "lloyd-backend") in log
+
+
+def test_restart_gives_up_cleanly_when_the_backend_never_goes_idle(monkeypatch):
+    log = _restart_harness(monkeypatch, idle=(False, "backend never went idle within 900s"))
+    with pytest.raises(P.PromoteError, match="never went idle"):
+        P.restart_stack()
+    assert ("restart", "lloyd-mcp") not in log
+    assert ("clear_pause",) in log, "the lease must not outlive a restart that never happened"
+
+
+def test_restart_releases_everything_when_a_leg_fails(monkeypatch):
+    log = _restart_harness(monkeypatch, health=False)
+    with pytest.raises(P.PromoteError, match="never became healthy"):
+        P.restart_stack()
+    assert log[-3:] == [("drain", False), ("release_pool",), ("clear_pause",)]
+    assert ("restart", "lloyd-backend") not in log, "stopped at the first unhealthy leg"
+
+
+def test_restart_only_one_program(monkeypatch):
+    log = _restart_harness(monkeypatch)
+    out = P.restart_stack(("lloyd-backend",))
+    assert [e for e in log if e[0] == "restart"] == [("restart", "lloyd-backend")]
+    assert out["restarted"] == ["lloyd-backend"]
+    with pytest.raises(P.PromoteError, match="no health probe"):
+        P.restart_stack(("lloyd-frontend",))

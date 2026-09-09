@@ -25,7 +25,30 @@ placeholders that `app/config.py` expands at boot. Never put a literal secret in
 
 ## Service Management
 
-Lloyd runs **directly on the host** under supervisord (installed as the `agent-supervisord.service` systemd `--user` unit; supervisord itself is the uv tool at `~/.local/bin/supervisord`). There is no longer any distrobox container in the loop. Use supervisorctl directly:
+Lloyd runs **directly on the host** under supervisord (installed as the `agent-supervisord.service` systemd `--user` unit; supervisord itself is the uv tool at `~/.local/bin/supervisord`). There is no longer any distrobox container in the loop.
+
+**To restart the backend and/or the aggregator, use the round CLI, not
+supervisorctl:**
+
+```bash
+.venvs/lloyd/bin/python -m scripts.selfmod.round restart --reason "picked up gate.py"
+.venvs/lloyd/bin/python -m scripts.selfmod.round restart --only lloyd-backend
+```
+
+It does what the promoter does for its own restarts and what this file used
+to describe as five manual steps: takes the guardian's pause lease, pauses
+the worker pool, drains the backend and waits for it to go idle, restarts
+`lloyd-mcp` then `lloyd-backend` with a health wait per leg, and releases
+all three. A bare `supervisorctl restart` is indistinguishable from a crash
+to the guardian — on 2026-09-09 four deliberate restarts each fired "Service
+down, but no promotion to revert" through every alert channel, toast and
+voice included — and it kills whatever worker job is mid-flight, whose
+connection errors then land in someone's observation window. It refuses
+while a promotion is under observation (`--force` overrides) and records a
+`restart` event on the ledger with the reason.
+
+supervisorctl is still the tool for everything else (the frontend, the
+engines, status), and is what the command above wraps:
 
 ```bash
 /home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c /home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-backend
@@ -35,7 +58,7 @@ Lloyd runs **directly on the host** under supervisord (installed as the `agent-s
 
 The process group is `lloyd-mc`, not `lloyd-backend` bare. Always use `lloyd-mc:lloyd-backend` and `lloyd-mc:lloyd-frontend`.
 
-After editing `server.py`, restart `lloyd-mc:lloyd-backend` for changes to take effect.  
+After editing `server.py`, `round restart --only lloyd-backend` for changes to take effect.  
 After editing frontend files, Vite HMR usually picks up changes automatically (no restart needed).
 
 **Never restart `agent-llm-primary` twice in quick succession.** `supervisorctl
