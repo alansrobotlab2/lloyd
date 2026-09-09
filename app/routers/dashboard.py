@@ -25,6 +25,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app import host_metrics, sessions_io, vllm_metrics
+from app.backlog_status import CLOSED_STATUSES
 
 logger = logging.getLogger("lloyd-server")
 
@@ -589,8 +590,8 @@ def _backlog() -> dict[str, Any]:
     return _cached("backlog", _VAULT_SCAN_TTL_S, _scan)
 
 
-# Statuses that take a task off the board.
-_BACKLOG_CLOSED = frozenset({"done", "closed", "cancelled", "wontfix"})
+# Statuses that take a task off the board, canonical and legacy.
+_BACKLOG_CLOSED = CLOSED_STATUSES
 
 
 def _iso(value: Any) -> str:

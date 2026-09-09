@@ -16,10 +16,11 @@ import yaml
 from mcp.types import Tool
 
 from agent_mcp._shared import parse_frontmatter_text, text_result
+from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import normalize_tags
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
-VALID_STATUSES = {"draft", "up_next", "in_progress", "done"}
+VALID_STATUSES = frozenset(PIPELINE_STATUSES)
 
 
 def parse_frontmatter(content: str) -> tuple:

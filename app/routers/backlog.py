@@ -9,13 +9,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agent_mcp._shared import parse_frontmatter_text
+from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import normalize_tags
 
 
 router = APIRouter()
 
 _BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
-_VALID_STATUSES = {"draft", "up_next", "in_progress", "done"}
+_VALID_STATUSES = frozenset(PIPELINE_STATUSES)
 _BACKLOG_PATTERN = re.compile(r"^(\d+)[-_].*\.md$")
 _BOARD_COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7"]
 _BOARD_ICONS = ["📋", "📋", "📋", "📋", "📋"]

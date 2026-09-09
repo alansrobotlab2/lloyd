@@ -36,10 +36,16 @@ from pathlib import Path
 
 import yaml
 
+from app.backlog_status import (
+    CLOSED_ALIASES,
+    OPEN_STATUSES,
+    PIPELINE_STATUSES,
+    canonical_status,
+    is_off_vocabulary,
+)
 from app.backlog_tags import normalize_tags
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
-OPEN_STATUSES = {"up_next", "draft", "in_progress"}
 
 # Tags `backlog_write_task` puts on items this loop files for itself —
 # `spawned-by-triage` from a verdict turn, `spawned-by-autoimplement` from an
@@ -252,18 +258,25 @@ def load_item(path: Path) -> Item | None:
     )
 
 
-def open_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:
-    """Open items, restricted to `boards` unless it is None."""
+def all_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:
+    """Every item on `boards`, whatever its status — including a status
+    outside `PIPELINE_STATUSES`, which is the one thing `open_items` cannot
+    show you and the reason the rescue below needs its own walk."""
     wanted = {b.lower() for b in boards} if boards else None
     out = []
     for path in sorted(BACKLOG_DIR.glob("*.md")):
         item = load_item(path)
-        if not item or item.status not in OPEN_STATUSES:
+        if not item:
             continue
         if wanted is not None and item.board.lower() not in wanted:
             continue
         out.append(item)
     return out
+
+
+def open_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:
+    """Open items, restricted to `boards` unless it is None."""
+    return [i for i in all_items(boards) if i.status in OPEN_STATUSES]
 
 
 def _ledger_events(ledger: Path, event: str, *, require_item: bool = True) -> list[dict]:
@@ -755,7 +768,9 @@ def work_title_for_round(ledger: Path, round_id: str) -> str:
 # incomplete, infra, rolled back, reopened). `done` is terminal for this
 # writer. A human may set any status by hand; the loop only rewrites a status
 # it has a ledger opinion about.
-PIPELINE_STATUSES = ("draft", "up_next", "in_progress", "done")
+# `PIPELINE_STATUSES` / `OPEN_STATUSES` come from `app.backlog_status`, which
+# five readers share; see that module for why a status outside it is the
+# failure mode rather than disagreement about what is inside it.
 TRIAGE_POOL_STATUS = "draft"
 IMPLEMENT_POOL_STATUS = "up_next"
 
@@ -775,27 +790,40 @@ def set_status(item_id: int, status: str, why: str, *,
     if status not in PIPELINE_STATUSES:
         raise ValueError(f"unknown status {status!r}")
     for item in open_items(None):
-        if item.id != int(item_id):
-            continue
-        fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
-        if fm.get("status") == status or fm.get("status") == "done":
-            return False
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
-        log = list(fm.get("activity_log") or [])
-        log.append(f"**{stamp}** — {fm.get('status')} → {status}: {why}")
-        fm["activity_log"] = log
-        fm["status"] = status
-        tags = [str(t) for t in (fm.get("tags") or [])]
-        tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
-        fm["tags"] = tags
-        fm["updated"] = stamp
-        if status == "done":
-            fm["completed"] = stamp
-        item.path.write_text(
-            f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-            f"---\n{body}", encoding="utf-8")
-        return True
+        if item.id == int(item_id):
+            return _apply_status(item.path, status, why,
+                                 add_tags=add_tags, remove_tags=remove_tags)
     return False
+
+
+def _apply_status(path: Path, status: str, why: str, *,
+                  add_tags: tuple[str, ...] = (), remove_tags: tuple[str, ...] = ()) -> bool:
+    """Write one status move onto an item file, reason in its activity log.
+
+    The single writer. `set_status` reaches it by id through `open_items`;
+    the off-vocabulary rescue reaches it by path, because the item it is
+    fixing is by definition not in `open_items`. A second definition of
+    "record a status move" is how the two would come to disagree about the
+    log line, the `updated` stamp, or which moves are refused.
+    """
+    fm, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+    if fm.get("status") == status or fm.get("status") == "done":
+        return False
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    log = list(fm.get("activity_log") or [])
+    log.append(f"**{stamp}** — {fm.get('status')} → {status}: {why}")
+    fm["activity_log"] = log
+    fm["status"] = status
+    tags = [str(t) for t in (fm.get("tags") or [])]
+    tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
+    fm["tags"] = tags
+    fm["updated"] = stamp
+    if status == "done":
+        fm["completed"] = stamp
+    path.write_text(
+        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
+        f"---\n{body}", encoding="utf-8")
+    return True
 
 
 def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS,
@@ -865,13 +893,55 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     return out
 
 
+def rescue_off_vocabulary(ledger: Path,
+                          boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[dict]:
+    """Bring items whose status is outside `PIPELINE_STATUSES` back onto the
+    board, mapping each onto the word it meant.
+
+    This cannot be part of `reconcile_statuses`' own pass, because that pass
+    reads `open_items` and `open_items` filters *on status* — so the one
+    defect it can never see is a status that is wrong in this particular way.
+    Such an item is stranded in the gap between the two halves of the system:
+    `dashboard._BACKLOG_CLOSED` counts `review` as open work, while
+    `OPEN_STATUSES` cannot see it at all, so it is shown to a human forever
+    and is invisible to every machine that would move it. #287 (`review`) and
+    #304 (`closed`) sat there from April 2026 until 2026-09-09.
+
+    Runs before the reconcile rather than after it, so the rescued item is in
+    `open_items` by the time the ledger's opinions are applied and gets a
+    real verdict in the same pass instead of waiting for the next one.
+
+    Board-filtered like everything else here: the backlog is shared, and an
+    Alfie or Architecture item with an unusual status is not this loop's to
+    rewrite.
+    """
+    from scripts.autoimplement import state as S
+    moved: list[dict] = []
+    for item in all_items(boards):
+        if not is_off_vocabulary(item.status):
+            continue
+        target = canonical_status(item.status)
+        why = (f"{item.status!r} is not one of {', '.join(PIPELINE_STATUSES)} — "
+               f"the board counted it "
+               f"{'closed' if item.status.strip().lower() in CLOSED_ALIASES else 'open'} "
+               f"and the loop could not see it at all")
+        if _apply_status(item.path, target, why):
+            S.append_event({"event": "status_moved", "item_id": item.id,
+                            "from": item.status, "to": target,
+                            "reason": why[:200], "off_vocabulary": True}, path=ledger)
+            moved.append({"item_id": item.id, "from": item.status, "to": target})
+    return moved
+
+
 def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
                        open_round_items: set[int] = frozenset(), enabled: bool = True) -> list[dict]:
     """Write the desired statuses that differ. Idempotent; returns what moved."""
     if not enabled:
         return []
     from scripts.autoimplement import state as S
-    moved: list[dict] = []
+    # First, anything the pass below is structurally unable to see. `current`
+    # is read after it so the rescued items are judged in this same pass.
+    moved: list[dict] = rescue_off_vocabulary(ledger, boards)
     current = {i.id: i.status for i in open_items(boards)}
     for iid, want in desired_statuses(ledger, boards, open_round_items=open_round_items).items():
         status, why = want[0], want[1]
