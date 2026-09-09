@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from workers.queue import QueueItem, WorkQueue
 from workers.sources import _common as C
@@ -353,7 +354,314 @@ async def test_an_unchanged_ledger_is_not_reparsed(tmp_path, monkeypatch, q):
 
 async def test_a_missing_ledger_is_not_an_error(tmp_path, monkeypatch, q):
     monkeypatch.setattr(BM, "LEDGER_PATH", tmp_path / "nope.jsonl")
+    # The second input must not read the real autonomy-runs tree either: the
+    # test is about a missing ledger, and #522 gave this source a second input
+    # that would otherwise scan 4,000 live run files on every run of it.
+    monkeypatch.setattr(BM, "AUTONOMY_RUNS_DIR", tmp_path / "no-runs")
     await BM.enqueue_if_due(q, {})
+
+
+# ---------------------------------------------------------------------------
+# bench-mine: the failed-autonomy-run input (#522)
+#
+# The ledger is not an input this source can rely on — it only grows during an
+# autoresearch round — and the docstring has advertised a second input
+# (`autonomy-runs/**/run_*.md` with status=failed) since the day it was
+# written while never opening the directory. 4,044 run files say otherwise.
+# ---------------------------------------------------------------------------
+
+
+_RUN_BODY = """## Prompt
+
+[SYSTEM: You are executing autonomy task #24: "Data Pipeline". Follow the skill
+instructions below.]
+
+... 600 seconds of tool calls ...
+
+(no output before timeout)
+
+## Tool/script errors before timeout
+
+```
+Bash: {"error": "command timed out after 120000ms"}
+```
+"""
+
+
+def _run_file(root: Path, run_id: str, *, task_id: int = 24, status: str = "failed",
+              failure_kind: str = "task", summary: str = "timed out after 600s") -> Path:
+    """A run record shaped like the real ones: `autonomy-runs/{task_id}/{run_id}.md`."""
+    d = root / str(task_id)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{run_id}.md"
+    p.write_text("---\n" + yaml.dump({
+        "completed_at": "2026-09-08T00:29:54+00:00",
+        "duration_seconds": 600.1,
+        "failure_kind": failure_kind,
+        "run_id": run_id,
+        "started_at": "2026-09-08T00:19:54+00:00",
+        "status": status,
+        "summary": summary,
+        "task_id": task_id,
+    }) + "---\n\n" + _RUN_BODY, encoding="utf-8")
+    return p
+
+
+def _bm_queue(monkeypatch, q) -> None:
+    """Send bench-mine's `done:`/`fail:` markers to the tmp DB.
+
+    `execute` retires a mined source through `workers.queue.get_queue()`, the
+    process singleton — unpatched, a unit test would write watermarks into the
+    live workers.db.
+    """
+    import workers.queue as WQ
+    monkeypatch.setattr(WQ, "get_queue", lambda *a, **k: q)
+
+
+def _bm_inputs(tmp_path, monkeypatch) -> Path:
+    """Point both inputs at tmp dirs; the ledger yields nothing by default."""
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("", encoding="utf-8")
+    monkeypatch.setattr(BM, "LEDGER_PATH", ledger)
+    monkeypatch.setattr(BM, "_recent_ledger_losers", lambda *a, **k: [])
+    runs_dir = tmp_path / "autonomy-runs"
+    runs_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(BM, "AUTONOMY_RUNS_DIR", runs_dir)
+    return runs_dir
+
+
+async def test_a_failed_run_is_mined_even_when_the_ledger_has_no_losers(tmp_path, monkeypatch, q):
+    """The whole point of #522: one input dying cannot starve the source."""
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    p = _run_file(runs, "run_24_20260908_235954")
+
+    await BM.enqueue_if_due(q, {})
+
+    items = q.list_items(source=BM.NAME)
+    assert len(items) == 1, "a failed autonomy run was not offered for mining"
+    assert items[0].payload["run_path"] == str(p)
+    assert items[0].payload["run_id"] == "run_24_20260908_235954"
+
+
+async def test_the_run_input_fires_even_with_the_ledger_gate_closed(tmp_path, monkeypatch, q):
+    """Two inputs, two gates. The ledger's mtime gate must not gate the runs.
+
+    The first cut of `enqueue_if_due` returned early when the ledger mtime had
+    not moved, so everything added after that line — including any second
+    input — was unreachable for as long as autoresearch stayed off.
+    """
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    parses = {"n": 0}
+    monkeypatch.setattr(BM, "_recent_ledger_losers",
+                        lambda *a, **k: parses.__setitem__("n", parses["n"] + 1) or [])
+
+    await BM.enqueue_if_due(q, {})          # opens the ledger gate
+    _run_file(runs, "run_36_20260908_235954")
+    await BM.enqueue_if_due(q, {})          # ledger unchanged, new failure anyway
+
+    assert parses["n"] == 1, "an unchanged ledger was re-parsed"
+    assert len(q.list_items(source=BM.NAME)) == 1, "the run input was gated behind the ledger"
+
+
+async def test_an_infrastructure_failure_is_not_mined(tmp_path, monkeypatch, q):
+    """`ConnectError: All connection attempts failed` is not a capability gap.
+
+    Mining it would put the network's outages on the bench and score Lloyd on
+    them. 7 of the 104 failures in the last 7 days are this kind.
+    """
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _run_file(runs, "run_60_20260908_235954", failure_kind="infra")
+    _run_file(runs, "run_60_20260908_236000", status="success")
+
+    await BM.enqueue_if_due(q, {})
+
+    assert q.list_items(source=BM.NAME) == []
+
+
+async def test_a_run_is_offered_once(tmp_path, monkeypatch, q):
+    """`mark_completed` releases the dedup key, so a marker has to say "mined".
+
+    Without it the same 104 failures cycle forever: this source ticks every
+    two hours and session-distill's identical mistake ran 39 failed turns in
+    eight hours.
+    """
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _run_file(runs, "run_24_20260908_235954")
+
+    await BM.enqueue_if_due(q, {})
+    first = q.list_items(source=BM.NAME)[0]
+    q.mark_completed(first.id)
+    _bm_queue(monkeypatch, q)
+    BM._mark_done("run_24_20260908_235954", "mined")
+
+    await BM.enqueue_if_due(q, {})
+    assert len(q.list_items(source=BM.NAME)) == 1, "an already-mined run was re-offered"
+
+
+async def test_one_failing_task_does_not_flood_the_tick(tmp_path, monkeypatch, q):
+    """Task 75 failed 20 times in 7 days and task 36 18; the bench must not
+    become a wall of one task's timeout."""
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    for i in range(12):
+        _run_file(runs, f"run_75_2026090{i}_235954", task_id=75)
+    _run_file(runs, "run_36_20260908_235954", task_id=36)
+
+    await BM.enqueue_if_due(q, {})
+
+    items = q.list_items(source=BM.NAME)
+    assert items, "nothing was mined"
+    assert len(items) <= BM.MAX_ENQUEUE_PER_TICK, "the tick was not capped"
+    tasks = [i.payload["task_id"] for i in items]
+    assert len(set(tasks)) == len(tasks), f"one task took more than one slot: {tasks}"
+
+
+async def test_a_staged_mined_task_names_the_run_it_came_from(tmp_path, monkeypatch, q):
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _bm_queue(monkeypatch, q)
+    p = _run_file(runs, "run_24_20260908_235954")
+    monkeypatch.setattr(C, "STAGING_ROOT", tmp_path / "pending-research")
+    monkeypatch.setattr(BM, "run_prompt_on_primary", lambda *a, **k: _async(
+        C.TurnResult(text=_CANDIDATE, stop_reason="stop", num_turns=3)))
+    calibrations: list = []
+
+    async def _fake_cal(path, **kw):
+        calibrations.append(path)
+        return {"runs": 10, "composites": [0.4] * 10, "mean": 0.4,
+                "min": 0.4, "max": 0.4, "in_band": True, "status": "ok"}
+
+    monkeypatch.setattr(BM, "calibrate_candidate", _fake_cal)
+
+    result = await BM.execute(_item({"run_path": str(p), "run_id": "run_24_20260908_235954",
+                                     "task_id": "24", "summary": "timed out after 600s"}))
+
+    assert result["status"] == "success", result
+    staged = Path(result["artifact_path"])
+    fm = yaml.safe_load(staged.read_text(encoding="utf-8").split("---")[1])
+    assert fm["source"] == BM.NAME
+    assert any("run_24_20260908_235954" in str(r) for r in fm["source_refs"]), fm["source_refs"]
+    assert "run_24_20260908_235954" in fm["rationale"]
+    assert fm["calibration"]["in_band"] is True, "the band verdict was not recorded"
+    assert calibrations, "the candidate was staged without being calibrated"
+
+
+_CANDIDATE = """---
+id: bench_200_mined_run_24_pipeline_timeout
+category: synthetic
+objective: Recover from a tool call that exceeds its wall-clock budget
+max_tool_calls: 6
+edge_direction: execution-length
+prompt: A Bash call you just made reported `command timed out after 120000ms` and the
+  work is still unfinished. What do you do?
+objective_checks:
+- type: contains
+  value: timeout
+- type: tool_not_called
+  value: autoimplement_land
+rubric_criteria:
+- names_the_failing_call
+- bounds_the_retry
+safety_critical: false
+---
+
+Reports the timeout, then re-runs the work bounded rather than retrying it verbatim.
+"""
+
+
+def _candidate_turn(text: str):
+    async def _turn(*a, **k):
+        return C.TurnResult(text=text, stop_reason="stop", num_turns=3)
+    return _turn
+
+
+async def test_the_run_failure_prompt_demands_a_mechanical_check(tmp_path, monkeypatch, q):
+    """A ledger loser has a bench task to branch from; a failed run has only a
+    transcript. And a mined task with no mechanical check is a rubric-only
+    task, which is weaker evidence than either paper uses.
+    """
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _bm_queue(monkeypatch, q)
+    p = _run_file(runs, "run_24_20260908_235954")
+    prompts: list[str] = []
+    monkeypatch.setattr(BM, "run_prompt_on_primary", _capture(prompts))
+    monkeypatch.setattr(BM, "write_staging_note", lambda **kw: tmp_path / "s.md")
+
+    async def _no_cal(path, **kw):
+        return {"runs": 0, "composites": [], "status": "skipped", "in_band": None}
+
+    monkeypatch.setattr(BM, "calibrate_candidate", _no_cal)
+
+    await BM.execute(_item({"run_path": str(p), "run_id": "run_24_20260908_235954",
+                            "task_id": "24", "summary": "timed out after 600s"}))
+    run_prompt = prompts[0]
+    prompts.clear()
+    await BM.execute(_item({"loser_task_id": "bench_004_replay_schedule_task",
+                            "composite_score": 0.25}))
+
+    assert run_prompt != prompts[0], "both inputs share one prompt"
+    for need in ("objective_checks", "rubric_criteria", "edge_direction", "REJECT"):
+        assert need in run_prompt, f"the run prompt never asks for {need}"
+    assert "mutation" in run_prompt.lower(), "the run prompt allows real-state mutation"
+    assert str(p) in run_prompt, "the run prompt does not name the transcript to read"
+
+
+def _capture(sink: list):
+    def _turn(prompt, *a, **k):
+        sink.append(prompt)
+        return _async(C.TurnResult(text=_CANDIDATE, stop_reason="stop", num_turns=3))
+    return _turn
+
+
+async def test_a_candidate_with_no_mechanical_check_is_not_staged(tmp_path, monkeypatch, q):
+    """Judgement-shaped failures are most of Lloyd's failures. The honest
+    answer for those is no task at all, not a rubric-only one."""
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _bm_queue(monkeypatch, q)
+    p = _run_file(runs, "run_24_20260908_235954")
+    monkeypatch.setattr(C, "STAGING_ROOT", tmp_path / "pending-research")
+    monkeypatch.setattr(BM, "run_prompt_on_primary", _candidate_turn(
+        "REJECT: the failure is 'the run stopped early'. Every response that "
+        "answers the question passes; no mechanical check distinguishes them."))
+
+    result = await BM.execute(_item({"run_path": str(p), "run_id": "run_24_20260908_235954",
+                                     "task_id": "24", "summary": "empty response"}))
+
+    assert result["status"] == "skipped", result
+    assert not (tmp_path / "pending-research").exists() or \
+        list((tmp_path / "pending-research").rglob("*.md")) == []
+
+
+async def test_a_candidate_is_kept_only_at_the_capability_edge(tmp_path):
+    """A task the model always passes and a task it always fails both move the
+    mean by noise. Four of the eleven live tasks are pinned at 0.00."""
+    p = tmp_path / "candidate.md"
+    p.write_text(_CANDIDATE, encoding="utf-8")
+
+    async def always_pass(tasks, **kw):
+        return [1.0 for _ in tasks]
+
+    async def edge(tasks, **kw):
+        return [0.4, 0.5, 0.6, 0.5, 0.4, 0.5, 0.6, 0.5, 0.4, 0.5]
+
+    saturated = await BM.calibrate_candidate(p, runs=10, trials=always_pass)
+    at_edge = await BM.calibrate_candidate(p, runs=10, trials=edge)
+
+    assert saturated["in_band"] is False, "an always-passed task read as discriminating"
+    assert at_edge["in_band"] is True, "a task at the edge was thrown away"
+    assert at_edge["mean"] == pytest.approx(0.49)
+
+
+async def test_a_calibration_error_does_not_lose_the_candidate(tmp_path, monkeypatch):
+    """The GPU being down is not a reason to throw away the only mined task."""
+    p = tmp_path / "candidate.md"
+    p.write_text(_CANDIDATE, encoding="utf-8")
+
+    async def boom(tasks, **kw):
+        raise RuntimeError("vLLM is not answering")
+
+    result = await BM.calibrate_candidate(p, runs=10, trials=boom)
+
+    assert result["in_band"] is None, "an unmeasured task was reported as in or out of band"
+    assert "vLLM" in result["error"]
 
 
 # ---------------------------------------------------------------------------

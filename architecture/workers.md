@@ -235,7 +235,7 @@ bounds nothing on a stream that keeps producing.
 | `youtube-digest` | one tracked-channel video: transcript → vault note → Lloyd eval → backlog draft | session, IV on |
 | `session-distill` | mines finished chats for gaps and patterns | direct |
 | `gap-fill` | resolves `label: gap` facts | direct |
-| `bench-mine` | new bench tasks from baseline losses | direct |
+| `bench-mine` | new bench tasks from failed autonomy runs, and from baseline losses when the ledger has any it can read | direct |
 
 **`deep-research` owns its own retries, and that is not a preference.** The
 pool records an in-band `{"status": "failed"}` and then calls `mark_completed`
@@ -376,9 +376,22 @@ counts because it dominates the depth table.
   `scheduled-task`; the queue itself has no edges.
 - **One pool per machine.** `claim_next` is safe across processes, but
   `recover_claimed()` at startup assumes nothing else is running.
-- **`gap-fill` and `bench-mine` have never enqueued anything here.** There is
-  one gap-labelled fact in the tree and no recent ledger losers. They are
-  correct and idle, not broken — but nothing has exercised their `execute`
+- **`bench-mine` advertised an input it never opened, and still has one it
+  cannot read.** Before #522 its `enqueue_if_due` returned early on the ledger
+  mtime, so the failed-run input its own docstring named since the first commit
+  was unreachable and the queue held zero rows for its entire life. It now
+  scans `AUTONOMY_RUNS_DIR/**/run_*.md` for `status: failed` on every tick,
+  gated by nothing the ledger does — 104 eligible failures in the last 7 days.
+  Each candidate is calibrated (`>= 10` trials, composite kept only strictly
+  inside 0.05–0.95) and tagged with one escalation direction. The ledger half
+  is still dead, and "idle" was never the right word for it:
+  `variant_sandbox.py` writes `BASELINE_<int>` while the filter matches
+  lowercase `baseline`, so 3,893 baseline rows — 648 of them recent losers —
+  have never been visible to it. That is #625, deliberately kept out of this
+  round. Nothing in this paragraph is confirmed in production until the
+  source's first real run appears in `runs`.
+- **`gap-fill` has one eligible input in the whole tree** (one gap-labelled
+  fact). Correct and idle, not broken, but nothing has exercised its `execute`
   path against real input, so treat it as untested in production.
 - **Run history grows without bound.** 4,894 runs and 4,544 queue rows today,
   6.3 MB. Fine for now; there is no retention job.
