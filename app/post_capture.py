@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 from app.paths import SESSIONS_DIR
 from app.sessions_io import mutate_session
 from app.secondary_models import (
@@ -98,8 +100,26 @@ def _append_daily_note(session_id: str, summary: str):
     entry = f"\n---\n\n### Session {now_time} PDT — Auto-captured\n\n{summary}\n"
 
     if not daily_path.exists():
+        # OKF requires a non-empty `type` (scripts/vault/validate_okf.py), and
+        # every pre-existing daily note uses this shape — see memory/2026-06-14.md.
+        # The old header was `segment: agents` with no `type`, which was wrong
+        # twice: the file lives under memory/, and each new calendar day was
+        # born a conformance violation (item #519). Dumped rather than spelled
+        # so the frontmatter is strict-parseable by construction, with the same
+        # kwargs scripts/vault/okf_migrate.py uses to repair the older ones.
+        frontmatter = yaml.safe_dump(
+            {
+                "segment": "memory",
+                "tags": ["memory", "daily-notes"],
+                "type": "note",
+                "timestamp": datetime.now(pst).strftime("%Y-%m-%dT%H:%M:%S"),
+            },
+            sort_keys=False,
+            allow_unicode=True,
+            default_flow_style=False,
+        ).rstrip()
         daily_path.write_text(
-            f"---\nsegment: agents\n---\n\n# {today} Daily Notes\n\n## Sessions\n{entry}"
+            f"---\n{frontmatter}\n---\n\n# {today} Daily Notes\n\n## Sessions\n{entry}"
         )
     else:
         with open(daily_path, "a") as f:
