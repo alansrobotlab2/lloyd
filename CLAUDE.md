@@ -374,6 +374,23 @@ held count so the skip summary can say which one it is. "Every open backlog
 item has been triaged" was true, and misleading, on a board of 122 where 106
 were this loop's own drafts.
 
+**Status is the pipeline's state machine, and the ledger is its source of
+truth.** Until 2026-09-09 the loop wrote `status` in exactly two places,
+both `done`; a `confirmed` verdict left an item wherever it was, no round
+ever set `in_progress`, and #353 landed while still `draft`. Now
+`autotriage` reads **`draft`** only and its verdict moves the item —
+`confirmed` → `up_next`, `already_done`/`stale` → `done`, anything else stays
+`draft` (triaged, not for the loop). `autoimplement` reads **`up_next`** only,
+sets `in_progress` the moment its turn starts, and the item ends `done`
+(landed and settled with the acceptance `met`, or the round's outcome said
+`unnecessary`) or back in `up_next` (external, incomplete, infra, rolled
+back, reopened, or its one attempt spent — that last one noted as a human's
+call). `backlog.desired_statuses` is the one table; `reconcile_statuses` runs
+it on every implement poll and after every turn, so a human moving an item by
+hand is honoured until the ledger next says otherwise, and untriaged items
+parked in `up_next` — where nothing can pull them — go back to `draft`. The
+first run was the migration. Kill switch: `workers.sources.autoimplement.status_pipeline`.
+
 **A landed item is closed when its round said the acceptance was met — and
 only then.** Nine promotions settled in the loop's first three days and not
 one item was closed: `promote` wrote the commit, the guardian wrote

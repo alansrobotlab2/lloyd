@@ -29,7 +29,7 @@ from workers.sources import autoimplement as I
 from workers.sources import autotriage as M
 
 
-def write_item(d: Path, item_id, *, status="up_next", days_old=100, body="Do the thing.",
+def write_item(d: Path, item_id, *, status="draft", days_old=100, body="Do the thing.",
                name="A thing", priority="medium", board="lloyd") -> Path:
     created = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
     fm = {"status": status, "priority": priority, "created": created,
@@ -229,6 +229,8 @@ def _confirm(item_id, acceptance="the check no longer reproduces", ts=None):
     S.append_event({"event": "backlog_triage", "item_id": item_id, "verdict": "confirmed",
                     "check": "grep -n x", "evidence": "still there",
                     "acceptance": acceptance}, path=S.LEDGER_PATH)
+    # What `record_verdict` does on `confirmed` now: into the implement pool.
+    B.set_status(item_id, "up_next", "test: confirmed")
 
 
 def test_only_confirmed_items_with_an_acceptance_check_are_implementable(isolated):
@@ -490,7 +492,7 @@ def test_human_only_acceptances_are_never_handed_to_the_implementer(isolated):
 
 
 def test_the_implementer_prompt_has_a_vault_route_and_renders_the_surface(isolated, monkeypatch):
-    write_item(isolated, 2)
+    write_item(isolated, 2, status="up_next")   # confirmed items sit in the implement pool
     S.append_event({"event": "backlog_triage", "item_id": 2, "verdict": "confirmed",
                     "surface": "vault", "check": "ls", "evidence": "e",
                     "acceptance": "skills/foo/SKILL.md names the new step"}, path=S.LEDGER_PATH)
@@ -989,7 +991,7 @@ def test_a_settled_landing_whose_round_met_the_acceptance_closes_the_item(isolat
 def test_a_deferred_acceptance_is_noted_and_left_open_naming_what_it_waits_on(isolated):
     """#520: 'the acceptance check is not yet closeable — it needs ~24h of
     traffic; #618 closes #520, not this report'."""
-    p = write_item(isolated, 520)
+    p = write_item(isolated, 520, status="up_next")
     _landed(520, "SM_520", "2677dea72677", outcome={"acceptance": "deferred", "landed": True,
                                                     "deferred_to": [618], "summary": "needs traffic",
                                                     "spawned": [618]})
@@ -1004,7 +1006,7 @@ def test_a_round_with_no_structured_outcome_is_noted_but_a_human_decides(isolate
     """The nine historical landings. Their rounds predate the finalizer, so
     nothing mechanical says the acceptance was met — and a closed item is
     never re-triaged, which is the reason not to guess."""
-    p = write_item(isolated, 353)
+    p = write_item(isolated, 353, status="up_next")
     _landed(353, "SM_353", "d29112b5d291", outcome=None)
     out = B.close_settled_items(S.LEDGER_PATH)
     assert out == [{"item_id": 353, "closed": False, "acceptance": None}]
@@ -1014,7 +1016,7 @@ def test_a_round_with_no_structured_outcome_is_noted_but_a_human_decides(isolate
 
 
 def test_not_met_leaves_the_item_open(isolated):
-    p = write_item(isolated, 602)
+    p = write_item(isolated, 602, status="up_next")
     _landed(602, "SM_602", "eeee11112222", outcome={"acceptance": "not_met", "landed": True,
                                                     "deferred_to": [], "summary": "", "spawned": []})
     assert B.close_settled_items(S.LEDGER_PATH)[0]["closed"] is False
@@ -1038,7 +1040,7 @@ def test_promoted_but_not_settled_is_not_a_landing_yet(isolated):
 
 
 def test_a_reverted_promotion_is_not_a_landing(isolated):
-    p = write_item(isolated, 605)
+    p = write_item(isolated, 605, status="up_next")
     _landed(605, "SM_605", "dead0000beef", reverted=True,
             outcome={"acceptance": "met", "landed": True, "deferred_to": [], "summary": "", "spawned": []})
     assert B.close_settled_items(S.LEDGER_PATH) == []
@@ -1130,3 +1132,167 @@ def test_the_prompt_says_what_met_means():
     assert "closed automatically" in low
     assert "`deferred` leaves it open and names the ids it waits on" in low
     assert "never re-triaged" in low
+
+
+
+# ===========================================================================
+# Status is the state machine: draft → up_next → in_progress → done
+# ===========================================================================
+
+def _status(isolated, iid):
+    return B._split_frontmatter(next(isolated.glob(f"{iid}-*.md")).read_text())[0].get("status")
+
+
+def test_triage_reads_draft_only(isolated):
+    write_item(isolated, 701, status="draft", days_old=90)
+    write_item(isolated, 702, status="up_next", days_old=99)      # older, but not where triage looks
+    write_item(isolated, 703, status="in_progress", days_old=98)
+    assert B.select_candidate(S.LEDGER_PATH).id == 701
+
+
+def test_confirmed_moves_the_item_into_the_implement_pool(isolated):
+    """#353 landed while still `draft`. The verdict now moves the item."""
+    p = write_item(isolated, 704)
+    item = B.load_item(p)
+    B.record_verdict(item, "confirmed", "still real", acceptance="the check passes")
+    assert _status(isolated, 704) == "up_next"
+    p = write_item(isolated, 705)
+    B.record_verdict(B.load_item(p), "unverifiable", "no claim to check")
+    assert _status(isolated, 705) == "draft", "triaged, not for the loop: stays where triage found it"
+    p = write_item(isolated, 706)
+    B.record_verdict(B.load_item(p), "stale", "moved on", close=True)
+    assert _status(isolated, 706) == "done"
+
+
+def test_implement_reads_up_next_only(isolated):
+    write_item(isolated, 707)
+    _confirm(707)
+    B.set_status(707, "draft", "a human parked it")
+    assert B.select_confirmed(S.LEDGER_PATH) is None, "parked anywhere but up_next keeps it out of the loop's hands"
+    B.set_status(707, "up_next", "back in")
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 707
+
+
+def test_set_status_is_logged_terminal_at_done_and_a_noop_when_already_there(isolated):
+    write_item(isolated, 708)
+    assert B.set_status(708, "up_next", "why not") is True
+    fm = B._split_frontmatter(next(isolated.glob("708-*.md")).read_text())[0]
+    assert fm["status"] == "up_next" and "draft → up_next: why not" in fm["activity_log"][-1]
+    assert B.set_status(708, "up_next", "again") is False
+    assert B.set_status(708, "done", "closing") is True and fm  # done sets completed
+    fm = B._split_frontmatter(next(isolated.glob("708-*.md")).read_text())[0]
+    assert fm["status"] == "done" and fm.get("completed")
+    assert B.set_status(708, "up_next", "reopen by status") is False, "done is terminal for this writer"
+    with pytest.raises(ValueError):
+        B.set_status(708, "someday", "x")
+
+
+def test_desired_statuses_covers_every_branch(isolated):
+    """One table for the migration and the steady state."""
+    # in flight: started with nothing after it
+    write_item(isolated, 710); _confirm(710)
+    S.append_event({"event": "backlog_implement", "item_id": 710, "phase": "started"}, path=S.LEDGER_PATH)
+    # landed and observing: promoted, not yet swept
+    write_item(isolated, 711); _confirm(711)
+    _blocked_round(711, "SM_711", external=False)
+    S.append_event({"event": "promoted", "round_id": "SM_711", "commit": "aa11"}, path=S.LEDGER_PATH)
+    # landed and swept (marker), left open
+    write_item(isolated, 712); _confirm(712)
+    p = next(isolated.glob("712-*.md")); fm, body = B._split_frontmatter(p.read_text())
+    fm["autoimplement_landed"] = "bb22"; p.write_text(f"---\n{yaml.dump(fm)}---\n{body}")
+    # offered again (external)
+    write_item(isolated, 713); _confirm(713); B.set_status(713, "in_progress", "was running")
+    _blocked_round(713, "SM_713", external=True)
+    # spent
+    write_item(isolated, 714); _confirm(714); B.set_status(714, "in_progress", "was running")
+    _blocked_round(714, "SM_714", external=False)
+    # confirmed, waiting, but parked in draft by nobody in particular
+    write_item(isolated, 715); _confirm(715); B.set_status(715, "draft", "parked")
+    # triaged, not confirmed
+    write_item(isolated, 716)
+    S.append_event({"event": "backlog_triage", "item_id": 716, "verdict": "unverifiable"}, path=S.LEDGER_PATH)
+    B.set_status(716, "up_next", "someone dragged it")
+    # untriaged in up_next: a dead state
+    write_item(isolated, 717, status="up_next")
+    # untriaged in draft: no opinion
+    write_item(isolated, 718, status="draft")
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[710][0] == "in_progress" and "in flight" in want[710][1]
+    assert want[711][0] == "in_progress" and "observation" in want[711][1]
+    assert want[712][0] == "in_progress" and "landed" in want[712][1]
+    assert want[713][0] == "up_next" and "offered again" in want[713][1]
+    assert want[714][0] == "up_next" and "spent" in want[714][1]
+    assert want[715][0] == "up_next" and "confirmed" in want[715][1]
+    assert want[716][0] == "draft" and "not for the unattended loop" in want[716][1]
+    assert want[717][0] == "draft" and "never triaged" in want[717][1]
+    assert 718 not in want, "no ledger opinion, already where triage looks: untouched"
+
+
+def test_reconcile_moves_only_the_differences_and_is_idempotent(isolated):
+    write_item(isolated, 720, status="up_next")           # untriaged, parked: → draft
+    write_item(isolated, 721); _confirm(721); B.set_status(721, "draft", "parked")   # → up_next
+    write_item(isolated, 722); _confirm(722)              # already up_next: untouched
+    moved = B.reconcile_statuses(S.LEDGER_PATH, None)
+    assert sorted((m["item_id"], m["from"], m["to"]) for m in moved) == [
+        (720, "up_next", "draft"), (721, "draft", "up_next")]
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "status_moved"]
+    assert {e["item_id"] for e in ev} == {720, 721}
+    assert B.reconcile_statuses(S.LEDGER_PATH, None) == []
+    assert B.reconcile_statuses(S.LEDGER_PATH, None, enabled=False) == []
+
+
+def test_a_round_sets_in_progress_and_an_unnecessary_outcome_closes_it(isolated, monkeypatch):
+    from workers.sources import autoimplement as I
+    write_item(isolated, 723); _confirm(723)
+    seen = {}
+    async def fake(prompt, **kw):
+        seen["status_during_turn"] = _status(isolated, 723)
+        return {"text": "premise no longer holds\n\nSPAWNED: none\n", "session_id": "s723",
+                "stop_reason": "stop", "num_turns": 4, "errors": [],
+                "structured": {"acceptance": "unnecessary", "landed": False, "deferred_to": [],
+                               "summary": "already true on main", "spawned": []}, "structured_error": ""}
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+    asyncio.run(I.execute(_Item({"structured_outcome": True})))
+    assert seen["status_during_turn"] == "in_progress"
+    assert _status(isolated, 723) == "done"
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_closed"][-1]
+    assert ev["item_id"] == 723 and ev["acceptance"] == "unnecessary"
+
+
+def test_an_early_exit_hands_the_item_back_to_the_pool(isolated, monkeypatch):
+    """The turn never ran (infra). It must not stay `in_progress` — that is
+    the old failure wearing a new status."""
+    from workers.sources import autoimplement as I
+    write_item(isolated, 724); _confirm(724)
+    async def dead(prompt, **kw):
+        assert _status(isolated, 724) == "in_progress"
+        return {"text": "", "session_id": "s724", "stop_reason": None, "num_turns": None,
+                "errors": ["ConnectError"]}
+    monkeypatch.setattr(C, "run_prompt_in_session", dead)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+    asyncio.run(I.execute(_Item()))
+    assert _status(isolated, 724) == "up_next"
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 724
+
+
+def test_an_abandoned_round_returns_the_item_to_the_pool(isolated, monkeypatch):
+    from workers.sources import autoimplement as I
+    write_item(isolated, 725); _confirm(725); B.set_status(725, "in_progress", "running")
+    S.append_event({"event": "backlog_implement", "item_id": 725, "phase": "finished",
+                    "round_id": "SM_725", "stop_reason": "turn_timeout", "session_id": "gone"}, path=S.LEDGER_PATH)
+    S.append_event({"event": "round_start", "round_id": "SM_725"}, path=S.LEDGER_PATH)
+    from scripts.autoimplement import round as R, worktree as W
+    monkeypatch.setattr(W, "worktree_path", lambda rid: isolated)   # "exists"
+    monkeypatch.setattr(R, "abort", lambda rid: None)
+    monkeypatch.setattr(S, "read_current", lambda: {})
+    out = I.reap_abandoned_rounds(now=9e12)
+    assert out and out[0]["round_id"] == "SM_725"
+    assert _status(isolated, 725) == "up_next"
+
+
+def test_the_outcome_schema_includes_unnecessary_and_the_prompt_explains_it():
+    from workers.sources.autoimplement import PROMPT
+    assert "unnecessary" in B.IMPLEMENT_OUTCOME_SCHEMA["properties"]["acceptance"]["enum"]
+    assert "`unnecessary` means the work is not needed after all" in " ".join(PROMPT.split())

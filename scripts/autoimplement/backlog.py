@@ -113,7 +113,7 @@ MAX_INCOMPLETE_ATTEMPTS = 2
 # open and say why. Built from this tuple, not restated, for the reason the
 # triage schema is: one list, or a new value lands in the grammar and not in
 # the validator.
-ACCEPTANCE_OUTCOMES = ("met", "not_met", "deferred")
+ACCEPTANCE_OUTCOMES = ("met", "not_met", "deferred", "unnecessary")
 
 IMPLEMENT_OUTCOME_SCHEMA: dict = {
     "type": "object",
@@ -126,7 +126,10 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
                        "description": ("met: the acceptance check recorded at triage is now "
                                        "true. not_met: it is not, and this round did not "
                                        "make it so. deferred: it cannot be judged until "
-                                       "something else happens — name it in deferred_to.")},
+                                       "something else happens — name it in deferred_to. "
+                                       "unnecessary: the work is not needed after all (the "
+                                       "premise no longer holds, or it is already true) and "
+                                       "the item should close without a landing.")},
         "deferred_to": {"type": "array", "items": {"type": "integer"},
                         "description": ("Backlog ids that must close before the acceptance "
                                         "can be judged. Empty unless acceptance is deferred.")},
@@ -737,6 +740,131 @@ def work_title_for_round(ledger: Path, round_id: str) -> str:
     return ""
 
 
+# ── Status is the pipeline's state machine ──────────────────────────────────
+#
+# Until 2026-09-09 the loop wrote `status` in exactly two places, both `done`.
+# A `confirmed` verdict left the item wherever it was; a round never set
+# `in_progress`; #353 landed while still `draft`. The ledger was the state
+# machine and the board showed none of it. Now:
+#
+#   draft ──autotriage confirms──▶ up_next ──round opens──▶ in_progress
+#                 │                                               │
+#                 └──already_done / stale──▶ done ◀── landed & met, or unnecessary
+#
+# and back to `up_next` when an attempt ends without a verdict (external,
+# incomplete, infra, rolled back, reopened). `done` is terminal for this
+# writer. A human may set any status by hand; the loop only rewrites a status
+# it has a ledger opinion about.
+PIPELINE_STATUSES = ("draft", "up_next", "in_progress", "done")
+TRIAGE_POOL_STATUS = "draft"
+IMPLEMENT_POOL_STATUS = "up_next"
+
+
+def set_status(item_id: int, status: str, why: str) -> bool:
+    """Move an open item, once, with the reason in its log. False if it is
+    not open, already there, or `done` (terminal for this writer)."""
+    if status not in PIPELINE_STATUSES:
+        raise ValueError(f"unknown status {status!r}")
+    for item in open_items(None):
+        if item.id != int(item_id):
+            continue
+        fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        if fm.get("status") == status or fm.get("status") == "done":
+            return False
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+        log = list(fm.get("activity_log") or [])
+        log.append(f"**{stamp}** — {fm.get('status')} → {status}: {why}")
+        fm["activity_log"] = log
+        fm["status"] = status
+        fm["updated"] = stamp
+        if status == "done":
+            fm["completed"] = stamp
+        item.path.write_text(
+            f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
+            f"---\n{body}", encoding="utf-8")
+        return True
+    return False
+
+
+def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS,
+                     *, open_round_items: set[int] = frozenset()) -> dict[int, tuple[str, str]]:
+    """`{item_id: (status, why)}` — what the ledger says each open item's
+    status should be. Only items the loop has an opinion about appear.
+
+    Pure, so the migration and the per-poll reconcile are the same function
+    run against the same table, and so a test can read the table without a
+    board. `open_round_items` is the set with a round in flight right now —
+    the reconciler passes it, the migration passes what it can see.
+    """
+    confirmed = confirmed_verdicts(ledger)
+    verdicts = triaged_ids(ledger)
+    outcomes = implement_outcomes(ledger)
+    # A turn in flight is a `started` with nothing after it. `implement_outcomes`
+    # reads that shape as `spent` (it is not a verdict either way), so the
+    # reconciler decides in-flight for itself rather than trusting a caller
+    # who may be running an hour after the turn began.
+    latest_phase: dict[int, str] = {}
+    for d in _ledger_events(ledger, "backlog_implement"):
+        latest_phase[int(d["item_id"])] = str(d.get("phase") or "")
+    in_flight = {i for i, ph in latest_phase.items() if ph == "started"} | set(open_round_items)
+    reverted = {str(d.get("commit") or "") for d in _ledger_events(ledger, "rollback_succeeded", require_item=False)}
+    live_promoted = {str(d.get("round_id") or "") for d in _ledger_events(ledger, "promoted", require_item=False)
+                     if str(d.get("commit") or "") not in reverted}
+    observing: set[int] = set()
+    for d in _ledger_events(ledger, "backlog_implement"):
+        if d.get("phase") == "finished" and str(d.get("round_id") or "") in live_promoted:
+            observing.add(int(d["item_id"]))
+    out: dict[int, tuple[str, str]] = {}
+    for item in open_items(boards):
+        iid = item.id
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        landed = fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS)
+        if iid in in_flight:
+            out[iid] = ("in_progress", "an autoimplement round is in flight for it")
+        elif landed:
+            out[iid] = ("in_progress", "landed, awaiting the acceptance check or a human close")
+        elif iid in observing:
+            # Promoted, not yet settled: the guardian is watching it and the
+            # sweep has not run. Neither back in the pool nor done.
+            out[iid] = ("in_progress", "landed; the promotion is under observation")
+        elif iid in outcomes:
+            verdict, detail = outcomes[iid]
+            if verdict == "spent":
+                out[iid] = ("up_next", "its one unattended attempt is spent; a human decides "
+                                       "(reopen_item to grant another)")
+            else:
+                out[iid] = ("up_next", f"offered again — {verdict}: {detail[:120]}")
+        elif iid in confirmed and not is_human_only(confirmed[iid].get("acceptance")):
+            out[iid] = ("up_next", "triage confirmed it with an acceptance check")
+        elif iid in verdicts:
+            # unverifiable / not_code / incomplete / human-only: triaged, not for
+            # the loop. Stays where triage found it.
+            out[iid] = ("draft", f"triaged {verdicts[iid]}; not for the unattended loop")
+        elif item.status == IMPLEMENT_POOL_STATUS:
+            # Untriaged but sitting in the implement pool: nothing can pull it
+            # from there. Back to where triage looks.
+            out[iid] = ("draft", "never triaged; autotriage reads draft")
+    return out
+
+
+def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                       open_round_items: set[int] = frozenset(), enabled: bool = True) -> list[dict]:
+    """Write the desired statuses that differ. Idempotent; returns what moved."""
+    if not enabled:
+        return []
+    from scripts.autoimplement import state as S
+    moved: list[dict] = []
+    current = {i.id: i.status for i in open_items(boards)}
+    for iid, (status, why) in desired_statuses(ledger, boards, open_round_items=open_round_items).items():
+        if current.get(iid) == status:
+            continue
+        if set_status(iid, status, why):
+            S.append_event({"event": "status_moved", "item_id": iid, "from": current.get(iid),
+                            "to": status, "reason": why[:200]}, path=ledger)
+            moved.append({"item_id": iid, "from": current.get(iid), "to": status})
+    return moved
+
+
 def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dict:
     """Grant an item another unattended implement attempt. Records why, in the
     ledger and on the item, so the second attempt is auditable as a decision
@@ -821,7 +949,11 @@ def triage_pool(ledger: Path,
     stop noticing that the board is growing.
     """
     seen = triaged_ids(ledger)
-    untriaged = [i for i in open_items(boards) if i.id not in seen]
+    # `draft` only: that is where an item waits to be judged. `up_next` is the
+    # implement pool and `in_progress` is a round in flight; an untriaged item
+    # in either is a dead state the reconciler moves back here.
+    untriaged = [i for i in open_items(boards)
+                 if i.id not in seen and i.status == TRIAGE_POOL_STATUS]
     fresh = [i for i in untriaged if not is_quarantined(i)]
     return fresh, len(untriaged) - len(fresh)
 
@@ -864,6 +996,11 @@ def select_confirmed(ledger: Path,
         ev = confirmed.get(item.id)
         if not ev or item.id in done:
             continue
+        # The board is the state machine now: a confirmed item the loop may
+        # take sits in `up_next`, and only there. A human parks one anywhere
+        # else to keep it out of the loop's hands.
+        if item.status != IMPLEMENT_POOL_STATUS:
+            continue
         if not acceptance_text(ev.get("acceptance")):
             continue
         if is_human_only(ev.get("acceptance")):
@@ -904,6 +1041,10 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     if close and verdict in RETIRING:
         fm["status"] = "done"
         fm["autotriage_retired"] = verdict
+    elif verdict == "confirmed" and fm.get("status") != "done":
+        # Into the implement pool. Before 2026-09-09 a confirmed item stayed
+        # wherever it was, and #353 landed while still `draft`.
+        fm["status"] = IMPLEMENT_POOL_STATUS
 
     section = (f"\n\n## Autoimplement triage — {stamp[:10]}\n\n"
                f"**Verdict:** {verdict}\n\n{evidence.strip()}\n")

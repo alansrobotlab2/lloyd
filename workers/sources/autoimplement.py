@@ -203,8 +203,11 @@ landed, and whether the acceptance check above is now `met`, `not_met`, or \
 closed automatically. `deferred` leaves it open and names the ids it waits on \
 — that is the honest answer when the check needs traffic, a nightly run, or \
 another item to close first; file that item and name it. `not_met` leaves it \
-open. A closed item is never re-triaged, so `met` on an acceptance you did not \
-actually verify is the one claim this loop cannot recover from.
+open. `unnecessary` means the work is not needed after all — the premise no \
+longer holds, or the acceptance is already true — and closes the item without a \
+landing; say so in the summary. A closed item is never re-triaged, so `met` (or \
+`unnecessary`) on a check you did not actually verify is the one claim this loop \
+cannot recover from.
 
 Report what you did, quoting the gate line rather than saying "it passed", \
 and end with one line `SPAWNED: <ids of the items you filed, or the word none>`. \
@@ -280,6 +283,7 @@ def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
             B.note_item(int(e["item_id"]),
                         f"autoimplement round {rid} abandoned: {rec['reason']}. Its work is on "
                         f"branch `autoimplement/{rid}` in ~/lloyd.")
+            B.set_status(int(e["item_id"]), "up_next", "its round was abandoned; back in the pool")
         logger.warning("reaped abandoned round %s (%s)", rid, rec["reason"])
         reaped.append(rec)
     return reaped
@@ -332,6 +336,15 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
                         "closed" if r["closed"] else "noted, left open", r["acceptance"])
     except Exception as exc:
         logger.warning("close_settled_items failed: %s", exc)
+    try:
+        # Status is the pipeline's state machine and the ledger is its source
+        # of truth: every poll, anything the two disagree on moves. This is
+        # also what migrated the board on 2026-09-09.
+        for r in B.reconcile_statuses(S.LEDGER_PATH,
+                                      enabled=bool(src_cfg.get("status_pipeline", True))):
+            logger.info("backlog #%s: %s → %s", r["item_id"], r["from"], r["to"])
+    except Exception as exc:
+        logger.warning("reconcile_statuses failed: %s", exc)
     free, why = _loop_is_free()
     if not free:
         logger.info("autoimplement: not queueing — %s", why)
@@ -360,7 +373,6 @@ def _round_opened_since(events: list[dict], since_ts: float) -> str | None:
 
 async def execute(item: QueueItem) -> dict[str, Any]:
     from scripts.autoimplement import backlog as B, state as S
-    from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
 
     free, why = _loop_is_free()
     if not free:
@@ -379,6 +391,23 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                     "phase": "started", "name": candidate.name[:200],
                     "budget": budget})
+    B.set_status(candidate.id, "in_progress", "autoimplement round starting")
+    try:
+        return await _run_and_record(item, candidate, triage, budget, started)
+    finally:
+        # Every exit — landed, aborted, timed out, never ran, skipped for a
+        # drain — hands the item back to the ledger's verdict. Without this the
+        # early returns left an item `in_progress` that nothing would ever
+        # pick up again, which is the old failure wearing a new status.
+        try:
+            B.reconcile_statuses(S.LEDGER_PATH)
+        except Exception as exc:
+            logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
+
+
+async def _run_and_record(item, candidate, triage, budget, started) -> dict[str, Any]:
+    from scripts.autoimplement import backlog as B, state as S
+    from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
     logger.info("implementing backlog #%s (budget %d): %s",
                 candidate.id, budget, candidate.name[:70])
 
@@ -459,6 +488,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                      and float(e.get("ts") or 0) >= started]
     outcome = B.parse_outcome(run.get("structured")) if want_outcome else None
     outcome_error = str(run.get("structured_error") or "")
+    if outcome and outcome["acceptance"] == "unnecessary":
+        # "Determined not to be necessary" is a verdict with no landing to wait
+        # for: the premise no longer holds, or the acceptance is already true.
+        # Closed here rather than by the settle sweep, which only sees landings.
+        B.set_status(candidate.id, "done",
+                     "the round found the work unnecessary" + (f": {outcome['summary']}" if outcome.get("summary") else ""))
+        S.append_event({"event": "item_closed", "item_id": candidate.id, "by": "autoimplement",
+                        "acceptance": "unnecessary", "reason": outcome.get("summary", "")[:300]})
     claimed = B.parse_spawned_line(run.get("text") or "")
     spawned = B.existing_ids(claimed)
     # Recorded, not enforced — the items are on disk before this line runs.

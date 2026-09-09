@@ -18,7 +18,7 @@ from scripts.autoimplement import backlog as B
 from workers.sources import autotriage as M
 
 
-def write_item(tmp_path, item_id, *, status="up_next", days_old=100, body="Do the thing.",
+def write_item(tmp_path, item_id, *, status="draft", days_old=100, body="Do the thing.",
                name="A thing", priority="medium", board="lloyd"):
     created = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
     fm = {"status": status, "priority": priority, "created": created,
@@ -44,7 +44,7 @@ def backlog_dir(tmp_path, monkeypatch):
 
 def test_only_open_items_are_candidates(backlog_dir, tmp_path):
     write_item(backlog_dir, 1, status="done")
-    write_item(backlog_dir, 2, status="up_next")
+    write_item(backlog_dir, 2, status="draft")
     write_item(backlog_dir, 3, status="closed")
     assert [i.id for i in B.open_items()] == [2]
 

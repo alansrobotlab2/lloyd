@@ -312,6 +312,34 @@ that begins `human-only:`, and `select_confirmed` skips it — the alternative
 was an implement round spent discovering it, which is what #278 cost before
 `web/src` was allowed.
 
+### 3.2a Status is the state machine
+
+Two jobs, one board, and until 2026-09-09 neither job wrote to it. The
+ledger decided everything (`backlog_triage` verdicts, `backlog_implement`
+phases) and `status` decided only open-versus-done — so the board could not
+tell you where anything was, and nine landed items sat as `up_next`.
+
+```
+draft ──autotriage: confirmed──▶ up_next ──autoimplement: round opens──▶ in_progress
+  │                                 ▲                                        │
+  └──autotriage: already_done/stale─┼──── attempt ended without a verdict ◀──┤
+                          done ◀────┘◀────────── landed & met, or unnecessary ┘
+```
+
+`autotriage` reads `draft` only; `autoimplement` reads `up_next` only. Every
+other transition is derived, not scattered: `backlog.desired_statuses`
+computes the status each open item *should* have from the ledger — in flight
+(`started` with nothing after it), landed-and-awaiting, promoted-and-observing,
+an outcome that re-offers or spends the attempt, a confirmed verdict, a
+non-confirmed verdict — and `reconcile_statuses` writes the differences, on
+every implement poll and after every turn. One table, so the migration of the
+existing board and the steady state are the same code.
+
+Two rules keep it from fighting a human: `done` is terminal for this writer,
+and the loop rewrites only statuses it has a ledger opinion about. The one
+exception is an untriaged item parked in `up_next` — nothing can pull it from
+there, so it goes back to `draft`, where triage looks.
+
 ### 3.2b The item is closed when the round says so, once the landing settles
 
 The loop wrote three records about a landing — the promotion, the guardian's
