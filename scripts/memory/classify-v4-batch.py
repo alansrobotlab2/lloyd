@@ -28,7 +28,7 @@ import threading
 import time
 import urllib.request
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -199,6 +199,19 @@ def _endpoint_alive(endpoint: str, model: str, timeout: int = 20) -> bool:
         return False
 
 
+def _summary_line(ok: int, fail: int, skipped: int, cancelled: int,
+                  elapsed: float) -> str:
+    """The one line anyone reads off a run — so every outcome needs a lane.
+
+    `cancelled` is never folded into `fail`. Drain cancels are pairs this run
+    never touched; failures are pairs it tried and could not classify. The
+    mirror-image bug (`e1f1889`) counted fabricated writes as `ok` and hid an
+    incident; counting untouched pairs as `failed` invents one.
+    """
+    return (f"Classified: {ok} ok, {fail} failed, {skipped} skipped "
+            f"(cache hit), {cancelled} cancelled (drain) in {elapsed:.1f}s")
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--sample", type=int, default=None,
@@ -277,6 +290,11 @@ def main() -> int:
     ok = 0
     fail = 0
     skipped = 0
+    # Pending futures the drain path cancels below — untouched work, not a
+    # failure. It needs its own channel because `CancelledError` is an
+    # `Exception` subclass, so the blanket handler under it cannot tell a
+    # SIGTERM drain from an endpoint that answered nothing.
+    cancelled = 0
     # Consecutive LLM failures, reset by every real classification. See the
     # fail branch for why a streak is treated as an outage, not bad luck.
     consec_fail = 0
@@ -345,7 +363,24 @@ def main() -> int:
                 completed += 1
                 try:
                     out = fut.result()
+                except CancelledError:
+                    # Drain, not failure: `_stop` was set (SIGTERM, or the
+                    # endpoint-down guard further down) and the loop above
+                    # cancelled every future that had not started. Task #74's
+                    # run at 2026-09-09T01:53Z printed `2455 ok, 6239 failed`
+                    # when 6,237 of those were this line and 2 were real, so
+                    # the number could not be alerted on in either direction
+                    # and the genuine failures were buried (#526). Nothing is
+                    # written for a cancelled pair, so the next run resumes
+                    # from it — and print nothing per pair, or the noise is
+                    # back.
+                    cancelled += 1
+                    continue
                 except Exception as exc:  # noqa: BLE001
+                    # A worker that actually raised. _process_one swallows the
+                    # LLM's own exceptions into action='fail', so what reaches
+                    # here is a bug in this runner or its context building —
+                    # a real failure, counted as one.
                     fail += 1
                     edge = futures[fut]
                     print(f"  [{completed}/{total}] EXC "
@@ -453,7 +488,7 @@ def main() -> int:
     elapsed = time.perf_counter() - t_start
     print()
     print("=" * 72)
-    print(f"Classified: {ok} ok, {fail} failed, {skipped} skipped (cache hit) in {elapsed:.1f}s")
+    print(_summary_line(ok, fail, skipped, cancelled, elapsed))
     if endpoint_down:
         print(f"[stopped] endpoint {args.endpoint} went down after {fail} failed "
               f"calls; {total - completed} candidate edges left untouched this run")
