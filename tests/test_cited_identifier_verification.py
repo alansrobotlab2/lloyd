@@ -70,8 +70,14 @@ def _load_skill_body(path: Path) -> str:
     skill = _load_skill(path.parent)
     assert skill, (
         f"{path.parent.name} does not load through agent_mcp.skills._load_skill — "
-        f"broken frontmatter or quarantined status, which means the model never "
-        f"sees it no matter what the file says")
+        f"quarantined status, which means the model never sees it no matter what "
+        f"the file says")
+    # A frontmatter that fails to parse is swallowed: `_parse_frontmatter`
+    # returns {} and the skill loads with an empty description and no tags, so
+    # skills_search can never match it while it still reads as installed.
+    assert str(skill.get("description") or "").strip(), (
+        f"{path.parent.name} loads with an empty description — its frontmatter "
+        f"does not parse, so prefetch can never surface the step this test pins")
     return skill["body"]
 
 
