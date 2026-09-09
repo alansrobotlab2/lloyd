@@ -209,6 +209,13 @@ async def run_query(
         # runs on every exit path.
         last_visible_tools: list[dict[str, Any]] = []
 
+        # Preserved-thinking window, enforced HERE at turn entry and nowhere
+        # else (backlog #520). See `_cap_history_reasoning`.
+        keep_reasoning = int(
+            getattr(options, "preserve_thinking_iterations", 0) or 0
+        )
+        _cap_history_reasoning(chat_messages, keep=keep_reasoning)
+
         while True:
             num_turns += 1
             if num_turns > options.max_turns:
@@ -436,15 +443,14 @@ async def run_query(
             # failure the observer exists for — and the persisted session
             # kept the same shape. The echo-guard re-prompt below always
             # appended after the assistant message and got this right.
-            keep_reasoning = int(
-                getattr(options, "preserve_thinking_iterations", 0) or 0
-            )
+            # Append-only from here on: `keep_reasoning` decides whether THIS
+            # message carries its reasoning, but nothing already appended —
+            # and therefore already prefilled and cached by the engine — is
+            # ever edited again. The window is applied at turn entry.
             chat_messages.append(_assistant_message_for_history(
                 text=assistant_text, tool_calls=tool_calls_committed,
                 reasoning=thinking_text if keep_reasoning > 0 else "",
             ))
-            if keep_reasoning > 0:
-                _prune_reasoning(chat_messages, keep=keep_reasoning)
 
             # Snapshot chat_messages length before firing OnEvent. The
             # observer may append a user message ("inject" lever); if it
@@ -1211,8 +1217,53 @@ def _assistant_message_for_history(
     return msg
 
 
+def _cap_history_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) -> None:
+    """Apply the preserved-thinking window ONCE, at turn entry.
+
+    The bound itself is unchanged (`_prune_reasoning`, same `keep`). What
+    changed is *where* it is applied, and that is the whole of backlog
+    #520: this used to run after every iteration, inside the loop.
+
+    Removing reasoning from a message the engine already prefilled is not
+    a free edit. vLLM's Automatic Prefix Caching keys KV blocks on the
+    serialized token prefix, so dropping tokens out of message *k*
+    invalidates every block after *k* and the next request re-prefills
+    them. With `keep=6` the message dropped at iteration *n* is the one
+    from *n-7*, so the cliff lands on iteration 8 and then recurs on every
+    iteration after it. Measured over the sessions created 2026-09-09:
+    cached fraction 79.0% at iteration 7 -> **24.5% at iteration 8**, 41
+    individual sessions falling ≥4 points at exactly that index, ≈10.2M
+    tokens/day of avoidable re-prefill (`vllm:prefix_cache_hits_total` /
+    `queries_total` = 61.75% since boot).
+
+    Turn entry is the free place to pay for the bound. History arrives
+    from `app.compaction.load_and_compact_session`, the prefix is cold on
+    the first request of a turn regardless, and microcompaction is already
+    rewriting messages there — so windowing costs nothing that is not
+    already being spent. The intra-turn list is then a strict extension of
+    the previous request's for the whole turn.
+
+    The cost is honest and small: reasoning carried *forward* past `keep`
+    iterations within one long turn is not trimmed any more, so a turn's
+    peak input grows by whatever the older thinking costs. Session
+    20260905_151355_iv5174 produced 66.6k reasoning tokens across 52
+    iterations, which is what the window exists to bound; at `keep=6` the
+    intra-turn overshoot is the thinking from iterations 1..n-6 that used
+    to be dropped. `eval/run_preserve_thinking_eval.py` prices the
+    keep-window trade-off if that ever needs re-tuning.
+    """
+    if keep <= 0:
+        return
+    _prune_reasoning(chat_messages, keep=keep)
+
+
 def _prune_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) -> None:
     """Keep `reasoning` on the most recent `keep` assistant messages only.
+
+    Callers: `_cap_history_reasoning` at turn entry ONLY. Calling this from
+    inside the iteration loop is the defect backlog #520 was filed against
+    — it rewrites history the engine has already cached and collapses the
+    prefix-cache hit rate from iteration `keep`+2 onward.
 
     Preserved thinking is not free: the review turn on
     20260905_151355_iv5174 generated 66.6k reasoning tokens, so carrying

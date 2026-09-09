@@ -170,8 +170,55 @@ def test_disabled_by_default_carries_nothing(monkeypatch):
         assert "reasoning" not in m, m
 
 
-def test_window_is_bounded(monkeypatch):
-    """Only the most recent N iterations keep their reasoning."""
+def test_history_is_append_only_across_iterations(monkeypatch):
+    """Every request must be a strict extension of the one before it.
+
+    This is the prefix-cache contract, and it is the measurement rather
+    than a design preference: vLLM's Automatic Prefix Caching keys KV
+    blocks on the serialized token prefix, so dropping a token from
+    message *k* invalidates every block after *k*, and the engine reports
+    that as a collapsed `cached_tokens` instead of an error.
+
+    Aggregating `assistant.stats.{cache_read, input_tokens}` over the
+    sessions created 2026-09-09 (one row per session × iteration) the
+    cached fraction ran 73-79% across iterations 3-7 and then fell to
+    **24.5% at iteration 8**, with 41 individual sessions dropping ≥4
+    points at exactly that index. `keep=6` predicts index 8 — the message
+    dropped at iteration *k* is the one from *k-7*. Backlog #520 cost that
+    cliff ≈10.2M re-prefilled tokens/day.
+
+    `_ThinkingScript` snapshots each request with `dict(m)`, so a later
+    in-place `pop` on the live buffer does NOT retroactively appear in an
+    earlier snapshot. That is what makes this a test of what was actually
+    sent rather than of what the buffer looks like afterwards.
+    """
+    script = _ThinkingScript([
+        ("T1", "a", [{"id": "c1", "name": "Bash", "arguments": {}}]),
+        ("T2", "b", [{"id": "c2", "name": "Bash", "arguments": {}}]),
+        ("T3", "c", [{"id": "c3", "name": "Bash", "arguments": {}}]),
+        ("T4", "d", []),
+    ])
+    # keep=1 prunes hardest, i.e. it is the worst case for the invariant.
+    captured = _run(monkeypatch, script, preserve_thinking_iterations=1)
+
+    assert len(captured) == 4, captured
+    for i in range(1, len(captured)):
+        prev, cur = captured[i - 1], captured[i]
+        assert len(cur) > len(prev), f"request {i+1} is shorter than request {i}"
+        assert cur[: len(prev)] == prev, (
+            f"request {i+1} rewrote history already sent in request {i} — "
+            "every KV block after the changed message gets re-prefilled"
+        )
+
+
+def test_window_is_bounded_at_the_turn_boundary(monkeypatch):
+    """The keep-window still bounds what a turn carries; it just may not be
+    enforced by editing history the engine has already cached.
+
+    Enforcement moved to turn entry (`_cap_history_reasoning`), which is
+    where history is rebuilt from the session JSON anyway and where the
+    prefix is cold regardless — so windowing there costs nothing.
+    """
     script = _ThinkingScript([
         ("T1", "a", [{"id": "c1", "name": "Bash", "arguments": {}}]),
         ("T2", "b", [{"id": "c2", "name": "Bash", "arguments": {}}]),
@@ -180,10 +227,25 @@ def test_window_is_bounded(monkeypatch):
     ])
     captured = _run(monkeypatch, script, preserve_thinking_iterations=2)
 
-    # Final request carries three prior assistant turns; only the last
-    # two keep reasoning.
+    # Intra-turn: nothing sent in an earlier iteration is taken back.
     kept = [m.get("reasoning") for m in _assistants(captured[-1])]
-    assert kept == [None, "T2", "T3"], kept
+    assert kept == ["T1", "T2", "T3"], kept
+
+
+def test_turn_boundary_cap_prunes_incoming_history():
+    """Reasoning arriving from a previous turn is windowed on entry."""
+    from app.harness.loop import _cap_history_reasoning
+
+    msgs = [{"role": "assistant", "content": f"a{i}", "reasoning": f"R{i}"}
+            for i in range(4)]
+    _cap_history_reasoning(msgs, keep=2)
+    assert [("reasoning" in m) for m in msgs] == [False, False, True, True]
+    assert msgs[2]["reasoning"] == "R2"
+
+    # A disabled knob leaves history alone.
+    msgs2 = [{"role": "assistant", "content": "a", "reasoning": "R"}]
+    _cap_history_reasoning(msgs2, keep=0)
+    assert msgs2[0]["reasoning"] == "R"
 
 
 def test_prune_reasoning_keeps_most_recent():
