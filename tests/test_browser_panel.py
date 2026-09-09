@@ -661,6 +661,40 @@ async def test_url_bar_falls_back_to_http_for_a_scheme_it_added(monkeypatch):
                      "http://127.0.0.1:8080/api/mc/state"]
 
 
+async def test_url_bar_retries_once_when_the_fallback_loses_a_navigation_race():
+    """The failed https attempt settles into Chromium's error page.
+
+    An immediate retry collides with it: "Navigation to http://... is
+    interrupted by another navigation to chrome-error://chromewebdata/". That
+    interruption says nothing about whether the scheme was right, so giving up
+    there reports an SSL error for a URL that works.
+    """
+    calls = []
+
+    async def fake_navigate(url, wait_until="domcontentloaded"):
+        calls.append(url)
+        if url.startswith("https://"):
+            return json.dumps({"error": "net::ERR_SSL_PROTOCOL_ERROR at " + url})
+        if len([c for c in calls if c.startswith("http://")]) == 1:
+            return json.dumps({"error": 'Navigation to "%s" is interrupted by '
+                                        'another navigation to "chrome-error://chromewebdata/"' % url})
+        return json.dumps({"ok": True, "url": url, "title": "t", "status": 200})
+
+    import agent_mcp.browser as bm
+    orig_nav, orig_push, orig_page = bm._browser_navigate, bm._push_browser_state, bm._existing_page
+    bm._browser_navigate = fake_navigate
+    bm._push_browser_state = lambda *_: _async(None)
+    bm._existing_page = lambda: None
+    try:
+        out = await bm.navigate_from_ui("127.0.0.1:8080/x")
+        assert out.get("ok") is True, out
+        assert calls == ["https://127.0.0.1:8080/x",
+                         "http://127.0.0.1:8080/x",
+                         "http://127.0.0.1:8080/x"]
+    finally:
+        bm._browser_navigate, bm._push_browser_state, bm._existing_page = orig_nav, orig_push, orig_page
+
+
 async def test_url_bar_never_downgrades_a_scheme_the_user_typed(monkeypatch):
     """The fallback is scoped to a completion we made.
 

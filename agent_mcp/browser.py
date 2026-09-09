@@ -1249,12 +1249,31 @@ async def navigate_from_ui(url: str) -> dict:
     # same fallback; we scope it to a completion we made, so a URL the user
     # typed `https://` on themselves is never silently downgraded.
     if completed and result.get("error") and _looks_like_wrong_scheme(result["error"]):
+        # A failed navigation settles into `chrome-error://chromewebdata/`
+        # asynchronously, and an immediate second goto races that: "Navigation
+        # to http://... is interrupted by another navigation to
+        # chrome-error://chromewebdata/". So let the page settle, then retry
+        # once more if we lost the race anyway — the interruption says nothing
+        # about whether the scheme was right, and giving up there reports an
+        # SSL error for a URL that works.
         retry = "http://" + url[len("https://"):]
-        raw = await _browser_navigate(retry)
-        try:
-            alt = json.loads(raw)
-        except Exception:
-            alt = None
+        alt = None
+        for attempt in range(2):
+            page = _existing_page()
+            if page is not None:
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=3000)
+                except Exception:
+                    pass
+            try:
+                alt = json.loads(await _browser_navigate(retry))
+            except Exception:
+                alt = None
+            if not isinstance(alt, dict):
+                alt = None
+                break
+            if not alt.get("error") or "interrupted by another navigation" not in alt["error"]:
+                break
         if isinstance(alt, dict) and not alt.get("error"):
             result = alt
 
