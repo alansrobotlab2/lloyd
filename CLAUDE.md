@@ -392,6 +392,35 @@ hand is honoured until the ledger next says otherwise, and untriaged items
 parked in `up_next` — where nothing can pull them — go back to `draft`. The
 first run was the migration. Kill switch: `workers.sources.autoimplement.status_pipeline`.
 
+**But a status outside that vocabulary is invisible to the loop and open on
+the board.** Five lists name it — the loop, the `backlog_*` tools, the
+Mission Control writer, `dashboard._BACKLOG_CLOSED`, and `STATUSES` in the
+React board — and all five agreed on the four words, so drift between them
+was never the bug. None had a case for a value *outside* them, and the two
+halves then disagreed in the worst direction: the dashboard counted such an
+item as open work while `OPEN_STATUSES` could not see it at all. Nothing
+could move it either — `set_status` and `reconcile_statuses` both reach
+items through `open_items`, which filters *on status*, so the pass that
+exists to correct a status is structurally unable to reach the one that is
+wrong in this particular way. #287 (`review`) and #304 (`closed`) sat there
+from April 2026 until 2026-09-09, stranded when the vocabulary was narrowed
+to four words and nothing migrated what was already on disk.
+`app/backlog_status.py` is the one definition now (stdlib-only in `app/`,
+like `backlog_tags`, so the autoimplement CLI does not pull `mcp` and
+`httpx` in behind it), and `backlog.rescue_off_vocabulary` runs at the top
+of every reconcile — before the main pass, so a rescued item is judged in
+that same pass — walking by **board** rather than by status, since an Alfie
+item with an unusual status is not this loop's to rewrite. The mapping is
+deliberately lopsided: only words already known to be terminal (`closed`,
+`cancelled`, `wontfix` — the legacy half of `_BACKLOG_CLOSED`, which is the
+tree's only record that they ever meant anything) reach `done`, and
+everything else becomes `draft`. Calling a word terminal when it is not
+buries a live item where nothing will look again; calling it live when it is
+not costs one triage run that closes it. `is_off_vocabulary` is
+case-sensitive — `status: Done` strands exactly as `review` does, since no
+reader lowercases — while an *absent* status is not off-vocabulary at all,
+because every reader already defaults it to `draft`.
+
 **A landed item is closed when its round said the acceptance was met — and
 only then.** Nine promotions settled in the loop's first three days and not
 one item was closed: `promote` wrote the commit, the guardian wrote
