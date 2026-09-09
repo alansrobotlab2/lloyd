@@ -1222,7 +1222,8 @@ def test_desired_statuses_covers_every_branch(isolated):
     assert want[711][0] == "in_progress" and "observation" in want[711][1]
     assert want[712][0] == "in_progress" and "landed" in want[712][1]
     assert want[713][0] == "up_next" and "offered again" in want[713][1]
-    assert want[714][0] == "up_next" and "spent" in want[714][1]
+    assert want[714][0] == "draft" and "spent" in want[714][1], (
+        "up_next means implement will take it, and it will not; a human decides")
     assert want[715][0] == "up_next" and "confirmed" in want[715][1]
     assert want[716][0] == "draft" and "not for the unattended loop" in want[716][1]
     assert want[717][0] == "draft" and "never triaged" in want[717][1]

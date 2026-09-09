@@ -330,7 +330,8 @@ draft ──autotriage: confirmed──▶ up_next ──autoimplement: round op
 other transition is derived, not scattered: `backlog.desired_statuses`
 computes the status each open item *should* have from the ledger — in flight
 (`started` with nothing after it), landed-and-awaiting, promoted-and-observing,
-an outcome that re-offers or spends the attempt, a confirmed verdict, a
+an outcome that re-offers (`up_next`) or spends the attempt (`draft` — the
+pool means implement will take it, and it will not), a confirmed verdict, a
 non-confirmed verdict — and `reconcile_statuses` writes the differences, on
 every implement poll and after every turn. One table, so the migration of the
 existing board and the steady state are the same code.

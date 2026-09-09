@@ -830,8 +830,12 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
         elif iid in outcomes:
             verdict, detail = outcomes[iid]
             if verdict == "spent":
-                out[iid] = ("up_next", "its one unattended attempt is spent; a human decides "
-                                       "(reopen_item to grant another)")
+                # Not `up_next`: that pool means "implement will take this", and
+                # it will not — the one unattended attempt is used, and a second
+                # is a human's call (`reopen_item`). `draft` is where a human
+                # looks for things that need a judgment.
+                out[iid] = ("draft", "its one unattended attempt is spent; a human decides "
+                                     "(reopen_item to grant another)")
             else:
                 out[iid] = ("up_next", f"offered again — {verdict}: {detail[:120]}")
         elif iid in confirmed and not is_human_only(confirmed[iid].get("acceptance")):
