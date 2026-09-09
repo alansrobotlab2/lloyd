@@ -255,7 +255,25 @@ class DrainActive(RuntimeError):
 
 
 class TurnTimeout(RuntimeError):
-    """The turn outlived its own budget and was cancelled in the backend."""
+    """The turn outlived its own budget and was cancelled in the backend.
+
+    Carries whatever the turn had already streamed. A run killed at its budget
+    is what the deadline anchor exists to make rare rather than impossible, and
+    the text it had produced by then is the most valuable thing about it: the
+    direct `run_query` path that `autonomy.run_task` used before this wrote it
+    into the run record under "Partial response before timeout". Raising a bare
+    error would discard it, and a caller cannot tell the difference between a
+    turn that produced nothing and one whose output was dropped on the way out.
+    """
+
+    def __init__(self, message: str, *, text: str = "",
+                 tool_errors: list[str] | None = None,
+                 saw_tool_call: bool = False, session_id: str = "") -> None:
+        super().__init__(message)
+        self.text = text
+        self.tool_errors = list(tool_errors or [])
+        self.saw_tool_call = saw_tool_call
+        self.session_id = session_id
 
 
 class _SSEParser:
@@ -348,6 +366,7 @@ async def _cancel_session_turn(backend: str, session_id: str) -> bool:
 async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                                 max_turns: int = 60, priority: int = 1,
                                 inner_voice: bool = True,
+                                model: str = "primary",
                                 timeout_seconds: float | None = None,
                                 extra_disallowed: list[str] | None = None,
                                 final_schema: dict | None = None,
@@ -371,9 +390,11 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     persisted.
 
     Returns {text, session_id, stop_reason, num_turns, errors, structured,
-    structured_error}. `stop_reason` is the part callers must look at:
-    `max_turns` means the model ran out of room, and its final text is not a
-    conclusion however finished it reads.
+    structured_error, usage, tool_errors, saw_tool_call, partial}.
+    `stop_reason` is the part callers must look at: `max_turns` means the model
+    ran out of room, and its final text is not a conclusion however finished it
+    reads. `tool_errors` and `saw_tool_call` are what a caller needs to tell a
+    task that failed from an engine that was down — see the note on `out` below.
 
     `final_schema` asks the harness to restate the finished turn as a JSON
     object matching that schema (`app/harness/finalizer.py`). It is honoured
@@ -414,8 +435,15 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     backend = service_url("backend", "http://127.0.0.1:8080").rstrip("/")
     if timeout_seconds is None:
         timeout_seconds = turn_timeout_for(source)
-    session_id = new_worker_session(title=title, source=source, inner_voice=inner_voice)
-    payload = {"session_id": session_id, "text": prompt, "model": "primary",
+    # `model` reaches BOTH the session file and the turn payload. It used to be
+    # hardcoded "primary" here while `new_worker_session` already took the
+    # parameter, so the one caller with a model of its own could not use it —
+    # autonomy task #68 is pinned to `secondary`, and routing it at primary
+    # would have been a silent model swap on a slot that exists to keep the
+    # 35B's single tenancy off the primary's queue.
+    session_id = new_worker_session(title=title, source=source, model=model,
+                                    inner_voice=inner_voice)
+    payload = {"session_id": session_id, "text": prompt, "model": model,
                "priority": int(priority), "max_turns": int(max_turns),
                # The same wall clock this function enforces below, announced to
                # the model. Iterations are not the budget a worker turn dies on:
@@ -430,9 +458,18 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
         if final_schema_prompt:
             payload["final_schema_prompt"] = final_schema_prompt
 
+    # `partial`, `tool_errors` and `saw_tool_call` exist for the caller that
+    # has to WRITE A RECORD of a turn that did not finish. `autonomy.run_task`
+    # distinguishes an infrastructure hiccup from a task failure on exactly
+    # these two signals — a fast empty answer with no tool call is the model
+    # server, and it gets a flat cooldown instead of burning the task's retry
+    # budget. On 2026-09-01 every task returned empty for eleven hours; without
+    # that split the whole fleet would have disabled itself. Losing the signals
+    # in the move to sessions would have re-armed that, invisibly.
     out: dict = {"text": "", "session_id": session_id, "stop_reason": None,
                  "num_turns": None, "errors": [], "structured": None,
-                 "structured_error": ""}
+                 "structured_error": "", "usage": None, "tool_errors": [],
+                 "saw_tool_call": False, "partial": ""}
 
     async def _stream() -> None:
         # Generous per-read timeout: a long tool call legitimately produces no
@@ -452,10 +489,22 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                 async for event, data in _aiter_sse(resp):
                     if event == "error":
                         out["errors"].append(str(data)[:400])
+                    elif event == "text_delta":
+                        # Accumulated only so a turn killed at its budget can
+                        # still report what it had. `done.response` is the
+                        # authority whenever the turn reaches it.
+                        out["partial"] += str(data.get("text") or "")
+                    elif event == "tool_start":
+                        out["saw_tool_call"] = True
+                    elif event == "tool_complete":
+                        if data.get("is_error"):
+                            out["tool_errors"].append(
+                                str(data.get("result") or "")[:600])
                     elif event == "done":
                         out["text"] = str(data.get("response") or "")
                         out["stop_reason"] = data.get("stop_reason")
                         out["num_turns"] = data.get("num_turns")
+                        out["usage"] = data.get("stats")
                         out["structured"] = data.get("structured")
                         out["structured_error"] = str(data.get("structured_error") or "")
                         break
@@ -466,5 +515,7 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
         cancelled = await _cancel_session_turn(backend, session_id)
         raise TurnTimeout(
             f"worker turn in {session_id} exceeded {timeout_seconds:.0f}s; "
-            f"backend cancel {'accepted' if cancelled else 'FAILED'}") from None
+            f"backend cancel {'accepted' if cancelled else 'FAILED'}",
+            text=out["partial"], tool_errors=out["tool_errors"],
+            saw_tool_call=out["saw_tool_call"], session_id=session_id) from None
     return out

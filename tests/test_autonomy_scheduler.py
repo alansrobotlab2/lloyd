@@ -34,11 +34,18 @@ def aut(tmp_path, monkeypatch):
 
 
 def write_task(aut, task_id, **fm):
+    # `session_backed: False` by default so this file keeps testing the DIRECT
+    # route it was written against — the one that patches `app.harness.run_query`
+    # and reads events straight off the harness. That route still exists (it is
+    # what a task opts into, and the fallback when the backend is unreachable),
+    # so this is real coverage rather than a test bent to keep passing. The
+    # session route, which is now the fleet default, is covered in
+    # tests/test_autonomy_session_route.py.
     base = {
         "id": task_id, "name": f"task{task_id}", "type": "autonomy",
         "status": "up_next", "frequency": "daily", "priority": "medium",
         "skill_name": aut._SKILL_FOR_TESTS, "timeout_seconds": 2,
-        "max_retries": 3, "failure_count": 0,
+        "max_retries": 3, "failure_count": 0, "session_backed": False,
     }
     base.update(fm)
     base = {k: v for k, v in base.items() if v is not None}

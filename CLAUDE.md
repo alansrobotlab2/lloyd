@@ -1587,6 +1587,66 @@ that knows when it is done. All three had an unbounded step:
 
 `tests/test_autonomy_budget_anchor.py` pins the anchor.
 
+### An autonomy run leaves a transcript
+
+`run_task` called `run_query` straight from the backend process: no session, no
+Inner Voice, and nothing of the run survived but its final text in
+`autonomy-runs/<task>/<run_id>.md`. That is ~180 turns a day across 30 enabled
+tasks — more LLM work than the rest of the system put together — and the
+failures were what it hid worst. Three rows from the run table, indistinguishable
+from outside: `#74 empty response after 257s (stop_reason=stop, turns=14)`,
+`#78 empty response after 10s (turns=1)`, `#80 timed out after 300s`. #74 did
+fourteen iterations of real work and reported none of it, and nothing existed
+that could say what they were. Meanwhile `backlog-selfmod` triaged one item in a
+visible session while #35 `backlog-triage` did the same job nightly, unwatched.
+
+The route is now `run_prompt_in_session` — the same path the four session-backed
+worker sources use, rather than a second copy of the observer wiring, which
+`app/routers/messages.py` remains the only home of.
+
+- **Two switches, because the two costs differ.** `autonomy.session_backed.enabled`
+  buys one session file per run and is on. `…​.inner_voice` attaches the observer,
+  which runs on the **primary** at priority 1 and judges roughly one tool result
+  in five — real load on the engine these tasks are already the heaviest consumer
+  of — so it is off for the fleet and opted into per task. Frontmatter
+  (`session_backed:`, `inner_voice:`) beats config, so moving one task is not a
+  fleet change. A *blank* frontmatter value means "not stated" and follows
+  config; a task that opts out is a script-runner, not a judgement task.
+- **What moved is not the transcript, it is the signals.** `run_task` already
+  decided things on `saw_tool_call`, `tool_errors` and partial text, and all
+  three came off harness events that a route over HTTP does not have.
+  `saw_tool_call` plus the wall clock is what separates *infra* from *task* on an
+  empty answer — infra gets a flat cooldown, task spends the retry budget and
+  disables at `max_retries`. On 2026-09-01 every task returned empty for eleven
+  hours; misclassifying that disables the fleet. They ride SSE now (`tool_start`,
+  `tool_complete.is_error`, `text_delta`), and `tool_complete` had to start
+  carrying `is_error` — it was computed for persistence a few lines on and simply
+  never put on the frame.
+- **`TurnTimeout` carries the partial answer.** #80's lesson one layer up: a run
+  killed at its budget holding eight paragraphs must not record "(no output
+  before timeout)". A bare exception would have reintroduced exactly the failure
+  the deadline anchor above exists to make rare.
+- **`run_prompt_in_session` hardcoded `model="primary"`** while
+  `new_worker_session` already took the parameter. #68 is pinned to `secondary`;
+  routing autonomy through it unchanged would have been a silent model swap onto
+  the slot that exists to keep the 35B's single tenancy off the primary's queue.
+- **An unreachable backend falls back to the direct route.** The session is a
+  better record of a run, not a precondition for one, and autonomy has to keep
+  working through exactly the outages that make the record most interesting. The
+  fallback is recorded in the run record (`session_fallback`), because a fallback
+  nobody can see is a route that has silently stopped being taken. `DrainActive`
+  is the exception and is **not** routed around — it is now an infra failure, so
+  a landing does not spend the retry budget of every task due in the window.
+- **Two hand-written lists on either side of an HTTP hop.** The router names the
+  SSE events; the stream loop branches on those names. A renamed frame does not
+  error, it stops matching, and the signal reads as "the model never did that" —
+  the Browser tab's four-list bug at two lists.
+  `tests/test_autonomy_session_route.py` pins that what is consumed is a subset
+  of what is emitted, and that `is_error` is on the frame.
+
+The run record and the `run_task` result now carry `session_id`, which is the
+only thing that answers the question a record like #74's opens.
+
 Pause and drain the pool before restarting the backend
 (`POST /api/workers/pause`): a worker turn killed mid-flight logs connection
 errors that land in the guardian's observation window and get blamed on

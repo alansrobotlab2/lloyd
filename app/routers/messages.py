@@ -928,6 +928,12 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 set_turn_activity(session_id, "working")
                 await _emit(turn, "tool_complete", {
                     "call_id": call_id, "name": evt.get("name", ""), "result": result_str,
+                    # Persisted onto the tool-result message a few lines down
+                    # already; on the frame as well because a worker driving
+                    # this turn over SSE has no other view of it. Autonomy's
+                    # run record counts tool errors, and the direct `run_query`
+                    # path it came from read `is_error` straight off the event.
+                    "is_error": bool(evt.get("is_error", False)),
                 })
                 _event_log.log_event(session_id, "brain1.tool_result_received", {
                     "tool_call_id": call_id,

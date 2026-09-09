@@ -202,6 +202,11 @@ _POOL_TIMEOUT_MARGIN = 30
 _INFRA_EXC_NAMES = frozenset({
     "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout", "PoolTimeout",
     "RemoteProtocolError", "ConnectionRefusedError", "ConnectionResetError",
+    # A landing has the backend draining and refusing turns. That is the
+    # self-modification loop deploying, not this task failing, and counting it
+    # would spend the retry budget of every task due during the window — the
+    # 2026-09-01 shape, where an eleven-hour outage nearly disabled the fleet.
+    "DrainActive",
 })
 
 
@@ -593,6 +598,184 @@ def _build_deadline_anchor(timeout_s: int):
     return build_deadline_anchor(timeout_s, what="task")
 
 
+# ── How a task's turn is run ──────────────────────────────────────────────────
+# Until 2026-09-09 there was one route: `run_query` straight from this process.
+# No session, no transcript, no Inner Voice. What survived a run was its final
+# text in `autonomy-runs/<task>/<run_id>.md`, and nothing of how it got there.
+#
+# That is ~180 turns a day — more LLM work than the rest of the system put
+# together — and the failures are the ones it hides worst. Three examples from
+# the run table, all of which read identically from outside: `#74 empty response
+# after 257s (stop_reason=stop, turns=14, tool_errors=0)` did fourteen
+# iterations of real work and reported none of it; `#78 empty response after
+# 10s (turns=1)`; `#80 timed out after 300s` on a script that takes 2.4s. A
+# transcript answers "doing what?" for all three and the run record cannot.
+#
+# So the default route is now a real session, through the same
+# `run_prompt_in_session` the four session-backed worker sources use — rather
+# than a second copy of the observer wiring, which `app/routers/messages.py`
+# remains the only home of.
+#
+# Two switches, because the two costs are different:
+#
+#   * `session_backed` — one session file per run. Cheap, and the whole point.
+#   * `inner_voice` — the observer, which runs on the PRIMARY at priority 1 and
+#     judges roughly one tool result in five. That is real load on the engine
+#     these tasks are already the heaviest consumer of, so it is off by default
+#     and opted into per task. The judgement-heavy tasks want it (a KG merge or
+#     a skill rewrite is exactly what an observer is for); a task that shells
+#     out to a script does not.
+#
+# Frontmatter on the task wins over config, so one task can be moved without
+# touching the fleet. `None` means "not stated" — a task that says nothing
+# follows the config, which is what makes the fleet switch a fleet switch.
+_SESSION_DEFAULTS = {"enabled": True, "inner_voice": False}
+
+
+def _session_policy(task: dict) -> tuple[bool, bool]:
+    """(session_backed, inner_voice) for this task, config then frontmatter."""
+    try:
+        from app.config import CONFIG
+        cfg = (CONFIG.get("autonomy") or {}).get("session_backed") or {}
+    except Exception:
+        cfg = {}
+
+    def pick(key: str) -> bool:
+        val = task.get(key if key != "enabled" else "session_backed")
+        if val is None or str(val).strip() == "":
+            val = cfg.get(key, _SESSION_DEFAULTS[key])
+        if isinstance(val, str):
+            return val.strip().lower() in ("1", "true", "yes", "on")
+        return bool(val)
+
+    return pick("enabled"), pick("inner_voice")
+
+
+async def _run_task_direct(turn: dict, tool_errors: list, *, prompt: str,
+                           task_model: str, model_env: dict, timeout: int) -> None:
+    """The original route: `run_query` in this process. No session, no observer.
+
+    Kept for tasks that opt out, and as the fallback when the backend cannot be
+    reached — a task must still run when the thing hosting its transcript is
+    the thing that is down.
+    """
+    from app.harness import run_query, RunOptions
+    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
+    from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
+    from prompt_builder import build_system_prompt
+
+    config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
+    # Resolve the tool surface through the same helpers the chat and voice
+    # routers use (app/routers/messages.py:1243). Two things were wrong
+    # with building it here by hand:
+    #
+    #   * the raw yaml.safe_load bypassed ${VAR} expansion and
+    #     data/tool_overrides.yaml — the same defect the 2026-09-04 review
+    #     fixed in builtin_task, in a second location;
+    #   * tool_search kwargs were never passed, so tool_search_baseline
+    #     stayed empty and the harness fell back to _DEFAULT_BASELINE_TOOLS
+    #     (Bash, Read, Write, Edit, Grep, Glob, Task). Every autonomy run
+    #     therefore had Bash permanently visible while http_search and
+    #     http_fetch sat behind a ToolSearch round-trip — and the nightly
+    #     research jobs are what generate the trajectories the skill miner
+    #     learns from, so the bias fed itself.
+    options = RunOptions(
+        model=task_model,
+        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
+        system_prompt=build_system_prompt(),
+        max_turns=config.get("agent", {}).get("max_turns", 60),
+        permission_mode="bypassPermissions",
+        mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
+        disallowed_tools=_get_disallowed_tools(),
+        env=model_env,
+        priority=1,
+        state_anchor=_build_deadline_anchor(timeout),
+        **_get_harness_kwargs(),
+    )
+
+    async with asyncio.timeout(timeout):
+        async for evt in run_query([{"role": "user", "content": prompt}], options):
+            if evt["type"] == "text_delta":
+                turn["text"] += evt["text"]
+            elif evt["type"] == "tool_call":
+                turn["saw_tool_call"] = True
+            elif evt["type"] == "result":
+                turn["stop_reason"] = evt.get("stop_reason")
+                turn["usage"] = evt.get("usage")
+                turn["num_turns"] = evt.get("num_turns")
+            elif evt["type"] == "tool_result" and evt.get("is_error"):
+                content = evt.get("content")
+                if isinstance(content, list):
+                    content = " ".join(
+                        str(b.get("text", b)) if isinstance(b, dict) else str(b)
+                        for b in content
+                    )
+                tool_errors.append(str(content)[:600])
+
+
+async def _run_task_in_session(turn: dict, tool_errors: list, *, task: dict,
+                               task_id, prompt: str, task_model: str,
+                               model_env: dict, timeout: int,
+                               inner_voice: bool) -> None:
+    """The session route: the backend's own chat path, so the run leaves a trace.
+
+    `TurnTimeout` is translated to `asyncio.TimeoutError` so the caller keeps
+    ONE timeout branch. The partial text rides across on the exception — a run
+    killed at its budget writing "(no output before timeout)" when it had in
+    fact produced eight paragraphs is the exact reading failure #80 taught, and
+    it would be a regression to reintroduce it one layer up.
+
+    A backend that cannot be reached falls back to the direct route rather than
+    failing the task. The session is a better record of a run, not a
+    precondition for one, and autonomy has to keep working through exactly the
+    outages that make the record most interesting.
+    """
+    from workers.sources._common import (
+        DrainActive, TurnTimeout, run_prompt_in_session)
+
+    config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
+    max_turns = int(config.get("agent", {}).get("max_turns", 60))
+    title = f"#{task_id} {task.get('name') or 'autonomy task'}"[:80]
+
+    try:
+        run = await run_prompt_in_session(
+            prompt, title=title, source="autonomy-task", model=task_model,
+            max_turns=max_turns, priority=1, inner_voice=inner_voice,
+            timeout_seconds=float(timeout))
+    except TurnTimeout as exc:
+        turn["text"] = exc.text
+        turn["saw_tool_call"] = exc.saw_tool_call
+        turn["session_id"] = exc.session_id or turn["session_id"]
+        tool_errors.extend(exc.tool_errors)
+        raise asyncio.TimeoutError from None
+    except DrainActive:
+        # A landing has the backend draining. Not this task's failure, and not
+        # a reason to route around the drain onto the direct path — that is the
+        # very turn `run_prompt_on_primary`'s own drain check exists to stop.
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Task #%s: session route unavailable (%s: %s); running direct",
+            task_id, type(exc).__name__, exc)
+        turn["session_fallback"] = f"{type(exc).__name__}: {exc}"[:200]
+        await _run_task_direct(turn, tool_errors, prompt=prompt,
+                               task_model=task_model, model_env=model_env,
+                               timeout=timeout)
+        return
+
+    turn["text"] = run.get("text") or ""
+    turn["stop_reason"] = run.get("stop_reason")
+    turn["usage"] = run.get("usage")
+    turn["num_turns"] = run.get("num_turns")
+    turn["saw_tool_call"] = bool(run.get("saw_tool_call"))
+    turn["session_id"] = run.get("session_id")
+    tool_errors.extend(run.get("tool_errors") or [])
+    # An SSE `error` frame is a turn that broke, not one that answered. The
+    # direct route surfaces the same thing as a raised exception.
+    for err in (run.get("errors") or []):
+        tool_errors.append(f"stream error: {err}")
+
+
 def _get_model_env(model_name: str) -> dict:
     config_path = LLOYD_HOME / "config.yaml"
     if not config_path.exists():
@@ -763,8 +946,11 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 "Task #%s timeout_seconds=%ds exceeds the caller cap %ds; using %ds",
                 task_id, declared_timeout, max_duration, timeout)
 
-    logger.info("Running task #%s: %s (model=%s, timeout=%ds)",
-                task_id, task.get("name"), task_model, timeout)
+    session_backed, inner_voice = _session_policy(task)
+    logger.info("Running task #%s: %s (model=%s, timeout=%ds, route=%s%s)",
+                task_id, task.get("name"), task_model, timeout,
+                "session" if session_backed else "direct",
+                ", IV" if session_backed and inner_voice else "")
     started_at = now_iso
     # Capture tool/script failures that happen INSIDE the run (e.g. a Bash command
     # exiting non-zero). The harness returns these to the model as tool_results with
@@ -773,71 +959,27 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     tool_errors: list[str] = []
 
     try:
-        from app.harness import run_query, RunOptions
-        from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
-        from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
-        from prompt_builder import build_system_prompt
-
-        system_prompt = build_system_prompt()
-
-        config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
-        # Resolve the tool surface through the same helpers the chat and voice
-        # routers use (app/routers/messages.py:1243). Two things were wrong
-        # with building it here by hand:
-        #
-        #   * the raw yaml.safe_load bypassed ${VAR} expansion and
-        #     data/tool_overrides.yaml — the same defect the 2026-09-04 review
-        #     fixed in builtin_task, in a second location;
-        #   * tool_search kwargs were never passed, so tool_search_baseline
-        #     stayed empty and the harness fell back to _DEFAULT_BASELINE_TOOLS
-        #     (Bash, Read, Write, Edit, Grep, Glob, Task). Every autonomy run
-        #     therefore had Bash permanently visible while http_search and
-        #     http_fetch sat behind a ToolSearch round-trip — and the nightly
-        #     research jobs are what generate the trajectories the skill miner
-        #     learns from, so the bias fed itself.
-        disallowed_tools = _get_disallowed_tools()
-
-        options = RunOptions(
-            model=task_model,
-            base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
-            system_prompt=system_prompt,
-            max_turns=config.get("agent", {}).get("max_turns", 60),
-            permission_mode="bypassPermissions",
-            mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
-            disallowed_tools=disallowed_tools,
-            env=model_env,
-            priority=1,
-            state_anchor=_build_deadline_anchor(timeout),
-            **_get_harness_kwargs(),
-        )
-
-        messages = [{"role": "user", "content": prompt}]
-        final_response = ""
-        stop_reason = None
-        usage = None
-        num_turns = None
-        saw_tool_call = False
+        # Both routes fill this in AS THEY STREAM rather than returning it at
+        # the end, because the branches that need it most — timeout,
+        # cancellation — are the ones where there is no end to return from.
+        turn: dict = {"text": "", "stop_reason": None, "usage": None,
+                      "num_turns": None, "saw_tool_call": False,
+                      "session_id": None, "session_fallback": None}
 
         try:
-            async with asyncio.timeout(timeout):
-                async for evt in run_query(messages, options):
-                    if evt["type"] == "text_delta":
-                        final_response += evt["text"]
-                    elif evt["type"] == "tool_call":
-                        saw_tool_call = True
-                    elif evt["type"] == "result":
-                        stop_reason = evt.get("stop_reason")
-                        usage = evt.get("usage")
-                        num_turns = evt.get("num_turns")
-                    elif evt["type"] == "tool_result" and evt.get("is_error"):
-                        content = evt.get("content")
-                        if isinstance(content, list):
-                            content = " ".join(
-                                str(b.get("text", b)) if isinstance(b, dict) else str(b)
-                                for b in content
-                            )
-                        tool_errors.append(str(content)[:600])
+            if session_backed:
+                await _run_task_in_session(
+                    turn, tool_errors, task=task, task_id=task_id, prompt=prompt,
+                    task_model=task_model, model_env=model_env, timeout=timeout,
+                    inner_voice=inner_voice)
+            else:
+                await _run_task_direct(
+                    turn, tool_errors, prompt=prompt, task_model=task_model,
+                    model_env=model_env, timeout=timeout)
         except asyncio.TimeoutError:
+            final_response = turn["text"]
+            stop_reason, usage = turn["stop_reason"], turn["usage"]
+            num_turns = turn["num_turns"]
             logger.warning("Task #%s timed out after %ds", task_id, timeout)
             partial = (f"## Partial response before timeout\n\n{final_response}"
                        if final_response else "(no output before timeout)")
@@ -851,7 +993,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 kind="task",
                 extra={"timeout": True, "timeout_seconds": timeout,
                        "stop_reason": stop_reason, "usage": usage,
-                       "num_turns": num_turns, "tool_errors": len(tool_errors)},
+                       "num_turns": num_turns, "tool_errors": len(tool_errors),
+                       "session_id": turn["session_id"]},
             )
         except asyncio.CancelledError:
             # The worker pool cancels via asyncio.wait_for. CancelledError is a
@@ -859,6 +1002,9 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             # below used to catch it: the run vanished with no record at all and
             # the task file was left in_progress until recover_stuck_tasks found
             # it. Record it, then re-raise so cancellation still propagates.
+            final_response = turn["text"]
+            stop_reason, usage = turn["stop_reason"], turn["usage"]
+            num_turns = turn["num_turns"]
             duration = (datetime.datetime.now(datetime.timezone.utc) - now).total_seconds()
             logger.warning("Task #%s cancelled after %.0fs", task_id, duration)
             partial = (f"## Partial response before cancellation\n\n{final_response}"
@@ -870,9 +1016,15 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 kind="task", alert=False,
                 extra={"cancelled": True, "stop_reason": stop_reason,
                        "usage": usage, "num_turns": num_turns,
-                       "tool_errors": len(tool_errors)},
+                       "tool_errors": len(tool_errors),
+                       "session_id": turn["session_id"]},
             )
             raise
+
+        final_response = turn["text"]
+        stop_reason, usage = turn["stop_reason"], turn["usage"]
+        num_turns, saw_tool_call = turn["num_turns"], turn["saw_tool_call"]
+        session_id = turn["session_id"]
 
         duration = (datetime.datetime.now(datetime.timezone.utc) - now).total_seconds()
 
@@ -897,7 +1049,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 kind=kind,
                 extra={"empty": True, "stop_reason": stop_reason, "usage": usage,
                        "num_turns": num_turns, "tool_errors": len(tool_errors),
-                       "saw_tool_call": saw_tool_call},
+                       "saw_tool_call": saw_tool_call, "session_id": session_id},
             )
 
         completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -919,7 +1071,18 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         is_silent = final_response.strip() == "[SILENT]"
         meta = {"stop_reason": stop_reason, "usage": usage, "num_turns": num_turns,
                 "tool_errors": len(tool_errors), "silent": is_silent,
-                "silent_failure_indicators": len(silent_failures)}
+                "silent_failure_indicators": len(silent_failures),
+                "session_id": session_id}
+        if turn["session_fallback"]:
+            meta["session_fallback"] = turn["session_fallback"]
+        # The transcript is the point of the session route, so the run record
+        # names it. A record that says a run took 257 seconds and produced
+        # nothing is the start of a question; the session id is the only thing
+        # that answers it.
+        if session_id:
+            body_parts.insert(
+                0, f"**Transcript:** session `{session_id}` "
+                   f"— Inner Voice tab, or `sessions/{session_id}.json`")
 
         _write_run_record(
             task_id=task_id, run_id=run_id, status="success",
@@ -959,6 +1122,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             "success": True, "status": "success", "task_id": task_id, "run_id": run_id,
             "duration_seconds": round(duration, 1),
             "response_preview": final_response[:300],
+            "session_id": session_id,
             "meta": meta,
         }
 

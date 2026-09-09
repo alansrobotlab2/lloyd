@@ -107,6 +107,24 @@ autonomy:
   enabled: true
   task_dir: ~/obsidian/autonomy
   tick_interval: 60
+  # Run each task's turn in a real session instead of calling `run_query`
+  # straight from this process. ~180 turns a day used to leave nothing behind
+  # but their final text — `#74 empty response after 257s (turns=14)` did
+  # fourteen iterations of real work and reported none of it, and no transcript
+  # existed to say what they were.
+  #
+  # `inner_voice` is a separate switch because the costs differ. A session file
+  # per run is cheap; the observer runs on the PRIMARY at priority 1 and judges
+  # roughly one tool result in five, which is real load on the engine these
+  # tasks are already the heaviest consumer of. So it is off for the fleet and
+  # opted into per task — the judgement-heavy ones (a KG merge, a skill
+  # rewrite) want it; a task that shells out to a script does not.
+  #
+  # Either can be overridden per task in its frontmatter (`session_backed:`,
+  # `inner_voice:`), which is what makes moving one task not a fleet change.
+  session_backed:
+    enabled: true
+    inner_voice: false
 autoresearch:
   bench_dir: ~/obsidian/lloyd/bench
   default_budget_minutes: 120

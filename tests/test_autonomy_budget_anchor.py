@@ -123,12 +123,30 @@ async def test_anchors_are_user_messages(clock):
     assert all(m["role"] == "user" for m in await collect(anchor))
 
 
-def test_run_task_wires_the_anchor_to_the_resolved_timeout():
-    """The anchor must be built from `timeout` — the value `asyncio.timeout`
-    actually gets after the pool-cap clamp — not from the frontmatter's
+def test_both_routes_get_the_anchor_from_the_resolved_timeout():
+    """The anchor must be built from `timeout` — the value the run is actually
+    bounded by after the pool-cap clamp — not from the frontmatter's
     `timeout_seconds`. Warning at 70% of a budget the run does not have is
-    worse than not warning: it arrives after the kill."""
-    source = __import__("inspect").getsource(autonomy.run_task)
-    assert "state_anchor=_build_deadline_anchor(timeout)" in source
+    worse than not warning: it arrives after the kill.
+
+    Both routes are checked because there are two of them now, and they reach
+    the same anchor by different means: the direct route builds it into
+    `RunOptions.state_anchor`, while the session route sends `timeout_seconds`
+    to `run_prompt_in_session`, which puts it on the payload as
+    `deadline_seconds` for the chat path to build there. A route that dropped
+    the clamp would warn late, and nothing else in the system would say so.
+    """
+    inspect = __import__("inspect")
+
+    direct = inspect.getsource(autonomy._run_task_direct)
+    assert "state_anchor=_build_deadline_anchor(timeout)" in direct
     # `timeout` is the clamped value; `declared_timeout` is not.
-    assert "state_anchor=_build_deadline_anchor(declared_timeout)" not in source
+    assert "declared_timeout" not in direct
+
+    session = inspect.getsource(autonomy._run_task_in_session)
+    assert "timeout_seconds=float(timeout)" in session
+    assert "declared_timeout" not in session
+
+    # And the caller hands both the same clamped value.
+    caller = inspect.getsource(autonomy.run_task)
+    assert caller.count("timeout=timeout") == 2
