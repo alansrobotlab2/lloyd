@@ -372,27 +372,60 @@ facts newer than the export timestamp and refuses if it finds any — re-run
 `export` and `import`, then swap. `--force` exists and is documented as
 something you should not use.
 
-### Where the run stands (2026-09-04)
+### The 2026-09-03 run: attempted, abandoned 2026-09-08
 
-Frozen 04:46Z against a baseline of MRR 0.496 / NDCG@10 0.579. Carry-over
-exported: 444 facts, 62 aliases, 46 experiment files, 7 review files, 0 stated
-edges. Extraction complete at 2,837/2,837 documents; the rebuild tree holds
-7,649 entity directories, 12,372 fact files, 75,081 indexed facts and 20,323
-edges over 5,663 nodes — 74% node coverage against the live tree's 14%.
+Kept here because the machinery still works and someone will be tempted again.
 
-The gate has been run once and failed, on a snapshot that predates the finished
-extraction (corpus coverage 62%) and on a carry-over not yet imported (0/444).
-Provenance, duplicate IDs, contamination and junk names all passed. `import`
-then `gate` are the next steps. #24, #48 and #74 stay paused; fact writes were
-turned back on deliberately — the rebuild runs for hours and the system stays
-usable — which is what `swap`'s second refusal exists to cover.
+It froze at 04:46Z against a baseline of MRR 0.496 / NDCG@10 0.579, extracted
+the full 2,837-document corpus, and produced a tree that was cleaner than live
+on every structural axis: 100% provenance against 7.9%, zero junk-named entity
+directories against 977, and 20,314 active edges against 14,049. Every one of
+the seven structural gate checks passed.
 
-Also outstanding: 977 junk-named entity directories
-(`_pipeline/memory-graph/junk-entities-review.json`) holding 6,898 facts in the
-live tree. The extractor rejects these names before registration now, so the set
-cannot grow; removing the existing ones moves fact files and drops edges, which
-is a merge-class operation and goes through review. The rebuild tree has none,
-which is why the gate can demand zero.
+It never swapped, because it lost on the only measure that decides what Lloyd
+finds: MRR 0.482 against the 0.496 baseline, and a fuzzy category down 0.250.
+NDCG@10 was actually better (0.584 vs 0.579), and it won on multi-hop (+0.074)
+and technical (+0.114). It lost on `single` and `fuzzy`.
+
+Read that fuzzy number carefully before repeating the exercise. The category
+holds **two** queries. One was unchanged; `autonomy-pipeline` went from rank 1
+to rank 2 on one document. That single rank slip is the entire -0.250, and a
+per-category threshold of -0.05 cannot distinguish it from a systemic
+regression at n=2. The gate is right to refuse on a signal it cannot read, but
+the signal is not what the number looks like.
+
+**What actually killed it was the reasoning underneath, not the score.** Three
+things justified rebuilding rather than repairing, and by 2026-09-08 two were
+gone:
+
+- *Duplicate fact IDs* were repaired in place, 130,614 of them (above).
+- *Self-ingestion* — roughly half of live's facts came from the pipeline
+  re-reading its own output — was fixed by the allow-list corpus in
+  `pipeline_config.yaml`, which protects the live tree just as well.
+- *Provenance* is the one that remains, and only a rebuild can fix it
+  retroactively.
+
+Meanwhile the live tree tripled its edges in the single day #24 spent unpaused,
+and the rebuild aged: frozen at a 09-04 snapshot, its corpus coverage drifted
+98.88% → 98.78% against a 98% floor purely because the vault kept growing. A
+parked rebuild is a wasting asset, and it needs a fresh `export`/`import` for
+every fact stated since its freeze.
+
+So the trade was 222,532 facts of which 92% can never be dated, against 75,560
+that all can — and worse retrieval today. Abandoned. The tree, its store, its
+content hashes and its state file are deleted; `freeze.json`, `gate.json` and
+the eval runs are kept under `_pipeline/backups/rebuild-20260903T214511Z/`
+alongside `kg-before.sqlite`, a 2026-09-03 snapshot of the live store.
+
+If provenance ever becomes the binding constraint, the tool is `kg_rebuild.py`
+and this section is the record of what it costs. Do not restart one without
+first deciding what a two-query category is allowed to veto.
+
+Also outstanding, and unrelated to the rebuild: 977 junk-named entity
+directories (`_pipeline/memory-graph/junk-entities-review.json`) holding 6,898
+facts in the live tree. The extractor rejects these names before registration
+now, so the set cannot grow; removing the existing ones moves fact files and
+drops edges, which is a merge-class operation and goes through review.
 
 ---
 
