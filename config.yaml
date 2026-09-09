@@ -647,6 +647,22 @@ workers:
     # `domain-research`, whose prompt never told the model to search the web:
     # 142 notes, 90 of them empty, none ever promoted. Left disabled until the
     # legacy import has run — an empty registry makes it a no-op either way.
+    # One tracked YouTube video per real session (Inner Voice on): the
+    # script fetches the transcript into a bundle, the session reads it,
+    # writes the vault note, judges it against eval/lloyd_profile.md and
+    # files a draft backlog item when something would improve Lloyd.
+    # Replaces autonomy task #75's script-only digest for both channels.
+    # `batch` is how many sit queued at once (refilled each tick), not a
+    # daily cap; `max_inflight: 1` keeps one primary-heavy turn at a time.
+    youtube-digest:
+      enabled: true
+      interval_seconds: 300
+      max_inflight: 1
+      max_duration_seconds: 1800
+      max_turns: 40
+      batch: 3
+      inner_voice: true
+      channels: [ai-engineer, discover-ai]
     deep-research:
       enabled: true
       interval_seconds: 3600

@@ -232,6 +232,7 @@ bounds nothing on a stream that keeps producing.
 | `selfmod-regression` | paired A/B eval after a promotion | none (subprocess) |
 | `autoresearch` | one prompt-optimisation round | its own |
 | `deep-research` | one registry topic, through the deep-dive-research skill | session, IV off |
+| `youtube-digest` | one tracked-channel video: transcript → vault note → Lloyd eval → backlog draft | session, IV on |
 | `session-distill` | mines finished chats for gaps and patterns | direct |
 | `gap-fill` | resolves `label: gap` facts | direct |
 | `bench-mine` | new bench tasks from baseline losses | direct |

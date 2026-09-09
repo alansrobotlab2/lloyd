@@ -1371,6 +1371,56 @@ Kill switch: `workers.sources.backlog-selfmod.structured_verdict`, carried in
 the queue payload like the budgets so a queued item runs under the config that
 was live when it was enqueued.
 
+## YouTube channel digests: the script fetches, a session judges
+
+Two channels are tracked for new agent and model techniques — AI Engineer
+(`@aiDotEngineer`) and Discover AI (`@code4AI`). Each new video becomes a
+vault note under `knowledge/youtube/<Channel>/` **and** an answer to one
+question: does it hold anything that would improve Lloyd? When it does, a
+draft backlog item is filed (tags `youtube-eval`, `<channel-key>`).
+
+The split is the design. `scripts/youtube_channel_monitor.py` is the
+deterministic half — the channel registry (`CHANNELS`), `seen.json` per
+channel under `~/.local/share/<channel>/`, the upload listing, and
+`--fetch`, which writes the transcript, metadata and link enrichment into a
+bundle directory. `workers/sources/youtube_digest.py` is the judgement half:
+one **real session per video** through `run_prompt_in_session`, Inner Voice
+on, that reads the bundle, writes the note, evaluates it against
+`eval/lloyd_profile.md` and files the draft. Before 2026-09-08 autonomy task
+#75 did all of this inside the script with a direct POST to the model and
+thinking off — nothing of it was a transcript anyone could read, which is
+why it moved. Task #75 is paused; the old name `ai-engineer-monitor.py` is a
+shim onto `--channel ai-engineer` and the script path (`--process-one`)
+still works as an operator fallback.
+
+- **The eval rule is Alan's:** an open-source framework, tool or model may
+  be proposed for direct adoption; a commercial product is never adopted,
+  only the aspects worth recreating locally are named; a paper becomes a
+  bounded experiment. It is in the prompt, and `eval/lloyd_profile.md` is
+  the rubric's picture of Lloyd — keep that file current when the stack
+  changes, or the eval will propose what already exists.
+- **Disk decides.** The note must exist at the path the source chose and
+  carry the video's id; a `FILED: #n` claim is checked against
+  `~/obsidian/backlog` before it is recorded. The verdict is stored on the
+  `seen.json` row and projected into
+  `~/obsidian/projects/lloyd/channel-eval/<channel>.md` after every run.
+- **The script owns the retry.** The pool never retries an in-band
+  `failed`, so the source reports through `--fail` and `_is_retry_eligible`
+  decides when `--pending` offers the video again. A `DrainActive` leaves
+  the row `fetched` and the bundle is reused next tick.
+- **Tracked from a date means a floor.** `--since-days N` registers the
+  window and records the oldest video in it as `floor_video_id`; the
+  new-video walk stops there. Without it a channel is crawled back through
+  its whole history one video at a time, which is what happened to AI
+  Engineer (628 notes). `--since-days N --requeue` also puts completed
+  videos in the window back through the session so they get the eval.
+- **Transcripts are wrapped at 100 columns** because the Read tool pages by
+  line, and a 40-minute talk arrives as one 60 kB line.
+- The toolbox denies `Bash`, `Edit`, `Task`, the selfmod tools and every
+  queue writer: a transcript is untrusted text. `Read`, `Write` and
+  `backlog_write_task` stay because they are the job, and vault writes
+  outside `knowledge/`, `backlog/` and the report directory are reported.
+
 ## Knowledge graph
 
 Two layers, and the distinction matters:
