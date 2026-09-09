@@ -400,6 +400,13 @@ def test_the_guard_is_actually_wired_into_every_url_entry_point():
     cap = src.split("async def _capture_state", 1)[1].split("\nasync def ", 1)[0]
     assert "_host_block_reason" in cap, \
         "the MC frame must not carry a screenshot of a private host"
+    # DNS is a blocking syscall and these run on the aggregator's loop, the
+    # one that dispatches every MCP tool call.
+    assert "await asyncio.to_thread(_resolve_addrs" in src, \
+        "host resolution must not block the event loop"
+    for fn in ("_guard_route", "_enforce_landing", "_capture_state"):
+        body = src.split(f"async def {fn}", 1)[1].split("\nasync def ", 1)[0]
+        assert "_host_block_reason_async" in body, f"{fn} must use the async check"
 
 
 async def test_navigate_refuses_a_lan_address_without_opening_a_browser(monkeypatch):

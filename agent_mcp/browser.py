@@ -233,6 +233,37 @@ def _block_since(seq: int) -> str | None:
     return None
 
 
+async def _prewarm_host(url: str) -> None:
+    """Resolve `url`'s host off the event loop, into the cache the sync check reads.
+
+    `socket.getaddrinfo` blocks, and the two hot callers are coroutines on the
+    aggregator's loop — the same loop that dispatches every MCP tool call.
+    A literal IP costs microseconds because it never leaves the resolver, but
+    a cold hostname is a network round trip, and the route interceptor sees
+    one per unique host on every page. `_resolve_addrs` is lru_cached, so
+    warming it here makes the `_host_block_reason` call that follows free.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return
+        host = parsed.hostname or ""
+        if host and host.lower() != "localhost":
+            await asyncio.to_thread(_resolve_addrs, host)
+    except Exception:
+        # A failure here costs a blocking lookup in the check below, never
+        # correctness — the sync path resolves for itself if the cache missed.
+        pass
+
+
+async def _host_block_reason_async(url: str) -> str | None:
+    """`_host_block_reason` with the DNS moved off the loop."""
+    if not _resolve_block_private():
+        return None
+    await _prewarm_host(url)
+    return _host_block_reason(url)
+
+
 async def _guard_route(route) -> None:
     """Route interceptor. Covers fresh requests, and NOT redirects.
 
@@ -250,7 +281,7 @@ async def _guard_route(route) -> None:
     losing the browser.
     """
     try:
-        reason = _host_block_reason(route.request.url)
+        reason = await _host_block_reason_async(route.request.url)
     except Exception as exc:
         logger.warning("browser: route guard failed open on %s: %s",
                        route.request.url[:120], exc)
@@ -282,7 +313,7 @@ async def _enforce_landing(page) -> str | None:
     a screenshot of it to Mission Control.
     """
     try:
-        reason = _host_block_reason(page.url)
+        reason = await _host_block_reason_async(page.url)
     except Exception:
         return None
     if not reason:
@@ -461,7 +492,7 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
     if wait_until not in ("load", "domcontentloaded", "networkidle", "commit"):
         wait_until = "domcontentloaded"
 
-    blocked = _host_block_reason(url)
+    blocked = await _host_block_reason_async(url)
     if blocked:
         return json.dumps({"error": blocked})
 
@@ -580,7 +611,7 @@ async def _browser_tabs(action: str, page_id: int | None = None, url: str | None
             return json.dumps({"error": f"Invalid URL: {url}"})
         if parsed.scheme not in ("http", "https"):
             return json.dumps({"error": "Only http/https URLs supported"})
-        blocked = _host_block_reason(url)
+        blocked = await _host_block_reason_async(url)
         if blocked:
             return json.dumps({"error": blocked})
 
@@ -681,7 +712,7 @@ async def _capture_state(tool_name: str) -> dict | None:
     # A frame is a screenshot plus an accessibility tree; both are page
     # content, and the tab is a surface a human reads. Same rule as snapshot.
     try:
-        if _host_block_reason(page.url):
+        if await _host_block_reason_async(page.url):
             return None
     except Exception:
         pass
