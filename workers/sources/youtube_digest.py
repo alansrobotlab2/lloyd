@@ -190,7 +190,11 @@ No preamble in the file and no code fence around it.
 3. **Evaluate it for Lloyd.** Read {profile_path} — it describes Lloyd's \
 stack, what already exists, and the standing problems. Decide whether this \
 video contains a specific technique, tool, framework, model or finding that \
-could concretely improve Lloyd, and where it would plug in.
+could concretely improve Lloyd, and where it would plug in. **When a claim \
+touches something Lloyd already measures, check the live number first** — the \
+profile's *Live measurements* section says where, reachable with `http_fetch` \
+and `Read`. A verdict that rests on "Lloyd already does this" must be backed \
+by the counter that says so.
    - `actionable` (relevance 70-100): a specific change with a measurable \
 acceptance, feasible on two 24 GB GPUs with no cloud dependency.
    - `worth_a_look` (40-69): promising, but needs reading before a change can \

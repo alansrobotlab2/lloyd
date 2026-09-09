@@ -131,6 +131,30 @@ projects. It also modifies its own code through a gated loop.
 9. Research pipeline: deep research off a registry; quality of synthesis and
    dedupe of topics is unmeasured.
 
+## Live measurements — check these before deciding
+
+When a video's claim touches a number Lloyd already measures, fetch the
+number before choosing a verdict. "Lloyd already caches the prefix" or
+"already batches" is only as true as the counter says, and the first digest
+session (2026-09-09) rated a talk `worth_a_look` on the assumption that the
+prefix stayed cached, while the live counter read 68.7%. From a digest
+session there is no Bash: use `http_fetch` on loopback and `Read` on files.
+
+- **Inference** — `http://127.0.0.1:8096/metrics`:
+  `vllm:prefix_cache_hits_total` / `vllm:prefix_cache_queries_total` is the
+  hit rate since boot (an append-only loop should be well above 90%);
+  `vllm:kv_cache_usage_perc`, `vllm:num_requests_running`, and the
+  time-to-first-token histogram if present. The rate form is on
+  `http://127.0.0.1:8080/api/dashboard` under `vllm`.
+- **Retrieval** — `eval/baselines/nightly-*.json` under `~/lloyd` (newest is
+  current): the 20-query numbers quoted above, per query, with the corpus
+  the run saw.
+- **Workers, autonomy, backlog** — `http://127.0.0.1:8080/api/dashboard`
+  (`workers`, `autonomy`, `backlog` sections) and
+  `http://127.0.0.1:8080/api/workers/runs` for recent run records.
+- **Prompt surface and sessions** — the same dashboard's `primary` section
+  for active turns; the prompt-surface measurements live with backlog #377.
+
 ## Things Lloyd already does (do not re-propose as new)
 
 Prefix/KV caching across iterations; preserved reasoning in history; a
