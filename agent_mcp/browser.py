@@ -1186,6 +1186,20 @@ async def shutdown() -> None:
 
 # ── Mission Control's URL bar ──────────────────────────────────────────────────
 
+# Failures that mean "right host, wrong scheme" rather than "no such page".
+_WRONG_SCHEME_MARKERS = (
+    "ERR_SSL_PROTOCOL_ERROR",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_CONNECTION_RESET",
+    "ERR_EMPTY_RESPONSE",
+    "ERR_SSL_VERSION_OR_CIPHER_MISMATCH",
+)
+
+
+def _looks_like_wrong_scheme(error: str) -> bool:
+    return any(m in error for m in _WRONG_SCHEME_MARKERS)
+
+
 async def navigate_from_ui(url: str) -> dict:
     """Drive the shared browser from the Browser tab's URL bar.
 
@@ -1215,7 +1229,8 @@ async def navigate_from_ui(url: str) -> dict:
     # and "example.com:8080/x" as a scheme, leaving them uncompleted for
     # `_browser_navigate` to reject as not-http. A protocol-relative
     # "//example.com" has no scheme either and gets the same completion.
-    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
+    completed = not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url)
+    if completed:
         url = "https://" + url.lstrip("/")
 
     raw = await _browser_navigate(url)
@@ -1225,6 +1240,23 @@ async def navigate_from_ui(url: str) -> dict:
         result = {"error": raw}
     if not isinstance(result, dict):
         result = {"error": str(result)}
+
+    # If the scheme was ours and https did not take, try http once. Local
+    # services are the case that needs it and they are split both ways on this
+    # box alone: the frontend serves TLS on 5173 while the backend, the
+    # aggregator and both engines are plain HTTP. Guessing wrong either way
+    # leaves a URL bar that cannot open the thing next to it. Browsers do the
+    # same fallback; we scope it to a completion we made, so a URL the user
+    # typed `https://` on themselves is never silently downgraded.
+    if completed and result.get("error") and _looks_like_wrong_scheme(result["error"]):
+        retry = "http://" + url[len("https://"):]
+        raw = await _browser_navigate(retry)
+        try:
+            alt = json.loads(raw)
+        except Exception:
+            alt = None
+        if isinstance(alt, dict) and not alt.get("error"):
+            result = alt
 
     # Push even on failure: a navigation that 404s or times out still leaves
     # the viewport showing something, and an unchanged tab after a click is

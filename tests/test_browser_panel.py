@@ -636,6 +636,66 @@ async def test_url_bar_completes_a_scheme_less_host(monkeypatch):
         assert result.get("ok") is True
 
 
+async def test_url_bar_falls_back_to_http_for_a_scheme_it_added(monkeypatch):
+    """Local services split both ways, so guessing once is not enough.
+
+    On this box the frontend serves TLS on 5173 while the backend, the
+    aggregator and both engines are plain HTTP. `127.0.0.1:8080` completed to
+    https dies on ERR_SSL_PROTOCOL_ERROR, and a URL bar that cannot open the
+    service next to it is not much of a URL bar.
+    """
+    tried = []
+
+    async def fake_navigate(url, wait_until="domcontentloaded"):
+        tried.append(url)
+        if url.startswith("https://"):
+            return json.dumps({"error": "net::ERR_SSL_PROTOCOL_ERROR at " + url})
+        return json.dumps({"ok": True, "url": url, "title": "t", "status": 200})
+
+    monkeypatch.setattr(browser_module, "_browser_navigate", fake_navigate)
+    monkeypatch.setattr(browser_module, "_push_browser_state", lambda *_: _async(None))
+
+    out = await browser_module.navigate_from_ui("127.0.0.1:8080/api/mc/state")
+    assert out.get("ok") is True
+    assert tried == ["https://127.0.0.1:8080/api/mc/state",
+                     "http://127.0.0.1:8080/api/mc/state"]
+
+
+async def test_url_bar_never_downgrades_a_scheme_the_user_typed(monkeypatch):
+    """The fallback is scoped to a completion we made.
+
+    Silently retrying a user's explicit `https://` over plaintext is the one
+    behaviour a URL bar must not have.
+    """
+    tried = []
+
+    async def fake_navigate(url, wait_until="domcontentloaded"):
+        tried.append(url)
+        return json.dumps({"error": "net::ERR_SSL_PROTOCOL_ERROR at " + url})
+
+    monkeypatch.setattr(browser_module, "_browser_navigate", fake_navigate)
+    monkeypatch.setattr(browser_module, "_push_browser_state", lambda *_: _async(None))
+
+    out = await browser_module.navigate_from_ui("https://example.com")
+    assert "error" in out
+    assert tried == ["https://example.com"], "must not retry over http"
+
+
+async def test_url_bar_does_not_retry_an_ordinary_404_or_dns_failure(monkeypatch):
+    """A page that is simply not there is an answer, not a scheme problem."""
+    tried = []
+
+    async def fake_navigate(url, wait_until="domcontentloaded"):
+        tried.append(url)
+        return json.dumps({"error": "net::ERR_NAME_NOT_RESOLVED"})
+
+    monkeypatch.setattr(browser_module, "_browser_navigate", fake_navigate)
+    monkeypatch.setattr(browser_module, "_push_browser_state", lambda *_: _async(None))
+
+    await browser_module.navigate_from_ui("nope.invalid")
+    assert len(tried) == 1
+
+
 async def test_url_bar_pushes_a_frame_even_when_the_page_fails(monkeypatch):
     """A 404 or a timeout still changes the viewport.
 
