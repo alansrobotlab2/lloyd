@@ -47,9 +47,9 @@ def get_sources_config() -> dict[str, dict]:
 # ~/obsidian/autonomy/, chained via depends_on — no dedicated source.
 from workers.sources import scheduled_task as _scheduled_task  # noqa: E402,F401
 from workers.sources import autoresearch as _autoresearch  # noqa: E402,F401
-from workers.sources import selfmod_regression as _selfmod_regression  # noqa: E402,F401
-from workers.sources import backlog_selfmod as _backlog_selfmod  # noqa: E402,F401
-from workers.sources import backlog_implement as _backlog_implement  # noqa: E402,F401
+from workers.sources import autoimplement_regression as _autoimplement_regression  # noqa: E402,F401
+from workers.sources import autotriage as _autotriage  # noqa: E402,F401
+from workers.sources import autoimplement as _autoimplement  # noqa: E402,F401
 from workers.sources import gap_fill as _gap_fill  # noqa: E402,F401
 from workers.sources import session_distill as _session_distill  # noqa: E402,F401
 from workers.sources import bench_mine as _bench_mine  # noqa: E402,F401
@@ -58,9 +58,9 @@ from workers.sources import youtube_digest as _youtube_digest  # noqa: E402,F401
 
 register(_scheduled_task)
 register(_autoresearch)
-register(_selfmod_regression)
-register(_backlog_selfmod)
-register(_backlog_implement)
+register(_autoimplement_regression)
+register(_autotriage)
+register(_autoimplement)
 register(_gap_fill)
 register(_session_distill)
 register(_bench_mine)

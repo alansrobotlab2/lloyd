@@ -14,7 +14,7 @@ Type=oneshot
 # guardian must still nag, and notify-send needs nothing but dbus.
 ExecStart=/usr/bin/bash -c 'snap="$HOME/.local/state/lloyd-guardian/bin/nag.py"; \
   if [ -f "$snap" ]; then exec /usr/bin/python3 "$snap"; fi; \
-  f="$HOME/.local/state/lloyd-selfmod/BROKEN"; [ -f "$f" ] || exit 0; \
+  f="$HOME/.local/state/lloyd-autoimplement/BROKEN"; [ -f "$f" ] || exit 0; \
   msg="$(head -c 400 "$f")"; \
   systemd-cat -t lloyd-guardian -p 2 -- echo "STILL BROKEN: $msg"; \
   notify-send -u critical "Lloyd guardian: STILL BROKEN" "$msg" || true'

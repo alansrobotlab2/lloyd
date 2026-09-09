@@ -381,14 +381,14 @@ def test_the_turn_budget_sits_strictly_under_the_pool_cap(monkeypatch):
     If the pool's wins, it cancels the HTTP request rather than the turn — and
     the chat path is built to keep running when its client disconnects. The
     turn is then orphaned, the pool records a failure and backs off, and for
-    `backlog-selfmod` the retry re-selects the same item, because no verdict
+    `autotriage` the retry re-selects the same item, because no verdict
     was written.
     """
     import workers.sources as sources
     monkeypatch.setattr(sources, "get_sources_config",
-                        lambda: {"backlog-selfmod": {"max_duration_seconds": 3600}},
+                        lambda: {"autotriage": {"max_duration_seconds": 3600}},
                         raising=False)
-    budget = C.turn_timeout_for("backlog-selfmod")
+    budget = C.turn_timeout_for("autotriage")
     assert budget < 3600
     assert budget == 3600 - C.POOL_TIMEOUT_MARGIN_SECONDS
 
@@ -437,7 +437,7 @@ async def test_an_overrunning_turn_is_cancelled_in_the_backend(monkeypatch, tmp_
     monkeypatch.setattr(httpx.AsyncClient, "__aenter__", never_finishes)
 
     with pytest.raises(C.TurnTimeout) as excinfo:
-        await C.run_prompt_in_session("go", title="t", source="backlog-selfmod")
+        await C.run_prompt_in_session("go", title="t", source="autotriage")
     assert cancelled, "the turn was left running in the backend"
     assert cancelled[0] in str(excinfo.value)
 
@@ -447,7 +447,7 @@ def test_a_worker_session_is_marked_as_one(tmp_path, monkeypatch):
     mistaken for the user's session by the morning brief and by
     session-distill alike."""
     monkeypatch.setattr(C, "SESSIONS_DIR", tmp_path)
-    sid = C.new_worker_session(title="t", source="backlog-selfmod")
+    sid = C.new_worker_session(title="t", source="autotriage")
     data = json.loads((tmp_path / f"{sid}.json").read_text())
 
     from app.sessions_io import is_user_session

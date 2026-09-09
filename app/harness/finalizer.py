@@ -24,7 +24,7 @@ yields plain content with no tool parser attached, `response_format.type ==
 Skipped unless the turn actually ended
 --------------------------------------
 Forcing a verdict out of a turn that died at `max_turns` recreates exactly
-the failure `INCOMPLETE` was added to fix in `scripts/selfmod/backlog.py`: a
+the failure `INCOMPLETE` was added to fix in `scripts/autoimplement/backlog.py`: a
 turn that ran out of budget has no verdict, and inventing a confident one is
 worse than recording that it did not finish.
 

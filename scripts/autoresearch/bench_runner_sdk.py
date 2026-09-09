@@ -134,9 +134,9 @@ STATEFUL_TOOLS: frozenset[str] = frozenset({
     # the research loop must not edit its own bench or promote itself
     "autoresearch_bench_add", "autoresearch_promote", "autoresearch_rollback",
     # ambient injection and self-modification
-    "session_inject_context", "selfmod_start", "selfmod_gate", "selfmod_land",
-    "selfmod_rollback", "selfmod_abort", "selfmod_vault_land",
-    "selfmod_vault_revert",
+    "session_inject_context", "autoimplement_start", "autoimplement_gate", "autoimplement_land",
+    "autoimplement_rollback", "autoimplement_abort", "autoimplement_vault_land",
+    "autoimplement_vault_revert",
 })
 
 # How to tell "the model tried and the harness refused" from "it ran".

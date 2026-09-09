@@ -57,7 +57,7 @@ def test_an_unknown_status_falls_back_to_success_and_is_logged(caplog):
 
 
 def test_a_bare_skipped_key_is_a_skip_not_a_success():
-    """The regression: `selfmod-regression` reports "cannot evaluate" this way.
+    """The regression: `autoimplement-regression` reports "cannot evaluate" this way.
 
     It returns `{"skipped": "<reason>"}` — a key where a status belongs — and
     all 22 of its runs were therefore recorded as successes with an empty
@@ -329,7 +329,7 @@ def test_no_source_blocks_the_event_loop_in_execute():
 
     That loop serves every HTTP request and streams every chat turn, so a
     source that calls `subprocess.run` from it does not slow the pool down —
-    it stops Lloyd answering. `selfmod_regression.execute` did exactly that,
+    it stops Lloyd answering. `autoimplement_regression.execute` did exactly that,
     with two 900-second eval arms and a `git worktree add` between them, and
     the 109-second run in its history is 109 seconds of dead backend.
 

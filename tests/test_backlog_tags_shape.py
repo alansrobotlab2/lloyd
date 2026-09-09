@@ -17,7 +17,7 @@ them said so:
 
   * ``BacklogPage`` called ``.map`` and took the whole board down with it — one
     malformed row out of 600, and the other 599 are unreachable;
-  * ``scripts/selfmod/backlog.py`` ran ``[str(t) for t in fm["tags"]]``, which
+  * ``scripts/autoimplement/backlog.py`` ran ``[str(t) for t in fm["tags"]]``, which
     iterates a string *by character*, so those items carried 47 one-character
     tags and ``is_quarantined`` — the gate that keeps the triage queue from
     doubling — quietly stopped matching them;
@@ -42,7 +42,7 @@ import yaml
 from agent_mcp import backlog as BL
 from app.backlog_tags import normalize_tags
 from app.routers import backlog as BR
-from scripts.selfmod import backlog as SB
+from scripts.autoimplement import backlog as SB
 
 
 # The exact scalar that was on disk, and the list it was meant to be.
@@ -72,7 +72,7 @@ def test_normalize_tags(value, expected):
 
 
 def test_normalize_tags_never_iterates_a_string_by_character():
-    """The selfmod failure specifically: `[str(t) for t in "abc"]` is 3 tags."""
+    """The autoimplement failure specifically: `[str(t) for t in "abc"]` is 3 tags."""
     out = normalize_tags(BAD_SCALAR)
     assert all(len(t) > 1 for t in out), out
 
@@ -135,7 +135,7 @@ def test_mcp_get_task_returns_a_list(boards):
     assert task["tags"] == WANT
 
 
-def test_selfmod_item_tags_are_whole_tags(boards):
+def test_autoimplement_item_tags_are_whole_tags(boards):
     """`is_quarantined` keys on these; character-tags match nothing."""
     _write(boards, 1, "tags:\n- spawned-by-triage")
     _write(boards, 2, f"tags: '{BAD_SCALAR}'")
@@ -255,7 +255,7 @@ def test_the_mcp_writer_refuses_a_yaml_broken_file(boards):
 @pytest.mark.live_vault
 def test_no_task_on_the_live_board_has_a_scalar_tags_field():
     """The four repaired files stay repaired. Carries `live_vault` so the
-    selfmod gate (`-m "not live_vault"`) does not fail a round on a vault the
+    autoimplement gate (`-m "not live_vault"`) does not fail a round on a vault the
     round never touched."""
     root = Path.home() / "obsidian" / "backlog"
     if not root.exists():

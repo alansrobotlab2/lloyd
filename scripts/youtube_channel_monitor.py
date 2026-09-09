@@ -1426,12 +1426,12 @@ def _parse_vllm_metrics(text):
 def newest_retrieval_baseline(baselines_dir=None):
     """The most recent retrieval-eval run that actually carries metrics.
 
-    `eval/baselines/` holds several kinds of file — nightly runs, selfmod
+    `eval/baselines/` holds several kinds of file — nightly runs, autoimplement
     checks, rebuild before/after pairs, per-item improve runs — and not all
     of them have an `overall` block (a rebuild-after file is a corpus
     description). Newest by mtime among those that do, nightly preferred
     when it is within a day of the newest, so the number the eval quotes is
-    the one the dashboard and the selfmod gate quote.
+    the one the dashboard and the autoimplement gate quote.
     """
     import glob
     d = baselines_dir or EVAL_BASELINES_DIR
@@ -1442,7 +1442,7 @@ def newest_retrieval_baseline(baselines_dir=None):
                 j = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
-        # The eval runner writes `summary: {overall, by_category}`; the selfmod
+        # The eval runner writes `summary: {overall, by_category}`; the autoimplement
         # ledger re-keys the overall block to top-level `overall`. Either
         # counts; a file with neither (a rebuild-after corpus description)
         # does not.

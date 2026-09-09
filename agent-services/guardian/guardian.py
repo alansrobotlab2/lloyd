@@ -70,10 +70,26 @@ def sd_notify(message: str) -> None:
         pass
 
 
+def rollback_title(current: dict | None, bad: str | None, expected: str) -> str:
+    """The rollback alert's headline — what was reverted, in words.
+
+    The promoter writes the item's name onto `current.json` as `title` when it
+    lands, because this process is stdlib-only and cannot look it up. Read
+    aloud, "Rolled back 1a2b3c4d to 5e6f7a8b" is sixteen letters of noise; the
+    hashes stay in the body and the ledger. A record without a title (a
+    landing from before the field existed, or a hand-driven round with no
+    item) falls back to the hashes rather than to the round id.
+    """
+    title = str((current or {}).get("title") or "").strip()
+    if title:
+        return f"Rolled back: {title}"
+    return f"Rolled back {(bad or '?')[:8]} → {expected[:8]}"
+
+
 class Guardian:
     def __init__(self, args):
         self.repo = args.repo
-        self.state = gstate.SelfModState(Path(args.state))
+        self.state = gstate.AutoimplementState(Path(args.state))
         self.gdir = Path(args.guardian_state)
         self.gdir.mkdir(parents=True, exist_ok=True)
         self.sup = SupervisorClient(args.supervisor_sock,
@@ -545,8 +561,9 @@ class Guardian:
                  if surgical else "Reset to the pre-promotion tree.")
         self.alert(
             "critical" if extra else "warn",
-            f"Rolled back {(bad or '?')[:8]} → {expected[:8]}",
-            f"Trigger: {trigger}\n{reason}\n{route}{extra}",
+            rollback_title(current, bad, expected),
+            f"Trigger: {trigger}\n{reason}\n{route}\n"
+            f"Reverted {(bad or '?')[:8]} → {expected[:8]}{extra}",
             evidence=json.dumps(evidence, indent=2),
             commit=bad or "", trigger=trigger, tag=tag,
         )
@@ -820,7 +837,7 @@ def count_vault_files(root: str) -> int | None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Lloyd self-modification guardian")
     p.add_argument("--repo", default=policy.REPO)
-    p.add_argument("--state", default=str(policy.SELFMOD_STATE))
+    p.add_argument("--state", default=str(policy.AUTOIMPLEMENT_STATE))
     p.add_argument("--guardian-state", default=str(policy.GUARDIAN_STATE))
     p.add_argument("--supervisor-sock", default=policy.SUPERVISOR_SOCK)
     p.add_argument("--backend-url", default=policy.BACKEND_HEALTH_URL)

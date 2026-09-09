@@ -1,6 +1,6 @@
 """The triage pass may not feed itself.
 
-`backlog-selfmod` exists to work through a stale backlog: it asks, of one old
+`autotriage` exists to work through a stale backlog: it asks, of one old
 item, whether the claim still describes the system. Step 6 of its prompt then
 requires it to file whatever the item did not cover, because a finding that
 lives only in a transcript is lost (#229).
@@ -36,10 +36,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts.selfmod import backlog as B, state as S
+from scripts.autoimplement import backlog as B, state as S
 from workers.sources import _common as C
-from workers.sources import backlog_implement as I
-from workers.sources import backlog_selfmod as M
+from workers.sources import autoimplement as I
+from workers.sources import autotriage as M
 
 
 def write_item(d: Path, item_id, *, status="draft", days_old=100, tags=("backlog",),
@@ -105,7 +105,7 @@ def test_a_fresh_self_filed_item_is_not_a_triage_candidate(isolated):
     assert B.select_candidate(S.LEDGER_PATH) is None
 
 
-@pytest.mark.parametrize("tag", ["spawned-by-triage", "spawned-by-selfmod"])
+@pytest.mark.parametrize("tag", ["spawned-by-triage", "spawned-by-autoimplement"])
 def test_both_producers_are_held(isolated, tag):
     """Triage files one tag and an implement round the other. Holding only the
     first would leave the hotter of the two producers wired straight back in —

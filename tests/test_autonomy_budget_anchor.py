@@ -43,7 +43,7 @@ def clock(monkeypatch):
     """A monotonic clock the test drives by hand."""
     state = {"t": 1000.0}
     # The clock lives in `app.deadline_anchor` now — one definition, shared
-    # with the selfmod worker turn. `autonomy._build_deadline_anchor` is a
+    # with the autoimplement worker turn. `autonomy._build_deadline_anchor` is a
     # thin flavour of it, and these tests still go through that entry point.
     monkeypatch.setattr(deadline_anchor.time, "monotonic", lambda: state["t"])
     return state

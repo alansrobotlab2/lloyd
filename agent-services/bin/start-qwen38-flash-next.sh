@@ -275,7 +275,7 @@ fi
 # Every default below reproduces what this slot served before the 2026-09-08
 # sweep, so an unset environment is the old config exactly. They exist so an
 # arm is ONE env var rather than an edit to this file: this file is tracked,
-# and a dirty tree is what scripts/selfmod/gate.py and promote.py both refuse
+# and a dirty tree is what scripts/autoimplement/gate.py and promote.py both refuse
 # to run against — editing it per arm would switch the self-modification loop
 # off for the length of the sweep.
 #

@@ -433,7 +433,7 @@ def _strip_ambient(text: str) -> str:
 
 
 # `cd <somewhere> && ` — the working-directory preamble, not the subject of
-# the call. Every Bash call in a selfmod round opens with
+# the call. Every Bash call in a autoimplement round opens with
 # `cd /home/<user>/lloyd-work/SM_<id>/home/lloyd &&`, and `SM_20260908_165950`
 # survives `_strip_ambient` (it has underscores), reaches 18 characters, and so
 # `_is_distinctive` lets it carry a near match on its own. Five injects fired in
@@ -555,7 +555,7 @@ def ubiquitous_identifiers(sigs: list[ToolCallSignature]) -> frozenset[str]:
     `_strip_ambient` removes the fragments that are ambient for the whole
     *machine* — the home directory, the username. It cannot remove the ones
     that are ambient for a single *turn*, because it does not know what the
-    turn is doing. A selfmod round is the case that matters: every Bash call
+    turn is doing. A autoimplement round is the case that matters: every Bash call
     is prefixed `cd /home/<user>/lloyd-work/SM_<id>/home/lloyd &&`, and
     `SM_20260908_165950` survives stripping (it has underscores), is present
     in literally every command, and is 18 characters — so `_is_distinctive`

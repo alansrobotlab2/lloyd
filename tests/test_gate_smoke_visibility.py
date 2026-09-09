@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.selfmod import gate as G
+from scripts.autoimplement import gate as G
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -110,5 +110,5 @@ def test_engine_reachable_says_so_when_config_names_no_endpoint(tmp_path):
 
 def test_the_mcp_tool_description_states_the_refusal():
     """The model reads this string, and it is the only place the rule is stated to it."""
-    src = (ROOT / "agent_mcp" / "selfmod.py").read_text(encoding="utf-8")
+    src = (ROOT / "agent_mcp" / "autoimplement.py").read_text(encoding="utf-8")
     assert "Honoured" in src and "unreachable" in src

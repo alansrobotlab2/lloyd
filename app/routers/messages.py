@@ -186,8 +186,8 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
     The **deadline** anchor is the same warning against the other clock, and
     only a caller that has one passes it. Iterations are not what unattended
     work usually dies on: `run_prompt_in_session` bounds a worker turn by wall
-    time, and selfmod round SM_20260909_054722 committed 757 lines into its
-    worktree and was killed fourteen seconds — one `selfmod_gate` call — before
+    time, and autoimplement round SM_20260909_054722 committed 757 lines into its
+    worktree and was killed fourteen seconds — one `autoimplement_gate` call — before
     the verdict that would have landed them, with 32 of its 100 iterations
     still unspent. The iteration anchor cannot see that clock and never fired.
     `app.deadline_anchor` is the single definition, shared with autonomy.
@@ -231,8 +231,8 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
             out.append({"role": "user", "content": (
                 f"<budget>Iteration {iteration} of {max_turns}: {left} iteration(s) "
                 "remain before this turn is stopped. A turn cut off at the budget "
-                "ends with no report and lands nothing. If a selfmod round is open, "
-                "gate and land it now (selfmod_gate, then selfmod_land) or abort it; "
+                "ends with no report and lands nothing. If a autoimplement round is open, "
+                "gate and land it now (autoimplement_gate, then autoimplement_land) or abort it; "
                 "otherwise finish — say what is done and what is not.</budget>")})
         return out
 
@@ -1587,7 +1587,7 @@ async def post_message_stream(request: Request):
     # this flag, then restarts — without it a turn arriving in that gap is
     # cancelled mid-flight by shutdown_cleanup's 2s grace. The flag carries a
     # mandatory TTL, so a promoter that dies here cannot wedge the endpoint.
-    from app.routers.selfmod import drain_active, drain_remaining
+    from app.routers.autoimplement import drain_active, drain_remaining
     if drain_active():
         raise HTTPException(
             status_code=503,

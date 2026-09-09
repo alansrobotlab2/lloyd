@@ -79,12 +79,12 @@ projects. It also modifies its own code through a gated loop.
 - One SQLite job queue drained by asyncio workers inside the backend runs
   every unasked thing: scheduled autonomy tasks (~37 task files with
   frequency, preferred hours, dependencies, cooldowns), deep research off a
-  topic registry, session distillation, backlog triage, and the selfmod
+  topic registry, session distillation, backlog triage, and the autoimplement
   implementer. Priority ASC, per-source `max_inflight`, `failed` vs raised
   distinction, `skipped` as a third outcome.
 - Backlog: markdown items on a kanban board (~450 items, ~120 open). A
   triage pass re-checks old claims against live code; an implement pass runs
-  one selfmod round per confirmed item. Self-filed items are quarantined
+  one autoimplement round per confirmed item. Self-filed items are quarantined
   from triage for 30 days because the pass once filed 2 items per item it
   closed.
 - Self-modification loop: cut a worktree from live main, make the change,
@@ -105,7 +105,7 @@ projects. It also modifies its own code through a gated loop.
 ## Evaluation surfaces that already exist
 
 - Nightly retrieval eval (above), pinned corpus, paired comparison for
-  selfmod rounds.
+  autoimplement rounds.
 - Tool-choice eval (`eval/run_tool_choice_eval.py`), prefetch eval,
   preserved-thinking A/B.
 - Guardian error-rate observation, worker run ledgers, usage store.

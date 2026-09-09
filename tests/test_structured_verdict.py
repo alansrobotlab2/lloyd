@@ -13,8 +13,8 @@ from __future__ import annotations
 import inspect
 import json
 
-from scripts.selfmod import backlog as B
-from workers.sources import backlog_selfmod as W
+from scripts.autoimplement import backlog as B
+from workers.sources import autotriage as W
 
 
 # ── the schema is derived, not restated ─────────────────────────────────────
@@ -144,7 +144,7 @@ def test_the_kill_switch_is_documented_in_config():
     from pathlib import Path
     root = Path(B.__file__).resolve().parent.parent.parent
     cfg = yaml.safe_load((root / "config.yaml").read_text())
-    src = cfg["workers"]["sources"]["backlog-selfmod"]
+    src = cfg["workers"]["sources"]["autotriage"]
     assert src["structured_verdict"] is True
 
 

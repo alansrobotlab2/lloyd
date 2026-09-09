@@ -2,7 +2,7 @@
 
 Why here rather than at the gate
 --------------------------------
-The selfmod gate already runs pyflakes as a delta, and it is the wrong place
+The autoimplement gate already runs pyflakes as a delta, and it is the wrong place
 to *learn* about a broken edit: it runs minutes later, after the model has
 built ten more edits on top of the mistake. opencode's one mechanical
 advantage over this harness was that its edit results carry diagnostics, so

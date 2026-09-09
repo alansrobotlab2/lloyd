@@ -49,7 +49,7 @@ SOUL = VAULT / "SOUL.md"
 LLOYD_REPO = Path(pb.__file__).parent
 
 # Two marks, and the second is the one that matters. `skipif` keeps these from
-# failing where the vault is absent; `live_vault` lets the selfmod gate exclude
+# failing where the vault is absent; `live_vault` lets the autoimplement gate exclude
 # them with `-m "not live_vault"`.
 #
 # They read a file no round under test controls — an hourly autoresearch
@@ -57,7 +57,7 @@ LLOYD_REPO = Path(pb.__file__).parent
 # and the next. Left on the gate's hard `tests` rung, a re-inflation would fail
 # every future round whatever its diff, which is how `test_tool_overrides.py`
 # aborted three rounds in fifteen hours on 2026-09-07. The invariants are
-# enforced at the writers instead — `scripts/selfmod/vault_round.py` and
+# enforced at the writers instead — `scripts/autoimplement/vault_round.py` and
 # `scripts/autoresearch/promote.py` both call `prompt_surface.check_contract`
 # before they commit — so this group is the reporting copy, not the enforcement.
 vault_only = pytest.mark.skipif(

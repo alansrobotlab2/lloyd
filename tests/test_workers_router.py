@@ -6,7 +6,7 @@ three consequences was serious on its own:
   * `CONFIG` is the *loaded* config, with `${VAR}` already expanded — so the
     dump would have written `livekit.api_secret` in clear into a tracked file.
   * It flattened every comment out of a 600-line file that is mostly comments.
-  * It left the live tree dirty, which `scripts/selfmod/gate.py` and
+  * It left the live tree dirty, which `scripts/autoimplement/gate.py` and
     `promote.py` both refuse — one click silently stopping the
     self-modification loop until a human committed the damage.
 

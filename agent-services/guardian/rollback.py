@@ -229,7 +229,7 @@ def restore_tree(repo: str, target: str, clean_paths: tuple[str, ...],
 
 
 def changed_tree_hash(repo: str, commit: str, paths: list) -> str | None:
-    """Content hash of `paths` at `commit`. Mirrors scripts/selfmod/state.py."""
+    """Content hash of `paths` at `commit`. Mirrors scripts/autoimplement/state.py."""
     if not paths:
         return None
     r = _git(repo, "ls-tree", "-r", "--full-tree", commit, "--", *paths, timeout=30)

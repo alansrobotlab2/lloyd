@@ -101,7 +101,7 @@ queries:
     expect_tools: [Grep, Bash]
 
   - id: control-todo-comment
-    prompt: "Are there any TODO comments left under scripts/selfmod?"
+    prompt: "Are there any TODO comments left under scripts/autoimplement?"
     category: control-string
     expect_tools: [Grep, Bash]
 

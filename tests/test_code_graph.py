@@ -218,13 +218,13 @@ def test_root_rejects_a_nonexistent_absolute_path(tmp_path):
 def test_root_accepts_a_round_id(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()
-    import scripts.selfmod.worktree as W
+    import scripts.autoimplement.worktree as W
     monkeypatch.setattr(W, "worktree_path", lambda rid: wt)
     assert CG.resolve_root("SM_20260908_101010") == Path(os.path.realpath(wt))
 
 
 def test_round_id_without_a_worktree_is_an_error(monkeypatch, tmp_path):
-    import scripts.selfmod.worktree as W
+    import scripts.autoimplement.worktree as W
     monkeypatch.setattr(W, "worktree_path", lambda rid: tmp_path / "gone")
     with pytest.raises(CG.RootError):
         CG.resolve_root("SM_20260908_101010")
@@ -585,7 +585,7 @@ def test_module_never_blocks_the_loop_with_subprocess_run():
 
 
 def test_graphify_out_is_ignored_by_gitignore_not_info_exclude():
-    """A build must not dirty the tree — the selfmod gate refuses a dirty one."""
+    """A build must not dirty the tree — the autoimplement gate refuses a dirty one."""
     from app.paths import LLOYD_HOME
     r = subprocess.run(
         ["git", "-C", str(LLOYD_HOME), "check-ignore", "-v",

@@ -251,11 +251,11 @@ def promote(
     # Commit through the vault route, which runs the real loaders and reverts
     # the paths if any of them fails. Before this, a promotion was an
     # uncommitted overwrite of a live tracked file: nothing recorded that it
-    # had happened, `selfmod_vault_revert` had no sha to undo, and the only
+    # had happened, `autoimplement_vault_revert` had no sha to undo, and the only
     # trace was a snapshot directory nobody was told about. The sha goes in the
-    # selfmod ledger as a `vault_land` event like every other vault change.
+    # autoimplement ledger as a `vault_land` event like every other vault change.
     try:
-        from scripts.selfmod import vault_round as VR
+        from scripts.autoimplement import vault_round as VR
 
         # Derive the vault-relative paths rather than assuming `lloyd/<name>`,
         # and commit nothing when the canonical prompts are not in the vault at

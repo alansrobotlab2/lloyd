@@ -145,7 +145,7 @@ async def workers_enable(request: Request):
     config, so the dump wrote the expanded values back: `${LIVEKIT_API_SECRET}`
     would have been replaced by the secret itself, in a tracked file. It
     flattened every comment in a 600-line file that is mostly comments. And it
-    dirtied the live tree, which `scripts/selfmod/gate.py` and `promote.py`
+    dirtied the live tree, which `scripts/autoimplement/gate.py` and `promote.py`
     both refuse — so one click here silently stopped the self-modification
     loop until a human committed the damage. That is the identical defect the
     Tools page was moved off `config.yaml` to avoid; this endpoint kept it

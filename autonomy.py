@@ -587,7 +587,7 @@ from app.deadline_anchor import build_deadline_anchor
 
 def _build_deadline_anchor(timeout_s: int):
     """The task-flavoured wall-clock anchor. One definition, in
-    `app.deadline_anchor` — a second caller (the selfmod worker turn) needs
+    `app.deadline_anchor` — a second caller (the autoimplement worker turn) needs
     the identical behaviour, and two copies of "how close is the deadline"
     drift in the direction nobody is watching."""
     return build_deadline_anchor(timeout_s, what="task")

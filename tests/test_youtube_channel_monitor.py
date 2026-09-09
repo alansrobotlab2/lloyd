@@ -330,7 +330,7 @@ def test_measurements_capture_parses_the_counters_the_eval_needs(monkeypatch, tm
     # A nightly within a day of the newest run is preferred over a newer
     # ad-hoc check (it is the number the dashboard and the gate quote); once
     # no nightly is that fresh, the newest run with metrics wins. Empty: None.
-    check = base / "selfmod-check-20260909-3.json"; check.write_text(json.dumps({"label": "check", "ran_at": "t4", "overall": {"entity_hit_rate": 0.6}}))
+    check = base / "autoimplement-check-20260909-3.json"; check.write_text(json.dumps({"label": "check", "ran_at": "t4", "overall": {"entity_hit_rate": 0.6}}))
     os.utime(new, (now - 200000, now - 200000))
     assert M.newest_retrieval_baseline(str(base))["measured_at"] == "t1", "day-old nightly beats the newer check"
     os.utime(old, (now - 200000, now - 200000))

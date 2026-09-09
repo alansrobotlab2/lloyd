@@ -1,10 +1,10 @@
-"""A selfmod round's worktree path must not make every call look like a repeat.
+"""A autoimplement round's worktree path must not make every call look like a repeat.
 
 Why this file exists
 --------------------
 Round SM_20260908_165950 (backlog #377) took five deterministic repetition
 injects across its 34 minutes. All five were false. Every Bash call in a
-selfmod round opens `cd /home/<user>/lloyd-work/SM_<round>/home/lloyd &&`, and
+autoimplement round opens `cd /home/<user>/lloyd-work/SM_<round>/home/lloyd &&`, and
 `sm_20260908_165950` survives `_strip_ambient` (it has underscores), clears the
 12-character identifier floor, and reaches 18 characters — so `_is_distinctive`
 treats it as a specific symbol the primary is chasing and lets it carry a near
@@ -12,7 +12,7 @@ match on its own. Four of the five injects named it first.
 
 The cost was not the noise. `interventions_used` is capped, the fifth inject
 exhausted it (`inner_voice.deterministic_budget_exhausted`, 17:26:42), and the
-round reached `selfmod_gate` and `selfmod_land` ninety seconds later with no
+round reached `autoimplement_gate` and `autoimplement_land` ninety seconds later with no
 guard left. Every implement round runs in a worktree, so this fires in every
 round: it is structural.
 
@@ -37,7 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.inner_voice import guards  # noqa: E402
-from fixture_iv_selfmod_worktree import WORKTREE_BASH_CALLS  # noqa: E402
+from fixture_iv_autoimplement_worktree import WORKTREE_BASH_CALLS  # noqa: E402
 
 WORKTREE = "/home/alansrobotlab/lloyd-work/SM_20260908_165950/home/lloyd"
 

@@ -99,13 +99,13 @@ eval/baselines/
 # else can fetch. Read qmd/CLAUDE.md before touching it.
 /qmd/
 
-# ad-hoc experiments; must not dirty the tree the selfmod gate refuses to gate against
+# ad-hoc experiments; must not dirty the tree the autoimplement gate refuses to gate against
 _scratch/
 
 # UI tool toggles. Runtime state, not source: the Tools page rewrites this
 # file on every toggle, and it was tracked — so flipping one switch in
 # Mission Control left `git status` dirty, which is refused by both
-# scripts/selfmod/gate.py and promote.py. A toggle in the UI silently
+# scripts/autoimplement/gate.py and promote.py. A toggle in the UI silently
 # stopped the self-modification loop until someone hand-committed the
 # result (see 4fb1ccd, 2ef86c7). The whole point of writing overrides here
 # instead of back over config.yaml was to keep the tracked tree clean, and
@@ -122,9 +122,9 @@ _scratch/
 # ─── Code graph (graphify) ──────────────────────────
 # `agent_mcp/code_graph.py` builds this on demand: graph.json (~10 MB), an
 # HTML viz, a markdown report, and a ~64k-file AST cache. Derived state,
-# rebuilt in ~15s from the tree itself. Unanchored so a selfmod worktree
+# rebuilt in ~15s from the tree itself. Unanchored so a autoimplement worktree
 # inherits the rule — an unignored build there dirties the tree and both
-# scripts/selfmod/gate.py and promote.py refuse to run against a dirty
+# scripts/autoimplement/gate.py and promote.py refuse to run against a dirty
 # tree, so the round would abort on its own map. `*.json` above already
 # hides graph.json by accident; GRAPH_REPORT.md, graph.html, manifest.json,
 # .graphify_root and cache/ast/** were not covered by anything.

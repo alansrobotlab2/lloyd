@@ -13,7 +13,7 @@ import inspect
 from collections import Counter
 
 from app import lint_findings as LF
-from scripts.selfmod import gate as G
+from scripts.autoimplement import gate as G
 
 
 # ── the normalisers themselves ──────────────────────────────────────────────
@@ -80,10 +80,10 @@ def test_the_gate_delegates_rather_than_reimplementing():
     assert "re.match" not in src, "the gate grew a second normaliser again"
 
 
-def test_the_aggregator_never_imports_the_selfmod_package():
+def test_the_aggregator_never_imports_the_autoimplement_package():
     """`app/lint_findings.py` exists so this stays true.
 
-    `scripts.selfmod.gate` pulls in worktrees, promotion and ledger state.
+    `scripts.autoimplement.gate` pulls in worktrees, promotion and ledger state.
     An aggregator that imported it would put the whole self-modification
     package behind every tool call in every session.
     """
@@ -92,8 +92,8 @@ def test_the_aggregator_never_imports_the_selfmod_package():
     pkg = Path(agent_mcp.__file__).parent
     offenders = [
         p.name for p in sorted(pkg.glob("*.py"))
-        if "scripts.selfmod.gate" in p.read_text()
-        or "from scripts.selfmod import gate" in p.read_text()
+        if "scripts.autoimplement.gate" in p.read_text()
+        or "from scripts.autoimplement import gate" in p.read_text()
     ]
     assert offenders == [], offenders
 

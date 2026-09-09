@@ -57,14 +57,14 @@ from typing import Any, Optional
 from app.paths import LLOYD_HOME, VAULT_ROOT
 from workers.queue import WorkQueue, QueueItem
 from workers.sources._common import (
-    WORKER_SELFMOD_BAN, DrainActive, TurnTimeout, run_prompt_in_session,
+    WORKER_AUTOIMPLEMENT_BAN, DrainActive, TurnTimeout, run_prompt_in_session,
 )
 
 logger = logging.getLogger("lloyd-workers.youtube-digest")
 
 NAME = "youtube-digest"
 #: Between backlog triage (55) and the research stream (70). A digest is
-#: routine; it should not starve a selfmod round, and it should run before
+#: routine; it should not starve a autoimplement round, and it should run before
 #: the next research topic because Alan reads these.
 DEFAULT_PRIORITY = 60
 
@@ -89,7 +89,7 @@ EXPECTED_VAULT_PREFIXES = ("knowledge/", "backlog/", "projects/lloyd/channel-eva
 #: `Read` and `Write` (the bundle is read from disk and the note written
 #: to a path the source chose) and `backlog_write_task` (filing is the job).
 DISALLOWED: tuple[str, ...] = (
-    *WORKER_SELFMOD_BAN,
+    *WORKER_AUTOIMPLEMENT_BAN,
     "Bash", "Edit", "Task",
     "http_request",
     "browser_evaluate", "browser_fill", "browser_type", "browser_click",
@@ -103,7 +103,7 @@ VERDICTS = ("actionable", "worth_a_look", "background", "not_relevant")
 SOURCE_KINDS = ("open-source", "commercial", "paper", "concept")
 APPROACHES = ("adopt", "recreate", "experiment", "read", "none")
 AREAS = ("model", "inference", "harness", "tools", "memory", "knowledge-graph",
-         "retrieval", "skills", "autonomy", "selfmod", "eval", "voice", "research", "ui")
+         "retrieval", "skills", "autonomy", "autoimplement", "eval", "voice", "research", "ui")
 _RESULTS = ("written", "kept", "failed")
 _FIELD_RE = re.compile(
     r"^(RESULT|NOTE|RELEVANCE|VERDICT|AREAS|SOURCE_KIND|APPROACH|IDEA|DUPLICATE_OF|FILED):\s*(.*)$",

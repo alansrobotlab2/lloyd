@@ -156,8 +156,8 @@ VAULT_ROOT = "/home/alansrobotlab/obsidian"
 import os as _os
 from pathlib import Path as _Path
 
-SELFMOD_STATE = _Path(
-    _os.environ.get("LLOYD_SELFMOD_STATE", _Path.home() / ".local/state/lloyd-selfmod")
+AUTOIMPLEMENT_STATE = _Path(
+    _os.environ.get("LLOYD_AUTOIMPLEMENT_STATE", _Path.home() / ".local/state/lloyd-autoimplement")
 )
 GUARDIAN_STATE = _Path(
     _os.environ.get("LLOYD_GUARDIAN_STATE", _Path.home() / ".local/state/lloyd-guardian")

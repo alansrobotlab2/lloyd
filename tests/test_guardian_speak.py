@@ -41,7 +41,7 @@ SHAPING = Path(__file__).resolve().parent.parent / "agent-services" / "tts_shapi
 @pytest.mark.parametrize("raw,expected_absent", [
     ("Rolled back 1a2b3c4d → 5e6f7a8b", "1a2b3c4d"),
     ("HEAD is already the last known good (9f8e7d6c)", "9f8e7d6c"),
-    ("Clear ~/.local/state/lloyd-selfmod/BROKEN once resolved", "lloyd-selfmod"),
+    ("Clear ~/.local/state/lloyd-autoimplement/BROKEN once resolved", "lloyd-autoimplement"),
 ])
 def test_speakable_drops_what_cannot_be_heard(raw, expected_absent):
     """Hashes and paths are in the toast, the ledger and the journal. Read
@@ -175,7 +175,7 @@ def _AWAKE(cfg, now=None):
     that a dispatch *happens*, and between 23:00 and 07:00 local they were
     asserting against a system that had correctly decided to stay quiet.
 
-    That is not academic: the unattended selfmod loop gates overnight, and the
+    That is not academic: the unattended autoimplement loop gates overnight, and the
     gate's `tests` rung is a hard rung. Rounds SM_20260908_065238 (23:52) and
     SM_20260908_105946 (04:07) both failed here and aborted; the same code at
     08:13 did not. The tests that *are* about the policy hold the real
@@ -328,18 +328,18 @@ def test_announce_is_suppressible_like_every_external_channel(tmp_path):
 def _run_nag(tmp_path, broken: str | None):
     import os
     import subprocess as sp
-    selfmod, guardian = tmp_path / "selfmod", tmp_path / "guardian"
-    selfmod.mkdir(parents=True, exist_ok=True)
+    autoimplement, guardian = tmp_path / "autoimplement", tmp_path / "guardian"
+    autoimplement.mkdir(parents=True, exist_ok=True)
     guardian.mkdir(parents=True, exist_ok=True)
     if broken is not None:
-        (selfmod / "BROKEN").write_text(broken)
+        (autoimplement / "BROKEN").write_text(broken)
     env = dict(os.environ,
-               LLOYD_SELFMOD_STATE=str(selfmod),
+               LLOYD_AUTOIMPLEMENT_STATE=str(autoimplement),
                LLOYD_GUARDIAN_STATE=str(guardian),
                LLOYD_VOICE_ALERTS="0",
                DBUS_SESSION_BUS_ADDRESS="")     # no real desktop toast from a test
     return sp.run([sys.executable, str(GUARDIAN_DIR / "nag.py")],
-                  capture_output=True, text=True, env=env, timeout=30), selfmod
+                  capture_output=True, text=True, env=env, timeout=30), autoimplement
 
 
 def test_nag_is_silent_when_nothing_is_broken(tmp_path):
@@ -352,10 +352,10 @@ def test_nag_announces_through_the_shared_fan_out(tmp_path):
     """It used to be an inline notify-send in the unit — a second, private
     definition of "tell the human" that could never gain a channel notify.py
     grew."""
-    proc, selfmod = _run_nag(tmp_path, "2026-09-06 liveness failed\n")
+    proc, autoimplement = _run_nag(tmp_path, "2026-09-06 liveness failed\n")
     assert proc.returncode == 0, proc.stderr
     assert "voice=" in proc.stdout and "journal=" in proc.stdout
-    assert not (selfmod / "promotions.jsonl").exists(), "the nag spammed the ledger"
+    assert not (autoimplement / "promotions.jsonl").exists(), "the nag spammed the ledger"
 
 
 def test_nag_reads_the_marker_file_not_the_incident_directory(tmp_path):
@@ -378,7 +378,7 @@ def test_a_successful_promotion_is_announced(monkeypatch):
     backwards: the successful landings are the ones nobody is watching a
     terminal for."""
     import notify
-    from scripts.selfmod import promote as promote_mod
+    from scripts.autoimplement import promote as promote_mod
 
     seen = {}
 
@@ -392,18 +392,23 @@ def test_a_successful_promotion_is_announced(monkeypatch):
 
     monkeypatch.setattr(notify, "Notifier", FakeNotifier)
     promote_mod._announce_promoted("SM_20260906_a1b2", "a" * 40,
-                                   ["app/x.py", "tests/y.py"])
+                                   ["app/x.py", "tests/y.py"],
+                                   title="Give deferred tool descriptions trigger conditions")
 
-    assert "SM_20260906_a1b2" in seen["title"]
+    assert seen["title"] == "Landed: Give deferred tool descriptions trigger conditions"
+    assert "SM_20260906_a1b2" not in seen["title"] + seen["body"], (
+        "the round id is bookkeeping; the toast names the work")
     assert "2 files" in seen["body"]
     assert seen["level"] == "info", "a success must not read as an incident"
     # And it must survive being read aloud: the round id keeps its date.
-    assert "20260906" in speak.utterance_for("info", seen["title"], seen["body"])
+    spoken = speak.utterance_for("info", seen["title"], seen["body"])
+    assert "deferred tool descriptions" in spoken
+    assert "20260906" not in spoken, "read aloud, a round id is a date one digit at a time"
 
 
 def test_one_changed_file_is_not_announced_as_1_files(monkeypatch):
     import notify
-    from scripts.selfmod import promote as promote_mod
+    from scripts.autoimplement import promote as promote_mod
     seen = {}
 
     class FakeNotifier:
@@ -424,7 +429,7 @@ def test_announcing_cannot_fail_a_promotion(monkeypatch):
     this runs. An announcement must never be able to turn that into a
     failure."""
     import notify
-    from scripts.selfmod import promote as promote_mod
+    from scripts.autoimplement import promote as promote_mod
 
     def boom(**kw):
         raise RuntimeError("notifier exploded")

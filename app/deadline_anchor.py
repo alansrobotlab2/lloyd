@@ -5,12 +5,12 @@ cannot meet.
 but iterations are not the budget most unattended work dies on. An autonomy
 task is bounded by `asyncio.timeout`; a worker turn is bounded by
 `run_prompt_in_session`'s own `wait_for`. Neither clock was visible to the
-model until #80/#78/#24 (autonomy, 2026-09-08) and #446 (selfmod, 2026-09-09)
+model until #80/#78/#24 (autonomy, 2026-09-08) and #446 (autoimplement, 2026-09-09)
 each died holding an answer they were never asked to write down.
 
 #446 is the sharpest case: it committed 757 lines into its worktree at
 06:43:36 and the wall clock killed it at 06:43:50 — fourteen seconds, one
-`selfmod_gate` call, short of the verdict that would have landed it.
+`autoimplement_gate` call, short of the verdict that would have landed it.
 
 This module is the single definition. It lived privately in `autonomy.py`,
 which is the wrong home once a second caller needs it: two copies of "how

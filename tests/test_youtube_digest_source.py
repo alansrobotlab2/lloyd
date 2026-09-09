@@ -5,7 +5,7 @@ into a real session so the transcript is reviewable. Pinned here: the prompt
 carries the paths and Alan's adoption rules; disk decides whether a note was
 written; a `FILED:` claim is verified; a failed turn is reported to the
 script's state (which owns the retry) and a drain is not; the toolbox denies
-the shell and the selfmod loop; and the producer interleaves channels under a
+the shell and the autoimplement loop; and the producer interleaves channels under a
 bounded queue depth.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ import pytest
 
 from workers.queue import QueueItem, WorkQueue
 from workers.sources import youtube_digest as Y
-from workers.sources._common import DrainActive, TurnTimeout, WORKER_SELFMOD_BAN
+from workers.sources._common import DrainActive, TurnTimeout, WORKER_AUTOIMPLEMENT_BAN
 
 
 def _item(payload: dict, item_id: int = 1) -> QueueItem:
@@ -97,7 +97,7 @@ RESULT: written
 NOTE: {note}
 RELEVANCE: 82
 VERDICT: actionable
-AREAS: harness, selfmod
+AREAS: harness, autoimplement
 SOURCE_KIND: open-source
 APPROACH: adopt
 IDEA: Run a second, cheaper harness that reviews the primary's tool plan before dispatch
@@ -131,7 +131,7 @@ def test_a_well_formed_block_parses():
     p = Y.parse_result(BLOCK.format(note="/v/n.md"))
     assert p["result"] == "written" and p["note"] == "/v/n.md"
     assert p["relevance"] == 82 and p["verdict"] == "actionable"
-    assert p["areas"] == ["harness", "selfmod"]
+    assert p["areas"] == ["harness", "autoimplement"]
     assert p["source_kind"] == "open-source" and p["approach"] == "adopt"
     assert p["idea"].startswith("Run a second")
     assert p["duplicate_of"] is None and p["filed"] == 523
@@ -185,7 +185,7 @@ def test_prompt_tells_the_session_about_an_existing_note(tmp_path):
 
 
 def test_the_toolbox_denies_the_shell_and_the_loop_but_keeps_the_job():
-    for tool in WORKER_SELFMOD_BAN:
+    for tool in WORKER_AUTOIMPLEMENT_BAN:
         assert tool in Y.DISALLOWED
     for tool in ("Bash", "Edit", "Task", "autonomy_write_task", "research_propose", "http_request"):
         assert tool in Y.DISALLOWED

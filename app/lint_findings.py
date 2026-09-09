@@ -1,4 +1,4 @@
-"""Normalisers shared by the selfmod gate and the aggregator's edit diagnostics.
+"""Normalisers shared by the autoimplement gate and the aggregator's edit diagnostics.
 
 Both answer the same question — "is this finding *new*?" — and they must
 answer it the same way. The gate judges pyflakes and tsc as deltas against
@@ -9,7 +9,7 @@ normalisers or the model is told about a finding the gate will not mind, or
 worse, not told about one it will.
 
 This lives in `app/` and imports nothing, because the aggregator cannot
-import `scripts.selfmod.gate` — that module pulls in the whole
+import `scripts.autoimplement.gate` — that module pulls in the whole
 self-modification package (worktrees, promotion, ledger state), and
 `agent_mcp` must not depend on any of it. `gate._pyflakes` and
 `gate._parse_tsc` are thin wrappers over these functions, pinned

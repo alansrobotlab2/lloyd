@@ -1,6 +1,6 @@
 """A slot must serve the model config says it serves.
 
-The 2026-09-06 near-miss: a `git reset` from the selfmod/guardian
+The 2026-09-06 near-miss: a `git reset` from the autoimplement/guardian
 machinery reverted `agent-llm-secondary.conf` to `MODEL=qwen35`, a
 launcher branch that serves Qwen3.5-**4B** on vLLM under the same alias
 and the same port as the 35B. The running process was never restarted so

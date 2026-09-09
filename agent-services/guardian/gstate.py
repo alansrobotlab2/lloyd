@@ -1,6 +1,6 @@
 """Guardian-side view of the self-modification state. Stdlib only.
 
-Reads the same files `scripts/selfmod/state.py` writes, but reimplements the
+Reads the same files `scripts/autoimplement/state.py` writes, but reimplements the
 access rather than importing it — the guardian must be able to read its
 rollback target while the repo those modules live in is mid-rewrite.
 
@@ -70,7 +70,7 @@ def read_events(ledger: Path, limit: int = 200) -> list[dict]:
     return out[-limit:]
 
 
-class SelfModState:
+class AutoimplementState:
     def __init__(self, state_dir: Path):
         self.dir = Path(state_dir)
         self.lkg_path = self.dir / "last_known_good.json"
