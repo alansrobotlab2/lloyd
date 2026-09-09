@@ -178,6 +178,7 @@ async def run(
             "task_id": t["task_id"],
             "task_category": t.get("task_category"),
             "harness": t.get("harness", "direct"),
+            "tool_search_enabled": t.get("tool_search_enabled"),
             "trace_status": t["status"],
             "turns": t.get("turns"),
             "tool_call_count": len(t.get("tool_calls", [])),

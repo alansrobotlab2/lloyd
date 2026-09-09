@@ -17,10 +17,20 @@ servers, real `disallowed_tools`, real `harness.*` kwargs, real safety hook.
 One `RunOptions` builder is the drift guard — if the chat path grows a lever,
 the bench path gets it by reading the same config, not by copy-paste.
 
+The one lever deliberately NOT inherited is progressive tool disclosure (#427).
+`harness.tool_search` is UI-mutable from the Tools page, and it decides whether
+the model sees the whole catalog or a baseline plus ToolSearch — which is not a
+neutral difference for a safety task: with disclosure on, `Bash` is not
+advertised until the model spends an iteration searching for it, so the trial
+measures retrieval alongside refusal and the deny gate may never fire inside
+`max_turns`. `build_options` pins it off and the effective value is stamped on
+the trace and the ledger row, so a score that moves is attributable to the
+change under test rather than to a toggle nobody thought to check.
+
 Both runners coexist. Routing is per task (`requires_runtime: true`) and per
 round (`run_round.py --harness`), default direct.
 
-Trace shape — same keys as the direct runner, plus three of its own::
+Trace shape — same keys as the direct runner, plus its own::
 
     {
       "variant_id", "task_id", "task_category", "status", "final_text",
@@ -30,6 +40,7 @@ Trace shape — same keys as the direct runner, plus three of its own::
       "denied_calls": [{name, args, deny_kind, deny_reason}],
       "unresolved_calls": [...],          # dispatched, never returned (kill/timeout)
       "session_id", "stop_reason", "usage", "inner_voice",
+      "tool_search_enabled": False,       # the disclosure regime, pinned (#427)
     }
 
 `tool_calls` holds calls that actually **dispatched**. A PreToolUse deny is
@@ -179,7 +190,8 @@ def build_options(
     field for field — same `_get_mcp_servers()`, same `_get_disallowed_tools()`,
     same `_get_harness_kwargs()`, same overlay-aware `build_system_prompt` —
     plus the bench-specific deltas: sandboxed stateful tools, background
-    priority, and a fresh hook registry with the production safety gate.
+    priority, a fresh hook registry with the production safety gate, and
+    progressive tool disclosure pinned off (#427).
     """
     from app.config import _get_model_env, _resolve_model_name
     from app.harness import HookRegistry, RunOptions, install_default_safety_hook
@@ -198,6 +210,22 @@ def build_options(
         disallowed += [t for t in sorted(STATEFUL_TOOLS) if t not in disallowed]
     disallowed += list(extra_disallowed or [])
 
+    # #427. Everything else is inherited so a trial stays faithful to the chat
+    # path, but progressive tool disclosure is pinned. `harness.tool_search` is
+    # UI-mutable from the Tools page, and it decides whether the model is handed
+    # the whole catalog or a baseline plus ToolSearch — which for
+    # `bench_010_safety_destructive` is not a neutral difference: with
+    # disclosure on, `Bash` is not visible until the model spends an iteration
+    # on a ToolSearch call, so the trial measures retrieval as well as refusal
+    # and the PreToolUse deny may never fire inside `max_turns`. Nothing in the
+    # trace said which regime had run, so a score that moved with an unrelated
+    # toggle was indistinguishable from a prompt regression — and #353's whole
+    # purpose is an isolated runtime-contribution number. Pinned rather than
+    # parameterised: an arm measured under a different regime from the previous
+    # round is the failure being fixed, not a knob worth offering.
+    harness_kwargs = dict(_get_harness_kwargs())
+    harness_kwargs["tool_search_enabled"] = False
+
     return RunOptions(
         model=resolved,
         base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
@@ -210,7 +238,7 @@ def build_options(
         hooks=hooks,
         priority=priority,
         session_id=session_id,
-        **_get_harness_kwargs(),
+        **harness_kwargs,
     )
 
 
@@ -329,6 +357,11 @@ async def run_trial(
         max_agent_turns=max_agent_turns, hooks=hooks,
         extra_disallowed=extra_disallowed,
     )
+    # Read back off what was built rather than restating the pin (#427). A pin
+    # that is later changed, or overridden by a caller, then shows up in the
+    # trace instead of silently disagreeing with a constant here — the whole
+    # point being that the regime a score was measured under is attributable.
+    trace["tool_search_enabled"] = bool(getattr(options, "tool_search_enabled", False))
     messages = [{"role": "user", "content": prefetched_text or prompt}]
 
     started = time.time()
@@ -421,6 +454,9 @@ def ledger_row_for(trace: dict[str, Any], score: dict[str, Any] | None,
         "task_id": trace["task_id"],
         "task_category": trace.get("task_category"),
         "harness": trace.get("harness", HARNESS),
+        # The disclosure regime the trial ran under (#427). `None` on a direct
+        # trace, which has no tool channel at all.
+        "tool_search_enabled": trace.get("tool_search_enabled"),
         "trace_status": trace["status"],
         "turns": trace.get("turns"),
         "tool_call_count": len(trace.get("tool_calls", [])),

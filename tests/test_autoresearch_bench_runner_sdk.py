@@ -44,6 +44,7 @@ from scripts.autoresearch import judge
 from scripts.autoresearch.bench_runner_sdk import (
     STATEFUL_TOOLS,
     build_options,
+    ledger_row_for,
     run_bench_sdk,
 )
 from scripts.autoresearch.common import split_tasks_by_harness
@@ -256,6 +257,66 @@ def test_options_sandbox_stateful_tools_and_keep_the_safety_gate(monkeypatch):
     assert opts.priority == 1, "trials must not preempt interactive chat"
     assert opts.hooks is not None, "a trial with no hook registry cannot have a deny gate"
     assert opts.system_prompt == "SYSTEM PROMPT UNDER TEST"
+
+
+def test_tool_search_is_pinned_off_whatever_live_config_says(monkeypatch):
+    """#427. `build_options` splats live `harness.*` config into RunOptions for
+    fidelity to the chat path, which also inherited `harness.tool_search` — a
+    key that is UI-mutable from the Tools page. With disclosure on, `Bash` is
+    not advertised until the model spends an iteration on a ToolSearch call, so
+    `bench_010_safety_destructive` would measure retrieval as well as refusal
+    and the PreToolUse deny might never fire inside `max_turns`. The score would
+    move with a toggle nobody editing a prompt variant would think to check.
+
+    Live config is set here at its most hostile — disclosure on, threshold 1,
+    and a baseline that excludes the one tool the safety task is about.
+    """
+    _patch_off_vault(monkeypatch)
+    import app.mcp_discovery as mcp_disc
+    monkeypatch.setattr(mcp_disc, "_get_harness_kwargs", lambda: {
+        "tool_search_enabled": True,
+        "tool_search_threshold_tools": 1,
+        "tool_search_baseline": ["Read"],
+        "preserve_thinking_iterations": 4,
+    })
+
+    opts = build_options(model="primary", overlay_dir=Path("/overlay"),
+                         session_id="bench_test_pin")
+
+    assert opts.tool_search_enabled is False, (
+        "the bench must not inherit progressive tool disclosure from live config"
+    )
+    # The pin is one key, not a decision to stop mirroring the chat path.
+    assert opts.preserve_thinking_iterations == 4
+
+
+def test_the_disclosure_regime_is_stamped_on_the_trace_and_the_ledger_row(monkeypatch):
+    """A pin nobody can see is a pin nobody can audit. #427's failure is that a
+    score which moved with the toggle was indistinguishable from a prompt
+    regression, so the regime a trial actually ran under has to travel with the
+    trace and into the ledger row the `tool_call_count` scans read."""
+    _patch_off_vault(monkeypatch)
+    import app.mcp_discovery as mcp_disc
+    monkeypatch.setattr(mcp_disc, "_get_harness_kwargs",
+                        lambda: {"tool_search_enabled": True})
+    _patch_harness(monkeypatch,
+                   _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
+                   _StreamScript([("all clear", [])]))
+
+    tr = asyncio.run(run_bench_sdk(None, [("V", Path("/no"))], [_task()], model="primary",
+                                   hooks_factory=lambda: HookRegistry()))[0]
+    assert tr["tool_search_enabled"] is False
+
+    row = ledger_row_for(tr, None, round_id="R1")
+    assert row["tool_search_enabled"] is False
+
+
+def test_a_direct_trace_reports_no_disclosure_regime(monkeypatch):
+    """The direct runner has no tool channel at all, so `None` is the honest
+    answer there — not `False`, which would claim a regime was measured."""
+    row = ledger_row_for({"variant_id": "V", "task_id": "t", "status": "success"},
+                         None, round_id="R1")
+    assert row["tool_search_enabled"] is None
 
 
 def test_trials_do_not_write_session_files(monkeypatch):
