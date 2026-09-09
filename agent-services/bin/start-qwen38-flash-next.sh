@@ -311,22 +311,33 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9345}"
 # allocates later is unaccounted for. --enable-flashinfer-autotune plus this
 # put the card at 96874 of 97887 MiB.
 #
-# THE WHOLE CARD IS RESERVED FOR vLLM. Nothing else is allowed to allocate on
-# GPU 1 — confirmed 2026-09-08, the only holders are VLLM::Worker and the PLE
-# offload worker. An older comment in this tree budgeted ~1.1 GiB for remmina
-# and the livekit worker on this card; that is stale, and believing it costs
-# ~50k KV tokens. If a desktop process ever shows up in
-# `nvidia-smi -i 1 --query-compute-apps`, move it rather than shrinking this.
+# THE WHOLE CARD IS RESERVED FOR vLLM — nothing else may allocate on GPU 1,
+# and on 2026-09-08 the only holders were VLLM::Worker and the PLE offload
+# worker. An older comment in this tree budgeted ~1.1 GiB here for remmina and
+# the livekit worker; that is stale. But do NOT conclude from that that the
+# rest of the card is free for KV.
 #
-# 13.5 GiB is therefore the practical ceiling, not a compromise: it leaves the
-# card at 96,876 of 97,887 MiB. That 413 MiB margin is thin ONLY because
-# setting this skips memory profiling, so the CUDA context, the FlashInfer
-# workspace and allocator fragmentation go unaccounted — the engine's resident
-# total is 96,116 MiB against a weights+KV+activation+cudagraph estimate of
-# ~92,959. Do not raise it to the boot log's "fully utilize" suggestion
-# (14.83 GiB): that number is computed from the same estimate and would
-# over-commit the card by ~1.3 GiB.
-KV_CACHE_MEMORY_BYTES="${KV_CACHE_MEMORY_BYTES:-14495514624}"
+# THE HEADROOM IS FOR vLLM ITSELF, AND THIS IS THE EXPENSIVE LESSON OF THE DAY.
+# Setting this flag SKIPS memory profiling, so nothing reserves the transient
+# activations a forward pass needs. At 13.5 GiB the card sat at 96,876 of
+# 97,887 MiB and served happily for 50 minutes — then a long prefill reached
+# ple_layer.py::_short_conv_dilated_prefill_, asked for 444 MiB against 362 MiB
+# free, and took the engine down with a plain CUDA OOM. Nothing was wrong with
+# the config at boot; it was wrong on the first prefill big enough to need its
+# scratch buffer, which is a workload this box sees constantly (27% of prompts
+# are over 50k tokens).
+#
+# 11.5 GiB is the MEASURED safe point, not a guess: booted at this value the
+# card reads 94,232 of 97,887 MiB, leaving 3,057 MiB — comfortably above both
+# the profiler's own 1.91 GiB peak-activation estimate and the 444 MiB
+# allocation that failed. It still yields ~414k KV tokens and 1.58x at 262k,
+# against 330,159 and 1.26x before this work.
+#
+# If you want more KV, do NOT just raise this number. Either drop
+# max_num_batched_tokens (the transient scales with the prefill chunk) or go
+# back to --gpu-memory-utilization, whose profiling pass exists to account for
+# exactly this and which is what was quietly bypassed here.
+KV_CACHE_MEMORY_BYTES="${KV_CACHE_MEMORY_BYTES:-12348030976}"
 
 # Skip the vision tower entirely. Measured from the checkpoint's safetensors
 # headers: 333 model.visual.* tensors, 0.84 GiB, which at this config's 30.3
