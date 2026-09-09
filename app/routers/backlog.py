@@ -8,6 +8,9 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from agent_mcp._shared import parse_frontmatter_text
+from app.backlog_tags import normalize_tags
+
 
 router = APIRouter()
 
@@ -18,13 +21,42 @@ _BOARD_COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7"]
 _BOARD_ICONS = ["📋", "📋", "📋", "📋", "📋"]
 
 
+_FALLBACK_FIELDS = ("board", "status", "priority", "tags", "blocked", "assigned", "position")
+
+
 def _backlog_parse_fm(content: str) -> tuple:
-    """Parse YAML frontmatter, return (dict, body_str)."""
+    """Parse YAML frontmatter, return (dict, body_str).
+
+    Uses the same graduated recovery as `agent_mcp/backlog.py` rather than a
+    bare `yaml.safe_load`. Three items on the lloyd board have an activity_log
+    entry with an unterminated quote; a strict parse raises, the callers here
+    all `except Exception: continue`, and those three vanish from the listing
+    *and* from the board's task count with nothing logged. A degraded record
+    beats an invisible one — which is the whole point of `parse_frontmatter_text`.
+
+    The recovered dict carries `_yaml_broken`; `_reject_broken_fm` keeps it out
+    of the writers, because the regex fallback only recovers `_FALLBACK_FIELDS`
+    and rewriting a file from it would drop every key it did not extract.
+    """
     if content.startswith("---"):
         parts = content.split("---", 2)
         if len(parts) >= 3:
-            return yaml.safe_load(parts[1]) or {}, parts[2].strip()
+            fm = parse_frontmatter_text(
+                parts[1], fallback_fields=_FALLBACK_FIELDS, log_label="backlog-api",
+            )
+            return fm, parts[2].strip()
     return {}, content
+
+
+def _reject_broken_fm(fm: dict, filepath: Path) -> None:
+    """Refuse to rewrite a file whose YAML only parsed by regex fallback."""
+    if fm.get("_yaml_broken"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{filepath.name} has malformed YAML frontmatter; "
+                   "fix it by hand before editing it here (rewriting would "
+                   "drop the fields the fallback parse could not read).",
+        )
 
 
 def _backlog_board_map() -> dict:
@@ -140,7 +172,7 @@ async def backlog_tasks(board_id: str = "", status: str = ""):
                 "status": fm.get("status", "draft"),
                 "priority": fm.get("priority", "none"),
                 "blocked": fm.get("blocked", False),
-                "tags": fm.get("tags", []),
+                "tags": normalize_tags(fm.get("tags")),
                 "completed": fm.get("status") == "done",
                 "due_date": fm.get("due_date") or fm.get("due") or None,
                 "position": fm.get("position", tid * 1000),
@@ -166,6 +198,7 @@ async def backlog_task_update(request: Request):
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     content = filepath.read_text()
     fm, body = _backlog_parse_fm(content)
+    _reject_broken_fm(fm, filepath)
     board_map = _backlog_board_map()
     id_to_name = {v: k for k, v in board_map.items()}
     if "name" in data:
@@ -188,7 +221,7 @@ async def backlog_task_update(request: Request):
         if key in data:
             fm[key] = data[key]
     if "tags" in data:
-        fm["tags"] = data["tags"]
+        fm["tags"] = normalize_tags(data["tags"])
     if "board_id" in data:
         fm["board"] = id_to_name.get(data["board_id"], fm.get("board", "default"))
     if "assigned_to_agent" in data:
@@ -238,7 +271,7 @@ async def backlog_task_create(request: Request):
         "updated": now,
     }
     if data.get("tags"):
-        fm["tags"] = data["tags"]
+        fm["tags"] = normalize_tags(data["tags"])
     body = f"# {name}"
     if data.get("description"):
         body += f"\n\n{data['description']}"

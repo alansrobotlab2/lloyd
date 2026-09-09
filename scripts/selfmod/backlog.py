@@ -36,6 +36,8 @@ from pathlib import Path
 
 import yaml
 
+from app.backlog_tags import normalize_tags
+
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 OPEN_STATUSES = {"up_next", "draft", "in_progress"}
 
@@ -240,7 +242,7 @@ def load_item(path: Path) -> Item | None:
         status=str(fm.get("status", "draft")), priority=str(fm.get("priority", "medium")),
         created=str(fm.get("created", "")), body=body,
         board=str(fm.get("board", "") or ""),
-        tags=[str(t) for t in (fm.get("tags") or [])],
+        tags=normalize_tags(fm.get("tags")),
     )
 
 

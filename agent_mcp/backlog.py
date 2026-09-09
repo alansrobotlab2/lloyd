@@ -16,6 +16,7 @@ import yaml
 from mcp.types import Tool
 
 from agent_mcp._shared import parse_frontmatter_text, text_result
+from app.backlog_tags import normalize_tags
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 VALID_STATUSES = {"draft", "up_next", "in_progress", "done"}
@@ -53,6 +54,13 @@ def load_task(task_id: int) -> dict | None:
 
 def save_task(task: dict) -> bool:
     if "filename" not in task:
+        return False
+    if task.get("_yaml_broken"):
+        # `parse_frontmatter_text` recovered this record by regex over a short
+        # list of fields. Dumping it back would write `_yaml_broken: true` into
+        # the file and drop every key the fallback could not read — activity_log
+        # and the timestamps among them. A degraded record is fine to *show*;
+        # it is not fine to round-trip.
         return False
     filepath = BACKLOG_DIR / task["filename"]
     fm = {}
@@ -192,12 +200,8 @@ def _handle_tasks(args: dict) -> str:
                 continue
             if assigned is not None and frontmatter.get("assigned") != assigned:
                 continue
-            if tag:
-                task_tags = frontmatter.get("tags", [])
-                if isinstance(task_tags, str):
-                    task_tags = [task_tags]
-                if tag not in task_tags:
-                    continue
+            if tag and tag not in normalize_tags(frontmatter.get("tags")):
+                continue
             title = f"Task {tid}"
             heading_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
             if heading_match:
@@ -207,7 +211,7 @@ def _handle_tasks(args: dict) -> str:
                 "status": frontmatter.get("status", "todo"),
                 "board": frontmatter.get("board", "default"),
                 "priority": frontmatter.get("priority", "medium"),
-                "tags": frontmatter.get("tags", []),
+                "tags": normalize_tags(frontmatter.get("tags")),
                 "blocked": frontmatter.get("blocked", False),
                 "assigned": frontmatter.get("assigned", False),
             })
@@ -228,7 +232,7 @@ def _handle_get(args: dict) -> str:
         "board": task.get("board"),
         "status": task.get("status"),
         "priority": task.get("priority"),
-        "tags": task.get("tags", []),
+        "tags": normalize_tags(task.get("tags")),
         "blocked": task.get("blocked", False),
         "assigned": task.get("assigned", False),
         "created": _serialize_datetime(task.get("created")),
@@ -331,7 +335,7 @@ def _handle_write(args: dict) -> str:
         if args.get(key):
             task[key] = args[key]
     if args.get("tags") is not None:
-        task["tags"] = args["tags"]
+        task["tags"] = normalize_tags(args["tags"])
     if args.get("blocked") is not None:
         task["blocked"] = args["blocked"]
     if args.get("assigned") is not None:
@@ -351,6 +355,12 @@ def _handle_write(args: dict) -> str:
             task = add_activity(task, f"Updated: {', '.join(changes)}")
 
     task["updated"] = now
+    if task.get("_yaml_broken"):
+        return json.dumps({"success": False, "error":
+            f"Task {task_id} ({task.get('filename')}) has malformed YAML "
+            "frontmatter and was only read by fallback parse; fix the file by "
+            "hand before writing to it (a rewrite would drop the fields the "
+            "fallback could not read)."})
     if not save_task(task):
         return json.dumps({"success": False, "error": "Failed to save task"})
     return json.dumps({"success": True, "task_id": task_id, "message": "Task updated"})

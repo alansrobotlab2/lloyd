@@ -339,7 +339,12 @@ function TaskCard({
               assigned
             </span>
           )}
-          {task.tags.map((tag) => (
+          {/* `tags` is normalized to an array by app/backlog_tags.py, but the
+              board renders whatever the vault holds and a hand-edited file can
+              still put a scalar there. One such row used to throw
+              `task.tags.map is not a function` out of render and blank the
+              entire board — the failure that motivated the normalizer. */}
+          {Array.isArray(task.tags) && task.tags.map((tag) => (
             <span
               key={tag}
               className="text-[10px] text-muted-foreground bg-card px-1.5 py-0.5 rounded"
