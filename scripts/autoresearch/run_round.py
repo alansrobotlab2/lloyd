@@ -37,7 +37,7 @@ from .common import (
 from .hypothesis_generator import propose_variants
 from .judge import aggregate_variant, judge_trace
 from .promote import evaluate_promotion, promote
-from .variant_sandbox import materialize, materialize_baseline
+from .variant_sandbox import AnchorApplyError, materialize, materialize_baseline
 
 logger = logging.getLogger("autoresearch.run_round")
 
@@ -153,9 +153,19 @@ async def run(
     # Materialize baseline + each variant as overlay dirs
     baseline_id, baseline_dir = materialize_baseline(cfg)
     variant_pairs: list[tuple[str, Path]] = [(baseline_id, baseline_dir)]
+    dropped = 0
     for v in variants:
-        overlay = materialize(cfg, v)
-        variant_pairs.append((v["variant_id"], overlay))
+        try:
+            overlay = materialize(cfg, v)
+        except AnchorApplyError as exc:
+            # #446: the parser bounds an edit's shape; only here can an anchor be
+            # checked against the text it claims to quote. Zero or two matches
+            # drops the variant whole — no fuzzy match, no partial write — and
+            # the round goes on with the variants that did apply.
+            logger.warning("dropping variant %s: %s", v.get("variant_id"), exc)
+            dropped += 1
+    if dropped:
+        logger.warning("dropped %d of %d variants at anchored-edit apply", dropped, len(variants))
 
     # Fan out (variant × task), split by harness routing (#353)
     logger.info("running %d variants × %d tasks = %d trials (harness=%s)",

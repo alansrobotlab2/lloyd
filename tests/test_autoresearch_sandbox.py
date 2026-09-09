@@ -151,6 +151,122 @@ def test_materialize_reuses_the_existing_dir_for_a_repeated_id(cfg):
     assert first == second
 
 
+# ── mechanical apply of anchored edits (#446) ────────────────────────────────
+#
+# A variant is now a patch, so someone has to apply it to the canonical text.
+# That someone is `materialize`, and the rule is exactly-once or nothing: an
+# anchor that matches twice is ambiguous and an anchor that matches zero times
+# was invented by the model. Guessing either way would put words into SOUL.md
+# that no proposal contained.
+
+@pytest.fixture
+def canonical(tmp_path, monkeypatch):
+    """A stand-in vault. SOUL.md has a line that appears twice and a line that
+    appears once — all the exactly-once rule needs to be testable."""
+    root = tmp_path / "vault"
+    root.mkdir()
+    soul = root / "SOUL.md"
+    soul.write_text(
+        "# SOUL\n"
+        "Be direct.\n"                        # ambiguous: appears twice
+        "Never open with an apology.\n"
+        "Be direct.\n",
+        encoding="utf-8",
+    )
+    memory = root / "MEMORY.md"
+    memory.write_text("# MEMORY\nA single unique note.\n", encoding="utf-8")
+    monkeypatch.setattr(vs, "_canonical_prompt_paths", lambda: {
+        "SOUL.md": soul, "MEMORY.md": memory,
+    })
+    return {"SOUL.md": soul, "MEMORY.md": memory}
+
+
+def anchored(anchor, replacement="replaced", path="SOUL.md"):
+    return {"variant_id": "V_anchored", "target_surface": "prompts",
+            "edits": [{"path": path, "anchor": anchor, "replacement": replacement}]}
+
+
+def test_anchored_edits_materialize_the_applied_text(cfg, canonical):
+    out = vs.materialize(cfg, anchored("Never open with an apology.", "Open with the answer."))
+    assert (out / "SOUL.md").read_text() == (
+        "# SOUL\nBe direct.\nOpen with the answer.\nBe direct.\n"
+    )
+
+
+def test_an_anchor_matching_zero_times_is_rejected(cfg, canonical):
+    """The model quoted a span that is not in the file. Fuzzy-matching it would
+    write text no proposal contained into the prompt that scores the run."""
+    with pytest.raises(vs.AnchorApplyError, match="matched 0 time"):
+        vs.materialize(cfg, anchored("A span that does not exist at all."))
+    assert not (cfg.paths.variants_dir / "V_anchored" / "SOUL.md").exists()
+
+
+def test_an_anchor_matching_two_times_is_rejected(cfg, canonical):
+    """The ambiguity case: 'Be direct.' is on line 2 and line 4. Picking one is
+    a guess about which sentence the model meant to change."""
+    with pytest.raises(vs.AnchorApplyError, match="matched 2 time"):
+        vs.materialize(cfg, anchored("Be direct.", "Be blunt."))
+    assert not (cfg.paths.variants_dir / "V_anchored" / "SOUL.md").exists()
+
+
+def test_a_failing_second_edit_writes_nothing_at_all(cfg, canonical):
+    """All-or-nothing. Edit 1 applies, edit 2 cannot; writing the first anyway
+    would evaluate a change under a variant that was supposed to be refused."""
+    variant = {"variant_id": "V_partial", "edits": [
+        {"path": "SOUL.md", "anchor": "Never open with an apology.", "replacement": "Open with the answer."},
+        {"path": "SOUL.md", "anchor": "No such span anywhere.", "replacement": "x"},
+    ]}
+    with pytest.raises(vs.AnchorApplyError, match="matched 0 time"):
+        vs.materialize(cfg, variant)
+    assert not (cfg.paths.variants_dir / "V_partial" / "SOUL.md").exists()
+
+
+def test_an_edit_list_spanning_two_surfaces_is_rejected(cfg, canonical):
+    variant = {"variant_id": "V_two", "edits": [
+        {"path": "SOUL.md", "anchor": "Never open with an apology.", "replacement": "x"},
+        {"path": "MEMORY.md", "anchor": "A single unique note.", "replacement": "y"},
+    ]}
+    with pytest.raises(vs.AnchorApplyError, match="one surface"):
+        vs.materialize(cfg, variant)
+
+
+def test_edits_apply_in_order_so_a_later_anchor_can_use_earlier_text(cfg, canonical):
+    variant = {"variant_id": "V_seq", "edits": [
+        {"path": "MEMORY.md", "anchor": "A single unique note.", "replacement": "STEP TWO."},
+        {"path": "MEMORY.md", "anchor": "STEP TWO.", "replacement": "STEP THREE."},
+    ]}
+    out = vs.materialize(cfg, variant)
+    assert (out / "MEMORY.md").read_text() == "# MEMORY\nSTEP THREE.\n"
+
+
+def test_an_empty_replacement_deletes_the_anchor(cfg, canonical):
+    out = vs.materialize(cfg, anchored("Never open with an apology.", ""))
+    assert "Never open with an apology." not in (out / "SOUL.md").read_text()
+
+
+def test_an_edit_on_a_path_outside_the_spec_is_rejected_before_any_write(cfg, canonical):
+    """The allowlist held for full-file overlays; an anchored edit has to fail
+    the same way instead of reading some other file's text."""
+    with pytest.raises(vs.AnchorApplyError, match="not a spec-writable"):
+        vs.materialize(cfg, anchored("whatever", "x", path="config.yaml"))
+    assert not (cfg.paths.variants_dir / "V_anchored" / "config.yaml").exists()
+
+
+def test_applying_a_patch_never_writes_the_canonical_vault(cfg, canonical):
+    vs.materialize(cfg, anchored("Never open with an apology.", "Open with the answer."))
+    assert "Never open with an apology." in canonical["SOUL.md"].read_text()
+
+
+def test_materialize_records_the_patch_in_the_variant_metadata(cfg, canonical):
+    """The audit trail needs the edit now that a proposal no longer carries the
+    file it produced — otherwise a promoted variant cannot be attributed to the
+    change that made it."""
+    out = vs.materialize(cfg, anchored("Never open with an apology.", "Open with the answer."))
+    meta = json.loads((out / "variant.json").read_text())
+    assert meta["overlay_files"] == ["SOUL.md"]
+    assert meta["edits"][0]["anchor"] == "Never open with an apology."
+
+
 # ── materialize_baseline ─────────────────────────────────────────────────────
 
 def test_baseline_overlay_is_empty_so_everything_falls_through(cfg):
