@@ -658,6 +658,15 @@ workers:
       enabled: true
       interval_seconds: 300
       max_inflight: 1
+      # 45, not the source default of 60: scheduled-task maps autonomy
+      # priorities critical/high/medium/low/background to 10/20/30/50/70
+      # and may hold both slots, so at 60 a digest only ran in the gaps
+      # between due autonomy tasks — three sat queued for 25 minutes on
+      # 2026-09-09 while two low-priority KG jobs held both slots. At 45
+      # with max_inflight 1 the digest takes one slot whenever it has work
+      # and beats low/background autonomy work for it; medium and above,
+      # and a selfmod implement round (40), still go first.
+      priority: 45
       max_duration_seconds: 1800
       max_turns: 40
       batch: 3
