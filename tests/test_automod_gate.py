@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.autoimplement import gate as G
+from scripts.automod import gate as G
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ def test_preflight_refuses_when_the_guardian_is_broken(live_repo, monkeypatch):
 def test_preflight_refuses_a_no_op_diff(live_repo, tmp_path, monkeypatch):
     base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     wt = tmp_path / "wt"
-    git(live_repo, "worktree", "add", "-q", "-b", "autoimplement/y", str(wt), base)
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/y", str(wt), base)
     g = _gate_for(live_repo, wt, base, monkeypatch)
     ok, reason, _ = g.rung_preflight()
     assert not ok and "no changes" in reason
@@ -189,7 +189,7 @@ def test_preflight_refuses_a_no_op_diff(live_repo, tmp_path, monkeypatch):
 def test_preflight_refuses_a_denied_path(live_repo, tmp_path, monkeypatch):
     base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     wt = tmp_path / "wt"
-    git(live_repo, "worktree", "add", "-q", "-b", "autoimplement/z", str(wt), base)
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/z", str(wt), base)
     (wt / "config.yaml").write_text("agent: {}\n", encoding="utf-8")
     git(wt, "add", "-A")
     git(wt, "commit", "-q", "-m", "touch config")
@@ -201,7 +201,7 @@ def test_preflight_refuses_a_denied_path(live_repo, tmp_path, monkeypatch):
 def test_preflight_accepts_an_in_scope_diff(live_repo, tmp_path, monkeypatch):
     base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     wt = tmp_path / "wt"
-    git(live_repo, "worktree", "add", "-q", "-b", "autoimplement/ok", str(wt), base)
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/ok", str(wt), base)
     (wt / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
     git(wt, "add", "-A")
     git(wt, "commit", "-q", "-m", "ordinary change")
@@ -215,7 +215,7 @@ def test_preflight_accepts_an_in_scope_diff(live_repo, tmp_path, monkeypatch):
 def test_preflight_flags_the_drill_for_a_protected_path(live_repo, tmp_path, monkeypatch):
     base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     wt = tmp_path / "wt"
-    git(live_repo, "worktree", "add", "-q", "-b", "autoimplement/p", str(wt), base)
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/p", str(wt), base)
     d = wt / "agent-services" / "guardian"
     d.mkdir(parents=True)
     (d / "detect.py").write_text("X = 1\n", encoding="utf-8")
@@ -234,7 +234,7 @@ def test_preflight_refuses_a_merge_commit(live_repo, tmp_path, monkeypatch):
     git(live_repo, "add", "-A"); git(live_repo, "commit", "-q", "-m", "side")
     git(live_repo, "checkout", "-q", "main")
     wt = tmp_path / "wt"
-    git(live_repo, "worktree", "add", "-q", "-b", "autoimplement/m", str(wt), base)
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/m", str(wt), base)
     (wt / "app" / "m.py").write_text("V = 3\n", encoding="utf-8")
     git(wt, "add", "-A"); git(wt, "commit", "-q", "-m", "wt change")
     git(wt, "merge", "--no-ff", "-q", "-m", "merge side", "side")
@@ -265,7 +265,7 @@ def _frontend_gate(live_repo, tmp_path, monkeypatch, *, changed, head, base, bui
     `base` are the tsc findings for the worktree and the live tree."""
     base_sha = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     wt = tmp_path / "wt"
-    git(live_repo, "worktree", "add", "-q", "-b", "autoimplement/fe", str(wt), base_sha)
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/fe", str(wt), base_sha)
     (live_repo / "web" / "node_modules" / ".bin").mkdir(parents=True, exist_ok=True)
     (live_repo / "web" / "node_modules" / ".bin" / "vite").write_text("#!/bin/sh\n")
     (wt / "web").mkdir(exist_ok=True)
@@ -473,7 +473,7 @@ def test_rung_tests_reports_pre_existing_breakage_as_an_external_blocker(tmp_pat
     monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
     wt = tmp_path / "work" / "SM_T" / "home" / "lloyd"
     wt.parent.mkdir(parents=True)
-    git(repo, "worktree", "add", "-q", "-b", "autoimplement/SM_T", str(wt), base)
+    git(repo, "worktree", "add", "-q", "-b", "automod/SM_T", str(wt), base)
     (wt / "unrelated.py").write_text("X = 1\n", encoding="utf-8")
     git(wt, "add", "-A")
     git(wt, "commit", "-q", "-m", "an unrelated change")
@@ -497,7 +497,7 @@ def test_rung_tests_blames_the_round_for_a_failure_it_introduced(tmp_path, monke
     monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
     wt = tmp_path / "work" / "SM_T2" / "home" / "lloyd"
     wt.parent.mkdir(parents=True)
-    git(repo, "worktree", "add", "-q", "-b", "autoimplement/SM_T2", str(wt), base)
+    git(repo, "worktree", "add", "-q", "-b", "automod/SM_T2", str(wt), base)
     (wt / "tests" / "test_mine.py").write_text(
         "def test_i_broke_this():\n    assert False\n", encoding="utf-8")
     git(wt, "add", "-A")
@@ -524,7 +524,7 @@ def test_a_test_the_round_added_does_not_hide_the_pre_existing_ones(tmp_path, mo
     monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
     wt = tmp_path / "work" / "SM_T3" / "home" / "lloyd"
     wt.parent.mkdir(parents=True)
-    git(repo, "worktree", "add", "-q", "-b", "autoimplement/SM_T3", str(wt), base)
+    git(repo, "worktree", "add", "-q", "-b", "automod/SM_T3", str(wt), base)
     # A new failing test appended to the SAME file that is already red.
     (wt / "tests" / "test_pre.py").write_text(
         "def test_already_broken():\n    assert False\n\n"
@@ -608,7 +608,7 @@ def test_an_empty_diff_carries_no_exemption(live_repo, tmp_path, monkeypatch):
 
 def _round(live_repo, tmp_path, name, base, edit=("app/m.py", "V = 2\n")):
     wt = tmp_path / f"wt_{name}"
-    git(live_repo, "worktree", "add", "-q", "-b", f"autoimplement/{name}", str(wt), base)
+    git(live_repo, "worktree", "add", "-q", "-b", f"automod/{name}", str(wt), base)
     rel, body = edit
     (wt / rel).parent.mkdir(parents=True, exist_ok=True)
     (wt / rel).write_text(body, encoding="utf-8")
@@ -732,7 +732,7 @@ def test_the_retest_judges_the_change_on_top_of_what_landed(tmp_path, monkeypatc
     monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
     wt = tmp_path / "work" / "SM_RT" / "home" / "lloyd"
     wt.parent.mkdir(parents=True)
-    git(live, "worktree", "add", "-q", "-b", "autoimplement/SM_RT", str(wt), base)
+    git(live, "worktree", "add", "-q", "-b", "automod/SM_RT", str(wt), base)
     (wt / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
     git(wt, "add", "-A"); git(wt, "commit", "-q", "-m", "round: V = 2")
 

@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     # gstate owns both names: the BROKEN marker file (beside the lowercase
     # `broken/` incident directory, which is a different thing) and the ledger
     # filename. Hardcoding either here is how the two drift.
-    state = gstate.AutoimplementState(Path(policy.AUTOIMPLEMENT_STATE))
+    state = gstate.AutomodState(Path(policy.AUTOMOD_STATE))
     body = read_broken(state.broken)
     if body is None:
         return 0                      # nothing broken — the common case

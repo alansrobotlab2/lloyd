@@ -29,7 +29,7 @@ logger = logging.getLogger("lloyd-workers.autotriage")
 
 NAME = "autotriage"
 # `priority ASC` — lower runs sooner. Below the research/distill stream (70),
-# above the implement round (40): see autoimplement.DEFAULT_PRIORITY.
+# above the implement round (40): see autocode.DEFAULT_PRIORITY.
 DEFAULT_PRIORITY = 55
 DEDUP_KEY = "autotriage:triage"
 
@@ -69,7 +69,7 @@ something that would come out differently depending on whether the premise \
 holds. Write it down before running it.
 4. **Run the check.** Use Read, Grep, Glob and Bash. You are read-only **on the \
 code**: do not edit, write, or commit anything under the repo, and do not start \
-a autoimplement round. The backlog is the one thing you write to — step 6 requires it.
+an automod round. The backlog is the one thing you write to — step 6 requires it.
 5. **Reach a verdict** from the evidence:
    - `confirmed` — the premise still holds; the problem is real today
    - `already_done` — it was real, and something has since fixed it
@@ -85,7 +85,7 @@ run `backlog_tasks` to be sure no item already covers it; if one does, cite its 
 number in EVIDENCE instead. Write the description as a handoff a fresh session \
 can execute alone: the claim, the current state with file paths and line \
 numbers, the check that shows it, and the first line \
-"Split from #{item_id} during autoimplement triage on <date>". The tool returns the \
+"Split from #{item_id} during automod triage on <date>". The tool returns the \
 new id; list every one under SPAWNED. **A finding that lives only in EVIDENCE \
 is lost**: nobody reads this transcript for to-dos, and the item you are \
 triaging is about to be closed. Filing nothing is fine when there is nothing — \
@@ -129,7 +129,7 @@ Rules that matter:
 - **`stale` and `already_done` are good outcomes.** Most of a backlog this old \
 should reach them. Do not strain to confirm an item so it looks productive.
 - **Never guess.** If you could not run a conclusive check, say `unverifiable` \
-and explain what you would need. A wrong `confirmed` sends the autoimplement loop \
+and explain what you would need. A wrong `confirmed` sends the automod loop \
 after a problem that does not exist.
 - **Quote your evidence.** File paths with line numbers, command output, commit \
 SHAs. A verdict without evidence is unusable, because the point of this pass is \
@@ -154,12 +154,12 @@ SPAWNED: <ids of the new items you filed in step 6, e.g. #401 #402; otherwise th
 """
 
 def _acceptance_text(value: str) -> str:
-    from scripts.autoimplement.backlog import acceptance_text
+    from scripts.automod.backlog import acceptance_text
     return acceptance_text(value)
 
 
 def _parse_spawned(value: str) -> list[int]:
-    from scripts.autoimplement.backlog import parse_spawned
+    from scripts.automod.backlog import parse_spawned
     return parse_spawned(value)
 
 
@@ -184,7 +184,7 @@ def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
     produced it as `source`, so the ledger can show the fallback rate rather
     than the two being indistinguishable.
     """
-    from scripts.autoimplement.backlog import VERDICTS, SURFACES
+    from scripts.automod.backlog import VERDICTS, SURFACES
 
     if isinstance(structured, dict):
         parsed = _from_structured(structured, VERDICTS, SURFACES)
@@ -302,7 +302,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     Now it is recorded as `incomplete`, the item comes back, and only a second
     exhaustion retires it, with evidence that says exactly that.
     """
-    from scripts.autoimplement import backlog as B, state as S
+    from scripts.automod import backlog as B, state as S
     from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
 
     candidates, held = B.triage_pool(S.LEDGER_PATH)
@@ -401,7 +401,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     # Retiring verdicts close the item; everything else only annotates it.
     # `confirmed` deliberately does NOT open a round — implementation is the
-    # `autoimplement` source's job, and it is gated separately.
+    # `autocode` source's job, and it is gated separately.
     close = parsed["verdict"] in B.RETIRING
 
     # What the model says it filed is a claim; the file on disk is the fact.

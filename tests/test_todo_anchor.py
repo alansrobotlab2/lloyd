@@ -211,7 +211,7 @@ def test_budget_anchor_fires_once_at_75_and_90_percent(monkeypatch):
     hits = {i: out for i in range(1, 101) if (out := asyncio.run(anchor(i)))}
     assert sorted(hits) == [75, 90]
     assert "Iteration 75 of 100" in hits[75][0]["content"] and "25 iteration" in hits[75][0]["content"]
-    assert "autoimplement_land" in hits[90][0]["content"] and hits[90][0]["role"] == "user"
+    assert "automod_land" in hits[90][0]["content"] and hits[90][0]["role"] == "user"
 
 
 def test_budget_anchor_is_silent_without_a_budget(monkeypatch):

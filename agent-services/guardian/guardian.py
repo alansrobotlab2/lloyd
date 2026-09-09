@@ -89,7 +89,7 @@ def rollback_title(current: dict | None, bad: str | None, expected: str) -> str:
 class Guardian:
     def __init__(self, args):
         self.repo = args.repo
-        self.state = gstate.AutoimplementState(Path(args.state))
+        self.state = gstate.AutomodState(Path(args.state))
         self.gdir = Path(args.guardian_state)
         self.gdir.mkdir(parents=True, exist_ok=True)
         self.sup = SupervisorClient(args.supervisor_sock,
@@ -837,7 +837,7 @@ def count_vault_files(root: str) -> int | None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Lloyd self-modification guardian")
     p.add_argument("--repo", default=policy.REPO)
-    p.add_argument("--state", default=str(policy.AUTOIMPLEMENT_STATE))
+    p.add_argument("--state", default=str(policy.AUTOMOD_STATE))
     p.add_argument("--guardian-state", default=str(policy.GUARDIAN_STATE))
     p.add_argument("--supervisor-sock", default=policy.SUPERVISOR_SOCK)
     p.add_argument("--backend-url", default=policy.BACKEND_HEALTH_URL)

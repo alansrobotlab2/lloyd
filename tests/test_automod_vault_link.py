@@ -2,7 +2,7 @@
 
 Why this file exists
 --------------------
-A `mixed` backlog item lands its vault half through `autoimplement_vault_land` and
+A `mixed` backlog item lands its vault half through `automod_vault_land` and
 its code half through the promoter. Until now nothing joined them: the vault
 sha went into a `vault_land` ledger event keyed on the backlog `item_id`, the
 code commit went into `current.json` keyed on the round, and a rollback saw
@@ -25,8 +25,8 @@ import json
 
 import pytest
 
-from scripts.autoimplement import promote as P
-from scripts.autoimplement import state as S
+from scripts.automod import promote as P
+from scripts.automod import state as S
 
 
 @pytest.fixture
@@ -110,7 +110,7 @@ def test_the_promotion_record_carries_the_field():
 
 def test_revert_many_goes_newest_first(monkeypatch):
     """Oldest-first conflicts by construction when both touch the same file."""
-    from scripts.autoimplement import vault_round as VR
+    from scripts.automod import vault_round as VR
 
     order: list[str] = []
     monkeypatch.setattr(VR, "revert", lambda sha, reason="": order.append(sha))
@@ -121,7 +121,7 @@ def test_revert_many_goes_newest_first(monkeypatch):
 
 def test_revert_many_reports_partial_progress(monkeypatch):
     """A rollback that undid two of three has still changed the tree."""
-    from scripts.autoimplement import vault_round as VR
+    from scripts.automod import vault_round as VR
 
     def flaky(sha, reason=""):
         if sha == "bbb":
@@ -134,7 +134,7 @@ def test_revert_many_reports_partial_progress(monkeypatch):
 
 
 def test_revert_many_on_an_empty_list_is_a_no_op(monkeypatch):
-    from scripts.autoimplement import vault_round as VR
+    from scripts.automod import vault_round as VR
 
     monkeypatch.setattr(VR, "revert", lambda sha, reason="": pytest.fail("called"))
     assert VR.revert_many([]) == {"ok": True, "reverted": []}

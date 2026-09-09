@@ -44,7 +44,7 @@ def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
     has to mean something defensible. Absent `status` means success, because
     most sources finish by returning their artifact and never think about it.
 
-    The interesting case is the one that was silently wrong. `autoimplement-
+    The interesting case is the one that was silently wrong. `automod-
     regression` reports "I could not measure anything" by returning
     `{"skipped": "<reason>"}` — a key, not a status — so all 22 of its runs
     were recorded as successes with an empty summary. A check that never ran

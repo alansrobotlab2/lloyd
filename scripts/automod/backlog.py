@@ -48,13 +48,18 @@ from app.backlog_tags import normalize_tags
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 
 # Tags `backlog_write_task` puts on items this loop files for itself —
-# `spawned-by-triage` from a verdict turn, `spawned-by-autoimplement` from an
+# `spawned-by-triage` from a verdict turn, `spawned-by-autocode` from an
 # implement round. They are how a self-filed item is told from a human one,
 # and `draft` alone cannot do it: that is the status of half the board.
 # Both spellings: ~100 items on the board carry the pre-rename tag, and
 # quarantine that stopped recognising them would re-admit every one of them
 # to the triage pool at once. New items get the new tag.
-SPAWN_TAGS = frozenset({"spawned-by-triage", "spawned-by-autoimplement", "spawned-by-selfmod"})
+# Two renames of the implement source (selfmod → autoimplement on 2026-09-09,
+# autoimplement → autocode the same day) left their tags on the board. Read all
+# three; write the newest. Quarantine that stopped recognising an old tag would
+# re-admit every item carrying it to the triage pool at once.
+SPAWN_TAGS = frozenset({"spawned-by-triage", "spawned-by-autocode",
+                        "spawned-by-autoimplement", "spawned-by-selfmod"})
 
 # How old a self-filed item must be before triage may judge it. Long enough
 # that 'is this still true?' is a real question about a claim nobody acted
@@ -126,7 +131,7 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
     "title": "backlog_implement_outcome",
     "properties": {
         "landed": {"type": "boolean",
-                   "description": ("Did this turn call autoimplement_land (or autoimplement_vault_land) "
+                   "description": ("Did this turn call automod_land (or automod_vault_land) "
                                    "on a change that passed the gate?")},
         "acceptance": {"type": "string", "enum": list(ACCEPTANCE_OUTCOMES),
                        "description": ("met: the acceptance check recorded at triage is now "
@@ -424,7 +429,7 @@ ROLLED_BACK_RETRY_CAP = 1    # the work is gone with the branch; one redo
 
 # Stop reasons that mean the turn ran out of room rather than reaching a
 # conclusion. #446 committed 757 lines and was killed by the wall clock
-# fourteen seconds before its `autoimplement_gate` call.
+# fourteen seconds before its `automod_gate` call.
 INCOMPLETE_STOP_REASONS = {"turn_timeout", "max_turns"}
 
 
@@ -553,13 +558,13 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
             out[iid] = ("incomplete",
                         f"the turn ran out of {'clock' if ev.get('stop_reason') == 'turn_timeout' else 'iterations'} "
                         f"before reaching a verdict"
-                        + (f"; its work is on branch `autoimplement/{rid}`" if rid else ""))
+                        + (f"; its work is on branch `automod/{rid}`" if rid else ""))
             continue
         if rid and rid in blocked and n <= EXTERNAL_RETRY_CAP:
             g = _last_gate_per_round(ledger).get(rid) or {}
             out[iid] = ("external",
                         f"round {rid} was blocked at the `{g.get('rung')}` rung by a condition "
-                        f"it did not cause; its work is on branch `autoimplement/{rid}`")
+                        f"it did not cause; its work is on branch `automod/{rid}`")
             continue
         out[iid] = ("spent", "")
     return out
@@ -601,9 +606,9 @@ def reoffer_reason(ledger: Path, item_id: int) -> str:
 # joined the three back to the item's status. `implemented_ids` kept them
 # from being re-picked, so they sat on the board as `up_next` and `draft` —
 # the loop's own finished work, counted as its backlog.
-LANDED_MARKER = "autoimplement_landed"
+LANDED_MARKER = "automod_landed"
 # Items landed before the rename carry the old marker. Read both; write the new.
-_LEGACY_LANDED_MARKERS = ("selfmod_landed",)
+_LEGACY_LANDED_MARKERS = ("autoimplement_landed", "selfmod_landed")
 
 
 def settled_landings(ledger: Path) -> list[dict]:
@@ -651,7 +656,7 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
     where = f"round {round_id}" if round_id else "a vault round"
-    entry = (f"**{stamp}** — autoimplement landed as `{commit[:8]}` ({where}, "
+    entry = (f"**{stamp}** — automod landed as `{commit[:8]}` ({where}, "
              f"{'settled' if round_id else 'committed'} {settled_at}). "
              + (f"Closed: {why}" if close else f"Left open: {why}"))
     log = list(fm.get("activity_log") or [])
@@ -662,7 +667,7 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     if close:
         fm["status"] = "done"
         fm["completed"] = stamp
-    section = (f"\n\n## Autoimplement landed — {stamp[:10]}\n\n`{commit[:8]}`, {where}, "
+    section = (f"\n\n## Automod landed — {stamp[:10]}\n\n`{commit[:8]}`, {where}, "
                f"{'settled' if round_id else 'committed'} {settled_at}.\n\n"
                + ("**Closed.** " if close else "**Left open.** ") + why + "\n")
     item.path.write_text(
@@ -685,7 +690,7 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
     """
     if not enabled:
         return []
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
     by_id = {i.id: i for i in open_items(boards)}
     done: list[dict] = []
     for landing in settled_landings(ledger):
@@ -862,7 +867,7 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
         fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
         landed = fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS)
         if iid in in_flight:
-            out[iid] = ("in_progress", "an autoimplement round is in flight for it")
+            out[iid] = ("in_progress", "an automod round is in flight for it")
         elif landed:
             out[iid] = ("in_progress", "landed, awaiting the acceptance check or a human close")
         elif iid in observing:
@@ -915,7 +920,7 @@ def rescue_off_vocabulary(ledger: Path,
     Alfie or Architecture item with an unusual status is not this loop's to
     rewrite.
     """
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
     moved: list[dict] = []
     for item in all_items(boards):
         if not is_off_vocabulary(item.status):
@@ -938,7 +943,7 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
     """Write the desired statuses that differ. Idempotent; returns what moved."""
     if not enabled:
         return []
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
     # First, anything the pass below is structurally unable to see. `current`
     # is read after it so the rescued items are judged in this same pass.
     moved: list[dict] = rescue_off_vocabulary(ledger, boards)
@@ -967,10 +972,10 @@ def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dic
     ledger = ledger or LEDGER_DEFAULT()
     if int(item_id) not in {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}:
         raise ValueError(f"#{item_id} has no implement attempt on record; nothing to reopen")
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
     S.append_event({"event": "backlog_implement", "item_id": int(item_id), "phase": "reopened",
                     "reason": reason}, path=ledger)
-    note_item(item_id, f"reopened for a second autoimplement attempt: {reason}")
+    note_item(item_id, f"reopened for a second automod attempt: {reason}")
     return {"item_id": int(item_id), "reopened": True, "reason": reason}
 
 
@@ -992,7 +997,7 @@ def note_item(item_id: int, text: str) -> bool:
 
 
 def LEDGER_DEFAULT() -> Path:
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
     return S.LEDGER_PATH
 
 
@@ -1120,7 +1125,7 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     fm, body = _split_frontmatter(text)
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
-    entry = f"**{stamp}** — autoimplement triage: **{verdict}**. {evidence.strip()}"
+    entry = f"**{stamp}** — autotriage: **{verdict}**. {evidence.strip()}"
     if check:
         entry += f" Check: `{check}`"
     if spawned:
@@ -1138,7 +1143,7 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # wherever it was, and #353 landed while still `draft`.
         fm["status"] = IMPLEMENT_POOL_STATUS
 
-    section = (f"\n\n## Autoimplement triage — {stamp[:10]}\n\n"
+    section = (f"\n\n## Automod triage — {stamp[:10]}\n\n"
                f"**Verdict:** {verdict}\n\n{evidence.strip()}\n")
     if check:
         section += f"\n**Premise check:**\n```\n{check.strip()}\n```\n"

@@ -47,7 +47,7 @@ from pathlib import Path
 
 import yaml
 
-from scripts.autoimplement import spec, state as S
+from scripts.automod import spec, state as S
 
 LLOYD_HOME = Path(__file__).resolve().parent.parent.parent
 VAULT = Path(os.environ.get("LLOYD_VAULT") or (Path.home() / "obsidian"))

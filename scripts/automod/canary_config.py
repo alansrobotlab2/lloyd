@@ -151,7 +151,7 @@ def canary_env(round_dir: Path, worktree: Path, *, overlay: Path,
         # A path that cannot exist, so a canary's startup hook physically
         # cannot reach the live supervisord and stop the live secondary vLLM.
         "LLOYD_SUPERVISOR_SOCK": str(round_dir / "no-such-supervisor.sock"),
-        "LLOYD_AUTOIMPLEMENT_STATE": str(round_dir / "autoimplement-state"),
+        "LLOYD_AUTOMOD_STATE": str(round_dir / "automod-state"),
         "LLOYD_GUARDIAN_STATE": str(round_dir / "guardian-state"),
         "PATH": f"{python.parent}:{env.get('PATH', '')}",
     })
@@ -214,7 +214,7 @@ stderr_logfile={logs}/server.err
 def _env_line(env: dict) -> str:
     """supervisord `environment=` line. Values are quoted; %% escapes %."""
     keep = ("HOME", "PYTHONPATH", "PYTHONUNBUFFERED", "LLOYD_CONFIG_OVERLAY",
-            "LLOYD_MCP_PORT", "LLOYD_SUPERVISOR_SOCK", "LLOYD_AUTOIMPLEMENT_STATE",
+            "LLOYD_MCP_PORT", "LLOYD_SUPERVISOR_SOCK", "LLOYD_AUTOMOD_STATE",
             "LLOYD_GUARDIAN_STATE", "PATH")
     parts = []
     for k in keep:

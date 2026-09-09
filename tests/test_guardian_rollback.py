@@ -228,7 +228,7 @@ def test_a_linked_worktree_is_untouched_by_a_rollback(repo, tmp_path):
     """The guardian must never reach into a round's worktree."""
     r = repo["path"]
     wt = tmp_path / "work"
-    git(r, "worktree", "add", "-q", "-b", "autoimplement/x", str(wt), repo["b"])
+    git(r, "worktree", "add", "-q", "-b", "automod/x", str(wt), repo["b"])
     (wt / "app" / "mod.py").write_text("VALUE = 'worktree'\n", encoding="utf-8")
 
     rb.restore_tree(str(r), repo["a"], policy.CLEAN_PATHS, policy.PYCACHE_PATHS)
@@ -241,14 +241,14 @@ def test_a_linked_worktree_is_untouched_by_a_rollback(repo, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_target_comes_from_the_lkg_pointer(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.set_lkg("a" * 40)
     target, source = st.rollback_target()
     assert target == "a" * 40 and "last_known_good" in source
 
 
 def test_target_falls_back_to_the_ledger_when_the_pointer_is_gone(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     gstate.append_event(st.ledger, {"event": "promoted", "commit": "b" * 40,
                                     "parent": "a" * 40})
     target, source = st.rollback_target()
@@ -256,7 +256,7 @@ def test_target_falls_back_to_the_ledger_when_the_pointer_is_gone(tmp_path):
 
 
 def test_a_malformed_pointer_falls_through_rather_than_crashing(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.lkg_path.parent.mkdir(parents=True, exist_ok=True)
     st.lkg_path.write_text("{not json", encoding="utf-8")
     gstate.append_event(st.ledger, {"event": "promoted", "commit": "b" * 40,
@@ -270,19 +270,19 @@ def test_no_target_anywhere_refuses_rather_than_guessing(tmp_path):
 
     A watchdog that guesses at a commit is worse than one that pages a human.
     """
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     target, source = st.rollback_target()
     assert target is None and "no usable" in source
 
 
 def test_a_short_or_non_hex_commit_is_not_accepted(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     gstate.write_json_atomic(st.lkg_path, {"schema": 1, "commit": "abc123"})
     assert st.rollback_target()[0] is None
 
 
 def test_the_floor_is_set_once_and_never_moves(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.set_lkg("a" * 40)
     st.set_lkg("b" * 40)
     assert st.floor() == "a" * 40
@@ -290,21 +290,21 @@ def test_the_floor_is_set_once_and_never_moves(tmp_path):
 
 def test_pause_is_capped_by_the_snapshots_own_policy(tmp_path):
     """A forgotten or over-long lease must not disable the watchdog."""
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.pause.parent.mkdir(parents=True, exist_ok=True)
     st.pause.write_text(str(time.time() + 10 * 24 * 3600), encoding="utf-8")
     assert st.pause_remaining(cap=1800.0) == pytest.approx(1800.0, abs=1.0)
 
 
 def test_an_expired_pause_reads_as_zero(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.pause.parent.mkdir(parents=True, exist_ok=True)
     st.pause.write_text(str(time.time() - 5), encoding="utf-8")
     assert st.pause_remaining(cap=1800.0) == 0.0
 
 
 def test_unfinished_rollback_is_detected_for_resume(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     gstate.append_event(st.ledger, {"event": "rollback_started", "to": "a" * 40})
     assert st.unfinished_rollback() is not None
     gstate.append_event(st.ledger, {"event": "rollback_succeeded", "restored": "a" * 40})
@@ -312,7 +312,7 @@ def test_unfinished_rollback_is_detected_for_resume(tmp_path):
 
 
 def test_recent_rollbacks_counts_only_inside_the_window(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.ledger.parent.mkdir(parents=True, exist_ok=True)
     old = {"event": "rollback_succeeded", "ts": time.time() - 10 * 3600}
     recent = {"event": "rollback_succeeded", "ts": time.time() - 60}
@@ -333,7 +333,7 @@ def test_recent_rollbacks_counts_only_inside_the_window(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_the_promotions_own_target_beats_a_stranded_lkg(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.set_lkg("a" * 40)                       # stranded hours ago
     # Deliberately distinct from `parent`, so this pins the preference order
     # rather than passing on either branch: the promoter writes
@@ -345,7 +345,7 @@ def test_the_promotions_own_target_beats_a_stranded_lkg(tmp_path):
 
 
 def test_the_parent_is_used_when_no_explicit_target_was_recorded(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.set_lkg("a" * 40)
     target, source = st.rollback_target({"commit": "c" * 40, "parent": "b" * 40})
     assert target == "b" * 40 and "parent" in source
@@ -353,14 +353,14 @@ def test_the_parent_is_used_when_no_explicit_target_was_recorded(tmp_path):
 
 def test_without_a_promotion_under_observation_the_lkg_still_wins(tmp_path):
     """The old ladder is intact for every path that has no `current`."""
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.set_lkg("a" * 40)
     assert st.rollback_target(None)[0] == "a" * 40
     assert st.rollback_target()[0] == "a" * 40
 
 
 def test_a_malformed_current_target_falls_through_to_the_lkg(tmp_path):
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.set_lkg("a" * 40)
     target, source = st.rollback_target({"rollback_target": "nope", "parent": ""})
     assert target == "a" * 40 and "last_known_good" in source
@@ -372,7 +372,7 @@ def test_the_26_commit_regression(tmp_path):
     LKG took the whole evening with it — the voice work, the alert fan-out, a
     dashboard fix and an IDE fix, none of which the loop had any business
     judging."""
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.set_lkg("9a0a1d84" + "0" * 32)                      # 14:24, stale
     current = {"commit": "5cc8618a" + "0" * 32,            # the promotion
                "parent": "90b6a2d7" + "0" * 32,           # 20:00, evening work

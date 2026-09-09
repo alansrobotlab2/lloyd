@@ -63,11 +63,11 @@ def run(*, backend: str, sessions_dir: Path, timeout: float = 150.0,
     sessions_dir.mkdir(parents=True, exist_ok=True)
     (sessions_dir / f"{session_id}.json").write_text(json.dumps({
         "id": session_id,
-        "title": "autoimplement canary smoke",
+        "title": "automod canary smoke",
         "model": model,
         "platform": "canary",
         # Deliberately unobserved, and NOT a hole in the "rounds run under
-        # Inner Voice" rule. This is a gate rung, not a autoimplement job: it drives
+        # Inner Voice" rule. This is a gate rung, not an automod job: it drives
         # one synthetic turn to prove a build can dispatch a tool. The observer
         # adds LLM calls and non-determinism to a check whose entire value is
         # that it fails if and only if code under test is broken.

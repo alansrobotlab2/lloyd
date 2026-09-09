@@ -26,11 +26,11 @@ import sys
 import time
 from pathlib import Path
 
-from scripts.autoimplement import canary as C
+from scripts.automod import canary as C
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
-BREAK_LINE = 'raise SystemExit("autoimplement rehearsal: deliberate boot failure")\n'
+BREAK_LINE = 'raise SystemExit("automod rehearsal: deliberate boot failure")\n'
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -107,7 +107,7 @@ def _run_one_drill(round_id: str, worktree: Path, base: str, *,
     """One scenario. Return (ok, detail). Never raises."""
     drill_root = Path.home() / "lloyd-work" / f"{round_id}-drill"
     scratch = drill_root / "home" / "lloyd"
-    state_dir = drill_root / "autoimplement-state"
+    state_dir = drill_root / "automod-state"
     guardian_state = drill_root / "guardian-state"
     marker = drill_root / "drill-in-progress"
     python = Path(python) if python else LIVE_ROOT / ".venvs/lloyd/bin/python"

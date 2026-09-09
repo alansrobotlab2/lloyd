@@ -145,7 +145,7 @@ async def _primary_state() -> dict[str, Any]:
 
     active = sessions_io.active_sessions_snapshot()
     # The snapshot is pure in-memory queue state and stays that way — it is
-    # also the autoimplement promoter's idle gate. Titles live on disk, so they
+    # also the automod promoter's idle gate. Titles live on disk, so they
     # are joined on here, off the loop and behind a TTL cache.
     if active:
         from app import session_titles

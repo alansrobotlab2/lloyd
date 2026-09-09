@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from scripts.autoimplement import promote as P, state as S
+from scripts.automod import promote as P, state as S
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +74,7 @@ def test_the_guardian_ignores_a_landing_record(tmp_path, monkeypatch):
                            "agent-services" / "guardian"))
     import gstate
 
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     gstate.write_json_atomic(st.current_path,
                              {"state": "landing", "commit": "b" * 40,
                               "errors_until_ts": None})
@@ -295,7 +295,7 @@ def shared_tree(tmp_path, monkeypatch):
     _git(live, "add", "-A"); _git(live, "commit", "-q", "-m", "base")
     base = _git(live, "rev-parse", "HEAD").stdout.strip()
     wt = tmp_path / "wt"
-    _git(live, "worktree", "add", "-q", "-b", "autoimplement/SM_MV", str(wt), base)
+    _git(live, "worktree", "add", "-q", "-b", "automod/SM_MV", str(wt), base)
     (wt / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
     _git(wt, "add", "-A"); _git(wt, "commit", "-q", "-m", "round")
     gated = _git(wt, "rev-parse", "HEAD").stdout.strip()
@@ -307,7 +307,7 @@ def shared_tree(tmp_path, monkeypatch):
     monkeypatch.setattr(P.S, "read_current", lambda: None)
     (S.ROUNDS_DIR / "SM_MV").mkdir(parents=True, exist_ok=True)
     (S.ROUNDS_DIR / "SM_MV" / "run_spec.yaml").write_text(
-        f"code:\n  base_commit: {base}\n  branch: autoimplement/SM_MV\n", encoding="utf-8")
+        f"code:\n  base_commit: {base}\n  branch: automod/SM_MV\n", encoding="utf-8")
     return {"live": live, "wt": wt, "base": base, "gated": gated, "moved": moved}
 
 
@@ -323,7 +323,7 @@ class _StubGate:
         type(self).seen.append((round_id, base))
 
     def run(self):
-        from scripts.autoimplement import worktree as W
+        from scripts.automod import worktree as W
         onto = _git(self.live, "rev-parse", "HEAD").stdout.strip()
         ok, why, conflicts = W.rebase_onto(self.worktree, onto)
         assert ok, (why, conflicts)
@@ -342,7 +342,7 @@ def test_a_moved_main_is_rebased_and_retested_before_landing(shared_tree, monkey
     runs the gate again with the old base — whose preflight rebases — and
     lands the retested result. Both records the next reader depends on are
     rewritten: gate.json (land's head) and the run spec (the next gate's base)."""
-    import scripts.autoimplement.gate as G
+    import scripts.automod.gate as G
     _StubGate.verdict, _StubGate.seen = True, []
     monkeypatch.setattr(G, "Gate", _StubGate)
     t = shared_tree
@@ -364,7 +364,7 @@ def test_a_retest_that_fails_is_a_land_failed_that_keeps_the_item(shared_tree, m
     """The round's change no longer passes on top of what landed. That is a
     refusal after every rung had passed — invisible to the backlog before
     `land_failed` existed, and it spent the item."""
-    import scripts.autoimplement.gate as G
+    import scripts.automod.gate as G
     _StubGate.verdict, _StubGate.seen = False, []
     monkeypatch.setattr(G, "Gate", _StubGate)
     t = shared_tree
@@ -379,7 +379,7 @@ def test_a_retest_that_fails_is_a_land_failed_that_keeps_the_item(shared_tree, m
 def test_a_commit_snuck_in_after_the_gate_is_still_refused_before_any_rebase(shared_tree, monkeypatch):
     """The ungated-commit guard runs first. A rebase legitimately moves the
     head; a stray commit is not a rebase, and must not be laundered by one."""
-    import scripts.autoimplement.gate as G
+    import scripts.automod.gate as G
     _StubGate.verdict, _StubGate.seen = True, []
     monkeypatch.setattr(G, "Gate", _StubGate)
     t = shared_tree
@@ -520,7 +520,7 @@ def test_the_announcement_carries_the_title_and_never_the_round_id():
 def test_the_promotion_record_and_result_carry_the_title(monkeypatch, tmp_path):
     """The guardian is stdlib-only and cannot look the name up, so the
     promoter writes it onto current.json; the rollback alert reads it there."""
-    from scripts.autoimplement import backlog as B
+    from scripts.automod import backlog as B
     S.append_event({"event": "backlog_implement", "item_id": 361, "phase": "started",
                     "name": "Audit deferred tool descriptions for trigger conditions"}, path=S.LEDGER_PATH)
     S.append_event({"event": "backlog_implement", "item_id": 361, "phase": "finished",
@@ -554,7 +554,7 @@ def test_work_title_falls_back_to_the_goal_then_to_nothing(monkeypatch, tmp_path
     """A hand-driven round has no item; its goal names the work. A round the
     ledger knows nothing about gets an empty string — the caller says
     something generic, never the id."""
-    from scripts.autoimplement import backlog as B
+    from scripts.automod import backlog as B
     monkeypatch.setattr(B, "BACKLOG_DIR", tmp_path / "none")
     S.append_event({"event": "round_start", "round_id": "SM_G",
                     "goal": "Wire the SSRF guard that was never called. Then retest the route interceptor."},

@@ -2,12 +2,12 @@
 
 Four programs read that field — `app/routers/backlog.py` for the Mission
 Control board, `agent_mcp/backlog.py` for the `backlog_*` tools,
-`scripts/autoimplement/backlog.py` for the triage/implement loop, and the React
+`scripts/automod/backlog.py` for the triage/implement loop, and the React
 `TaskCard` — and before this each coerced it privately, or not at all.
 
 It lives in `app/` and imports only the standard library for the same reason
-`lint_findings` does: `scripts/autoimplement/backlog.py` is the light module the
-autoimplement CLI loads, and it must not pull `mcp` and `httpx` in behind a
+`lint_findings` does: `scripts/automod/backlog.py` is the light module the
+automod CLI loads, and it must not pull `mcp` and `httpx` in behind a
 fifteen-line helper.
 """
 

@@ -11,7 +11,7 @@ tracked file leaves the two disagreeing, and the state a fresh clone would boot
 into is not the state being served.
 
 `tests/test_tool_overrides.py::test_config_yaml_agrees_with_the_live_override`
-catches that, and it can only catch it **in live**: a autoimplement worktree has no
+catches that, and it can only catch it **in live**: an automod worktree has no
 override file, so the test returns early there. So the failure mode is a
 tracked-config change that passes the gate in every worktree and then fails the
 `tests` rung on the live tree afterwards — which is how three rounds aborted in

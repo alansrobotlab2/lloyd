@@ -69,7 +69,7 @@ queued ──claim──► claimed ──► running ──┬─ ok ───�
 
 Ordered `priority ASC, enqueued_at ASC` — **a lower priority number runs
 sooner**, which is worth saying out loud because it has been read backwards
-once already: `autoimplement` sat at 80, behind research jobs at 70 that
+once already: `autocode` sat at 80, behind research jobs at 70 that
 arrive every few minutes, and the first unattended round had no path to a
 slot. It is at 40 now.
 
@@ -143,7 +143,7 @@ registered in `workers/sources/__init__.py`.
 | `meta` | structured detail (stop reason, flags) |
 
 **`skipped` is not a failure and not a success**: the source looked and there
-was nothing to do. That distinction is not cosmetic. `autoimplement-regression`
+was nothing to do. That distinction is not cosmetic. `automod-regression`
 signalled "I could not measure anything" by returning `{"skipped": reason}` —
 a key where a status belongs — so all 22 of its runs were recorded as
 successes with an empty summary. For a detector whose entire premise is *a
@@ -160,7 +160,7 @@ does not slow the pool down, it stops Lloyd answering.
 
 So: no `subprocess.run`, no `urlopen`, no unbounded file walk directly inside
 `execute` or `enqueue_if_due`. Put the body in a plain function and hand it to
-`asyncio.to_thread`. `autoimplement_regression.execute` broke this with two
+`asyncio.to_thread`. `automod_regression.execute` broke this with two
 900-second eval arms and a `git worktree add` between them; the 109-second run
 in its history is 109 seconds during which the backend answered nothing.
 `test_workers_pool.py::test_no_source_blocks_the_event_loop_in_execute` greps
@@ -181,7 +181,7 @@ reason.
 
 `app/routers/messages.py` is the **only** turn path that attaches the
 observer, so work a human must be able to audit goes through it rather than
-having the observer wiring copied into a second place. `autoimplement_start` refuses
+having the observer wiring copied into a second place. `automod_start` refuses
 a turn with no Inner Voice, which is what makes that structural rather than a
 convention.
 
@@ -228,8 +228,8 @@ bounds nothing on a stream that keeps producing.
 |---|---|---|
 | `scheduled-task` | runs `~/obsidian/autonomy/*.md` via `autonomy.run_task` | its own |
 | `autotriage` | triages one backlog item — read-only, reaches a verdict | session |
-| `autoimplement` | one gated autoimplement round per confirmed item | session |
-| `autoimplement-regression` | paired A/B eval after a promotion | none (subprocess) |
+| `autocode` | one gated automod round per confirmed item | session |
+| `automod-regression` | paired A/B eval after a promotion | none (subprocess) |
 | `autoresearch` | one prompt-optimisation round | its own |
 | `deep-research` | one registry topic, through the deep-dive-research skill | session, IV off |
 | `youtube-digest` | one tracked-channel video: transcript → vault note → Lloyd eval → backlog draft | session, IV on |
@@ -287,7 +287,7 @@ completion after the turn ends, restating its conclusion under a JSON schema
 (`app/harness/finalizer.py`). It returns `structured` and `structured_error`
 beside `text` and `stop_reason`.
 
-- `scripts/autoimplement/backlog.TRIAGE_VERDICT_SCHEMA` is built from
+- `scripts/automod/backlog.TRIAGE_VERDICT_SCHEMA` is built from
   `VERDICTS`/`SURFACES`, not restated — one list, or a new verdict lands in the
   grammar and not the validator. It carries no `maxLength`: that is enforced by
   the guided decoder, so the model would stop mid-sentence at the limit rather
@@ -309,7 +309,7 @@ beside `text` and `stop_reason`.
   that was live when it was enqueued.
 
 Follow-ups, not done: schemas for `deep_research.parse_result` and
-`autoimplement.parse_spawned_line`.
+`autocode.parse_spawned_line`.
 
 ## 6. Configuration
 
@@ -357,7 +357,7 @@ sqlite3 ~/lloyd/workers.db \
 
 **Pause and drain before restarting the backend.** The pool lives in that
 process, so a restart kills whatever is in flight — and if a worker turn dies
-mid-flight during a autoimplement landing, the connection errors it logs on the way
+mid-flight during an automod landing, the connection errors it logs on the way
 down land inside the guardian's observation window and get blamed on the
 promotion. That is the 2026-09-06 20:14 false-positive rollback exactly. The
 promoter now drains the pool itself, and `run_prompt_on_primary` refuses to

@@ -18,7 +18,7 @@ import pytest
 from app import research_store as R
 from workers.queue import QueueItem, WorkQueue
 from workers.sources import deep_research as D
-from workers.sources._common import DrainActive, TurnTimeout, WORKER_AUTOIMPLEMENT_BAN
+from workers.sources._common import DrainActive, TurnTimeout, WORKER_AUTOMOD_BAN
 
 
 @pytest.fixture
@@ -398,7 +398,7 @@ async def test_the_turn_cannot_reach_what_a_fetched_page_would_want(
 
     await D.execute(_item(payload))
     denied = set(turn.seen["extra_disallowed"])
-    for name in WORKER_AUTOIMPLEMENT_BAN:
+    for name in WORKER_AUTOMOD_BAN:
         assert name in denied, name
     for name in ("Bash", "Read", "Write", "Edit", "Grep", "Glob", "Task",
                  "http_request", "browser_evaluate", "backlog_write_task",
@@ -475,8 +475,8 @@ async def test_pre_existing_vault_churn_is_not_blamed_on_the_turn(
     assert "unexpected_vault_writes" not in registry.get(topic_id)["extra"]
 
 
-def test_the_source_yields_to_the_autoimplement_workers():
+def test_the_source_yields_to_the_automod_workers():
     """The queue dequeues priority ASC and a round is rarer than a note."""
-    from workers.sources import autoimplement, autotriage
-    assert autoimplement.DEFAULT_PRIORITY < autotriage.DEFAULT_PRIORITY
+    from workers.sources import autocode, autotriage
+    assert autocode.DEFAULT_PRIORITY < autotriage.DEFAULT_PRIORITY
     assert autotriage.DEFAULT_PRIORITY < D.DEFAULT_PRIORITY

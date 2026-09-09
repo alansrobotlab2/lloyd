@@ -31,8 +31,8 @@ Lloyd runs **directly on the host** under supervisord (installed as the `agent-s
 supervisorctl:**
 
 ```bash
-.venvs/lloyd/bin/python -m scripts.autoimplement.round restart --reason "picked up gate.py"
-.venvs/lloyd/bin/python -m scripts.autoimplement.round restart --only lloyd-backend
+.venvs/lloyd/bin/python -m scripts.automod.round restart --reason "picked up gate.py"
+.venvs/lloyd/bin/python -m scripts.automod.round restart --only lloyd-backend
 ```
 
 It does what the promoter does for its own restarts and what this file used
@@ -77,20 +77,24 @@ Wait for `MemAvailable` to come back above ~150 GiB between boots;
 120 GiB. Note the blast radius is the *unit*, so the guardian (a separate
 systemd unit, deliberately) survives it.
 
-## Self-modification
+## Automod (self-modification)
 
 Lloyd can change his own code through a gated loop with automatic rollback.
-`architecture/autoimplement.md` is the long version. The master switch is
-`autoimplement.enabled` in config.yaml and it defaults to **false**.
+`automod` is the whole of it — the worktree/gate/promoter/guardian machinery,
+its state dir, MCP tools, API routes and config block. Two worker sources run
+inside it: `autotriage` judges draft backlog items and `autocode` implements
+the confirmed ones. (Named `selfmod`, then `autoimplement`, until 2026-09-09.)
+`architecture/automod.md` is the long version. The master switch is
+`automod.enabled` in config.yaml and it defaults to **false**.
 
 ```bash
-python -m scripts.autoimplement.round status              # state + ledger + guardian
-python -m scripts.autoimplement.round start "goal"        # cuts a worktree
-python -m scripts.autoimplement.round gate  SM_<id>       # 8 rungs, ~2.5 min
-python -m scripts.autoimplement.round land  SM_<id>       # idle-gated, verified
-python -m scripts.autoimplement.round bless               # HEAD becomes last-known-good
-python -m scripts.autoimplement.round recover             # clear BROKEN, restart the stack
-python -m scripts.autoimplement.rehearse --yes-i-mean-it  # prove rollback still works
+python -m scripts.automod.round status              # state + ledger + guardian
+python -m scripts.automod.round start "goal"        # cuts a worktree
+python -m scripts.automod.round gate  SM_<id>       # 8 rungs, ~2.5 min
+python -m scripts.automod.round land  SM_<id>       # idle-gated, verified
+python -m scripts.automod.round bless               # HEAD becomes last-known-good
+python -m scripts.automod.round recover             # clear BROKEN, restart the stack
+python -m scripts.automod.rehearse --yes-i-mean-it  # prove rollback still works
 ```
 
 **Nothing inside the blast radius performs a rollback, and a landing runs
@@ -99,7 +103,7 @@ from inside either process issues the stop that kills its own caller and never
 reaches `git reset` — the stack goes down and the tree does not move. They
 write `rollback_request.json` and the guardian performs it. Likewise the
 promoter restarts `lloyd-mcp`, which is where the MCP tool calling it lives,
-so `autoimplement_land` spawns it in a new session (`state.spawn_detached`) — a
+so `automod_land` spawns it in a new session (`state.spawn_detached`) — a
 process group signal cannot reach that. Before this, the CLI path worked only
 because the Bash tool already spawns that way, so the loop worked when a human
 drove it and would have failed the first time Lloyd did.
@@ -115,7 +119,7 @@ Things worth knowing before touching any of it:
   staged only if the candidate compiles and passes its own selftest. Editing
   `agent-services/guardian/` does nothing until a staged copy proves itself, so
   a broken guardian degrades to a *stale* watchdog, never to none.
-- **State lives at `~/.local/state/lloyd-autoimplement/`**, outside the repo, because
+- **State lives at `~/.local/state/lloyd-automod/`**, outside the repo, because
   the guardian must read its rollback target while the repo is being rewritten.
 - **`HEAD == last-known-good` never rolls back.** Everything broken with
   nothing promoted is infrastructure, not a bad change.
@@ -177,7 +181,7 @@ error-shaped lines.
   `implemented_ids` counted any finished round as the one attempt "whatever it
   did", and six of the loop's first seventeen attempts were spent by something
   that was never a judgment on the change: three on pre-existing test failures,
-  #446 on the wall clock (fourteen seconds and one `autoimplement_gate` call short of
+  #446 on the wall clock (fourteen seconds and one `automod_gate` call short of
   landing 757 lines), #447 on `preflight: live tree is dirty` from an unrelated
   uncommitted edit in production, #392 on a turn that never ran at all — the
   backend was down and it was recorded as an attempt one second after starting.
@@ -221,7 +225,7 @@ error-shaped lines.
   budget anchor (`<budget>` at 75%/90% of `max_turns`) tells the model to
   gate-and-land or abort while it still can; the observer's ambient
   follow-up is the first responder when it did not (that is what landed
-  #278); `autoimplement.reap_abandoned_rounds` is the backstop, twenty
+  #278); `autocode.reap_abandoned_rounds` is the backstop, twenty
   minutes later, branch kept. Never abort a round at turn end.
 - **The idle gate drains first, then waits.** `wait_idle` used to arm the
   drain only *after* three quiet polls — the one moment it is no longer
@@ -329,7 +333,7 @@ right — the sync only stops the two drifting after a voice *change*.
 
 ### Unattended: triage, then implement
 
-`autotriage` triages; `autoimplement` runs one round per `confirmed`
+`autotriage` triages; `autocode` runs one round per `confirmed`
 item with an acceptance check, behind every gate the loop enforces. Both are
 off by default and both run **in a real session** via `run_prompt_in_session`,
 which is the only way a worker turn gets Inner Voice and a transcript — never
@@ -362,7 +366,7 @@ drains, however good the verdicts are. Oldest-first ordering hid it, because
 self-filed items sort to the back and the pass reads as healthy right up to
 the moment the real backlog runs out — which was 6 items away when this
 landed. `backlog.is_quarantined` holds a self-filed item (tagged
-`spawned-by-triage` or `spawned-by-autoimplement`) out of the candidate pool until
+`spawned-by-triage` or `spawned-by-autocode`) out of the candidate pool until
 it is `SPAWN_TRIAGE_MIN_AGE_DAYS` old. Quarantine, not exclusion: an item
 nobody implements really can go stale, and then the question is real again.
 The gate keys on those tags and **not** on `draft`, which is the status of
@@ -380,7 +384,7 @@ both `done`; a `confirmed` verdict left an item wherever it was, no round
 ever set `in_progress`, and #353 landed while still `draft`. Now
 `autotriage` reads **`draft`** only and its verdict moves the item —
 `confirmed` → `up_next`, `already_done`/`stale` → `done`, anything else stays
-`draft` (triaged, not for the loop). `autoimplement` reads **`up_next`** only,
+`draft` (triaged, not for the loop). `autocode` reads **`up_next`** only,
 sets `in_progress` the moment its turn starts, and the item ends `done`
 (landed and settled with the acceptance `met`, or the round's outcome said
 `unnecessary`) or back in `up_next` (external, incomplete, infra, rolled
@@ -390,7 +394,7 @@ not until a human reopens it; the tag comes off when a reopen moves it back. `ba
 it on every implement poll and after every turn, so a human moving an item by
 hand is honoured until the ledger next says otherwise, and untriaged items
 parked in `up_next` — where nothing can pull them — go back to `draft`. The
-first run was the migration. Kill switch: `workers.sources.autoimplement.status_pipeline`.
+first run was the migration. Kill switch: `workers.sources.autocode.status_pipeline`.
 
 **But a status outside that vocabulary is invisible to the loop and open on
 the board.** Five lists name it — the loop, the `backlog_*` tools, the
@@ -406,7 +410,7 @@ wrong in this particular way. #287 (`review`) and #304 (`closed`) sat there
 from April 2026 until 2026-09-09, stranded when the vocabulary was narrowed
 to four words and nothing migrated what was already on disk.
 `app/backlog_status.py` is the one definition now (stdlib-only in `app/`,
-like `backlog_tags`, so the autoimplement CLI does not pull `mcp` and
+like `backlog_tags`, so the automod CLI does not pull `mcp` and
 `httpx` in behind it), and `backlog.rescue_off_vocabulary` runs at the top
 of every reconcile — before the main pass, so a rescued item is judged in
 that same pass — walking by **board** rather than by status, since an Alfie
@@ -431,7 +435,7 @@ the item's status, so the loop's own finished work sat on the board as
 as `met` / `not_met` / `deferred` with the ids it waits on. `backlog.close_settled_items`
 runs beside the reaper in the implement source's poll, joins
 `settled → promoted → finished` (a vault round lands on its own `vault_land`,
-with no window), writes the landing onto the item as `autoimplement_landed: <sha>`
+with no window), writes the landing onto the item as `automod_landed: <sha>`
 and an activity line, and closes it **only for `met`**. `deferred` and
 `not_met` are noted and left open; a round with no outcome (everything
 before this) is noted and left for a human. The asymmetry is deliberate: a
@@ -439,7 +443,7 @@ closed item is never re-triaged, so the prompt tells the model that `met` on
 an acceptance it did not verify is the one claim the loop cannot recover
 from, and `deferred` with an id is the honest answer for a check that needs
 traffic or a nightly run (#520 → #618). Kill switches:
-`workers.sources.autoimplement.close_on_settle` and `structured_outcome`
+`workers.sources.autocode.close_on_settle` and `structured_outcome`
 (carried in the queue payload like the budgets).
 
 `SPAWN_CAP` (3, both sources) bounds fan-out per run; overflow goes into one
@@ -453,13 +457,13 @@ counterfactual: with the window set to zero the same run grows the queue.
 The verdict's `SURFACE:` picks the implementer's route. `code` and `frontend`
 run a worktree round through the gate — `web/src/**` is in scope since the
 `frontend` rung (tsc delta + `vite build`) exists. `vault` runs
-`scripts/autoimplement/vault_round.py` (`autoimplement_vault_land`): the vault is a live,
+`scripts/automod/vault_round.py` (`automod_vault_land`): the vault is a live,
 shared tree with no worktree, so the route is validate the named paths (front
 matter; the real prompt/skill/task loaders for `skills/**`, `lloyd/**`,
 `autonomy/**`), commit exactly those paths on `main`, revert on failure. A
 `confirmed` whose fix needs a path the loop may never touch begins its
 acceptance with `human-only:` and is skipped, not attempted.
-`architecture/autoimplement.md` §3.2.
+`architecture/automod.md` §3.2.
 
 ### Development happens in ~/lloyd-sandbox
 
@@ -688,7 +692,7 @@ config.yaml holds the hand-edited defaults and is **read-only at boot**; UI togg
 exists.** `save_tool_overrides` replaced dumping the entire CONFIG back over
 config.yaml on every toggle, because config.yaml is tracked and a tracked
 file rewritten by a UI click leaves the live tree dirty — which
-`scripts/autoimplement/gate.py` and `promote.py` both refuse. Until 2026-09-07 the
+`scripts/automod/gate.py` and `promote.py` both refuse. Until 2026-09-07 the
 override file was tracked too, so the escape hatch had the defect it was
 built to avoid: one click on the Tools page dirtied the tree and silently
 stopped the self-modification loop until someone hand-committed the result
@@ -698,7 +702,7 @@ stopped the self-modification loop until someone hand-committed the result
 
 **A test about untracked state may not require that state to be present.**
 The end-to-end test asserted `(ROOT / "data/tool_overrides.yaml").exists()`
-with `ROOT` resolved from `__file__` — so in a autoimplement worktree it demanded a
+with `ROOT` resolved from `__file__` — so in an automod worktree it demanded a
 file that is, by design, never checked out. `data/` has no tracked contents at
 all, so it failed for **every round from `d11ad8c` onward, whatever the diff
 under test**, and the `tests` rung is a hard rung: three rounds aborted on it
@@ -757,7 +761,7 @@ or moves on.
   for the files *that session* edited. Somebody else's breakage is somebody
   else's news.
 - **The root is derived from the edited path**, not from `LLOYD_HOME`: a
-  autoimplement round edits under `~/lloyd-work/…` and the live tree's tsc would
+  automod round edits under `~/lloyd-work/…` and the live tree's tsc would
   say nothing about it. No `web/node_modules/.bin/tsc` under that root means
   no run *and no hint* — promising a check that cannot happen is worse than
   silence.
@@ -854,7 +858,7 @@ Editing a binary file is now a normal error rather than a `UnicodeDecodeError`
 escaping the aggregator as an MCP exception with no path in it.
 
 `app/lint_findings.py` holds the pyflakes/tsc normalisers that `gate.py` used
-to own privately. The aggregator cannot import `scripts.autoimplement.gate` — that
+to own privately. The aggregator cannot import `scripts.automod.gate` — that
 pulls the whole self-modification package behind every tool call — and two
 private definitions of "is this finding new?" is exactly how the gate and the
 model would come to disagree about the same edit.
@@ -863,7 +867,7 @@ model would come to disagree about the same edit.
 
 A successful `Edit`/`Write` on a `.py` file carries a `<diagnostics>` block
 listing what it *introduced*. Before this, the model learned about a broken
-edit at the autoimplement gate — minutes later, with ten more edits built on top.
+edit at the automod gate — minutes later, with ten more edits built on top.
 `agent_mcp/_edit_diagnostics.py` runs pyflakes in-process against the
 pre-image and post-image and reports the difference.
 
@@ -1084,21 +1088,21 @@ the standing hazard there.
 
 ## Code graph
 
-**Vault half, held as a patch.** The `autoimplement-change-own-code` skill's
+**Vault half, held as a patch.** The `automod-change-own-code` skill's
 blast-radius step lives at
-`scripts/maintenance/vault-autoimplement-skill-blast-radius.patch`, not in the vault,
+`scripts/maintenance/vault-automod-skill-blast-radius.patch`, not in the vault,
 until `code_graph` is actually deployed. The vault is a live shared tree with
 no PR path, so editing it lands *immediately* — while the `graph_*` tools it
 names only exist after lloyd-mcp restarts on the merged code. An edited skill
-in that gap tells every autoimplement round to call a tool that returns "Unknown
+in that gap tells every automod round to call a tool that returns "Unknown
 tool" and makes its own quality gate 4 unsatisfiable. Apply it after the
 restart:
 
-    git -C ~/obsidian apply scripts/maintenance/vault-autoimplement-skill-blast-radius.patch
+    git -C ~/obsidian apply scripts/maintenance/vault-automod-skill-blast-radius.patch
 
-`tests/test_code_graph_doc_claims.py::test_autoimplement_skill_maps_the_radius_between_opening_and_working`
+`tests/test_code_graph_doc_claims.py::test_automod_skill_maps_the_radius_between_opening_and_working`
 fails with that command until it is applied. It carries `live_vault`, so the
-autoimplement gate (`-m "not live_vault"`) excludes it and no round is failed by a
+automod gate (`-m "not live_vault"`) excludes it and no round is failed by a
 vault someone else has not updated yet.
 
 
@@ -1115,7 +1119,7 @@ tools: `graph_explain`, `graph_affected`, `graph_path`, `graph_hubs`,
   `DEFAULT_LLOYD_MCP_SERVERS` and would never see it;
   `tests/test_mcp_layer.py` needs every configured server discoverable at
   test time, including inside a worktree where no second daemon is running;
-  `agent-services/supervisor/**` is a protected autoimplement path, so Lloyd could
+  `agent-services/supervisor/**` is a protected automod path, so Lloyd could
   never repair the program running it; and graphify-mcp has no `affected`,
   which is the one query a change actually needs.
 - **`root` is explicit and never inferred.** Nothing on disk links a chat
@@ -1131,7 +1135,7 @@ tools: `graph_explain`, `graph_affected`, `graph_path`, `graph_hubs`,
   rule are debounced by `min_refresh_interval_s` (30 s); a debounced query
   still answers and says `STALE`.
 - **`graphify-out/` must stay gitignored, unanchored.** A build inside a
-  round dirties the tree, and both `scripts/autoimplement/gate.py` and
+  round dirties the tree, and both `scripts/automod/gate.py` and
   `promote.py` refuse a dirty tree — so an unignored build would abort the
   round on its own map. `*.json` at the top of `.gitignore` hid `graph.json`
   by accident; `GRAPH_REPORT.md`, `graph.html`, `.graphify_root` and the
@@ -1468,7 +1472,7 @@ is a no-op when nothing is running and a no-op again when the state is
 unchanged (the text path calls it per token).
 
 The snapshot itself stays **pure in-memory queue state** — it is also
-the autoimplement promoter's idle gate, and a disk read there would put the
+the automod promoter's idle gate, and a disk read there would put the
 filesystem in front of a restart decision. Titles are joined on in
 `_primary_state`, off the loop via `asyncio.to_thread`.
 
@@ -1495,7 +1499,7 @@ asked. Two things that panel taught us:
 `models.<alias>` in config.yaml is only the *endpoint*. Which model actually
 answers there is decided by the supervisord program's `environment=MODEL=...`
 and its start script — three places that can drift apart, and did on
-2026-09-06 when a autoimplement rollback reverted `agent-llm-secondary.conf` to a
+2026-09-06 when an automod rollback reverted `agent-llm-secondary.conf` to a
 launcher branch serving a 4B under the same alias and port as the 35B.
 
 `models.<alias>.expect_model` is a case-insensitive substring checked against
@@ -1579,12 +1583,12 @@ the voice to *work*, only for a change to reach that consumer.
 ## Workers: one queue, everything unasked
 
 Scheduled autonomy tasks, research, session mining, backlog triage and the
-autoimplement round that implements a confirmed item all run through one SQLite
+automod round that implements a confirmed item all run through one SQLite
 queue drained by `workers.slots` asyncio workers **inside the backend
 process**. `architecture/workers.md` is the long version.
 
 - **`priority ASC` — a lower number runs sooner.** Read backwards once
-  already: `autoimplement` sat at 80, behind research jobs at 70 that
+  already: `autocode` sat at 80, behind research jobs at 70 that
   arrive every few minutes, and the rarest, most valuable job in the pool had
   no path to a slot.
 - **`max_inflight` is applied in the SQL, not to a window of rows.**
@@ -1597,14 +1601,14 @@ process**. `architecture/workers.md` is the long version.
   one timed-out autonomy task re-run three times at 600 s before the
   scheduler's own cooldown was consulted.
 - **`skipped` is a third outcome and must be said as a status.**
-  `autoimplement-regression` signalled "I could not measure anything" by returning
+  `automod-regression` signalled "I could not measure anything" by returning
   `{"skipped": reason}` — a key where a status belongs — so all 22 of its runs
   read as successes with an empty summary. `pool.normalize_result` is the
   contract now, and it reads that shape.
 - **Nothing in a source may block the event loop.** It is the loop that serves
   every HTTP request and streams every chat turn, so a `subprocess.run` inside
   `execute` does not slow the pool, it stops Lloyd answering.
-  `autoimplement_regression` ran two 900-second eval arms there.
+  `automod_regression` ran two 900-second eval arms there.
   `tests/test_workers_pool.py` greps for the pattern.
 - **An empty turn is a failed turn.** `run_prompt_on_primary` returns a
   `TurnResult`, not a string, because a turn that dies at `max_turns` yields
@@ -1634,7 +1638,7 @@ process**. `architecture/workers.md` is the long version.
 - **`workers.enabled` is UI-mutable, so it lives in the override file.**
   `POST /api/workers/enable` used to `yaml.dump(CONFIG)` over the tracked
   `config.yaml`, which would have written expanded secrets into the tree,
-  flattened its comments, and dirtied it — stopping the autoimplement loop. Same
+  flattened its comments, and dirtied it — stopping the automod loop. Same
   route as the Tools page now.
 
 ### A budget the model cannot see is a deadline it cannot meet
@@ -1796,7 +1800,7 @@ still works as an operator fallback.
   videos in the window back through the session so they get the eval.
 - **Transcripts are wrapped at 100 columns** because the Read tool pages by
   line, and a 40-minute talk arrives as one 60 kB line.
-- The toolbox denies `Bash`, `Edit`, `Task`, the autoimplement tools and every
+- The toolbox denies `Bash`, `Edit`, `Task`, the automod tools and every
   queue writer: a transcript is untrusted text. `Read`, `Write` and
   `backlog_write_task` stay because they are the job, and vault writes
   outside `knowledge/`, `backlog/` and the report directory are reported.

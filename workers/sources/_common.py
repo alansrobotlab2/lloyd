@@ -34,12 +34,12 @@ POOL_TIMEOUT_MARGIN_SECONDS = 60
 #: The self-modification loop is not a worker's to drive. Named here rather
 #: than inline because two turn paths need it now: `run_prompt_on_primary`
 #: bakes it in, and a session-backed source passes it as `extra_disallowed`.
-#: `tests/test_autoimplement_hardening.py::test_worker_turns_cannot_drive_the_loop`
+#: `tests/test_automod_hardening.py::test_worker_turns_cannot_drive_the_loop`
 #: greps this file for these names, so this is where they live.
-WORKER_AUTOIMPLEMENT_BAN: tuple[str, ...] = (
-    "autoimplement_start", "autoimplement_gate", "autoimplement_land",
-    "autoimplement_abort", "autoimplement_rollback",
-    "autoimplement_vault_land", "autoimplement_vault_revert",
+WORKER_AUTOMOD_BAN: tuple[str, ...] = (
+    "automod_start", "automod_gate", "automod_land",
+    "automod_abort", "automod_rollback",
+    "automod_vault_land", "automod_vault_revert",
 )
 
 
@@ -162,8 +162,8 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
     observer to. A worker turn has none of that, so nothing here is watched and
     nothing lands in the Inner Voice history.
 
-    That is why `autoimplement_start` refuses a worker turn and why worker jobs are
-    barred from the autoimplement tools below: a round must be observable, and this
+    That is why `automod_start` refuses a worker turn and why worker jobs are
+    barred from the automod tools below: a round must be observable, and this
     path cannot be. If `autotriage` is ever enabled, its verdicts are
     produced unobserved — acceptable for read-only triage, and the reason the
     fix is to route worker turns through the one IV-capable path rather than to
@@ -180,7 +180,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
     # land inside the observation window and are blamed on the promotion. That
     # is the exact shape of the 2026-09-06 20:14 false positive.
     try:
-        from app.routers.autoimplement import drain_active, drain_remaining
+        from app.routers.automod import drain_active, drain_remaining
         if drain_active():
             raise RuntimeError(
                 f"lloyd is landing a code update; not starting a worker turn "
@@ -210,7 +210,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
     # rewrites production sat one prompt injection away from a source whose
     # entire job is ingesting untrusted text. The backlog triage worker was
     # told not to start a round IN ITS PROMPT, which is not a control.
-    for tname in WORKER_AUTOIMPLEMENT_BAN:
+    for tname in WORKER_AUTOMOD_BAN:
         disallowed.append(tname)
         disallowed.append(f"mcp__lloyd-mcp__{tname}")
 
@@ -366,7 +366,7 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     for second definitions of "due", "healthy" and "tell the human" already —
     this goes through it: a session with `inner_voice` on, then
     `POST /api/message/stream` over loopback, exactly the way the three
-    hand-driven autoimplement rounds ran. The turn shows up in the session list, in
+    hand-driven automod rounds ran. The turn shows up in the session list, in
     `/health.turns`, and in the Inner Voice tab, and every tool call is
     persisted.
 
@@ -384,7 +384,7 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     should skip this run rather than count it.
 
     **`extra_disallowed` is the only tool control this path has**, and until a
-    caller passes it there was none. `run_prompt_on_primary` bakes the autoimplement
+    caller passes it there was none. `run_prompt_on_primary` bakes the automod
     ban into its own `RunOptions`; this path posts to `/api/message/stream`,
     which builds `disallowed_tools` from config plus whatever the body names
     (`app/routers/messages.py::_refresh_disallowed_for_session`). Nothing in
@@ -419,9 +419,9 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                "priority": int(priority), "max_turns": int(max_turns),
                # The same wall clock this function enforces below, announced to
                # the model. Iterations are not the budget a worker turn dies on:
-               # autoimplement round SM_20260909_054722 was killed here with 32 of its
+               # automod round SM_20260909_054722 was killed here with 32 of its
                # 100 iterations unspent, fourteen seconds after committing the
-               # work and one `autoimplement_gate` call short of landing it.
+               # work and one `automod_gate` call short of landing it.
                "deadline_seconds": float(timeout_seconds)}
     if extra_disallowed:
         payload["extra_disallowed"] = list(extra_disallowed)

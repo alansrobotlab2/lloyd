@@ -11,7 +11,7 @@ from the live repo. That is what lets landing be a pure fast-forward with no
 fetch and no push.
 
 `main` is checked out in the live tree, and git refuses to check out the same
-branch twice, so every round gets its own `autoimplement/<round_id>` branch.
+branch twice, so every round gets its own `automod/<round_id>` branch.
 """
 
 from __future__ import annotations
@@ -38,11 +38,11 @@ def worktree_path(round_id: str) -> Path:
 
 
 def create(round_id: str, base: str = "HEAD", repo: Path | None = None) -> Path:
-    """Create `<work>/<round_id>/home/lloyd` on branch `autoimplement/<round_id>`."""
+    """Create `<work>/<round_id>/home/lloyd` on branch `automod/<round_id>`."""
     repo = repo or LIVE_ROOT
     wt = worktree_path(round_id)
     wt.parent.mkdir(parents=True, exist_ok=True)
-    branch = f"autoimplement/{round_id}"
+    branch = f"automod/{round_id}"
     r = git(repo, "worktree", "add", "-q", "-b", branch, str(wt), base)
     if r.returncode != 0:
         raise RuntimeError(f"git worktree add failed: {r.stderr.strip()[:400]}")
@@ -133,7 +133,7 @@ def remove(round_id: str, *, keep_branch: bool = False, repo: Path | None = None
         git(repo, "worktree", "remove", "--force", str(wt))
     git(repo, "worktree", "prune")
     if not keep_branch:
-        git(repo, "branch", "-D", f"autoimplement/{round_id}")
+        git(repo, "branch", "-D", f"automod/{round_id}")
     rd = round_dir(round_id)
     if rd.exists():
         shutil.rmtree(rd, ignore_errors=True)

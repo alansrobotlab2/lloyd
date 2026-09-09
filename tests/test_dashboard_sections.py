@@ -322,7 +322,7 @@ def test_open_states_exclude_completed():
 @pytest.mark.asyncio
 async def test_primary_state_names_sessions_by_title(monkeypatch):
     """The panel renders titles, but the snapshot they decorate must stay
-    pure in-memory queue state — it is also the autoimplement promoter's idle
+    pure in-memory queue state — it is also the automod promoter's idle
     gate, and a disk read there would put the filesystem in front of a
     restart decision."""
     from app import session_titles

@@ -2,9 +2,9 @@
 
 `agent.max_turns` has been warned about since `_build_state_anchor` landed, but
 iterations are not the budget unattended work dies on. `run_prompt_in_session`
-bounds a worker turn by wall time, and autoimplement round SM_20260909_054722
+bounds a worker turn by wall time, and automod round SM_20260909_054722
 committed 757 lines into its worktree at 06:43:36 and was killed at 06:43:50 —
-fourteen seconds, one `autoimplement_gate` call, short of the verdict that would have
+fourteen seconds, one `automod_gate` call, short of the verdict that would have
 landed them, with 32 of its 100 iterations still unspent. The iteration anchor
 cannot see that clock and never fired.
 

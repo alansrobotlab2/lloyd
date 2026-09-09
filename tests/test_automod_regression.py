@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from workers.sources import autoimplement_regression as R
+from workers.sources import automod_regression as R
 
 
 ZERO_NOISE = {"metrics": {k: {"stdev": 0.0} for k in R.ARMED_METRICS}}
@@ -144,7 +144,7 @@ def _observing(**over):
 
 
 async def test_nothing_recent_to_check_is_a_noop(monkeypatch):
-    import scripts.autoimplement.state as S
+    import scripts.automod.state as S
     monkeypatch.setattr(S, "read_current", lambda: None)
     monkeypatch.setattr(S, "read_last_settled", lambda: None)
     out = await R.execute(_Item())
@@ -157,7 +157,7 @@ async def test_a_settled_promotion_is_still_checked(monkeypatch, tmp_path):
     Keying on `current.json` alone meant the subject was gone before the check
     ever ran — which is why this source has never produced a single run.
     """
-    import scripts.autoimplement.state as S
+    import scripts.automod.state as S
     monkeypatch.setattr(S, "read_current", lambda: None)
     monkeypatch.setattr(S, "read_last_settled", lambda: _observing())
     monkeypatch.setattr(S, "read_events", lambda **k: [])
@@ -175,7 +175,7 @@ async def test_the_baseline_is_the_parent_not_the_lkg(monkeypatch, tmp_path):
     Comparing against it would check out the same code in both arms and be
     structurally incapable of finding anything.
     """
-    import scripts.autoimplement.state as S
+    import scripts.automod.state as S
     seen = {}
     noise = tmp_path / "noise.json"
     noise.write_text(json.dumps(ZERO_NOISE))
@@ -195,7 +195,7 @@ async def test_the_baseline_is_the_parent_not_the_lkg(monkeypatch, tmp_path):
 
 async def test_one_measurement_per_promotion(monkeypatch, tmp_path):
     """Both arms are full evals plus a worktree; the answer cannot change."""
-    import scripts.autoimplement.state as S
+    import scripts.automod.state as S
     monkeypatch.setattr(S, "read_current", lambda: _observing())
     monkeypatch.setattr(S, "read_last_settled", lambda: None)
     monkeypatch.setattr(S, "read_events", lambda **k: [
@@ -210,7 +210,7 @@ async def test_an_empty_corpus_arm_cannot_evaluate(monkeypatch, tmp_path):
     And it does not look like one: with the graph deleted, mrr_doc, ndcg10 and
     doc_hit_rate come back identical to a real run.
     """
-    import scripts.autoimplement.state as S
+    import scripts.automod.state as S
     noise = tmp_path / "noise.json"
     noise.write_text(json.dumps(ZERO_NOISE))
     monkeypatch.setattr(R, "NOISE_PATH", noise)
@@ -227,7 +227,7 @@ async def test_an_empty_corpus_arm_cannot_evaluate(monkeypatch, tmp_path):
 
 async def test_a_regression_is_handed_to_the_guardian(monkeypatch, tmp_path):
     """Never rolled back inline: the rollback stops the process doing it."""
-    import scripts.autoimplement.state as S
+    import scripts.automod.state as S
     captured = {}
     noise = tmp_path / "noise.json"
     noise.write_text(json.dumps(ZERO_NOISE))
@@ -250,7 +250,7 @@ async def test_a_regression_is_handed_to_the_guardian(monkeypatch, tmp_path):
 
 async def test_a_missing_noise_file_means_cannot_evaluate(monkeypatch, tmp_path):
     """Never 'no regression'. `eval/baselines/` is gitignored and can be absent."""
-    import scripts.autoimplement.state as S
+    import scripts.automod.state as S
     monkeypatch.setattr(S, "read_current", lambda: _observing())
     monkeypatch.setattr(S, "read_events", lambda **k: [])
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
@@ -260,7 +260,7 @@ async def test_a_missing_noise_file_means_cannot_evaluate(monkeypatch, tmp_path)
 
 
 async def test_a_failed_paired_baseline_does_not_silently_pass(monkeypatch, tmp_path):
-    import scripts.autoimplement.state as S
+    import scripts.automod.state as S
     noise = tmp_path / "noise.json"
     noise.write_text(json.dumps(ZERO_NOISE))
     monkeypatch.setattr(R, "NOISE_PATH", noise)

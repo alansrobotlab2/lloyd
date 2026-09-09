@@ -19,7 +19,7 @@ produced 3 sections for 14+ session files.
 Both skills now carry a named ``## Artifact Phase`` section. This test pins it, so rewriting
 either skill cannot silently drop the requirement again. The check is expressed as a pure
 function over skill text and exercised hermetically on fixtures below — those cases RUN under
-the autoimplement gate. The assertions against the live skill files read ``~/obsidian``, which no
+the automod gate. The assertions against the live skill files read ``~/obsidian``, which no
 round under test controls, so they carry ``live_vault``: they run in the ordinary suite and in
 CI, and are excluded from the gate's ``-m "not live_vault"`` rung for the same reason
 ``test_prompt_surface_budget.py`` is.
@@ -100,7 +100,7 @@ def _skill_file(name: str) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# hermetic — these RUN under the autoimplement gate (`-m "not live_vault"`)
+# hermetic — these RUN under the automod gate (`-m "not live_vault"`)
 # ---------------------------------------------------------------------------
 
 _CANONICAL = """

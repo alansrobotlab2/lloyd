@@ -25,7 +25,7 @@ import prompt_builder as pb
 from agent_mcp import code_graph as CG
 
 ROOT = Path(pb.__file__).resolve().parent
-VAULT_SKILL = Path.home() / "obsidian" / "skills" / "autoimplement-change-own-code" / "SKILL.md"
+VAULT_SKILL = Path.home() / "obsidian" / "skills" / "automod-change-own-code" / "SKILL.md"
 
 GRAPH_TOOL_RE = re.compile(r"\bgraph_[a-z_]+")
 
@@ -39,8 +39,8 @@ def _system_prompt() -> str:
 
 
 def _implement_prompt() -> str:
-    from workers.sources import autoimplement
-    return autoimplement.PROMPT
+    from workers.sources import autocode
+    return autocode.PROMPT
 
 
 async def test_every_graph_name_in_the_system_prompt_exists():
@@ -63,7 +63,7 @@ async def test_every_graph_name_in_claude_md_and_tools_md_exists():
 
 @pytest.mark.live_vault
 @pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present")
-async def test_every_graph_name_in_the_autoimplement_skill_exists():
+async def test_every_graph_name_in_the_automod_skill_exists():
     names = _extract(VAULT_SKILL.read_text())
     assert names <= await _advertised(), names - await _advertised()
 
@@ -115,23 +115,23 @@ def test_implement_prompt_steps_stay_numbered_in_order():
     assert nums == [1, 2, 3, 4, 5, 6], nums
 
 
-PATCH = "scripts/maintenance/vault-autoimplement-skill-blast-radius.patch"
+PATCH = "scripts/maintenance/vault-automod-skill-blast-radius.patch"
 APPLY = f"git -C ~/obsidian apply {PATCH}"
 
 
 @pytest.mark.live_vault
 @pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present")
-def test_autoimplement_skill_maps_the_radius_between_opening_and_working():
+def test_automod_skill_maps_the_radius_between_opening_and_working():
     """The vault half of this change, and the reason it is a separate step.
 
     The vault is a live shared tree with no PR path, so editing it lands
     immediately — while the `graph_*` tools it names only exist after this
     branch merges and lloyd-mcp restarts. An edited skill therefore tells
-    every autoimplement round in the gap to call a tool that returns "Unknown
+    every automod round in the gap to call a tool that returns "Unknown
     tool", and makes quality gate 4 unsatisfiable. So the edit is held as a
     patch and applied at merge time, and THIS test is the reminder.
 
-    `live_vault` keeps it off the autoimplement gate's hard rung (`-m "not
+    `live_vault` keeps it off the automod gate's hard rung (`-m "not
     live_vault"`), where a vault someone else rewrote would fail an
     unrelated round.
     """
@@ -151,7 +151,7 @@ def test_autoimplement_skill_maps_the_radius_between_opening_and_working():
 
 @pytest.mark.live_vault
 @pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present")
-def test_autoimplement_skill_procedure_stays_numbered_in_order():
+def test_automod_skill_procedure_stays_numbered_in_order():
     """Holds before and after the patch — the insertion renumbers 6-8 to 7-9."""
     body = VAULT_SKILL.read_text()
     proc = body[body.find("## Procedure"):body.find("## What the gate rejects")]

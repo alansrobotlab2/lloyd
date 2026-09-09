@@ -1,6 +1,6 @@
 """On-disk state for the self-modification loop.
 
-Everything lives under ``~/.local/state/lloyd-autoimplement/`` — deliberately
+Everything lives under ``~/.local/state/lloyd-automod/`` — deliberately
 **outside the repo**, because the guardian must read it while the repo is
 being rewritten. `_pipeline/` would not do: it is gitignored but still inside
 the tree, so a `git clean -fdx` would take it.
@@ -22,7 +22,7 @@ that function is documented "best-effort — never raises", with no fsync and no
 locking. Defensible for a research ledger; wrong for the audit record of what
 code is running in production, where a silently dropped line means you cannot
 reconstruct what landed. `append_event` here fsyncs and raises.
-``tests/test_autoimplement_state.py`` asserts the two behave differently so nobody
+``tests/test_automod_state.py`` asserts the two behave differently so nobody
 later refactors them together.
 """
 
@@ -39,7 +39,7 @@ from pathlib import Path
 
 
 STATE_DIR = Path(
-    os.environ.get("LLOYD_AUTOIMPLEMENT_STATE", Path.home() / ".local" / "state" / "lloyd-autoimplement")
+    os.environ.get("LLOYD_AUTOMOD_STATE", Path.home() / ".local" / "state" / "lloyd-automod")
 )
 
 LKG_PATH = STATE_DIR / "last_known_good.json"
@@ -56,7 +56,7 @@ LAST_SETTLED_PATH = STATE_DIR / "last_settled.json"
 # is the one component outside that failure domain, and it already owns
 # evidence preservation, retry, the denylist and flap protection.
 ROLLBACK_REQUEST_PATH = STATE_DIR / "rollback_request.json"
-# Last measured quality baseline, written by the autoimplement-regression worker and
+# Last measured quality baseline, written by the automod-regression worker and
 # READ (never written) by the guardian, which folds it into the LKG record at
 # settle. Keeps "the guardian is the only writer of last_known_good.json"
 # true while still letting a venv-only measurement reach it.
@@ -396,7 +396,7 @@ def update_run_spec_base(round_id: str, base: str) -> bool:
 
     `run_gate` reads `code.base_commit` from `run_spec.yaml`, and `changed_paths`
     is `base...HEAD`. Leave the old base in place after a rebase and the next
-    `autoimplement_gate` call computes the round's diff against a commit that is no
+    `automod_gate` call computes the round's diff against a commit that is no
     longer its parent — sweeping every file the human committed in between
     into the round's changed paths, and from there into scope checks, the
     tree hash and the promotion record. False if there is no spec to update.
@@ -451,12 +451,12 @@ def spawn_detached(argv: list[str], log_path: Path, cwd=None) -> int:
 # The master switch
 # ---------------------------------------------------------------------------
 
-class AutoimplementDisabled(RuntimeError):
-    """`autoimplement.enabled` is false in config.yaml."""
+class AutomodDisabled(RuntimeError):
+    """`automod.enabled` is false in config.yaml."""
 
 
 def is_enabled(repo=None) -> bool:
-    """Read `autoimplement.enabled` straight from config.yaml.
+    """Read `automod.enabled` straight from config.yaml.
 
     Read raw rather than through `app.config` so this works from a stdlib-ish
     context and cannot be affected by overlay expansion. It is an interlock
@@ -472,13 +472,13 @@ def is_enabled(repo=None) -> bool:
         raw = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")) or {}
     except Exception:
         return False
-    return bool((raw.get("autoimplement") or {}).get("enabled", False))
+    return bool((raw.get("automod") or {}).get("enabled", False))
 
 
 def require_enabled(action: str, repo=None) -> None:
     if not is_enabled(repo):
-        raise AutoimplementDisabled(
-            f"autoimplement.enabled is false in config.yaml — refusing to {action}. "
+        raise AutomodDisabled(
+            f"automod.enabled is false in config.yaml — refusing to {action}. "
             "The loop ships inert; enabling it is a deliberate human decision.")
 
 

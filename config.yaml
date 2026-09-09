@@ -171,7 +171,7 @@ browser:
 code_graph:
   graphify_bin: ~/.local/bin/graphify
   # Rebuild a stale graph on first use. The dirty-file rule matters most
-  # inside a autoimplement round, where HEAD does not move while the model edits.
+  # inside an automod round, where HEAD does not move while the model edits.
   auto_refresh: true
   refresh_timeout_s: 120
   # Floor between automatic rebuilds triggered by uncommitted edits. Below
@@ -526,7 +526,7 @@ livekit:
 # Self-modification loop: worktree -> gate -> promote, with guardian rollback.
 # `enabled: false` is the master switch and the default. The machinery lands
 # inert; turning it on is a deliberate human act.
-autoimplement:
+automod:
   # Enabled 2026-09-06, after the autonomous path was fixed. It had shipped
   # inert since it was written, and the two landings in its history were both
   # driven from a terminal — the MCP path would have failed on first use,
@@ -536,7 +536,7 @@ autoimplement:
   # reasons: the observer watches the one activity that rewrites production,
   # and an IV session is the only kind the Inner Voice tab lists, so this is
   # what makes a round reviewable afterwards rather than just a ledger row and
-  # a diff. `autoimplement_start` enables the flag and refuses once, because the
+  # a diff. `automod_start` enables the flag and refuses once, because the
   # observer attaches at turn start and cannot be added to a turn in flight.
   # The CLI is exempt: no bound session, and a human is their own observer.
   require_inner_voice: true
@@ -589,7 +589,7 @@ workers:
     # benchmarks", the technique #377 was filed against.
     #
     # `promote()` now refuses a variant that breaks the prompt-surface
-    # invariants and commits what it does apply through `autoimplement_vault_land`,
+    # invariants and commits what it does apply through `automod_vault_land`,
     # so the writer is bounded rather than removed. It stays off until backlog
     # #506 closes the rest — `variant.json` written with `json.dump`, and the
     # snapshot directory wired up as a real rollback target. Flip `enabled` to
@@ -602,7 +602,7 @@ workers:
     # Behavioural-regression check for a landed self-modification. Off until
     # the loop itself is enabled — it is a no-op without a promotion under
     # observation, but there is no reason to schedule it before then.
-    autoimplement-regression:
+    automod-regression:
       # Enabled as a POST-LANDING check, not a gate rung. The gate's canary is
       # deliberately data-isolated (its own empty scratch vault), so a quality
       # eval run there would score an empty corpus and measure nothing. This
@@ -616,7 +616,7 @@ workers:
       max_duration_seconds: 1800
     # Re-checks one backlog item per run against the system as it is today.
     # Read-only: it reaches a verdict and retires stale items, and never
-    # implements anything — confirmed items go through the autoimplement gate as a
+    # implements anything — confirmed items go through the automod gate as a
     # separate, explicit act.
     #
     # 1800 -> 3600 on 2026-09-08. At 30 minutes this pass is a net PRODUCER of
@@ -643,7 +643,7 @@ workers:
       # half of the oldest item on the board.
       body_chars: 30000
       # Ask the harness to restate the finished turn's verdict as a JSON
-      # object under scripts/autoimplement/backlog.TRIAGE_VERDICT_SCHEMA, instead of
+      # object under scripts/automod/backlog.TRIAGE_VERDICT_SCHEMA, instead of
       # relying on a regex over `VERDICT:` lines. The text block stays in the
       # prompt and the regex stays as the fallback — the finalizer is skipped
       # whenever the turn did not end of its own accord, and a verdict
@@ -652,7 +652,7 @@ workers:
       # visible rather than the two being indistinguishable.
       structured_verdict: true
     # Picks up items triage has CONFIRMED (with an acceptance check) and runs
-    # one autoimplement round on each through the normal gate. This is the only
+    # one automod round on each through the normal gate. This is the only
     # automated path from a backlog item to landed code, and it is gated
     # hard: refuses while a promotion is under observation, while halted or
     # broken, or while a round is open. One item per run, oldest first.
@@ -677,13 +677,13 @@ workers:
     # meaning four rounds an hour, and all three predate this change:
     # `_loop_is_free` (no queue while a round is open, a promotion is under
     # observation, or a rollback is pending, re-checked in `execute` because
-    # a queued item can sit), the `autoimplement:round` dedup key (coalesces
+    # a queued item can sit), the `autocode:round` dedup key (coalesces
     # against any queued/claimed/running row), and `max_inflight: 1`. A poll
     # that finds any of those returns in milliseconds and logs one line. The
     # housekeeping at the top of `enqueue_if_due` — reap, close settled,
     # reconcile statuses — gets the same 4x, which is the half of this that
     # runs even when no round can start.
-    autoimplement:
+    autocode:
       enabled: true
       interval_seconds: 900
       max_inflight: 1
@@ -717,7 +717,7 @@ workers:
       # 2026-09-09 while two low-priority KG jobs held both slots. At 45
       # with max_inflight 1 the digest takes one slot whenever it has work
       # and beats low/background autonomy work for it; medium and above,
-      # and a autoimplement implement round (40), still go first.
+      # and an autocode round (40), still go first.
       priority: 45
       max_duration_seconds: 1800
       max_turns: 40

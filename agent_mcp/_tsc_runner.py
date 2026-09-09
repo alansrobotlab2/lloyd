@@ -77,7 +77,7 @@ def _cfg() -> dict:
 def project_root(real_path: str) -> Path | None:
     """The tree `real_path` belongs to, or None if tsc cannot say anything.
 
-    Walks up from the file looking for a `web/tsconfig.json`, so a autoimplement
+    Walks up from the file looking for a `web/tsconfig.json`, so an automod
     worktree answers about itself rather than about the live checkout. The
     file must be under that project's `web/src`, which is the only thing
     `tsconfig.json` includes.

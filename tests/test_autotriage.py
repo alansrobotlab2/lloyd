@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import yaml
 
-from scripts.autoimplement import backlog as B
+from scripts.automod import backlog as B
 from workers.sources import autotriage as M
 
 
@@ -115,7 +115,7 @@ def test_the_evidence_is_always_written_not_just_the_conclusion(backlog_dir):
     text = path.read_text()
     assert "No caller remains" in text
     assert "rg -n 'old_fn' app/" in text
-    assert "Autoimplement triage" in text
+    assert "Automod triage" in text
     fm = yaml.safe_load(text.split("---\n")[1])
     assert any("stale" in e for e in fm["activity_log"])
 
@@ -181,7 +181,7 @@ def test_triage_never_starts_a_round():
     """
     import inspect
     src = inspect.getsource(M)
-    for forbidden in ("autoimplement_start", "round.start", "R.start(", "promote("):
+    for forbidden in ("automod_start", "round.start", "R.start(", "promote("):
         assert forbidden not in src, f"triage must not call {forbidden}"
 
 

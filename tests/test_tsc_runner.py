@@ -74,7 +74,7 @@ def test_project_root_walks_up_to_the_tree_that_owns_the_file(tree):
 
 
 def test_a_worktree_answers_about_itself(tmp_path):
-    """A autoimplement round edits under ~/lloyd-work/...; the live tree's tsc
+    """An automod round edits under ~/lloyd-work/...; the live tree's tsc
     would say nothing about it."""
     for name in ("live", "work/SM_1/home/lloyd"):
         root = tmp_path / name

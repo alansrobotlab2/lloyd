@@ -36,9 +36,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts.autoimplement import backlog as B, state as S
+from scripts.automod import backlog as B, state as S
 from workers.sources import _common as C
-from workers.sources import autoimplement as I
+from workers.sources import autocode as I
 from workers.sources import autotriage as M
 
 
@@ -105,7 +105,7 @@ def test_a_fresh_self_filed_item_is_not_a_triage_candidate(isolated):
     assert B.select_candidate(S.LEDGER_PATH) is None
 
 
-@pytest.mark.parametrize("tag", ["spawned-by-triage", "spawned-by-autoimplement"])
+@pytest.mark.parametrize("tag", ["spawned-by-triage", "spawned-by-autocode"])
 def test_both_producers_are_held(isolated, tag):
     """Triage files one tag and an implement round the other. Holding only the
     first would leave the hotter of the two producers wired straight back in —

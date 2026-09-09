@@ -1,6 +1,6 @@
 """The architecture doc's load-bearing numbers must match the code.
 
-`architecture/autoimplement.md` states specific thresholds, path rules and
+`architecture/automod.md` states specific thresholds, path rules and
 config placements as fact. A doc that quietly drifts from the implementation is
 worse than no doc: it is the thing someone reads at 3am while deciding whether
 the watchdog can be trusted.
@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "agent-services" / "guardian"))
 
 import policy  # noqa: E402
 
-DOC = ROOT / "architecture" / "autoimplement.md"
+DOC = ROOT / "architecture" / "automod.md"
 
 
 def test_the_doc_exists():
@@ -87,13 +87,13 @@ def test_supervisor_confs_stop_process_groups(conf):
     ("web/package.json", "denied"),
     ("web/vite.config.ts", "denied"),
     ("agent-services/guardian/guardian.py", "protected"),
-    ("scripts/autoimplement/gate.py", "protected"),
+    ("scripts/automod/gate.py", "protected"),
     ("app/routers/health.py", "protected"),
     ("requirements.lock", "allowed"),
     ("app/harness/loop.py", "allowed"),
 ])
 def test_path_policy_matches_the_doc(path, expected):
-    from scripts.autoimplement import spec
+    from scripts.automod import spec
     assert spec.classify(path) == expected
 
 
@@ -102,12 +102,12 @@ def test_path_policy_matches_the_doc(path, expected):
 def test_the_gate_uses_reflink_always_not_auto():
     """§10: "--reflink=always, not auto — auto degrades to a real 6GB copy
     silently"."""
-    gate = (ROOT / "scripts" / "autoimplement" / "gate.py").read_text()
+    gate = (ROOT / "scripts" / "automod" / "gate.py").read_text()
     assert "--reflink=always" in gate
 
 
 def test_the_collected_floor_matches_the_doc():
-    from scripts.autoimplement import gate
+    from scripts.automod import gate
     assert gate.PYTEST_MIN_COLLECTED == 1000
 
 
@@ -115,7 +115,7 @@ def test_the_collected_floor_matches_the_doc():
 
 def test_latency_is_never_armed():
     """§8.1: "Only latency_ms_avg moved ... and it is never compared"."""
-    from workers.sources import autoimplement_regression as R
+    from workers.sources import automod_regression as R
     assert "latency_ms_avg" not in R.ARMED_METRICS
     assert "latency_ms_avg" in R.REPORT_ONLY
 
@@ -128,7 +128,7 @@ def test_all_seven_are_armed_because_the_corpus_is_now_pinned():
     LLOYD_CODE_ROOT, the arms agree to 0.0000 on all seven and four repeat
     runs move 0.0000. So all seven are armed again.
     """
-    from workers.sources import autoimplement_regression as R
+    from workers.sources import automod_regression as R
     assert set(R.ARMED_METRICS) == {
         "entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg",
         "ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg"}
@@ -138,7 +138,7 @@ def test_all_seven_are_armed_because_the_corpus_is_now_pinned():
 def test_the_pin_is_a_precondition_not_an_optimisation():
     """A comparison falling back to the live daemon would be the broken one
     wearing the fixed one's name."""
-    src = (ROOT / "workers" / "sources" / "autoimplement_regression.py").read_text()
+    src = (ROOT / "workers" / "sources" / "automod_regression.py").read_text()
     assert "PinError" in src and "pinned corpus unavailable" in src
 
 
@@ -152,13 +152,13 @@ def test_both_arms_score_the_same_questions():
     """The baseline arm runs the OLD run_eval.py out of a worktree, carrying
     the OLD query set. Editing the eval would otherwise ask the arms different
     questions and score the difference as a code regression."""
-    src = (ROOT / "workers" / "sources" / "autoimplement_regression.py").read_text()
+    src = (ROOT / "workers" / "sources" / "automod_regression.py").read_text()
     assert "LIVE_QUERIES" in src and '"--queries"' in src
 
 
 def test_the_noise_file_is_not_in_the_eval_run_record_directory():
     """§13: eval/baselines holds run records, and test_eval_scorer globs it."""
-    from workers.sources import autoimplement_regression as R
+    from workers.sources import automod_regression as R
     assert "eval/baselines" not in str(R.NOISE_PATH)
 
 
@@ -166,13 +166,13 @@ def test_the_noise_file_is_not_in_the_eval_run_record_directory():
 
 def test_state_lives_outside_the_repo():
     """§11: so `git reset --hard` and `git clean -fdx` cannot reach it."""
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
     assert ROOT not in S.STATE_DIR.parents and S.STATE_DIR != ROOT
 
 
 def test_the_ledger_raises_where_autoresearchs_swallows(tmp_path):
     """§11: the documented divergence."""
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
 
     blocker = tmp_path / "f"
     blocker.write_text("not a dir", encoding="utf-8")
@@ -207,7 +207,7 @@ def test_the_armed_metrics_are_named_for_what_they_actually_read():
     so these read the fact layer, not the edge set, and calling them "graph
     sensitive" would be the same overclaim this detector exists to avoid.
     """
-    from workers.sources import autoimplement_regression as R
+    from workers.sources import automod_regression as R
     assert not hasattr(R, "GRAPH_SENSITIVE_METRICS"), \
         "the old name overclaims: edge expiry is invisible to every armed metric"
     assert set(R.FACT_LAYER_METRICS) == {
@@ -225,7 +225,7 @@ def test_the_eval_refuses_an_empty_corpus_by_default():
 
 def test_the_quality_check_compares_against_the_parent_not_the_lkg():
     """§8.1: after settling the LKG pointer IS the promoted commit."""
-    src = (ROOT / "workers" / "sources" / "autoimplement_regression.py").read_text()
+    src = (ROOT / "workers" / "sources" / "automod_regression.py").read_text()
     assert 'subject.get("parent")' in src
 
 
@@ -233,20 +233,20 @@ def test_the_quality_check_compares_against_the_parent_not_the_lkg():
 
 def test_the_landing_is_detached():
     """§2/§6: the promoter restarts the process it is usually called from."""
-    assert "spawn_detached" in (ROOT / "agent_mcp" / "autoimplement.py").read_text()
-    assert "start_new_session=True" in (ROOT / "scripts" / "autoimplement" / "state.py").read_text()
+    assert "spawn_detached" in (ROOT / "agent_mcp" / "automod.py").read_text()
+    assert "start_new_session=True" in (ROOT / "scripts" / "automod" / "state.py").read_text()
 
 
 def test_only_one_promotion_may_be_under_observation():
     """§6 step 0: a second landing overwrote current.json, so the first never
     settled and the new rollback target had never survived a window."""
-    src = (ROOT / "scripts" / "autoimplement" / "promote.py").read_text()
+    src = (ROOT / "scripts" / "automod" / "promote.py").read_text()
     assert "still under observation" in src
 
 
 def test_the_promoter_refuses_a_commit_the_gate_did_not_judge():
     """§6 step 0."""
-    src = (ROOT / "scripts" / "autoimplement" / "promote.py").read_text()
+    src = (ROOT / "scripts" / "automod" / "promote.py").read_text()
     assert "gate_head" in src and "re-gate before landing" in src
 
 
@@ -263,7 +263,7 @@ def test_a_rollback_can_revert_in_place():
 # ── §11 state ───────────────────────────────────────────────────────────────
 
 def test_the_new_state_files_exist_where_the_doc_says():
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
     assert S.LAST_SETTLED_PATH.name == "last_settled.json"
     assert S.ROLLBACK_REQUEST_PATH.name == "rollback_request.json"
     assert S.EVAL_LAST_PATH.name == "eval_last.json"
@@ -276,8 +276,8 @@ def test_the_aggregator_verdict_streak_matches_the_doc():
 
 def test_a_round_requires_an_observer():
     """§2: "A round runs under Inner Voice, or not at all"."""
-    src = (ROOT / "agent_mcp" / "autoimplement.py").read_text()
+    src = (ROOT / "agent_mcp" / "automod.py").read_text()
     assert "_inner_voice_gate" in src
     import yaml
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
-    assert cfg["autoimplement"]["require_inner_voice"] is True
+    assert cfg["automod"]["require_inner_voice"] is True

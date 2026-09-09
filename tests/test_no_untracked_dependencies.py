@@ -66,8 +66,8 @@ def _committed(path: str) -> str | None:
 def _local_target(module: str, tracked: set[str]) -> str | None:
     """The repo-relative file `module` resolves to, or None if it is external.
 
-    Longest prefix first, so `scripts.autoimplement.backlog` resolves to
-    `scripts/autoimplement/backlog.py` rather than stopping at a `scripts` package
+    Longest prefix first, so `scripts.automod.backlog` resolves to
+    `scripts/automod/backlog.py` rather than stopping at a `scripts` package
     that may not exist. Anything that resolves nowhere in the repo is stdlib
     or a site-package and is not this test's business.
     """
@@ -118,7 +118,7 @@ def test_no_tracked_module_imports_an_untracked_one():
 
     assert not offenders, (
         "tracked code depends on files git does not have, so a fresh worktree "
-        "cannot run it and the autoimplement gate's `tests` rung fails for every "
+        "cannot run it and the automod gate's `tests` rung fails for every "
         "round regardless of its diff:\n  " + "\n  ".join(offenders)
         + "\n\n`git add` them, or the dependency is not real and should go."
     )
@@ -129,7 +129,7 @@ def test_the_guard_actually_resolves_local_modules():
     clean repo, and this one's whole job is to notice an absence."""
     tracked = set(_tracked_python_files())
     assert _local_target("prompt_builder", tracked) == "prompt_builder.py"
-    assert _local_target("scripts.autoimplement.backlog", tracked) == "scripts/autoimplement/backlog.py"
+    assert _local_target("scripts.automod.backlog", tracked) == "scripts/automod/backlog.py"
     # External packages and stdlib resolve nowhere in the repo.
     assert _local_target("pytest", tracked) is None
     assert _local_target("pathlib", tracked) is None
@@ -157,7 +157,7 @@ def test_it_reads_head_not_the_working_tree():
     """The property that keeps this guard off the hard-rung tripwire list.
 
     If it read from disk, every author with an unstaged new module would fail
-    the suite — and on the autoimplement gate that means every round aborts on
+    the suite — and on the automod gate that means every round aborts on
     somebody else's desk state.
     """
     tracked = _tracked_python_files()

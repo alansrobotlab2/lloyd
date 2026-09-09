@@ -47,7 +47,7 @@ def _board_page_statuses() -> set[str]:
 def test_every_python_reader_shares_one_vocabulary():
     from agent_mcp import backlog as mcp_backlog
     from app.routers import backlog as board_router
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     assert set(mcp_backlog.VALID_STATUSES) == set(PIPELINE_STATUSES)
     assert set(board_router._VALID_STATUSES) == set(PIPELINE_STATUSES)
@@ -131,7 +131,7 @@ def _write_item(d: Path, num: int, status: str, board: str = "lloyd") -> Path:
 
 @pytest.fixture()
 def board(tmp_path, monkeypatch):
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
     d = tmp_path / "backlog"
     d.mkdir()
     monkeypatch.setattr(loop, "BACKLOG_DIR", d)
@@ -141,7 +141,7 @@ def board(tmp_path, monkeypatch):
 def test_an_off_vocabulary_item_is_stranded_between_the_two_halves(board):
     """The regression, stated end to end — this is what the rescue undoes."""
     from app.routers import dashboard
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     _write_item(board, 287, "review")
 
@@ -154,7 +154,7 @@ def test_an_off_vocabulary_item_is_stranded_between_the_two_halves(board):
 
 
 def test_rescue_moves_review_to_draft_and_closed_to_done(board, tmp_path):
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     _write_item(board, 287, "review")
     _write_item(board, 304, "closed")
@@ -173,7 +173,7 @@ def test_rescue_moves_review_to_draft_and_closed_to_done(board, tmp_path):
 def test_rescue_records_each_move_on_the_ledger(board, tmp_path):
     import json
 
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     _write_item(board, 287, "review")
     ledger = tmp_path / "ledger.jsonl"
@@ -187,7 +187,7 @@ def test_rescue_records_each_move_on_the_ledger(board, tmp_path):
 
 
 def test_rescue_writes_the_reason_into_the_activity_log(board, tmp_path):
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     p = _write_item(board, 287, "review")
     loop.rescue_off_vocabulary(tmp_path / "ledger.jsonl")
@@ -197,7 +197,7 @@ def test_rescue_writes_the_reason_into_the_activity_log(board, tmp_path):
 
 
 def test_rescue_is_idempotent(board, tmp_path):
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     _write_item(board, 287, "review")
     ledger = tmp_path / "ledger.jsonl"
@@ -210,7 +210,7 @@ def test_rescue_is_idempotent(board, tmp_path):
 def test_rescue_respects_the_board_filter(board, tmp_path):
     """The backlog is shared. An Alfie item with an unusual status is not
     this loop's to rewrite."""
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     _write_item(board, 500, "review", board="alfie")
     ledger = tmp_path / "ledger.jsonl"
@@ -222,7 +222,7 @@ def test_rescue_respects_the_board_filter(board, tmp_path):
 
 
 def test_rescue_leaves_the_four_good_statuses_alone(board, tmp_path):
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     for n, st in enumerate(PIPELINE_STATUSES, start=100):
         _write_item(board, n, st)
@@ -234,7 +234,7 @@ def test_rescue_leaves_the_four_good_statuses_alone(board, tmp_path):
 
 def test_reconcile_runs_the_rescue_first(board, tmp_path):
     """The rescued item must be judged in the same pass, not the next one."""
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     _write_item(board, 287, "review")
     ledger = tmp_path / "ledger.jsonl"
@@ -246,7 +246,7 @@ def test_reconcile_runs_the_rescue_first(board, tmp_path):
 
 
 def test_reconcile_kill_switch_covers_the_rescue(board, tmp_path):
-    from scripts.autoimplement import backlog as loop
+    from scripts.automod import backlog as loop
 
     _write_item(board, 287, "review")
     assert loop.reconcile_statuses(tmp_path / "ledger.jsonl", ("lloyd",), enabled=False) == []

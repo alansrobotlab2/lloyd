@@ -1,9 +1,9 @@
-diff --git i/skills/autoimplement-change-own-code/SKILL.md w/skills/autoimplement-change-own-code/SKILL.md
+diff --git i/skills/automod-change-own-code/SKILL.md w/skills/automod-change-own-code/SKILL.md
 index 141428ba..7cad23a7 100644
---- i/skills/autoimplement-change-own-code/SKILL.md
-+++ w/skills/autoimplement-change-own-code/SKILL.md
-@@ -48,30 +48,38 @@ reversible. Triage after something goes wrong is `autoimplement-guardian-triage`.
- 1. **Open a round.** `autoimplement_start(goal)` returns a worktree path under
+--- i/skills/automod-change-own-code/SKILL.md
++++ w/skills/automod-change-own-code/SKILL.md
+@@ -48,30 +48,38 @@ reversible. Triage after something goes wrong is `automod-guardian-triage`.
+ 1. **Open a round.** `automod_start(goal)` returns a worktree path under
     `~/lloyd-work/<round_id>/home/lloyd`. Every edit goes there. Never edit
     `~/lloyd` directly to make the change.
 -2. **Do the work normally.** Ordinary Read/Edit/Write/Bash inside that worktree,
@@ -21,12 +21,12 @@ index 141428ba..7cad23a7 100644
 -3. **Write the test first when the change is a fix.** The gate runs the whole
 +4. **Write the test first when the change is a fix.** The gate runs the whole
     suite; a fix with no test passes the gate and proves nothing.
--4. **Gate it.** `autoimplement_gate(round_id)` — two to three minutes. Eight rungs, and it
-+5. **Gate it.** `autoimplement_gate(round_id)` — two to three minutes. Eight rungs, and it
+-4. **Gate it.** `automod_gate(round_id)` — two to three minutes. Eight rungs, and it
++5. **Gate it.** `automod_gate(round_id)` — two to three minutes. Eight rungs, and it
     stops at the first failure. Read the failing rung's `detail`; it names the
     cause.
--5. **Land it.** `autoimplement_land(round_id)` **returns immediately** — the landing
-+6. **Land it.** `autoimplement_land(round_id)` **returns immediately** — the landing
+-5. **Land it.** `automod_land(round_id)` **returns immediately** — the landing
++6. **Land it.** `automod_land(round_id)` **returns immediately** — the landing
     runs detached, because it restarts the very process the tool runs in. It
     waits for the backend to go idle (up to 15 minutes — a busy backend is
     normal, not a fault), fast-forwards, restarts MCP then backend, and verifies
@@ -34,12 +34,12 @@ index 141428ba..7cad23a7 100644
 -6. **Then stop. End your turn.** This is the step that is easy to get wrong.
 +7. **Then stop. End your turn.** This is the step that is easy to get wrong.
     The landing waits for the backend to be *idle*, and your own turn is what is
-    keeping it busy — polling `autoimplement_status` in a loop starves the very gate
+    keeping it busy — polling `automod_status` in a loop starves the very gate
     the landing is waiting on, and after 15 minutes it gives up. Landing also
     restarts the backend, which ends your turn regardless. Say what you did and
     finish.
--7. **Check on your next turn.** `autoimplement_status` shows `current.state`
-+8. **Check on your next turn.** `autoimplement_status` shows `current.state`
+-7. **Check on your next turn.** `automod_status` shows `current.state`
++8. **Check on your next turn.** `automod_status` shows `current.state`
     `landing` -> `observing`; `observing` means the code is live and the running
     commit was verified to have changed. If the landing failed it reverted
     itself and `current` is null again — the reason is in the round's `land.log`.

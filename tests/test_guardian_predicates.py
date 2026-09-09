@@ -600,7 +600,7 @@ def test_the_drill_passes_no_external_alerts(tmp_path):
     from pathlib import Path
 
     src = (Path(__file__).resolve().parent.parent /
-           "scripts" / "autoimplement" / "rehearse.py").read_text()
+           "scripts" / "automod" / "rehearse.py").read_text()
     assert "--no-external-alerts" in src
 
 

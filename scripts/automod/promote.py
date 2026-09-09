@@ -29,7 +29,7 @@ import urllib.request
 from pathlib import Path
 
 from app.supervisor_client import restart_process, stop_process
-from scripts.autoimplement import state as S, worktree as W
+from scripts.automod import state as S, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -116,7 +116,7 @@ def _post(url: str, payload: dict, timeout: float = 5.0) -> bool:
 
 
 def set_drain(on: bool, ttl: float = DRAIN_TTL) -> bool:
-    return _post(f"{BACKEND}/api/autoimplement/drain", {"on": on, "ttl_s": ttl})
+    return _post(f"{BACKEND}/api/automod/drain", {"on": on, "ttl_s": ttl})
 
 
 def pool_paused() -> bool | None:
@@ -332,7 +332,7 @@ def _announce_promoted(round_id: str, commit: str, changed: list, title: str = "
             sys.path.insert(0, str(gdir))
         import gstate, notify as notify_mod, policy
         notifier = notify_mod.Notifier(
-            ledger=gstate.AutoimplementState(Path(policy.AUTOIMPLEMENT_STATE)).ledger,
+            ledger=gstate.AutomodState(Path(policy.AUTOMOD_STATE)).ledger,
             state_dir=Path(policy.GUARDIAN_STATE),
             vault_root=policy.VAULT_ROOT,
             voice_window=policy.VOICE_REPEAT_SECONDS,
@@ -346,7 +346,7 @@ def _announce_promoted(round_id: str, commit: str, changed: list, title: str = "
 def vault_commits_for(round_id: str) -> list[str]:
     """Vault shas this round landed, newest last.
 
-    A `mixed` backlog item lands its vault half through `autoimplement_vault_land`
+    A `mixed` backlog item lands its vault half through `automod_vault_land`
     and its code half through this promoter, and until now the two halves were
     recorded in different places with nothing joining them. That matters at
     rollback: reverting #377's code commit alone would restore the Python
@@ -416,7 +416,7 @@ def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
     depends on: `gate.json`, which `land` reads its head from, and the run
     spec's base, which the next `run_gate` reads its diff from.
     """
-    from scripts.autoimplement import gate as G   # lazy: gate → canary → ports; not needed elsewhere here
+    from scripts.automod import gate as G   # lazy: gate → canary → ports; not needed elsewhere here
     report = G.Gate(round_id, Path(worktree), base, live_root=live).run()
     rep = report.to_dict()
     S.write_gate_report(round_id, rep)
@@ -497,7 +497,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
     changed = W.changed_paths(Path(worktree), base)
     # The item's name, for the toast, the spoken line and the guardian's
     # rollback alert — the guardian is stdlib-only and reads it off this record.
-    from scripts.autoimplement import backlog as B
+    from scripts.automod import backlog as B
     title = B.work_title_for_round(S.LEDGER_PATH, round_id)
 
     # Uncommitted edits in production are tolerated when they are disjoint
@@ -529,7 +529,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         "commit": head,
         "parent": live_head,
         "rollback_target": live_head,
-        "branch": f"autoimplement/{round_id}",
+        "branch": f"automod/{round_id}",
         "state": "landing",
         "landed_at": None,
         "landed_ts": None,
@@ -595,7 +595,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         # ── land ───────────────────────────────────────────────────────
         S.set_pause(RESTART_LEASE)   # the guardian must not read our own restart as a crash
         merge = subprocess.run(
-            ["git", "-C", str(live), "merge", "--ff-only", f"autoimplement/{round_id}"],
+            ["git", "-C", str(live), "merge", "--ff-only", f"automod/{round_id}"],
             capture_output=True, text=True)
         if merge.returncode != 0:
             # Chased twice and still not a fast-forward: `main` is moving faster

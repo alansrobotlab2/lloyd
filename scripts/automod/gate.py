@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app import lint_findings
-from scripts.autoimplement import canary as C
-from scripts.autoimplement import spec, state as S, worktree as W
+from scripts.automod import canary as C
+from scripts.automod import spec, state as S, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 PYTEST_MIN_COLLECTED = 1000
@@ -312,7 +312,7 @@ class Gate:
 
         Only the canary redirected the self-modification state dir. The static,
         tests and venv rungs ran candidate code against the LIVE
-        `~/.local/state/lloyd-autoimplement/`, so a candidate test that forgot its
+        `~/.local/state/lloyd-automod/`, so a candidate test that forgot its
         isolation fixture could write a real `BROKEN` or `promotions-halted`
         flag, or append to the production audit trail — from inside the very
         gate that is supposed to be read-only judgment. Point them at scratch.
@@ -322,12 +322,12 @@ class Gate:
         otherwise talk to the room.
         """
         scratch = W.round_dir(self.round_id) / "gate-state"
-        (scratch / "autoimplement").mkdir(parents=True, exist_ok=True)
+        (scratch / "automod").mkdir(parents=True, exist_ok=True)
         (scratch / "guardian").mkdir(parents=True, exist_ok=True)
         return {
             "PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
             "PYTHONPATH": str(root or self.worktree),
-            "LLOYD_AUTOIMPLEMENT_STATE": str(scratch / "autoimplement"),
+            "LLOYD_AUTOMOD_STATE": str(scratch / "automod"),
             "LLOYD_GUARDIAN_STATE": str(scratch / "guardian"),
             "LLOYD_VOICE_ALERTS": "0",
         }
@@ -729,7 +729,7 @@ class Gate:
     def rung_drill(self):
         if not spec.requires_drill(self.report.changed_paths):
             return True, "no protected paths touched — drill not required", {}
-        from scripts.autoimplement import rehearse
+        from scripts.automod import rehearse
         # Stop the gate's canary first: the drill needs the ports.
         if self._canary:
             self._canary.stop()

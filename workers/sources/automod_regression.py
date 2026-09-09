@@ -46,14 +46,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from scripts.autoimplement.evalpin import PinError, PinnedCorpus
+from scripts.automod.evalpin import PinError, PinnedCorpus
 from workers.queue import WorkQueue, QueueItem
 
-logger = logging.getLogger("lloyd-workers.autoimplement-regression")
+logger = logging.getLogger("lloyd-workers.automod-regression")
 
-NAME = "autoimplement-regression"
+NAME = "automod-regression"
 DEFAULT_PRIORITY = 70
-DEDUP_KEY = "autoimplement:regression"
+DEDUP_KEY = "automod:regression"
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 # Both arms score THESE questions, whichever commit's code is running.
@@ -65,8 +65,8 @@ LIVE_QUERIES = LIVE_ROOT / "eval" / "vault_recall_queries.yaml"
 # fails an unrelated test. It also belongs with the loop's other runtime state,
 # which lives outside the repo so it survives a rollback.
 NOISE_PATH = Path(os.environ.get(
-    "LLOYD_AUTOIMPLEMENT_STATE",
-    Path.home() / ".local" / "state" / "lloyd-autoimplement")) / "eval-noise.json"
+    "LLOYD_AUTOMOD_STATE",
+    Path.home() / ".local" / "state" / "lloyd-automod")) / "eval-noise.json"
 
 # ARMED = the metrics this comparison actually CONTROLS.
 #
@@ -128,9 +128,9 @@ REPORT_ONLY = ("latency_ms_avg", "n_queries")
 # past this check in silence. Calling them "graph sensitive" would be the exact
 # overclaim this whole detector is meant to avoid — a check that reports
 # healthy because it was never looking. Edge quality has no armed metric and is
-# a stated limit in architecture/autoimplement.md §13, not a covered case.
+# a stated limit in architecture/automod.md §13, not a covered case.
 #
-# `test_autoimplement_doc_claims` pins the split. Re-arming a doc-side metric means
+# `test_automod_doc_claims` pins the split. Re-arming a doc-side metric means
 # first making the doc corpus part of the pairing — pointing both arms at a
 # pinned qmd index instead of the live daemon.
 FACT_LAYER_METRICS = ("entity_hit_rate", "entity_recall_avg",
@@ -149,7 +149,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         dedup_key=DEDUP_KEY,
     )
     if new_id is not None:
-        logger.info("Enqueued autoimplement regression check id=%d", new_id)
+        logger.info("Enqueued automod regression check id=%d", new_id)
 
 
 def _load_run(baselines: Path, label: str) -> dict | None:
@@ -181,7 +181,7 @@ def _baseline_worktree(commit: str):
     Kept open across BOTH arms, not just the baseline one: it is also the
     shared grep corpus. See `_run_arm`.
     """
-    scratch = Path(tempfile.mkdtemp(prefix="autoimplement-eval-"))
+    scratch = Path(tempfile.mkdtemp(prefix="automod-eval-"))
     wt = scratch / "lloyd"
     try:
         r = subprocess.run(["git", "-C", str(LIVE_ROOT), "worktree", "add",
@@ -248,12 +248,12 @@ def measure_noise(trials: int = 5) -> dict:
     """
     import tempfile as _tf
     samples: dict[str, list[float]] = {}
-    work = Path(_tf.mkdtemp(prefix="autoimplement-noise-pin-"))
+    work = Path(_tf.mkdtemp(prefix="automod-noise-pin-"))
     try:
         with PinnedCorpus(work) as pin:
             env = pin.env_for(code_root=LIVE_ROOT)
             for i in range(trials):
-                run = _run_arm(LIVE_ROOT, f"autoimplement-noise-{i}", env)
+                run = _run_arm(LIVE_ROOT, f"automod-noise-{i}", env)
                 overall = (run or {}).get("overall")
                 if not overall:
                     continue
@@ -383,7 +383,7 @@ def _execute_blocking() -> dict[str, Any]:
     same code, so the comparison was guaranteed to find nothing. The baseline
     is the promotion's own parent.
     """
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
 
     promo = S.read_current()
     if promo and promo.get("state") == "observing":
@@ -417,7 +417,7 @@ def _execute_blocking() -> dict[str, Any]:
     if not noise:
         # Explicitly "cannot evaluate" — never "no regression".
         msg = (f"no measured noise floor at {NOISE_PATH}; run "
-               f"`autoimplement_regression.measure_noise()` once on an unchanged tree")
+               f"`automod_regression.measure_noise()` once on an unchanged tree")
         logger.warning(msg)
         S.append_event({"event": "regression_skipped", "reason": msg})
         return _skipped(msg)
@@ -427,7 +427,7 @@ def _execute_blocking() -> dict[str, Any]:
     # much as the code — this retriever searches the repository it ships in,
     # so each arm was grepping its own source.
     pin_provenance: dict = {}
-    work = Path(tempfile.mkdtemp(prefix="autoimplement-pin-"))
+    work = Path(tempfile.mkdtemp(prefix="automod-pin-"))
     try:
         with PinnedCorpus(work) as pin:
             pin_provenance = dict(pin.provenance)
@@ -438,8 +438,8 @@ def _execute_blocking() -> dict[str, Any]:
                     return _skipped("baseline worktree failed")
                 # The baseline tree is the shared grep corpus for BOTH arms.
                 env = pin.env_for(code_root=wt)
-                baseline = _run_arm(wt, "autoimplement-paired-lkg", env)
-                current = _run_arm(LIVE_ROOT, "autoimplement-check", env)
+                baseline = _run_arm(wt, "automod-paired-lkg", env)
+                current = _run_arm(LIVE_ROOT, "automod-check", env)
             pin.discard()
     except PinError as exc:
         # A comparison that quietly fell back to the live daemon would be the

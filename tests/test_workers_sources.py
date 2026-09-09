@@ -556,7 +556,7 @@ objective_checks:
 - type: contains
   value: timeout
 - type: tool_not_called
-  value: autoimplement_land
+  value: automod_land
 rubric_criteria:
 - names_the_failing_call
 - bounds_the_retry

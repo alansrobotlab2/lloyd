@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.autoimplement import backlog as B, round as R, state as S, worktree as W
+from scripts.automod import backlog as B, round as R, state as S, worktree as W
 
 
 def git(repo, *args):
@@ -41,7 +41,7 @@ def scratch(tmp_path, monkeypatch):
 
 def test_round_start_records_live_dirt_instead_of_refusing(scratch):
     """A worktree is cut from HEAD — committed state — and an uncommitted edit
-    in production cannot reach it. Refusing blocked `autoimplement_start` for #448
+    in production cannot reach it. Refusing blocked `automod_start` for #448
     over one orphaned file. Recorded, not refused."""
     (scratch / "app" / "wip.py").write_text("x = 1\n", encoding="utf-8")
     out = R.start("a goal", force=True)

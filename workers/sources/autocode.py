@@ -1,4 +1,4 @@
-"""Implement a backlog item that triage has confirmed, through one autoimplement round.
+"""Implement a backlog item that triage has confirmed, through one automod round.
 
 This is the only automated path from a backlog item to landed code, and it is
 deliberately the last link in a chain with two gates in front of it:
@@ -11,7 +11,7 @@ deliberately the last link in a chain with two gates in front of it:
      no promotion under observation, no rollback pending, no round open. That
      is re-checked at run time, because a queue item can sit for a while.
 
-Then one turn, in a real session, following `autoimplement-change-own-code`. The
+Then one turn, in a real session, following `automod-change-own-code`. The
 turn opens the round, does the work, gates it, and either lands it or aborts.
 Landing runs detached and the turn ends, exactly as it does when a human
 drives it — the three rounds that proved the loop worked were driven this way
@@ -23,7 +23,7 @@ recorded and the item is not picked again by this source. A second attempt is
 a human's decision.
 
 Why this goes through `/api/message/stream` rather than `run_query`: the
-observer. `autoimplement_start` refuses a turn with no Inner Voice attached, and the
+observer. `automod_start` refuses a turn with no Inner Voice attached, and the
 chat path is the only one that attaches it. Going through it also puts the
 round in the Inner Voice history, which is where anyone reviews what the agent
 did afterwards.
@@ -38,16 +38,16 @@ from typing import Any
 
 from workers.queue import WorkQueue, QueueItem
 
-logger = logging.getLogger("lloyd-workers.autoimplement")
+logger = logging.getLogger("lloyd-workers.automod")
 
-NAME = "autoimplement"
+NAME = "autocode"
 # The queue dequeues `priority ASC`: a lower number runs sooner. Research and
 # distill jobs sit at 70 and arrive every few minutes, so at 80 the first
 # unattended round (job 4476, 2026-09-07) sat queued behind four of them with
 # no path to a slot. One round every four hours, gated on the loop being free,
 # is the rarest and most valuable job in this pool; it goes first.
 DEFAULT_PRIORITY = 40
-DEDUP_KEY = "autoimplement:round"
+DEDUP_KEY = "autocode:round"
 
 # Same cap and the same reason as autotriage.SPAWN_CAP. An implement
 # round ran hotter than triage did — 17 items over 6 runs, and the three
@@ -55,7 +55,7 @@ DEDUP_KEY = "autoimplement:round"
 # nothing. A round that cannot make its own change true is the last one
 # that should be growing the board.
 SPAWN_CAP = 3
-# 150, not 100. Round SM_20260908_165950 called `autoimplement_land` at iteration 91
+# 150, not 100. Round SM_20260908_165950 called `automod_land` at iteration 91
 # of 100 — nine left for a landing that must be followed by an immediate turn
 # end, and #278 died at 101 with a gated, ready change it never landed. The
 # budget anchor fires at 75% and 90%, so a cap that is too tight spends its
@@ -68,7 +68,7 @@ LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 PROMPT = """\
 Backlog item #{item_id} on your own board was triaged {triaged_ago} and \
 **confirmed**: the premise still holds and there is real work here. Implement \
-it through the self-modification loop, following `autoimplement-change-own-code` \
+it through the self-modification loop, following `automod-change-own-code` \
 exactly.
 
 <item id="{item_id}" status="{status}" priority="{priority}">
@@ -97,7 +97,7 @@ the acceptance check does not cover — a second bug beside the first, a \
 refactor the fix wants, a test the area is missing, a premise in the item that \
 turned out wider than its check. Each one becomes **its own backlog item, filed \
 by you** with `backlog_write_task` (board `lloyd`, no `task_id`, tag \
-`spawned-by-autoimplement`, first line "Found while implementing #{item_id}"), \
+`spawned-by-autocode`, first line "Found while implementing #{item_id}"), \
 written as a handoff a fresh session can execute alone: what is wrong, where \
 (file paths and line numbers), and how to verify. Then keep this round to the \
 contract. One change per round is what makes a rollback mean something. Do not \
@@ -122,7 +122,7 @@ triage had already stated before it opened its round.
 Procedure when the surface is `code` or `frontend`:
 1. Re-read the item and the triage evidence. If anything has changed since the \
 triage and the premise no longer holds, say so and stop — that is a result.
-2. `autoimplement_start` with a goal naming item #{item_id}. Work only in the \
+2. `automod_start` with a goal naming item #{item_id}. Work only in the \
 worktree it returns. The frontend is in scope: `web/src/**`, `web/index.html` \
 and `web/public/**` are writable and the gate type-checks and builds them; \
 `package.json`, the lockfile and the Vite/TS config are not.
@@ -135,8 +135,8 @@ one-file change or a five-file one, and a grep for the symbol's spelling will \
 not tell you.
 4. Write the test that fails today. Then the smallest change that makes it \
 pass. One change per round.
-5. `autoimplement_gate`. If it fails twice on the same rung for the same reason, \
-`autoimplement_abort` and report — with one exception, below. A preflight that says \
+5. `automod_gate`. If it fails twice on the same rung for the same reason, \
+`automod_abort` and report — with one exception, below. A preflight that says \
 it **rebased** is a pass, not a warning: something landed on `main` under you \
 and the gate moved your branch onto it and retested. Your base has moved; do \
 not re-cut. Only a rebase *conflict* stops you, and it names the files — \
@@ -153,7 +153,7 @@ wrong. If you cannot write that sentence, the test is catching your bug and \
 the correct move is to fix the code. Never delete a test to get to green (the \
 gate refuses it), never add a skip, and never weaken an assertion you cannot \
 justify in those terms.
-6. `autoimplement_land`. Then **end your turn immediately** — the landing needs the \
+6. `automod_land`. Then **end your turn immediately** — the landing needs the \
 backend idle, and your own turn is what keeps it busy.
 
 Procedure when the surface is `vault`:
@@ -162,20 +162,20 @@ Procedure when the surface is `vault`:
 has no worktree. Touch only the paths the acceptance check names. **Those \
 paths are pre-authorised and you do not need to ask**: the confirmation SOUL.md \
 requires for a protected path is what the item's triage verdict already \
-recorded, and `autoimplement_vault_land` supplies the rest of what confirmation is \
+recorded, and `automod_vault_land` supplies the rest of what confirmation is \
 for — it validates through the real loaders and commits one revertable sha. \
 Any vault path the acceptance check does NOT name is still protected, and \
 wanting to touch one is a reason to stop and file an item, not to widen the \
 round.
 3. Verify the acceptance check yourself, then \
-`autoimplement_vault_land(paths, message, item_id={item_id})`. It validates exactly \
+`automod_vault_land(paths, message, item_id={item_id})`. It validates exactly \
 those paths (front matter, and for skills, tasks and identity files the real \
 loaders), commits them on the vault's main and records the sha. If it refuses, \
 it has already reverted your edits: fix the cause and retry once, or stop and \
 report. Nothing restarts, so your turn continues.
 
 If the surface is `mixed`, land the vault half first, then run the code \
-procedure, and end your turn after `autoimplement_land`.
+procedure, and end your turn after `automod_land`.
 
 **If the change touches the prompt surface** — `prompt_builder.py`, \
 `prefetch.py`, or `lloyd/SOUL.md` / `lloyd/MEMORY.md` / `lloyd/USER.md` in the \
@@ -246,7 +246,7 @@ def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
     after the turn ended. The branch is kept — it is the only record of
     what was attempted — and the item is told where it is.
     """
-    from scripts.autoimplement import backlog as B, round as R, state as S, worktree as W
+    from scripts.automod import backlog as B, round as R, state as S, worktree as W
     now = now or time.time()
     events = S.read_events(limit=500)
     # `infra_failed` too: a turn can open a round and then lose its stream, and
@@ -274,15 +274,15 @@ def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
             continue
         R.abort(rid)
         rec = {"event": "round_abandoned", "round_id": rid, "item_id": e.get("item_id"),
-               "branch": f"autoimplement/{rid}",
+               "branch": f"automod/{rid}",
                "reason": (f"implement turn ended ({e.get('stop_reason')}) and the round "
                           f"stayed open for {int(age // 60)} min with nothing running in "
                           f"its session")}
         S.append_event(rec)
         if e.get("item_id") is not None:
             B.note_item(int(e["item_id"]),
-                        f"autoimplement round {rid} abandoned: {rec['reason']}. Its work is on "
-                        f"branch `autoimplement/{rid}` in ~/lloyd.")
+                        f"automod round {rid} abandoned: {rec['reason']}. Its work is on "
+                        f"branch `automod/{rid}` in ~/lloyd.")
             B.set_status(int(e["item_id"]), "up_next", "its round was abandoned; back in the pool")
         logger.warning("reaped abandoned round %s (%s)", rid, rec["reason"])
         reaped.append(rec)
@@ -292,10 +292,10 @@ def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
 def _loop_is_free() -> tuple[bool, str]:
     """Every gate the loop itself enforces, checked here first so a queued
     item does not spend a full agent turn discovering it cannot proceed."""
-    from scripts.autoimplement import state as S, worktree as W
+    from scripts.automod import state as S, worktree as W
 
     if not S.is_enabled(LIVE_ROOT):
-        return False, "autoimplement.enabled is false"
+        return False, "automod.enabled is false"
     if S.is_halted():
         return False, "promotions are halted"
     if S.is_broken():
@@ -320,7 +320,7 @@ def _age_phrase(ts: float | None) -> str:
 
 
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
-    from scripts.autoimplement import backlog as B, state as S
+    from scripts.automod import backlog as B, state as S
 
     try:
         reap_abandoned_rounds()
@@ -347,7 +347,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         logger.warning("reconcile_statuses failed: %s", exc)
     free, why = _loop_is_free()
     if not free:
-        logger.info("autoimplement: not queueing — %s", why)
+        logger.info("autocode: not queueing — %s", why)
         return
     if B.select_confirmed(S.LEDGER_PATH) is None:
         return
@@ -372,7 +372,7 @@ def _round_opened_since(events: list[dict], since_ts: float) -> str | None:
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
-    from scripts.autoimplement import backlog as B, state as S
+    from scripts.automod import backlog as B, state as S
 
     free, why = _loop_is_free()
     if not free:
@@ -391,7 +391,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                     "phase": "started", "name": candidate.name[:200],
                     "budget": budget})
-    B.set_status(candidate.id, "in_progress", "autoimplement round starting")
+    B.set_status(candidate.id, "in_progress", "automod round starting")
     try:
         return await _run_and_record(item, candidate, triage, budget, started)
     finally:
@@ -406,7 +406,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
 
 async def _run_and_record(item, candidate, triage, budget, started) -> dict[str, Any]:
-    from scripts.autoimplement import backlog as B, state as S
+    from scripts.automod import backlog as B, state as S
     from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
     logger.info("implementing backlog #%s (budget %d): %s",
                 candidate.id, budget, candidate.name[:70])
@@ -433,7 +433,7 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
     want_outcome = bool((item.payload or {}).get("structured_outcome", True))
     try:
         run = await run_prompt_in_session(
-            prompt, title=f"autoimplement #{candidate.id}: {candidate.name[:48]}",
+            prompt, title=f"autocode #{candidate.id}: {candidate.name[:48]}",
             source=NAME, max_turns=budget, priority=1,
             final_schema=B.IMPLEMENT_OUTCOME_SCHEMA if want_outcome else None,
             final_schema_prompt=(
@@ -494,7 +494,7 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
         # Closed here rather than by the settle sweep, which only sees landings.
         B.set_status(candidate.id, "done",
                      "the round found the work unnecessary" + (f": {outcome['summary']}" if outcome.get("summary") else ""))
-        S.append_event({"event": "item_closed", "item_id": candidate.id, "by": "autoimplement",
+        S.append_event({"event": "item_closed", "item_id": candidate.id, "by": "autocode",
                         "acceptance": "unnecessary", "reason": outcome.get("summary", "")[:300]})
     claimed = B.parse_spawned_line(run.get("text") or "")
     spawned = B.existing_ids(claimed)

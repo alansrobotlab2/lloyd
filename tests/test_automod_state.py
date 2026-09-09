@@ -18,12 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts.autoimplement import state as S
+from scripts.automod import state as S
 
 
 @pytest.fixture(autouse=True)
 def isolated_state(tmp_path, monkeypatch):
-    """No test touches the real ~/.local/state/lloyd-autoimplement."""
+    """No test touches the real ~/.local/state/lloyd-automod."""
     monkeypatch.setattr(S, "STATE_DIR", tmp_path)
     monkeypatch.setattr(S, "LKG_PATH", tmp_path / "last_known_good.json")
     monkeypatch.setattr(S, "CURRENT_PATH", tmp_path / "current.json")
@@ -231,7 +231,7 @@ def test_a_lock_whose_holder_died_is_available_again(isolated_state):
 
     code = (
         "import sys; sys.path.insert(0, %r);"
-        "from scripts.autoimplement import state as S;"
+        "from scripts.automod import state as S;"
         "S.LOCK_PATH = __import__('pathlib').Path(%r);"
         "S.Lock(owner='dead').acquire()"
         % (str(Path(__file__).resolve().parent.parent), str(S.LOCK_PATH))

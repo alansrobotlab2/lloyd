@@ -7,7 +7,7 @@ process actually listening on the port. Nothing reconciled the third
 against the first two. `server.py::_sync_secondary_llm_state` only ever
 decided whether the secondary should be *running*, never *what* it is.
 
-On 2026-09-06 a `git reset` from the autoimplement/guardian machinery reverted
+On 2026-09-06 a `git reset` from the automod/guardian machinery reverted
 `start-secondary.sh` and `agent-llm-secondary.conf` to a revision whose
 `MODEL=qwen35` branch serves Qwen3.5-**4B** on vLLM. The 35B kept running
 because the process was never restarted, but any restart in that window

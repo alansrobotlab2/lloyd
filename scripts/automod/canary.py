@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from scripts.autoimplement import canary_config as cc
+from scripts.automod import canary_config as cc
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 SUPERVISORD_BIN = Path.home() / ".local/share/uv/tools/supervisor/bin/supervisord"
@@ -218,7 +218,7 @@ class Canary:
 
     def smoke(self, timeout: float = 150.0) -> dict:
         """Drive one real turn end to end. See canary_smoke.py."""
-        from scripts.autoimplement import canary_smoke
+        from scripts.automod import canary_smoke
         return canary_smoke.run(
             backend=f"http://127.0.0.1:{self.backend_port}",
             sessions_dir=self.worktree / "sessions",

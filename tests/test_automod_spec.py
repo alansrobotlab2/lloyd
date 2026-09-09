@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.autoimplement import spec
+from scripts.automod import spec
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ def test_ordinary_code_is_allowed(path):
 
 
 @pytest.mark.parametrize("path", [
-    "scripts/autoimplement/gate.py", "scripts/autoimplement/spec.py",
+    "scripts/automod/gate.py", "scripts/automod/spec.py",
     "agent-services/guardian/guardian.py", "agent-services/guardian/rollback.py",
     "agent-services/systemd/lloyd-guardian.service",
     "agent-services/supervisor/conf.d/lloyd-backend.conf",
@@ -120,10 +120,10 @@ def test_a_clean_ordinary_diff_needs_no_drill():
 def valid_spec() -> dict:
     return {
         "objective": "make the harness faster",
-        "evaluation": {"command": "scripts.autoimplement.gate", "timeout_secs": 3600},
+        "evaluation": {"command": "scripts.automod.gate", "timeout_secs": 3600},
         "budget": {"max_rounds": 1, "max_variants_per_round": 1},
         "mutation_scope": {"writable_paths": ["app/**", "tests/**"]},
-        "code": {"base_commit": "a" * 40, "branch": "autoimplement/SM_1"},
+        "code": {"base_commit": "a" * 40, "branch": "automod/SM_1"},
     }
 
 
@@ -169,7 +169,7 @@ def test_code_block_fields_are_required(key):
 def test_the_denylist_is_not_overridable_by_a_spec():
     """The single most important safety property in the design.
 
-    A round that could land a change to `scripts/autoimplement/**` by naming it in
+    A round that could land a change to `scripts/automod/**` by naming it in
     `writable_paths` would remove the only guard permanently, and every
     subsequent round would inherit the weakened gate.
     """

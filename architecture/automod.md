@@ -1,12 +1,12 @@
 ---
 segment: architecture
-tags: [architecture, lloyd, autoimplement]
+tags: [architecture, lloyd, automod]
 type: reference
 status: implemented
 date: 2026-09-06
 ---
 
-# Self-modification with automatic rollback
+# Automod: self-modification with automatic rollback
 
 Lloyd changes his own code through a gated loop that can undo itself. This
 describes the framework, the process for using it, and the reasoning behind
@@ -54,9 +54,9 @@ write what.
 
 | Component | Lives in | May write |
 |---|---|---|
-| Round | `scripts/autoimplement/round.py` | its worktree |
-| Gate | `scripts/autoimplement/gate.py` | nothing in the live tree |
-| Promoter | `scripts/autoimplement/promote.py` | live tree, `current.json` |
+| Round | `scripts/automod/round.py` | its worktree |
+| Gate | `scripts/automod/gate.py` | nothing in the live tree |
+| Promoter | `scripts/automod/promote.py` | live tree, `current.json` |
 | Guardian | `agent-services/guardian/` | live tree, `last_known_good.json`, `last_settled.json` |
 
 **The promoter never advances last-known-good and the guardian never
@@ -75,12 +75,12 @@ reason a **landing runs detached** (`state.spawn_detached`, a new session,
 which is what supervisord's `stopasgroup` signal cannot reach): the promoter
 restarts the very process it is usually called from.
 
-**The round is a wrapper, not a code generator.** `autoimplement_start` returns a
+**The round is a wrapper, not a code generator.** `automod_start` returns a
 worktree path; Lloyd edits it with the ordinary Edit/Write/Bash tools and
-commits. There is deliberately no `autoimplement_write_code` tool — proposing a
+commits. There is deliberately no `automod_write_code` tool — proposing a
 change is just normal work that happens somewhere safe.
 
-**A round runs under Inner Voice, or not at all.** `autoimplement_start` refuses a
+**A round runs under Inner Voice, or not at all.** `automod_start` refuses a
 turn with no observer attached. Two reasons, and the second is the one that
 survives a round nobody was watching live: the observer catches the loop
 drifting off the request while it happens, and an IV session is the only kind
@@ -96,11 +96,11 @@ system prompt. A single-turn round would otherwise report itself observed while
 running blind. The retry runs observed.
 
 Two paths stay unobserved on purpose. The **canary smoke turn** is a gate rung,
-not a autoimplement job, and the observer would add LLM calls and non-determinism to
+not an automod job, and the observer would add LLM calls and non-determinism to
 a check whose value is failing if and only if code under test is broken.
 **Worker turns** have no session at all, so `messages.py` cannot attach an
 observer to them; that is why workers and Task subagents are barred from the
-autoimplement tools rather than trusted with a prompt that says not to.
+automod tools rather than trusted with a prompt that says not to.
 
 ---
 
@@ -109,15 +109,15 @@ autoimplement tools rather than trusted with a prompt that says not to.
 ### 3.1 For Lloyd (autonomous)
 
 ```bash
-python -m scripts.autoimplement.round start "make X faster"   # cuts a worktree
+python -m scripts.automod.round start "make X faster"   # cuts a worktree
 #   ...edit that worktree, commit inside it...
-python -m scripts.autoimplement.round gate  SM_<id>           # 8 rungs, ~2.5 min
-python -m scripts.autoimplement.round land  SM_<id>           # idle-gated, verified
+python -m scripts.automod.round gate  SM_<id>           # 8 rungs, ~2.5 min
+python -m scripts.automod.round land  SM_<id>           # idle-gated, verified
 ```
 
-Or the same four steps as MCP tools: `autoimplement_start`, `autoimplement_gate`,
-`autoimplement_land`, `autoimplement_status` (plus `autoimplement_abort` and
-`autoimplement_rollback`). Every mutating tool refuses while `autoimplement.enabled` is
+Or the same four steps as MCP tools: `automod_start`, `automod_gate`,
+`automod_land`, `automod_status` (plus `automod_abort` and
+`automod_rollback`). Every mutating tool refuses while `automod.enabled` is
 false, which is the default.
 
 ### 3.2 Unattended
@@ -130,7 +130,7 @@ start from an unverified premise:
   `confirmed` records an acceptance check and stops. It never opens a round.
   Items this loop filed itself are held out of its candidate pool while they
   are fresh — see "The pass may not eat what it files" below.
-- **`autoimplement`** takes the oldest still-open `confirmed` item that
+- **`autocode`** takes the oldest still-open `confirmed` item that
   has an acceptance check, and runs one round on it through the normal gate.
   It refuses while the loop is anything but free — disabled, halted, BROKEN,
   a promotion under observation, a rollback pending, a round open — and checks
@@ -193,7 +193,7 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   in-focus item does not cover — a claim that survives a `stale`, a bug seen
   on the way, scope the implementer's acceptance check does not reach — is
   filed with `backlog_write_task` (tags `spawned-by-triage` /
-  `spawned-by-autoimplement`, first line naming the source item) *before* the
+  `spawned-by-autocode`, first line naming the source item) *before* the
   verdict, and listed under a new `SPAWNED:` field. The triage prompt's
   read-only rule now says read-only **on the code**, because as written it
   forbade the very write. What the model says it filed is a claim and the
@@ -217,7 +217,7 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   the pass works the real backlog first and reads as healthy right up to the
   moment there is nothing else left; on 2026-09-08 that moment was three hours
   and 6 items away. `backlog.is_quarantined` holds an item tagged
-  `spawned-by-triage` or `spawned-by-autoimplement` out of the pool until it is
+  `spawned-by-triage` or `spawned-by-autocode` out of the pool until it is
   `SPAWN_TRIAGE_MIN_AGE_DAYS` (30) old. Quarantine rather than exclusion: an
   item nobody implements really can go stale, and then the question triage
   asks is real again. The gate keys on those tags and **not** on `draft`,
@@ -248,7 +248,7 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
 **Surfaces.** The verdict block carries `SURFACE: code|frontend|vault|mixed|
 external`, and it decides the implementer's route. `code` and `frontend` go
 through a worktree round and the gate (the frontend rung builds `web/src`).
-`vault` goes through `scripts/autoimplement/vault_round.py`, because the vault is a
+`vault` goes through `scripts/automod/vault_round.py`, because the vault is a
 separate git repo and a *live* tree — Lloyd, the nightly jobs and Alan write
 into it at once, and `prompt_builder` and `autonomy` read it straight from
 disk — so there is no candidate to gate in isolation. The route is therefore
@@ -262,8 +262,8 @@ failure puts the round's paths back (tracked ones to HEAD, new ones deleted),
 because on a live tree "nothing lands" has to mean "nothing stays". Success
 commits exactly those paths on the vault's `main` (the same branch guard as
 `scripts/util/vault-commit.sh`) and records a `vault_land` ledger event with
-the sha; `autoimplement_vault_revert` is a plain `git revert`, also recorded. Both
-tools sit behind the Inner Voice gate like `autoimplement_start`, and both are
+the sha; `automod_vault_revert` is a plain `git revert`, also recorded. Both
+tools sit behind the Inner Voice gate like `automod_start`, and both are
 denied to session-less worker turns. `not_code` is now reserved for
 `external` — hardware, robots, third-party services — and vault items get
 real verdicts.
@@ -320,13 +320,13 @@ phases) and `status` decided only open-versus-done — so the board could not
 tell you where anything was, and nine landed items sat as `up_next`.
 
 ```
-draft ──autotriage: confirmed──▶ up_next ──autoimplement: round opens──▶ in_progress
+draft ──autotriage: confirmed──▶ up_next ──autocode: round opens──▶ in_progress
   │                                 ▲                                        │
   └──autotriage: already_done/stale─┼──── attempt ended without a verdict ◀──┤
                           done ◀────┘◀────────── landed & met, or unnecessary ┘
 ```
 
-`autotriage` reads `draft` only; `autoimplement` reads `up_next` only. Every
+`autotriage` reads `draft` only; `autocode` reads `up_next` only. Every
 other transition is derived, not scattered: `backlog.desired_statuses`
 computes the status each open item *should* have from the ledger — in flight
 (`started` with nothing after it), landed-and-awaiting, promoted-and-observing,
@@ -358,7 +358,7 @@ recorded on the `finished` event as `outcome`, with `outcome_error` beside it
 so a finalizer that quietly stopped working does not look like one that is
 working. `close_settled_items` runs on every implement poll: for each
 settled promotion (or vault landing) whose item is still open and not yet
-marked, it writes `autoimplement_landed: <sha>` and an activity line, and sets
+marked, it writes `automod_landed: <sha>` and an activity line, and sets
 `status: done` **only when the round said `met`**.
 
 Only the round judged the acceptance, and it is asked in a grammar rather
@@ -406,7 +406,7 @@ which is also the natural home for dependency changes and guardian edits.
 
 ## 3.3 Map the blast radius before editing
 
-Both the `autoimplement-change-own-code` skill and `autoimplement`'s PROMPT now
+Both the `automod-change-own-code` skill and `autocode`'s PROMPT now
 put one step between opening a round and doing the work: `graph_refresh`, then
 `graph_affected` for each symbol about to change and `graph_explain` for its
 callers (`agent_mcp/code_graph.py`, an AST extraction with no LLM calls). The
@@ -552,7 +552,7 @@ exemption is how it becomes an open door.
 | Item | What ended it | Work left behind |
 |---|---|---|
 | #361, #370, #376 | pre-existing test failures (§4.2b) | 3 branches |
-| #446 | wall clock, 14 s and one `autoimplement_gate` call short of landing | 757 lines |
+| #446 | wall clock, 14 s and one `automod_gate` call short of landing | 757 lines |
 | #447 | `preflight: live tree is dirty` — an unrelated uncommitted edit in production | 587 lines |
 | #392 | the turn never ran; the backend was down | none |
 
@@ -598,7 +598,7 @@ the work. (#446's and #447's both still rebase onto `main` cleanly.)
 iterations are not the budget unattended work dies on. `autonomy.run_task`
 got a deadline anchor on 2026-09-08 after #80, #78 and #24 each died holding
 an answer they were never asked to write down; #446 is the same failure
-against the autoimplement worker's clock. `app.deadline_anchor` is now the one
+against the autocode worker's clock. `app.deadline_anchor` is now the one
 definition — autonomy delegates to it, and `/api/message/stream` takes a
 `deadline_seconds` the anchor announces at 70% and 90%.
 
@@ -668,7 +668,7 @@ a post-merge failure still restores, and the event names the patch.
 
 ### 4.3 Rungs that run candidate code run it against scratch state
 
-Only the canary redirected `LLOYD_AUTOIMPLEMENT_STATE`. The static, tests and venv
+Only the canary redirected `LLOYD_AUTOMOD_STATE`. The static, tests and venv
 rungs executed candidate code against the **live** state directory, so a
 candidate test that forgot its isolation fixture could write a real `BROKEN`
 or `promotions-halted` flag, or append to the production audit trail — from
@@ -716,7 +716,7 @@ that reconcile is a no-op by construction.
 
 ## 6. Landing
 
-`scripts/autoimplement/promote.py`, **in a detached session**, in this order:
+`scripts/automod/promote.py`, **in a detached session**, in this order:
 
 0. **Refuse unless the candidate is the commit the gate judged, and unless
    nothing else is under observation.** `land` passed the base along but the
@@ -750,10 +750,10 @@ that reconcile is a no-op by construction.
    judge.
 
 **The caller must then stop talking.** The idle gate counts the calling turn
-too, so an agent that lands and then polls `autoimplement_status` in a loop is itself
+too, so an agent that lands and then polls `automod_status` in a loop is itself
 the reason the backend never goes idle — the landing waits its full 15 minutes
 and gives up. This is not a bug in the gate: the landing restarts the backend,
-which ends that turn regardless. `autoimplement_land` says so in its own result, and
+which ends that turn regardless. `automod_land` says so in its own result, and
 the skill's step after "land it" is "end your turn". It only shows up when the
 loop is driven by the agent rather than from a terminal, which is exactly the
 path that had never been exercised.
@@ -1014,7 +1014,7 @@ working regardless. Only `entity_hit_rate`, `entity_recall_avg` and
 
 **The document corpus is pinned, and it has two halves.** The comparison
 already held the fact tree and the knowledge graph still. It now also serves
-both arms from a frozen qmd snapshot (`scripts/autoimplement/evalpin.py`: qmd keeps
+both arms from a frozen qmd snapshot (`scripts/automod/evalpin.py`: qmd keeps
 its index in one SQLite file and takes `--index <name>`, so a `VACUUM INTO`
 copy on a second port is a 1.5-second freeze) and points both at one
 `LLOYD_CODE_ROOT`.
@@ -1161,7 +1161,7 @@ build, it is inventing one.
 
 ## 10. What Lloyd may change
 
-`scripts/autoimplement/spec.py`. **Denied beats protected beats allowed**, and a run
+`scripts/automod/spec.py`. **Denied beats protected beats allowed**, and a run
 spec cannot widen its own permissions by naming a denied path in
 `writable_paths`.
 
@@ -1193,7 +1193,7 @@ of the venv plus a `uv pip install` of the delta, booted by the canary.
 
 ## 11. State
 
-Everything under `~/.local/state/lloyd-autoimplement/` — outside the repo, so
+Everything under `~/.local/state/lloyd-automod/` — outside the repo, so
 `git reset --hard` and `git clean -fdx` cannot reach it. `_pipeline/` would
 not do: gitignored but still inside the tree.
 
@@ -1223,10 +1223,10 @@ nobody refactors them together.
 ## 12. Operating it
 
 ```bash
-python -m scripts.autoimplement.round status              # state + ledger + guardian
-python -m scripts.autoimplement.round bless               # record HEAD as last-known-good
-python -m scripts.autoimplement.round recover             # clear BROKEN/halted, start the stack
-python -m scripts.autoimplement.rehearse --yes-i-mean-it  # prove rollback still works
+python -m scripts.automod.round status              # state + ledger + guardian
+python -m scripts.automod.round bless               # record HEAD as last-known-good
+python -m scripts.automod.round recover             # clear BROKEN/halted, start the stack
+python -m scripts.automod.rehearse --yes-i-mean-it  # prove rollback still works
 systemctl --user status lloyd-guardian
 /usr/bin/python3 agent-services/guardian/guardian.py --selftest
 journalctl --user -u lloyd-guardian -f
@@ -1253,7 +1253,7 @@ Recovering from a rollback: the reverted commit is on the
 stash. `git merge --ff-only guardian-broken-<ts>` restores it (clear the SHA
 from `denied.json` first).
 
-`autoimplement.enabled` in config.yaml is the master switch and defaults to
+`automod.enabled` in config.yaml is the master switch and defaults to
 **false**.
 
 **Before enabling:** merge the outstanding PRs, run the drill, and confirm
@@ -1295,9 +1295,9 @@ from `denied.json` first).
   implementation and four policy constants for one, wired to nothing; they are
   gone rather than left looking operable. If it comes back it needs its own
   false-positive budget, measured.
-- **The master switch is an interlock, not a sandbox.** `autoimplement.enabled`
+- **The master switch is an interlock, not a sandbox.** `automod.enabled`
   now gates the CLI as well as the MCP tools, and worker jobs and subagents
-  cannot call `autoimplement_*` at all. None of that constrains anything holding the
+  cannot call `automod_*` at all. None of that constrains anything holding the
   Bash tool, which can edit `config.yaml` directly. It stops accidents and
   stops a prompt-injected worker; it is not a boundary against a misaligned
   agent with a shell.
@@ -1314,5 +1314,5 @@ from `denied.json` first).
   commit make retrieval worse", never "is retrieval better than last month".
 - **`POST /api/backlog/task-create` is still unauthenticated** on the tailnet
   when no client fingerprint is forwarded. The guardian files rollback tasks
-  through it over loopback; `/api/autoimplement/drain` was restricted because it can
+  through it over loopback; `/api/automod/drain` was restricted because it can
   silence every user turn for ten minutes, this one can only create a note.

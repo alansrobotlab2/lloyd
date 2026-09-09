@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.autoimplement import state as S, vault_round as V
+from scripts.automod import state as S, vault_round as V
 
 
 def git(repo, *args):

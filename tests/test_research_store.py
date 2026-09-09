@@ -56,7 +56,7 @@ def test_an_unreadable_registry_raises_rather_than_reading_empty(tmp_path):
 
 def test_the_default_store_is_opened_lazily_and_can_be_pointed(tmp_path):
     """A module-level instance would create the live file at import time, which
-    under the autoimplement gate means a canary writing into production."""
+    under the automod gate means a canary writing into production."""
     assert R._default is None, "importing the module must not open a store"
     configured = R.configure(tmp_path / "elsewhere.db")
     assert configured.path == tmp_path / "elsewhere.db"

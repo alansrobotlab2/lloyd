@@ -37,15 +37,15 @@ from typing import Any, Optional
 from app.paths import VAULT_ROOT
 from workers.queue import WorkQueue, QueueItem
 from workers.sources._common import (
-    WORKER_AUTOIMPLEMENT_BAN, DrainActive, TurnTimeout,
+    WORKER_AUTOMOD_BAN, DrainActive, TurnTimeout,
     build_skill_prompt, run_prompt_in_session,
 )
 
 logger = logging.getLogger("lloyd-workers.deep-research")
 
 NAME = "deep-research"
-#: Routine research tier. The autoimplement sources sit below it deliberately —
-#: `autoimplement` at 40 and `autotriage` at 55 — because the queue
+#: Routine research tier. The automod sources sit below it deliberately —
+#: `autocode` at 40 and `autotriage` at 55 — because the queue
 #: dequeues `priority ASC` and a round is rarer and more valuable than a note.
 DEFAULT_PRIORITY = 70
 
@@ -71,7 +71,7 @@ _MIN_NOTE_BYTES = 400
 #: `vault_read`/`search`/`recall`, `vault_write` and `fact_add` stay: they are
 #: the job.
 DISALLOWED: tuple[str, ...] = (
-    *WORKER_AUTOIMPLEMENT_BAN,
+    *WORKER_AUTOMOD_BAN,
     "Bash", "Read", "Write", "Edit", "Grep", "Glob", "Task",
     "http_request",
     "browser_evaluate", "browser_fill", "browser_type", "browser_click",

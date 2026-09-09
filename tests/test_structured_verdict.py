@@ -13,7 +13,7 @@ from __future__ import annotations
 import inspect
 import json
 
-from scripts.autoimplement import backlog as B
+from scripts.automod import backlog as B
 from workers.sources import autotriage as W
 
 

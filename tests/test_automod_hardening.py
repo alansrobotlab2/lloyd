@@ -34,7 +34,7 @@ import gstate      # noqa: E402
 import policy      # noqa: E402
 import rollback as rb  # noqa: E402
 
-from scripts.autoimplement import state as S  # noqa: E402
+from scripts.automod import state as S  # noqa: E402
 
 
 def git(repo, *args):
@@ -46,11 +46,11 @@ def git(repo, *args):
 def isolated_state(tmp_path, monkeypatch):
     """Point the state module at a scratch dir. Never the live one."""
     import importlib
-    monkeypatch.setenv("LLOYD_AUTOIMPLEMENT_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("LLOYD_AUTOMOD_STATE", str(tmp_path / "state"))
     importlib.reload(S)
     S.ensure_dirs()
     yield tmp_path / "state"
-    monkeypatch.delenv("LLOYD_AUTOIMPLEMENT_STATE", raising=False)
+    monkeypatch.delenv("LLOYD_AUTOMOD_STATE", raising=False)
     importlib.reload(S)
 
 
@@ -116,18 +116,18 @@ def test_the_detached_child_survives_a_group_kill(tmp_path):
 
 
 def test_the_master_switch_covers_the_cli_not_only_the_tool(isolated_state, tmp_path):
-    """`autoimplement.enabled` was checked in the MCP wrapper alone.
+    """`automod.enabled` was checked in the MCP wrapper alone.
 
-    The skill's own worked examples drive `python -m scripts.autoimplement.round`,
+    The skill's own worked examples drive `python -m scripts.automod.round`,
     so "the loop ships inert" was true of the surface nobody used and false of
     the one they did.
     """
-    (tmp_path / "config.yaml").write_text("autoimplement:\n  enabled: false\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("automod:\n  enabled: false\n", encoding="utf-8")
     assert S.is_enabled(tmp_path) is False
-    with pytest.raises(S.AutoimplementDisabled):
+    with pytest.raises(S.AutomodDisabled):
         S.require_enabled("land a round", tmp_path)
 
-    (tmp_path / "config.yaml").write_text("autoimplement:\n  enabled: true\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("automod:\n  enabled: true\n", encoding="utf-8")
     assert S.is_enabled(tmp_path) is True
     S.require_enabled("land a round", tmp_path)          # does not raise
 
@@ -140,20 +140,20 @@ def test_a_missing_config_reads_as_disabled(tmp_path):
 def test_worker_turns_cannot_drive_the_loop():
     """`domain-research` reads arbitrary web pages into its context.
 
-    The autoimplement tools were advertised to every worker prompt, so the machinery
+    The automod tools were advertised to every worker prompt, so the machinery
     that rewrites production sat one prompt injection away from a source whose
     whole job is ingesting untrusted text. The backlog worker was told not to
     use them in its PROMPT, which is not a control.
     """
     src = (ROOT / "workers" / "sources" / "_common.py").read_text()
-    for tool in ("autoimplement_start", "autoimplement_gate", "autoimplement_land", "autoimplement_rollback"):
+    for tool in ("automod_start", "automod_gate", "automod_land", "automod_rollback"):
         assert tool in src, f"{tool} is not disallowed for worker turns"
 
 
 def test_subagents_cannot_drive_the_loop():
     """A Task runs inside the aggregator a landing restarts."""
     src = (ROOT / "agent_mcp" / "builtin_task.py").read_text()
-    for tool in ("autoimplement_start", "autoimplement_land", "autoimplement_rollback"):
+    for tool in ("automod_start", "automod_land", "automod_rollback"):
         assert tool in src, f"{tool} is not disallowed for subagents"
 
 
@@ -164,7 +164,7 @@ def test_the_drain_endpoint_is_loopback_only():
     a fingerprint is actually forwarded, so on the tailnet this was an
     unauthenticated way to make the backend refuse every turn for 10 minutes.
     """
-    src = (ROOT / "app" / "routers" / "autoimplement.py").read_text()
+    src = (ROOT / "app" / "routers" / "automod.py").read_text()
     assert "_is_loopback" in src and "loopback-only" in src
 
 
@@ -317,7 +317,7 @@ def test_nothing_inside_the_blast_radius_rolls_back_inline():
     then never reaching `git reset`: the stack goes down and the tree does not
     move, which is worse than either doing it or not doing it.
     """
-    for rel in ("agent_mcp/autoimplement.py", "workers/sources/autoimplement_regression.py"):
+    for rel in ("agent_mcp/automod.py", "workers/sources/automod_regression.py"):
         src = (ROOT / rel).read_text()
         assert "_rollback_inline(" not in src, f"{rel} still reverts inline"
         assert "request_rollback" in src, f"{rel} does not hand the rollback over"
@@ -402,7 +402,7 @@ def test_the_test_rung_requires_tests_to_have_RUN():
     A collected-count floor alone is satisfied by a suite that skipped itself
     wholesale, which is one conftest line away.
     """
-    from scripts.autoimplement import gate as G
+    from scripts.automod import gate as G
     counts = G._parse_pytest_summary("collected 1632 items\n\n1632 skipped in 2s")
     assert counts["collected"] == 1632 and counts["passed"] == 0
     assert counts["collected"] >= G.PYTEST_MIN_COLLECTED, "the old floor passes this"
@@ -410,7 +410,7 @@ def test_the_test_rung_requires_tests_to_have_RUN():
 
 
 def test_skips_are_parsed_at_all():
-    from scripts.autoimplement import gate as G
+    from scripts.automod import gate as G
     assert G._parse_pytest_summary("1600 passed, 12 skipped in 30s")["skipped"] == 12
 
 
@@ -421,14 +421,14 @@ def test_gate_rungs_run_candidate_code_against_scratch_state():
     BROKEN or promotions-halted flag, or append to the production audit trail,
     from inside the gate that is supposed to be read-only judgment.
     """
-    from scripts.autoimplement import gate as G
+    from scripts.automod import gate as G
     g = G.Gate.__new__(G.Gate)
     g.round_id = "SM_TEST"
     g.worktree = Path("/tmp/nonexistent-worktree")
     env = G.Gate._child_env(g)
-    assert "/lloyd-autoimplement" not in env["LLOYD_AUTOIMPLEMENT_STATE"], "points at live state"
+    assert "/lloyd-automod" not in env["LLOYD_AUTOMOD_STATE"], "points at live state"
     assert env["LLOYD_VOICE_ALERTS"] == "0"
-    assert env["LLOYD_GUARDIAN_STATE"] != env["LLOYD_AUTOIMPLEMENT_STATE"]
+    assert env["LLOYD_GUARDIAN_STATE"] != env["LLOYD_AUTOMOD_STATE"]
 
 
 def test_the_idle_gate_can_see_turns_that_never_touch_a_session_queue():
@@ -453,7 +453,7 @@ def test_the_idle_gate_can_see_turns_that_never_touch_a_session_queue():
 
 
 def test_the_promoter_treats_a_harness_run_as_busy():
-    src = (ROOT / "scripts" / "autoimplement" / "promote.py").read_text()
+    src = (ROOT / "scripts" / "automod" / "promote.py").read_text()
     assert "harness_runs" in src, "wait_idle cannot see worker turns"
 
 
@@ -468,7 +468,7 @@ def test_settling_records_what_landed_and_what_it_replaced(tmp_path):
     window closed had nothing to read — which is why the nightly quality check
     found no promotion under observation essentially always.
     """
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     st.write_last_settled({"commit": "b" * 40, "parent": "a" * 40,
                            "settled_ts": time.time()})
     back = gstate.read_json(st.last_settled)
@@ -478,7 +478,7 @@ def test_settling_records_what_landed_and_what_it_replaced(tmp_path):
 def test_the_guardian_reads_the_eval_baseline_and_never_writes_it(tmp_path):
     """LKG has exactly one writer, and that is what makes it mean
     observed-healthy-in-production rather than measured-by-somebody."""
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     gstate.write_json_atomic(st.eval_last, {"commit": "b" * 40, "overall": {"ndcg10": 0.5}})
     assert st.read_eval_last()["commit"] == "b" * 40
     assert not hasattr(st, "write_eval_last"), "the guardian must not write the measurement"
@@ -493,7 +493,7 @@ def test_installed_units_are_compared_against_the_repo():
     A unit edit that was never installed is a change that looks landed and
     does nothing — for a watchdog unit, the worst kind of silent no-op.
     """
-    from scripts.autoimplement.round import _unit_drift
+    from scripts.automod.round import _unit_drift
     assert isinstance(_unit_drift(), list)
 
 
@@ -501,7 +501,7 @@ def test_protected_service_definitions_are_actually_applied():
     """spec.py calls them protected — allowed with a drill — but nothing ever
     applied one: supervisord needs reread/update, units need installing, and
     the guardian runs a pinned snapshot re-staged only on a unit restart."""
-    src = (ROOT / "scripts" / "autoimplement" / "promote.py").read_text()
+    src = (ROOT / "scripts" / "automod" / "promote.py").read_text()
     assert "_apply_service_changes" in src
     for needed in ("reread", "update", "daemon-reload", "lloyd-guardian"):
         assert needed in src, f"{needed} is never applied after landing"
@@ -522,7 +522,7 @@ def test_policy_carries_no_knob_that_nothing_reads(name):
 
 
 def test_the_promotion_record_carries_no_field_nothing_reads():
-    src = (ROOT / "scripts" / "autoimplement" / "promote.py").read_text()
+    src = (ROOT / "scripts" / "automod" / "promote.py").read_text()
     guardian = (GUARDIAN_DIR / "guardian.py").read_text()
     for field in ("err_offset", "liveness_until_ts"):
         assert f'"{field}"' not in src, f"{field} is written and never read"
@@ -551,7 +551,7 @@ def test_a_real_tick_completes_against_the_live_state(tmp_path):
 
     args = G.build_parser().parse_args([
         "--repo", str(ROOT),
-        "--state", str(tmp_path / "autoimplement"),
+        "--state", str(tmp_path / "automod"),
         "--guardian-state", str(tmp_path / "guardian"),
         "--supervisor-sock", str(tmp_path / "no-such.sock"),
         "--no-external-alerts",
@@ -572,14 +572,14 @@ def test_a_real_tick_completes_against_the_live_state(tmp_path):
 
 def test_every_state_object_attribute_the_guardian_calls_exists(tmp_path):
     """A cheap structural guard against the same class of typo."""
-    st = gstate.AutoimplementState(tmp_path)
+    st = gstate.AutomodState(tmp_path)
     for name in ("lkg", "current", "floor", "rollback_target", "set_lkg",
                  "clear_current", "write_last_settled", "read_eval_last",
                  "read_rollback_request", "clear_rollback_request",
                  "is_broken", "is_halted", "set_broken", "set_halted",
                  "deny", "recent_rollbacks", "unfinished_rollback",
                  "pause_remaining"):
-        assert hasattr(st, name), f"AutoimplementState.{name} is called but does not exist"
+        assert hasattr(st, name), f"AutomodState.{name} is called but does not exist"
 
 
 # ===========================================================================
@@ -590,23 +590,23 @@ def test_landing_tells_the_caller_to_end_its_turn():
     """Found by driving the loop end to end as the agent, not from a terminal.
 
     The idle gate counts the CALLING turn too. An agent that lands and then
-    polls `autoimplement_status` in a loop is itself the reason the backend never
+    polls `automod_status` in a loop is itself the reason the backend never
     goes idle, so the landing waits its full 15 minutes and gives up. The
     landing restarts the backend and ends that turn regardless, so the only
-    correct move after `autoimplement_land` returns is to stop.
+    correct move after `automod_land` returns is to stop.
 
     This is only reachable on the path that had never been exercised, which is
     the whole reason the loop was driven by the agent before being trusted.
     """
-    src = (ROOT / "agent_mcp" / "autoimplement.py").read_text()
+    src = (ROOT / "agent_mcp" / "automod.py").read_text()
     assert "END YOUR TURN" in src
     # ...and the tool description must not still say to poll, or the two
     # halves of the contract contradict each other.
-    assert "Poll autoimplement_status to follow it" not in src
+    assert "Poll automod_status to follow it" not in src
 
 
 def test_the_skill_says_to_stop_after_landing():
-    skill = Path.home() / "obsidian" / "skills" / "autoimplement-change-own-code" / "SKILL.md"
+    skill = Path.home() / "obsidian" / "skills" / "automod-change-own-code" / "SKILL.md"
     if not skill.exists():
         pytest.skip("vault skill not present")
     text = skill.read_text()
@@ -638,7 +638,7 @@ def test_promote_refuses_a_commit_made_after_the_gate_passed(isolated_state, can
                                                              monkeypatch):
     """`land` passed the base along, but the candidate HEAD was re-read from
     the worktree — so a commit made after a passing gate landed ungated."""
-    from scripts.autoimplement import promote as P
+    from scripts.automod import promote as P
     r = candidate["path"]
     (r / "f.py").write_text("A = 3  # snuck in after the gate\n", encoding="utf-8")
     git(r, "add", "-A"); git(r, "commit", "-q", "-m", "ungated")
@@ -659,7 +659,7 @@ def test_promote_allows_exactly_the_gated_commit(isolated_state, candidate, monk
     the module for `worktree.git` too, which makes `W.head` return the wrong
     commit and the test pass for the wrong reason.
     """
-    from scripts.autoimplement import promote as P
+    from scripts.automod import promote as P
     monkeypatch.setattr(P.S, "read_current", lambda: None)
     try:
         P.promote("SM_TEST", candidate["path"], candidate["base"],
@@ -673,7 +673,7 @@ def test_promote_refuses_while_another_promotion_is_observed(isolated_state, can
                                                              monkeypatch):
     """A second landing overwrote current.json: the first never settled, and
     the new rollback target had never survived a window."""
-    from scripts.autoimplement import promote as P
+    from scripts.automod import promote as P
     monkeypatch.setattr(P.S, "read_current", lambda: {
         "commit": "c" * 40, "state": "observing",
         "errors_until_ts": time.time() + 600})
@@ -686,7 +686,7 @@ def test_promote_refuses_while_another_promotion_is_observed(isolated_state, can
 
 def test_promote_refuses_a_change_denied_by_content(isolated_state, candidate, monkeypatch):
     """Re-deriving a reverted change under a new SHA must not walk past."""
-    from scripts.autoimplement import promote as P
+    from scripts.automod import promote as P
     monkeypatch.setattr(P.S, "read_current", lambda: None)
     tree_hash = S.changed_tree_hash(candidate["path"], candidate["gated"], ["f.py"])
     S.deny("does-not-matter", tree_hash=tree_hash)
@@ -709,7 +709,7 @@ def test_service_definition_changes_are_applied_by_kind(monkeypatch, tmp_path):
     re-staged only when its unit restarts. A round could pass the drill, land,
     look healthy, and leave the running system on the old definition.
     """
-    from scripts.autoimplement import promote as P
+    from scripts.automod import promote as P
     calls = []
     monkeypatch.setattr(P, "_run", lambda argv, timeout=60.0: calls.append(
         [str(a) for a in argv]) or type("R", (), {"returncode": 0, "stdout": "",
@@ -734,7 +734,7 @@ def test_service_definition_changes_are_applied_by_kind(monkeypatch, tmp_path):
 
 def test_a_code_only_change_touches_no_service_machinery(monkeypatch, tmp_path):
     """The common case must not restart the watchdog for nothing."""
-    from scripts.autoimplement import promote as P
+    from scripts.automod import promote as P
     calls = []
     monkeypatch.setattr(P, "_run", lambda argv, timeout=60.0: calls.append(argv)
                         or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
@@ -755,7 +755,7 @@ def test_an_aggregator_verdict_is_confirmed_across_ticks(tmp_path):
 
     args = G.build_parser().parse_args([
         "--repo", str(ROOT),
-        "--state", str(tmp_path / "autoimplement"),
+        "--state", str(tmp_path / "automod"),
         "--guardian-state", str(tmp_path / "guardian"),
         "--supervisor-sock", str(tmp_path / "no-such.sock"),
         "--no-external-alerts",
@@ -822,7 +822,7 @@ def test_the_pin_refuses_a_port_it_did_not_start(tmp_path):
     """Comparing against somebody else's daemon is comparing against unknown
     data, which is the failure the pin exists to remove."""
     import socket
-    from scripts.autoimplement import evalpin
+    from scripts.automod import evalpin
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -839,7 +839,7 @@ def test_the_overlay_repoints_only_the_qmd_service(tmp_path):
     """It rides the same mechanism as the gate's canary, so it must not carry
     anything else that could change how an arm behaves."""
     import yaml
-    from scripts.autoimplement import evalpin
+    from scripts.automod import evalpin
 
     path = evalpin.write_overlay(tmp_path / "o.yaml", port=18999)
     doc = yaml.safe_load(path.read_text())
@@ -847,7 +847,7 @@ def test_the_overlay_repoints_only_the_qmd_service(tmp_path):
 
 
 def test_env_for_pins_both_halves_of_the_corpus(tmp_path):
-    from scripts.autoimplement import evalpin
+    from scripts.automod import evalpin
     pin = evalpin.PinnedCorpus(tmp_path)
     pin.overlay = tmp_path / "o.yaml"
     env = pin.env_for({}, code_root="/some/tree")
@@ -880,7 +880,7 @@ def test_the_pin_does_not_outlive_its_owner():
     """
     import ast
 
-    src = (ROOT / "scripts" / "autoimplement" / "evalpin.py").read_text()
+    src = (ROOT / "scripts" / "automod" / "evalpin.py").read_text()
     popens = [n for n in ast.walk(ast.parse(src))
               if isinstance(n, ast.Call)
               and isinstance(n.func, ast.Attribute) and n.func.attr == "Popen"]
@@ -894,7 +894,7 @@ def test_the_pin_frees_its_snapshot_even_when_interrupted():
     """The snapshot is 1 GB. `discard` on the happy path only meant an
     interrupted run leaked it, which is what happened on 2026-09-07."""
     import inspect
-    from scripts.autoimplement import evalpin
+    from scripts.automod import evalpin
     body = inspect.getsource(evalpin.PinnedCorpus.__exit__)
     assert "self.stop()" in body and "self.discard()" in body
 
@@ -907,10 +907,10 @@ def test_a_noise_floor_records_the_questions_it_was_measured_against():
     way. A stale floor cannot make the comparison wrong, only its record
     misleading, so it is reported rather than enforced.
     """
-    from workers.sources import autoimplement_regression as R
+    from workers.sources import automod_regression as R
     fp = R.queries_fingerprint()
     assert fp and len(fp) == 12
-    src = (ROOT / "workers" / "sources" / "autoimplement_regression.py").read_text()
+    src = (ROOT / "workers" / "sources" / "automod_regression.py").read_text()
     assert '"queries_fingerprint": queries_fingerprint()' in src
     assert "noise_floor_stale" in src
 
@@ -923,7 +923,7 @@ def _iv_gate(monkeypatch, tmp_path, session_id, session_data=None, require=True)
     """Drive `_inner_voice_gate` with a scratch sessions dir."""
     import json
 
-    import agent_mcp.autoimplement as M
+    import agent_mcp.automod as M
     if session_data is not None:
         (tmp_path / f"{session_id}.json").write_text(json.dumps(session_data),
                                                      encoding="utf-8")
@@ -975,20 +975,20 @@ def test_the_requirement_is_switchable(monkeypatch, tmp_path):
                     require=False) is None
 
 
-def test_the_gate_is_actually_wired_into_autoimplement_start():
+def test_the_gate_is_actually_wired_into_automod_start():
     """A gate nothing calls is the failure this whole review keeps finding."""
-    src = (ROOT / "agent_mcp" / "autoimplement.py").read_text()
-    start = src.index('if name == "autoimplement_start"')
+    src = (ROOT / "agent_mcp" / "automod.py").read_text()
+    start = src.index('if name == "automod_start"')
     body = src[start:start + 500]
-    assert "_inner_voice_gate(" in body, "autoimplement_start does not consult the gate"
+    assert "_inner_voice_gate(" in body, "automod_start does not consult the gate"
 
 
 def test_the_two_unobserved_paths_are_deliberate_and_say_so():
     """The canary smoke turn and worker turns both run without an observer.
     Neither is an oversight, and both must explain themselves where someone
     would otherwise 'fix' them."""
-    smoke = (ROOT / "scripts" / "autoimplement" / "canary_smoke.py").read_text()
-    assert "not a autoimplement job" in smoke.lower() or "gate rung, not a autoimplement job" in smoke
+    smoke = (ROOT / "scripts" / "automod" / "canary_smoke.py").read_text()
+    assert "not an automod job" in smoke.lower() or "gate rung, not an automod job" in smoke
 
     common = (ROOT / "workers" / "sources" / "_common.py").read_text()
     assert "No session, therefore no Inner Voice" in common

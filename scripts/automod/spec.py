@@ -62,13 +62,13 @@ ALLOWED_GLOBS: tuple[str, ...] = (
 )
 
 PROTECTED_GLOBS: tuple[str, ...] = (
-    "scripts/autoimplement/**",
+    "scripts/automod/**",
     "agent-services/guardian/**",
     "agent-services/systemd/**",
     "agent-services/supervisor/**",
     "agent-services/bin/**",
     "app/routers/health.py",
-    "app/routers/autoimplement.py",
+    "app/routers/automod.py",
     "app/supervisor_client.py",
     "app/lifecycle.py",
     "app/gitinfo.py",

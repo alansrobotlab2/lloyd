@@ -1,6 +1,6 @@
 """One definition of "a backlog task's `status`".
 
-Five lists name this vocabulary — ``scripts/autoimplement/backlog.py`` for the
+Five lists name this vocabulary — ``scripts/automod/backlog.py`` for the
 triage/implement loop, ``agent_mcp/backlog.py`` for the ``backlog_*`` tools,
 ``app/routers/backlog.py`` for the Mission Control board's writer,
 ``app/routers/dashboard.py`` for the board's counters, and ``STATUSES`` in the
@@ -28,8 +28,8 @@ triage run and is self-correcting, so only the words already known to mean
 "off the board" are terminal and *everything* else becomes ``draft``.
 
 It lives in ``app/`` and imports only the standard library for the same reason
-``backlog_tags`` does: ``scripts/autoimplement/backlog.py`` is the light module
-the autoimplement CLI loads, and it must not pull ``mcp`` and ``httpx`` in
+``backlog_tags`` does: ``scripts/automod/backlog.py`` is the light module
+the automod CLI loads, and it must not pull ``mcp`` and ``httpx`` in
 behind a twenty-line helper.
 """
 

@@ -25,7 +25,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
-logger = logging.getLogger("lloyd-autoimplement")
+logger = logging.getLogger("lloyd-automod")
 
 # Absolute epoch after which the drain lapses. 0 = not draining.
 _drain_until: float = 0.0
@@ -54,7 +54,7 @@ def _is_loopback(request: Request) -> bool:
     return host in ("127.0.0.1", "::1", "localhost")
 
 
-@router.post("/api/autoimplement/drain")
+@router.post("/api/automod/drain")
 async def post_drain(request: Request):
     # Loopback only. `server.py`'s auth middleware enforces the client-cert
     # allowlist for /api/* routes only when a fingerprint is actually
@@ -67,20 +67,20 @@ async def post_drain(request: Request):
     on = bool(data.get("on", True))
     ttl = float(data.get("ttl_s", 180.0))
     set_drain(on, ttl)
-    logger.info("autoimplement drain %s (ttl=%.0fs)", "ON" if on else "OFF", drain_remaining())
+    logger.info("automod drain %s (ttl=%.0fs)", "ON" if on else "OFF", drain_remaining())
     return JSONResponse({"draining": drain_active(), "remaining_s": round(drain_remaining(), 1)})
 
 
-@router.get("/api/autoimplement/drain")
+@router.get("/api/automod/drain")
 async def get_drain():
     return JSONResponse({"draining": drain_active(), "remaining_s": round(drain_remaining(), 1)})
 
 
-@router.get("/api/autoimplement/status")
+@router.get("/api/automod/status")
 async def get_status(limit: int = 25):
     """State + ledger tail, for the Mission Control banner."""
     try:
-        from scripts.autoimplement import state as S
+        from scripts.automod import state as S
     except Exception as exc:
         return JSONResponse({"available": False, "error": str(exc)[:200]}, status_code=200)
 
@@ -118,10 +118,10 @@ async def get_status(limit: int = 25):
     })
 
 
-@router.post("/api/autoimplement/ack")
+@router.post("/api/automod/ack")
 async def post_ack(request: Request):
     data = await request.json()
     commit = str(data.get("commit") or "")
-    from scripts.autoimplement import state as S
+    from scripts.automod import state as S
     S.append_event({"event": "ack", "commit": commit, "by": "user"})
     return JSONResponse({"acked": commit})

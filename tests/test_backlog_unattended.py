@@ -10,7 +10,7 @@ file existed, and each has a test that fails without its fix:
   * it ran with no session, so no Inner Voice and no transcript.
 
 The fourth thing is not a bug but a gap: nothing turned a `confirmed` verdict
-into a round. `autoimplement` does, behind every gate the loop enforces.
+into a round. `autocode` does, behind every gate the loop enforces.
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts.autoimplement import backlog as B, state as S
+from scripts.automod import backlog as B, state as S
 from workers.sources import _common as C
-from workers.sources import autoimplement as I
+from workers.sources import autocode as I
 from workers.sources import autotriage as M
 
 
@@ -282,7 +282,7 @@ def test_a_closed_item_is_never_implemented(isolated):
 
 
 @pytest.mark.parametrize("block, why", [
-    (dict(enabled=False), "autoimplement.enabled is false"),
+    (dict(enabled=False), "automod.enabled is false"),
     (dict(halted=True), "halted"),
     (dict(broken=True), "BROKEN"),
     (dict(current={"commit": "c" * 40, "state": "observing"}), "under observation"),
@@ -291,7 +291,7 @@ def test_a_closed_item_is_never_implemented(isolated):
 ])
 def test_every_gate_the_loop_enforces_stops_the_implementer(monkeypatch, block, why):
     """Checked BEFORE spending an agent turn, and again at run time."""
-    from scripts.autoimplement import worktree as W
+    from scripts.automod import worktree as W
     monkeypatch.setattr(S, "is_enabled", lambda repo=None: block.get("enabled", True))
     monkeypatch.setattr(S, "is_halted", lambda: block.get("halted", False))
     monkeypatch.setattr(S, "is_broken", lambda: block.get("broken", False))
@@ -303,7 +303,7 @@ def test_every_gate_the_loop_enforces_stops_the_implementer(monkeypatch, block, 
 
 
 def test_a_free_loop_is_free(monkeypatch):
-    from scripts.autoimplement import worktree as W
+    from scripts.automod import worktree as W
     monkeypatch.setattr(S, "is_enabled", lambda repo=None: True)
     monkeypatch.setattr(S, "is_halted", lambda: False)
     monkeypatch.setattr(S, "is_broken", lambda: False)
@@ -324,7 +324,7 @@ def test_the_implementer_hands_the_acceptance_check_over_as_the_contract(isolate
 
     prompt = fake.calls[0]["prompt"]
     assert "grep finds zero hits for the old name" in prompt
-    assert "autoimplement-change-own-code" in prompt
+    assert "automod-change-own-code" in prompt
     assert "end your turn immediately" in prompt
     assert fake.calls[0]["max_turns"] == 100
     events = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "backlog_implement"]
@@ -364,7 +364,7 @@ def test_the_implementer_is_off_unless_a_human_turns_it_on():
     pool_src = Path(I.__file__).resolve().parent.parent / "pool.py"
     assert 'src_cfg.get("enabled", False)' in pool_src.read_text()
     cfg = yaml.safe_load((Path(I.__file__).resolve().parent.parent.parent / "config.yaml").read_text())
-    src = cfg["workers"]["sources"]["autoimplement"]
+    src = cfg["workers"]["sources"]["autocode"]
     assert isinstance(src.get("enabled"), bool), "the flag must be explicit in config, never implied"
 
 
@@ -451,7 +451,7 @@ def test_a_confirmed_acceptance_is_kept_whole_and_written_into_the_item(isolated
     assert tri["acceptance"] == contract, "the implementer is handed the whole contract"
 
 
-def test_autoimplement_jobs_are_not_queued_behind_routine_research():
+def test_automod_jobs_are_not_queued_behind_routine_research():
     """The pool dequeues `priority ASC`. At 80 the first implement round sat
     behind four research/distill jobs at 70 with more arriving every few
     minutes, and never reached a slot."""
@@ -506,7 +506,7 @@ def test_the_implementer_prompt_has_a_vault_route_and_renders_the_surface(isolat
                 "stop_reason": "stop", "num_turns": 4, "errors": []}
     monkeypatch.setattr(C, "run_prompt_in_session", fake)
     out = asyncio.run(I.execute(_Item()))
-    assert "Surface: vault" in fake.prompt and "autoimplement_vault_land" in fake.prompt
+    assert "Surface: vault" in fake.prompt and "automod_vault_land" in fake.prompt
     assert "web/src/**" in fake.prompt
     ev = [e for e in S.read_events(path=S.LEDGER_PATH)
           if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
@@ -529,7 +529,7 @@ def test_a_human_can_grant_a_second_attempt_and_only_one(isolated):
     assert out["reopened"]
     item, _ = B.select_confirmed(S.LEDGER_PATH)
     assert item.id == 2
-    assert "reopened for a second autoimplement attempt" in " ".join(item.path.read_text().split())
+    assert "reopened for a second automod attempt" in " ".join(item.path.read_text().split())
     S.append_event({"event": "backlog_implement", "item_id": 2, "phase": "started"}, path=S.LEDGER_PATH)
     assert B.select_confirmed(S.LEDGER_PATH) is None, "one more attempt, not unlimited"
     with pytest.raises(ValueError, match="no implement attempt"):
@@ -541,7 +541,7 @@ def test_a_human_can_grant_a_second_attempt_and_only_one(isolated):
 # ===========================================================================
 
 def _reaper_env(monkeypatch, tmp_path, *, worktree=True, busy=(), current=None):
-    from scripts.autoimplement import round as R, worktree as W
+    from scripts.automod import round as R, worktree as W
     import app.sessions_io as sio
     aborted: list[str] = []
     monkeypatch.setattr(R, "abort", lambda rid: aborted.append(rid) or {"aborted": rid})
@@ -571,8 +571,8 @@ def test_reaper_closes_a_round_left_open_after_the_grace(isolated, monkeypatch, 
     later = _t.time() + I.ABANDON_GRACE_SECONDS + 1
     assert I.reap_abandoned_rounds(now=later) and aborted == ["SM_X"]
     ev = S.read_events(path=S.LEDGER_PATH)[-1]
-    assert ev["event"] == "round_abandoned" and ev["branch"] == "autoimplement/SM_X" and ev["item_id"] == 2
-    assert "autoimplement/SM_X" in next(isolated.glob("2-*.md")).read_text()
+    assert ev["event"] == "round_abandoned" and ev["branch"] == "automod/SM_X" and ev["item_id"] == 2
+    assert "automod/SM_X" in next(isolated.glob("2-*.md")).read_text()
     assert I.reap_abandoned_rounds(now=later) == [], "reaped once, not on every tick"
 
 
@@ -746,7 +746,7 @@ def test_a_human_reopen_still_wins_over_the_cap(isolated):
 
 def test_a_turn_killed_by_the_wall_clock_is_incomplete_not_an_attempt(isolated):
     """#446 committed 757 lines into its worktree at 06:43:36 and was killed at
-    06:43:50 — fourteen seconds, one `autoimplement_gate` call, short of the verdict
+    06:43:50 — fourteen seconds, one `automod_gate` call, short of the verdict
     that would have landed them, with 32 of its 100 iterations unspent. Triage
     has recorded budget exhaustion as `incomplete` since #229; implement had no
     such rule."""
@@ -756,7 +756,7 @@ def test_a_turn_killed_by_the_wall_clock_is_incomplete_not_an_attempt(isolated):
 
     verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[446]
     assert verdict == "incomplete"
-    assert "clock" in detail and "autoimplement/SM_446" in detail
+    assert "clock" in detail and "automod/SM_446" in detail
     assert 446 not in B.implemented_ids(S.LEDGER_PATH)
     assert B.select_confirmed(S.LEDGER_PATH)[0].id == 446
 
@@ -871,15 +871,15 @@ def test_each_re_offer_is_capped(isolated):
 def test_the_re_offer_reason_reaches_the_next_round(isolated):
     """A re-offer is not a fresh start: the branch may still hold the work. A
     round told nothing re-derives it, or redoes it."""
-    from workers.sources.autoimplement import _reoffer_block
+    from workers.sources.autocode import _reoffer_block
     write_item(isolated, 398)
     _confirm(398)
     _blocked_round(398, "SM_398", external=False, stop_reason="turn_timeout")
 
     reason = B.reoffer_reason(S.LEDGER_PATH, 398)
-    assert reason.startswith("incomplete:") and "autoimplement/SM_398" in reason
+    assert reason.startswith("incomplete:") and "automod/SM_398" in reason
     block = _reoffer_block(reason)
-    assert "offered again" in block and "autoimplement/SM_398" in block
+    assert "offered again" in block and "automod/SM_398" in block
     assert _reoffer_block("") == "", "a first attempt gets no banner"
 
 
@@ -890,8 +890,8 @@ def test_the_prompt_and_the_skill_both_cover_a_test_that_pins_old_behaviour(isol
     needs the audit clause beside it, or the escape hatch becomes a way to
     delete the test that was catching the bug."""
     from pathlib import Path
-    from workers.sources.autoimplement import PROMPT
-    skill = Path.home() / "obsidian/skills/autoimplement-change-own-code/SKILL.md"
+    from workers.sources.autocode import PROMPT
+    skill = Path.home() / "obsidian/skills/automod-change-own-code/SKILL.md"
 
     for name, text in (("prompt", PROMPT), ("skill", skill.read_text())):
         # Normalised: the skill is wrapped markdown and the prompt is a
@@ -911,7 +911,7 @@ def test_a_turn_that_never_completed_is_written_as_infra_failed(isolated, monkey
     """The write side of #392: `execute` must not record a `finished` event for
     a turn whose stream closed without a `done` frame."""
     import asyncio
-    from workers.sources import autoimplement as I
+    from workers.sources import autocode as I
     write_item(isolated, 500)
     _confirm(500)
 
@@ -937,7 +937,7 @@ def test_the_reaper_can_close_a_round_an_infra_failed_turn_left_open(isolated):
     """A turn can open a round and then lose its stream. A round nobody will
     ever close blocks `_loop_is_free` for every item behind it."""
     import inspect
-    from workers.sources import autoimplement as I
+    from workers.sources import autocode as I
     src = inspect.getsource(I.reap_abandoned_rounds)
     assert 'e.get("phase") in ("finished", "infra_failed")' in src
 
@@ -979,10 +979,10 @@ def test_a_settled_landing_whose_round_met_the_acceptance_closes_the_item(isolat
     out = B.close_settled_items(S.LEDGER_PATH)
     assert out == [{"item_id": 601, "closed": True, "acceptance": "met"}]
     fm = _fm(p)
-    assert fm["status"] == "done" and fm["autoimplement_landed"] == "abc123abc123"
+    assert fm["status"] == "done" and fm["automod_landed"] == "abc123abc123"
     assert fm.get("completed")
     assert "shipped it" in fm["activity_log"][-1] and "Closed:" in fm["activity_log"][-1]
-    assert "## Autoimplement landed" in p.read_text() and "abc123ab" in p.read_text()
+    assert "## Automod landed" in p.read_text() and "abc123ab" in p.read_text()
     ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_landed"][-1]
     assert ev["item_id"] == 601 and ev["closed"] is True and ev["acceptance"] == "met"
     assert 601 not in {i.id for i in B.open_items(None)}, "off the board"
@@ -998,7 +998,7 @@ def test_a_deferred_acceptance_is_noted_and_left_open_naming_what_it_waits_on(is
     out = B.close_settled_items(S.LEDGER_PATH)
     assert out == [{"item_id": 520, "closed": False, "acceptance": "deferred"}]
     fm = _fm(p)
-    assert fm["status"] == "up_next" and fm["autoimplement_landed"] == "2677dea72677"
+    assert fm["status"] == "up_next" and fm["automod_landed"] == "2677dea72677"
     assert "#618" in fm["activity_log"][-1] and "Left open" in fm["activity_log"][-1]
 
 
@@ -1011,7 +1011,7 @@ def test_a_round_with_no_structured_outcome_is_noted_but_a_human_decides(isolate
     out = B.close_settled_items(S.LEDGER_PATH)
     assert out == [{"item_id": 353, "closed": False, "acceptance": None}]
     fm = _fm(p)
-    assert fm["status"] == "up_next" and fm["autoimplement_landed"] == "d29112b5d291"
+    assert fm["status"] == "up_next" and fm["automod_landed"] == "d29112b5d291"
     assert "predates the finalizer" in fm["activity_log"][-1]
 
 
@@ -1036,7 +1036,7 @@ def test_promoted_but_not_settled_is_not_a_landing_yet(isolated):
     _landed(604, "SM_604", "0000aaaa0000", settled=False,
             outcome={"acceptance": "met", "landed": True, "deferred_to": [], "summary": "", "spawned": []})
     assert B.close_settled_items(S.LEDGER_PATH) == []
-    assert "autoimplement_landed" not in _fm(p), "the guardian has not judged the window"
+    assert "automod_landed" not in _fm(p), "the guardian has not judged the window"
 
 
 def test_a_reverted_promotion_is_not_a_landing(isolated):
@@ -1086,7 +1086,7 @@ def test_the_outcome_schema_is_built_from_the_one_list():
 
 
 def test_execute_records_the_structured_outcome_on_the_finished_event(isolated, monkeypatch):
-    from workers.sources import autoimplement as I
+    from workers.sources import autocode as I
     write_item(isolated, 608)
     _confirm(608)
 
@@ -1110,7 +1110,7 @@ def test_execute_records_the_structured_outcome_on_the_finished_event(isolated, 
 
 
 def test_execute_with_the_outcome_switched_off_asks_for_nothing(isolated, monkeypatch):
-    from workers.sources import autoimplement as I
+    from workers.sources import autocode as I
     write_item(isolated, 609)
     _confirm(609)
     async def fake(prompt, **kw):
@@ -1127,7 +1127,7 @@ def test_execute_with_the_outcome_switched_off_asks_for_nothing(isolated, monkey
 
 
 def test_the_prompt_says_what_met_means():
-    from workers.sources.autoimplement import PROMPT
+    from workers.sources.autocode import PROMPT
     low = " ".join(PROMPT.lower().split())
     assert "closed automatically" in low
     assert "`deferred` leaves it open and names the ids it waits on" in low
@@ -1199,7 +1199,7 @@ def test_desired_statuses_covers_every_branch(isolated):
     # landed and swept (marker), left open
     write_item(isolated, 712); _confirm(712)
     p = next(isolated.glob("712-*.md")); fm, body = B._split_frontmatter(p.read_text())
-    fm["autoimplement_landed"] = "bb22"; p.write_text(f"---\n{yaml.dump(fm)}---\n{body}")
+    fm["automod_landed"] = "bb22"; p.write_text(f"---\n{yaml.dump(fm)}---\n{body}")
     # offered again (external)
     write_item(isolated, 713); _confirm(713); B.set_status(713, "in_progress", "was running")
     _blocked_round(713, "SM_713", external=True)
@@ -1246,7 +1246,7 @@ def test_reconcile_moves_only_the_differences_and_is_idempotent(isolated):
 
 
 def test_a_round_sets_in_progress_and_an_unnecessary_outcome_closes_it(isolated, monkeypatch):
-    from workers.sources import autoimplement as I
+    from workers.sources import autocode as I
     write_item(isolated, 723); _confirm(723)
     seen = {}
     async def fake(prompt, **kw):
@@ -1267,7 +1267,7 @@ def test_a_round_sets_in_progress_and_an_unnecessary_outcome_closes_it(isolated,
 def test_an_early_exit_hands_the_item_back_to_the_pool(isolated, monkeypatch):
     """The turn never ran (infra). It must not stay `in_progress` — that is
     the old failure wearing a new status."""
-    from workers.sources import autoimplement as I
+    from workers.sources import autocode as I
     write_item(isolated, 724); _confirm(724)
     async def dead(prompt, **kw):
         assert _status(isolated, 724) == "in_progress"
@@ -1281,12 +1281,12 @@ def test_an_early_exit_hands_the_item_back_to_the_pool(isolated, monkeypatch):
 
 
 def test_an_abandoned_round_returns_the_item_to_the_pool(isolated, monkeypatch):
-    from workers.sources import autoimplement as I
+    from workers.sources import autocode as I
     write_item(isolated, 725); _confirm(725); B.set_status(725, "in_progress", "running")
     S.append_event({"event": "backlog_implement", "item_id": 725, "phase": "finished",
                     "round_id": "SM_725", "stop_reason": "turn_timeout", "session_id": "gone"}, path=S.LEDGER_PATH)
     S.append_event({"event": "round_start", "round_id": "SM_725"}, path=S.LEDGER_PATH)
-    from scripts.autoimplement import round as R, worktree as W
+    from scripts.automod import round as R, worktree as W
     monkeypatch.setattr(W, "worktree_path", lambda rid: isolated)   # "exists"
     monkeypatch.setattr(R, "abort", lambda rid: None)
     monkeypatch.setattr(S, "read_current", lambda: {})
@@ -1296,7 +1296,7 @@ def test_an_abandoned_round_returns_the_item_to_the_pool(isolated, monkeypatch):
 
 
 def test_the_outcome_schema_includes_unnecessary_and_the_prompt_explains_it():
-    from workers.sources.autoimplement import PROMPT
+    from workers.sources.autocode import PROMPT
     assert "unnecessary" in B.IMPLEMENT_OUTCOME_SCHEMA["properties"]["acceptance"]["enum"]
     assert "`unnecessary` means the work is not needed after all" in " ".join(PROMPT.split())
 

@@ -2006,7 +2006,7 @@ def install_observer(
                 # From the WHOLE ring, not the post-baseline slice. An
                 # identifier every call carries cannot discriminate between
                 # them, and after a fire `comparable` is too short to tell —
-                # which is how a autoimplement round's worktree id kept matching.
+                # which is how an automod round's worktree id kept matching.
                 ambient=_guards.ubiquitous_identifiers(state.recent_tool_calls),
             )
             if rep is not None:

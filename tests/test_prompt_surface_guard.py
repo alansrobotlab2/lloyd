@@ -3,14 +3,14 @@
 Why this file exists
 --------------------
 #377 trimmed the operating contract and pinned it with tests that read the
-live `~/obsidian` vault. Those ran on the autoimplement gate's hard `tests` rung, so
+live `~/obsidian` vault. Those ran on the automod gate's hard `tests` rung, so
 the first writer to re-inflate `SOUL.md` would have failed every subsequent
 round whatever its diff — and the writer in question runs hourly and is not a
 round at all. `tests/test_prompt_surface_budget.py` keeps those assertions for
 reporting, marked `live_vault` and deselected by the gate; enforcement lives
 here, at the two paths that actually change the file:
 
-* `scripts/autoimplement/vault_round.validate` — the loop's own vault route.
+* `scripts/automod/vault_round.validate` — the loop's own vault route.
 * `scripts/autoresearch/promote` — the hourly prompt search, which is what
   produced the #464 clobber and the 2026-09-08 re-inflation.
 
@@ -151,14 +151,14 @@ def _fake_vault(tmp_path: Path, soul: str, memory: str = "# Lloyd Long-Term Memo
 
 
 def test_vault_route_ignores_a_diff_that_does_not_touch_the_contract(tmp_path, monkeypatch):
-    from scripts.autoimplement import vault_round as VR
+    from scripts.automod import vault_round as VR
 
     monkeypatch.setattr(VR, "VAULT", _fake_vault(tmp_path, "gibberish, no gate at all"))
     assert VR.contract_errors(["skills/foo/SKILL.md", "autonomy/12-thing.md"]) == []
 
 
 def test_vault_route_refuses_a_contract_that_broke_its_invariants(tmp_path, monkeypatch):
-    from scripts.autoimplement import vault_round as VR
+    from scripts.automod import vault_round as VR
 
     monkeypatch.setattr(VR, "VAULT", _fake_vault(tmp_path, "# Contract\n\n## Core\nBe nice.\n"))
     errs = VR.contract_errors(["lloyd/SOUL.md"])
@@ -166,7 +166,7 @@ def test_vault_route_refuses_a_contract_that_broke_its_invariants(tmp_path, monk
 
 
 def test_vault_route_passes_a_healthy_contract(tmp_path, monkeypatch):
-    from scripts.autoimplement import vault_round as VR
+    from scripts.automod import vault_round as VR
 
     monkeypatch.setattr(VR, "VAULT", _fake_vault(tmp_path, GOOD_CONTRACT))
     assert VR.contract_errors(["lloyd/SOUL.md", "lloyd/MEMORY.md"]) == []
@@ -174,7 +174,7 @@ def test_vault_route_passes_a_healthy_contract(tmp_path, monkeypatch):
 
 def test_validate_runs_the_contract_check_before_the_loaders(tmp_path, monkeypatch):
     """The loaders spawn an interpreter; a refusal must not pay for one."""
-    from scripts.autoimplement import vault_round as VR
+    from scripts.automod import vault_round as VR
 
     monkeypatch.setattr(VR, "VAULT", _fake_vault(tmp_path, "# Contract\n\n## Core\nBe nice.\n"))
     monkeypatch.setattr(VR, "check_scope",
@@ -258,7 +258,7 @@ def test_gate_tests_rung_excludes_live_vault_assertions():
     carry it, and the gate keeps running them anyway.
     """
     src = (Path(__file__).resolve().parent.parent
-           / "scripts" / "autoimplement" / "gate.py").read_text(encoding="utf-8")
+           / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
     assert '"-m", "not live_vault"' in src
 
 
@@ -268,7 +268,7 @@ def test_live_vault_marker_is_registered():
 
 
 @pytest.mark.parametrize("path,fn", [
-    ("scripts/autoimplement/vault_round.py", "check_paths"),
+    ("scripts/automod/vault_round.py", "check_paths"),
     ("scripts/autoresearch/promote.py", "check_contract"),
 ])
 def test_both_writers_call_the_shared_invariants(path, fn):

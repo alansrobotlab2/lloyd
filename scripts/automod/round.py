@@ -14,7 +14,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from scripts.autoimplement import gate as G, promote as P, spec, state as S, worktree as W
+from scripts.automod import gate as G, promote as P, spec, state as S, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -38,7 +38,7 @@ def start(goal: str, *, base: str | None = None, force: bool = False) -> dict:
     try:
         # A worktree is cut from HEAD, which is committed state; uncommitted
         # edits in production are not in it and cannot reach it. Refusing here
-        # blocked `autoimplement_start` for #448 over one orphaned file while the
+        # blocked `automod_start` for #448 over one orphaned file while the
         # human was working on something else entirely. Recorded, not refused
         # — the gate and the promoter check the paths that actually matter,
         # which are the ones this round's diff will overlap.
@@ -53,10 +53,10 @@ def start(goal: str, *, base: str | None = None, force: bool = False) -> dict:
 
         run_spec = {
             "objective": goal,
-            "evaluation": {"command": "scripts.autoimplement.gate", "timeout_secs": 3600},
+            "evaluation": {"command": "scripts.automod.gate", "timeout_secs": 3600},
             "budget": {"max_rounds": 1, "max_variants_per_round": 1},
             "mutation_scope": {"writable_paths": list(spec.ALLOWED_GLOBS)},
-            "code": {"base_commit": base, "branch": f"autoimplement/{rid}",
+            "code": {"base_commit": base, "branch": f"automod/{rid}",
                      "worktree": str(wt)},
         }
         err = spec.validate_code_run_spec(run_spec)
@@ -74,7 +74,7 @@ def start(goal: str, *, base: str | None = None, force: bool = False) -> dict:
                         "goal": goal[:500], "worktree": str(wt),
                         **({"live_dirty_paths": dirty[:20]} if dirty else {})})
         out_d = {"round_id": rid, "worktree": str(wt), "base": base,
-                 "branch": f"autoimplement/{rid}",
+                 "branch": f"automod/{rid}",
                  "run_spec": str(out / "run_spec.yaml")}
         if dirty:
             out_d["live_dirty_paths"] = dirty[:20]
@@ -131,7 +131,7 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
 def abort(round_id: str) -> dict:
     W.remove(round_id, keep_branch=True, repo=LIVE_ROOT)
     S.append_event({"event": "round_aborted", "round_id": round_id})
-    return {"aborted": round_id, "branch_kept": f"autoimplement/{round_id}"}
+    return {"aborted": round_id, "branch_kept": f"automod/{round_id}"}
 
 
 def _unit_drift() -> list[str]:
@@ -190,7 +190,7 @@ def bless(note: str = "") -> dict:
     Verifies against the RUNNING process, not the working tree. `git rev-parse`
     proves the filesystem; only `/health.commit` proves the service.
     """
-    from scripts.autoimplement.promote import _get, BACKEND
+    from scripts.automod.promote import _get, BACKEND
     head = subprocess.run(["git", "-C", str(LIVE_ROOT), "rev-parse", "HEAD"],
                           capture_output=True, text=True).stdout.strip()
     if not head:
@@ -244,10 +244,10 @@ def main(argv=None) -> int:
     # own worked examples drive the CLI — so "the loop ships inert" was true of
     # the surface nobody used and false of the one they did.
     s = sub.add_parser("start"); s.add_argument("goal")
-    s.add_argument("--force", action="store_true", help="ignore autoimplement.enabled")
+    s.add_argument("--force", action="store_true", help="ignore automod.enabled")
     g = sub.add_parser("gate"); g.add_argument("round_id"); g.add_argument("--skip-smoke", action="store_true")
     l = sub.add_parser("land"); l.add_argument("round_id"); l.add_argument("--dry-run", action="store_true")
-    l.add_argument("--force", action="store_true", help="ignore autoimplement.enabled")
+    l.add_argument("--force", action="store_true", help="ignore automod.enabled")
     a = sub.add_parser("abort"); a.add_argument("round_id")
     sub.add_parser("status")
     b = sub.add_parser("bless", help="record the running commit as last-known-good")

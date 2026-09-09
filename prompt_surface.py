@@ -4,7 +4,7 @@ Why this module exists
 ----------------------
 Backlog #377 trimmed the operating contract and pinned the result with
 `tests/test_prompt_surface_budget.py`. That pinned it in the wrong place. The
-tests read the *live* vault, and the autoimplement gate's `tests` rung is a hard
+tests read the *live* vault, and the automod gate's `tests` rung is a hard
 rung, so a writer that re-inflated `SOUL.md` would fail every subsequent
 round whatever its diff — the same shape as the `data/tool_overrides.yaml`
 test that aborted three rounds in fifteen hours on 2026-09-07. A tripwire on
@@ -14,7 +14,7 @@ So the invariants move here, and the three consumers share one definition:
 
 * `tests/test_prompt_surface_budget.py` imports them, and its live-vault
   group is marked `live_vault` so the gate can exclude it.
-* `scripts/autoimplement/vault_round.py` runs `check_contract` before it commits
+* `scripts/automod/vault_round.py` runs `check_contract` before it commits
   `lloyd/SOUL.md` or `lloyd/MEMORY.md`, alongside the loaders it already runs.
 * `scripts/autoresearch/promote.py` runs it before `apply_overlay`, which is
   the writer that actually caused #464 and #465 — an hourly job that copied a

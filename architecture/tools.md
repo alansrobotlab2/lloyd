@@ -137,7 +137,7 @@ do these two connect.
 | `graph_refresh` | Force a rebuild (~15 s on this repo) |
 
 `root` is explicit and never inferred from the calling session — nothing on
-disk links a chat session to an open autoimplement round, so a "bound session's
+disk links a chat session to an open automod round, so a "bound session's
 worktree" default would confidently answer about the wrong checkout. It
 defaults to `LLOYD_HOME`, accepts an `SM_…` round id, or an absolute path.
 
@@ -155,7 +155,7 @@ right tool for string keys, route paths and config names.
 
 `graphify-out/` is gitignored (unanchored, so worktrees inherit it): a
 build inside a round would otherwise dirty the tree, and both
-`scripts/autoimplement/gate.py` and `promote.py` refuse a dirty tree.
+`scripts/automod/gate.py` and `promote.py` refuse a dirty tree.
 
 ### Web (3)
 
@@ -178,7 +178,7 @@ the public web, the `http_*` tools are the answer — see the `web-search-and-fe
 page writes `data/tool_overrides.yaml`, which is merged over it
 (`app/config.py:_merge_tool_overrides`). That file is gitignored on purpose
 and must stay that way: the Tools page rewrites it on every toggle, and while
-it was tracked a single click left the live tree dirty, which the autoimplement
+it was tracked a single click left the live tree dirty, which the automod
 gate and promoter both refuse. A fresh clone therefore has no override file
 and boots on `config.yaml`, so the tracked defaults must describe the state
 actually being served — the merge warns when they disagree. Resolve the effective set through

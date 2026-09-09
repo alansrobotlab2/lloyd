@@ -15,9 +15,9 @@ line. It is the wrong shape here:
   name collision, so a second server is a permanent collision risk.
 - Task subagents pin `DEFAULT_LLOYD_MCP_SERVERS`, so they would not see it.
 - `tests/test_mcp_layer.py` requires every configured server to be
-  discoverable at test time — including inside a autoimplement worktree, where a
+  discoverable at test time — including inside an automod worktree, where a
   second daemon is not running.
-- `agent-services/supervisor/**` is a protected autoimplement path, so Lloyd
+- `agent-services/supervisor/**` is a protected automod path, so Lloyd
   could never add or repair the program that runs it.
 - graphify-mcp has no `affected`, which is the one query a change most
   needs.
@@ -79,7 +79,7 @@ RATIONALE_RELATIONS: frozenset[str] = frozenset({"rationale_for"})
 # because graphify extracts document headings too.
 SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".md")
 
-# A round id, as `scripts/autoimplement/round.py` mints them.
+# A round id, as `scripts/automod/round.py` mints them.
 ROUND_ID_RE = re.compile(r"^SM_\d{8}_\d{6}$")
 
 _DEFAULTS: dict[str, Any] = {
@@ -176,7 +176,7 @@ def resolve_root(root: str | None) -> Path:
     """Resolve the `root` argument to a real directory.
 
     Explicit, never inferred from the calling session. Nothing on disk
-    links a chat session to an open autoimplement round — `round_start` ledger
+    links a chat session to an open automod round — `round_start` ledger
     rows carry no session id — so a "bound session's worktree" default
     would silently answer about the wrong checkout.
     """
@@ -184,7 +184,7 @@ def resolve_root(root: str | None) -> Path:
     if not raw:
         return Path(os.path.realpath(LLOYD_HOME))
     if ROUND_ID_RE.match(raw):
-        from scripts.autoimplement.worktree import worktree_path
+        from scripts.automod.worktree import worktree_path
         p = worktree_path(raw)
         if not p.is_dir():
             raise RootError(f"round {raw} has no worktree at {p}")
@@ -437,7 +437,7 @@ async def staleness(root: Path, entry: Entry | None) -> Staleness:
 async def _dirty_sources_newer_than_graph(root: Path) -> list[str]:
     """Uncommitted source files modified after graph.json was written.
 
-    Mandatory, not a nicety: inside a autoimplement round HEAD does not move
+    Mandatory, not a nicety: inside an automod round HEAD does not move
     while the model edits, so a commit-only staleness rule would call a
     graph fresh for the entire round it is most wrong in.
     """
@@ -465,7 +465,7 @@ async def _dirty_sources_newer_than_graph(root: Path) -> list[str]:
 
 
 async def _open_worktrees() -> list[str]:
-    """Autoimplement worktrees currently checked out, cached for 10 s."""
+    """Automod worktrees currently checked out, cached for 10 s."""
     now = time.time()
     if now - float(_WORKTREES["at"]) < 10.0:
         return list(_WORKTREES["paths"])
@@ -749,7 +749,7 @@ async def _header_lines(root: Path, entry: Entry | None, st: Staleness,
         lines.append(f"note: {n}")
     if os.path.realpath(root) == os.path.realpath(LLOYD_HOME):
         for wt in await _open_worktrees():
-            lines.append(f"note: open autoimplement worktree at {wt}; "
+            lines.append(f"note: open automod worktree at {wt}; "
                          f"pass root={wt} if you are editing there")
     return lines
 
@@ -1081,7 +1081,7 @@ async def _refresh_tool(args: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _ROOT_DESC = ("Tree to answer about. Omit for the live checkout; pass an "
-              "SM_… round id or an absolute path to ask about a autoimplement "
+              "SM_… round id or an absolute path to ask about an automod "
               "worktree. Never inferred from the session.")
 _REFRESH_DESC = ("Rebuild first when the graph is stale (default true). "
                  "false answers from the existing graph and says it is stale.")
@@ -1177,7 +1177,7 @@ async def list_tools():
             description=(
                 "Is the graph there and is it current? Node/edge counts, the "
                 "commit it was built at, HEAD, why it is stale, and any open "
-                "autoimplement worktree. Never builds."
+                "automod worktree. Never builds."
             ),
             inputSchema={
                 "type": "object",

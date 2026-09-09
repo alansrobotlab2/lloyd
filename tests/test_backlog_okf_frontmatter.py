@@ -91,7 +91,7 @@ def test_new_task_frontmatter_declares_type_and_segment(mcp_board):
 def test_new_task_file_passes_the_okf_gate(mcp_board):
     """The acceptance check: the nightly gate must not count the new file."""
     path = _mcp_create(mcp_board, status="up_next", priority="high",
-                       tags=["spawned-by-autoimplement"])
+                       tags=["spawned-by-autocode"])
     assert okf_type_of(path) == "backlog"
 
 

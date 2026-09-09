@@ -193,8 +193,8 @@ async def _task(args: dict[str, Any]) -> str:
     # code on production. Landing from inside a Task would also restart the
     # aggregator the Task is running in. Same reasoning as the Task recursion
     # cap: the constraint belongs here, not in a prompt.
-    for name in ("autoimplement_start", "autoimplement_gate", "autoimplement_land",
-                 "autoimplement_abort", "autoimplement_rollback"):
+    for name in ("automod_start", "automod_gate", "automod_land",
+                 "automod_abort", "automod_rollback"):
         if name not in disallowed:
             disallowed.append(name)
             disallowed.append(f"mcp__lloyd-mcp__{name}")

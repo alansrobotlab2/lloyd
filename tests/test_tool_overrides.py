@@ -4,7 +4,7 @@ Two properties, and they are the same property seen from two sides.
 
 The Tools page must be able to change tool state without editing
 `config.yaml`, because `config.yaml` is tracked and a tracked file rewritten
-by a UI click leaves the live tree dirty — which `scripts/autoimplement/gate.py`
+by a UI click leaves the live tree dirty — which `scripts/automod/gate.py`
 and `promote.py` both refuse. That is why `save_tool_overrides` exists at
 all; its docstring records that it replaced dumping the whole CONFIG back
 over `config.yaml` on every toggle.
@@ -61,7 +61,7 @@ def test_the_override_file_is_not_tracked():
     assert r.returncode != 0, (
         f"{OVERRIDES} is tracked again. The Tools page rewrites it on every "
         f"toggle, so tracking it means a UI click leaves `git status` dirty "
-        f"and the autoimplement gate/promoter refuse to run."
+        f"and the automod gate/promoter refuse to run."
     )
 
 
