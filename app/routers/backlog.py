@@ -218,7 +218,16 @@ async def backlog_task_create(request: Request):
     create_status = data.get("status", "draft")
     if create_status not in _VALID_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status '{create_status}'. Must be one of: {', '.join(sorted(_VALID_STATUSES))}")
+    # A second live writer beside agent_mcp/backlog.py — the UI and
+    # agent-services/guardian/notify.py both POST here — so fixing only the MCP
+    # path leaves half of new tasks non-conformant. `type` is the one thing OKF
+    # v0.1 requires of a concept file; without it the task is a violation at
+    # birth and scripts/vault/validate_okf.py counts one more every time
+    # (item #518). backlog_task_update only round-trips existing keys, so this
+    # is the sole place a type can be declared, and updates never invent one.
     fm = {
+        "type": "backlog",
+        "segment": "backlog",
         "status": create_status,
         "priority": data.get("priority", "none"),
         "board": board_name,

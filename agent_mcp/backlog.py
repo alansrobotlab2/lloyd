@@ -269,9 +269,15 @@ def _handle_write(args: dict) -> str:
         # Slugify name for filename (match server.py behavior)
         task_name = args.get("name", "new-task")
         slug = re.sub(r"[^a-z0-9]+", "-", task_name.lower()).strip("-")[:50] or "new-task"
+        # `type`/`segment` are what make the file OKF-conformant on disk. Without
+        # them every task written through this tool is a violation at birth and
+        # the nightly OKF count can only climb (item #518). save_task round-trips
+        # them verbatim, and only new tasks get them — updating a legacy file
+        # still does not backfill a type it never had.
         task = {"id": task_id, "filename": f"{task_id}-{slug}.md", "created": now,
                 "status": "draft", "priority": "medium", "blocked": False,
-                "assigned": False, "position": task_id * 1000}
+                "assigned": False, "position": task_id * 1000,
+                "type": "backlog", "segment": "backlog"}
 
     name = args.get("name")
     description = args.get("description")
