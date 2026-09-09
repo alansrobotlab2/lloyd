@@ -37,7 +37,6 @@ import argparse
 import json
 import sqlite3
 import subprocess
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -53,7 +52,15 @@ REPORT_DIR = Path.home() / "lloyd/_pipeline/reflection"
 # exclusive lock and the daemon must be down for it, so don't pay that for a
 # handful of rows. At the observed accumulation rate this trips every few days.
 ORPHAN_RATIO_TRIGGER = 0.20
-ORPHAN_ABS_TRIGGER = 50_000
+# Floor, in absolute rows, so a nearly-empty index doesn't trip the ratio on
+# noise. It is a floor and not a second gate: the two were ANDed at 50,000,
+# which on a ~21,000-vector live corpus meant the ratio had to reach ~70%
+# before the AND could pass — the absolute trigger sat above the entire live
+# index, so `ORPHAN_RATIO_TRIGGER` was unreachable and the prune never ran on
+# ratio alone. Found 2026-09-07 at 65% orphans (38,910 of 59,897) with
+# `need_prune: false`, costing ~49% of every vec query. A threshold that can
+# only fire when the corpus is mostly garbage is not a safety margin.
+ORPHAN_ABS_TRIGGER = 2_000
 
 QMD_ENV = {
     "HOME": str(Path.home()),
@@ -150,6 +157,10 @@ def main() -> int:
         before.get("orphan_ratio", 0) >= ORPHAN_RATIO_TRIGGER
         and before.get("vectors_orphaned", 0) >= ORPHAN_ABS_TRIGGER
     )
+    # A dead env var is worse than no env var: QMD_VEC_BACKEND is set in
+    # QMD_ENV and qmd 2.8.3 reads it nowhere (it appears in no dist/*.js).
+    # Left in place deliberately — removing it is a separate change — but do
+    # not add tuning here expecting it to take effect.
     need_embed = pend > 0
     report["need_prune"], report["need_embed"] = need_prune, need_embed
 

@@ -75,6 +75,17 @@ VAULT_SEGMENTS = [
     "memory", "knowledge", "projects", "personal", "work", "skills",
     "architecture", "lloyd", "autonomy", "backlog", "people",
 ]
+# Over-request factor for the global-scan path in `_qmd_daemon_search`.
+# `subliminal` indexes the whole vault, so every hit arrives twice before
+# dedup; qmd also derives its ANN k from `limit` (k = limit*3), so a bigger
+# ask widens the candidate pool as well as the reply. Measured free on the
+# fork, 2026-09-09: limit 10 and limit 20 both land at ~470ms (rerank on),
+# so the wider ask costs nothing. The recall gain (0.32 -> 0.35) is carried
+# from the original 2.8.3 measurement and has NOT been re-run against the
+# fork — the latency claim beside it had shifted, so treat it as the weaker
+# of the two.
+QMD_GLOBAL_LIMIT_FACTOR = 2
+
 VAULT_EXCLUDE_DIRS = {"templates", "images"}
 VAULT_EXCLUDE_FILES = {"tags.md"}
 
@@ -331,6 +342,37 @@ def _qmd_post(payload: dict) -> list:
     ]
 
 
+def _qmd_normalize_global(rows: list, allowed: set) -> list:
+    """Fold a whole-index result set back onto the vault-segment view.
+
+    The global-scan path (see `_qmd_daemon_search`) searches every collection
+    in the index, which is a superset of `VAULT_SEGMENTS` in two ways:
+
+      - `subliminal` is the entire vault under one collection, so every hit
+        arrives twice — once as `qmd://knowledge/x.md` and once as
+        `qmd://subliminal/knowledge/x.md`. Strip the prefix and they are the
+        same document.
+      - `autonomy-runs` (3,746 files) is indexed but has never been part of
+        what vault retrieval searches.
+
+    Keeping only paths whose first component is a known segment reproduces
+    the old corpus exactly and drops `autonomy-runs`, `agents/` and
+    `templates/` in one rule. Deduping keeps the higher score: the same file
+    can arrive from two collections with slightly different RRF scores.
+    """
+    best: dict = {}
+    for r in rows:
+        path = r.get("file", "").removeprefix("qmd://")
+        path = path[len("subliminal/"):] if path.startswith("subliminal/") else path
+        head = path.split("/", 1)[0]
+        if head not in allowed:
+            continue
+        prev = best.get(path)
+        if prev is None or float(r.get("score", 0) or 0) > float(prev.get("score", 0) or 0):
+            best[path] = {**r, "file": f"qmd://{path}"}
+    return sorted(best.values(), key=lambda r: -float(r.get("score", 0) or 0))
+
+
 def _qmd_daemon_search(query: str, limit: int, collections: list,
                       skip_rerank: bool = not RECALL_QMD_RERANK,
                       legs: tuple[str, ...] = ("lex", "vec"),
@@ -352,6 +394,39 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     and the full hybrid as a straggler whose result carries over to the
     next turn.
 
+    **An unrestricted search sends `collections: []`, not the segment list.**
+    826ms -> 462ms on the arm this client actually runs (rerank on), and
+    136ms -> 50ms with rerank off. The mechanism is not fan-out: qmd falls
+    back to an exact cosine scan — `WHERE hash_seq IN (400 placeholders)` per
+    batch — for any collection under `COLLECTION_VEC_EXACT_SCAN_MAX` (20,000
+    chunks). Every segment here is under it, so *none* of them reach
+    sqlite-vec's native `MATCH` index. Querying `subliminal` alone, the same
+    corpus in one collection, was no faster: the collection *count* was never
+    the driver, the chunk count was.
+
+    An empty list makes the REST handler resolve `collections` to `undefined`,
+    which takes the `MATCH` path — one ANN scan instead of eleven exact ones.
+    `_qmd_normalize_global` folds the wider result set back onto the segment
+    view.
+
+    The numbers above are the fork's, re-measured 2026-09-09 because the
+    original ones were not. This was written against published 2.8.3, where
+    the same change read as 4.2s -> 269ms; the fork closed most of that gap
+    on its own (see the paragraph above), so a margin justified by 2.8.3's
+    per-collection scan had to be re-derived before it could be trusted. It
+    survived, smaller: 1.8x rather than 5x. Measured with a fresh query per
+    sample and rotated arm order — the daemon caches query embeddings, and a
+    sequential A/B reading the same queries through each arm measures arm
+    order, not arm.
+
+    The trade is real and bounded: a global top-k can starve a small
+    collection that a per-collection scan would have surfaced (qmd's own
+    #791/#803). Two of five small-collection probes lost their top hit. So a
+    **scope-restricted** search keeps the per-collection path — it names a
+    subset deliberately, and a subset small enough to scope to is cheap to
+    scan exactly. Only the unrestricted search, where the global top-k is the
+    honest question anyway, takes the fast path.
+
     `lex_query`, when given, replaces the lex leg's text. The lex leg is
     FTS5 with implicit AND (every term must match), so it wants a short,
     high-signal term list, while the vec leg benefits from the full
@@ -370,18 +445,36 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     lex_q = stripped
     if lex_query:
         lex_q = _qmd_strip_stopwords(_qmd_sanitize(lex_query)) or stripped
+
+    # Unrestricted == "every segment we know about". Anything narrower is a
+    # deliberate scope and keeps the exact-scan path.
+    allowed = set(VAULT_SEGMENTS)
+    global_scan = allowed.issubset(set(collections or []))
+    # Over-request on the global path: `subliminal` doubles every hit before
+    # dedup, and qmd derives its ANN k from `limit` (k = limit*3), so asking
+    # for more also widens the candidate pool. Measured free — limit 10 and
+    # limit 20 both land at ~267ms.
+    wire_limit = limit * QMD_GLOBAL_LIMIT_FACTOR if global_scan else limit
     payload = {
         "searches": [{"type": leg, "query": lex_q if leg == "lex" else stripped}
                      for leg in legs],
-        "limit": limit,
-        "collections": collections,
+        "limit": wire_limit,
+        "collections": [] if global_scan else collections,
         # Always explicit. Omitting it means "the daemon's default", which
         # is rerank-on today and is not something this client should lean on.
+        # The stash this came from made the key conditional; that undoes a
+        # deliberate decision from 91a59f9 and is not part of the global-scan
+        # change.
         "rerank": not skip_rerank,
     }
 
+    def _finish(rows: list) -> list:
+        if not global_scan:
+            return rows
+        return _qmd_normalize_global(rows, allowed)[:limit]
+
     try:
-        return _qmd_post(payload)
+        return _finish(_qmd_post(payload))
     except urllib.error.HTTPError as e:
         # Rerank context OOM manifests as HTTP 500. One-shot retry without
         # rerank so callers see documents instead of silent zero-hits.
@@ -389,7 +482,10 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
             try:
                 payload["rerank"] = False
                 _qmd_log("rerank failed (HTTP 500) — retrying with rerank off")
-                return _qmd_post(payload)
+                # `_finish` on the retry too: a global scan that falls back to
+                # rerank-off still returns whole-index rows that have to be
+                # folded onto the segment view before a caller sees them.
+                return _finish(_qmd_post(payload))
             except Exception as e2:
                 _qmd_log(f"rerank-off retry also failed: {e2!r}")
                 return None
@@ -570,19 +666,15 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
     # Run QMD search across the requested collections AND the source-code
     # grep fallback in parallel (lever 3) when not scope-restricted.
     def _do_qmd():
-        if len(coll_list) == 1:
-            return _qmd_daemon_search(query, max_results, coll_list) or []
-        def _search_one(coll):
-            return _qmd_daemon_search(query, max_results, [coll]) or []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(coll_list), 4)) as pool:
-            batches = list(pool.map(_search_one, coll_list))
-        merged = {}
-        for batch in batches:
-            for r in batch:
-                fpath = r.get("file", "")
-                if fpath not in merged or float(r.get("score", 0)) > float(merged[fpath].get("score", 0)):
-                    merged[fpath] = r
-        return sorted(merged.values(), key=lambda x: float(x.get("score", 0)), reverse=True)
+        # One request, whatever the collection count. This used to fan out one
+        # request per collection through a 4-worker pool, which was strictly
+        # worse than not doing it: the qmd daemon is a single node process that
+        # serves requests serially — 8 concurrent requests take exactly 8x one
+        # request, measured — so the pool only queued them. Same query, same
+        # answer: 9571ms fanned out against 3971ms as one call. The threads
+        # bought nothing and paid twelve times for the per-collection scan that
+        # `_qmd_daemon_search` now avoids entirely.
+        return _qmd_daemon_search(query, max_results, coll_list) or []
 
     def _do_grep():
         # Skip grep when caller restricted scope — they want vault-only results.
