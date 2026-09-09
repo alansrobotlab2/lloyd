@@ -938,3 +938,195 @@ def test_the_reaper_can_close_a_round_an_infra_failed_turn_left_open(isolated):
     from workers.sources import backlog_implement as I
     src = inspect.getsource(I.reap_abandoned_rounds)
     assert 'e.get("phase") in ("finished", "infra_failed")' in src
+
+
+# ===========================================================================
+# A landed item gets closed — when the round said the acceptance was met
+#
+# Nine promotions settled in the loop's first three days and not one item
+# was closed. `promote` wrote the commit, the guardian wrote `settled`,
+# `execute` wrote `finished`, and nothing joined the three back to the item.
+# ===========================================================================
+
+def _landed(item_id, rid, commit, *, outcome, settled=True, reverted=False, vault=False):
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    fin = {"event": "backlog_implement", "item_id": item_id, "phase": "finished",
+           "round_id": None if vault else rid, "stop_reason": "stop", "num_turns": 40,
+           "outcome": outcome}
+    if vault:
+        fin["vault_commits"] = [commit]
+    S.append_event(fin, path=S.LEDGER_PATH)
+    if not vault:
+        S.append_event({"event": "promoted", "round_id": rid, "commit": commit}, path=S.LEDGER_PATH)
+        if settled:
+            S.append_event({"event": "settled", "commit": commit}, path=S.LEDGER_PATH)
+        if reverted:
+            S.append_event({"event": "rollback_succeeded", "commit": commit}, path=S.LEDGER_PATH)
+
+
+def _fm(path):
+    return B._split_frontmatter(path.read_text())[0]
+
+
+def test_a_settled_landing_whose_round_met_the_acceptance_closes_the_item(isolated):
+    p = write_item(isolated, 601)
+    _landed(601, "SM_601", "abc123abc123", outcome={"acceptance": "met", "landed": True,
+                                                    "deferred_to": [], "summary": "shipped it",
+                                                    "spawned": []})
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert out == [{"item_id": 601, "closed": True, "acceptance": "met"}]
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm["selfmod_landed"] == "abc123abc123"
+    assert fm.get("completed")
+    assert "shipped it" in fm["activity_log"][-1] and "Closed:" in fm["activity_log"][-1]
+    assert "## Selfmod landed" in p.read_text() and "abc123ab" in p.read_text()
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_landed"][-1]
+    assert ev["item_id"] == 601 and ev["closed"] is True and ev["acceptance"] == "met"
+    assert 601 not in {i.id for i in B.open_items(None)}, "off the board"
+
+
+def test_a_deferred_acceptance_is_noted_and_left_open_naming_what_it_waits_on(isolated):
+    """#520: 'the acceptance check is not yet closeable — it needs ~24h of
+    traffic; #618 closes #520, not this report'."""
+    p = write_item(isolated, 520)
+    _landed(520, "SM_520", "2677dea72677", outcome={"acceptance": "deferred", "landed": True,
+                                                    "deferred_to": [618], "summary": "needs traffic",
+                                                    "spawned": [618]})
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert out == [{"item_id": 520, "closed": False, "acceptance": "deferred"}]
+    fm = _fm(p)
+    assert fm["status"] == "up_next" and fm["selfmod_landed"] == "2677dea72677"
+    assert "#618" in fm["activity_log"][-1] and "Left open" in fm["activity_log"][-1]
+
+
+def test_a_round_with_no_structured_outcome_is_noted_but_a_human_decides(isolated):
+    """The nine historical landings. Their rounds predate the finalizer, so
+    nothing mechanical says the acceptance was met — and a closed item is
+    never re-triaged, which is the reason not to guess."""
+    p = write_item(isolated, 353)
+    _landed(353, "SM_353", "d29112b5d291", outcome=None)
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert out == [{"item_id": 353, "closed": False, "acceptance": None}]
+    fm = _fm(p)
+    assert fm["status"] == "up_next" and fm["selfmod_landed"] == "d29112b5d291"
+    assert "predates the finalizer" in fm["activity_log"][-1]
+
+
+def test_not_met_leaves_the_item_open(isolated):
+    p = write_item(isolated, 602)
+    _landed(602, "SM_602", "eeee11112222", outcome={"acceptance": "not_met", "landed": True,
+                                                    "deferred_to": [], "summary": "", "spawned": []})
+    assert B.close_settled_items(S.LEDGER_PATH)[0]["closed"] is False
+    assert _fm(p)["status"] == "up_next"
+
+
+def test_the_sweep_is_idempotent(isolated):
+    write_item(isolated, 603)
+    _landed(603, "SM_603", "f00df00df00d", outcome={"acceptance": "deferred", "landed": True,
+                                                    "deferred_to": [9], "summary": "", "spawned": []})
+    assert len(B.close_settled_items(S.LEDGER_PATH)) == 1
+    assert B.close_settled_items(S.LEDGER_PATH) == [], "the marker means processed"
+
+
+def test_promoted_but_not_settled_is_not_a_landing_yet(isolated):
+    p = write_item(isolated, 604)
+    _landed(604, "SM_604", "0000aaaa0000", settled=False,
+            outcome={"acceptance": "met", "landed": True, "deferred_to": [], "summary": "", "spawned": []})
+    assert B.close_settled_items(S.LEDGER_PATH) == []
+    assert "selfmod_landed" not in _fm(p), "the guardian has not judged the window"
+
+
+def test_a_reverted_promotion_is_not_a_landing(isolated):
+    p = write_item(isolated, 605)
+    _landed(605, "SM_605", "dead0000beef", reverted=True,
+            outcome={"acceptance": "met", "landed": True, "deferred_to": [], "summary": "", "spawned": []})
+    assert B.close_settled_items(S.LEDGER_PATH) == []
+    assert _fm(p)["status"] == "up_next"
+
+
+def test_a_vault_round_lands_on_its_own_commit_with_no_window(isolated):
+    p = write_item(isolated, 606)
+    _landed(606, "", "a9712c1a9712", vault=True,
+            outcome={"acceptance": "met", "landed": True, "deferred_to": [], "summary": "skill fixed",
+                     "spawned": []})
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert out == [{"item_id": 606, "closed": True, "acceptance": "met"}]
+    assert _fm(p)["status"] == "done"
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_landed"][-1]
+    assert ev["vault"] is True and "a vault round" in _fm(p)["activity_log"][-1]
+
+
+def test_the_kill_switch_and_an_already_closed_item(isolated):
+    write_item(isolated, 607, status="done")
+    _landed(607, "SM_607", "c105edc105ed",
+            outcome={"acceptance": "met", "landed": True, "deferred_to": [], "summary": "", "spawned": []})
+    assert B.close_settled_items(S.LEDGER_PATH, enabled=False) == []
+    assert B.close_settled_items(S.LEDGER_PATH) == [], "a human closed it; nothing to do"
+
+
+@pytest.mark.parametrize("obj,expect", [
+    ({"acceptance": "met", "landed": True, "deferred_to": [], "summary": "x", "spawned": ["7", 8]},
+     {"landed": True, "acceptance": "met", "deferred_to": [], "summary": "x", "spawned": [7, 8]}),
+    ({"acceptance": "maybe"}, None),
+    ("not a dict", None),
+    ({"acceptance": "deferred", "deferred_to": ["618", "bad"], "summary": "  a   b  " + "z" * 500},
+     {"landed": False, "acceptance": "deferred", "deferred_to": [618],
+      "summary": ("a b " + "z" * 500)[:400], "spawned": []}),
+])
+def test_parse_outcome_validates_and_clamps(obj, expect):
+    assert B.parse_outcome(obj) == expect
+
+
+def test_the_outcome_schema_is_built_from_the_one_list():
+    assert B.IMPLEMENT_OUTCOME_SCHEMA["properties"]["acceptance"]["enum"] == list(B.ACCEPTANCE_OUTCOMES)
+    assert "maxLength" not in json.dumps(B.IMPLEMENT_OUTCOME_SCHEMA), "clamps stay in Python"
+
+
+def test_execute_records_the_structured_outcome_on_the_finished_event(isolated, monkeypatch):
+    from workers.sources import backlog_implement as I
+    write_item(isolated, 608)
+    _confirm(608)
+
+    async def fake(prompt, **kw):
+        fake.kw = kw
+        return {"text": "done\n\nSPAWNED: none\n", "session_id": "s608", "stop_reason": "stop",
+                "num_turns": 9, "errors": [],
+                "structured": {"acceptance": "met", "landed": True, "deferred_to": [],
+                               "summary": "the check passes now", "spawned": []},
+                "structured_error": ""}
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+    asyncio.run(I.execute(_Item({"structured_outcome": True})))
+
+    assert fake.kw["final_schema"] is B.IMPLEMENT_OUTCOME_SCHEMA
+    assert "met" in fake.kw["final_schema_prompt"] and "say what is true" in fake.kw["final_schema_prompt"]
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
+    assert ev["outcome"]["acceptance"] == "met" and ev["outcome"]["summary"] == "the check passes now"
+    assert ev["outcome_error"] == ""
+
+
+def test_execute_with_the_outcome_switched_off_asks_for_nothing(isolated, monkeypatch):
+    from workers.sources import backlog_implement as I
+    write_item(isolated, 609)
+    _confirm(609)
+    async def fake(prompt, **kw):
+        fake.kw = kw
+        return {"text": "done\n\nSPAWNED: none\n", "session_id": "s609", "stop_reason": "stop",
+                "num_turns": 3, "errors": [], "structured": None, "structured_error": ""}
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+    asyncio.run(I.execute(_Item({"structured_outcome": False})))
+    assert fake.kw["final_schema"] is None
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
+    assert ev["outcome"] is None
+
+
+def test_the_prompt_says_what_met_means():
+    from workers.sources.backlog_implement import PROMPT
+    low = " ".join(PROMPT.lower().split())
+    assert "closed automatically" in low
+    assert "`deferred` leaves it open and names the ids it waits on" in low
+    assert "never re-triaged" in low

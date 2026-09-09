@@ -374,6 +374,27 @@ held count so the skip summary can say which one it is. "Every open backlog
 item has been triaged" was true, and misleading, on a board of 122 where 106
 were this loop's own drafts.
 
+**A landed item is closed when its round said the acceptance was met — and
+only then.** Nine promotions settled in the loop's first three days and not
+one item was closed: `promote` wrote the commit, the guardian wrote
+`settled`, `execute` wrote `finished`, and nothing joined the three back to
+the item's status, so the loop's own finished work sat on the board as
+`up_next` and `draft`. An implement turn now ends with a structured finalizer
+(`IMPLEMENT_OUTCOME_SCHEMA`, mirroring triage's): `landed`, and `acceptance`
+as `met` / `not_met` / `deferred` with the ids it waits on. `backlog.close_settled_items`
+runs beside the reaper in the implement source's poll, joins
+`settled → promoted → finished` (a vault round lands on its own `vault_land`,
+with no window), writes the landing onto the item as `selfmod_landed: <sha>`
+and an activity line, and closes it **only for `met`**. `deferred` and
+`not_met` are noted and left open; a round with no outcome (everything
+before this) is noted and left for a human. The asymmetry is deliberate: a
+closed item is never re-triaged, so the prompt tells the model that `met` on
+an acceptance it did not verify is the one claim the loop cannot recover
+from, and `deferred` with an id is the honest answer for a check that needs
+traffic or a nightly run (#520 → #618). Kill switches:
+`workers.sources.backlog-implement.close_on_settle` and `structured_outcome`
+(carried in the queue payload like the budgets).
+
 `SPAWN_CAP` (3, both sources) bounds fan-out per run; overflow goes into one
 "Further findings from…" item rather than being dropped, since #229's lesson
 still holds. It is **recorded, not enforced** — the items exist on disk before

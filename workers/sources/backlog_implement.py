@@ -196,6 +196,16 @@ the prior run it compared against and exits non-zero on a regression — quote \
 its output. Exit 2 means it had nothing to compare against, which is not a \
 pass.
 
+**Your outcome closes the item — or leaves it open.** When this turn ends you \
+will be asked to restate the result as one JSON object: whether the change \
+landed, and whether the acceptance check above is now `met`, `not_met`, or \
+`deferred`. Once the promotion settles, an item whose round said `met` is \
+closed automatically. `deferred` leaves it open and names the ids it waits on \
+— that is the honest answer when the check needs traffic, a nightly run, or \
+another item to close first; file that item and name it. `not_met` leaves it \
+open. A closed item is never re-triaged, so `met` on an acceptance you did not \
+actually verify is the one claim this loop cannot recover from.
+
 Report what you did, quoting the gate line rather than saying "it passed", \
 and end with one line `SPAWNED: <ids of the items you filed, or the word none>`. \
 Work autonomously; do not ask for confirmation.
@@ -312,6 +322,16 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         reap_abandoned_rounds()
     except Exception as exc:  # the backstop must never take the scheduler down
         logger.warning("reap_abandoned_rounds failed: %s", exc)
+    try:
+        # Landed items used to stay open forever: nothing joined `promoted`,
+        # `settled` and `finished` back to the item. Same rule as the reaper —
+        # this must never take the scheduler down.
+        for r in B.close_settled_items(S.LEDGER_PATH,
+                                       enabled=bool(src_cfg.get("close_on_settle", True))):
+            logger.info("backlog #%s landed: %s (acceptance=%s)", r["item_id"],
+                        "closed" if r["closed"] else "noted, left open", r["acceptance"])
+    except Exception as exc:
+        logger.warning("close_settled_items failed: %s", exc)
     free, why = _loop_is_free()
     if not free:
         logger.info("backlog-implement: not queueing — %s", why)
@@ -320,7 +340,10 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         return
     new_id = queue.enqueue(
         source=NAME, kind="round",
-        payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS))},
+        payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
+                 # Carried in the payload like the budget, so a queued item runs
+                 # under the config that was live when it was enqueued.
+                 "structured_outcome": bool(src_cfg.get("structured_outcome", True))},
         priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
         dedup_key=DEDUP_KEY,
     )
@@ -378,10 +401,20 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         # round told nothing re-derives it — or redoes it.
         reoffer=_reoffer_block(B.reoffer_reason(S.LEDGER_PATH, candidate.id)),
     )
+    want_outcome = bool((item.payload or {}).get("structured_outcome", True))
     try:
         run = await run_prompt_in_session(
             prompt, title=f"selfmod #{candidate.id}: {candidate.name[:48]}",
-            source=NAME, max_turns=budget, priority=1)
+            source=NAME, max_turns=budget, priority=1,
+            final_schema=B.IMPLEMENT_OUTCOME_SCHEMA if want_outcome else None,
+            final_schema_prompt=(
+                "Restate the result of this round as a single JSON object matching "
+                "the schema: whether the change landed, and whether the acceptance "
+                "check recorded at triage is now met, not_met, or deferred (with the "
+                "ids it waits on). Same filed ids as your SPAWNED line. This is a "
+                "transcription of what you already reported, not a re-decision — and "
+                "`met` closes the item once the promotion settles, so say what is true."
+            ))
     except DrainActive as exc:
         S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                         "phase": "skipped", "reason": f"landing in progress: {exc}"})
@@ -424,6 +457,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                      if e.get("event") == "vault_land" and e.get("ok")
                      and e.get("item_id") == candidate.id
                      and float(e.get("ts") or 0) >= started]
+    outcome = B.parse_outcome(run.get("structured")) if want_outcome else None
+    outcome_error = str(run.get("structured_error") or "")
     claimed = B.parse_spawned_line(run.get("text") or "")
     spawned = B.existing_ids(claimed)
     # Recorded, not enforced — the items are on disk before this line runs.
@@ -443,6 +478,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "num_turns": run.get("num_turns"),
                     "spawned": spawned,
                     "spawned_unverified": [i for i in claimed if i not in spawned],
+                    # The finalizer's verdict on the acceptance check, and why
+                    # there is none when there is none — a finalizer that
+                    # quietly stopped working must not look like one working.
+                    "outcome": outcome, "outcome_error": outcome_error,
                     "response_tail": (run.get("text") or "")[-1500:]})
     outcome = (f"round {round_id}" if round_id else
                f"vault commit {vault_commits[-1][:8]}" if vault_commits else "no round opened")

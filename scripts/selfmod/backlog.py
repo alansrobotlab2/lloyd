@@ -103,6 +103,66 @@ MAX_INCOMPLETE_ATTEMPTS = 2
 # the limit rather than write a shorter one. INCOMPLETE is deliberately absent:
 # it is not a verdict, it is the record of a turn that ran out of budget, and
 # the finalizer never runs on such a turn anyway.
+# What an implement round says about the acceptance check when its turn ends.
+# `met` closes the item once the promotion settles; the other two leave it
+# open and say why. Built from this tuple, not restated, for the reason the
+# triage schema is: one list, or a new value lands in the grammar and not in
+# the validator.
+ACCEPTANCE_OUTCOMES = ("met", "not_met", "deferred")
+
+IMPLEMENT_OUTCOME_SCHEMA: dict = {
+    "type": "object",
+    "title": "backlog_implement_outcome",
+    "properties": {
+        "landed": {"type": "boolean",
+                   "description": ("Did this turn call selfmod_land (or selfmod_vault_land) "
+                                   "on a change that passed the gate?")},
+        "acceptance": {"type": "string", "enum": list(ACCEPTANCE_OUTCOMES),
+                       "description": ("met: the acceptance check recorded at triage is now "
+                                       "true. not_met: it is not, and this round did not "
+                                       "make it so. deferred: it cannot be judged until "
+                                       "something else happens — name it in deferred_to.")},
+        "deferred_to": {"type": "array", "items": {"type": "integer"},
+                        "description": ("Backlog ids that must close before the acceptance "
+                                        "can be judged. Empty unless acceptance is deferred.")},
+        "summary": {"type": "string",
+                    "description": "One sentence: what landed, or why nothing did."},
+        "spawned": {"type": "array", "items": {"type": "integer"},
+                    "description": "Backlog ids filed during this round."},
+    },
+    "required": ["landed", "acceptance", "deferred_to", "summary", "spawned"],
+    "additionalProperties": False,
+}
+
+
+def parse_outcome(structured) -> dict | None:
+    """The finalizer's object, validated and clamped, or None if unusable.
+
+    Clamped here rather than in the grammar for the reason the triage schema
+    carries no `maxLength`: a guided decoder stops mid-sentence at a limit
+    rather than writing something shorter.
+    """
+    if not isinstance(structured, dict):
+        return None
+    acceptance = str(structured.get("acceptance") or "")
+    if acceptance not in ACCEPTANCE_OUTCOMES:
+        return None
+
+    def ints(v) -> list[int]:
+        out: list[int] = []
+        for x in (v or []):
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    return {"landed": bool(structured.get("landed")), "acceptance": acceptance,
+            "deferred_to": ints(structured.get("deferred_to")),
+            "summary": " ".join(str(structured.get("summary") or "").split())[:400],
+            "spawned": ints(structured.get("spawned"))}
+
+
 TRIAGE_VERDICT_SCHEMA: dict = {
     "type": "object",
     "title": "backlog_triage_verdict",
@@ -512,6 +572,129 @@ def reoffer_reason(ledger: Path, item_id: int) -> str:
     """
     verdict, detail = implement_outcomes(ledger).get(int(item_id), ("", ""))
     return "" if verdict in ("", "spent") else f"{verdict}: {detail}"
+
+
+# Every landed item stayed open. Nine promotions settled in the loop's first
+# three days and not one item was closed: `promote` writes the commit,
+# the guardian writes `settled`, `execute` writes `finished`, and nothing
+# joined the three back to the item's status. `implemented_ids` kept them
+# from being re-picked, so they sat on the board as `up_next` and `draft` —
+# the loop's own finished work, counted as its backlog.
+LANDED_MARKER = "selfmod_landed"
+
+
+def settled_landings(ledger: Path) -> list[dict]:
+    """Every item whose round landed and stayed landed.
+
+    A code round counts once its promotion has `settled` — the guardian
+    watched the window and did not revert. A vault round counts on its own
+    `vault_land`: it is validated and committed in one step and has no window
+    to survive. A reverted promotion is not a landing.
+    """
+    settled = {str(d.get("commit") or ""): d
+               for d in _ledger_events(ledger, "settled", require_item=False)}
+    settled.pop("", None)
+    reverted = {str(d.get("commit") or "") for d in
+                _ledger_events(ledger, "rollback_succeeded", require_item=False)}
+    promoted = {str(d.get("round_id") or ""): d
+                for d in _ledger_events(ledger, "promoted", require_item=False)
+                if str(d.get("commit") or "") in settled and d.get("round_id")}
+    out: list[dict] = []
+    for d in _ledger_events(ledger, "backlog_implement"):
+        if d.get("phase") != "finished":
+            continue
+        rid = str(d.get("round_id") or "")
+        vault = [str(c) for c in (d.get("vault_commits") or []) if c]
+        if rid in promoted and promoted[rid]["commit"] not in reverted:
+            p = promoted[rid]
+            out.append({"item_id": int(d["item_id"]), "round_id": rid, "commit": p["commit"],
+                        "settled_at": settled[p["commit"]].get("created_at"),
+                        "outcome": d.get("outcome"), "vault": False})
+        elif vault and not rid:
+            out.append({"item_id": int(d["item_id"]), "round_id": "", "commit": vault[-1],
+                        "settled_at": d.get("created_at"),
+                        "outcome": d.get("outcome"), "vault": True})
+    return out
+
+
+def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
+                 close: bool, why: str) -> Path:
+    """Record the landing on the item; close it when `close`.
+
+    The marker is written either way, so a landing is processed once. A
+    human can still close an item the loop left open; the loop will not
+    reopen one a human closed.
+    """
+    fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    where = f"round {round_id}" if round_id else "a vault round"
+    entry = (f"**{stamp}** — selfmod landed as `{commit[:8]}` ({where}, "
+             f"{'settled' if round_id else 'committed'} {settled_at}). "
+             + (f"Closed: {why}" if close else f"Left open: {why}"))
+    log = list(fm.get("activity_log") or [])
+    log.append(entry)
+    fm["activity_log"] = log
+    fm["updated"] = stamp
+    fm[LANDED_MARKER] = commit
+    if close:
+        fm["status"] = "done"
+        fm["completed"] = stamp
+    section = (f"\n\n## Selfmod landed — {stamp[:10]}\n\n`{commit[:8]}`, {where}, "
+               f"{'settled' if round_id else 'committed'} {settled_at}.\n\n"
+               + ("**Closed.** " if close else "**Left open.** ") + why + "\n")
+    item.path.write_text(
+        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
+        f"---\n{body.rstrip()}{section}", encoding="utf-8")
+    return item.path
+
+
+def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                        enabled: bool = True) -> list[dict]:
+    """The sweep: note every settled landing on its item, close the ones whose
+    round said the acceptance check was met.
+
+    Only `met` closes. The round is the only party that judged the acceptance
+    and it is asked in a structured finalizer, not read out of prose; anything
+    else — `deferred` with the ids it waits on, `not_met`, or no outcome at all
+    because the round predates the finalizer — is noted and left for a human.
+    A closed item is never re-triaged, which is why the default is to leave
+    it open rather than guess.
+    """
+    if not enabled:
+        return []
+    from scripts.selfmod import state as S
+    by_id = {i.id: i for i in open_items(boards)}
+    done: list[dict] = []
+    for landing in settled_landings(ledger):
+        item = by_id.get(landing["item_id"])
+        if item is None:
+            continue
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        if fm.get(LANDED_MARKER):
+            continue
+        outcome = landing.get("outcome") or {}
+        acc = outcome.get("acceptance")
+        if acc == "met":
+            close = True
+            why = "the round reported the acceptance check met" + (
+                f" — {outcome['summary']}" if outcome.get("summary") else "")
+        elif acc == "deferred":
+            ids = ", ".join(f"#{i}" for i in outcome.get("deferred_to") or []) or "an unnamed follow-up"
+            close, why = False, (f"the round deferred the acceptance check to {ids}; "
+                                 f"close this when that closes")
+        elif acc == "not_met":
+            close, why = False, "the round landed but reported the acceptance check not met"
+        else:
+            close, why = False, ("the round recorded no structured outcome (it predates the "
+                                 "finalizer); a human decides")
+        close_landed(item, commit=landing["commit"], round_id=landing["round_id"],
+                     settled_at=str(landing.get("settled_at") or ""), close=close, why=why)
+        S.append_event({"event": "item_landed", "item_id": item.id,
+                        "round_id": landing["round_id"], "commit": landing["commit"],
+                        "vault": landing["vault"], "closed": close,
+                        "acceptance": acc, "reason": why[:300]}, path=ledger)
+        done.append({"item_id": item.id, "closed": close, "acceptance": acc})
+    return done
 
 
 def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dict:

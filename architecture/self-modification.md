@@ -312,6 +312,32 @@ that begins `human-only:`, and `select_confirmed` skips it — the alternative
 was an implement round spent discovering it, which is what #278 cost before
 `web/src` was allowed.
 
+### 3.2b The item is closed when the round says so, once the landing settles
+
+The loop wrote three records about a landing — the promotion, the guardian's
+`settled`, the turn's `finished` — and read none of them back to the item.
+Nine settled landings, nine open items. `implemented_ids` kept them from
+being re-picked, so the failure was invisible from inside the loop and
+visible only as an open count that never went down.
+
+An implement turn now ends the way a triage turn does: one more completion
+under a grammar (`IMPLEMENT_OUTCOME_SCHEMA`) restating the result as
+`{landed, acceptance: met|not_met|deferred, deferred_to, summary, spawned}`,
+recorded on the `finished` event as `outcome`, with `outcome_error` beside it
+so a finalizer that quietly stopped working does not look like one that is
+working. `close_settled_items` runs on every implement poll: for each
+settled promotion (or vault landing) whose item is still open and not yet
+marked, it writes `selfmod_landed: <sha>` and an activity line, and sets
+`status: done` **only when the round said `met`**.
+
+Only the round judged the acceptance, and it is asked in a grammar rather
+than read out of prose. Everything else is noted and left open: `deferred`
+names the ids it waits on, `not_met` says so, and a round from before the
+finalizer says "a human decides". A closed item is never re-triaged, which is
+the whole reason not to guess — and the reason the prompt tells the model
+that `met` on an unverified acceptance is the one claim the loop cannot
+recover from.
+
 ### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the
