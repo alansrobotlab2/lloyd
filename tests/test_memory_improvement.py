@@ -480,3 +480,62 @@ def test_new_tools_carry_descriptions_and_documented_parameters():
                 undocumented.append(f"{tool.name}.{pname}")
     assert thin == []
     assert undocumented == []
+
+
+# ── 4. the schedule half: a consumer nobody dispatches is dead text ───────────
+#
+# Everything above is reachable-but-unrunnable until something calls it on a
+# schedule. That is not a hypothetical here: the 09-08 attempt at this item
+# landed the *vault* half (autonomy task #84 + the `fact-improvement` skill)
+# and aborted the code half, so the vault spent a day naming a script that did
+# not exist — and #463 is the same failure class one level up, a consolidation
+# pass described everywhere that runs nowhere.
+
+_AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+_SKILL_PATH = Path.home() / "obsidian" / "skills" / "fact-improvement" / "SKILL.md"
+_SCRIPT_PATH = ROOT / "scripts" / "memory" / "fact-improvement.py"
+
+
+def _improvement_tasks() -> list[tuple[Path, dict]]:
+    """Autonomy tasks whose `skill_name` is the fact-improvement pass."""
+    if not _AUTONOMY_DIR.is_dir():
+        pytest.skip("no vault on this box; the schedule lives in the vault")
+    found = []
+    for path in sorted(_AUTONOMY_DIR.glob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if not text.startswith("---"):
+            continue
+        try:
+            front = yaml.safe_load(text.split("---", 2)[1]) or {}
+        except yaml.YAMLError:
+            continue
+        if str(front.get("skill_name", "")) == "fact-improvement":
+            found.append((path, front))
+    return found
+
+
+def test_the_improvement_pass_is_armed_on_a_schedule():
+    """#376 asks for a *scheduled* consumer. `up_next` is the only status the
+    scheduler dispatches (autonomy.py:419), so a task sitting in `draft` is a
+    description of a feature, not one."""
+    tasks = _improvement_tasks()
+    assert tasks, "no autonomy task runs the fact-improvement skill"
+    for path, front in tasks:
+        assert str(front.get("status")) == "up_next", (
+            f"{path.name} is status={front.get('status')!r}: the improvement "
+            "pass is not scheduled. Arm it (status up_next) or archive it; a "
+            "draft task is dead text, which is #463's failure class.")
+        assert str(front.get("frequency")) in ("daily", "weekly"), front.get("frequency")
+
+
+def test_the_skill_names_a_script_that_exists():
+    """The wiring is only complete if the file the skill tells the worker to
+    run is in the tree — the half that the 09-08 attempt left missing."""
+    tasks = _improvement_tasks()
+    assert tasks, "no autonomy task runs the fact-improvement skill"
+    assert _SKILL_PATH.is_file(), _SKILL_PATH
+    skill_text = _SKILL_PATH.read_text(encoding="utf-8", errors="replace")
+    assert "scripts/memory/fact-improvement.py" in skill_text, (
+        "the skill must name the command it runs")
+    assert _SCRIPT_PATH.is_file(), (
+        f"{_SCRIPT_PATH} is named by {_SKILL_PATH} but is not in the tree")
