@@ -64,7 +64,7 @@ DEFAULTS: dict = {
     "api_url": "http://127.0.0.1:8090",
     "model": "qwen3-tts",
     "voice": "clone:dave_cullen",
-    "speed": 0.85,
+    "speed": 1.22,
     "sample_rate": 24000,
     "tail_silence_ms": 250,
     "presence_eq": True,

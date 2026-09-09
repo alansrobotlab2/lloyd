@@ -445,11 +445,19 @@ livekit:
     #   0.70 -> 2.70 w/s   0.80 -> 3.09   0.85 -> 3.28   0.90 -> 3.47   1.00 -> 3.87
     # Every one of those is already *faster* than Dave's 2.06 by that measure.
     #
+    # 2026-09-09: still by ear, 0.85 -> 1.02 -> 1.22 (two +20% steps, both
+    # judged on the same sentence).  Above 1.0 the WSOLA stretch is
+    # *compressing* the model's own output rather than expanding it, which is
+    # the cheaper direction — no invented material, just a shorter analysis
+    # hop — so there is no quality reason to stop at 1.0.  The audible ceiling
+    # is where the similarity search starts dropping whole pitch periods and
+    # consonants smear; 1.22 is well short of it.
+    #
     # Applied client-side by livekit_worker, NOT by the server: the server's
     # streaming path (`generate_voice_clone_streaming`) takes no speed argument
     # and silently drops it, so until 2026-09-06 voice mode spoke at 1.0 no
     # matter what this said.  See agent-services/tts_shaping.py.
-    speed: 0.85
+    speed: 1.22
     sample_rate: 24000
     skip_empty: true
     # Silence appended to every utterance.  _stream_utterance returns once the
