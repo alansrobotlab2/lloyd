@@ -210,6 +210,7 @@ def test_wrap_transcript_makes_a_pageable_file():
 
 
 def _stub_fetchers(monkeypatch, transcript="the talk " * 400, metadata=None):
+    monkeypatch.setattr(M, "_fetch_text", lambda url, timeout=6: (_ for _ in ()).throw(OSError("no network in tests")))
     monkeypatch.setattr(M, "fetch_video_metadata", lambda vid: metadata if metadata is not None else {
         "title": "Adaptive Harness", "upload_date": "20260901", "channel": "Discover AI",
         "description": "see https://github.com/acme/harness and arxiv.org/abs/2608.13560"})
@@ -235,6 +236,38 @@ def test_build_bundle_writes_what_the_session_reads(monkeypatch):
     assert meta["transcript_lines"] > 20 and meta["transcript_words"] > 400
     assert M.load_bundle("abc123")["video_id"] == "abc123"
     assert M.load_bundle("nope") is None
+    # The snapshot is always written, even with every source unreachable.
+    m = json.loads(Path(meta["measurements_path"]).read_text())
+    assert Path(meta["measurements_path"]).parent == bdir
+    assert len(m["errors"]) >= 2 and "unavailable" in meta["measurements_summary"]
+
+
+def test_measurements_capture_parses_the_counters_the_eval_needs(monkeypatch, tmp_path):
+    """`http_fetch` refuses loopback, so the script snapshots the numbers into
+    the bundle. The prefix-cache rate is the one the first review turned on."""
+    prom = "\n".join([
+        "# HELP vllm:prefix_cache_queries_total x",
+        'vllm:prefix_cache_queries_total{model_name="primary"} 1000',
+        'vllm:prefix_cache_hits_total{model_name="primary"} 687',
+        'vllm:kv_cache_usage_perc{model_name="primary"} 0.79',
+        'vllm:num_requests_running{model_name="primary"} 5',
+        'vllm:other_metric{model_name="primary"} 42',
+    ])
+    dash = json.dumps({"vllm": {"engines": []}, "workers": {"slots": 2}, "primary": {"big": "x" * 10}})
+    monkeypatch.setattr(M, "_fetch_text", lambda url, timeout=6: prom if url.endswith("/metrics") else dash)
+    base = tmp_path / "baselines"; base.mkdir()
+    (base / "nightly-20260908-1.json").write_text(json.dumps({"measured_at": "t1", "overall": {"entity_hit_rate": 0.5, "doc_hit_rate": 0.9}}))
+    (base / "nightly-20260909-1.json").write_text(json.dumps({"measured_at": "t2", "overall": {"entity_hit_rate": 0.55, "doc_hit_rate": 0.95}}))
+    monkeypatch.setattr(M, "EVAL_BASELINES_DIR", str(base))
+    bdir = tmp_path / "b"; bdir.mkdir()
+    path, m = M.capture_measurements(str(bdir))
+    assert Path(path) == bdir / "measurements.json"
+    assert m["vllm"]["prefix_cache_hit_rate_since_boot"] == 0.687
+    assert m["vllm"]["vllm:num_requests_running"] == 5 and "vllm:other_metric" not in m["vllm"]
+    assert set(m["dashboard"]) == {"vllm", "workers"}, "only the sections a verdict needs"
+    assert m["retrieval_eval"]["measured_at"] == "t2" and m["errors"] == []
+    summary = M.measurements_summary(m)
+    assert "68.7%" in summary and "79%" in summary and "entity_hit_rate 0.55" in summary
 
 
 def test_build_bundle_reuses_an_existing_note_path(monkeypatch):

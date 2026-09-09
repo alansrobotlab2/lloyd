@@ -136,6 +136,7 @@ transcript: {transcript_path} ({transcript_words} words, {transcript_lines} line
 metadata: {meta_path}
 existing_note: {existing_note}
 enrichment_notes: {enrichment}
+measurements: {measurements_path} (live numbers captured at fetch time: {measurements_summary})
 </video>
 
 Work in this order:
@@ -191,10 +192,12 @@ No preamble in the file and no code fence around it.
 stack, what already exists, and the standing problems. Decide whether this \
 video contains a specific technique, tool, framework, model or finding that \
 could concretely improve Lloyd, and where it would plug in. **When a claim \
-touches something Lloyd already measures, check the live number first** — the \
-profile's *Live measurements* section says where, reachable with `http_fetch` \
-and `Read`. A verdict that rests on "Lloyd already does this" must be backed \
-by the counter that says so.
+touches something Lloyd already measures, check the live number first**: Read \
+the measurements file above — vLLM counters, the dashboard's engine and \
+worker sections, and the newest retrieval-eval baseline, captured when the \
+bundle was fetched. `http_fetch` cannot reach loopback, so do not try the \
+URLs from here. A verdict that rests on "Lloyd already does this" must be \
+backed by the counter that says so.
    - `actionable` (relevance 70-100): a specific change with a measurable \
 acceptance, feasible on two 24 GB GPUs with no cloud dependency.
    - `worth_a_look` (40-69): promising, but needs reading before a change can \
@@ -285,6 +288,8 @@ def build_prompt(meta: dict, tracked: list[dict]) -> str:
         target_note=target,
         note_stem=Path(target).stem if target else "",
         existing_note_instruction=_EXISTING if meta.get("existing_note") else _FRESH,
+        measurements_path=meta.get("measurements_path") or "none",
+        measurements_summary=meta.get("measurements_summary") or "none captured",
         profile_path=str(PROFILE_PATH),
         tracked="\n".join(tracked_lines),
         eval_tag=EVAL_TAG,

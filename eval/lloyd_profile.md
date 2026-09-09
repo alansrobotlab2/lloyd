@@ -137,8 +137,15 @@ When a video's claim touches a number Lloyd already measures, fetch the
 number before choosing a verdict. "Lloyd already caches the prefix" or
 "already batches" is only as true as the counter says, and the first digest
 session (2026-09-09) rated a talk `worth_a_look` on the assumption that the
-prefix stayed cached, while the live counter read 68.7%. From a digest
-session there is no Bash: use `http_fetch` on loopback and `Read` on files.
+prefix stayed cached, while the live counter read 68.7%.
+
+**From a digest session:** there is no Bash and `http_fetch` refuses
+loopback by design, so do not try the URLs below from there. Instead Read
+`measurements.json` in your bundle directory (beside `transcript.txt`): it
+holds the vLLM counters, the dashboard's `vllm`/`workers`/`host`/`usage`
+sections and the newest retrieval-eval baseline, captured when the bundle
+was fetched, with an `errors` list naming any source that was unreachable.
+The URLs are for a human or a shell.
 
 - **Inference** — `http://127.0.0.1:8096/metrics`:
   `vllm:prefix_cache_hits_total` / `vllm:prefix_cache_queries_total` is the

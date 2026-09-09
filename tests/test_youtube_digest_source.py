@@ -39,6 +39,8 @@ def _meta(tmp_path: Path, *, existing: str | None = None) -> dict:
         "transcript_path": str(bdir / "transcript.txt"), "transcript_words": 6000,
         "transcript_lines": 420, "entities": {}, "existing_note": existing, "target_note": target,
         "enrichment": {"github": [{"note_path": "/v/github/acme-harness.md"}], "papers": []},
+        "measurements_path": str(bdir / "measurements.json"),
+        "measurements_summary": "prefix-cache hit rate since boot 68.7%; KV cache 79% used",
     }
 
 
@@ -159,7 +161,9 @@ def test_prompt_carries_the_paths_the_rules_and_the_tracked_items(tmp_path):
     assert "backlog_write_task" in prompt and "youtube-eval" in prompt and "discover-ai" in prompt
     # The first session rated a talk on the assumption that the prefix stayed
     # cached while the live counter read 68.7%: measured claims get checked.
-    assert "check the live number first" in prompt and "Live measurements" in prompt
+    assert "check the live number first" in prompt
+    assert meta["measurements_path"] in prompt and "68.7%" in prompt
+    assert "cannot reach loopback" in prompt
     assert prompt.rstrip().endswith("say why in one line before the block.")
     assert "RESULT: <written|kept|failed>" in prompt
 

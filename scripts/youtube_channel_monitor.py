@@ -1343,6 +1343,7 @@ def build_bundle(video_id, title="", published="", entry=None):
         f.write(wrapped + "\n")
 
     existing = existing_note_for(video_id, entry)
+    measurements_path, measurements = capture_measurements(bdir)
     meta = {
         "channel_key": CHANNEL_KEY,
         "channel_handle": CHANNEL_HANDLE,
@@ -1362,11 +1363,104 @@ def build_bundle(video_id, title="", published="", entry=None):
         "enrichment": enrichment,
         "existing_note": existing,
         "target_note": existing or target_note_path(title, published),
+        "measurements_path": measurements_path,
+        "measurements_summary": measurements_summary(measurements),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
     with open(meta["meta_path"], "w") as f:
         json.dump(meta, f, indent=2, default=str)
     return meta, None
+
+
+MEASUREMENT_URLS = {
+    "vllm_metrics": "http://127.0.0.1:8096/metrics",
+    "dashboard": "http://127.0.0.1:8080/api/dashboard",
+}
+_VLLM_WANTED = (
+    "vllm:prefix_cache_queries_total", "vllm:prefix_cache_hits_total",
+    "vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc",
+    "vllm:num_requests_running", "vllm:num_requests_waiting",
+)
+EVAL_BASELINES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "eval", "baselines")
+
+
+def _fetch_text(url, timeout=6):
+    return request.urlopen(request.Request(url, headers={"User-Agent": "lloyd-youtube-monitor"}),
+                           timeout=timeout).read().decode("utf-8", "replace")
+
+
+def _parse_vllm_metrics(text):
+    """Sum the wanted Prometheus series across label sets."""
+    out = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name = line.split("{", 1)[0].split(" ", 1)[0]
+        if name not in _VLLM_WANTED:
+            continue
+        try:
+            val = float(line.rsplit(" ", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        out[name] = out.get(name, 0.0) + val
+    q, h = out.get("vllm:prefix_cache_queries_total"), out.get("vllm:prefix_cache_hits_total")
+    if q:
+        out["prefix_cache_hit_rate_since_boot"] = round((h or 0.0) / q, 4)
+    return out
+
+
+def capture_measurements(bdir):
+    """Snapshot the live numbers a digest session may need to judge a claim.
+
+    The session's `http_fetch` refuses loopback by design (it fetches
+    arbitrary web pages), so the first session that tried to check the
+    prefix-cache counter could not reach it and fell back to guessing. This
+    script has no such limit: it takes the snapshot at fetch time and the
+    session Reads it. Best effort per source — a failure is recorded under
+    `errors`, never raised, and the file is always written.
+    """
+    import glob
+    out = {"captured_at": datetime.now(timezone.utc).isoformat(), "vllm": {}, "dashboard": {},
+           "retrieval_eval": {}, "errors": []}
+    try:
+        out["vllm"] = _parse_vllm_metrics(_fetch_text(MEASUREMENT_URLS["vllm_metrics"]))
+    except Exception as e:  # noqa: BLE001
+        out["errors"].append(f"vllm metrics: {e}")
+    try:
+        d = json.loads(_fetch_text(MEASUREMENT_URLS["dashboard"], timeout=10))
+        out["dashboard"] = {k: d[k] for k in ("vllm", "workers", "host", "usage") if k in d}
+    except Exception as e:  # noqa: BLE001
+        out["errors"].append(f"dashboard: {e}")
+    try:
+        files = sorted(glob.glob(os.path.join(EVAL_BASELINES_DIR, "nightly-*.json")))
+        if files:
+            with open(files[-1]) as f:
+                j = json.load(f)
+            out["retrieval_eval"] = {"path": os.path.abspath(files[-1]), "measured_at": j.get("measured_at"),
+                                     "overall": j.get("overall")}
+    except Exception as e:  # noqa: BLE001
+        out["errors"].append(f"retrieval eval: {e}")
+
+    path = os.path.join(bdir, "measurements.json")
+    with open(path, "w") as f:
+        json.dump(out, f, indent=2, default=str)
+    return path, out
+
+
+def measurements_summary(m):
+    """One line for the prompt: the numbers most claims turn on."""
+    bits = []
+    v = (m or {}).get("vllm") or {}
+    if "prefix_cache_hit_rate_since_boot" in v:
+        bits.append(f"prefix-cache hit rate since boot {v['prefix_cache_hit_rate_since_boot'] * 100:.1f}%")
+    if "vllm:kv_cache_usage_perc" in v:
+        bits.append(f"KV cache {v['vllm:kv_cache_usage_perc'] * 100:.0f}% used")
+    ev = ((m or {}).get("retrieval_eval") or {}).get("overall") or {}
+    if ev.get("entity_hit_rate") is not None:
+        bits.append(f"retrieval eval entity_hit_rate {ev['entity_hit_rate']}, doc_hit_rate {ev.get('doc_hit_rate')}")
+    if (m or {}).get("errors"):
+        bits.append(f"{len(m['errors'])} source(s) unavailable")
+    return "; ".join(bits) or "no live numbers captured"
 
 
 def load_bundle(video_id):
@@ -1854,6 +1948,11 @@ def main():
             print(f"Reusing bundle on disk: {meta['bundle_dir']}")
             meta["existing_note"] = existing_note_for(vid, entry)
             meta["target_note"] = meta["existing_note"] or target_note_path(meta["title"], meta["published"])
+            # The transcript keeps; the numbers do not.
+            mpath, m = capture_measurements(meta["bundle_dir"])
+            meta["measurements_path"], meta["measurements_summary"] = mpath, measurements_summary(m)
+            with open(meta["meta_path"], "w") as f:
+                json.dump(meta, f, indent=2, default=str)
         else:
             print(f"\n=== Fetching bundle: {entry.get('title') or vid} ({vid}) ===")
             meta, err = build_bundle(vid, entry.get("title", ""), entry.get("published", ""), entry)
