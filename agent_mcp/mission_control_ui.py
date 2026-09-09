@@ -136,6 +136,7 @@ async def list_tools():
         Tool(
             name="mc_get_state",
             description=(
+                "Use when you need to know what the user is looking at; to move their view use mc_navigate.\n\n"
                 "Report which Mission Control tab the user is currently viewing "
                 "and the work item (if any) they have focused inside it. "
                 "Returns {tab, focus, focus_by_tab, last_updated}. focus is "
@@ -146,6 +147,7 @@ async def list_tools():
         Tool(
             name="mc_navigate",
             description=(
+                "Use whenever the user names a tab; reach for it before vault_read or backlog_get_task.\n\n"
                 "Switch the user's Mission Control tab and optionally focus a "
                 "specific item within it. Pushes the change to the user's open "
                 "browser tabs and returns a brief summary of what's now visible.\n\n"
@@ -205,6 +207,7 @@ async def list_tools():
         Tool(
             name="mc_close_modal",
             description=(
+                "Use when the user says \"close that\" or \"dismiss it\"; for IDE editor tabs use ide_close_tab instead.\n\n"
                 "Dismiss any modal popup currently open in the given Mission "
                 "Control tab. Counterpart to mc_navigate when its focus_id "
                 "opens a modal (memory document viewer, autonomy/backlog task "

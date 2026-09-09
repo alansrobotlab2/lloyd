@@ -343,6 +343,7 @@ def _http_request(method: str, url: str, headers: dict | None = None, body: str 
 async def list_tools():
     return [
         Tool(name="http_search", description=(
+            "Use to find a URL you do not yet have; to read one you already have, use http_fetch instead.\n\n"
             "Search the public web (DuckDuckGo) and get back ranked titles, URLs and snippets. "
             "This is the way to look something up online — reach for it before Bash whenever the "
             "answer is on the internet rather than on this machine, including when you do not yet "
@@ -357,6 +358,7 @@ async def list_tools():
             "required": ["query"],
         }),
         Tool(name="http_fetch", description=(
+            "Use to read a known public web page as prose; for an API use http_request, for localhost use Bash.\n\n"
             "Fetch a public http(s) URL and read it as clean markdown or plain text, keeping headings, "
             "lists, tables and link URLs while dropping navigation and boilerplate. Use it for any web "
             "page, article or documentation page — in markdown mode the links come back as "
@@ -377,6 +379,7 @@ async def list_tools():
             "required": ["url"],
         }),
         Tool(name="http_request", description=(
+            "Use for APIs, non-GET verbs or a raw body; to read a human-facing page use http_fetch instead.\n\n"
             "Make a raw HTTP request with any verb, custom headers and a body, and get back the status "
             "code, response headers and the unparsed body. Use it for REST/GraphQL APIs, for POST/PUT/PATCH/DELETE, and whenever you want JSON or XML exactly as the server sent it rather than extracted "
             "prose. For reading a human-facing web page use http_fetch; to find a URL first use http_search."

@@ -547,6 +547,7 @@ async def list_tools():
         Tool(
             name="Read",
             description=(
+                "Use when you know the exact path and want the contents; to locate a file use Glob or Grep first.\n\n"
                 "Read a file from the local filesystem. Returns content with "
                 "1-indexed `cat -n`-style line number prefix. Default 2000 "
                 "lines per call; pass `offset` and `limit` for larger files."
@@ -564,6 +565,7 @@ async def list_tools():
         Tool(
             name="Write",
             description=(
+                "Use to create a file or replace one wholesale; to change part of a file you have Read, use Edit instead.\n\n"
                 "Write a file to the local filesystem. Creates parent "
                 "directories as needed. Creating a new file needs nothing "
                 "first; OVERWRITING an existing one requires that you have "
@@ -583,6 +585,7 @@ async def list_tools():
         Tool(
             name="Edit",
             description=(
+                "Use to change part of a file you have Read in this session; to replace the whole file use Write instead.\n\n"
                 "Replace exact-match text in a file. You must Read the file in "
                 "this session first — a partial Read with offset/limit counts — "
                 "and the file must not have changed since; the edit is refused "
@@ -622,6 +625,7 @@ async def list_tools():
         Tool(
             name="Grep",
             description=(
+                "Use to search file contents by pattern; for file names use Glob, for a known path use Read.\n\n"
                 "Search file content with ripgrep. Modes: files_with_matches "
                 "(default, list paths), content (lines), count. Supports "
                 "case-insensitive (-i), line numbers (-n), context (-A/-B/-C), "
@@ -672,6 +676,7 @@ async def list_tools():
         Tool(
             name="Glob",
             description=(
+                "Use to find files by name pattern; to search inside files use Grep instead.\n\n"
                 "Find files by glob pattern. Returns absolute paths sorted by "
                 "modification time, newest first."
             ),

@@ -179,6 +179,7 @@ async def list_tools():
         Tool(
             name="ide_open_folder",
             description=(
+                "Use to point the file tree at a directory; to open a single file use ide_open_file instead.\n\n"
                 "Set the folder shown in the IDE tab's file tree. The user's "
                 "current tab is also switched to IDE so they immediately see "
                 "the change. Returns the new open_folder and a small "
@@ -199,6 +200,7 @@ async def list_tools():
         Tool(
             name="ide_open_file",
             description=(
+                "Use whenever the user asks to pull up, show or open a file; for a directory use ide_open_folder instead.\n\n"
                 "Open a file in the IDE tab — adds an editor tab and focuses "
                 "it (or just focuses if already open). The user's IDE folder "
                 "should usually contain this file, but any absolute path "
@@ -220,6 +222,7 @@ async def list_tools():
         Tool(
             name="ide_close_tab",
             description=(
+                "Use to close an IDE editor tab; for a Mission Control modal use mc_close_modal instead.\n\n"
                 "Close the IDE editor tab for the given path. No-op if no "
                 "tab matches that path; if the closed tab is currently "
                 "visible, the IDE picks an adjacent tab to show."

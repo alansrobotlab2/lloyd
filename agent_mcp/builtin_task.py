@@ -427,6 +427,7 @@ async def list_tools():
         Tool(
             name="Task",
             description=(
+                "Use for a scoped subtask you need now; for tracked or recurring work use autonomy_write_task instead.\n\n"
                 "Spawn a subagent to complete a task. The subagent runs in the "
                 "same process with the full lloyd-mcp tool pool (minus Task). "
                 "Returns the subagent's final response, the tools it used, and a "

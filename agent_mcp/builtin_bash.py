@@ -318,6 +318,7 @@ async def list_tools():
         Tool(
             name="Bash",
             description=(
+                "Use only for shell work — builds, git, tests; to read or search files use Read, Grep or Glob instead.\n\n"
                 "Execute a bash command. Merged stdout/stderr, default "
                 "timeout 120000ms (max 600000ms), output truncated at 30000 "
                 "characters. Inner voice safety rules apply upstream."
