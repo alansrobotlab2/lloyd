@@ -274,6 +274,9 @@ export interface BacklogTask {
   due_date: string | null
   position: number
   assigned_to_agent: boolean
+  /** Board name — the stable identity. `board_id` is positional over the
+   *  sorted board names and renumbers whenever a board appears or vanishes. */
+  board: string
   board_id: number
   url: string
   created_at: string
@@ -970,20 +973,32 @@ export const api = {
     return fetch(`${API_BASE}/backlog/tasks${qs}`).then(r => r.json()).then(d => Array.isArray(d) ? d : [])
   },
 
+  // These three threw away the response. `fetch` does not reject on 4xx, so a
+  // refused write — a malformed-frontmatter 409, an invalid status, an
+  // unresolvable board — resolved successfully and the task modal closed as
+  // though it had saved. Raise so the caller can say what happened.
   async backlogUpdateTask(id: number, updates: Record<string, any>): Promise<void> {
-    await fetch(`${API_BASE}/backlog/task-update`, {
+    const r = await fetch(`${API_BASE}/backlog/task-update`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, ...updates }),
     })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `task-update failed: ${r.status}`)
+    }
   },
 
   async backlogDeleteTask(id: number): Promise<void> {
-    await fetch(`${API_BASE}/backlog/task-delete`, {
+    const r = await fetch(`${API_BASE}/backlog/task-delete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
     })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `task-delete failed: ${r.status}`)
+    }
   },
 
   skills(): Promise<SkillsData> {
@@ -1056,16 +1071,22 @@ export const api = {
   async backlogCreateTask(data: {
     name: string
     description?: string
+    /** Board name. Preferred over `board_id`; see BacklogTask.board. */
+    board?: string
     board_id?: number
     status?: string
     tags?: string[]
     priority?: string
   }): Promise<void> {
-    await fetch(`${API_BASE}/backlog/task-create`, {
+    const r = await fetch(`${API_BASE}/backlog/task-create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `task-create failed: ${r.status}`)
+    }
   },
 
   services(): Promise<ServicesData> {

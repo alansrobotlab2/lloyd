@@ -178,6 +178,14 @@ async def backlog_tasks(board_id: str = "", status: str = ""):
                 "due_date": fm.get("due_date") or fm.get("due") or None,
                 "position": fm.get("position", tid * 1000),
                 "assigned_to_agent": fm.get("assigned", False),
+                # Both, and the name is the real one. `board_id` is positional
+                # over `sorted(names)`, so it renumbers whenever a board name
+                # appears or disappears — and a board disappears exactly when
+                # its last task is moved off it, which the task modal now does
+                # in one click. The vault, `agent_mcp/backlog.py` and the
+                # frontmatter all key on the name; the id stays for the
+                # existing filter/tab contract.
+                "board": task_board,
                 "board_id": board_map.get(task_board, 0),
                 "url": "",
                 "created_at": str(created),
@@ -223,8 +231,31 @@ async def backlog_task_update(request: Request):
             fm[key] = data[key]
     if "tags" in data:
         fm["tags"] = normalize_tags(data["tags"])
-    if "board_id" in data:
-        fm["board"] = id_to_name.get(data["board_id"], fm.get("board", "default"))
+    # `board` (a name) is preferred and `board_id` is the compatibility path.
+    # An id is positional over the sorted board names, so a browser tab holding
+    # a board list from before a board appeared or vanished sends an id that is
+    # still *valid* — for a different board — and the item moves somewhere
+    # nobody asked for. The name cannot drift that way. An unresolvable id used
+    # to fall back to the task's current board and return success: a move the
+    # user asked for that silently did not happen, which is the one outcome
+    # worse than an error. It is a 400 now, like an invalid status above.
+    if "board" in data:
+        board = data["board"]
+        if not isinstance(board, str) or not board.strip():
+            raise HTTPException(status_code=400, detail="board must be a non-empty name")
+        fm["board"] = board.strip()
+    elif "board_id" in data:
+        try:
+            board_id = int(data["board_id"])
+        except (TypeError, ValueError):
+            board_id = None
+        if board_id not in id_to_name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown board_id {data['board_id']!r}. Known boards: "
+                       + ", ".join(f"{i}={n}" for i, n in sorted(id_to_name.items())),
+            )
+        fm["board"] = id_to_name[board_id]
     if "assigned_to_agent" in data:
         fm["assigned"] = data["assigned_to_agent"]
     fm["updated"] = datetime.now().isoformat()
@@ -247,7 +278,14 @@ async def backlog_task_create(request: Request):
     filename = f"{task_id}-{slug}.md"
     board_map = _backlog_board_map()
     id_to_name = {v: k for k, v in board_map.items()}
-    board_name = id_to_name.get(data.get("board_id"), "default")
+    # Same preference as task-update: the name is the identity, the id is the
+    # compatibility path. Create keeps the id's silent "default" fallback,
+    # since a create with no resolvable board still has to land somewhere.
+    board_name = data.get("board")
+    if not isinstance(board_name, str) or not board_name.strip():
+        board_name = id_to_name.get(data.get("board_id"), "default")
+    else:
+        board_name = board_name.strip()
     now = datetime.now().isoformat()
     create_status = data.get("status", "draft")
     if create_status not in _VALID_STATUSES:

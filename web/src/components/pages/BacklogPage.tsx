@@ -48,28 +48,40 @@ const PRIORITIES = ["none", "low", "medium", "high"];
 
 function TaskModal({
   task,
+  boards,
   onClose,
   onSave,
   onDelete,
   onCreate,
-  defaultBoardId,
+  defaultBoard,
 }: {
   task: BacklogTask | null;
+  boards: BacklogBoard[];
   onClose: () => void;
   onSave: (id: number, updates: Record<string, any>) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onCreate: (data: Record<string, any>) => Promise<void>;
-  defaultBoardId: number | null;
+  defaultBoard: string | null;
 }) {
   const isCreate = !task;
   const [name, setName] = useState(task?.name || "");
   const [description, setDescription] = useState(task?.description || "");
   const [status, setStatus] = useState(task?.status || "draft");
   const [priority, setPriority] = useState(task?.priority || "none");
+  const [board, setBoard] = useState(task?.board || defaultBoard || "");
   const [blocked, setBlocked] = useState(task?.blocked || false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const backdropRef = useRef<HTMLDivElement>(null);
+
+  // A Select whose value matches no option renders a blank trigger, so an
+  // out-of-list board is carried in as its own option rather than showing the
+  // task as belonging to nothing. It happens for real: `board_id` is 0 for a
+  // board name the map missed, and the board list is 10s-cached upstream.
+  const boardOptions = !board || boards.some((b) => b.name === board)
+    ? boards
+    : [...boards, { id: -1, name: board, icon: "\u{1F4CB}", color: "", tasks_count: 0 }];
 
   const handleBackdropClick = (e: React.MouseEvent) => {
     if (e.target === backdropRef.current) onClose();
@@ -77,17 +89,24 @@ function TaskModal({
 
   const handleSave = async () => {
     setSaving(true);
+    setError(null);
     try {
       if (isCreate) {
         const data: Record<string, any> = { name, description, status, priority };
-        if (defaultBoardId) data.board_id = defaultBoardId;
+        if (board) data.board = board;
         await onCreate(data);
       } else {
-        await onSave(task.id, { name, description, status, priority, blocked });
+        const updates: Record<string, any> = { name, description, status, priority, blocked };
+        // Only on a real change: the parent reads `"board" in updates` as the
+        // signal that this save moved the task and the whole board has to be
+        // refetched, and an ordinary title edit should not pay for that.
+        if (board && board !== task.board) updates.board = board;
+        await onSave(task.id, updates);
       }
       onClose();
     } catch (err) {
       console.error("Save failed:", err);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
@@ -100,11 +119,14 @@ function TaskModal({
       return;
     }
     setSaving(true);
+    setError(null);
     try {
       await onDelete(task.id);
       onClose();
     } catch (err) {
       console.error("Delete failed:", err);
+      setError(err instanceof Error ? err.message : String(err));
+      setConfirmDelete(false);
     } finally {
       setSaving(false);
     }
@@ -173,8 +195,25 @@ function TaskModal({
 
         {/* Additional fields section */}
         <div className="px-5 py-3 border-t border-border/50 space-y-3">
-          {/* Status + Priority row */}
-          <div className="grid grid-cols-2 gap-3">
+          {/* Board + Status + Priority row */}
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
+                Board
+              </label>
+              <Select value={board} onValueChange={setBoard} disabled={boardOptions.length === 0}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder={boardOptions.length === 0 ? "No boards" : "Pick a board"} />
+                </SelectTrigger>
+                <SelectContent>
+                  {boardOptions.map((b) => (
+                    <SelectItem key={b.name} value={b.name}>
+                      {b.icon} {b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div>
               <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
                 Status
@@ -238,6 +277,12 @@ function TaskModal({
         </div>
 
         {/* Footer */}
+        {error && (
+          <div className="px-5 pt-3 -mb-1 text-[11px] text-destructive flex items-start gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-px" />
+            <span className="min-w-0 break-words">{error}</span>
+          </div>
+        )}
         <div className="flex items-center gap-2 px-5 py-3 border-t border-border/50">
           {!isCreate && (
             <Button
@@ -472,6 +517,10 @@ export default function BacklogPage() {
   const [editingTask, setEditingTask] = useState<BacklogTask | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  // The board list as `loadData` last saw it, so a refetch can tell which
+  // board the active id *used* to name before the ids renumbered.
+  const boardsRef = useRef<BacklogBoard[]>([]);
+  const activeBoardName = boards.find((b) => b.id === activeBoard)?.name ?? null;
 
   // Mirror current focus for the agent. Editing-task wins; otherwise
   // active board.
@@ -512,14 +561,30 @@ export default function BacklogPage() {
 
   const loadData = useCallback(async () => {
     try {
+      // The board the user is standing on, by name, taken before the refetch.
+      const previousName = boardsRef.current.find((b) => b.id === activeBoard)?.name;
       const [boardsData, tasksData] = await Promise.all([
         api.backlogBoards(),
         api.backlogTasks(activeBoard ? { board_id: String(activeBoard) } : undefined),
       ]);
+      boardsRef.current = boardsData;
       setBoards(boardsData);
       setTasks(tasksData);
       if (!activeBoard && boardsData.length > 0) {
         setActiveBoard(boardsData[0].id);
+      } else if (previousName) {
+        // Board ids are positional over the sorted board names, so a board
+        // appearing or vanishing renumbers every board after it — and one
+        // vanishes exactly when its last task is moved off, which the modal
+        // now does in one click. Following the id would leave the user on a
+        // tab that is quietly a different board. Follow the name; the id
+        // change re-runs this callback with the correct filter.
+        const sameBoard = boardsData.find((b) => b.name === previousName);
+        if (sameBoard) {
+          if (sameBoard.id !== activeBoard) setActiveBoard(sameBoard.id);
+        } else if (boardsData.length > 0) {
+          setActiveBoard(boardsData[0].id);
+        }
       }
     } catch (err) {
       console.error("Backlog load failed:", err);
@@ -585,6 +650,16 @@ export default function BacklogPage() {
 
   const handleSave = async (id: number, updates: Record<string, any>) => {
     await api.backlogUpdateTask(id, updates);
+    // A board move changes which tab the task belongs to, every board's
+    // task_count, and possibly the board *ids* themselves — moving the last
+    // task off a board deletes that board, and ids are positional over the
+    // sorted names. None of that is derivable from `updates`, which carries
+    // the board as a name and no board_id at all, so merging it locally would
+    // leave the card sitting on the board it just left. Refetch instead.
+    if ("board" in updates) {
+      await loadData();
+      return;
+    }
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, ...updates } : t)),
     );
@@ -702,11 +777,12 @@ export default function BacklogPage() {
       {(editingTask || showCreateModal) && (
         <TaskModal
           task={editingTask}
+          boards={boards}
           onClose={() => { setEditingTask(null); setShowCreateModal(false); }}
           onSave={handleSave}
           onDelete={handleDelete}
           onCreate={handleCreate}
-          defaultBoardId={activeBoard}
+          defaultBoard={activeBoardName}
         />
       )}
     </div>
