@@ -39,18 +39,24 @@ CHECKOUT = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "evidence"
 
 
-def _seed_root() -> Path:
-    """Root the seeded claims resolve against: the live tree when it has a
-    `_pipeline`, else a checked-in mirror of the same relative layout.
+def _seed_root_for(rel_path: str) -> Path | None:
+    """The root that actually holds this artifact — live tree first, then the
+    checked-in mirror of the same relative layout.
 
-    `_pipeline/**` is gitignored, so a round's worktree has none and the mirror
-    keeps the assertion alive there (its excerpt copies of the same two dated
-    artifacts, and three failure dumps instead of a hundred). On the live
-    checkout the real files are used, which is what makes the replay an
-    assertion about the artifacts the corrections log argued about. Both
-    branches assert; neither skips.
+    Resolved per artifact rather than once per tree, because `_pipeline/` is
+    created lazily by the pipeline code that runs under it: a round's worktree
+    can hold an empty `_pipeline/reflection/` skeleton — the gate's full-suite
+    run creates one — and an empty directory is not the artifact store. The
+    mirror keeps the assertion alive where `_pipeline` is absent entirely (it is
+    gitignored); on the live checkout the real files win, which is what makes
+    the replay an assertion about the artifacts the corrections log argued
+    about. Every caller asserts the artifact exists, so neither branch is
+    vacuous and neither skips.
     """
-    return CHECKOUT if (CHECKOUT / "_pipeline").is_dir() else FIXTURES / "seeded"
+    for root in (CHECKOUT, FIXTURES / "seeded"):
+        if (root / rel_path).exists():
+            return root
+    return None
 
 
 def _item(payload: dict | None = None, source: str = "s", **kw) -> QueueItem:
@@ -663,13 +669,13 @@ def test_a_seeded_report_versus_disk_case_replays_as_refuted():
     against whatever is on disk now. Zero refutations would mean the claims are
     too weak, not that the system is clean — so all three must come back
     refuted."""
-    root = _seed_root()
     statuses = {}
     for name, seed in SEED_CLAIMS.items():
-        artifact = root / seed["check"]["path"]
-        assert artifact.exists(), (
-            f"seed {name}: the artifact its claim is about is missing from "
-            f"{artifact} — the replay would be vacuous")
+        rel = seed["check"]["path"]
+        root = _seed_root_for(rel)
+        assert root is not None, (
+            f"seed {name}: no copy of {rel} in the tree or in the fixture "
+            f"mirror — the replay would be vacuous")
         statuses[name] = verify_claim(seed, root=root)["status"]
 
     assert statuses == {"relationships_12131": "refuted",
@@ -680,6 +686,7 @@ def test_a_seeded_report_versus_disk_case_replays_as_refuted():
 def test_the_seeds_come_from_real_handoff_text():
     """If a seed stops matching the handoff it was quoted from, the replay above
     is testing a claim nobody made — so pin the provenance too."""
-    handoff = _seed_root() / "_pipeline/reflection/knowledge-handoff-2026-08-24.md"
-    assert handoff.is_file()
-    assert "12,131" in handoff.read_text(errors="replace")
+    rel = "_pipeline/reflection/knowledge-handoff-2026-08-24.md"
+    root = _seed_root_for(rel)
+    assert root is not None, f"no copy of {rel} in the tree or the fixture mirror"
+    assert "12,131" in (root / rel).read_text(errors="replace")
