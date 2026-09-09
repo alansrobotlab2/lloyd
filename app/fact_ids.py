@@ -92,3 +92,40 @@ def assign_ids(facts: list[dict], category: str | None) -> list[dict]:
         taken.append(fid)
         seen.add(fid)
     return facts
+
+
+def dedupe_ids(facts: list[dict], category: str | None) -> int:
+    """Renumber every fact whose ID another fact in the list already holds.
+
+    `assign_ids` only fills in the blanks, by design: an ID is a handle other
+    records name, so it will not renumber one that exists. That is right for
+    appending and wrong for **merging**, which is the one operation that
+    concatenates two independently-numbered sequences. Two entity files that
+    each counted `stat-001, stat-002` upward produce a merged list holding
+    `stat-001` twice, and from then on `fact_invalidate` and every revert
+    report that names it act on whichever comes first.
+
+    The first holder keeps the ID -- it is the one outside records already
+    point at -- and later collisions are renumbered. Returns how many moved.
+
+    Merging without this is why the live store carried 29,315 colliding
+    (file, fact_id) pairs across 13% of its facts on 2026-09-08, while a tree
+    built by a fresh extraction carried none.
+    """
+    seen: set[str] = set()
+    collided = 0
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        fid = fact.get("id")
+        if not fid:
+            continue
+        if fid in seen:
+            fact["id"] = None
+            collided += 1
+        else:
+            seen.add(fid)
+    if collided:
+        assign_ids(facts, category)
+    return collided
+

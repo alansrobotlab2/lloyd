@@ -53,6 +53,7 @@ import yaml
 
 from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_KG_DB
 from app.entity_naming import looks_like_junk_entity
+from app.fact_ids import dedupe_ids
 from app.kg_store import KGStore
 from app.atomic_io import atomic_write_text
 
@@ -640,6 +641,9 @@ def _merge_fact_file_into(src: Path, dst: Path) -> None:
     merged = _merge_facts_lists(dst_fm.get("facts") or [], src_fm.get("facts") or [])
     if not merged:
         return
+    # Both sides numbered their facts from 1, so the concatenation holds each
+    # ID twice. Dedup above is by fact TEXT and cannot see it.
+    dedupe_ids(merged, dst_fm.get("category"))
     dst_fm["facts"] = merged
     dst_fm["last_updated"] = dt.datetime.now().isoformat()
     entity = dst_fm.get("entity", "")

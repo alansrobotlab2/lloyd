@@ -52,6 +52,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent.parent))
 from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB  # noqa: E402
+from app.fact_ids import dedupe_ids
 from app.atomic_io import atomic_write_text  # noqa: E402
 from app.kg_store import KGStore  # noqa: E402
 from _invocation import invocation_ledger  # noqa: E402
@@ -178,6 +179,7 @@ def execute(ops: list[dict], root: Path, st, apply: bool) -> dict:
                 if dest.exists():
                     dfm, _ = _read(dest)
                     dfm["facts"] = _merge_facts(dfm.get("facts") or [], fm.get("facts") or [])
+                    dedupe_ids(dfm["facts"], category)
                     dfm["entity"] = variant
                     atomic_write_text(dest, _dump(dfm, _body(variant, category, len(dfm["facts"]))))
                     src.unlink()
@@ -196,6 +198,7 @@ def execute(ops: list[dict], root: Path, st, apply: bool) -> dict:
                 if dest.exists():
                     dfm, _ = _read(dest)
                     dfm["facts"] = _merge_facts(dfm.get("facts") or [], mine)
+                    dedupe_ids(dfm["facts"], category)
                 else:
                     dfm = {"type": "facts", "entity": variant, "category": category, "facts": mine}
                 dfm["entity"] = variant
