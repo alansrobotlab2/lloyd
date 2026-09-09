@@ -26,6 +26,7 @@ import signal
 import sys
 import threading
 import time
+import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -166,6 +167,38 @@ def _prepare_candidate(
     return edge, context, ch
 
 
+# Consecutive LLM-call failures tolerated before the run gives up. One
+# failed call is a transient vLLM hiccup (observed sub-1%); a run of these
+# means the endpoint is gone — see _endpoint_alive.
+CONSECUTIVE_FAILURE_LIMIT = 12
+
+
+def _endpoint_alive(endpoint: str, model: str, timeout: int = 20) -> bool:
+    """Cheapest real probe of the chat endpoint: one 1-token completion.
+
+    GET /v1/models would be cheaper but `--endpoint` is an arbitrary
+    chat-completions URL, so the only probe that actually proves what this
+    runner needs is a completion against that exact URL.
+    """
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "priority": 2,
+    }
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--sample", type=int, default=None,
@@ -244,6 +277,11 @@ def main() -> int:
     ok = 0
     fail = 0
     skipped = 0
+    # Consecutive LLM failures, reset by every real classification. See the
+    # fail branch for why a streak is treated as an outage, not bad luck.
+    consec_fail = 0
+    endpoint_down = False
+    stop_check_lock = threading.Lock()
     vocab_counts: Counter = Counter()
     adjust_counts: Counter = Counter()
     total = len(candidates)
@@ -279,6 +317,18 @@ def main() -> int:
             return {"action": "fail", "edge": edge,
                     "dt_ms": (time.perf_counter() - t0) * 1000,
                     "reason": repr(exc)}
+        if (result or {}).get("verdict_adjustment") == "call_failed":
+            # classify_edge_v4 returns a synthetic `mentions @ 0.1` when the
+            # endpoint is unreachable — not a judgment. Writing that record
+            # would burn the pair: resume skips a pair when its stored
+            # context_hash matches the current one, so a fabricated row pins
+            # the pair as "already classified" and it never gets re-tried
+            # even after the facts change. On 2026-09-09 a vLLM restart
+            # mid-run burned 5,760 pairs this way (85% of the day's writes).
+            # Report it as a failure instead; failure writes nothing.
+            return {"action": "fail", "edge": edge,
+                    "dt_ms": (time.perf_counter() - t0) * 1000,
+                    "reason": "llm call failed (endpoint down?)"}
         return {"action": "classified", "edge": edge, "result": result,
                 "context_hash": ch, "dt_ms": (time.perf_counter() - t0) * 1000}
 
@@ -321,6 +371,28 @@ def main() -> int:
                           f"{edge['source'][:22]!r:<26}->"
                           f"{edge['target'][:22]!r:<26}: {out.get('reason','')}",
                           file=sys.stderr)
+                    # A dead endpoint fails every remaining edge in ~2ms, so
+                    # without this the run grinds the whole backlog at
+                    # ~1,500 'edges/s', burns 20+ minutes of wall clock, and
+                    # reports a healthy-looking pass. Probe on a run of
+                    # failures; if the endpoint really is down, drain and
+                    # stop so the next scheduled run resumes cleanly.
+                    with stop_check_lock:
+                        consec_fail += 1
+                        burst = consec_fail
+                    if burst >= CONSECUTIVE_FAILURE_LIMIT and not _stop.is_set():
+                        if _endpoint_alive(args.endpoint, args.model):
+                            with stop_check_lock:
+                                consec_fail = 0
+                        else:
+                            print(
+                                f"\n[error] {burst} consecutive LLM failures and "
+                                f"{args.endpoint} is not answering — stopping early. "
+                                "Nothing was written for these pairs; the next run "
+                                "resumes from where this one stopped.",
+                                file=sys.stderr)
+                            endpoint_down = True
+                            _stop.set()
                     continue
 
                 # action == "classified"
@@ -338,6 +410,8 @@ def main() -> int:
                     continue
 
                 ok += 1
+                with stop_check_lock:
+                    consec_fail = 0
                 vocab_counts[new_type] += 1
                 adj = result.get("verdict_adjustment", "none")
                 adjust_counts[adj] += 1
@@ -380,6 +454,9 @@ def main() -> int:
     print()
     print("=" * 72)
     print(f"Classified: {ok} ok, {fail} failed, {skipped} skipped (cache hit) in {elapsed:.1f}s")
+    if endpoint_down:
+        print(f"[stopped] endpoint {args.endpoint} went down after {fail} failed "
+              f"calls; {total - completed} candidate edges left untouched this run")
     if ok > 0:
         rate = ok / elapsed
         print(f"Rate: {rate:.2f} edges/s ({rate * 60:.0f}/min) "
