@@ -665,9 +665,27 @@ workers:
     # so this is "try as soon as the loop is free", with the gates doing the
     # throttling. That is the correct place for it: they know whether a round
     # is safe to start and a clock does not.
+    #
+    # 3600 -> 900 on 2026-09-09, which is the same argument carried to its
+    # end: if the gates decide when a round may start, the clock's only job
+    # is to ask them often enough. At an hour it did not. Round
+    # SM_20260909_185311 landed at 19:00 and settled at 19:16, and the poll
+    # was not due again until 19:50 — 34 minutes of a free loop, four
+    # confirmed items sitting in `up_next`, and nothing running. That gap is
+    # pure loss: the observation window has already closed, so there is
+    # nothing the wait is protecting. Three things stop 15 minutes from
+    # meaning four rounds an hour, and all three predate this change:
+    # `_loop_is_free` (no queue while a round is open, a promotion is under
+    # observation, or a rollback is pending, re-checked in `execute` because
+    # a queued item can sit), the `autoimplement:round` dedup key (coalesces
+    # against any queued/claimed/running row), and `max_inflight: 1`. A poll
+    # that finds any of those returns in milliseconds and logs one line. The
+    # housekeeping at the top of `enqueue_if_due` — reap, close settled,
+    # reconcile statuses — gets the same 4x, which is the half of this that
+    # runs even when no round can start.
     autoimplement:
       enabled: true
-      interval_seconds: 3600
+      interval_seconds: 900
       max_inflight: 1
       max_duration_seconds: 3600
       max_turns: 100
