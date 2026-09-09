@@ -937,3 +937,87 @@ def test_a_day_of_emission_carries_neither_defect(tmp_path):
     assert keys, "the run emitted nothing, so the assertions below are vacuous"
     assert not [k for k in keys if "truncated" in k.lower()]
     assert not [k for k in keys if k.endswith("_signature")]
+
+
+# ── live-data guard: the sweep must not survive in regenerated data ──────────
+#
+# #392: the extractor used to derive `has_errors` / `error_tools` by regexing a
+# tool's result *text*, so a `Read` of any file containing the word `Error`
+# became a "failed step", and `stats.is_error` — the harness's own answer to
+# "did this call fail", present on every tool message — was never read. The
+# mining chain is ordered "error trajectories first", so the phantom flags
+# steered skill mining at prose-reading sessions and away from real failures.
+# The derivation now reads the persisted flag (`extract-trajectories.py:355`);
+# the sweep survives only as `output_mentions_errors`, which promotes nothing.
+#
+# The unit pins above prove the CODE cannot promote the sweep. These two prove
+# the DATA on this machine was written by that code. The regression they catch
+# is the one the unit tests cannot: a change that re-introduces the old
+# derivation and then re-extracts — every unit pin stays green while the
+# buckets the miner actually reads go back to phantom failures.
+
+ERROR_REGENERATED_FROM = "2026-09-05"   # start of the window re-extracted for #392
+KEYWORD_ONLY_SOURCE = "semantic"        # the pre-fix `error_source` value
+CORROBORATED_SOURCES = mt.CORROBORATED_ERROR_SOURCES
+
+
+def _live_buckets(since=None):
+    live = _ROOT / "_pipeline" / "trajectories"
+    if not live.exists():
+        pytest.skip("no trajectories dir on this machine")
+    return [p for p in sorted(live.glob("*.jsonl"))
+            if since is None or p.stem >= since]
+
+
+def _entries(path):
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            yield json.loads(line)
+
+
+def test_no_regenerated_bucket_promotes_the_keyword_sweep():
+    """Read-only. Acceptance #392: `error_source: "semantic"`-only flags across
+    the regenerated window reach 0 — measured at 196 of 234 before the fix."""
+    offending = {}
+    for path in _live_buckets(since=ERROR_REGENERATED_FROM):
+        hits = sum(1 for entry in _entries(path)
+                   for flag in (entry.get("error_tools") or [])
+                   if flag.get("error_source") == KEYWORD_ONLY_SOURCE)
+        if hits:
+            offending[path.name] = hits
+    assert not offending, (
+        "result-text keyword matching is being promoted as a failure again "
+        f"(buckets still carrying `error_source: {KEYWORD_ONLY_SOURCE!r}`): {offending}"
+    )
+
+
+def test_the_regenerated_window_flags_only_persisted_flag_failures():
+    """Read-only. #392's reproduction clause, machine-checked: 2026-09-05
+    carried 30 `error_tools` — 7 / 5 / 18 across three sessions — against 6 real
+    `stats.is_error` failures (3 in iv5174, 2 in iv2314, 1 in ivbf4f). ~20 of
+    the 30 were `Read`/`Grep` output quoting source code that merely contains
+    the word `error` or `Warning`, and all three sessions were flagged."""
+    buckets = {p.stem: p for p in _live_buckets()}
+    path = buckets.get(ERROR_REGENERATED_FROM)
+    if path is None:
+        pytest.skip(f"{ERROR_REGENERATED_FROM} bucket not on this machine")
+    expected = {"iv5174": 3, "iv2314": 2, "ivbf4f": 1}
+    found: dict[str, int] = {}
+    uncorroborated: list[str] = []
+    for entry in _entries(path):
+        key = str(entry.get("session_key", ""))
+        flags = entry.get("error_tools") or []
+        uncorroborated += [f"{key}:{f.get('name')}={f.get('error_source')}"
+                           for f in flags
+                           if f.get("error_source") not in CORROBORATED_SOURCES]
+        if not flags and entry.get("has_errors"):
+            uncorroborated.append(f"{key}: has_errors with no error_tools")
+        for tag, want in expected.items():
+            if tag in key:
+                found[tag] = len(flags)
+    assert not uncorroborated, (
+        f"`error_tools` entries with no corroborating signal: {uncorroborated}")
+    assert found == expected, (
+        f"2026-09-05 flagged steps per session are {found}, expected {expected} "
+        "— the extractor is not deriving them from `stats.is_error`")
+    assert sum(len(e.get("error_tools") or []) for e in _entries(path)) == 6
