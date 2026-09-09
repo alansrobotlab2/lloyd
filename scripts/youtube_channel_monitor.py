@@ -1409,6 +1409,51 @@ def _parse_vllm_metrics(text):
     return out
 
 
+def newest_retrieval_baseline(baselines_dir=None):
+    """The most recent retrieval-eval run that actually carries metrics.
+
+    `eval/baselines/` holds several kinds of file — nightly runs, selfmod
+    checks, rebuild before/after pairs, per-item improve runs — and not all
+    of them have an `overall` block (a rebuild-after file is a corpus
+    description). Newest by mtime among those that do, nightly preferred
+    when it is within a day of the newest, so the number the eval quotes is
+    the one the dashboard and the selfmod gate quote.
+    """
+    import glob
+    d = baselines_dir or EVAL_BASELINES_DIR
+    candidates = []
+    for path in glob.glob(os.path.join(d, "*.json")):
+        try:
+            with open(path) as f:
+                j = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        # The eval runner writes `summary: {overall, by_category}`; the selfmod
+        # ledger re-keys the overall block to top-level `overall`. Either
+        # counts; a file with neither (a rebuild-after corpus description)
+        # does not.
+        summ = j.get("summary")
+        metrics = None
+        if isinstance(summ, dict):
+            metrics = summ.get("overall") if isinstance(summ.get("overall"), dict) else summ
+        if not metrics and isinstance(j.get("overall"), dict):
+            metrics = j["overall"]
+        if not isinstance(metrics, dict) or not metrics:
+            continue
+        candidates.append((os.path.getmtime(path), path, j, metrics))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    newest_mtime = candidates[0][0]
+    pick = next((c for c in candidates
+                 if os.path.basename(c[1]).startswith("nightly-") and newest_mtime - c[0] <= 86400),
+                candidates[0])
+    mtime, path, j, metrics = pick
+    return {"path": os.path.abspath(path), "label": j.get("label") or os.path.basename(path),
+            "measured_at": j.get("measured_at") or j.get("ran_at"),
+            "overall": metrics}
+
+
 def capture_measurements(bdir):
     """Snapshot the live numbers a digest session may need to judge a claim.
 
@@ -1419,7 +1464,6 @@ def capture_measurements(bdir):
     session Reads it. Best effort per source — a failure is recorded under
     `errors`, never raised, and the file is always written.
     """
-    import glob
     out = {"captured_at": datetime.now(timezone.utc).isoformat(), "vllm": {}, "dashboard": {},
            "retrieval_eval": {}, "errors": []}
     try:
@@ -1432,12 +1476,7 @@ def capture_measurements(bdir):
     except Exception as e:  # noqa: BLE001
         out["errors"].append(f"dashboard: {e}")
     try:
-        files = sorted(glob.glob(os.path.join(EVAL_BASELINES_DIR, "nightly-*.json")))
-        if files:
-            with open(files[-1]) as f:
-                j = json.load(f)
-            out["retrieval_eval"] = {"path": os.path.abspath(files[-1]), "measured_at": j.get("measured_at"),
-                                     "overall": j.get("overall")}
+        out["retrieval_eval"] = newest_retrieval_baseline() or {}
     except Exception as e:  # noqa: BLE001
         out["errors"].append(f"retrieval eval: {e}")
 

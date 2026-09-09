@@ -255,9 +255,15 @@ def test_measurements_capture_parses_the_counters_the_eval_needs(monkeypatch, tm
     ])
     dash = json.dumps({"vllm": {"engines": []}, "workers": {"slots": 2}, "primary": {"big": "x" * 10}})
     monkeypatch.setattr(M, "_fetch_text", lambda url, timeout=6: prom if url.endswith("/metrics") else dash)
+    import os, time
     base = tmp_path / "baselines"; base.mkdir()
-    (base / "nightly-20260908-1.json").write_text(json.dumps({"measured_at": "t1", "overall": {"entity_hit_rate": 0.5, "doc_hit_rate": 0.9}}))
-    (base / "nightly-20260909-1.json").write_text(json.dumps({"measured_at": "t2", "overall": {"entity_hit_rate": 0.55, "doc_hit_rate": 0.95}}))
+    old = base / "nightly-20260908-1.json"; old.write_text(json.dumps({"measured_at": "t1", "overall": {"entity_hit_rate": 0.5, "doc_hit_rate": 0.9}}))
+    # The runner's real shape: metrics under `summary`, time under `ran_at`.
+    new = base / "nightly-20260909-1.json"; new.write_text(json.dumps({"ran_at": "t2", "summary": {"overall": {"entity_hit_rate": 0.55, "doc_hit_rate": 0.95}, "by_category": {}}}))
+    # Newer by mtime but no metrics: a rebuild-after file is a corpus description.
+    corpus = base / "rebuild-after-20260909-2.json"; corpus.write_text(json.dumps({"label": "rebuild", "ran_at": "t3", "corpus": {"docs": 1}}))
+    now = time.time()
+    os.utime(old, (now - 7200, now - 7200)); os.utime(new, (now - 3600, now - 3600)); os.utime(corpus, (now, now))
     monkeypatch.setattr(M, "EVAL_BASELINES_DIR", str(base))
     bdir = tmp_path / "b"; bdir.mkdir()
     path, m = M.capture_measurements(str(bdir))
@@ -265,7 +271,16 @@ def test_measurements_capture_parses_the_counters_the_eval_needs(monkeypatch, tm
     assert m["vllm"]["prefix_cache_hit_rate_since_boot"] == 0.687
     assert m["vllm"]["vllm:num_requests_running"] == 5 and "vllm:other_metric" not in m["vllm"]
     assert set(m["dashboard"]) == {"vllm", "workers"}, "only the sections a verdict needs"
-    assert m["retrieval_eval"]["measured_at"] == "t2" and m["errors"] == []
+    assert m["retrieval_eval"]["measured_at"] == "t2" and m["errors"] == [], "newest *with metrics*, not newest file"
+    # A nightly within a day of the newest run is preferred over a newer
+    # ad-hoc check (it is the number the dashboard and the gate quote); once
+    # no nightly is that fresh, the newest run with metrics wins. Empty: None.
+    check = base / "selfmod-check-20260909-3.json"; check.write_text(json.dumps({"label": "check", "ran_at": "t4", "overall": {"entity_hit_rate": 0.6}}))
+    os.utime(new, (now - 200000, now - 200000))
+    assert M.newest_retrieval_baseline(str(base))["measured_at"] == "t1", "day-old nightly beats the newer check"
+    os.utime(old, (now - 200000, now - 200000))
+    assert M.newest_retrieval_baseline(str(base))["measured_at"] == "t4"
+    assert M.newest_retrieval_baseline(str(tmp_path / "empty")) is None
     summary = M.measurements_summary(m)
     assert "68.7%" in summary and "79%" in summary and "entity_hit_rate 0.55" in summary
 
