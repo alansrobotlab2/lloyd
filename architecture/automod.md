@@ -59,6 +59,37 @@ write what.
 | Promoter | `scripts/automod/promote.py` | live tree, `current.json` |
 | Guardian | `agent-services/guardian/` | live tree, `last_known_good.json`, `last_settled.json` |
 
+### 2.1 Names
+
+| Name | What it is | Where it lives |
+|---|---|---|
+| `automod` | the whole architecture: round, gate, promoter, guardian, state, tools, routes, config | `scripts/automod/`, `agent_mcp/automod.py` (`automod_*` tools), `app/routers/automod.py` (`/api/automod/*`), `automod:` in config.yaml, `~/.local/state/lloyd-automod/`, `automod/<round>` branches |
+| `autotriage` | worker source: judges one `draft` item per run and records a verdict; never opens a round | `workers/sources/autotriage.py` |
+| `autocode` | worker source: takes one `up_next` item and runs one round on it through the gate | `workers/sources/autocode.py`, dedup key `autocode:round`, tag `spawned-by-autocode` |
+| `automod-regression` | worker source: paired A/B eval after a promotion, read by the guardian's regression detector | `workers/sources/automod_regression.py` |
+| `SM_<stamp>` | a round id; the prefix predates both renames below and stays | `automod/SM_…` branches, `~/lloyd-work/SM_…` worktrees |
+
+The rule: `automod` names the machinery and anything only the machinery
+touches; a source is named for its job. A round is automod's unit of work
+whoever opened it — a human at the CLI, `autocode`, or the vault route — so
+"an automod round" is right and "an autocode round" is not.
+
+**Two earlier names survive on disk, and that is history, not drift.** The
+loop was `selfmod` (sources `backlog-selfmod` / `backlog-implement`) until
+2026-09-09 11:21, then `autoimplement` — one word for both the loop and its
+implement source, which is the ambiguity this split removes — until 23:06 the
+same day. Deliberately not rewritten either time: the ledger's event types
+(`backlog_triage`, `backlog_implement`; append-only), the `runs` and `queue`
+rows in `workers.db` under retired source names, the `spawned-by-selfmod` /
+`spawned-by-autoimplement` tags and `selfmod_landed` / `autoimplement_landed`
+markers on backlog items (`scripts/automod/backlog.py` reads all of them
+beside the current ones — a quarantine that stopped recognising an old tag
+would re-admit every item carrying it to the triage pool at once), session ids
+with the `autoimpl_` slug, and the round-id prefix. Both renames landed the
+same way: commit, bridge the old state dir with a symlink so the pinned
+guardian keeps reading, `round restart` under the guardian lease, re-stage the
+guardian, remove the symlink.
+
 **The promoter never advances last-known-good and the guardian never
 promotes.** That split is what makes LKG mean *observed healthy in
 production* rather than *passed a pre-flight*, and it guarantees a rollback
@@ -1226,6 +1257,7 @@ nobody refactors them together.
 python -m scripts.automod.round status              # state + ledger + guardian
 python -m scripts.automod.round bless               # record HEAD as last-known-good
 python -m scripts.automod.round recover             # clear BROKEN/halted, start the stack
+python -m scripts.automod.round restart --reason "…"  # pause, drain, restart mcp+backend under the lease
 python -m scripts.automod.rehearse --yes-i-mean-it  # prove rollback still works
 systemctl --user status lloyd-guardian
 /usr/bin/python3 agent-services/guardian/guardian.py --selftest
