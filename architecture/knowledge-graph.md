@@ -54,22 +54,33 @@ Not derivable, and therefore backed up: the edge graph, the alias table, merge
 history and hand-review state. Fact *content* can be re-extracted from the vault;
 the fact that two entities are related, and who decided so, cannot.
 
-### Scale (2026-09-04)
+### Scale (2026-09-08)
 
-| Metric | Count |
-|---|---|
-| Entity directories | 23,571 (977 of them junk-named; see below) |
-| Fact files | 61,394 |
-| Indexed facts | 205,573 across 23,567 registered entities |
-| Edges | 6,703 total, 4,029 active |
-| Nodes with ≥1 edge | 3,304 — 14% coverage |
-| Aliases | 3,874 (2,541 case, 1,271 punct, 61 suffix, 1 semantic) |
-| Entity kinds | 16,678 system, 4,171 unclassified, 951 concept, 703 skill, 631 doc, 425 task, 1 person |
+| Metric | Count | 2026-09-04 |
+|---|---|---|
+| Entity directories | 23,812 | 23,571 |
+| Fact files | 62,410 | 61,394 |
+| Indexed facts | 222,532 across 23,816 registered entities | 205,573 / 23,567 |
+| Edges | 18,753 total, 14,049 active | 6,703 / 4,029 |
+| Nodes with ≥1 edge | 6,564 — 28% coverage | 3,304 — 14% |
+| Aliases | 3,874 (2,541 case, 1,271 punct, 61 suffix, 1 semantic) | unchanged |
+| Entity kinds | 16,678 system, 4,171 entity, 951 concept, 703 skill, 631 doc, 425 task, 256 unclassified, 1 person | |
+| Fact files with duplicate IDs | 0 | 15,825 |
+| Provenance coverage | 7.9% (17,687) | 0.37% (755) |
 
-Two of these numbers are the work still outstanding: **provenance coverage is
-0.37%** (755 of 205,573 facts) and **15,825 fact files carry duplicate fact
-IDs**. Both are artefacts of the pre-2026-09-04 extractor and both are fixed by
-re-extraction, not by repair — see *The rebuild* below, which is mid-flight.
+The 09-04 column is not history for its own sake: everything between the two
+was **one day of the pipeline running again**. #24 had been paused since
+2026-09-04 by a `kg_rebuild.py freeze` whose rebuild never passed its gate, and
+nothing un-paused it, so the graph simply stopped growing and the only record
+of that was a `status:` line in a vault file. Edges nearly tripled and node
+coverage doubled on the first day back. Treat a flat edge count as an outage
+signal, not a quiet week.
+
+Provenance is still the outstanding one, and it only improves going forward —
+the 0.37% floor was every fact written before the extractor started recording
+`created_at` and `source_doc`, and those cannot be dated now. Duplicate fact
+IDs used to sit beside it here; they were repaired in place on 2026-09-08, see
+*The rebuild*.
 
 ---
 
@@ -252,18 +263,38 @@ question. The same threshold refuses the pairwise contradiction scan behind
 
 ## The rebuild
 
-Two defects cannot be repaired in place, only re-extracted:
+One defect cannot be repaired in place, only re-extracted:
 
 - **0.37% provenance coverage.** Facts written before 2026-09-04 have no
   `created_at` and no `source_doc`, so they cannot be dated, attributed or
-  selectively reverted.
-- **15,825 fact files with duplicate fact IDs.** The extractor restarted its
-  numbering each run, so anything that addresses a fact by ID acts on whichever
-  copy it finds first.
+  selectively reverted. Repairing this in place means inventing provenance for
+  facts whose source is unknown, which is worse than not having it.
+  Re-extraction is honest: every fact in the new tree came from a named
+  document at a known time.
 
-Repairing either in place means inventing provenance for facts whose source is
-unknown, which is worse than not having it. Re-extraction is honest: every fact
-in the new tree came from a named document at a known time.
+**Duplicate fact IDs were the second one, and they were repaired in place on
+2026-09-08.** The claim that they could not be is what kept them: an ID is a
+handle, so `assign_ids` refuses to renumber one that exists, and that reads
+like "unrepairable" until you notice it only has to renumber the *later*
+holder of a collision. The first holder keeps the ID — it is what outside
+records name, and what a reader scanning the file already lands on, so
+resolving the ambiguity that way agrees with every reference already made.
+
+`scripts/memory/repair_fact_ids.py` did 130,614 IDs across 15,841 of 62,410
+files, taking the live tree from 29,315 colliding `(file, fact_id)` pairs to
+zero with no fact text changed. It re-reads each file inside `locked_file`
+before writing, so it runs against a live system; extraction added 3,560 facts
+while it worked. `vLLM/vLLM-state.md` alone held 4,098 collisions in 4,447
+facts.
+
+The extractor's restarting numbering was only the original source, fixed
+2026-09-03 by `app.fact_ids`. The **merge** path kept minting new ones for
+another five days: `_merge_fact_file_into` and both of `revert-suffix-merges.py`'s
+merge branches concatenate two independently-numbered `facts:` lists, and the
+dedup beside them is by fact *text* and cannot see an ID. They call
+`dedupe_ids` now. Without that this repair would have been undone by the next
+entity merge — which is exactly what happened to the rebuild tree on 2026-09-08
+when a punct sweep put 356 collisions into a tree that had none.
 
 `scripts/memory/kg_rebuild.py` builds a second tree beside the live one and
 swaps it in only if a gate passes. The extraction writes to `facts-rebuild/`
@@ -371,6 +402,12 @@ which is why the gate can demand zero.
 `fact_invalidate`, `fact_relate`, `fact_relationships`, `fact_path`,
 `fact_neighbors` (`agent_mcp/facts.py`), and `vault_recall`
 (`agent_mcp/vault.py`).
+
+Three of those address a fact by `<file, id>` -- `fact_resolve`,
+`fact_invalidate` and every revert report -- so the ID has to name exactly one
+fact. `scripts/memory/repair_fact_ids.py` is the repair when it does not; see
+**The rebuild** for what it fixed and why the merge path kept re-creating the
+problem.
 
 `fact_resolve` reports by default. It defaulted to `auto_resolve=True`, so a
 call that reads like a query silently expired facts — and its contradiction
