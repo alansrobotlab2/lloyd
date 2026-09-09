@@ -6,6 +6,7 @@ Runs at 2 AM PST with the primary model for comprehensive extraction.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -502,6 +503,40 @@ class NightlyExtraction:
         return self.profile_generator.regenerate_all(workers=8)
 
 
+# ── single-instance lock ──────────────────────────────────────────────────────
+# Two extractors racing rewrite `_pipeline/content-hashes.json` and the fact
+# tree from under each other. Nothing in this script prevented that; the only
+# guard was autonomy task #24's `in_progress` status, and that guard has a hole:
+# the task's skill launches this script with `run_in_background`, so the child
+# outlives its turn, and stale-task recovery flips the task back to `up_next`
+# while the extractor is still working. A backend restart on 2026-09-08 produced
+# exactly that state — an orphaned extractor at document 19 of 1395, with the
+# task due to be freed for a second run 55 minutes later.
+#
+# flock, not a pidfile: the kernel releases it when the process dies, so a
+# `kill -9` or an OOM cannot leave a stale lock that wedges the pipeline.
+_LOCK_PATH = Path.home() / "lloyd" / "_pipeline" / "nightly_extraction.lock"
+
+
+def acquire_single_instance_lock():
+    """Return the held lock file, or None if another extractor owns it."""
+    try:
+        _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(_LOCK_PATH, "w")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return None
+    except OSError as e:
+        # A lock we cannot take is not a reason to refuse to run: this guard
+        # protects against a race, and failing closed on e.g. a read-only
+        # _pipeline would turn a rare overlap into a total outage.
+        print(f"[lock] could not acquire ({e}); continuing without it")
+        return False
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    return fh
+
+
 def main():
     print("Nightly Deep Extraction - Next-Gen Memory")
     print("=" * 50)
@@ -547,7 +582,14 @@ def main():
     )
 
     args = parser.parse_args()
-    
+
+    _lock = acquire_single_instance_lock()
+    if _lock is None:
+        print("PIPELINE_RESULT files_processed=0 facts=0 failed=0 status=locked")
+        print("Another nightly_extraction.py holds the lock; exiting without "
+              "starting a second one.")
+        return
+
     extraction = NightlyExtraction()
     
     if args.rebuild_index_only:

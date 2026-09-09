@@ -49,7 +49,7 @@ export interface QueueState {
 
 export interface MessageEntry {
   id: string
-  role: 'user' | 'assistant' | 'tool' | 'subliminal'
+  role: 'user' | 'assistant' | 'tool' | 'subliminal' | 'thinking'
   content: Array<{ type: 'text'; text: string }>
   timestamp: string
   session_key?: string
@@ -59,6 +59,20 @@ export interface MessageEntry {
    *  reasoning chunk to last. Absent on sessions that predate the field
    *  and on turns where the harness reported nothing. */
   reasoning_ms?: number
+  /** Present only on `role: 'thinking'` rows — one reasoning phase of one
+   *  agent-loop iteration, rendered on the timeline as "Thought for Xs".
+   *  The text itself rides in `reasoning`; `content` is empty, which is
+   *  what keeps these rows out of every transcript generated from the
+   *  session logs. */
+  thinking?: {
+    chars: number
+    iteration: number
+    turn_id: string
+    /** Set only on the provisional row the browser shows while a phase is
+     *  still streaming, and replaced when `thinking_done` lands with the
+     *  harness's own measurement. Never persisted. */
+    live?: boolean
+  }
   stats?: TurnStats
   context_tokens?: number
   tool_calls?: Array<{
@@ -685,7 +699,10 @@ export const api = {
       onToolProgress?: (name: string, preview: string) => void
       onTextDelta?: (text: string) => void
       onThinkingDelta?: (text: string) => void
-      onThinkingDone?: (fullText: string, durationMs?: number) => void
+      /** One reasoning phase ended. `seq` orders phases within the turn and
+       *  `iteration` names the agent-loop iteration, matching the
+       *  `role: 'thinking'` row the backend persists for the same phase. */
+      onThinkingDone?: (fullText: string, durationMs?: number, seq?: number, iteration?: number) => void
       onDone?: (response: string, sessionId: string, stats?: TurnStats, reasoning?: string, cancelled?: boolean, reasoningMs?: number) => void
       onError?: (detail: string) => void
       onAborted?: () => void
@@ -741,7 +758,7 @@ export const api = {
               case 'tool_progress': callbacks.onToolProgress?.(payload.name, payload.preview); break
               case 'text_delta': callbacks.onTextDelta?.(payload.text); break
               case 'thinking_delta': callbacks.onThinkingDelta?.(payload.text); break
-              case 'thinking_done': callbacks.onThinkingDone?.(payload.text, payload.duration_ms); break
+              case 'thinking_done': callbacks.onThinkingDone?.(payload.text, payload.duration_ms, payload.seq, payload.iteration); break
               case 'done': callbacks.onDone?.(payload.response, payload.session_id, payload.stats, payload.reasoning, payload.cancelled, payload.reasoning_ms); break
               case 'error': callbacks.onError?.(payload.detail); break
               case 'queue_state': callbacks.onQueueState?.(payload as QueueState); break

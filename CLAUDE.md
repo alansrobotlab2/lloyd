@@ -370,10 +370,11 @@ authority — these keys are not the OpenAI wire names):
   complete. `duration_ms` spans the first reasoning chunk to the last,
   not the iteration's wall clock, which also covers prefill and the
   answer written afterwards. It reaches the chat's collapsed thinking
-  panel as `reasoning_ms` on the persisted assistant message, so the
-  header reads the same on reload as it did live — the event lands
-  *after* that iteration's text, so the browser measures the delta
-  timestamps itself until the real number arrives.
+  panel as `reasoning_ms` on that phase's own `role="thinking"` row (see
+  "The thinking trace"), so the header reads the same on reload as it did
+  live — the event lands *after* that iteration's text, so the browser
+  opens the row on the first *delta* and measures the timestamps itself
+  until the real number arrives.
 - `tool_call` — `{type, call_id, name, args_json, args_dict, summary}` — tool
   invocation. `summary` is the model's own one-liner for the transcript;
   it is absent from `args_json`/`args_dict` (see "Tool-call summaries").
@@ -850,6 +851,82 @@ second caption field, and that the caption reaches MCP through `_meta` only.
 schema; the UI falls back to the bare tool name. Worth reaching for if a
 model ever starts spending its tool-call budget on the caption.
 
+### The thinking trace
+
+The harness has always emitted one `thinking_done` per agent-loop
+iteration. The router kept almost none of them: a single
+`accumulated_thinking` buffer held the current phase, each new phase
+**replaced** it (`messages.py`, not `+=`), and it only reached disk on an
+iteration that produced both tool calls *and* non-empty text. A tool-only
+iteration — the common shape — never flushed, so a forty-iteration turn
+persisted exactly one reasoning phase, the last one, and the chat could
+only ever show that. On the verification turn for this feature the first
+phase was the one that chose both tool calls and wrote no text at all:
+precisely what used to be discarded.
+
+Each phase is now its own message entry, `role="thinking"`, built by
+`app/routers/_messages_thinking.py`:
+
+```json
+{"id": "think_<turn>_<seq>", "role": "thinking", "content": [],
+ "reasoning": "…", "reasoning_ms": 11800,
+ "thinking": {"chars": 3201, "iteration": 7, "turn_id": "…"}}
+```
+
+- **Ordering is free, and that is why it is written on `thinking_done`.**
+  The loop yields that event before `_commit_tool_calls` and before the
+  `assistant_message` that flushes a text segment, so appending there
+  lands the thought ahead of the tool and text rows it produced. No
+  sorting logic; Inner Voice's timeline sorts on `timestamp` and slots it
+  in for free.
+- **The role is what keeps reasoning out of the transcripts, and it is
+  the only thing that does.** Every producer generated from a session log
+  branches on role first — the vault exporter and
+  `_build_capture_transcript` in `app/post_capture.py`,
+  `session_titles.build_transcript`, the `scripts/memory/*` renderers,
+  `scripts/extract-trajectories.py`, `session_recall`'s corpus — and none
+  has a `"thinking"` case. Measured, not assumed: change the role to
+  `assistant` and six of the seven leak; leave the role alone and filling
+  `content` leaks from none. `content` stays empty as a *second* layer,
+  against a future producer that walks content without checking role. Do
+  not read the empty content as the reason this works and conclude the
+  role is free to change. `tests/test_thinking_trace_transcripts.py` pins
+  both directions.
+- **It never re-enters the prompt.** `thinking` is not one of
+  compaction's conversation roles, so the rows are dropped before
+  `_prepare_messages_for_harness` is reached. Preserved thinking
+  (`loop._assistant_message_for_history`) is a separate, in-flight
+  mechanism and is untouched.
+- **A hard compaction discards the trace**, exactly as it already
+  discards `subliminal` rows — the rewrite sets `data["messages"]` to the
+  conversation-only set. The event log's `brain1.thinking_block_emitted`
+  stays the durable record. Called out at that site so it does not read
+  as a bug.
+- **`accumulated_thinking` is cleared when a phase is flushed**, so what
+  remains at the cancel and error paths is only a phase that streamed
+  deltas and never reached `thinking_done` — which is exactly what those
+  paths should still attach to their own message. Nothing is lost to a
+  cancel mid-reasoning, and no phase is written twice.
+- **`seq` rides on the SSE frame only when the trace is on.** That is how
+  the browser knows a row is going to be persisted for this phase;
+  without it, it withdraws its provisional row and falls back to hanging
+  the reasoning off the assistant bubble. The kill switch therefore
+  changes live rendering and reload rendering together rather than
+  leaving them disagreeing.
+
+The UI is one component — `ChatPanel`'s `ThinkingRow`, which the chat,
+the right-hand chat sidebar and the Inner Voice timeline all mount, so
+none of them needed its own work. The row must be handled **above**
+`MessageRow`'s content guard: it has no content blocks and would be
+dropped before it rendered. It opens on the first `thinking_delta` and
+ticks locally, because `thinking_done` arrives after the iteration's
+text and a row created there would sort below the answer it preceded;
+`makeThinkingTracker` holds that bookkeeping in one place because the
+file's two stream handlers are near-duplicates and drift between them is
+the standing hazard there.
+
+`harness.thinking_trace.enabled: false` restores the old behaviour.
+
 ## Code graph
 
 **Vault half, held as a patch.** The `selfmod-change-own-code` skill's
@@ -1317,6 +1394,67 @@ process**. `architecture/workers.md` is the long version.
   `config.yaml`, which would have written expanded secrets into the tree,
   flattened its comments, and dirtied it — stopping the selfmod loop. Same
   route as the Tools page now.
+
+### A budget the model cannot see is a deadline it cannot meet
+
+An autonomy run is bounded by wall clock — `asyncio.timeout(timeout_seconds)`
+in `autonomy.run_task` — and until 2026-09-08 nothing told the model that clock
+existed. The chat path has warned at 75%/90% of `max_turns` since
+`_build_state_anchor` landed, but that counts *iterations*, which is not the
+budget an autonomy task dies on, and `run_task` calls `run_query` directly and
+passed no `state_anchor` at all.
+
+The failure that produces is silent and looks like a stall. Task #80 runs
+`validate_okf.py`, which takes **2.4 seconds**, on a 300 s budget. Three
+consecutive runs on 2026-09-08 failed, all three recorded
+`(no output before timeout)`, and the task auto-disabled at `max_retries`. It
+had not hung: the run records show 39 completions and real findings in the
+partial text. The model had the answer inside the first minute, kept
+investigating — re-verifying counts against a frozen vault snapshot, diagnosing
+a bubblewrap sandbox that does not exist (nothing in `agent_mcp/builtin_bash.py`
+sandboxes anything) — and was killed without ever being asked to write it down.
+#78 and #24 died the same way in the same window.
+
+`_build_deadline_anchor(timeout)` is now passed as `RunOptions.state_anchor`,
+firing once at 70% and once at 90% of the resolved budget. Three things about
+it are load-bearing:
+
+- **It is built from `timeout`, not `declared_timeout`.** The pool clamps the
+  frontmatter value (`max_duration - _POOL_TIMEOUT_MARGIN`), so warning at 70%
+  of the *declared* budget can land after the kill.
+- **The two levels say different things.** At 70% it is "do not open new lines
+  of investigation"; at 90% it is "stop calling tools and write the report from
+  what you have". A run that spends its last seconds on one more tool call
+  reports nothing at all, and a partial report beats a failed run.
+- **Each level fires once.** The chat anchor's rule, for the same reason: a
+  warning re-sent every iteration is one the model learns to skip.
+
+Resolution is one iteration — a single tool call longer than the remaining
+budget still overruns. That is the accepted limit; the failure being fixed is
+twenty short iterations past the stopping point, not one long one.
+
+The skills matter as much as the mechanism, because a budget only helps a task
+that knows when it is done. All three had an unbounded step:
+
+- **#80** named `okf_migrate.py --apply` as the repair path without saying "not
+  from this task", and its last successful report *ended in a question*
+  ("Want me to run the migrate pass?"). Nobody answers an autonomy report, so
+  the next three runs went looking for their own permission to act.
+- **#78** Step 2 asked the model to hand-filter "unreferenced notes" — but only
+  711 of 4,448 vault files contain a wikilink at all, so the sweep returned
+  ~3,600 files, 84% of the vault. Its Step 3 was `[! -f "$file" ]`, which is not
+  valid shell: it raises `[!: command not found` every iteration and has never
+  detected a missing skill.
+- **#24** Step 1 ran `nightly_extraction.py` in the foreground. The Bash tool
+  defaults to 120 s and caps at 600 s; that script's last seven real runs took
+  545–1666 s, so the call *cannot* complete and the model improvises a `nohup`.
+  On 2026-09-08 the improvised run finished fine 40 minutes later — the task had
+  already timed out, so `files_processed=133 facts=4969 failed=1048` was reported
+  to nobody. (Those 1048 were one incident, not 1048 problems: the extractor
+  talks to the primary on :8096 and that engine restarted mid-run, so every
+  remaining document raised `Connection refused`. Unhashed files retry.)
+
+`tests/test_autonomy_budget_anchor.py` pins the anchor.
 
 Pause and drain the pool before restarting the backend
 (`POST /api/workers/pause`): a worker turn killed mid-flight logs connection

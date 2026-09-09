@@ -39,6 +39,70 @@ const thinkDuration = (ms: number): string => {
 
 type ToolCallRef = { name: string; args: string; summary: string }
 
+// Live thinking rows.
+//
+// A phase opens a provisional row on its *first delta*, not on
+// `thinking_done`: the harness only emits that once the iteration's stream
+// has ended, which is after the iteration's own text, so a row created there
+// would sort below the answer it preceded. Opening early puts it in the
+// right place and lets the duration tick; `thinking_done` then closes it in
+// place with the harness's own measurement.
+//
+// This lives in one factory because the two stream handlers below (the goal
+// path and the main path) are near-duplicates, and drifting apart is the
+// standing hazard in this file.
+function makeThinkingTracker(apply: (fn: (prev: ApiMessage[]) => ApiMessage[]) => void) {
+  let liveId: string | null = null
+  let opened = 0
+  return {
+    /** Every reasoning delta. Opens the row on the first of each phase. */
+    onDelta() {
+      if (liveId) return
+      const id = `msg_think_live_${Date.now()}_${opened++}`
+      liveId = id
+      apply(prev => [...prev, {
+        id,
+        role: 'thinking' as const,
+        content: [],
+        timestamp: new Date().toISOString(),
+        thinking: { chars: 0, iteration: 0, turn_id: '', live: true },
+      }])
+    },
+    /** Close the phase.
+     *
+     *  Returns whether the backend is persisting a `role="thinking"` row for
+     *  it, which it signals by sending `seq`. When it is not — the
+     *  `harness.thinking_trace` kill switch is off — the provisional row is
+     *  withdrawn and the caller falls back to hanging the reasoning off the
+     *  assistant bubble, so what you see live and what you see on reload
+     *  agree under either setting.
+     */
+    onDone(fullText: string, durationMs?: number, seq?: number, iteration?: number): boolean {
+      const id = liveId
+      liveId = null
+      const persisted = seq !== undefined
+      if (!id) return persisted
+      if (!persisted) {
+        apply(prev => prev.filter(m => m.id !== id))
+        return false
+      }
+      apply(prev => prev.map(m => m.id === id ? {
+        ...m,
+        reasoning: fullText,
+        reasoning_ms: durationMs ?? 0,
+        thinking: { chars: fullText.length, iteration: iteration ?? 0, turn_id: '' },
+      } : m))
+      return true
+    },
+    /** Drop any row still open — the turn ended or was cancelled mid-phase. */
+    discard() {
+      const id = liveId
+      liveId = null
+      if (id) apply(prev => prev.filter(m => m.id !== id))
+    },
+  }
+}
+
 // Preserve per-message object identity across polling refreshes so memoized
 // rows don't re-render when nothing actually changed.
 const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => {
@@ -51,7 +115,12 @@ const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => 
       const nt = n.content?.map(c => c.text).join('') || ''
       const sameStats = (p.stats == null && n.stats == null) ||
         (p.stats && n.stats && JSON.stringify(p.stats) === JSON.stringify(n.stats))
-      if (pt === nt && sameStats && p.reasoning === n.reasoning
+      // A thinking row's identity is entirely in these fields — its
+      // content is empty — so without the `thinking` comparison a live
+      // row would never be repainted by the persisted one.
+      const sameThinking = (p.thinking == null && n.thinking == null) ||
+        (p.thinking && n.thinking && JSON.stringify(p.thinking) === JSON.stringify(n.thinking))
+      if (pt === nt && sameStats && sameThinking && p.reasoning === n.reasoning
           && p.reasoning_ms === n.reasoning_ms) {
         return p
       }
@@ -159,6 +228,90 @@ function ChangedFilesFooter({ sessionId, turnId, files }: {
   )
 }
 
+// One reasoning phase, rendered where it happened rather than collapsed
+// into the answer at the end. The harness emits one `thinking_done` per
+// agent-loop iteration, so a long tool-using turn shows its thinking
+// interleaved with the tool bubbles.
+//
+// A thinking row carries no content blocks — its text is in `reasoning` —
+// so this cannot be folded into MessageRow's normal path, which drops any
+// message with no renderable text.
+function ThinkingRow({ msg, isMobile, compact, forceLeftAlign }: {
+  msg: ApiMessage
+  isMobile: boolean
+  compact: boolean
+  forceLeftAlign: boolean
+}) {
+  const live = msg.thinking?.live === true
+  // While the phase is streaming the harness has not reported a duration
+  // yet, so tick locally off the row's own timestamp; `thinking_done`
+  // replaces this row with the measured one. Only live rows pay for the
+  // interval.
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    if (!live) return
+    const id = setInterval(() => setTick(t => t + 1), 200)
+    return () => clearInterval(id)
+  }, [live])
+
+  const ms = live
+    ? Math.max(0, Date.now() - Date.parse(msg.timestamp))
+    : (msg.reasoning_ms ?? 0)
+  void tick   // the interval exists to re-read the clock above
+
+  const chars = msg.thinking?.chars ?? msg.reasoning?.length ?? 0
+  const shown = thinkDuration(ms)
+  const label = live
+    ? (shown ? `Thinking for ${shown}` : 'Thinking')
+    : (shown ? `Thought for ${shown}` : 'Thought')
+
+  const header = (
+    <>
+      <Brain className={cn('w-3 h-3 shrink-0', live && 'animate-pulse')} />
+      <span className="font-semibold shrink-0">{label}</span>
+      {!live && chars > 0 && (
+        <span className="text-muted-foreground/80 font-normal truncate min-w-0">
+          · {chars.toLocaleString()} chars
+        </span>
+      )}
+    </>
+  )
+
+  return (
+    <div className="flex gap-3">
+      {!compact && !forceLeftAlign && !isMobile && (
+        <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 overflow-hidden hidden sm:flex">
+          <div className="w-full h-full bg-purple-900/40 flex items-center justify-center">
+            <Brain className="w-3.5 h-3.5 text-purple-300" />
+          </div>
+        </div>
+      )}
+      <div className="flex-1 min-w-0">
+        <div className="rounded-xl border px-2.5 py-1.5 bg-purple-950/25 border-purple-500/20 text-foreground">
+          {/* A live row has nothing to expand yet, so it renders as a plain
+              header — a disclosure triangle that opens on an empty body
+              reads as a bug. */}
+          {live || !msg.reasoning ? (
+            <div className="flex items-center gap-1.5 text-xs text-purple-400 w-full min-w-0">
+              {header}
+            </div>
+          ) : (
+            <Collapsible>
+              <CollapsibleTrigger className="group cursor-pointer flex items-center gap-1.5 text-xs text-purple-400 hover:text-purple-300 transition-colors w-full min-w-0 text-left">
+                <ChevronRight className="w-3 h-3 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+                {header}
+              </CollapsibleTrigger>
+              <CollapsibleContent className="mt-2 p-3 bg-purple-900/10 border border-purple-500/10 rounded text-xs text-foreground/90 whitespace-pre-wrap max-h-96 overflow-y-auto">
+                {msg.reasoning}
+              </CollapsibleContent>
+            </Collapsible>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const MessageRow = memo(function MessageRow({
   msg,
   showAgentDetails,
@@ -169,6 +322,21 @@ const MessageRow = memo(function MessageRow({
   compact = false,
   sessionId = '',
 }: MessageRowProps) {
+  // Above the content guard on purpose: a thinking row's text lives in
+  // `reasoning`, not in a content block, so it has nothing for the guard
+  // below to find and would be dropped before it rendered.
+  if (msg.role === 'thinking') {
+    if (!showAgentDetails && !thinkEnabled) return null
+    return (
+      <ThinkingRow
+        msg={msg}
+        isMobile={isMobile}
+        compact={compact}
+        forceLeftAlign={forceLeftAlign}
+      />
+    )
+  }
+
   const hasContent = msg.content?.some(c => c.text?.trim())
   if (!hasContent) return null
 
@@ -865,6 +1033,7 @@ export default function ChatPanel({
       let thinkStartG = 0
       let thinkLastG = 0
       let thinkMsG = 0
+      const thinkTrackerG = makeThinkingTracker(fn => setMessages(fn))
       const thinkingMsG = () => thinkMsG || (thinkStartG ? thinkLastG - thinkStartG : 0)
       let pendingDeltaG = ''
       let rafIdG: number | null = null
@@ -874,11 +1043,9 @@ export default function ChatPanel({
         if (!delta || !assistantMsgIdG) return
         pendingDeltaG = ''
         const cid = assistantMsgIdG
-        const ct = accumulatedThinkingG
-        const cms = thinkingMsG()
         setMessages(prev => prev.map(m =>
           m.id === cid
-            ? { ...m, content: [{ type: 'text' as const, text: m.content[0].text + delta }], ...(ct && !m.reasoning ? { reasoning: ct, ...(cms ? { reasoning_ms: cms } : {}) } : {}) }
+            ? { ...m, content: [{ type: 'text' as const, text: m.content[0].text + delta }] }
             : m
         ))
       }
@@ -922,10 +1089,31 @@ export default function ChatPanel({
           thinkLastG = Date.now()
           if (!thinkStartG) thinkStartG = thinkLastG
           accumulatedThinkingG += delta
+          thinkTrackerG.onDelta()
         },
-        onThinkingDone: (fullText, durationMs) => {
-          accumulatedThinkingG = fullText || accumulatedThinkingG
-          thinkMsG = durationMs || thinkMsG
+        onThinkingDone: (fullText, durationMs, seq, iteration) => {
+          const text = fullText || accumulatedThinkingG
+          if (thinkTrackerG.onDone(text, durationMs, seq, iteration)) {
+            // The phase has its own row now. Leaving it on the accumulator
+            // would also hang it off the next assistant bubble, rendering
+            // the same thinking twice.
+            accumulatedThinkingG = ''
+            thinkStartG = 0; thinkLastG = 0; thinkMsG = 0
+          } else {
+            // Trace off: no row is coming, so the reasoning belongs on the
+            // assistant bubble as it always did. Attached here rather than
+            // on the text delta because that fires *before* thinking_done
+            // and would show a phase the reload would not have.
+            accumulatedThinkingG = text
+            thinkMsG = durationMs || thinkMsG
+            const aid = assistantMsgIdG
+            const ms = thinkingMsG()
+            if (aid) {
+              setMessages(prev => prev.map(m => m.id === aid
+                ? { ...m, reasoning: text, ...(ms ? { reasoning_ms: ms } : {}) }
+                : m))
+            }
+          }
         },
         onTextDelta: (delta) => {
           streamingStartedG = true
@@ -933,7 +1121,7 @@ export default function ChatPanel({
             segmentCounterG += 1
             const nid = `msg_${Date.now()}_resp_${segmentCounterG}`
             assistantMsgIdG = nid
-            setMessages(prev => [...prev, { id: nid, role: 'assistant', content: [{ type: 'text', text: delta }], timestamp: new Date().toISOString(), ...(accumulatedThinkingG ? { reasoning: accumulatedThinkingG, ...(thinkingMsG() ? { reasoning_ms: thinkingMsG() } : {}) } : {}) }])
+            setMessages(prev => [...prev, { id: nid, role: 'assistant', content: [{ type: 'text', text: delta }], timestamp: new Date().toISOString() }])
           } else {
             pendingDeltaG += delta
             scheduleFlushG()
@@ -942,6 +1130,7 @@ export default function ChatPanel({
         onDone: () => {
           if (settledG) return
           settledG = true
+          thinkTrackerG.discard()
           // Flush any final delta before clearing state.
           if (pendingDeltaG) flushDeltaG()
           setSending(false)
@@ -951,11 +1140,12 @@ export default function ChatPanel({
           void streamingStartedG
         },
         onError: (detail) => {
+          thinkTrackerG.discard()
           setMessages(prev => [...prev, { id: `msg_${Date.now()}_err`, role: 'assistant', content: [{ type: 'text', text: `Error: ${detail}` }], timestamp: new Date().toISOString() }])
           setSending(false)
           setThinking(false)
         },
-        onAborted: () => { setSending(false); setThinking(false) },
+        onAborted: () => { thinkTrackerG.discard(); setSending(false); setThinking(false) },
       })
       return
     }
@@ -1011,6 +1201,7 @@ export default function ChatPanel({
     let thinkStart = 0
     let thinkLast = 0
     let thinkMs = 0
+    const thinkTracker = makeThinkingTracker(fn => setMessages(fn))
     const thinkingMs = () => thinkMs || (thinkStart ? thinkLast - thinkStart : 0)
 
     // RAF-batched delta flush — per-token setState on long sessions kills the
@@ -1023,19 +1214,11 @@ export default function ChatPanel({
       if (!delta || !assistantMsgId) return
       pendingDelta = ''
       const currentId = assistantMsgId
-      const currentThinking = accumulatedThinking
-      const currentThinkingMs = thinkingMs()
       setMessages(prev => prev.map(m =>
         m.id === currentId
           ? {
               ...m,
               content: [{ type: 'text' as const, text: m.content[0].text + delta }],
-              ...(currentThinking && !m.reasoning
-                ? {
-                    reasoning: currentThinking,
-                    ...(currentThinkingMs ? { reasoning_ms: currentThinkingMs } : {}),
-                  }
-                : {}),
             }
           : m
       ))
@@ -1101,10 +1284,28 @@ export default function ChatPanel({
         thinkLast = Date.now()
         if (!thinkStart) thinkStart = thinkLast
         accumulatedThinking += delta
+        thinkTracker.onDelta()
       },
-      onThinkingDone: (fullText, durationMs) => {
-        accumulatedThinking = fullText || accumulatedThinking
-        thinkMs = durationMs || thinkMs
+      onThinkingDone: (fullText, durationMs, seq, iteration) => {
+        const text = fullText || accumulatedThinking
+        if (thinkTracker.onDone(text, durationMs, seq, iteration)) {
+          // The phase has its own row now. Leaving it on the accumulator
+          // would also hang it off the next assistant bubble, rendering
+          // the same thinking twice.
+          accumulatedThinking = ''
+          thinkStart = 0; thinkLast = 0; thinkMs = 0
+        } else {
+          // Trace off: see the goal path above.
+          accumulatedThinking = text
+          thinkMs = durationMs || thinkMs
+          const aid = assistantMsgId
+          const ms = thinkingMs()
+          if (aid) {
+            setMessages(prev => prev.map(m => m.id === aid
+              ? { ...m, reasoning: text, ...(ms ? { reasoning_ms: ms } : {}) }
+              : m))
+          }
+        }
       },
       onTextDelta: (delta) => {
         streamingStarted = true
@@ -1117,12 +1318,6 @@ export default function ChatPanel({
             role: 'assistant' as const,
             content: [{ type: 'text' as const, text: delta }],
             timestamp: new Date().toISOString(),
-            ...(accumulatedThinking
-              ? {
-                  reasoning: accumulatedThinking,
-                  ...(thinkingMs() ? { reasoning_ms: thinkingMs() } : {}),
-                }
-              : {}),
           }])
         } else {
           pendingDelta += delta
@@ -1132,6 +1327,7 @@ export default function ChatPanel({
       onDone: (response, _sid, stats, reasoning, _cancelled, reasoningMs) => {
         if (settled) return
         settled = true
+        thinkTracker.discard()
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
         const pendingFinal = pendingDelta
         pendingDelta = ''
@@ -1180,6 +1376,7 @@ export default function ChatPanel({
       onError: (detail) => {
         if (settled) return
         settled = true
+        thinkTracker.discard()
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
         pendingDelta = ''
         setMessages(prev => [...prev, {
@@ -1198,6 +1395,7 @@ export default function ChatPanel({
       onAborted: () => {
         if (settled) return
         settled = true
+        thinkTracker.discard()
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
         pendingDelta = ''
         abortControllerRef.current = null
@@ -1311,11 +1509,17 @@ export default function ChatPanel({
             {timeline.map(item => {
               if (item.kind === 'msg') {
                 const m = item.msg
-                const hasContent = m.content?.some(c => c.text?.trim())
-                if (!hasContent) return null
-                const isError = m.role === 'tool' && m.stats?.is_error === true
-                if (!showAgentDetails && m.role === 'tool' && !isError) return null
-                if (!showAgentDetails && m.role === 'subliminal') return null
+                if (m.role === 'thinking') {
+                  // Carries no content blocks, so it has to clear the
+                  // guard below before it reaches MessageRow.
+                  if (!showAgentDetails && !thinkEnabled) return null
+                } else {
+                  const hasContent = m.content?.some(c => c.text?.trim())
+                  if (!hasContent) return null
+                  const isError = m.role === 'tool' && m.stats?.is_error === true
+                  if (!showAgentDetails && m.role === 'tool' && !isError) return null
+                  if (!showAgentDetails && m.role === 'subliminal') return null
+                }
               }
               return (
                 <div key={item.key} className="grid grid-cols-[1fr_28px_1fr] gap-x-3 py-1.5">
@@ -1341,6 +1545,8 @@ export default function ChatPanel({
                         ? (item.obs.trigger === 'result' && item.obs.action === 'noop'
                             ? 'bg-emerald-400'
                             : actionStyle(item.obs.action).dot)
+                        : item.msg.role === 'thinking'
+                        ? 'bg-purple-400'
                         : 'bg-primary',
                     )} />
                   </div>

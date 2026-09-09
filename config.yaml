@@ -232,6 +232,19 @@ harness:
   # review turn would push peak context past the microcompaction trigger,
   # and microcompaction can only clear tool results. 0 disables.
   preserve_thinking_iterations: 6
+  # Thinking trace. Persist each agent-loop iteration's reasoning phase as
+  # its own `role="thinking"` session entry, so the chat timeline can show
+  # a "Thought for 11.8s" row where the thinking actually happened. Before
+  # this, one buffer held the current phase and each new phase replaced it,
+  # flushing to disk only on an iteration that produced both tool calls and
+  # text — so a forty-iteration turn persisted exactly one phase, the last.
+  # `role="thinking"` is what keeps these rows out of every transcript
+  # generated from the logs — each producer branches on role and none has
+  # a case for it — and it is also not a conversation role, so compaction
+  # drops them and they never re-enter the prompt. false restores the old
+  # behaviour.
+  thinking_trace:
+    enabled: true
   # Tool-call summaries. Adds a `summary` string parameter to every
   # advertised tool — a short phrase the model writes describing what the
   # call is doing, rendered beside the tool name in the chat and Inner

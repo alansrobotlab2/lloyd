@@ -81,6 +81,7 @@ from app.routers._messages_subliminal import (
     _detect_subliminal_sources,
     _build_subliminal_entry,
 )
+from app.routers._messages_thinking import _build_thinking_entry
 from app.routers._messages_inner_voice import (
     _session_inner_voice_enabled,
     _session_iv_evaluate_user_turns_enabled,
@@ -498,6 +499,18 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # chunk to last). Persisted beside the text so the collapsed thinking
     # panel can say how long it took on reload, not just live.
     accumulated_thinking_ms = 0
+    # Per-phase thinking rows (`role="thinking"`). `thinking_seq` orders them
+    # within the turn and keeps ids unique; `current_iteration` names the
+    # agent-loop iteration a phase belongs to. When the trace is on, a phase
+    # is flushed to its own row on `thinking_done` and the accumulator is
+    # cleared — so what remains in `accumulated_thinking` at the cancel and
+    # error paths below is only a phase that streamed deltas and never
+    # reached `thinking_done`, which is exactly what those paths should save.
+    thinking_trace = bool(
+        (CONFIG.get("harness") or {}).get("thinking_trace", {}).get("enabled", True)
+    )
+    thinking_seq = 0
+    current_iteration = 0
     tool_calls_log: list[dict] = []
     tool_results_log: list[dict] = []
     persisted_tool_ids: set[str] = set()
@@ -749,17 +762,51 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 thinking_text = evt.get("text", "")
                 accumulated_thinking = thinking_text
                 accumulated_thinking_ms = int(evt.get("duration_ms") or 0)
+                # `seq` is present only when the trace is on, which is how
+                # the browser knows a `role="thinking"` row is going to be
+                # persisted for this phase. Without it, the frontend keeps
+                # the old behaviour and hangs the reasoning off the
+                # assistant bubble — so the kill switch changes live
+                # rendering and reload rendering together, rather than
+                # leaving them disagreeing.
                 await _emit(turn, "thinking_done", {
                     "text": thinking_text,
                     "duration_ms": accumulated_thinking_ms,
+                    **({"seq": thinking_seq, "iteration": current_iteration + 1}
+                       if thinking_trace and thinking_text else {}),
                 })
                 _event_log.log_event(session_id, "brain1.thinking_block_emitted", {
                     "thinking": thinking_text,
                     "chars": len(thinking_text),
                     "duration_ms": accumulated_thinking_ms,
                 }, turn_id=turn.turn_id)
+                # Persist the phase as its own row. The loop yields this
+                # event before it commits tool calls and before the
+                # `assistant_message` that flushes a text segment, so
+                # appending here puts the thought ahead of the tool and
+                # text rows it produced — chronological order for free.
+                if thinking_trace and thinking_text:
+                    await _append_messages(session_id, [_build_thinking_entry(
+                        turn,
+                        thinking_text,
+                        accumulated_thinking_ms,
+                        thinking_seq,
+                        current_iteration + 1,
+                        datetime.now().isoformat(),
+                    )])
+                    thinking_seq += 1
+                    # Cleared because the phase is now on disk. Whatever is
+                    # left here later is an unflushed partial, which is what
+                    # the cancel and error paths still want to save.
+                    accumulated_thinking = ""
+                    accumulated_thinking_ms = 0
 
             elif etype == "assistant_message":
+                # The loop yields `thinking_done` for iteration N *before*
+                # this event, so the next phase belongs to `current_iteration
+                # + 1`. Track completions rather than reading `iteration`
+                # off the event, which the recovery path can rewind.
+                current_iteration = evt.get("iteration") or (current_iteration + 1)
                 # Capture per-iteration usage so subsequent tool_call /
                 # tool_result rows can carry their own stats block.
                 iter_usage = evt.get("usage") or {}
@@ -1457,6 +1504,15 @@ async def _slash_compact_sse(
         # contract is "messages now equals the compacted set." UI-only
         # entries that lived in the dropped block were already filtered
         # out at convo-build time, so we don't try to re-merge them.
+        #
+        # Known and deliberate: this discards `role="subliminal"` and
+        # `role="thinking"` rows for the whole session, not just the
+        # compacted block, because `convo` keeps only the conversation
+        # roles. A hard compaction therefore drops the thinking trace from
+        # the session JSON; the event log's `brain1.thinking_block_emitted`
+        # stays the durable record. Preserving UI-only rows across a
+        # compaction is a separate change — it needs a merge that puts them
+        # back at the right positions, which this swap cannot express.
         data["messages"] = new_messages
         data["last_active"] = datetime.now().isoformat()
         data["message_count"] = len(new_messages)
