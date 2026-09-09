@@ -384,9 +384,9 @@ ever set `in_progress`, and #353 landed while still `draft`. Now
 sets `in_progress` the moment its turn starts, and the item ends `done`
 (landed and settled with the acceptance `met`, or the round's outcome said
 `unnecessary`) or back in `up_next` (external, incomplete, infra, rolled
-back, reopened) — or back to `draft` when its one attempt is spent, because
-`up_next` means implement will take it and it will not until a human reopens
-it. `backlog.desired_statuses` is the one table; `reconcile_statuses` runs
+back, reopened) — or back to `draft`, tagged `needs-human`, when its one
+attempt is spent, because `up_next` means implement will take it and it will
+not until a human reopens it; the tag comes off when a reopen moves it back. `backlog.desired_statuses` is the one table; `reconcile_statuses` runs
 it on every implement poll and after every turn, so a human moving an item by
 hand is honoured until the ledger next says otherwise, and untriaged items
 parked in `up_next` — where nothing can pull them — go back to `draft`. The

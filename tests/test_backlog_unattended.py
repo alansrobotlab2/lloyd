@@ -1224,6 +1224,8 @@ def test_desired_statuses_covers_every_branch(isolated):
     assert want[713][0] == "up_next" and "offered again" in want[713][1]
     assert want[714][0] == "draft" and "spent" in want[714][1], (
         "up_next means implement will take it, and it will not; a human decides")
+    assert want[714][2] is True, "spent is the one case that needs a human"
+    assert all(len(w) == 2 for i, w in want.items() if i != 714), "nothing else is tagged"
     assert want[715][0] == "up_next" and "confirmed" in want[715][1]
     assert want[716][0] == "draft" and "not for the unattended loop" in want[716][1]
     assert want[717][0] == "draft" and "never triaged" in want[717][1]
@@ -1297,3 +1299,23 @@ def test_the_outcome_schema_includes_unnecessary_and_the_prompt_explains_it():
     from workers.sources.autoimplement import PROMPT
     assert "unnecessary" in B.IMPLEMENT_OUTCOME_SCHEMA["properties"]["acceptance"]["enum"]
     assert "`unnecessary` means the work is not needed after all" in " ".join(PROMPT.split())
+
+
+
+def test_the_needs_human_tag_rides_the_status_move_both_ways(isolated):
+    """A spent item in `draft` looks like one of 250 unread drafts; the tag is
+    the difference. It goes on with the move to draft and comes off when a
+    reopen takes the item back into the pool."""
+    write_item(isolated, 730); _confirm(730); B.set_status(730, "in_progress", "running")
+    _blocked_round(730, "SM_730", external=False)                 # spent
+    moved = B.reconcile_statuses(S.LEDGER_PATH, None)
+    assert [(m["from"], m["to"]) for m in moved] == [("in_progress", "draft")]
+    fm = B._split_frontmatter(next(isolated.glob("730-*.md")).read_text())[0]
+    assert fm["status"] == "draft" and B.NEEDS_HUMAN_TAG in fm["tags"]
+
+    B.reopen_item(730, "the blocker is gone", ledger=S.LEDGER_PATH)
+    moved = B.reconcile_statuses(S.LEDGER_PATH, None)
+    assert [(m["from"], m["to"]) for m in moved] == [("draft", "up_next")]
+    fm = B._split_frontmatter(next(isolated.glob("730-*.md")).read_text())[0]
+    assert fm["status"] == "up_next" and B.NEEDS_HUMAN_TAG not in fm["tags"]
+    assert "backlog" in fm["tags"], "other tags survive"

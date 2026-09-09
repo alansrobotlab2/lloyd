@@ -760,7 +760,16 @@ TRIAGE_POOL_STATUS = "draft"
 IMPLEMENT_POOL_STATUS = "up_next"
 
 
-def set_status(item_id: int, status: str, why: str) -> bool:
+# A spent attempt goes to `draft`, where a human looks for things that need a
+# judgment — but `draft` is also 250 items deep, and an item that needs a
+# decision looks exactly like one nobody has read yet. The tag is the
+# difference. It rides the status move both ways: on when the item goes to
+# draft as spent, off when a reopen takes it back into the pool.
+NEEDS_HUMAN_TAG = "needs-human"
+
+
+def set_status(item_id: int, status: str, why: str, *,
+               add_tags: tuple[str, ...] = (), remove_tags: tuple[str, ...] = ()) -> bool:
     """Move an open item, once, with the reason in its log. False if it is
     not open, already there, or `done` (terminal for this writer)."""
     if status not in PIPELINE_STATUSES:
@@ -776,6 +785,9 @@ def set_status(item_id: int, status: str, why: str) -> bool:
         log.append(f"**{stamp}** — {fm.get('status')} → {status}: {why}")
         fm["activity_log"] = log
         fm["status"] = status
+        tags = [str(t) for t in (fm.get("tags") or [])]
+        tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
+        fm["tags"] = tags
         fm["updated"] = stamp
         if status == "done":
             fm["completed"] = stamp
@@ -787,9 +799,11 @@ def set_status(item_id: int, status: str, why: str) -> bool:
 
 
 def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS,
-                     *, open_round_items: set[int] = frozenset()) -> dict[int, tuple[str, str]]:
-    """`{item_id: (status, why)}` — what the ledger says each open item's
-    status should be. Only items the loop has an opinion about appear.
+                     *, open_round_items: set[int] = frozenset()) -> dict[int, tuple]:
+    """`{item_id: (status, why[, needs_human])}` — what the ledger says each
+    open item's status should be. Only items the loop has an opinion about
+    appear. The optional third element marks a spent attempt: the tag goes on
+    with the move to draft and comes off with any move back into the pool.
 
     Pure, so the migration and the per-poll reconcile are the same function
     run against the same table, and so a test can read the table without a
@@ -835,7 +849,7 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                 # is a human's call (`reopen_item`). `draft` is where a human
                 # looks for things that need a judgment.
                 out[iid] = ("draft", "its one unattended attempt is spent; a human decides "
-                                     "(reopen_item to grant another)")
+                                     "(reopen_item to grant another)", True)
             else:
                 out[iid] = ("up_next", f"offered again — {verdict}: {detail[:120]}")
         elif iid in confirmed and not is_human_only(confirmed[iid].get("acceptance")):
@@ -859,10 +873,14 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
     from scripts.autoimplement import state as S
     moved: list[dict] = []
     current = {i.id: i.status for i in open_items(boards)}
-    for iid, (status, why) in desired_statuses(ledger, boards, open_round_items=open_round_items).items():
+    for iid, want in desired_statuses(ledger, boards, open_round_items=open_round_items).items():
+        status, why = want[0], want[1]
+        needs_human = bool(want[2]) if len(want) > 2 else False
         if current.get(iid) == status:
             continue
-        if set_status(iid, status, why):
+        if set_status(iid, status, why,
+                      add_tags=(NEEDS_HUMAN_TAG,) if needs_human else (),
+                      remove_tags=() if needs_human else (NEEDS_HUMAN_TAG,)):
             S.append_event({"event": "status_moved", "item_id": iid, "from": current.get(iid),
                             "to": status, "reason": why[:200]}, path=ledger)
             moved.append({"item_id": iid, "from": current.get(iid), "to": status})
