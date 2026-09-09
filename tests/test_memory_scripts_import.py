@@ -209,8 +209,8 @@ def test_import_carries_facts_aliases_edges_and_experiments(tmp_path):
     proc, rebuild = _run_import(tmp_path, carry)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     stats = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert stats == {"facts": 1, "rejected_junk": 0, "dropped": 0,
-                     "aliases": 1, "edges": 1, "experiments": 1}
+    assert stats == {"facts": 1, "already_present": 0, "rejected_junk": 0,
+                     "dropped": 0, "aliases": 1, "edges": 1, "experiments": 1}
 
     from app.kg_store import KGStore
     st = KGStore(tmp_path / "kg-rebuild.sqlite")
@@ -396,3 +396,30 @@ def test_swap_dry_run_moves_nothing(tmp_path, monkeypatch):
     live, rebuild, _, _ = _swap_world(tmp_path, m, monkeypatch)
     assert m.cmd_swap(_Args(dry_run=True)) == 0
     assert (live / "Old").exists() and rebuild.exists()
+
+
+def test_import_is_idempotent(tmp_path):
+    """`fact_add` appends with no duplicate check, so a second `import` used
+    to write every carried-over fact again. Both the dropped-fact message and
+    `swap`'s refusal tell you to re-run it, so the advice the tool printed was
+    the thing that would corrupt the tree it was protecting."""
+    facts = [{"entity": "Alan", "category": "preference", "fact": "prefers terse reports",
+              "confidence": 0.95, "provenance": "STATED", "source_doc": "sessions/abc.json",
+              "valid_at": None}]
+    carry = _carryover(tmp_path, facts)
+
+    first, rebuild = _run_import(tmp_path, carry)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert _json.loads(first.stdout.strip().splitlines()[-1])["facts"] == 1
+
+    second, _ = _run_import(tmp_path, carry)
+    assert second.returncode == 0, second.stdout + second.stderr
+    again = _json.loads(second.stdout.strip().splitlines()[-1])
+    assert again["facts"] == 0 and again["already_present"] == 1
+
+    from app.kg_store import KGStore
+    st = KGStore(tmp_path / "kg-rebuild.sqlite")
+    try:
+        assert len(st.facts_idx.for_entity("Alan")) == 1
+    finally:
+        st.close()

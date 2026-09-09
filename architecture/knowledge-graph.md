@@ -276,10 +276,21 @@ system keeps serving throughout. Every step appends to `rebuild-state.json`;
 | `freeze` | Pauses #24, #48 and #74, sets `knowledge_graph.write_enabled: false`, backs up the store with `Connection.backup()`, runs the eval and records the baseline the gate is measured against. `--keep-writes` leaves fact writes on |
 | `export` | Collects what re-extraction cannot reproduce: STATED/INFERRED/AMBIGUOUS facts and anything sourced from a session, semantic/suffix/manual aliases, `facts/Experiments/**` verbatim, judge verdicts and merge history, and stated edges |
 | `extract` | Runs `nightly_extraction --full` against the rebuild tree with a content-hash index of its own, or it would skip every file the live tree already extracted |
-| `import` | Replays the carry-over into the new tree through `fact_add`, so it gets the new ID scheme |
-| `gate` | Every check, as JSON. Exit 0 only if all pass |
-| `swap` | Two renames and a reindex. The old tree becomes `facts-quarantine-<ts>`, the old store `kg-quarantine-<ts>.sqlite`; re-enables writes |
-| `rollback` | Reverses both renames |
+| `import` | Replays the carry-over into the new tree through `fact_add`, so it gets the new ID scheme. Skips a fact already present, so the re-run its own failure message tells you to do adds nothing twice |
+| `gate` | Every check, as JSON. Exit 0 only if all pass. `--skip-eval` runs the structural half and deliberately does **not** record a verdict `swap` will accept |
+| `swap` | Two renames and a reindex. The old tree becomes `facts-quarantine-<ts>`, the old store `kg-quarantine-<ts>.sqlite`; re-enables writes and un-pauses what `freeze` paused |
+| `rollback` | Reverses both renames, and un-pauses what `freeze` paused |
+| `unfreeze` | Restores those tasks without swapping or rolling back — the way out of an abandoned rebuild |
+
+**A freeze has to be able to end by itself.** `freeze` records what it paused
+and, until 2026-09-08, nothing read that list back: `swap` printed
+`Then un-pause #24, #48, #74.` — hardcoded to one run's ids — and `rollback`
+said nothing at all. So the only exit ran through a line printed on the one
+outcome that does not happen when a rebuild goes wrong. The 2026-09-03
+rebuild's gate failed, the swap never ran, and #24 and #74 stayed paused for
+four days with no reason recorded in their own task files. Fact extraction is
+downstream of #24, so the whole graph stopped growing and the only thing that
+said so was a `status:` line in a vault file nobody had cause to read.
 
 `extract` is resumable and multi-pass. A failed document is deliberately never
 content-hashed, so a re-run retries exactly the failures; `--passes` (default 3)

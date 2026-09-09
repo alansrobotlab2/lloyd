@@ -177,6 +177,46 @@ def _text_hash(text: str) -> str:
     return hashlib.sha256((text or "").strip().lower().encode("utf-8")).hexdigest()[:16]
 
 
+def _carryover_entities(st, entity: str) -> tuple:
+    """The names a carried-over fact may be stored under.
+
+    `fact_add` runs the entity through `_resolve_entity`, so the name a fact
+    is exported under is not always the name it lands under.
+    """
+    names = [entity]
+    try:
+        canonical = st.aliases.resolve(entity)
+        if canonical and canonical not in names:
+            names.append(canonical)
+    except Exception:
+        pass
+    return tuple(names)
+
+
+def _carryover_present(st, fact: dict) -> bool:
+    """Whether this carried-over fact is already in the target store.
+
+    Matched on the fact's text hash and its entity **case-insensitively**.
+    Case is the whole reason this is not an equality test: a rebuild builds
+    its entity registry from extraction, and the export deliberately leaves
+    behind the case and punctuation aliases on the grounds that the
+    resolution sweep re-derives them. So the same fact exported under
+    `AutoResearch` lands under `autoresearch`, and `QMD` under `qmd`. On the
+    2026-09-03 rebuild that read as 21 carried-over facts missing from an
+    import that dropped none, and the gate that guards the swap failed on
+    facts that were sitting right there under another capitalisation.
+    Folding case is what the alias layer exists to do; doing it here keeps
+    the check honest until the sweep has run.
+    """
+    names = _carryover_entities(st, fact.get("entity", ""))
+    lowered = tuple(n.lower() for n in names)
+    rows = st._query(
+        "SELECT 1 FROM facts_idx WHERE text_hash=? AND LOWER(entity) IN (%s) LIMIT 1"
+        % ",".join("?" * len(lowered)),
+        (_text_hash(fact.get("fact") or ""), *lowered))
+    return bool(rows)
+
+
 def _junk_named(facts: list) -> int:
     """Carry-over facts whose entity the junk predicate legitimately refuses."""
     from app.entity_naming import looks_like_junk_entity
@@ -428,8 +468,8 @@ def cmd_import_worker(args) -> int:
         return 2
 
     st = store()
-    stats = {"facts": 0, "rejected_junk": 0, "dropped": 0, "aliases": 0,
-             "edges": 0, "experiments": 0}
+    stats = {"facts": 0, "already_present": 0, "rejected_junk": 0, "dropped": 0,
+             "aliases": 0, "edges": 0, "experiments": 0}
     dropped: list = []
 
     # Facts go back through fact_add so they get the new ID scheme and land in
@@ -440,6 +480,14 @@ def cmd_import_worker(args) -> int:
     # is a fact about to be lost, and fails the import rather than becoming a
     # line in a stats dict.
     for f in json.loads((carry / "facts.json").read_text()):
+        # `fact_add` appends unconditionally -- it has no duplicate check --
+        # so without this, re-running `import` writes every carried-over fact
+        # a second time. Both the dropped-fact message below and `swap`'s
+        # refusal tell you to re-run it, so the advice this tool prints was
+        # the thing that would corrupt the tree.
+        if _carryover_present(st, f):
+            stats["already_present"] += 1
+            continue
         res = facts_mod._fact_add({
             "entity": f["entity"], "category": f["category"], "fact": f["fact"],
             "confidence": f.get("confidence") or 0.9,
@@ -582,13 +630,7 @@ def cmd_gate(args) -> int:
     carry = Path(state.get("carryover") or "")
     if (carry / "facts.json").is_file():
         want = json.loads((carry / "facts.json").read_text())
-        have = 0
-        for f in want:
-            rows = st._query(
-                "SELECT 1 FROM facts_idx WHERE entity=? AND text_hash=? LIMIT 1",
-                (f["entity"], _text_hash(f["fact"] or "")))
-            if rows:
-                have += 1
+        have = sum(1 for f in want if _carryover_present(st, f))
         junk = len(want) - have
         record("carryover_facts", have + _junk_named(want) >= len(want),
                f"{have}/{len(want)}", "all present",
@@ -620,11 +662,22 @@ def cmd_gate(args) -> int:
                "the gate cannot pass without a retrieval measurement")
 
     results["pass"] = all(c["pass"] for c in results["checks"].values())
+    # `--skip-eval` runs the structural checks and none of the retrieval ones,
+    # so its verdict may not be the one `swap` reads. Without this, skipping
+    # the eval writes `gate: true` into state and the next `swap` proceeds on
+    # structural evidence alone -- which is the opposite of what skipping a
+    # check should do, and the branch below already refuses to pass a run
+    # whose eval merely failed to produce a result. A preview stays a preview.
+    results["skipped_eval"] = bool(args.skip_eval)
+    authorises_swap = results["pass"] and not args.skip_eval
     out = run_dir / "gate.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(results, indent=2, default=str))
-    save_state(gate=results["pass"], gate_file=str(out))
-    print(f"\ngate: {'PASS' if results['pass'] else 'FAIL'}  ->  {out}")
+    save_state(gate=authorises_swap, gate_file=str(out))
+    verdict = "PASS" if results["pass"] else "FAIL"
+    if args.skip_eval:
+        verdict += " (structural only; --skip-eval does not authorise a swap)"
+    print(f"\ngate: {verdict}  ->  {out}")
     return 0 if results["pass"] else 1
 
 
@@ -711,7 +764,7 @@ def cmd_swap(args) -> int:
     print("\nRestart the backend and the aggregator when idle:")
     print("  supervisorctl -c agent-services/supervisor/supervisord.conf "
           "restart lloyd-mc:lloyd-mcp lloyd-mc:lloyd-backend")
-    print("Then un-pause #24, #48, #74.")
+    _unfreeze(state)
     return 0
 
 
@@ -729,8 +782,57 @@ def cmd_rollback(args) -> int:
         if VAULT_KG_DB.exists():
             VAULT_KG_DB.rename(VAULT_DERIVED_ROOT / f"kg-rolledback-{ts}.sqlite")
         old_db.rename(VAULT_KG_DB)
+    _unfreeze(state)
     save_state(rolled_back_at=_now())
     print("rolled back. Restart the backend and the aggregator.")
+    return 0
+
+
+def _unfreeze(state: dict) -> list:
+    """Restore the tasks `freeze` paused, each to the status it recorded.
+
+    `freeze` writes this list and, until 2026-09-08, nothing ever read it.
+    `swap` printed a hardcoded "Then un-pause #24, #48, #74." for a human to
+    act on and `rollback` said nothing at all -- so the only path out of a
+    freeze ran through a line that is printed once, on the one outcome that
+    did not happen. The 2026-09-03 rebuild's gate never passed, the swap
+    never ran, and #24 and #74 stayed paused for four days with no reason
+    recorded in their own files. A freeze has to be able to end by itself.
+    """
+    import re
+
+    restored = []
+    for entry in state.get("paused") or []:
+        path = Path(entry.get("path") or "")
+        was = entry.get("was") or "up_next"
+        # `freeze` also records tasks it found already paused, so that it can
+        # leave them that way. Restoring those to "paused" is a no-op worth
+        # skipping rather than a write.
+        if was == "paused" or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        new, n = re.subn(r"^status: paused$", f"status: {was}", text, count=1, flags=re.M)
+        if not n:
+            continue
+        path.write_text(new, encoding="utf-8")
+        restored.append({"task": entry.get("task"), "restored_to": was})
+        print(f"  un-paused #{entry.get('task')} -> {was}")
+    return restored
+
+
+def cmd_unfreeze(args) -> int:
+    """Undo `freeze`'s pauses without swapping or rolling back.
+
+    The escape hatch for an abandoned rebuild: the tree stays parked and the
+    scheduled jobs come back.
+    """
+    state = load_state()
+    if not (state.get("paused") or []):
+        print("nothing recorded as paused by freeze")
+        return 0
+    restored = _unfreeze(state)
+    save_state(unfrozen_at=_now(), unfroze=restored)
+    print(f"un-paused {len(restored)} task(s)")
     return 0
 
 
@@ -778,6 +880,7 @@ def main() -> int:
     p.add_argument("--force", action="store_true")
     p.set_defaults(fn=cmd_swap)
     sub.add_parser("rollback").set_defaults(fn=cmd_rollback)
+    sub.add_parser("unfreeze").set_defaults(fn=cmd_unfreeze)
     sub.add_parser("status").set_defaults(fn=cmd_status)
 
     args = ap.parse_args()
