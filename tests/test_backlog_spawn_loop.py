@@ -234,7 +234,7 @@ def test_both_prompts_state_the_cap():
     impl = I.PROMPT.format(item_id=9, status="draft", priority="low", name="n", body="b",
                            triaged_ago="an hour ago", surface="code", check="c",
                            evidence="e", acceptance="a", spawn_cap=I.SPAWN_CAP,
-                           round_label="item9")
+                           round_label="item9", reoffer="")
     assert f"File at most {I.SPAWN_CAP}" in impl
     assert "Further findings from implementing #9" in impl
 
@@ -252,7 +252,7 @@ def test_the_overflow_item_keeps_the_anti_229_property():
     impl = I.PROMPT.format(item_id=9, status="draft", priority="low", name="n", body="b",
                            triaged_ago="an hour ago", surface="code", check="c",
                            evidence="e", acceptance="a", spawn_cap=I.SPAWN_CAP,
-                           round_label="item9")
+                           round_label="item9", reoffer="")
     assert "Nothing is dropped; the fan-out is." in impl
     # The shape that produced 14 items and no landed code on 2026-09-08.
     assert "while *not* landing a change" in impl

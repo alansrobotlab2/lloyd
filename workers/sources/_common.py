@@ -416,7 +416,13 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
         timeout_seconds = turn_timeout_for(source)
     session_id = new_worker_session(title=title, source=source, inner_voice=inner_voice)
     payload = {"session_id": session_id, "text": prompt, "model": "primary",
-               "priority": int(priority), "max_turns": int(max_turns)}
+               "priority": int(priority), "max_turns": int(max_turns),
+               # The same wall clock this function enforces below, announced to
+               # the model. Iterations are not the budget a worker turn dies on:
+               # selfmod round SM_20260909_054722 was killed here with 32 of its
+               # 100 iterations unspent, fourteen seconds after committing the
+               # work and one `selfmod_gate` call short of landing it.
+               "deadline_seconds": float(timeout_seconds)}
     if extra_disallowed:
         payload["extra_disallowed"] = list(extra_disallowed)
     if final_schema:

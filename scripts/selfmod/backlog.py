@@ -327,68 +327,184 @@ def human_only_ids(ledger: Path) -> dict[int, str]:
             if is_human_only(ev.get("acceptance"))}
 
 
-# An externally-blocked round costs the item nothing, but it cannot cost
-# nothing forever: `select_confirmed` takes the oldest ready item, so an item
-# re-offered without bound would be re-picked every round for as long as the
-# tree stayed red, starving every item behind it. Three free re-offers, then it
-# is spent like any other attempt — by which point a red tree has survived four
-# rounds and is an incident nobody is handling, not a blip to keep retrying.
-EXTERNAL_RETRY_CAP = 3
+# One attempt per item is the rule. What the rule was missing is that some
+# rounds never reach a verdict at all — and a round that was refused at the
+# door, ran out of clock, or never started is not a judgment on the item.
+# Triage has recorded budget exhaustion as `incomplete` since #229 ("the item
+# comes back once"); implement never got the same rule, and paid for it six
+# times in seventeen attempts.
+#
+# Each re-offer is capped, because `select_confirmed` takes the OLDEST ready
+# item: an uncapped re-offer is re-picked every round for as long as the cause
+# persists, starving everything behind it.
+EXTERNAL_RETRY_CAP = 3       # a red tree surviving four rounds is an incident
+INCOMPLETE_RETRY_CAP = 1     # triage's rule: it comes back once
+ROLLED_BACK_RETRY_CAP = 1    # the work is gone with the branch; one redo
+
+# Stop reasons that mean the turn ran out of room rather than reaching a
+# conclusion. #446 committed 757 lines and was killed by the wall clock
+# fourteen seconds before its `selfmod_gate` call.
+INCOMPLETE_STOP_REASONS = {"turn_timeout", "max_turns"}
+
+
+def _last_gate_per_round(ledger: Path) -> dict[str, dict]:
+    """The gate event that ENDED each round's most recent gate run.
+
+    The ladder short-circuits, so the last event of a failed run is the failing
+    rung and the last event of a passing run is `drill`. Reading the last event
+    rather than a named rung is what lets a re-gate clear an exemption its
+    first attempt earned, in either direction.
+    """
+    last: dict[str, dict] = {}
+    for d in _ledger_events(ledger, "gate", require_item=False):
+        rid = str(d.get("round_id") or "")
+        if rid:
+            last[rid] = d
+    return last
 
 
 def externally_blocked_rounds(ledger: Path) -> set[str]:
-    """Rounds whose `tests` rung failed on breakage that predates them.
+    """Rounds whose final gate attempt failed on a condition they did not cause.
 
-    Keyed on the LAST tests rung per round, because a round that is gated,
-    fixed and re-gated must be judged on its final attempt: an external
-    failure followed by a real one is a round that broke something.
+    Two rungs set the flag, and both are about the state of the *live tree*
+    rather than the diff: `tests` when every failure reproduces at the round's
+    base, `preflight` when the live tree is dirty or HEAD has moved under it.
+    An empty diff ("no changes to promote") is a preflight failure that IS the
+    round's own, and deliberately does not carry the flag.
     """
-    last: dict[str, bool] = {}
-    for d in _ledger_events(ledger, "gate", require_item=False):
-        if d.get("rung") != "tests":
+    return {rid for rid, ev in _last_gate_per_round(ledger).items()
+            if not ev.get("ok") and ev.get("external_blocker")}
+
+
+def rolled_back_rounds(ledger: Path) -> set[str]:
+    """Rounds that promoted and were then reverted by the guardian.
+
+    Nothing else joins these two facts: the promotion carries the round id and
+    the rollback carries only the commit, so an unattended round that landed
+    and was reverted spent its item and left no trace on it. Every rollback
+    this loop has performed has been a false positive, which is the argument
+    for re-offering rather than against it — and the landing deletes the
+    branch, so the redo really is a redo. The guardian tag holds the tree.
+    """
+    reverted = {str(d.get("commit") or "") for d in
+                _ledger_events(ledger, "rollback_succeeded", require_item=False)}
+    reverted.discard("")
+    return {str(d.get("round_id") or "") for d in
+            _ledger_events(ledger, "promoted", require_item=False)
+            if str(d.get("commit") or "") in reverted and d.get("round_id")}
+
+
+def _never_ran(ev: dict) -> bool:
+    """A `finished` event from a turn that never reported completion.
+
+    `run_prompt_in_session` returns `stop_reason=None` when the stream closed
+    without a `done` frame — the backend was down, the connection dropped.
+    #392's session holds one user message and nothing else; it was recorded as
+    that item's one attempt one second after it started. Newer runs record
+    `infra_failed` outright, but this reads the same fact off the old shape so
+    history heals without a backfill.
+    """
+    # The key must be PRESENT and null, not merely absent. `execute` always
+    # records `stop_reason`, so an explicit null is the producer saying the
+    # stream closed without a `done` frame; a missing key is some other writer
+    # whose shape we should not be interpreting. Absence falls through to
+    # `spent`, which is the status quo and the safe direction.
+    return ("stop_reason" in ev and ev["stop_reason"] is None
+            and not ev.get("num_turns"))
+
+
+def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
+    """`{item_id: (verdict, detail)}` for every item an implement turn touched.
+
+    `verdict` is one of `spent`, `reopened`, `external`, `incomplete`,
+    `infra`, `rolled_back` — where everything but `spent` means the item is
+    offered again. Exposed rather than folded into `implemented_ids` because
+    the reason is worth putting in front of the next round: a re-offer whose
+    branch still exists, or whose work was reverted, is not a fresh start.
+    """
+    latest: dict[int, dict] = {}
+    attempts: dict[int, int] = {}
+    for d in _ledger_events(ledger, "backlog_implement"):
+        iid = int(d["item_id"])
+        latest[iid] = d
+        if str(d.get("phase") or "") in ("finished", "infra_failed"):
+            attempts[iid] = attempts.get(iid, 0) + 1
+
+    blocked = externally_blocked_rounds(ledger)
+    reverted = rolled_back_rounds(ledger)
+    promoted = {str(d.get("round_id") or "") for d in
+                _ledger_events(ledger, "promoted", require_item=False)}
+    out: dict[int, tuple[str, str]] = {}
+    for iid, ev in latest.items():
+        phase = str(ev.get("phase") or "")
+        rid = str(ev.get("round_id") or "")
+        n = attempts.get(iid, 0)
+        if phase == "reopened":
+            out[iid] = ("reopened", str(ev.get("reason") or "reopened by a human"))
             continue
-        rid = str(d.get("round_id") or "")
-        if rid:
-            last[rid] = bool(d.get("external_blocker"))
-    return {rid for rid, external in last.items() if external}
+        # A promotion is a verdict however the turn ended. #278 died at
+        # `max_turns` and the observer's ambient follow-up gated and landed it
+        # anyway; without this the incomplete rule below would re-offer a
+        # change that is already in `main` and the next round would redo it.
+        # Only a rollback reopens a landed item, and that is the next branch.
+        if rid and rid in promoted and rid not in reverted:
+            out[iid] = ("spent", "")
+            continue
+        if rid and rid in reverted and n <= ROLLED_BACK_RETRY_CAP:
+            out[iid] = ("rolled_back",
+                        f"round {rid} landed and the guardian reverted it; the branch "
+                        f"was deleted at landing, so the tree is in the guardian tag")
+            continue
+        if phase == "infra_failed" or (phase == "finished" and _never_ran(ev)):
+            if n <= 1 + INCOMPLETE_RETRY_CAP:
+                errs = "; ".join(str(e)[:120] for e in (ev.get("errors") or [])[:2])
+                out[iid] = ("infra", f"the turn never reported completion{': ' + errs if errs else ''}")
+                continue
+        if (phase == "finished" and str(ev.get("stop_reason") or "") in INCOMPLETE_STOP_REASONS
+                and n <= 1 + INCOMPLETE_RETRY_CAP):
+            out[iid] = ("incomplete",
+                        f"the turn ran out of {'clock' if ev.get('stop_reason') == 'turn_timeout' else 'iterations'} "
+                        f"before reaching a verdict"
+                        + (f"; its work is on branch `selfmod/{rid}`" if rid else ""))
+            continue
+        if rid and rid in blocked and n <= EXTERNAL_RETRY_CAP:
+            g = _last_gate_per_round(ledger).get(rid) or {}
+            out[iid] = ("external",
+                        f"round {rid} was blocked at the `{g.get('rung')}` rung by a condition "
+                        f"it did not cause; its work is on branch `selfmod/{rid}`")
+            continue
+        out[iid] = ("spent", "")
+    return out
 
 
 def implemented_ids(ledger: Path) -> set[int]:
-    """Items an implementation turn has already been run for, whatever it did —
-    with two exemptions.
+    """Items whose one unattended attempt is spent.
 
-    A human may reopen one (`reopen_item`), in which case the latest event is
-    `reopened`. One attempt per item is the rule; a second is a human's call,
-    and this is how the human makes it.
+    An attempt is spent when a round reached a verdict on the change — it
+    landed, or the gate judged the diff and refused it. Everything else is not
+    a verdict and is offered again, bounded: see `implement_outcomes`.
 
-    And a round whose gate failed on breakage it did not write never spent the
-    attempt at all. On 2026-09-08 three rounds aborted on the same three
-    pre-existing test failures — #361, #370 and #376 — and all three items were
-    marked attempted and became unreachable; the fix (`8138f1c`) landed seven
-    hours after the last of them and nothing went back for any of them. Every
-    one of those rounds had *proved* the failures predate it, in prose, in a
-    report read once. `gate.rung_tests` now records that finding as a field, and
-    this is what reads it. Blocking the promotion was always right; spending the
-    item was not.
+    On 2026-09-08 three rounds aborted on pre-existing test failures (#361,
+    #370, #376), one was refused because an unrelated uncommitted edit sat in
+    the production tree (#447), one was killed by the wall clock fourteen
+    seconds before it would have gated (#446), and one was recorded as an
+    attempt a second after starting because the backend was down (#392). Six
+    of seventeen attempts, none of them a judgment on the item, all six
+    unreachable afterwards.
     """
-    latest: dict[int, tuple[str, str]] = {}
-    finished: dict[int, int] = {}
-    for d in _ledger_events(ledger, "backlog_implement"):
-        iid = int(d["item_id"])
-        phase = str(d.get("phase") or "")
-        latest[iid] = (phase, str(d.get("round_id") or ""))
-        if phase == "finished":
-            finished[iid] = finished.get(iid, 0) + 1
-    blocked = externally_blocked_rounds(ledger)
-    out: set[int] = set()
-    for iid, (phase, round_id) in latest.items():
-        if phase == "reopened":
-            continue
-        if (round_id and round_id in blocked
-                and finished.get(iid, 0) <= EXTERNAL_RETRY_CAP):
-            continue
-        out.add(iid)
-    return out
+    return {iid for iid, (verdict, _) in implement_outcomes(ledger).items()
+            if verdict == "spent"}
+
+
+def reoffer_reason(ledger: Path, item_id: int) -> str:
+    """Why this item is being offered again, for the round that gets it.
+
+    A re-offer is not a fresh start: the branch may still hold the work, or a
+    landing may have been reverted. A round told nothing re-derives it, or
+    worse, redoes it.
+    """
+    verdict, detail = implement_outcomes(ledger).get(int(item_id), ("", ""))
+    return "" if verdict in ("", "spent") else f"{verdict}: {detail}"
 
 
 def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dict:

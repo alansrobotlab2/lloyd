@@ -486,6 +486,68 @@ Only the `tests` rung grants it. `preflight` failing on a dirty live tree is
 also not the round's fault, but it is cheap and re-runnable, and widening an
 exemption is how it becomes an open door.
 
+### 4.2c A round that never reached a verdict has not spent the item
+
+`implemented_ids` counted any finished round as the item's one attempt,
+"whatever it did". Across the loop's first seventeen unattended attempts,
+**six** were spent by something that was never a judgment on the change:
+
+| Item | What ended it | Work left behind |
+|---|---|---|
+| #361, #370, #376 | pre-existing test failures (§4.2b) | 3 branches |
+| #446 | wall clock, 14 s and one `selfmod_gate` call short of landing | 757 lines |
+| #447 | `preflight: live tree is dirty` — an unrelated uncommitted edit in production | 587 lines |
+| #392 | the turn never ran; the backend was down | none |
+
+`implement_outcomes` classifies each attempt instead, and only `spent` closes
+the item. Everything else is offered again, each bounded by its own cap
+because `select_confirmed` takes the *oldest* ready item — an uncapped
+re-offer is re-picked every round for as long as the cause persists, starving
+everything behind it.
+
+- **`incomplete`** — `turn_timeout` or `max_turns` on a round that did not
+  promote. Triage has recorded budget exhaustion this way since #229 ("the
+  item comes back once"); implement never got the rule. #446 is why: it
+  committed 757 lines at 06:43:36 and was killed at 06:43:50, with 32 of its
+  100 iterations unspent.
+- **`infra`** — the turn never reported completion. `run_prompt_in_session`
+  returns `stop_reason=None` when the stream closes without a `done` frame.
+  #392 was recorded as its item's one attempt *one second* after starting, on
+  a session holding a single user message, while the guardian was alerting
+  that supervisord was unreachable. New runs record `infra_failed`; the read
+  path also recognises the old shape, so history heals without a backfill —
+  but only an **explicit null**, never a missing key, so a writer whose shape
+  we do not know falls through to `spent`.
+- **`external`** — §4.2b, now including preflight's two live-tree refusals.
+- **`rolled_back`** — the round landed and the guardian reverted it. Nothing
+  joined those two facts before: the promotion carries the round id, the
+  rollback carries only the commit. Every rollback this loop has performed has
+  been a false positive, which is the argument for re-offering rather than
+  against it. The landing deletes the branch, so the redo really is a redo and
+  the detail says where the tree is (the `guardian-broken-*` tag).
+
+**A promotion is a verdict however the turn ended,** and that check runs
+first. #278 died at `max_turns` and the observer's ambient follow-up gated and
+landed it anyway; without the short-circuit the `incomplete` rule would
+re-offer a change already in `main`.
+
+The reason travels: `reoffer_reason` puts it at the top of the next round's
+prompt, because a re-offer is not a fresh start — the branch may still hold
+the work. (#446's and #447's both still rebase onto `main` cleanly.)
+
+### 4.2d A worker turn can see its wall clock
+
+`agent.max_turns` has been warned about since `_build_state_anchor`, but
+iterations are not the budget unattended work dies on. `autonomy.run_task`
+got a deadline anchor on 2026-09-08 after #80, #78 and #24 each died holding
+an answer they were never asked to write down; #446 is the same failure
+against the selfmod worker's clock. `app.deadline_anchor` is now the one
+definition — autonomy delegates to it, and `/api/message/stream` takes a
+`deadline_seconds` the anchor announces at 70% and 90%.
+
+Only a caller that *enforces* a clock sends one. A chat turn has none, and
+telling a human's turn it has 900 seconds left would be a lie.
+
 ### 4.3 Rungs that run candidate code run it against scratch state
 
 Only the canary redirected `LLOYD_SELFMOD_STATE`. The static, tests and venv

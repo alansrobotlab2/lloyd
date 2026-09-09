@@ -401,8 +401,17 @@ class Gate:
             return False, f"promotions halted: {S.HALTED_PATH}", {}
         if S.is_broken():
             return False, f"guardian is in a BROKEN state: {S.BROKEN_PATH}", {}
+        # Both of the next two refusals are about the state of the LIVE TREE,
+        # not about the diff under test, so they carry `external_blocker` and
+        # do not spend the item's one attempt (`backlog.implement_outcomes`).
+        # A round lives an hour; an uncommitted edit in production can outlast
+        # it, and #447 lost 587 lines waiting for one to clear. "No changes to
+        # promote", further down, is the round's own and carries no flag.
         if not W.is_clean(self.live):
-            return False, "live tree is dirty — refusing to gate against a moving base", {}
+            paths = W.dirty_paths(self.live)
+            return False, ("live tree is dirty — refusing to gate against a moving base; "
+                           f"uncommitted: {paths}"), {"external_blocker": True,
+                                                      "dirty_paths": paths}
 
         head = W.head(self.worktree)
         if not head:
@@ -411,7 +420,8 @@ class Gate:
 
         live_head = _run(["git", "-C", str(self.live), "rev-parse", "HEAD"]).stdout.strip()
         if live_head != self.base:
-            return False, f"live HEAD moved: {live_head[:8]} != base {self.base[:8]}", {}
+            return False, (f"live HEAD moved: {live_head[:8]} != base {self.base[:8]} — "
+                           "something landed underneath this round"), {"external_blocker": True}
 
         anc = _run(["git", "-C", str(self.live), "merge-base", "--is-ancestor",
                     self.base, head])

@@ -67,6 +67,19 @@ def is_clean(repo: Path) -> bool:
     return r.returncode == 0 and not r.stdout.strip()
 
 
+def dirty_paths(repo: Path, limit: int = 8) -> list[str]:
+    """What is actually dirty, for an error message that can be acted on.
+
+    "live tree is dirty" sent round SM_20260909_081105 hunting: four tool
+    calls to find the one uncommitted file, then half an hour polling for it
+    to clear. The paths are one command away and belong in the refusal.
+    """
+    r = git(repo, "status", "--porcelain")
+    if r.returncode != 0:
+        return []
+    return [ln[3:].strip() or ln.strip() for ln in r.stdout.splitlines() if ln.strip()][:limit]
+
+
 def has_merge_commits(repo: Path, base: str, head_ref: str) -> bool:
     r = git(repo, "rev-list", "--count", "--merges", f"{base}..{head_ref}")
     return r.returncode == 0 and r.stdout.strip() not in ("", "0")

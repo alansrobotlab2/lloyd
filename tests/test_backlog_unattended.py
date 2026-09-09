@@ -602,13 +602,20 @@ def test_reaper_leaves_landed_observed_and_cleaned_rounds_alone(isolated, monkey
 # A round killed by breakage it did not write keeps the item's attempt
 # ===========================================================================
 
-def _blocked_round(item_id, round_id, *, external=True, rung="tests"):
+def _blocked_round(item_id, round_id, *, external=True, rung="tests",
+                   stop_reason="stop"):
     """One implement attempt that ended at the gate, and the gate rung that
-    ended it."""
+    ended it.
+
+    `stop_reason` is written because the real producer always writes it: a
+    turn that reached the gate and reported back has one, and an event without
+    it is a different shape entirely (see `_never_ran`).
+    """
     S.append_event({"event": "backlog_implement", "item_id": item_id,
                     "phase": "started"}, path=S.LEDGER_PATH)
     S.append_event({"event": "backlog_implement", "item_id": item_id,
-                    "phase": "finished", "round_id": round_id}, path=S.LEDGER_PATH)
+                    "phase": "finished", "round_id": round_id,
+                    "stop_reason": stop_reason, "num_turns": 40}, path=S.LEDGER_PATH)
     ev = {"event": "gate", "round_id": round_id, "rung": rung, "ok": False,
           "detail": "pytest failed"}
     if external:
@@ -675,17 +682,30 @@ def test_a_passing_re_gate_also_clears_the_exemption(isolated):
     assert 364 in B.implemented_ids(S.LEDGER_PATH)
 
 
-def test_only_the_tests_rung_grants_the_exemption(isolated):
-    """`preflight` failing because the live tree is dirty is also not the
-    round's fault, but it is not this exemption: preflight is cheap and
-    re-runnable, and widening the rule is how an exemption becomes an
-    open door."""
+def test_preflight_live_tree_conditions_also_grant_the_exemption(isolated):
+    """#447. A round lives an hour; an uncommitted edit in production can
+    outlast it. That round polled `git status` for half an hour, filed the
+    finding, ran both evals and aborted per the two-strikes rule — and lost 587
+    lines because the refusal counted as its item's one attempt. The condition
+    is the live tree's, not the diff's."""
     write_item(isolated, 365)
     _confirm(365)
     _blocked_round(365, "SM_R5", external=True, rung="preflight")
 
+    assert "SM_R5" in B.externally_blocked_rounds(S.LEDGER_PATH)
+    assert 365 not in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_an_empty_diff_is_the_rounds_own_failure(isolated):
+    """The counterfactual that keeps the preflight exemption honest: "no
+    changes to promote" is also a preflight failure, and it is entirely the
+    round's. It carries no flag, so it spends the attempt."""
+    write_item(isolated, 368)
+    _confirm(368)
+    _blocked_round(368, "SM_R6", external=False, rung="preflight")
+
     assert B.externally_blocked_rounds(S.LEDGER_PATH) == set()
-    assert 365 in B.implemented_ids(S.LEDGER_PATH)
+    assert 368 in B.implemented_ids(S.LEDGER_PATH)
 
 
 def test_the_free_re_offers_are_capped(isolated):
@@ -712,3 +732,209 @@ def test_a_human_reopen_still_wins_over_the_cap(isolated):
     assert 367 in B.implemented_ids(S.LEDGER_PATH)
     B.reopen_item(367, "the blocker was fixed", ledger=S.LEDGER_PATH)
     assert 367 not in B.implemented_ids(S.LEDGER_PATH)
+
+
+# ===========================================================================
+# The other four ways a round ends without a verdict
+#
+# Six of the loop's first seventeen implement attempts were spent by something
+# that was never a judgment on the change. Three were pre-existing test
+# breakage. These are the rest.
+# ===========================================================================
+
+def test_a_turn_killed_by_the_wall_clock_is_incomplete_not_an_attempt(isolated):
+    """#446 committed 757 lines into its worktree at 06:43:36 and was killed at
+    06:43:50 — fourteen seconds, one `selfmod_gate` call, short of the verdict
+    that would have landed them, with 32 of its 100 iterations unspent. Triage
+    has recorded budget exhaustion as `incomplete` since #229; implement had no
+    such rule."""
+    write_item(isolated, 446)
+    _confirm(446)
+    _blocked_round(446, "SM_446", external=False, stop_reason="turn_timeout")
+
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[446]
+    assert verdict == "incomplete"
+    assert "clock" in detail and "selfmod/SM_446" in detail
+    assert 446 not in B.implemented_ids(S.LEDGER_PATH)
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 446
+
+
+def test_running_out_of_iterations_is_incomplete_too(isolated):
+    write_item(isolated, 449)
+    _confirm(449)
+    _blocked_round(449, "SM_449", external=False, stop_reason="max_turns")
+    assert B.implement_outcomes(S.LEDGER_PATH)[449][0] == "incomplete"
+    assert 449 not in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_a_promoted_round_is_a_verdict_however_the_turn_ended(isolated):
+    """#278 died at `max_turns` and the observer's ambient follow-up gated and
+    landed it anyway. A promotion is the verdict; the stop reason is not."""
+    write_item(isolated, 278)
+    _confirm(278)
+    _blocked_round(278, "SM_278", external=False, stop_reason="max_turns")
+    S.append_event({"event": "promoted", "round_id": "SM_278", "commit": "abc123"},
+                   path=S.LEDGER_PATH)
+    assert B.implement_outcomes(S.LEDGER_PATH)[278][0] == "spent"
+    assert 278 in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_a_turn_that_never_reported_completion_is_not_an_attempt(isolated):
+    """#392's session holds one user message and nothing else. It was recorded
+    as that item's one attempt ONE SECOND after starting, while the guardian
+    was alerting that supervisord was unreachable."""
+    write_item(isolated, 392)
+    _confirm(392)
+    S.append_event({"event": "backlog_implement", "item_id": 392, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 392, "phase": "infra_failed",
+                    "round_id": None, "errors": ["ConnectError: refused"]},
+                   path=S.LEDGER_PATH)
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[392]
+    assert verdict == "infra" and "ConnectError" in detail
+    assert 392 not in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_the_old_never_ran_shape_heals_without_a_backfill(isolated):
+    """#392 is already on the ledger as `finished` with an explicit null
+    stop_reason. Newer runs record `infra_failed`, but the old shape has to
+    read the same or history stays broken."""
+    write_item(isolated, 393)
+    _confirm(393)
+    S.append_event({"event": "backlog_implement", "item_id": 393, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 393, "phase": "finished",
+                    "round_id": None, "stop_reason": None, "num_turns": None},
+                   path=S.LEDGER_PATH)
+    assert B.implement_outcomes(S.LEDGER_PATH)[393][0] == "infra"
+    assert 393 not in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_a_finished_event_with_no_stop_reason_key_still_spends_the_attempt(isolated):
+    """Absence is not an explicit null. A writer whose shape we do not know
+    falls through to `spent` — the status quo, and the safe direction."""
+    write_item(isolated, 394)
+    _confirm(394)
+    S.append_event({"event": "backlog_implement", "item_id": 394, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 394, "phase": "finished"},
+                   path=S.LEDGER_PATH)
+    assert 394 in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_a_reverted_promotion_gives_the_item_one_more_go(isolated):
+    """Nothing joined these two facts: the promotion carries the round id and
+    the rollback carries only the commit, so an unattended round that landed
+    and was reverted spent its item and left no trace on it. Every rollback
+    this loop has performed has been a false positive."""
+    write_item(isolated, 395)
+    _confirm(395)
+    _blocked_round(395, "SM_395", external=False)
+    S.append_event({"event": "promoted", "round_id": "SM_395", "commit": "deadbee"},
+                   path=S.LEDGER_PATH)
+    assert 395 in B.implemented_ids(S.LEDGER_PATH), "a landed round is spent"
+
+    S.append_event({"event": "rollback_succeeded", "commit": "deadbee",
+                    "restored": "cafe123"}, path=S.LEDGER_PATH)
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[395]
+    assert verdict == "rolled_back"
+    assert "guardian tag" in detail, "the branch is deleted at landing; say where the tree is"
+    assert 395 not in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_a_rollback_of_someone_elses_commit_does_not_reopen_an_item(isolated):
+    """The join is on the commit. A rollback of a hand-landed commit must not
+    re-offer an unrelated item that happened to promote."""
+    write_item(isolated, 396)
+    _confirm(396)
+    _blocked_round(396, "SM_396", external=False)
+    S.append_event({"event": "promoted", "round_id": "SM_396", "commit": "aaa111"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "rollback_succeeded", "commit": "bbb222"}, path=S.LEDGER_PATH)
+    assert 396 in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_each_re_offer_is_capped(isolated):
+    """Uncapped, an item is re-picked every round for as long as the cause
+    persists — `select_confirmed` takes the oldest ready item."""
+    write_item(isolated, 397)
+    _confirm(397)
+    for n in range(1 + B.INCOMPLETE_RETRY_CAP):
+        _blocked_round(397, f"SM_INC{n}", external=False, stop_reason="turn_timeout")
+        assert 397 not in B.implemented_ids(S.LEDGER_PATH), f"attempt {n + 1} is free"
+    _blocked_round(397, "SM_INC_LAST", external=False, stop_reason="turn_timeout")
+    assert 397 in B.implemented_ids(S.LEDGER_PATH), "past the cap it is spent"
+
+
+def test_the_re_offer_reason_reaches_the_next_round(isolated):
+    """A re-offer is not a fresh start: the branch may still hold the work. A
+    round told nothing re-derives it, or redoes it."""
+    from workers.sources.backlog_implement import _reoffer_block
+    write_item(isolated, 398)
+    _confirm(398)
+    _blocked_round(398, "SM_398", external=False, stop_reason="turn_timeout")
+
+    reason = B.reoffer_reason(S.LEDGER_PATH, 398)
+    assert reason.startswith("incomplete:") and "selfmod/SM_398" in reason
+    block = _reoffer_block(reason)
+    assert "offered again" in block and "selfmod/SM_398" in block
+    assert _reoffer_block("") == "", "a first attempt gets no banner"
+
+
+def test_the_prompt_and_the_skill_both_cover_a_test_that_pins_old_behaviour(isolated):
+    """A model told only "if it fails twice on the same rung, abort" will abort
+    on a test that fails *because* it asserts the behaviour the item asked to
+    change. That is work, not a blocker — but licensing a round to edit tests
+    needs the audit clause beside it, or the escape hatch becomes a way to
+    delete the test that was catching the bug."""
+    from pathlib import Path
+    from workers.sources.backlog_implement import PROMPT
+    skill = Path.home() / "obsidian/skills/selfmod-change-own-code/SKILL.md"
+
+    for name, text in (("prompt", PROMPT), ("skill", skill.read_text())):
+        # Normalised: the skill is wrapped markdown and the prompt is a
+        # backslash-continued string, so a phrase is split across lines in
+        # both. The claim is about the content, not the line breaks.
+        low = " ".join(text.lower().split())
+        assert "pins the behaviour you were asked to change" in low, name
+        assert "name the test" in low or "must name the test" in low, name
+        assert "quote the assertion" in low, name
+        assert "acceptance" in low, name
+        # The guard rails that keep it from becoming an open door.
+        assert "never delete a test" in low, name
+        assert "skip" in low, name
+
+
+def test_a_turn_that_never_completed_is_written_as_infra_failed(isolated, monkeypatch):
+    """The write side of #392: `execute` must not record a `finished` event for
+    a turn whose stream closed without a `done` frame."""
+    import asyncio
+    from workers.sources import backlog_implement as I
+    write_item(isolated, 500)
+    _confirm(500)
+
+    async def dead_backend(prompt, **kw):
+        return {"text": "", "session_id": "sess_dead", "stop_reason": None,
+                "num_turns": None, "errors": ["ConnectError: All attempts failed"]}
+    monkeypatch.setattr(C, "run_prompt_in_session", dead_backend)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+
+    out = asyncio.run(I.execute(_Item()))
+    assert out["status"] == "failed"
+    assert "not counted as an attempt" in out["summary"]
+
+    evs = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "backlog_implement" and e.get("item_id") == 500]
+    phases = [e.get("phase") for e in evs]
+    assert "infra_failed" in phases and "finished" not in phases
+    assert 500 not in B.implemented_ids(S.LEDGER_PATH)
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 500
+
+
+def test_the_reaper_can_close_a_round_an_infra_failed_turn_left_open(isolated):
+    """A turn can open a round and then lose its stream. A round nobody will
+    ever close blocks `_loop_is_free` for every item behind it."""
+    import inspect
+    from workers.sources import backlog_implement as I
+    src = inspect.getsource(I.reap_abandoned_rounds)
+    assert 'e.get("phase") in ("finished", "infra_failed")' in src

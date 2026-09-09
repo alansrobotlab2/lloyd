@@ -594,3 +594,54 @@ def test_a_probe_that_could_not_run_says_so_instead_of_reporting_zero(tmp_path):
                                        ["tests/test_pre.py::test_already_broken"],
                                        tmp_path / "scratch")
     assert failed == set() and "baseline probe failed" in note
+
+
+# ---------------------------------------------------------------------------
+# Preflight: the two refusals that are about the live tree, not the diff
+# ---------------------------------------------------------------------------
+
+def test_a_dirty_live_tree_names_the_paths_and_is_not_the_rounds_fault(live_repo, tmp_path, monkeypatch):
+    """#447 spent four tool calls finding the one uncommitted file behind
+    "live tree is dirty", then half an hour polling for it to clear, then
+    aborted — and the refusal counted as its item's one attempt. A round lives
+    an hour; an uncommitted edit in production can outlast it."""
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    (live_repo / "app" / "someone_elses_wip.py").write_text("x = 1\n", encoding="utf-8")
+    g = _gate_for(live_repo, live_repo, base, monkeypatch)
+    ok, detail, data = g.rung_preflight()
+
+    assert ok is False
+    assert data.get("external_blocker") is True
+    assert "app/someone_elses_wip.py" in detail, "the paths are one command away"
+    assert data["dirty_paths"] == ["app/someone_elses_wip.py"]
+
+
+def test_a_moved_live_head_is_not_the_rounds_fault_either(live_repo, tmp_path, monkeypatch):
+    """Something landed underneath the round. Its diff is still fine."""
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = tmp_path / "wt"
+    git(live_repo, "worktree", "add", "-q", "-b", "cand", str(wt), base)
+    (wt / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
+    git(wt, "add", "-A"); git(wt, "commit", "-q", "-m", "candidate")
+    (live_repo / "app" / "other.py").write_text("y = 1\n", encoding="utf-8")
+    git(live_repo, "add", "-A"); git(live_repo, "commit", "-q", "-m", "landed underneath")
+
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, detail, data = g.rung_preflight()
+    assert ok is False and data.get("external_blocker") is True
+    assert "landed underneath" in detail
+    git(live_repo, "worktree", "remove", "--force", str(wt))
+
+
+def test_an_empty_diff_carries_no_exemption(live_repo, tmp_path, monkeypatch):
+    """The counterfactual that keeps the preflight exemption honest. "No
+    changes to promote" is also a preflight failure and is entirely the
+    round's own — widening an exemption is how it becomes an open door."""
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = tmp_path / "wt2"
+    git(live_repo, "worktree", "add", "-q", "-b", "empty", str(wt), base)
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, detail, data = g.rung_preflight()
+    assert ok is False and "no changes to promote" in detail
+    assert not data.get("external_blocker")
+    git(live_repo, "worktree", "remove", "--force", str(wt))

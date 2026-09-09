@@ -15,7 +15,6 @@ import re
 import subprocess
 import logging
 import os
-import time
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -583,49 +582,15 @@ def _build_task_prompt(task: dict, skill_content: str) -> str:
 # 2.4s, the budget was 300s, and three consecutive runs spent all of it
 # investigating and reported nothing. A timeout the model cannot see is a
 # deadline it cannot meet.
-_BUDGET_WARN_FRACTIONS = (0.70, 0.90)
+from app.deadline_anchor import build_deadline_anchor
 
 
 def _build_deadline_anchor(timeout_s: int):
-    """`RunOptions.state_anchor` that announces the wall clock, once per level.
-
-    The harness calls this at the top of each iteration, so the resolution is
-    one iteration: a single tool call longer than the remaining budget still
-    overruns. That is acceptable — the failure being fixed is a model taking
-    twenty short iterations past the point where it should have stopped, not
-    one long one.
-    """
-    if not timeout_s or timeout_s <= 0:
-        return None
-
-    started = time.monotonic()
-    fired: set[float] = set()
-
-    async def anchor(iteration: int) -> list[dict]:
-        elapsed = time.monotonic() - started
-        out = []
-        for frac in _BUDGET_WARN_FRACTIONS:
-            if frac in fired or elapsed < frac * timeout_s:
-                continue
-            fired.add(frac)
-            left = max(0, int(timeout_s - elapsed))
-            if frac >= 0.90:
-                out.append({"role": "user", "content": (
-                    f"<budget>{left}s of this task's {timeout_s}s budget remain. "
-                    "Stop calling tools and write your report NOW, from what you "
-                    "already have. A run cut off at the budget is recorded as a "
-                    "failure and reports nothing, however much work it did — an "
-                    "incomplete answer is worth far more than none. Say what you "
-                    "found and what you did not get to.</budget>")})
-            else:
-                out.append({"role": "user", "content": (
-                    f"<budget>{left}s of this task's {timeout_s}s budget remain. "
-                    "Finish the task's own deliverable first; do not open new "
-                    "lines of investigation. If the skill's work is already done, "
-                    "report now rather than verifying further.</budget>")})
-        return out
-
-    return anchor
+    """The task-flavoured wall-clock anchor. One definition, in
+    `app.deadline_anchor` — a second caller (the selfmod worker turn) needs
+    the identical behaviour, and two copies of "how close is the deadline"
+    drift in the direction nobody is watching."""
+    return build_deadline_anchor(timeout_s, what="task")
 
 
 def _get_model_env(model_name: str) -> dict:

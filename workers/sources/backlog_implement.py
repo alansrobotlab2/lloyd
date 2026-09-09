@@ -112,7 +112,7 @@ to file more than {spawn_cap} while *not* landing a change, that is the signal \
 to stop and report instead — a round that aborts and files six items has \
 converted one problem into six and solved none.
 
-**The triage evidence above was measured today, on this tree.** File sizes,
+{reoffer}**The triage evidence above was measured today, on this tree.** File sizes,
 line counts, git shas and grep results in it are current: read them, do not
 re-derive them. Re-measure exactly one thing — the acceptance check, which you
 must confirm fails before you start and passes when you finish. Round
@@ -136,7 +136,19 @@ not tell you.
 4. Write the test that fails today. Then the smallest change that makes it \
 pass. One change per round.
 5. `selfmod_gate`. If it fails twice on the same rung for the same reason, \
-`selfmod_abort` and report.
+`selfmod_abort` and report — with one exception, below.
+
+**An existing test that fails because it pins the behaviour you were asked to \
+change is work, not a blocker.** The gate reports whether a failure is new in \
+this round or predates it; a *new* failure in a test you did not write is the \
+case to look at rather than abort on. Read the test. If it asserts the old \
+behaviour and the item's acceptance says that behaviour is wrong, updating it \
+is part of the change — and then your report must name the test, quote the \
+assertion you changed, and say which line of the acceptance check makes it \
+wrong. If you cannot write that sentence, the test is catching your bug and \
+the correct move is to fix the code. Never delete a test to get to green (the \
+gate refuses it), never add a skip, and never weaken an assertion you cannot \
+justify in those terms.
 6. `selfmod_land`. Then **end your turn immediately** — the landing needs the \
 backend idle, and your own turn is what keeps it busy.
 
@@ -189,6 +201,17 @@ Work autonomously; do not ask for confirmation.
 ABANDON_GRACE_SECONDS = 20 * 60
 
 
+def _reoffer_block(reason: str) -> str:
+    """The banner an item gets when it is being offered again."""
+    if not reason:
+        return ""
+    return (f"**This item is being offered again — its previous round never reached a "
+            f"verdict on the change ({reason}).** Read what is there before you start: "
+            f"if a branch is named, `git log`/`git diff` it against your new base and "
+            f"reuse what still applies rather than rewriting it. Say in your report "
+            f"what you reused and what you redid.\n\n")
+
+
 def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
     """Close rounds this source opened that nobody finished — after a grace
     period, and only while nothing is happening in their session.
@@ -209,8 +232,11 @@ def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
     from scripts.selfmod import backlog as B, round as R, state as S, worktree as W
     now = now or time.time()
     events = S.read_events(limit=500)
+    # `infra_failed` too: a turn can open a round and then lose its stream, and
+    # a round nobody will ever close blocks `_loop_is_free` for every item
+    # behind it.
     finished = [e for e in events if e.get("event") == "backlog_implement"
-                and e.get("phase") == "finished" and e.get("round_id")]
+                and e.get("phase") in ("finished", "infra_failed") and e.get("round_id")]
     closed = {e.get("round_id") for e in events
               if e.get("event") in ("promoted", "round_aborted", "round_abandoned")}
     try:
@@ -343,6 +369,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         # that judged item 377, months later, in a directory of bare
         # timestamps.
         round_label=f"item{candidate.id}",
+        # A re-offer is not a fresh start. The previous round's branch may
+        # still hold the work, or a landing may have been reverted, and a
+        # round told nothing re-derives it — or redoes it.
+        reoffer=_reoffer_block(B.reoffer_reason(S.LEDGER_PATH, candidate.id)),
     )
     try:
         run = await run_prompt_in_session(
@@ -367,6 +397,25 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     events = S.read_events(limit=200)
     round_id = _round_opened_since(events, started)
+
+    # A turn that never reported completion is not an attempt. The stream
+    # closes without a `done` frame when the backend is down or the connection
+    # drops, leaving `stop_reason=None` — and #392 was recorded as its item's
+    # one attempt ONE SECOND after starting, on a session holding a single user
+    # message, while the guardian was alerting that supervisord was
+    # unreachable. Recorded under its own phase so `implement_outcomes` can
+    # tell it from a round that ran and failed, and so `reap_abandoned_rounds`
+    # (which looks for `finished`) is not handed a round that was never opened.
+    if run.get("stop_reason") is None:
+        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
+                        "phase": "infra_failed", "session_id": run["session_id"],
+                        "round_id": round_id,
+                        "errors": [str(e)[:300] for e in (run.get("errors") or [])[:5]],
+                        "num_turns": run.get("num_turns")})
+        logger.warning("backlog #%s: turn never completed (session %s); not an attempt",
+                       candidate.id, run["session_id"])
+        return {"status": "failed", "item_id": candidate.id,
+                "summary": f"#{candidate.id}: turn never completed — not counted as an attempt"}
     vault_commits = [e.get("commit") for e in events
                      if e.get("event") == "vault_land" and e.get("ok")
                      and e.get("item_id") == candidate.id

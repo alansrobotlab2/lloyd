@@ -98,6 +98,21 @@ from app.routers._messages_inner_voice import (
 
 
 
+def _turn_deadline(data: dict) -> float:
+    """Wall-clock budget for one turn, in seconds, or 0 for "unbounded".
+
+    Only a caller that actually enforces a deadline should send one, and only
+    the ones that do get the warning: a chat turn has no wall clock, and
+    telling a human's turn it has 900 seconds left would be a lie. Clamped to
+    a day so a bad value cannot produce a nonsense sentence.
+    """
+    try:
+        secs = float(data.get("deadline_seconds") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(secs, 86_400.0))
+
+
 def _turn_budget(data: dict) -> int:
     """Iteration budget for one turn: `agent.max_turns`, or a per-request
     `max_turns` clamped to `agent.max_turns_ceiling`.
@@ -155,10 +170,11 @@ def _load_session_todos(session_id: str) -> list[dict]:
         return []
 
 
-def _build_state_anchor(session_id: str, max_turns: int = 0):
+def _build_state_anchor(session_id: str, max_turns: int = 0,
+                        deadline_seconds: float = 0.0):
     """Build the closure handed to ``RunOptions.state_anchor``.
 
-    Two anchors ride this closure. The **budget** anchor fires once at 75%
+    Three anchors ride this closure. The **budget** anchor fires once at 75%
     and once at 90% of `max_turns`: a turn cut off at the cap ends with no
     report and lands nothing, and the model has no other way to know the cap
     is near — the observer's `iteration_pressure` nudge is LLM-judged and
@@ -166,6 +182,15 @@ def _build_state_anchor(session_id: str, max_turns: int = 0):
     repetition guards before it ever got a budget warning. It then died at
     101 of 100 with a gated-and-ready change it had not landed. This anchor
     is deterministic and costs nothing.
+
+    The **deadline** anchor is the same warning against the other clock, and
+    only a caller that has one passes it. Iterations are not what unattended
+    work usually dies on: `run_prompt_in_session` bounds a worker turn by wall
+    time, and selfmod round SM_20260909_054722 committed 757 lines into its
+    worktree and was killed fourteen seconds — one `selfmod_gate` call — before
+    the verdict that would have landed them, with 32 of its 100 iterations
+    still unspent. The iteration anchor cannot see that clock and never fired.
+    `app.deadline_anchor` is the single definition, shared with autonomy.
 
     Re-anchors `session.todos` inside a long turn. The `<active_todos>`
     block in the system prompt is rendered once, from the list as it
@@ -211,8 +236,14 @@ def _build_state_anchor(session_id: str, max_turns: int = 0):
                 "otherwise finish — say what is done and what is not.</budget>")})
         return out
 
+    from app.deadline_anchor import build_deadline_anchor
+    deadline = build_deadline_anchor(deadline_seconds, what="turn")
+
     async def anchor(iteration: int) -> list[dict[str, Any]]:
-        return budget(iteration) + await todo_anchor(iteration)
+        out = budget(iteration)
+        if deadline is not None:
+            out += await deadline(iteration)
+        return out + await todo_anchor(iteration)
 
     async def todo_anchor(iteration: int) -> list[dict[str, Any]]:
         if interval <= 0:
@@ -706,7 +737,9 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # Re-anchor session.todos inside the turn. The system prompt's
     # <active_todos> block is frozen at turn start and cannot be refreshed
     # without invalidating the cached prefix, so this appends instead.
-    options.state_anchor = _build_state_anchor(session_id, max_turns=int(options.max_turns or 0))
+    options.state_anchor = _build_state_anchor(
+        session_id, max_turns=int(options.max_turns or 0),
+        deadline_seconds=float(payload.get("deadline_seconds") or 0.0))
 
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,
@@ -1715,6 +1748,9 @@ async def post_message_stream(request: Request):
             "model": model,
             "options": options,
             "meta_path": meta_path,
+            # Only a caller that actually enforces a wall clock sends one; a
+            # chat turn has none and is never told it does.
+            "deadline_seconds": _turn_deadline(data),
         },
         enqueued_at=datetime.now(),
     )

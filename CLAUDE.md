@@ -150,6 +150,30 @@ error-shaped lines.
   Fails closed everywhere (a probe that cannot run blames the round), capped
   at `EXTERNAL_RETRY_CAP` re-offers so a permanently red tree cannot starve
   the board, and granted by the `tests` rung only.
+- **A round that never reached a verdict has not spent the item.**
+  `implemented_ids` counted any finished round as the one attempt "whatever it
+  did", and six of the loop's first seventeen attempts were spent by something
+  that was never a judgment on the change: three on pre-existing test failures,
+  #446 on the wall clock (fourteen seconds and one `selfmod_gate` call short of
+  landing 757 lines), #447 on `preflight: live tree is dirty` from an unrelated
+  uncommitted edit in production, #392 on a turn that never ran at all — the
+  backend was down and it was recorded as an attempt one second after starting.
+  `backlog.implement_outcomes` classifies each: `spent` closes the item, and
+  `incomplete` / `infra` / `external` / `rolled_back` re-offer it, each capped
+  because `select_confirmed` takes the *oldest* ready item and an uncapped
+  re-offer starves the board. **A promotion is a verdict however the turn
+  ended** and is checked first — #278 died at `max_turns` and the observer
+  landed it anyway. A `rolled_back` re-offer is the one that changes a safety
+  property: nothing joined the promotion (which carries the round id) to the
+  rollback (which carries only the commit), and every rollback this loop has
+  performed has been a false positive. The reason rides into the next round's
+  prompt via `reoffer_reason`, because a re-offer is not a fresh start — the
+  branch usually still holds the work.
+- **A worker turn can see its wall clock now.** `app.deadline_anchor` is the
+  single definition (autonomy delegates to it), and `/api/message/stream`
+  accepts `deadline_seconds`, which `run_prompt_in_session` sets to the same
+  timeout it enforces. Only a caller that enforces a clock sends one — a chat
+  turn has none and must never be told it does.
 - **A turn that dies at its budget is not the end of the round.** The
   budget anchor (`<budget>` at 75%/90% of `max_turns`) tells the model to
   gate-and-land or abort while it still can; the observer's ambient
