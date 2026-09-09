@@ -109,6 +109,17 @@ An intermediate unguarded pass over the four entities that dominate the
 queries' fact pools moved the metric **0.35 → 0.30** — a regression, and the
 clearest evidence in this whole change that "delete more" is not "improve".
 
+**Re-measured independently on 2026-09-09 (the promotion round), same method,
+fresh copies, and the flat result reproduced.** Baseline `fact_entity_recall`
+**0.375** on the live corpus (20 queries, `errors=0`); the guarded nightly
+policy over 40 correction/drift entities found **0 admissible actions** (136
+detector pairs, 0 of them opposing-terms — every one was the near-duplicate
+class the loop refuses to delete); an unguarded pass expired 24 facts
+(255,812 → 255,788) → **0.375**; a further pass restricted to the 43
+`expect_entities` of the 20 eval queries expired 8 more, including **5 of
+`Task #363`'s 34 facts** → **0.375**. Probe records:
+`_pipeline/improvement/2026090917*-apply.json`.
+
 **The honest result: the loop runs correctly and does not move the metric.**
 #376's acceptance says "a change that cannot move that metric is not this
 feature". Two findings say the criterion is mis-aimed rather than the code dead:
@@ -132,6 +143,13 @@ pairs, explains, logs counts, and writes nothing. Applying is an explicit act.
 The apply-mode policy decision, with the numbers above, is filed as its own
 item rather than being taken quietly at 3am by a scheduler.
 
+Filed out of this round, so the next reader does not re-derive them: **#659**
+(the metric is insensitive to the mechanism — what to measure instead), **#660**
+(`fact_resolve(auto_resolve=true)` selects by colliding fact ids — the
+2 → 25 collateral above, reproduced minimally 09-09), **#661** (nothing checks
+that a skill's named script exists, which is how this item's vault half shipped
+a day before its code half).
+
 ## 5. Files
 
 | path | role |
@@ -139,5 +157,5 @@ item rather than being taken quietly at 3am by a scheduler.
 | `agent_mcp/fact_improvement.py` | the loop: signals → plan → apply → record |
 | `agent_mcp/memory_ops.py` | `remember` / `recall` / `forget` / `improve` |
 | `scripts/memory/fact-improvement.py` | CLI; exits 2 on failure, 3 on blast-radius overrun |
-| `tests/test_memory_improvement.py` | 25 tests, incl. the one-fact-per-action and near-duplicate guards |
-| `skills/fact-improvement/SKILL.md` + `autonomy/84-fact-improvement.md` | the scheduled consumer |
+| `tests/test_memory_improvement.py` | 27 tests, incl. the one-fact-per-action and near-duplicate guards, and the schedule wiring (task armed + script named by the skill exists) |
+| `skills/fact-improvement/SKILL.md` + `autonomy/84-fact-improvement.md` | the scheduled consumer — armed `up_next`, daily, window 14:00 local, plan mode only |
