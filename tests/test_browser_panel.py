@@ -354,3 +354,149 @@ def test_ssrf_host_check_is_intact():
     assert browser_module._is_private_host("169.254.1.1") is True
     assert browser_module._is_private_host("::1") is True
     assert browser_module._is_private_host("example.com") is False
+
+
+# ── The URL bar ───────────────────────────────────────────────────────────────
+#
+# The panel shipped read-only. A URL bar is the one control it has, and it
+# deliberately does not go through MCP: the user typing a URL is not the agent
+# calling a tool, and dispatching it as one would write a `browser_navigate`
+# into the transcript that the model never made. So it is a plain route on the
+# aggregator, proxied by the backend, and `navigate_from_ui` must stay off the
+# tool list — which `test_still_fourteen_browser_tools_with_unchanged_names`
+# above already enforces.
+
+
+async def test_url_bar_completes_a_scheme_less_host(monkeypatch):
+    """A human types `news.ycombinator.com`; the tool would reject it.
+
+    `browser_navigate` stays strict on purpose — an agent omitting the scheme
+    has made a mistake worth surfacing. A person has saved eight keystrokes.
+    """
+    seen: list[str] = []
+
+    async def fake_navigate(url, wait_until="domcontentloaded"):
+        seen.append(url)
+        return json.dumps({"ok": True, "url": url, "title": "t", "status": 200})
+
+    async def fake_push(tool_name):
+        seen.append(f"push:{tool_name}")
+
+    monkeypatch.setattr(browser_module, "_browser_navigate", fake_navigate)
+    monkeypatch.setattr(browser_module, "_push_browser_state", fake_push)
+
+    for typed, want in (
+        ("news.ycombinator.com", "https://news.ycombinator.com"),
+        ("example.com/a/b?q=1", "https://example.com/a/b?q=1"),
+        ("//example.com", "https://example.com"),
+        ("  example.com  ", "https://example.com"),
+        # A port is not a scheme. Detecting one by the bare colon reads the
+        # whole of "localhost:8080" as a scheme and leaves it uncompleted,
+        # which `_browser_navigate` then rejects as not-http — and a box
+        # serving this much on loopback hits that case first.
+        ("localhost:8080", "https://localhost:8080"),
+        ("example.com:8080/x?q=1", "https://example.com:8080/x?q=1"),
+        ("127.0.0.1:8500/health", "https://127.0.0.1:8500/health"),
+        # An explicit scheme is never rewritten, http included.
+        ("http://example.com", "http://example.com"),
+        ("https://example.com", "https://example.com"),
+    ):
+        seen.clear()
+        result = await browser_module.navigate_from_ui(typed)
+        assert seen[0] == want, f"{typed!r} -> {seen[0]!r}, wanted {want!r}"
+        assert result.get("ok") is True
+
+
+async def test_url_bar_pushes_a_frame_even_when_the_page_fails(monkeypatch):
+    """A 404 or a timeout still changes the viewport.
+
+    Returning without a push leaves the tab showing the page they navigated
+    away from, which is the most confusing possible answer to a click.
+    """
+    pushed: list[str] = []
+
+    async def fake_navigate(url, wait_until="domcontentloaded"):
+        return json.dumps({"error": "net::ERR_NAME_NOT_RESOLVED"})
+
+    async def fake_push(tool_name):
+        pushed.append(tool_name)
+
+    monkeypatch.setattr(browser_module, "_browser_navigate", fake_navigate)
+    monkeypatch.setattr(browser_module, "_push_browser_state", fake_push)
+
+    result = await browser_module.navigate_from_ui("nope.invalid")
+    assert "error" in result
+    # Tagged so the tab can say a human drove this frame, not the agent.
+    assert pushed == ["url_bar"]
+
+
+async def test_url_bar_rejects_an_empty_url(monkeypatch):
+    async def boom(*a, **k):
+        raise AssertionError("must not reach the browser")
+
+    monkeypatch.setattr(browser_module, "_browser_navigate", boom)
+    monkeypatch.setattr(browser_module, "_push_browser_state", boom)
+    assert "error" in await browser_module.navigate_from_ui("   ")
+
+
+def test_aggregator_serves_the_navigate_route():
+    """Playwright lives in the lloyd-mcp process, so the control action has
+    to cross that seam — the same one the dashboard crosses for /state."""
+    from agent_mcp import main as mcp_main
+
+    paths = {r.path for r in mcp_main.starlette_app.routes if hasattr(r, "path")}
+    assert "/browser/navigate" in paths
+
+
+def test_backend_proxies_the_url_bar_to_the_aggregator():
+    src = (ROOT / "app" / "routers" / "browser.py").read_text(encoding="utf-8")
+    assert "/api/browser/navigate" in src
+    assert "8500/browser/navigate" in src, \
+        "the proxy must target the aggregator, which is where the browser is"
+
+
+def test_navigate_summary_never_carries_the_screenshot():
+    """`mc_navigate(tab="browser")` puts this in the model's context.
+
+    The frame is ~20 KB of base64 plus up to 8 KB of accessibility tree; the
+    summary is meant to be a line saying what is on screen.
+    """
+    browser_router._latest = {
+        "url": "https://example.com",
+        "title": "Example",
+        "ts": 1.0,
+        "tool": "url_bar",
+        "mime": "image/jpeg",
+        "screenshot_b64": "A" * 5000,
+        "snapshot": "B" * 5000,
+        "refs": [{"ref": "e1", "role": "link", "name": "x"}],
+    }
+    try:
+        summary = browser_router.latest_frame_summary()
+        assert summary["url"] == "https://example.com"
+        assert summary["driven_by"] == "url_bar"
+        assert "screenshot_b64" not in summary
+        assert "snapshot" not in summary
+        assert "refs" not in summary
+        assert len(json.dumps(summary)) < 500
+    finally:
+        browser_router._latest = None
+
+    assert browser_router.latest_frame_summary() == {"active": False}
+
+
+def test_url_bar_does_not_bind_the_input_to_the_live_frame():
+    """A frame lands after every browser_* tool call.
+
+    Binding the input straight to `frame.url` would erase whatever the user
+    is halfway through typing the moment the agent navigates, so the re-seed
+    is gated on the field being clean.
+    """
+    page = next(WEB.rglob("BrowserPage.tsx"))
+    src = page.read_text(encoding="utf-8")
+    assert "browserNavigate" in src, "the URL bar must call the navigate API"
+    assert "onSubmit" in src, "Enter must submit"
+    assert re.search(r"if\s*\(!urlDirty\)\s*setUrlInput", src), \
+        "the frame must only re-seed the input while it is clean"
+    assert re.search(r"value=\{urlInput\}", src), \
+        "the input must be driven by its own state, not frame.url"

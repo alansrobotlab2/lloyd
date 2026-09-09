@@ -906,3 +906,52 @@ async def shutdown() -> None:
         except Exception as exc:
             logger.warning("browser: %s %s() failed during shutdown: %s", label, closer, exc)
     _context = _browser = _pw = None
+
+
+# ── Mission Control's URL bar ──────────────────────────────────────────────────
+
+async def navigate_from_ui(url: str) -> dict:
+    """Drive the shared browser from the Browser tab's URL bar.
+
+    Reached over loopback from the backend, not through MCP: the URL bar is
+    the user typing, and routing a human keystroke through the agent's tool
+    surface would put it in the transcript as something the model did.
+
+    Two deliberate differences from ``browser_navigate``:
+
+    * A scheme-less host is completed to ``https://``. The tool stays strict
+      because an agent that omits the scheme has made a mistake worth seeing;
+      a human typing ``news.ycombinator.com`` has just saved eight keystrokes.
+    * The state push is awaited rather than fired off. ``call_tool`` can spawn
+      it because the agent's next move is its own tool call, but the URL bar's
+      caller *is* the viewer — returning before the frame exists shows them
+      the page they navigated away from until the next push happens to land.
+
+    The frame is tagged ``url_bar`` rather than ``browser_navigate`` so the
+    tab can say a human drove this one.
+    """
+    url = (url or "").strip()
+    if not url:
+        return {"error": "url is required"}
+    # Detect a scheme by "://" rather than by the colon alone. A bare colon
+    # is ambiguous with a port, and the port is the case this box hits first:
+    # `[a-zA-Z][a-zA-Z0-9+.-]*:` happily reads the whole of "localhost:8080"
+    # and "example.com:8080/x" as a scheme, leaving them uncompleted for
+    # `_browser_navigate` to reject as not-http. A protocol-relative
+    # "//example.com" has no scheme either and gets the same completion.
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
+        url = "https://" + url.lstrip("/")
+
+    raw = await _browser_navigate(url)
+    try:
+        result = json.loads(raw)
+    except Exception:
+        result = {"error": raw}
+    if not isinstance(result, dict):
+        result = {"error": str(result)}
+
+    # Push even on failure: a navigation that 404s or times out still leaves
+    # the viewport showing something, and an unchanged tab after a click is
+    # the most confusing possible answer.
+    await _push_browser_state("url_bar")
+    return result

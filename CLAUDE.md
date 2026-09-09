@@ -1205,6 +1205,49 @@ number — otherwise a restart renders as a one-second spike of the
 engine's entire history. An unreachable engine drops its baseline for the
 same reason.
 
+### The Browser tab has one control, and four lists decide who can see it
+
+The panel mirrors the agent's Chromium (`app/routers/browser.py` + the
+frames `agent_mcp/browser.py` pushes). Its **URL bar** POSTs to
+`/api/browser/navigate`, which the backend proxies to the aggregator's own
+`/browser/navigate` route — Playwright runs in that process, the same seam
+the dashboard crosses to read `/state`. Deliberately **not** an MCP call:
+the user typing a URL is not the agent using a tool, and dispatching it as
+one would write a `browser_navigate` into the transcript that the model
+never made. The frame it pushes is tagged `url_bar` so the tab can say who
+drove it. `navigate_from_ui` completes a scheme-less host to `https://`,
+detecting the scheme by `://` rather than by the bare colon — the colon
+alone reads the whole of `localhost:8080` as a scheme, and on this box that
+is the first thing anybody types. `browser_navigate` stays strict, because
+an agent omitting the scheme has made a mistake worth seeing.
+
+Everything else on the page stays read-only, and not for want of a route:
+the ref overlay has nothing to send, since the tool surface has no "click
+pixel (x,y)" and the a11y tree is gone by render time.
+
+**Four hand-written lists name the tabs**, and nothing made them agree until
+`tests/test_mc_tab_parity.py`. `Page` in `web/src/components/Sidebar.tsx`
+renders them; `mc_state.VALID_TABS` decides what the frontend may *report*;
+`mission_control_ui._VALID_TABS` what the agent may ask for; `VALID_TABS` in
+`useMcNavigationEvents.ts` what the frontend will *act on*. Drift is silent
+in the worst direction: `browser` was in the union and in none of the three,
+so a user sitting on that tab made `POST /api/mc/state` return 400 — and
+`useMcStateSync` swallows the failure *after* recording the payload as sent.
+The mirror kept serving whichever tab they came from, so `mc_get_state`
+answered confidently and **wrongly** for as long as they stayed there. Not
+"Lloyd doesn't know", which he could have said. `dashboard` was missing from
+two of the three, the quieter half: the backend had carried a
+`_summarize_dashboard` all along for a tab the agent was refused and the
+frontend would have ignored. A tab absent from `_SUMMARIZERS` is the same
+shape of quiet — `_summarize_tab` returns `{}` and the agent is told nothing
+about where it just sent the user.
+
+`_summarize_browser` must never carry `screenshot_b64` or `snapshot`: that
+is ~124 KB of base64 plus 8 KB of accessibility tree, and the summary goes
+into the model's context every time it moves the user to the tab. It reads
+`browser_router.latest_frame_summary()`, which exists to make that the
+default rather than a thing each caller remembers.
+
 ## Session titles and live activity
 
 Every Mission Control surface that names a session — the chat history

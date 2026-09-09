@@ -26,10 +26,14 @@ from agent_mcp._shared import _err, _wrap, ErrorCode, make_http_client
 
 LLOYD_API = os.environ.get("LLOYD_API_URL") or service_url("backend", "http://127.0.0.1:8080")
 
+# Mirrors app.mc_state.VALID_TABS — the backend validates against that set,
+# so anything missing here is a tab the agent is refused before it can ask.
+# `dashboard` and `browser` were both absent while being real, rendered tabs.
 _VALID_TABS = [
+    "dashboard",
     "inner_voice", "chat", "backlog", "autonomy", "workers",
     "memory", "architecture", "skills", "tools", "services",
-    "settings", "graph", "ide",
+    "settings", "graph", "ide", "browser",
 ]
 
 
@@ -166,7 +170,10 @@ async def list_tools():
                 "  services           → service unit name (expands)\n"
                 "  ide                → absolute file path (opens it in a "
                 "new editor tab; prefer ide_open_file for richer feedback)\n"
-                "  architecture / settings / graph → no focus supported\n\n"
+                "  browser            → no focus; drive the page with "
+                "browser_navigate, which this tab mirrors live\n"
+                "  architecture / settings / graph / dashboard → no focus "
+                "supported\n\n"
                 "If focus_id is invalid (path doesn't exist, escapes vault), the "
                 "tab still switches and the result returns `focus_error` describing "
                 "the failure with `focus_id: null`. Inspect `focus_error` and retry "

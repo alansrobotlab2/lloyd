@@ -2,10 +2,15 @@ import { useEffect, useRef } from 'react'
 import { useMcUi, type IdeActionKind } from '../contexts/McUiContext'
 import type { Page } from '../components/Sidebar'
 
+// Mirrors app/mc_state.py::VALID_TABS and the `Page` union in Sidebar.tsx.
+// A tab missing here is one the agent can switch to on the backend and the
+// frontend then silently ignores — the navigate succeeds and nothing moves.
+// `dashboard` and `browser` were both in `Page` and missing from this set.
 const VALID_TABS: ReadonlySet<string> = new Set([
+  'dashboard',
   'inner_voice', 'chat', 'backlog', 'autonomy', 'workers',
   'memory', 'architecture', 'skills', 'tools', 'services',
-  'settings', 'graph', 'ide',
+  'settings', 'graph', 'ide', 'browser',
 ])
 
 const VALID_IDE_ACTIONS: ReadonlySet<string> = new Set(['open_folder', 'close_tab'])

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Camera, RefreshCw, ExternalLink, Globe, Crosshair } from 'lucide-react'
+import {
+  ArrowRight, Camera, RefreshCw, ExternalLink, Globe, Crosshair, Loader2,
+} from 'lucide-react'
 import { api, type BrowserFrame } from '../../api'
 import { useReportMcFocus } from '../../contexts/McUiContext'
 import { Button } from '../ui/button'
@@ -13,11 +15,16 @@ import { cn } from '@/lib/utils'
 // browse session costs the user a tab instead of a second browser window on
 // the box's display.
 //
-// Deliberately read-only: the overlay shows which regions the agent's `eN`
-// refs point at, but clicking them does nothing. There is no backend route
-// that accepts an injected click, and the tool surface has no "click pixel
-// (x,y)" — refs come from an a11y tree we no longer hold. Driving the page is
-// the agent's job; this page's job is to let you see what it is doing.
+// The URL bar is the one control here. It POSTs to /api/browser/navigate,
+// which the backend proxies to the aggregator — Playwright runs in that
+// process, so a control action has to cross the seam. It is not an MCP call:
+// the user typing a URL is not the agent using a tool, and dispatching it as
+// one would write a browser_navigate into the transcript nobody made.
+//
+// Everything else stays read-only, and not for want of a route: the overlay
+// shows which regions the agent's `eN` refs point at, but clicking one has
+// nothing to send. The tool surface has no "click pixel (x,y)" — refs come
+// from an a11y tree we no longer hold by the time the frame is rendered.
 const REFS_WITHOUT_GEOMETRY = 0
 
 function RefBadge({ label }: { label: string }) {
@@ -35,6 +42,11 @@ export default function BrowserPage() {
   const [error, setError] = useState<string | null>(null)
   const [natural, setNatural] = useState({ w: 0, h: 0 })
   const [showOverlay, setShowOverlay] = useState(true)
+  const [urlInput, setUrlInput] = useState('')
+  const [urlDirty, setUrlDirty] = useState(false)
+  const [navigating, setNavigating] = useState(false)
+  const [navError, setNavError] = useState<string | null>(null)
+  const urlRef = useRef<HTMLInputElement>(null)
   const imgRef = useRef<HTMLImageElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const [containerW, setContainerW] = useState(0)
@@ -48,6 +60,36 @@ export default function BrowserPage() {
     setFrame(next)
     setError(null)
   }, [])
+
+  // A frame lands after every browser_* tool call, so binding the input
+  // straight to frame.url would wipe whatever the user is halfway through
+  // typing the moment the agent navigates. Re-seed only while the bar is
+  // clean; what they typed survives until they submit it or press Escape.
+  useEffect(() => {
+    if (!urlDirty) setUrlInput(frame?.url ?? '')
+  }, [frame?.url, urlDirty])
+
+  const submitUrl = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault()
+    const target = urlInput.trim()
+    if (!target || navigating) return
+    setNavigating(true)
+    setNavError(null)
+    try {
+      const res = await api.browserNavigate(target)
+      // A bad host or a timeout comes back 200 with `error` — the request
+      // was fine, the page wasn't.
+      if (res.error) setNavError(res.error)
+      // Clean again on success, so the frame this navigation pushes re-seeds
+      // the bar with where we actually landed: redirects, added scheme and
+      // trailing-slash normalisation included.
+      else setUrlDirty(false)
+    } catch (err) {
+      setNavError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setNavigating(false)
+    }
+  }, [urlInput, navigating])
 
   useEffect(() => {
     let es: EventSource | null = null
@@ -165,9 +207,47 @@ export default function BrowserPage() {
         </div>
       </header>
 
-      <div className="truncate border-b border-border/40 px-4 py-1 font-mono text-[11px] text-muted-foreground">
-        {frame?.url ?? 'no browser session yet'}
-      </div>
+      <form onSubmit={submitUrl} className="flex items-center gap-2 border-b border-border/40 px-4 py-1.5">
+        <input
+          ref={urlRef}
+          value={urlInput}
+          onChange={e => {
+            setUrlInput(e.target.value)
+            setUrlDirty(true)
+          }}
+          onKeyDown={e => {
+            if (e.key !== 'Escape') return
+            e.preventDefault()
+            setUrlDirty(false)
+            setUrlInput(frame?.url ?? '')
+            urlRef.current?.blur()
+          }}
+          spellCheck={false}
+          autoComplete="off"
+          autoCorrect="off"
+          placeholder="Type a URL and press Enter"
+          aria-label="Browser address"
+          className="min-w-0 flex-1 rounded border border-border/60 bg-muted/30 px-2 py-1 font-mono text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-ring"
+        />
+        <Button
+          type="submit"
+          variant="ghost"
+          size="sm"
+          className="h-7 shrink-0 gap-1 text-xs"
+          disabled={navigating || !urlInput.trim()}
+        >
+          {navigating
+            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            : <ArrowRight className="h-3.5 w-3.5" />}
+          go
+        </Button>
+      </form>
+
+      {navError && (
+        <div className="border-b border-border/40 px-4 py-1 text-[11px] text-destructive">
+          {navError}
+        </div>
+      )}
 
       <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto p-4">
         {frame?.screenshot_b64 ? (

@@ -454,6 +454,18 @@ def _summarize_ide() -> dict:
     }
 
 
+def _summarize_browser() -> dict:
+    """Brief for `mc_navigate(tab="browser")` — what the page is showing.
+
+    Reads the live frame through the router's own accessor so the screenshot
+    and the accessibility tree stay out of it: this string goes into the
+    model's context every time it moves the user to this tab.
+    """
+    from app.routers import browser as browser_router
+
+    return browser_router.latest_frame_summary()
+
+
 def _summarize_dashboard() -> dict:
     """Brief for `mc_navigate(tab="dashboard")`.
 
@@ -505,6 +517,7 @@ _SUMMARIZERS = {
     "settings": lambda: {},
     "graph": lambda: {},
     "ide": _summarize_ide,
+    "browser": _summarize_browser,
 }
 
 

@@ -464,6 +464,36 @@ async def state(request):
     })
 
 
+async def browser_navigate(request):
+    """Mission Control's URL bar. `POST /browser/navigate {url}`.
+
+    Playwright lives in this process, so the backend has no handle on the
+    browser and proxies here — the same seam the dashboard crosses to read
+    `/state`. It is a route rather than a tool because the user typing a URL
+    is not the agent calling something, and it must not be logged as one.
+
+    A navigation that fails is a 200 carrying `error`: DNS not resolving is
+    an answer for the viewer to read, not a broken request. Only a malformed
+    body is a 4xx.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    url = body.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return JSONResponse({"error": "url is required"}, status_code=400)
+
+    try:
+        result = await browser.navigate_from_ui(url)
+    except Exception as e:
+        logger.warning("browser/navigate failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=200)
+    return JSONResponse(result)
+
+
 async def changes(request):
     """What a turn wrote. `GET /changes?session=<sid>&turn=<turn_id>`."""
     session = request.query_params.get("session") or ""
@@ -586,6 +616,7 @@ starlette_app = combined.streamable_http_app(
     custom_starlette_routes=[
         Route("/health", health, methods=["GET"]),
         Route("/state", state, methods=["GET"]),
+        Route("/browser/navigate", browser_navigate, methods=["POST"]),
         Route("/changes", changes, methods=["GET"]),
         Route("/changes/revert", changes_revert, methods=["POST"]),
     ],

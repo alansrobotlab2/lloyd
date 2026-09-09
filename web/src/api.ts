@@ -335,6 +335,16 @@ export interface BrowserFrame {
   refs?: BrowserRef[]
 }
 
+/** Result of driving the shared browser from the URL bar. `ok` and `error`
+ *  are mutually exclusive; a 404 or a timeout arrives as `error`. */
+export interface BrowserNavigateResult {
+  ok?: boolean
+  url?: string
+  title?: string
+  status?: number
+  error?: string
+}
+
 export interface ServiceDetail {
   id: string
   name: string
@@ -1242,6 +1252,16 @@ export const api = {
   // updates; this is the cold-start read so a fresh tab isn't blank.
   getBrowserFrame: (): Promise<BrowserFrame> =>
     fetch(`${API_BASE}/browser/frame`).then(r => r.json()),
+
+  // The Browser tab's URL bar. A failed navigation (bad host, timeout) comes
+  // back as a 200 carrying `error` — it is an answer for the user to read,
+  // not a broken request — so callers must check the body, not the status.
+  browserNavigate: (url: string): Promise<BrowserNavigateResult> =>
+    fetch(`${API_BASE}/browser/navigate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    }).then(r => r.json()),
 
   getActiveProcs: (): Promise<{ procs: ActiveProc[] }> =>
     fetch(`${API_BASE}/sessions/active-procs`).then(r => r.json()),

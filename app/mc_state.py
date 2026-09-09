@@ -21,11 +21,18 @@ from app.paths import LLOYD_HOME
 
 logger = logging.getLogger("lloyd-server")
 
+# Must stay in step with the `Page` union in web/src/components/Sidebar.tsx,
+# with `_VALID_TABS` in agent_mcp/mission_control_ui.py (what the agent may
+# navigate to) and with `VALID_TABS` in web/src/hooks/useMcNavigationEvents.ts
+# (what the frontend will act on). A tab missing from this set is worse than
+# unnavigable: `set_state` raises, the frontend's report 400s, and the mirror
+# keeps serving the tab the user was on *before* — so `mc_get_state` answers
+# confidently and wrongly. tests/test_mc_tab_parity.py pins all four.
 VALID_TABS = {
     "dashboard",
     "inner_voice", "chat", "backlog", "autonomy", "workers",
     "memory", "architecture", "skills", "tools", "services",
-    "settings", "graph", "ide",
+    "settings", "graph", "ide", "browser",
 }
 
 _STATE_PATH = LLOYD_HOME / "mc-state.json"
