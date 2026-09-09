@@ -9,6 +9,8 @@ and production.
 from __future__ import annotations
 
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -364,3 +366,231 @@ def test_frontend_rung_refuses_when_the_live_tree_has_no_install(live_repo, tmp_
     shutil.rmtree(live_repo / "web" / "node_modules")
     ok, reason, _ = g.rung_frontend()
     assert not ok and "npm install" in reason
+
+
+# ---------------------------------------------------------------------------
+# The base probe: is this failure the round's fault, or was the tree red?
+#
+# On 2026-09-08 three rounds aborted at this rung on three failures that
+# reproduced on their own pristine base, and each one was recorded as its
+# item's single attempt. #361, #370 and #376 became unreachable; the fix landed
+# seven hours after the last of them and nothing went back. Blocking those
+# promotions was right — a red tree is not a tree to land onto. Spending the
+# items was not.
+# ---------------------------------------------------------------------------
+
+SUMMARY = """\
+=========================== short test summary info ============================
+FAILED tests/test_guardian_speak.py::test_alert_dispatches_voice_by_default - assert False
+FAILED tests/test_tool_overrides.py::test_a_written_override_leaves_the_live_tree_clean
+ERROR tests/test_broken_import.py
+3 failed, 2044 passed, 8 skipped, 3 xfailed in 44.99s
+"""
+
+
+def test_failed_node_ids_reads_both_failed_and_error_lines():
+    assert G._failed_node_ids(SUMMARY) == [
+        "tests/test_guardian_speak.py::test_alert_dispatches_voice_by_default",
+        "tests/test_tool_overrides.py::test_a_written_override_leaves_the_live_tree_clean",
+        "tests/test_broken_import.py",
+    ]
+
+
+def test_failed_node_ids_ignores_prose_and_dedupes():
+    """pytest writes the word ERROR in plenty of places that are not a node
+    id, and a node id always names a file."""
+    text = ("ERROR could not load plugin\n"
+            "FAILED tests/a.py::t - boom\n"
+            "FAILED tests/a.py::t - boom\n"
+            "some ERROR tests/b.py mid-line\n")
+    assert G._failed_node_ids(text) == ["tests/a.py::t"]
+
+
+@pytest.mark.parametrize("node_ids,base_failed,external,new", [
+    # every failure predates the round: the exemption case
+    (["a::t", "b::t"], {"a::t", "b::t"}, True, []),
+    # one is new — the round broke something, and one real regression is
+    # enough to disqualify it however many old failures sit beside it
+    (["a::t", "b::t"], {"a::t"}, False, ["b::t"]),
+    # nothing reproduces: an ordinary failing round
+    (["a::t"], set(), False, ["a::t"]),
+    # the base probe found MORE than the round did; still external
+    (["a::t"], {"a::t", "z::t"}, True, []),
+    # unparseable summary is never an exemption — fail closed
+    ([], {"a::t"}, False, []),
+])
+def test_classify_test_failure_is_a_delta(node_ids, base_failed, external, new):
+    assert G._classify_test_failure(node_ids, set(base_failed)) == (external, new)
+
+
+def _repo_with_failing_test(tmp_path):
+    r = tmp_path / "live"
+    (r / "tests").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com")
+    git(r, "config", "user.name", "t")
+    (r / "tests" / "test_pre.py").write_text(
+        "def test_already_broken():\n    assert False\n\n"
+        "def test_fine():\n    assert True\n", encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    return r, git(r, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_the_base_probe_finds_a_failure_that_predates_the_round(tmp_path):
+    """The integration half, against a real git repo and a real pytest: the
+    probe checks out the base into a throwaway worktree and re-runs exactly the
+    failing node ids there."""
+    repo, base = _repo_with_failing_test(tmp_path)
+    failed, note = G._failures_at_base(
+        Path(sys.executable), repo, base,
+        ["tests/test_pre.py::test_already_broken", "tests/test_pre.py::test_fine"],
+        tmp_path / "scratch")
+    assert failed == {"tests/test_pre.py::test_already_broken"}
+    assert "already failing" in note
+
+    external, new = G._classify_test_failure(
+        ["tests/test_pre.py::test_already_broken"], failed)
+    assert external is True and new == []
+
+
+def test_the_base_probe_cleans_up_its_worktree(tmp_path):
+    """It runs inside a round that is still open, and a stray registration
+    would outlive it — `promote.py` and `preflight` both refuse a dirty tree."""
+    repo, base = _repo_with_failing_test(tmp_path)
+    G._failures_at_base(Path(sys.executable), repo, base,
+                        ["tests/test_pre.py::test_already_broken"], tmp_path / "scratch")
+    listed = git(repo, "worktree", "list", "--porcelain").stdout
+    assert "baseline" not in listed, listed
+    assert not (tmp_path / "scratch" / "baseline").exists()
+
+
+def test_the_base_probe_fails_closed_when_the_worktree_cannot_be_made(tmp_path):
+    """Every failure mode returns the empty set, which classifies the failure
+    as the round's own. Being wrong that way costs the status quo; being wrong
+    the other way lands a change nobody checked."""
+    repo, _ = _repo_with_failing_test(tmp_path)
+    failed, note = G._failures_at_base(Path(sys.executable), repo,
+                                       "0000000000000000000000000000000000000000",
+                                       ["tests/test_pre.py::test_already_broken"],
+                                       tmp_path / "scratch")
+    assert failed == set()
+    assert "baseline worktree failed" in note
+
+
+def test_no_node_ids_is_not_an_exemption(tmp_path):
+    failed, note = G._failures_at_base(Path(sys.executable), tmp_path, "HEAD", [],
+                                       tmp_path / "scratch")
+    assert failed == set() and "no node ids" in note
+
+
+def test_rung_tests_reports_pre_existing_breakage_as_an_external_blocker(tmp_path, monkeypatch):
+    """End to end through the real rung: a tree that was already red, plus a
+    round that changed something unrelated. The rung still FAILS — landing onto
+    a red tree would hand the guardian's observation window a broken baseline —
+    but it says whose fault it is, and `backlog.implemented_ids` reads that."""
+    repo, base = _repo_with_failing_test(tmp_path)
+    monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
+    wt = tmp_path / "work" / "SM_T" / "home" / "lloyd"
+    wt.parent.mkdir(parents=True)
+    git(repo, "worktree", "add", "-q", "-b", "selfmod/SM_T", str(wt), base)
+    (wt / "unrelated.py").write_text("X = 1\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "an unrelated change")
+
+    g = _gate_for(repo, wt, base, monkeypatch)
+    g.python = Path(sys.executable)
+    ok, detail, data = g.rung_tests()
+
+    assert ok is False, "a red tree is still not a tree to land onto"
+    assert data.get("external_blocker") is True
+    assert data["external_failures"] == ["tests/test_pre.py::test_already_broken"]
+    assert "PRE-EXISTING BREAKAGE" in detail
+    git(repo, "worktree", "remove", "--force", str(wt))
+
+
+def test_rung_tests_blames_the_round_for_a_failure_it_introduced(tmp_path, monkeypatch):
+    """The counterfactual that makes the test above mean something: the same
+    already-red tree, but this round also breaks a test of its own. One new
+    failure disqualifies the exemption however many old ones sit beside it."""
+    repo, base = _repo_with_failing_test(tmp_path)
+    monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
+    wt = tmp_path / "work" / "SM_T2" / "home" / "lloyd"
+    wt.parent.mkdir(parents=True)
+    git(repo, "worktree", "add", "-q", "-b", "selfmod/SM_T2", str(wt), base)
+    (wt / "tests" / "test_mine.py").write_text(
+        "def test_i_broke_this():\n    assert False\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "a change that breaks its own test")
+
+    g = _gate_for(repo, wt, base, monkeypatch)
+    g.python = Path(sys.executable)
+    ok, detail, data = g.rung_tests()
+
+    assert ok is False
+    assert not data.get("external_blocker"), "one new failure is the round's own"
+    assert data["new_failures"] == ["tests/test_mine.py::test_i_broke_this"]
+    assert "are new in this round" in detail
+    git(repo, "worktree", "remove", "--force", str(wt))
+
+
+def test_a_test_the_round_added_does_not_hide_the_pre_existing_ones(tmp_path, monkeypatch):
+    """Regression, found building this: probing by node id is wrong. Handed a
+    node id that does not exist at base — a test the round just wrote, in a file
+    that already existed — pytest exits `ERROR: not found:` and runs NOTHING, so
+    the pre-existing failure beside it never reports and a red tree reads as
+    green. The probe runs whole files for exactly this reason."""
+    repo, base = _repo_with_failing_test(tmp_path)
+    monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
+    wt = tmp_path / "work" / "SM_T3" / "home" / "lloyd"
+    wt.parent.mkdir(parents=True)
+    git(repo, "worktree", "add", "-q", "-b", "selfmod/SM_T3", str(wt), base)
+    # A new failing test appended to the SAME file that is already red.
+    (wt / "tests" / "test_pre.py").write_text(
+        "def test_already_broken():\n    assert False\n\n"
+        "def test_fine():\n    assert True\n\n"
+        "def test_added_by_this_round():\n    assert False\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "adds a failing test to an already-red file")
+
+    g = _gate_for(repo, wt, base, monkeypatch)
+    g.python = Path(sys.executable)
+    ok, detail, data = g.rung_tests()
+
+    assert ok is False
+    assert not data.get("external_blocker"), "the round added a failure of its own"
+    assert data["new_failures"] == ["tests/test_pre.py::test_added_by_this_round"]
+    # The pre-existing one was still seen — that is what a node-id probe lost.
+    assert "tests/test_pre.py::test_already_broken" in data["failed_node_ids"]
+    assert "1 of 2 failures are new" in detail
+    git(repo, "worktree", "remove", "--force", str(wt))
+
+
+def test_a_probe_that_could_not_run_says_so_instead_of_reporting_zero(tmp_path):
+    """Found by running this against real history: handed a python with no
+    pytest, the probe reported "0 already failing" and blamed the round. Both
+    "nothing pre-existing" and "pytest never ran" are an empty set, and only
+    one of them is an answer — a silent downgrade is indistinguishable from
+    success. The verdict is the same (no exemption, fail closed); the note is
+    not."""
+    repo, base = _repo_with_failing_test(tmp_path)
+    # A python that exists and runs, but cannot import pytest — the exact
+    # shape that produced the silent zero (a `.resolve()` on the venv symlink
+    # landed on the bare uv interpreter).
+    stub = tmp_path / "python-without-pytest"
+    stub.write_text("#!/bin/sh\necho 'No module named pytest' >&2\nexit 1\n",
+                    encoding="utf-8")
+    stub.chmod(0o755)
+    failed, note = G._failures_at_base(stub, repo, base,
+                                       ["tests/test_pre.py::test_already_broken"],
+                                       tmp_path / "scratch")
+    assert failed == set()
+    assert "INCONCLUSIVE" in note, note
+    assert "already failing" not in note
+
+    # A binary that does not exist at all takes the exception path, which is
+    # also named rather than silent.
+    failed, note = G._failures_at_base(Path("/nonexistent/python"), repo, base,
+                                       ["tests/test_pre.py::test_already_broken"],
+                                       tmp_path / "scratch")
+    assert failed == set() and "baseline probe failed" in note

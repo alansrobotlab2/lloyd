@@ -427,6 +427,65 @@ also floors `passed` and caps `skipped`. Three numbers, because the failure
 being prevented is a round that reaches green by removing the question rather
 than by answering it.
 
+### 4.2b A failing tests rung says whose breakage it is
+
+The rung is a diff too, for the same reason 4.1 is — it just took an incident
+to notice. `pytest` failing says the tree is red; it does not say the round
+made it red. On **2026-09-08** three rounds aborted here on the same three
+failures, none of which any diff under test had written:
+
+| Item | Round | Gated (UTC) | Failures |
+|---|---|---|---|
+| #361 | `SM_20260908_065238` | 07:00 | guardian_speak ×2, tool_overrides |
+| #370 | `SM_20260908_105946` | 11:05 | guardian_speak ×2, tool_overrides |
+| #376 | `SM_20260908_145622` | 15:14 | tool_overrides |
+
+Two tests asserted the wall clock against a 23→07 quiet-hours window, so they
+failed exactly when the unattended loop runs; one asserted that a deliberately
+untracked file had been checked out, so it failed in *every* worktree whatever
+the diff. `8138f1c` fixed them at 16:39 UTC — after all three — and nothing
+went back for any of them, because `implemented_ids` counts any finished round
+as the item's one attempt. Three items were consumed by breakage none of them
+wrote, and each of those rounds had *proved* it: #361's cut a worktree at its
+own base and reproduced the failures with none of its code present, #370's
+filed #479 saying the gate was unlandable for every round, #376's ended "the
+branch is ready as-is". All of it in prose, in reports that are read once.
+
+So on a failure the rung re-runs the failing **files** at the round's base, in
+a throwaway worktree, and classifies:
+
+- every failure reproduces at base → `external_blocker: true`
+- any failure is new → the round's own, and the detail names which
+
+The rung still **fails** either way. A red tree is not a tree to land onto:
+the promotion's observation window would open against a broken baseline, and
+§8 is built on the assumption that errors after a landing are about the
+landing. Blocking was always right; spending the item was not.
+`backlog.implemented_ids` reads the flag off the ledger event — not off
+`gate.json`, which lives in the round dir and is deleted with the worktree —
+and does not count such a round as the attempt.
+
+Three things that decide whether it works:
+
+- **It probes files, not node ids.** Handed a node id that does not exist at
+  base — a test the round just wrote — pytest exits `ERROR: not found:` and
+  runs *nothing*, so one new test would hide every pre-existing failure beside
+  it and a red tree would read as green. Found while building this; pinned by
+  `test_a_test_the_round_added_does_not_hide_the_pre_existing_ones`.
+- **It fails closed in every direction.** A worktree that will not create, a
+  probe that times out, an unparseable summary — all return "nothing
+  reproduces", which blames the round. Being wrong that way costs the status
+  quo; being wrong the other way lands a change nobody checked.
+- **The exemption is capped** (`EXTERNAL_RETRY_CAP`, 3). `select_confirmed`
+  takes the oldest ready item, so an item re-offered without bound would be
+  re-picked every round for as long as the tree stayed red, starving
+  everything behind it. A tree red across four rounds is an incident nobody is
+  handling, not a blip worth retrying.
+
+Only the `tests` rung grants it. `preflight` failing on a dirty live tree is
+also not the round's fault, but it is cheap and re-runnable, and widening an
+exemption is how it becomes an open door.
+
 ### 4.3 Rungs that run candidate code run it against scratch state
 
 Only the canary redirected `LLOYD_SELFMOD_STATE`. The static, tests and venv

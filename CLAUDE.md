@@ -130,6 +130,26 @@ Errors are read from `logs/server.err`, never `server.log` — `basicConfig`
 writes to stderr, so `server.log` is uvicorn's access log and holds zero
 error-shaped lines.
 
+- **A failing `tests` rung says the tree is red, not that the round made it
+  red.** On 2026-09-08 three rounds aborted here on the same three failures
+  no diff under test had written — two asserting the wall clock against a
+  23→07 quiet-hours window (so they failed exactly when the unattended loop
+  runs), one asserting that a deliberately untracked file had been checked
+  out (so it failed in every worktree). `8138f1c` fixed them at 16:39 UTC,
+  after all three, and nothing went back: `implemented_ids` counts any
+  finished round as the item's one attempt, so #361, #370 and #376 were
+  consumed by someone else's breakage. Each of those rounds had *proved* it
+  predated them — in prose, in a report read once. `rung_tests` now re-runs
+  the failing **files** at the round's base in a throwaway worktree and
+  records `external_blocker: true` when every failure reproduces there. The
+  rung still fails, because landing onto a red tree opens the guardian's
+  observation window against a broken baseline; what changes is that the
+  item keeps its attempt. Probing by *file* is load-bearing — handed a node
+  id the round just added, pytest exits `ERROR: not found:` and runs
+  nothing, so one new test would hide every pre-existing failure beside it.
+  Fails closed everywhere (a probe that cannot run blames the round), capped
+  at `EXTERNAL_RETRY_CAP` re-offers so a permanently red tree cannot starve
+  the board, and granted by the `tests` rung only.
 - **A turn that dies at its budget is not the end of the round.** The
   budget anchor (`<budget>` at 75%/90% of `max_turns`) tells the model to
   gate-and-land or abort while it still can; the observer's ambient

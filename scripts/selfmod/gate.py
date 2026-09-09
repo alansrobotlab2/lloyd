@@ -12,7 +12,9 @@ cost 3 seconds, not a full canary boot.
 
   0 preflight      ~1s    lock, clean tree, ancestry, diff scope
   1 static         ~8s    compileall, import smoke, pyflakes delta
-  2 tests         ~35s    full pytest + a collected-count floor
+  2 tests         ~35s    full pytest + a collected-count floor; on
+                          failure, re-probes the failing files at the
+                          round's base to say whose breakage it is
   3 venv        0-300s    only when requirements changed (reflink + uv)
   4 canary boot   ~30s    both /health green, tool floor, config-follows-code
   5 canary smoke  ~30s    one real turn, sentinel through a real Bash call
@@ -168,6 +170,129 @@ def _parse_pytest_summary(text: str) -> dict:
     return out
 
 
+# Every rollback and every abort this loop has performed has been a false
+# positive, and the `tests` rung has its own version of that failure: on
+# 2026-09-08 three rounds aborted on the same three pre-existing failures, and
+# because `implemented_ids` counts any finished round as the item's one
+# attempt, #361, #370 and #376 were consumed by breakage none of them wrote.
+# The fix landed seven hours after the last of them and nothing went back.
+#
+# So the rung asks a second question when it fails: do these exact tests
+# already fail at the base this round branched from, where the diff under test
+# is absent? Blocking the promotion is still right — landing onto a red tree
+# would give the guardian's observation window a broken baseline. Consuming the
+# backlog item is what was wrong.
+EXTERNAL_PROBE_TIMEOUT = 600.0
+
+
+def _failed_node_ids(text: str) -> list[str]:
+    """Node ids from pytest's short test summary, in order, deduplicated.
+
+    Both `FAILED tests/x.py::test_y - AssertionError` and the bare
+    `ERROR tests/x.py` a collection failure emits are node ids pytest will
+    accept back on a command line, which is what the base probe needs.
+    """
+    out: list[str] = []
+    for raw in text.splitlines():
+        m = re.match(r"^(?:FAILED|ERROR)\s+(\S+)", raw.strip())
+        if not m:
+            continue
+        nid = m.group(1)
+        # Guard against prose: pytest writes "ERROR" in other contexts, and a
+        # node id always names a file.
+        if ".py" not in nid or nid in out:
+            continue
+        out.append(nid)
+    return out
+
+
+def _classify_test_failure(node_ids: list[str],
+                           base_failed: set[str]) -> tuple[bool, list[str]]:
+    """`(external, new)` — a delta, for the same reason the pyflakes rung is one.
+
+    A failure absent from the base is this round's. A failure present at the
+    base predates it. External means *every* failure reproduces: one new
+    failure alongside twenty old ones is still a round that broke something,
+    and the exemption is for rounds that broke nothing at all.
+
+    Empty `node_ids` is never external. pytest failed and the summary could not
+    be parsed, which is a reason to know less, not a reason to grant an
+    exemption — this whole path fails closed.
+    """
+    new = [n for n in node_ids if n not in base_failed]
+    return (bool(node_ids) and not new), new
+
+
+def _failures_at_base(python: Path, live_root: Path, base: str,
+                      node_ids: list[str], scratch: Path,
+                      env: dict | None = None) -> tuple[set[str], str]:
+    """Which of `node_ids` already fail at `base`, in a throwaway worktree.
+
+    Module-level and fully parameterised so it can be exercised against a real
+    throwaway repo without standing up a Gate.
+
+    Fails closed in every direction: a worktree that will not create, a probe
+    that times out, a python that will not start — all return the empty set,
+    which classifies the failure as the round's own. The cost of being wrong
+    that way is the status quo; the cost of being wrong the other way is
+    landing a change nobody checked.
+    """
+    if not node_ids:
+        return set(), "no node ids to probe"
+    wt = scratch / "baseline"
+    shutil.rmtree(wt, ignore_errors=True)
+    r = W.git(live_root, "worktree", "add", "--detach", "-q", str(wt), base)
+    if r.returncode != 0:
+        return set(), f"baseline worktree failed: {r.stderr.strip()[:200]}"
+    try:
+        # Probe by FILE, never by node id. Handed a node id that does not exist
+        # at the base — a test the round itself added — pytest exits 4 with
+        # `ERROR: not found:` and runs *nothing*, so one new test would hide
+        # every pre-existing failure beside it and the probe would report a red
+        # tree as green. Files the round added are skipped for the same reason
+        # and are new by construction.
+        files = []
+        for nid in node_ids:
+            f = nid.split("::", 1)[0]
+            if f not in files and (wt / f).exists():
+                files.append(f)
+        if not files:
+            return set(), "none of the failing files exist at base"
+        probe_env = dict(env or {})
+        if probe_env:
+            probe_env["PYTHONPATH"] = str(wt)
+        # `--no-header -p no:cacheprovider`: the probe must not write a
+        # .pytest_cache into a tree it is about to delete, and must not read
+        # one written by the candidate run.
+        r = _run([str(python), "-m", "pytest", "-q", "--no-header",
+                  "-p", "no:cacheprovider", "--continue-on-collection-errors",
+                  "-m", "not live_vault", *files],
+                 cwd=wt, env=probe_env or None, timeout=EXTERNAL_PROBE_TIMEOUT)
+        text = r.stdout + r.stderr
+        failed = set(_failed_node_ids(text))
+        # "pytest ran and found nothing pre-existing" and "pytest never ran"
+        # both come back as an empty set, and only one of them is an answer.
+        # A missing interpreter, a broken venv or a usage error all exit
+        # non-zero with no summary — and reporting that as "0 already failing"
+        # blames the round for breakage it may not own, silently, which is the
+        # failure this whole probe exists to stop. Same verdict either way
+        # (no exemption), but the note has to say which one happened.
+        if not failed and not _parse_pytest_summary(text)["collected"]:
+            tail = " | ".join(text.strip().splitlines()[-3:])[:200]
+            return set(), (f"baseline probe INCONCLUSIVE at base {base[:8]} — "
+                           f"pytest produced no summary (rc={r.returncode}): {tail}")
+        return failed, (f"probed {len(files)} file(s) at base {base[:8]}: "
+                        f"{len(failed)} already failing")
+    except subprocess.TimeoutExpired:
+        return set(), f"baseline probe timed out after {EXTERNAL_PROBE_TIMEOUT:.0f}s"
+    except Exception as exc:
+        return set(), f"baseline probe failed: {type(exc).__name__}: {exc}"
+    finally:
+        W.git(live_root, "worktree", "remove", "--force", str(wt))
+        W.git(live_root, "worktree", "prune")
+        shutil.rmtree(wt, ignore_errors=True)
+
+
 class Gate:
     def __init__(self, round_id: str, worktree: Path, base: str, *,
                  live_root: Path | None = None, skip_smoke: bool = False):
@@ -182,7 +307,7 @@ class Gate:
         self.report = GateReport(round_id=round_id, base=base,
                                  head=W.head(self.worktree) or "")
 
-    def _child_env(self) -> dict:
+    def _child_env(self, root: Path | None = None) -> dict:
         """Environment for rungs that execute CANDIDATE code outside the canary.
 
         Only the canary redirected the self-modification state dir. The static,
@@ -201,7 +326,7 @@ class Gate:
         (scratch / "guardian").mkdir(parents=True, exist_ok=True)
         return {
             "PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
-            "PYTHONPATH": str(self.worktree),
+            "PYTHONPATH": str(root or self.worktree),
             "LLOYD_SELFMOD_STATE": str(scratch / "selfmod"),
             "LLOYD_GUARDIAN_STATE": str(scratch / "guardian"),
             "LLOYD_VOICE_ALERTS": "0",
@@ -218,10 +343,18 @@ class Gate:
             ok, detail, data = False, f"{type(exc).__name__}: {exc}", {}
         res = RungResult(name, ok, str(detail)[:2000], time.time() - started, data or {})
         self.report.rungs.append(res)
-        S.append_event({"event": "gate", "round_id": self.round_id, "rung": name,
-                        "ok": ok, "detail": res.detail[:500],
-                        "skipped": bool((res.data or {}).get("skipped")),
-                        "seconds": round(res.seconds, 2)})
+        # `external_blocker` rides on the event, not only in the report:
+        # `gate.json` lives in the round dir and is deleted with the worktree,
+        # while `backlog.implemented_ids` has to answer "was this round's
+        # failure its own fault?" long after the round is gone.
+        event = {"event": "gate", "round_id": self.round_id, "rung": name,
+                 "ok": ok, "detail": res.detail[:500],
+                 "skipped": bool((res.data or {}).get("skipped")),
+                 "seconds": round(res.seconds, 2)}
+        if (res.data or {}).get("external_blocker"):
+            event["external_blocker"] = True
+            event["external_failures"] = (res.data or {}).get("external_failures", [])
+        S.append_event(event)
         print(f"[{'PASS' if ok else 'FAIL'}] {name} ({res.seconds:.1f}s) {res.detail[:160]}")
         return ok
 
@@ -412,7 +545,33 @@ class Gate:
         counts = _parse_pytest_summary(text)
         if r.returncode != 0:
             tail = "\n".join(text.strip().splitlines()[-15:])
-            return False, f"pytest failed ({counts}): {tail[-900:]}", counts
+            node_ids = _failed_node_ids(text)
+            base_failed, probe_note = _failures_at_base(
+                self.python, self.live, self.base, node_ids,
+                W.round_dir(self.round_id), self._child_env())
+            external, new = _classify_test_failure(node_ids, base_failed)
+            data = {**counts, "failed_node_ids": node_ids,
+                    "base_probe": probe_note}
+            if external:
+                # The rung still fails: a red tree is not a tree to land onto,
+                # and the guardian would judge the promotion against a broken
+                # baseline. What changes is that this does not spend the
+                # backlog item's one attempt — see `backlog.implemented_ids`.
+                data["external_blocker"] = True
+                data["external_failures"] = node_ids
+                return False, (f"pytest failed ({counts}), but every failure "
+                               f"reproduces at base {self.base[:8]} with this "
+                               f"round's diff absent — PRE-EXISTING BREAKAGE, "
+                               f"not caused by this change: {node_ids}. "
+                               f"{probe_note}. Blocking the promotion; the item "
+                               f"keeps its attempt."), data
+            if node_ids and base_failed:
+                data["new_failures"] = new
+                return False, (f"pytest failed ({counts}): {len(new)} of "
+                               f"{len(node_ids)} failures are new in this round "
+                               f"({new}); the rest predate it. {probe_note}\n"
+                               f"{tail[-600:]}"), data
+            return False, f"pytest failed ({counts}): {tail[-900:]}\n{probe_note}", data
 
         # Non-negotiable under auto-landing: `pytest -q` exits 0 if the round
         # simply deleted the test that was failing.

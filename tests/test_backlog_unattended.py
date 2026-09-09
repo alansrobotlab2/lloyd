@@ -596,3 +596,119 @@ def test_reaper_leaves_landed_observed_and_cleaned_rounds_alone(isolated, monkey
     aborted2 = _reaper_env(monkeypatch, tmp_path, worktree=False)
     _finished("SM_GONE")
     assert I.reap_abandoned_rounds(now=later) == [] and aborted2 == [], "already cleaned up"
+
+
+# ===========================================================================
+# A round killed by breakage it did not write keeps the item's attempt
+# ===========================================================================
+
+def _blocked_round(item_id, round_id, *, external=True, rung="tests"):
+    """One implement attempt that ended at the gate, and the gate rung that
+    ended it."""
+    S.append_event({"event": "backlog_implement", "item_id": item_id,
+                    "phase": "started"}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": item_id,
+                    "phase": "finished", "round_id": round_id}, path=S.LEDGER_PATH)
+    ev = {"event": "gate", "round_id": round_id, "rung": rung, "ok": False,
+          "detail": "pytest failed"}
+    if external:
+        ev["external_blocker"] = True
+        ev["external_failures"] = ["tests/test_guardian_speak.py::test_alert_dispatches_voice_by_default"]
+    S.append_event(ev, path=S.LEDGER_PATH)
+
+
+def test_a_round_blocked_by_pre_existing_breakage_does_not_spend_the_attempt(isolated):
+    """2026-09-08, exactly. Three rounds aborted at the `tests` rung on three
+    failures that reproduced on their own pristine base, and because any
+    finished round counted as the item's one attempt, #361, #370 and #376
+    became unreachable. The fix landed seven hours later and nothing went back
+    for any of them."""
+    write_item(isolated, 361)
+    _confirm(361)
+    _blocked_round(361, "SM_20260908_065238")
+
+    assert "SM_20260908_065238" in B.externally_blocked_rounds(S.LEDGER_PATH)
+    assert 361 not in B.implemented_ids(S.LEDGER_PATH)
+    pair = B.select_confirmed(S.LEDGER_PATH)
+    assert pair is not None and pair[0].id == 361, (
+        "an item whose round was killed by breakage it did not write must come back"
+    )
+
+
+def test_a_round_that_really_failed_still_spends_the_attempt(isolated):
+    """The counterfactual, and the whole reason the flag is written by the gate
+    rather than inferred from 'the round aborted'. A gate failure with no
+    external verdict is the round's own."""
+    write_item(isolated, 362)
+    _confirm(362)
+    _blocked_round(362, "SM_R2", external=False)
+
+    assert B.externally_blocked_rounds(S.LEDGER_PATH) == set()
+    assert 362 in B.implemented_ids(S.LEDGER_PATH)
+    assert B.select_confirmed(S.LEDGER_PATH) is None
+
+
+def test_the_last_tests_rung_decides_not_the_first(isolated):
+    """A round is gated, fixed and re-gated. An external failure followed by a
+    real one is a round that broke something — it must not keep the exemption
+    its first attempt earned."""
+    write_item(isolated, 363)
+    _confirm(363)
+    _blocked_round(363, "SM_R3", external=True)
+    S.append_event({"event": "gate", "round_id": "SM_R3", "rung": "tests",
+                    "ok": False, "detail": "pytest failed"}, path=S.LEDGER_PATH)
+
+    assert B.externally_blocked_rounds(S.LEDGER_PATH) == set()
+    assert 363 in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_a_passing_re_gate_also_clears_the_exemption(isolated):
+    """The same rule from the other side: a round that went on to pass its
+    tests rung is not externally blocked, whatever its first attempt said."""
+    write_item(isolated, 364)
+    _confirm(364)
+    _blocked_round(364, "SM_R4", external=True)
+    S.append_event({"event": "gate", "round_id": "SM_R4", "rung": "tests",
+                    "ok": True, "detail": "2695 passed"}, path=S.LEDGER_PATH)
+
+    assert B.externally_blocked_rounds(S.LEDGER_PATH) == set()
+    assert 364 in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_only_the_tests_rung_grants_the_exemption(isolated):
+    """`preflight` failing because the live tree is dirty is also not the
+    round's fault, but it is not this exemption: preflight is cheap and
+    re-runnable, and widening the rule is how an exemption becomes an
+    open door."""
+    write_item(isolated, 365)
+    _confirm(365)
+    _blocked_round(365, "SM_R5", external=True, rung="preflight")
+
+    assert B.externally_blocked_rounds(S.LEDGER_PATH) == set()
+    assert 365 in B.implemented_ids(S.LEDGER_PATH)
+
+
+def test_the_free_re_offers_are_capped(isolated):
+    """`select_confirmed` takes the oldest ready item, so an item re-offered
+    without bound would be re-picked every round for as long as the tree stayed
+    red, starving everything behind it. A tree red across four rounds is an
+    incident nobody is handling."""
+    write_item(isolated, 366)
+    _confirm(366)
+    for n in range(B.EXTERNAL_RETRY_CAP):
+        _blocked_round(366, f"SM_CAP{n}")
+        assert 366 not in B.implemented_ids(S.LEDGER_PATH), f"re-offer {n + 1} should be free"
+    _blocked_round(366, "SM_CAP_LAST")
+    assert 366 in B.implemented_ids(S.LEDGER_PATH), "past the cap it is spent like any other"
+
+
+def test_a_human_reopen_still_wins_over_the_cap(isolated):
+    """The two exemptions are independent: `reopen_item` is a decision and does
+    not consult the automatic one."""
+    write_item(isolated, 367)
+    _confirm(367)
+    for n in range(B.EXTERNAL_RETRY_CAP + 2):
+        _blocked_round(367, f"SM_H{n}")
+    assert 367 in B.implemented_ids(S.LEDGER_PATH)
+    B.reopen_item(367, "the blocker was fixed", ledger=S.LEDGER_PATH)
+    assert 367 not in B.implemented_ids(S.LEDGER_PATH)

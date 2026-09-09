@@ -198,7 +198,10 @@ def open_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:
     return out
 
 
-def _ledger_events(ledger: Path, event: str) -> list[dict]:
+def _ledger_events(ledger: Path, event: str, *, require_item: bool = True) -> list[dict]:
+    """Rows of one event type. `require_item=False` for the event types that
+    are about a round rather than an item — `gate` carries a `round_id` and no
+    `item_id`, and the default filter drops it silently."""
     out: list[dict] = []
     if not ledger.exists():
         return out
@@ -210,8 +213,11 @@ def _ledger_events(ledger: Path, event: str) -> list[dict]:
                 d = json.loads(line)
             except ValueError:
                 continue
-            if d.get("event") == event and d.get("item_id") is not None:
-                out.append(d)
+            if d.get("event") != event:
+                continue
+            if require_item and d.get("item_id") is None:
+                continue
+            out.append(d)
     except OSError:
         pass
     return out
@@ -321,16 +327,68 @@ def human_only_ids(ledger: Path) -> dict[int, str]:
             if is_human_only(ev.get("acceptance"))}
 
 
+# An externally-blocked round costs the item nothing, but it cannot cost
+# nothing forever: `select_confirmed` takes the oldest ready item, so an item
+# re-offered without bound would be re-picked every round for as long as the
+# tree stayed red, starving every item behind it. Three free re-offers, then it
+# is spent like any other attempt — by which point a red tree has survived four
+# rounds and is an incident nobody is handling, not a blip to keep retrying.
+EXTERNAL_RETRY_CAP = 3
+
+
+def externally_blocked_rounds(ledger: Path) -> set[str]:
+    """Rounds whose `tests` rung failed on breakage that predates them.
+
+    Keyed on the LAST tests rung per round, because a round that is gated,
+    fixed and re-gated must be judged on its final attempt: an external
+    failure followed by a real one is a round that broke something.
+    """
+    last: dict[str, bool] = {}
+    for d in _ledger_events(ledger, "gate", require_item=False):
+        if d.get("rung") != "tests":
+            continue
+        rid = str(d.get("round_id") or "")
+        if rid:
+            last[rid] = bool(d.get("external_blocker"))
+    return {rid for rid, external in last.items() if external}
+
+
 def implemented_ids(ledger: Path) -> set[int]:
     """Items an implementation turn has already been run for, whatever it did —
-    unless a human has since reopened them (`reopen_item`), in which case the
-    latest event is `reopened` and the item is eligible for exactly one more
-    attempt. One attempt per item is the rule; a second is a human's call, and
-    this is how the human makes it."""
-    latest: dict[int, str] = {}
+    with two exemptions.
+
+    A human may reopen one (`reopen_item`), in which case the latest event is
+    `reopened`. One attempt per item is the rule; a second is a human's call,
+    and this is how the human makes it.
+
+    And a round whose gate failed on breakage it did not write never spent the
+    attempt at all. On 2026-09-08 three rounds aborted on the same three
+    pre-existing test failures — #361, #370 and #376 — and all three items were
+    marked attempted and became unreachable; the fix (`8138f1c`) landed seven
+    hours after the last of them and nothing went back for any of them. Every
+    one of those rounds had *proved* the failures predate it, in prose, in a
+    report read once. `gate.rung_tests` now records that finding as a field, and
+    this is what reads it. Blocking the promotion was always right; spending the
+    item was not.
+    """
+    latest: dict[int, tuple[str, str]] = {}
+    finished: dict[int, int] = {}
     for d in _ledger_events(ledger, "backlog_implement"):
-        latest[int(d["item_id"])] = str(d.get("phase") or "")
-    return {i for i, phase in latest.items() if phase != "reopened"}
+        iid = int(d["item_id"])
+        phase = str(d.get("phase") or "")
+        latest[iid] = (phase, str(d.get("round_id") or ""))
+        if phase == "finished":
+            finished[iid] = finished.get(iid, 0) + 1
+    blocked = externally_blocked_rounds(ledger)
+    out: set[int] = set()
+    for iid, (phase, round_id) in latest.items():
+        if phase == "reopened":
+            continue
+        if (round_id and round_id in blocked
+                and finished.get(iid, 0) <= EXTERNAL_RETRY_CAP):
+            continue
+        out.add(iid)
+    return out
 
 
 def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dict:
