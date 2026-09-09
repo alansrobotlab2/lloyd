@@ -157,7 +157,7 @@ def test_videos_above_floor_bounds_the_walk():
 
 
 def test_get_next_video_never_goes_below_the_floor(monkeypatch):
-    monkeypatch.setattr(M, "is_video_playable", lambda vid: (True, ""))
+    monkeypatch.setattr(M, "is_video_playable", lambda vid: (True, "", "20260908"))
     videos = [_v(1), _v(2), _v(3)]
     st = _state(v1={"status": "completed"}, v2={"status": "completed"})
     st["floor_video_id"] = "v2"
@@ -188,6 +188,61 @@ def test_register_since_uses_existing_note_dates_and_requeues(monkeypatch, tmp_p
     assert st["seen"]["v2"]["status"] == "pending"
     assert "v3" not in st["seen"] and "v4" not in st["seen"], "below the window"
     assert st["floor_video_id"] == "v2" and result["requeued"] == 1 and result["added"] == 1
+
+
+def test_register_new_dates_a_new_upload_from_the_playability_probe(monkeypatch):
+    """The flat playlist listing carries no dates, so `register_new` used to
+    write `published: ""` — and `pending_entries` sorts newest-first, which
+    puts "" *last*. Every genuinely new upload therefore went to the back of
+    the queue that exists to reach new uploads first. Harmless on an empty
+    board; on 2026-09-09 AI Engineer had 170 pending, so a video published
+    that morning would have waited behind all of them.
+
+    The date is free: `is_video_playable` already does a full extraction.
+    """
+    monkeypatch.setattr(M, "is_video_playable",
+                        lambda vid: (True, "", {"v3": "20260909"}.get(vid, "")))
+    st = _state(v1={"status": "completed", "published": "20260801"},
+                v2={"status": "pending", "published": "20260715"})
+
+    added = M.register_new(st, [_v(3), _v(1), _v(2)])
+
+    assert added == ["v3"]
+    assert st["seen"]["v3"]["published"] == "20260909"
+    assert [r["video_id"] for r in M.pending_entries(st)] == ["v3", "v2"], \
+        "the new upload sorts ahead of the backlog, which is the whole point"
+
+
+def test_a_probe_that_cannot_date_a_video_still_registers_it(monkeypatch):
+    """An unresolvable date is "" — exactly the old behaviour. A video with
+    no date is worth less queue position than it is worth losing."""
+    monkeypatch.setattr(M, "is_video_playable", lambda vid: (True, "", ""))
+    st = _state(v1={"status": "completed", "published": "20260801"})
+    assert M.register_new(st, [_v(2), _v(1)]) == ["v2"]
+    assert st["seen"]["v2"]["published"] == ""
+    assert [r["video_id"] for r in M.pending_entries(st)] == ["v2"]
+
+
+def test_the_playability_probe_reports_the_date_it_already_fetched(monkeypatch):
+    """A three-tuple, not a second yt-dlp call: the probe is a full extract
+    and `upload_date` is in the payload it already parses."""
+    payload = json.dumps({"playable": True, "status": "", "availability": "public",
+                          "reason": "", "play_reason": "", "upload_date": "20260909"})
+    monkeypatch.setattr(M.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, payload, ""))
+    assert M.is_video_playable("v1") == (True, "", "20260909")
+
+    premiere = json.dumps({"playable": False, "status": "premiere_scheduled",
+                           "availability": "", "reason": "Premieres in 2 hours",
+                           "play_reason": "", "upload_date": "20260910"})
+    monkeypatch.setattr(M.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, premiere, ""))
+    playable, reason, date = M.is_video_playable("v2")
+    assert playable is False and "Premieres" in reason and date == "20260910"
+
+    monkeypatch.setattr(M.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "boom"))
+    assert M.is_video_playable("v3") == (False, "yt-dlp unavailable", "")
 
 
 class _FrozenDatetime(M.datetime):
@@ -341,7 +396,7 @@ def test_worker_state_transitions_and_pending_order():
 
 def test_register_new_registers_everything_above_the_floor(monkeypatch):
     monkeypatch.setattr(M, "is_video_playable",
-                        lambda vid: (False, "Premieres in 2 hours") if vid == "v2" else (True, ""))
+                        lambda vid: (False, "Premieres in 2 hours", "") if vid == "v2" else (True, "", "20260908"))
     st = _state(v4={"status": "completed"}); st["floor_video_id"] = "v4"
     added = M.register_new(st, [_v(1), _v(2), _v(3), _v(4), _v(5)])
     assert added == ["v1", "v3"]

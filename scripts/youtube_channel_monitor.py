@@ -144,7 +144,19 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "primary")
 
 def is_video_playable(video_id):
     """Quick check if a video is playable (not a scheduled premiere, not age-restricted, etc).
-    Returns (playable: bool, reason: str)."""
+
+    Returns (playable: bool, reason: str, upload_date: str).
+
+    The date is a by-product, not a second probe: this is a full
+    (`extract_flat: False`) extraction, so it already holds the one field the
+    flat playlist listing does not carry. `register_new` used to drop it and
+    record `published: ""`, and `pending_entries` sorts newest-first with ""
+    last — so every genuinely new upload went to the *back* of a queue that
+    exists to reach new uploads first. Invisible while a backlog is small;
+    on 2026-09-09 AI Engineer had 170 pending and a video published that day
+    would have waited behind all of them. An unresolvable date is still "",
+    which is exactly the old behaviour.
+    """
     code = '''
 import sys, json, re
 try:
@@ -170,6 +182,7 @@ try:
         "availability": availability,
         "reason": reason,
         "play_reason": play_reason,
+        "upload_date": info.get("upload_date") or "",
     }))
 except Exception as e:
     err_msg = str(e).lower()
@@ -185,19 +198,20 @@ except Exception as e:
         capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
-        return False, "yt-dlp unavailable"
+        return False, "yt-dlp unavailable", ""
     output = result.stdout.strip()
     if output.startswith("NOT_PLAYABLE") or output.startswith("UNKNOWN"):
-        return False, output.split(": ", 1)[-1] if ": " in output else output
+        return False, output.split(": ", 1)[-1] if ": " in output else output, ""
     if output.startswith("{"):
         try:
             data = json.loads(output)
+            date = data.get("upload_date") or ""
             if not data.get("playable"):
-                return False, data.get("reason") or data.get("play_reason") or data.get("status", "unplayable")
-            return True, ""
+                return False, data.get("reason") or data.get("play_reason") or data.get("status", "unplayable"), date
+            return True, "", date
         except json.JSONDecodeError:
             pass
-    return True, ""  # Assume playable if we can't determine
+    return True, "", ""  # Assume playable if we can't determine
 
 
 # ── State management ───────────────────────────────────────────────────
@@ -1157,7 +1171,7 @@ def get_next_video(state, all_videos):
         # Unseen, or previously deferred (transiently unplayable) → (re)check
         # playability. A premiere/livestream stays deferred until it airs.
         if entry is None or (isinstance(entry, dict) and entry.get("status") == "deferred"):
-            playable, reason = is_video_playable(vid_id)
+            playable, reason, _date = is_video_playable(vid_id)
             if not playable:
                 if _is_transient_unplayable(reason):
                     print(f"  Deferring not-yet-available video {vid_id}: {reason}")
@@ -1598,6 +1612,11 @@ def register_new(state, all_videos):
     The session path's counterpart to `get_next_video`: the same playability
     gate (premieres deferred, dead videos skipped), but it registers all of
     them so the worker can queue more than one. Returns the new ids.
+
+    The publish date comes from the playability probe, not from the playlist
+    entry, which carries none — see `is_video_playable`. Without it a new
+    upload is registered undated and `pending_entries` sorts it behind every
+    dated video in the backlog.
     """
     now = datetime.now(timezone.utc).isoformat()
     added = []
@@ -1607,7 +1626,7 @@ def register_new(state, all_videos):
         is_deferred = isinstance(entry, dict) and entry.get("status") == "deferred"
         if entry is not None and not is_deferred:
             continue
-        playable, reason = is_video_playable(vid)
+        playable, reason, upload_date = is_video_playable(vid)
         if not playable:
             if _is_transient_unplayable(reason):
                 print(f"  Deferring not-yet-available video {vid}: {reason}")
@@ -1616,9 +1635,12 @@ def register_new(state, all_videos):
                 print(f"  Skipping unplayable video {vid}: {reason}")
                 mark_video_skipped(state, vid, reason)
             continue
+        published = video.get("published", "") or ""
+        if not _is_yyyymmdd(published):
+            published = upload_date if _is_yyyymmdd(upload_date) else published
         state["seen"][vid] = {
             "title": video["title"],
-            "published": video.get("published", "") or "",
+            "published": published,
             "status": "pending",
             "registered_at": now,
         }
