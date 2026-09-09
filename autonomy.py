@@ -571,6 +571,70 @@ def _build_task_prompt(task: dict, skill_content: str) -> str:
     return "\n".join(parts)
 
 
+# ── Verifier-bound evidence claims (#525) ──────────────────────────────────
+# A task's final text used to be the whole of its run record: `summary` is that
+# text front-sliced, and nothing re-checked any number in it against the disk.
+# The corrections log is the cost — the 08-24 handoff that reported the entity
+# graph "restored to 12,131 relationships" against a same-night health report
+# reading `| Total relationships | 0 |`, the 09-03 counts of 96/21 against 121/64
+# on disk, the 09-04 "307KB" signals-latest.md that was 13,503 bytes. The fix so
+# far has been a skill instruction ("verify on disk before claiming"), which
+# binds only a willing model.
+#
+# The pilot is these four tasks and nothing else until the two-week numbers
+# exist, which is why this is a literal set rather than a config key: widening it
+# should be a change someone reads, and retiring it deletes four lines.
+EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40})
+
+
+def _evidence_pilot(task_id) -> bool:
+    try:
+        return int(task_id) in EVIDENCE_PILOT_TASK_IDS
+    except (TypeError, ValueError):
+        return False
+
+
+def _evidence_gap_list(task_id) -> list[str]:
+    """The gap list this task's previous run left behind, if any.
+
+    Read from the queue's watermarks, not from the task file: the gap list is
+    ledger state, and `~/obsidian/autonomy/*.md` is a human-edited file that a
+    worker has no business rewriting hourly.
+    """
+    try:
+        from workers.evidence import gaps_key, parse_gap_list
+        from workers.queue import WorkQueue, configured_db_path
+        q = WorkQueue(configured_db_path())
+        return parse_gap_list(q.wm_get("scheduled-task", gaps_key(task_id)))
+    except Exception as e:
+        # Unevaluable carry-forward is worth a log line, but never worth losing
+        # the run over.
+        logger.warning("could not read the evidence gap list for task #%s: %s",
+                       task_id, e)
+        return []
+
+
+def _evidence_prompt(task_id, gaps: Optional[list[str]] = None) -> str:
+    """The evidence section appended to a pilot task's prompt.
+
+    Static instruction first, dynamic gap list last: the whole point of #520 is
+    that this harness is prefix-cache-sensitive, so the part that never changes
+    goes where it can stay cached and the part that changes goes at the tail.
+    The system prompt is not touched at all.
+    """
+    if not _evidence_pilot(task_id):
+        return ""
+    from workers.evidence import CLAIMS_INSTRUCTION, gaps_prompt
+    return CLAIMS_INSTRUCTION + gaps_prompt(
+        _evidence_gap_list(task_id) if gaps is None else gaps)
+
+
+def _evidence_claims(final_response: str) -> list[dict]:
+    """Pull the claims block out of a finished run's own final text."""
+    from workers.evidence import parse_claims_block
+    return parse_claims_block(final_response)
+
+
 # Wall-clock budget anchor. The chat path warns a turn that it is running out of
 # ITERATIONS (app/routers/messages.py::_build_state_anchor, 75%/90% of
 # max_turns); an autonomy run is bounded by neither of those — it dies on
@@ -672,12 +736,19 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
 
     logger.error("Task #%s failed (%s, %d/%d): %s", task_id, kind, failures,
                  max_retries, summary[:200])
-    return {
+    failed = {
         "success": False, "status": "failed", "task_id": task_id, "run_id": run_id,
         "error": summary, "duration_seconds": round(duration, 1),
         "failure_kind": kind, "disabled": disabled,
         "meta": {**(extra or {}), "failure_kind": kind, "disabled": disabled},
     }
+    # A failed pilot run still gets a bundle — an empty one, which the verifier
+    # records as "nothing this run asserted was checked". Silence in the ledger
+    # would look like an un-piloted task, and the pilot's own coverage would be
+    # the first thing nobody could measure.
+    if _evidence_pilot(task_id):
+        failed["claims"] = []
+    return failed
 
 
 async def run_task(task_id, *, max_duration: int | None = None) -> dict:
@@ -724,6 +795,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
 
     _update_task_field(task_id, status="in_progress", updated=now_iso)
     prompt = _build_task_prompt(task, skill_content)
+    # Appended payload only — see `_evidence_prompt` for the cache reasoning.
+    prompt += _evidence_prompt(task_id)
 
     # Resolve model
     task_model = str(task.get("model", "") or "").strip()
@@ -955,12 +1028,21 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
 
         logger.info("Task #%s completed in %.1fs (stop_reason=%s)",
                     task_id, duration, stop_reason)
-        return {
+        result = {
             "success": True, "status": "success", "task_id": task_id, "run_id": run_id,
             "duration_seconds": round(duration, 1),
             "response_preview": final_response[:300],
             "meta": meta,
         }
+        # Out unverified on purpose: the pool runs the checks when it writes the
+        # row, so nothing that happened during the run — including this model's
+        # own tool calls, which could have edited the file being claimed — can
+        # affect the measurement of what the record asserts. An empty list is
+        # still a bundle: "the model emitted no claims" is a gap the ledger has
+        # to show, not an absence.
+        if _evidence_pilot(task_id):
+            result["claims"] = _evidence_claims(final_response)
+        return result
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
@@ -1016,6 +1098,25 @@ def _row_task_id(row: dict) -> Optional[str]:
     return None
 
 
+def _row_claims(row: dict) -> Optional[dict]:
+    """Decode a run row's verified evidence bundle, or None when it has none.
+
+    None means "no bundle" — a source outside the #525 pilot, a row from before
+    it shipped, or a write that failed. It is never treated as a clean run: a
+    task whose rows are all None reports a rate of None, because a metric that
+    reads its own missing input as zero is the failure mode this file has now
+    been burned on three times.
+    """
+    raw = row.get("claims_json")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
     """Aggregate run rows into per-task and fleet health. Pure function."""
     by_task: dict[str, dict] = {}
@@ -1047,11 +1148,33 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
             "task_id": tid, "runs": 0, "successes": 0, "failures": 0,
             "timeouts": 0, "empty": 0, "silent": 0, "silent_indicator_runs": 0,
             "max_turns_runs": 0, "tool_error_runs": 0,
+            "runs_with_bundle": 0, "runs_without_bundle": 0,
+            "claims_checked": 0, "claims_verified": 0, "claims_refuted": 0,
+            "claims_insufficient": 0, "gap_runs": 0,
             "gpu_hours": 0.0, "wasted_hours": 0.0, "total_seconds": 0.0,
             "max_seconds": 0.0, "consecutive_failures": 0, "last_success": None,
             "_streak_open": True,
         })
         e["runs"] += 1
+        # #525: the claims a run asserted and what the verifier found on disk.
+        # Counted from the per-claim statuses rather than trusting the bundle's
+        # own rate field, so a source cannot write its own score.
+        bundle = _row_claims(row)
+        if bundle is None:
+            e["runs_without_bundle"] += 1
+        else:
+            e["runs_with_bundle"] += 1
+            for claim in bundle.get("claims") or []:
+                status = (str(claim.get("status") or "")
+                          if isinstance(claim, dict) else "")
+                if status == "verified":
+                    e["claims_verified"] += 1
+                elif status == "refuted":
+                    e["claims_refuted"] += 1
+                elif status == "insufficient":
+                    e["claims_insufficient"] += 1
+            if bundle.get("gap"):
+                e["gap_runs"] += 1
         e["total_seconds"] += duration
         e["max_seconds"] = max(e["max_seconds"], duration)
         e["gpu_hours"] += duration / 3600.0
@@ -1084,6 +1207,16 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
         runs = e["runs"] or 1
         e["fail_rate"] = round(e["failures"] / runs, 3)
         e["silent_rate"] = round(e["silent"] / runs, 3)
+        # Denominator is the claims that were CHECKED, not the runs. A [SILENT]
+        # run asserted nothing, so counting it in a run-level denominator would
+        # pull a task's refutation rate toward zero every time it said less —
+        # which is how a fleet reports itself clean by doing nothing (#525).
+        e["claims_checked"] = (e["claims_verified"] + e["claims_refuted"]
+                               + e["claims_insufficient"])
+        unverified = e["claims_refuted"] + e["claims_insufficient"]
+        e["refuted_or_insufficient_rate"] = (
+            round(unverified / e["claims_checked"], 3) if e["claims_checked"]
+            else None)
         e["avg_seconds"] = round(e["total_seconds"] / runs, 1)
         e["gpu_hours"] = round(e["gpu_hours"], 2)
         e["wasted_hours"] = round(e["wasted_hours"], 2)
@@ -1112,6 +1245,10 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
              "runs": 0, "successes": 0, "failures": 0, "timeouts": 0, "empty": 0,
              "silent": 0, "fail_rate": 0.0, "silent_rate": 0.0, "gpu_hours": 0.0,
              "wasted_hours": 0.0, "avg_seconds": 0.0, "max_seconds": 0.0,
+             "runs_with_bundle": 0, "runs_without_bundle": 0,
+             "claims_checked": 0, "claims_verified": 0, "claims_refuted": 0,
+             "claims_insufficient": 0, "gap_runs": 0,
+             "refuted_or_insufficient_rate": None,
              "consecutive_failures": 0, "last_success": None,
              "failure_count": int(t.get("failure_count") or 0),
              "last_run": t.get("last_run")}
@@ -1119,6 +1256,9 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
 
     total_runs = sum(t["runs"] for t in out_tasks)
     total_fail = sum(t["failures"] for t in out_tasks)
+    total_claims = sum(t["claims_checked"] for t in out_tasks)
+    total_unverified = (sum(t["claims_refuted"] for t in out_tasks)
+                        + sum(t["claims_insufficient"] for t in out_tasks))
     return {
         "days": days,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1130,6 +1270,18 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
             "wasted_hours": round(sum(t["wasted_hours"] for t in out_tasks), 2),
             "empty_runs": sum(t["empty"] for t in out_tasks),
             "timeout_runs": sum(t["timeouts"] for t in out_tasks),
+            # #525 pilot coverage next to the rate it produces. A window with a
+            # low rate but most runs in `runs_without_bundle` is a window where
+            # the rate describes a slice nobody chose — so the two are read
+            # together or not at all.
+            "claims_checked": total_claims,
+            "claims_verified": sum(t["claims_verified"] for t in out_tasks),
+            "claims_refuted": sum(t["claims_refuted"] for t in out_tasks),
+            "claims_insufficient": sum(t["claims_insufficient"] for t in out_tasks),
+            "runs_with_bundle": sum(t["runs_with_bundle"] for t in out_tasks),
+            "runs_without_bundle": sum(t["runs_without_bundle"] for t in out_tasks),
+            "refuted_or_insufficient_rate": (
+                round(total_unverified / total_claims, 3) if total_claims else None),
             "active_tasks": len([t for t in tasks if str(t.get("status")) == "up_next"]),
             "failed_tasks": [str(t.get("id")) for t in tasks
                              if str(t.get("status")) == "failed"],

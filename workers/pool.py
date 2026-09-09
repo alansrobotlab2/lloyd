@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Optional
 
+from workers.evidence import gaps_key, verify_bundle
 from workers.queue import WorkQueue, QueueItem, get_queue, new_run_id
 
 logger = logging.getLogger("lloyd-workers.pool")
@@ -38,8 +39,8 @@ RUN_STATUSES = ("success", "failed", "skipped")
 def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
     """Coerce whatever a source returned into the run-record contract.
 
-    The contract is `{status, summary, artifact_path, response, task_id,
-    meta}`, and every field is optional except in the sense that its absence
+    The contract is `{status, summary, artifact_path, response, task_id, meta,
+    claims}`, and every field is optional except in the sense that its absence
     has to mean something defensible. Absent `status` means success, because
     most sources finish by returning their artifact and never think about it.
 
@@ -76,6 +77,14 @@ def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
         logger.warning("source %s produced a run record with no summary and no "
                        "artifact — the run is unreadable after the fact", item.source)
 
+    # `claims` is a list of `{claim, check}` pairs the source wants recorded as
+    # this run's evidence (#525). Presence of the key is the pilot's scope
+    # mechanism: a source that does not emit claims gets no bundle at all, and
+    # the health view counts that as `runs_without_bundle` instead of scoring it
+    # as a clean check. An empty list is different and deliberate — the source
+    # is in the pilot and its model emitted nothing, which is a gap.
+    claims = result.get("claims") if isinstance(result.get("claims"), list) else None
+
     return {
         "status": status,
         "summary": summary[:500],
@@ -83,6 +92,7 @@ def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
         "response": str(result.get("response") or "")[:50000],
         "task_id": _task_id_of(item, result),
         "meta": result.get("meta") if isinstance(result.get("meta"), dict) else {},
+        "claims": claims,
     }
 
 
@@ -185,6 +195,28 @@ class WorkerPool:
             "in_flight_count": len(self._in_flight),
         }
 
+    def _carry_gaps(self, item: QueueItem, task_id: Optional[str],
+                    bundle: dict) -> None:
+        """Store one task's unverified claims for its next run's prompt (#525).
+
+        The run record is where a refutation is *recorded*; this is where it
+        becomes load-bearing. HOH's E-state keeps the gap set as a first-class
+        part of the next iteration, because a gap that lives only in the prose
+        of the last run is a gap nobody reads.
+
+        Writing an empty list on a clean run is deliberate: a resolved gap must
+        stop being re-litigated, or the carry-forward turns into permanent
+        fine-print and gets skimmed like every other standing warning.
+        """
+        if not task_id:
+            return
+        try:
+            self.queue.wm_set(item.source, gaps_key(task_id),
+                              json.dumps(bundle.get("gap") or [])[:4000])
+        except Exception as e:
+            logger.warning("could not carry the evidence gap list for %s/%s: %s",
+                           item.source, task_id, e)
+
     # ── Scheduler loop — drives source.enqueue_if_due() ───────────────────
 
     async def _scheduler_loop(self) -> None:
@@ -279,6 +311,17 @@ class WorkerPool:
                 # scheduler's own cooldown is ever consulted.
                 norm = normalize_result(item, result)
                 run_status = norm["status"]
+                # #525 — verify the run's claims at the moment its record is
+                # written, and only for a source that emitted any (`claims`
+                # present is the pilot's scope switch). Off the event loop,
+                # because a check reads files. The verifier is stdlib-only by
+                # design: an LLM grading a model's own claims would be the
+                # narration this replaces, one layer up.
+                bundle = None
+                if norm["claims"] is not None:
+                    bundle = await asyncio.to_thread(verify_bundle, norm["claims"])
+                    await asyncio.to_thread(
+                        self._carry_gaps, item, norm["task_id"], bundle)
                 await asyncio.to_thread(
                     partial(
                         self.queue.record_run,
@@ -294,6 +337,8 @@ class WorkerPool:
                         response_json=norm["response"],
                         task_id=norm["task_id"],
                         meta_json=json.dumps(norm["meta"], default=str),
+                        claims_json=(json.dumps(bundle, default=str)
+                                     if bundle is not None else ""),
                     )
                 )
                 await asyncio.to_thread(self.queue.mark_completed, item.id)
@@ -303,6 +348,16 @@ class WorkerPool:
                     {"failed": "FAILED", "skipped": "skipped"}.get(run_status, "completed"),
                     item.source, item.kind, duration,
                     f" — {norm['summary'][:120]}" if norm["summary"] else "")
+                if bundle is not None:
+                    unverified = (bundle["counts"]["refuted"]
+                                  + bundle["counts"]["insufficient"])
+                    if unverified:
+                        logger.warning(
+                            "[%s] %s/%s task %s: %d of %d evidence claims did NOT "
+                            "verify against disk — %s; gap carried to the next run",
+                            worker_id, item.source, item.kind, norm["task_id"],
+                            unverified, bundle["counts"]["total"],
+                            bundle["gap"][0][:160])
             except asyncio.TimeoutError:
                 duration = time.monotonic() - started_perf
                 completed_at = datetime.now(timezone.utc).isoformat()
