@@ -155,6 +155,19 @@ session_titles:
 # mcp_servers.lloyd-mcp.disabled_tools, and an enabled:false that emptied
 # list_tools() would break the annotation-staleness test in
 # tests/test_mcp_layer.py.
+browser:
+  # Chromium for the browser_* tools. Headed mode needs a live display the
+  # agent-worker unit does not have, so this stays true outside debugging.
+  headless: true
+  # Refuse hosts on this machine's network: RFC1918, link-local, reserved.
+  # Loopback stays allowed, mirroring http_tools.http_request — the agent
+  # browses Lloyd's own dashboard, and it already holds Bash and the MCP
+  # surface, so refusing the browser there removes no authority an injected
+  # page could not reach more directly. What this stops is the LAN: the
+  # router, the NAS, the printer, every unauthenticated device on it.
+  # LLOYD_BROWSER_BLOCK_PRIVATE=0 turns it off for one process.
+  block_private_hosts: true
+
 code_graph:
   graphify_bin: ~/.local/bin/graphify
   # Rebuild a stale graph on first use. The dirty-file rule matters most

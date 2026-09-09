@@ -10,10 +10,13 @@ Tools (Phase 3): browser_select, browser_drag, browser_cookies
 
 import asyncio
 import base64
+import functools
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import time
 import urllib.parse
 from pathlib import Path
@@ -66,25 +69,231 @@ def _resolve_headless() -> bool:
 
 
 # ── SSRF protection ────────────────────────────────────────────────────────────
+#
+# This guard existed as a function and nothing else from 2026-04-11 (`b20a8c4`)
+# to 2026-09-09: `_is_private_host` was defined, tested, named in backlog #278's
+# acceptance as "the SSRF host check ... is intact", and called from nowhere.
+# Every stage confirmed the previous stage's reading of a symbol at a line
+# number; none asked whether anything invoked it. The lesson is in the shape of
+# the test below, which now asserts the *entry points call it* rather than that
+# the predicate returns the right booleans.
+#
+# The policy mirrors `http_tools.http_request`, which is the other tool that
+# drives things over HTTP: block the network the machine is on, allow the
+# machine itself. Loopback stays reachable because the agent legitimately
+# browses Lloyd's own dashboard, and because it already holds Bash and the MCP
+# surface — blocking the browser there removes no authority an injected prompt
+# could not get more directly. What it cannot reach is your LAN: the router,
+# the NAS, the printer, every unauthenticated device on 192.168/10/172.16.
+#
+# The check is on RESOLVED addresses, not on the hostname string. That is what
+# makes it more than a speed bump: the platform resolver normalises every
+# encoding that beat the old regex list (`2130706433`, `0x7f000001`,
+# `::ffff:127.0.0.1` are all 127.0.0.1 to getaddrinfo, exactly as they are to
+# Chromium), and it catches a name like `router.local` that a string test can
+# never classify.
 
-_PRIVATE_IP_PATTERNS = [
-    re.compile(r"^127\."),
-    re.compile(r"^10\."),
-    re.compile(r"^172\.(1[6-9]|2\d|3[01])\."),
-    re.compile(r"^192\.168\."),
-    re.compile(r"^0\."),
-    re.compile(r"^169\.254\."),
-    re.compile(r"^::1$"),
-    re.compile(r"^fc00:", re.IGNORECASE),
-    re.compile(r"^fd", re.IGNORECASE),
-    re.compile(r"^fe80:", re.IGNORECASE),
-]
+
+def _resolve_block_private() -> bool:
+    """Whether to refuse private/internal hosts. Defaults to on.
+
+    `browser.block_private_hosts: false` in config.yaml, or
+    LLOYD_BROWSER_BLOCK_PRIVATE=0, turns it off; the env wins, so a one-off
+    debug against a LAN device does not need a config edit. Same shape as
+    `_resolve_headless` above.
+    """
+    raw = os.environ.get("LLOYD_BROWSER_BLOCK_PRIVATE")
+    if raw is None or not raw.strip():
+        configured = (CONFIG.get("browser") or {}).get("block_private_hosts")
+        if configured is None:
+            return True
+        raw = str(configured)
+    val = raw.strip().lower()
+    if val in _TRUTHY:
+        return True
+    if val in _FALSY:
+        return False
+    logger.warning("browser: unparseable block_private_hosts %r — staying on", raw)
+    return True
+
+
+@functools.lru_cache(maxsize=1024)
+def _resolve_addrs(hostname: str) -> tuple[str, ...]:
+    """Every address `hostname` resolves to, or () when it does not resolve.
+
+    Cached for the life of the process. That is deliberate on both counts: a
+    page pulls subresources from a handful of hosts and the route interceptor
+    below sees every one of them, and holding the first answer also blunts DNS
+    rebinding, where a name resolves public once and private immediately after.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except Exception:
+        return ()
+    return tuple(sorted({i[4][0] for i in infos}))
 
 
 def _is_private_host(hostname: str) -> bool:
-    if not hostname or hostname.lower() == "localhost":
+    """True when `hostname` is the machine itself or somewhere on its network.
+
+    Kept as the predicate the tests and `http_tools` both name, but it now
+    answers from resolution rather than from a prefix match.
+    """
+    if not hostname:
         return True
-    return any(p.match(hostname) for p in _PRIVATE_IP_PATTERNS)
+    if hostname.lower() == "localhost":
+        return True
+    for addr in _resolve_addrs(hostname):
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_unspecified):
+            return True
+    return False
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    """The machine itself, by any of its names.
+
+    Mirrors `http_tools._is_loopback_host`: `127.0.0.1` and `localhost` are the
+    same host and must be treated identically, or the guard's answer depends on
+    which spelling was typed.
+    """
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    addrs = _resolve_addrs(hostname)
+    if not addrs:
+        return False
+    resolved = []
+    for addr in addrs:
+        try:
+            resolved.append(ipaddress.ip_address(addr))
+        except ValueError:
+            return False
+    # Every address must be loopback. A name that resolves to both loopback
+    # and something else is not "the machine itself" in any useful sense, and
+    # treating it as such is how a rebinding trick would buy the exemption.
+    return bool(resolved) and all(ip.is_loopback for ip in resolved)
+
+
+def _host_block_reason(url: str) -> str | None:
+    """The one decision. Returns a message to refuse with, or None to allow.
+
+    Every place that can put a URL in front of Chromium calls this, and so
+    does the route interceptor, which is what covers the three lanes an
+    entry-point check cannot see: a redirect to a private address, a click on
+    a link, and a subresource fetched by a page that is itself public.
+    """
+    if not _resolve_block_private():
+        return None
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return f"Blocked — unparseable URL: {url}"
+    # Only http(s) names a host on the network. `about:blank` has no hostname
+    # at all, and treating an empty host as private made this guard block the
+    # blank page `_enforce_landing` itself navigates to — so one refusal
+    # poisoned every later snapshot with `private/internal host ""`, and a
+    # freshly launched browser could not be snapshotted before its first
+    # navigation. `data:` and `blob:` are the same shape. Non-http schemes are
+    # out of scope here rather than allowed on purpose: navigation is already
+    # restricted to http/https at each entry point.
+    if parsed.scheme not in ("http", "https"):
+        return None
+    hostname = parsed.hostname or ""
+    if _is_loopback_host(hostname):
+        return None
+    if _is_private_host(hostname):
+        return f'Blocked — private/internal host "{hostname}"'
+    return None
+
+
+# The most recent refusal, so a navigation killed by the interceptor can say
+# why. Aborting a redirect leaves `page.goto` waiting for a load that will
+# never arrive, and it surfaces as a bare 30s timeout — a message that sends
+# the agent looking for a slow site instead of telling it the hop was refused.
+_block_log: dict = {"seq": 0, "url": "", "reason": "", "ts": 0.0}
+
+
+def _record_block(url: str, reason: str) -> None:
+    _block_log["seq"] += 1
+    _block_log["url"] = url
+    _block_log["reason"] = reason
+    _block_log["ts"] = time.time()
+
+
+def _block_since(seq: int) -> str | None:
+    """The reason recorded since `seq`, if the guard fired during a call."""
+    if _block_log["seq"] > seq and _block_log["reason"]:
+        return f'{_block_log["reason"]} (redirected to {_block_log["url"][:120]})'
+    return None
+
+
+async def _guard_route(route) -> None:
+    """Route interceptor. Covers fresh requests, and NOT redirects.
+
+    Measured, not assumed: `route.continue_()` hands the request to Chromium's
+    network stack, which follows a 3xx internally and never re-enters
+    interception. Instrumenting the handler against a loopback server that
+    302s to this box's own LAN address shows the redirected request arriving
+    as a `request` *event* while the route handler is called exactly once, for
+    the first hop. So this layer stops a direct navigation, a clicked link and
+    a subresource; `_enforce_landing` below is what stops a redirect.
+
+    Fails OPEN on an internal error. A bug in here would otherwise break every
+    page load in the process, and the entry-point checks still stand — this
+    layer is defence in depth, so its failure mode should be losing depth, not
+    losing the browser.
+    """
+    try:
+        reason = _host_block_reason(route.request.url)
+    except Exception as exc:
+        logger.warning("browser: route guard failed open on %s: %s",
+                       route.request.url[:120], exc)
+        reason = None
+    try:
+        if reason:
+            logger.warning("browser: %s (%s)", reason, route.request.url[:120])
+            _record_block(route.request.url, reason)
+            await route.abort("blockedbyclient")
+        else:
+            await route.continue_()
+    except Exception:
+        # The page navigated away mid-flight and the route is already dead.
+        pass
+
+
+async def _enforce_landing(page) -> str | None:
+    """Where the page actually ended up, whatever route it took there.
+
+    The last line, and the one that does not depend on enumerating lanes. A
+    server-side redirect defeats the interceptor above; a meta-refresh, a
+    `window.location` in a script and a form POST all do too. Rather than
+    chase each one, every path that could put a private page in front of the
+    model asks this, so content from a private host cannot be read, snapshotted
+    or screenshotted no matter how the browser got there.
+
+    Blanks the page on a hit. Leaving it parked on the LAN device would mean
+    the very next `browser_snapshot` reads it, and the state mirror would push
+    a screenshot of it to Mission Control.
+    """
+    try:
+        reason = _host_block_reason(page.url)
+    except Exception:
+        return None
+    if not reason:
+        return None
+    _record_block(page.url, reason)
+    try:
+        await page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+    except Exception:
+        pass
+    _ref_map.clear()
+    return reason
 
 
 # ── Browser state (persistent for server lifetime) ─────────────────────────────
@@ -158,6 +367,11 @@ async def _launch_browser_locked():
             "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
         ),
     )
+    # Armed at launch rather than per page, so a tab the agent opens by
+    # clicking a target=_blank link is covered too. Checked once here: the
+    # flag is read per request inside `_host_block_reason` anyway, so a
+    # config change takes effect on the next navigation, not the next launch.
+    await _context.route("**/*", _guard_route)
     return _context
 
 
@@ -247,10 +461,18 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
     if wait_until not in ("load", "domcontentloaded", "networkidle", "commit"):
         wait_until = "domcontentloaded"
 
+    blocked = _host_block_reason(url)
+    if blocked:
+        return json.dumps({"error": blocked})
+
     page = await _get_page()
     _ref_map.clear()
+    seq = _block_log["seq"]
     try:
         resp = await page.goto(url, wait_until=wait_until, timeout=30000)
+        landed = await _enforce_landing(page)
+        if landed:
+            return json.dumps({"error": f"{landed} (redirected from {url[:100]})"})
         return json.dumps({
             "ok": True,
             "url": page.url,
@@ -258,12 +480,20 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
             "status": resp.status if resp else 0,
         })
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        # Only on failure: a block during a navigation that still loaded was a
+        # subresource, and reporting that as the navigation's error would turn
+        # a working page into a refusal.
+        return json.dumps({"error": _block_since(seq) or str(exc)})
 
 
 async def _browser_snapshot(full: bool = False) -> str:
     global _ref_map
     page = await _get_page()
+    # Whatever route the browser took to a private host, its content stops
+    # here rather than entering the model's context.
+    landed = await _enforce_landing(page)
+    if landed:
+        return json.dumps({"error": landed})
     _ref_map = {}
     try:
         raw = await page.locator("body").aria_snapshot()
@@ -297,7 +527,6 @@ async def _browser_click(ref: str, button: str = "left") -> str:
         return json.dumps({"error": str(exc)})
     except Exception as exc:
         return json.dumps({"error": f"Click failed: {exc}"})
-
 
 async def _browser_type(ref: str, text: str, clear: bool = False) -> str:
     page = await _get_page()
@@ -342,6 +571,19 @@ async def _browser_press(key: str) -> str:
 
 async def _browser_tabs(action: str, page_id: int | None = None, url: str | None = None) -> str:
     global _active_page, _ref_map
+    # Validated before `_ensure_browser`, or a refused URL still launches
+    # Chromium on its way to being told no.
+    if url:
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception:
+            return json.dumps({"error": f"Invalid URL: {url}"})
+        if parsed.scheme not in ("http", "https"):
+            return json.dumps({"error": "Only http/https URLs supported"})
+        blocked = _host_block_reason(url)
+        if blocked:
+            return json.dumps({"error": blocked})
+
     ctx = await _ensure_browser()
     pages = ctx.pages
 
@@ -375,18 +617,11 @@ async def _browser_tabs(action: str, page_id: int | None = None, url: str | None
         return json.dumps({"ok": True, "closed_id": page_id})
 
     elif action == "new":
+        # url was scheme- and host-checked at the top, before the launch.
         if len(pages) >= MAX_TABS:
             await pages[0].close()
         new_page = await ctx.new_page()
         if url:
-            try:
-                parsed = urllib.parse.urlparse(url)
-            except Exception:
-                await new_page.close()
-                return json.dumps({"error": f"Invalid URL: {url}"})
-            if parsed.scheme not in ("http", "https"):
-                await new_page.close()
-                return json.dumps({"error": "Only http/https URLs supported"})
             await new_page.goto(url, wait_until="domcontentloaded", timeout=30000)
         _active_page = new_page
         _ref_map.clear()
@@ -443,6 +678,13 @@ async def _capture_state(tool_name: str) -> dict | None:
     page = _existing_page()
     if page is None:
         return None
+    # A frame is a screenshot plus an accessibility tree; both are page
+    # content, and the tab is a surface a human reads. Same rule as snapshot.
+    try:
+        if _host_block_reason(page.url):
+            return None
+    except Exception:
+        pass
     try:
         shot = await page.screenshot(type="jpeg", quality=72, full_page=False)
     except Exception as exc:
@@ -493,6 +735,9 @@ async def _push_browser_state(tool_name: str) -> None:
 
 async def _browser_evaluate(script: str) -> str:
     page = await _get_page()
+    landed = await _enforce_landing(page)
+    if landed:
+        return json.dumps({"error": landed})
     try:
         result = await asyncio.wait_for(page.evaluate(script), timeout=10.0)
         result_json = json.dumps(result)

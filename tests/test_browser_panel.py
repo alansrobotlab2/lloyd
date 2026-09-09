@@ -346,14 +346,236 @@ async def test_tool_schemas_still_expose_the_same_fourteen_tools():
     }
 
 
-def test_ssrf_host_check_is_intact():
-    assert browser_module._is_private_host("localhost") is True
-    assert browser_module._is_private_host("127.0.0.1") is True
-    assert browser_module._is_private_host("10.1.2.3") is True
-    assert browser_module._is_private_host("192.168.0.7") is True
-    assert browser_module._is_private_host("169.254.1.1") is True
-    assert browser_module._is_private_host("::1") is True
+# ── The SSRF guard ────────────────────────────────────────────────────────────
+#
+# The test that used to live here asserted `_is_private_host` returned the
+# right booleans. It did, for five months, while being called from nowhere.
+# Backlog #278's acceptance asked that "the SSRF host check ... is intact" and
+# this test answered that question about a symbol rather than about a
+# behaviour. So the predicate test stays, but it is no longer the point: what
+# follows pins that every entry point INVOKES the guard, which is the property
+# that was actually missing.
+
+
+def test_the_predicate_still_classifies_hosts(monkeypatch):
+    p = browser_module._is_private_host
+    assert p("localhost") is True
+    assert p("127.0.0.1") is True
+    assert p("10.1.2.3") is True
+    assert p("192.168.0.7") is True
+    assert p("169.254.1.1") is True
+    assert p("::1") is True
+    assert p("") is True
+    # Public: resolution stubbed so the suite never depends on DNS.
+    browser_module._resolve_addrs.cache_clear()
+    monkeypatch.setattr(browser_module, "_resolve_addrs", lambda h: ("93.184.216.34",))
     assert browser_module._is_private_host("example.com") is False
+
+
+def test_the_guard_is_actually_wired_into_every_url_entry_point():
+    """The regression that mattered: defined, tested, and never called.
+
+    A source-level check because it is the only one that fails for the right
+    reason. A behavioural test can be satisfied by a second, private check
+    added beside the guard, which is how the two copies of this function came
+    to exist in the first place.
+    """
+    src = (ROOT / "agent_mcp" / "browser.py").read_text(encoding="utf-8")
+    body = src.split("async def _browser_navigate", 1)[1]
+    assert "_host_block_reason" in body.split("async def ", 1)[0], \
+        "browser_navigate must consult the guard"
+    tabs = src.split("async def _browser_tabs", 1)[1].split("\nasync def ", 1)[0]
+    assert "_host_block_reason" in tabs, "browser_tabs(new, url=...) must consult the guard"
+    ui = src.split("async def navigate_from_ui", 1)[1]
+    # The URL bar inherits it through _browser_navigate rather than repeating
+    # the check; assert the delegation exists so it cannot quietly stop.
+    assert "_browser_navigate" in ui.split("\nasync def ", 1)[0]
+    assert 'await _context.route("**/*", _guard_route)' in src, \
+        "the context interceptor covers clicks and subresources"
+    # And the layer that covers what interception cannot: see the redirect
+    # test below for why these two are not the same guard.
+    for fn in ("_browser_snapshot", "_browser_evaluate"):
+        body = src.split(f"async def {fn}", 1)[1].split("\nasync def ", 1)[0]
+        assert "_enforce_landing" in body, f"{fn} must check where the page landed"
+    cap = src.split("async def _capture_state", 1)[1].split("\nasync def ", 1)[0]
+    assert "_host_block_reason" in cap, \
+        "the MC frame must not carry a screenshot of a private host"
+
+
+async def test_navigate_refuses_a_lan_address_without_opening_a_browser(monkeypatch):
+    """Refused before `_get_page`, so a blocked URL never launches Chromium."""
+    async def boom():
+        raise AssertionError("must not reach the browser")
+    monkeypatch.setattr(browser_module, "_get_page", boom)
+
+    for host in ("192.168.1.1", "10.0.0.5", "172.16.4.4", "169.254.169.254"):
+        out = json.loads(await browser_module._browser_navigate(f"http://{host}/"))
+        assert "error" in out and "private/internal" in out["error"], (host, out)
+
+
+async def test_navigate_allows_the_machine_itself(monkeypatch):
+    """Loopback stays reachable, by IP and by name.
+
+    Mirrors `http_tools.http_request`. The agent browses Lloyd's own dashboard,
+    and it already holds Bash and the MCP surface — refusing the browser here
+    removes no authority an injected prompt could not reach more directly.
+    """
+    reached = []
+
+    class FakePage:
+        url = "http://127.0.0.1:8080/x"
+        async def goto(self, url, **kw):
+            reached.append(url)
+            return type("R", (), {"status": 200})()
+        async def title(self):
+            return "ok"
+
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(FakePage()))
+    for url in ("http://127.0.0.1:8080/x", "http://localhost:8080/x", "http://[::1]:8080/x"):
+        out = json.loads(await browser_module._browser_navigate(url))
+        assert out.get("ok") is True, (url, out)
+    assert len(reached) == 3
+
+
+async def test_an_encoded_lan_address_is_blocked_and_encoded_loopback_is_not():
+    """What the old regex list could not do.
+
+    `3232235777` is 192.168.1.1 and `2130706433` is 127.0.0.1; a prefix match
+    on the hostname string classifies neither. Checking resolved addresses
+    gets both right, because the platform resolver normalises exactly the way
+    Chromium does.
+    """
+    assert browser_module._is_private_host("3232235777") is True
+    assert browser_module._is_loopback_host("3232235777") is False
+    assert browser_module._is_loopback_host("2130706433") is True
+    assert browser_module._is_loopback_host("0x7f000001") is True
+    assert browser_module._host_block_reason("http://3232235777/") is not None
+    assert browser_module._host_block_reason("http://2130706433:8080/") is None
+
+
+async def test_tabs_refuses_a_lan_url_before_opening_the_tab(monkeypatch):
+    """A check placed after `new_page()` strands an empty tab against MAX_TABS."""
+    async def boom():
+        raise AssertionError("must not open a context")
+    monkeypatch.setattr(browser_module, "_ensure_browser", boom)
+    out = json.loads(await browser_module._browser_tabs("new", url="http://192.168.1.1/"))
+    assert "private/internal" in out.get("error", "")
+
+
+def test_a_blocked_redirect_reports_the_reason_not_a_timeout():
+    """Aborting a redirect leaves `goto` waiting for a load that never comes.
+
+    The raw failure is a bare 30s timeout, which sends the agent looking for a
+    slow site rather than telling it the hop was refused.
+    """
+    before = browser_module._block_log["seq"]
+    assert browser_module._block_since(before) is None
+    browser_module._record_block("http://192.168.1.1/admin", 'Blocked — private/internal host "192.168.1.1"')
+    msg = browser_module._block_since(before)
+    assert msg and "192.168.1.1" in msg and "redirected to" in msg
+
+
+class _LandingPage:
+    """Minimal page: a url that can change, and a goto that records.
+
+    Named apart from the module's other `_FakePage`, which is a fixed-content
+    stub for the frame test and has no settable url.
+    """
+    def __init__(self, url):
+        self.url = url
+        self.goto_calls = []
+    async def goto(self, url, **kw):
+        self.goto_calls.append(url)
+        self.url = url
+        return type("R", (), {"status": 200})()
+    async def title(self):
+        return "t"
+
+
+async def test_a_redirect_to_a_private_host_is_caught_after_the_fact():
+    """Route interception does not see redirects, and that is measured.
+
+    `route.continue_()` hands the request to Chromium, which follows a 3xx
+    internally without re-entering interception. Against a loopback server
+    that 302s to this box's own LAN address, the handler is called once, for
+    the first hop, while the redirected request arrives only as an event. So
+    the landing check is not belt-and-braces here, it is the only thing
+    standing in that lane.
+    """
+    page = _LandingPage("http://192.168.50.108:8080/admin")
+    reason = await browser_module._enforce_landing(page)
+    assert reason and "private/internal" in reason
+    # Blanked, or the next snapshot reads the page we just refused and the
+    # state mirror pushes a screenshot of it to Mission Control.
+    assert page.goto_calls == ["about:blank"]
+    assert page.url == "about:blank"
+
+
+async def test_the_landing_check_leaves_an_allowed_page_alone():
+    page = _LandingPage("https://example.com/")
+    assert await browser_module._enforce_landing(page) is None
+    assert page.goto_calls == []
+
+
+async def test_snapshot_refuses_to_read_a_private_page(monkeypatch):
+    """The chokepoint: however the browser got there, content stops here."""
+    # A fresh page per call: the first check blanks the one it refuses, which
+    # is the point, so reusing it would test the blank page instead.
+    page = _LandingPage("http://10.1.2.3/secrets")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    out = json.loads(await browser_module._browser_snapshot())
+    assert "private/internal" in out.get("error", "")
+
+    page2 = _LandingPage("http://10.1.2.3/secrets")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page2))
+    out = json.loads(await browser_module._browser_evaluate("1+1"))
+    assert "private/internal" in out.get("error", "")
+
+
+async def test_the_mc_frame_carries_nothing_from_a_private_host(monkeypatch):
+    """A frame is a screenshot plus an a11y tree, and a human reads the tab."""
+    page = _LandingPage("http://192.168.0.9/cam")
+    monkeypatch.setattr(browser_module, "_existing_page", lambda: page)
+    assert await browser_module._capture_state("browser_navigate") is None
+
+
+def test_a_blank_page_is_not_a_private_host():
+    """The bug this guard nearly shipped with.
+
+    `about:blank` has no hostname, and an empty host counts as private — so
+    the blank page `_enforce_landing` navigates to was itself refused. One
+    refusal then poisoned every later snapshot with `private/internal host ""`,
+    and a freshly launched browser could not be snapshotted before its first
+    navigation. Only http(s) names a host on the network.
+    """
+    assert browser_module._host_block_reason("about:blank") is None
+    assert browser_module._host_block_reason("data:text/html,hi") is None
+    # Still refused when the scheme really does reach out with no host.
+    assert browser_module._host_block_reason("http:///x") is not None
+
+
+async def test_the_landing_check_is_idempotent_on_the_page_it_blanks():
+    """Blank once, not forever: the second call must be a no-op."""
+    page = _LandingPage("http://192.168.1.9/x")
+    assert await browser_module._enforce_landing(page) is not None
+    assert page.url == "about:blank"
+    assert await browser_module._enforce_landing(page) is None
+    assert page.goto_calls == ["about:blank"]
+
+
+def test_the_guard_has_a_kill_switch(monkeypatch):
+    monkeypatch.setenv("LLOYD_BROWSER_BLOCK_PRIVATE", "0")
+    assert browser_module._resolve_block_private() is False
+    assert browser_module._host_block_reason("http://192.168.1.1/") is None
+    monkeypatch.setenv("LLOYD_BROWSER_BLOCK_PRIVATE", "1")
+    assert browser_module._resolve_block_private() is True
+    assert browser_module._host_block_reason("http://192.168.1.1/") is not None
+
+
+def _async(value):
+    async def _c():
+        return value
+    return _c()
 
 
 # ── The URL bar ───────────────────────────────────────────────────────────────

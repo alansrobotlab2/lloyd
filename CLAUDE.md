@@ -1249,6 +1249,50 @@ Everything else on the page stays read-only, and not for want of a route:
 the ref overlay has nothing to send, since the tool surface has no "click
 pixel (x,y)" and the a11y tree is gone by render time.
 
+### The SSRF guard that was never called
+
+`_is_private_host` was defined in `agent_mcp/browser.py` on 2026-04-11 and
+called from nowhere until 2026-09-09. Backlog #278's acceptance required that
+"the SSRF host check at `agent_mcp/browser.py:50` is intact"; its triage
+verdict called that line "the only network-shaped code" in the module; and
+the test written to satisfy both asserted the predicate returned the right
+booleans. All three statements were true and none was about a guard. **An
+acceptance criterion that names a symbol at a line number certifies that the
+symbol is still there.** `tests/test_browser_panel.py` now asserts the entry
+points *invoke* it, which is the property that was missing.
+
+The policy mirrors `http_tools.http_request` rather than `http_fetch`: block
+the network the machine is on, allow the machine itself. Loopback stays
+reachable because the agent browses Lloyd's own dashboard, and because an
+injected prompt that wants loopback has Bash and the whole MCP surface
+already — the browser is not the weak link there. The LAN is what this
+closes: the router, the NAS, the printer.
+
+**The check is on resolved addresses, not on the hostname string.** That is
+what makes it more than a speed bump. `getaddrinfo` normalises every encoding
+that beat the old regex list — `2130706433`, `0x7f000001` and
+`::ffff:127.0.0.1` are all 127.0.0.1 to the resolver exactly as they are to
+Chromium — and it classifies a name like `router.local` that no prefix match
+can. `_resolve_addrs` is `lru_cache`d, which also blunts DNS rebinding by
+holding the first answer.
+
+**Route interception does not see redirects, and that is measured, not
+assumed.** `route.continue_()` hands the request to Chromium's network stack,
+which follows a 3xx internally and never re-enters interception. Instrumented
+against a loopback server that 302s to this box's own LAN address, the
+handler fires exactly once, for the first hop, while the redirected request
+arrives only as a `request` event. So the interceptor covers a clicked link
+and a subresource, and `_enforce_landing` covers the rest by asking where the
+page actually *ended up* — which needs no enumeration of lanes, and so also
+catches a meta-refresh and a `window.location`. It blanks the page on a hit,
+because leaving it parked means the next `browser_snapshot` reads it and the
+state mirror pushes a screenshot of it to Mission Control.
+
+`_browser_snapshot`, `_browser_evaluate` and `_capture_state` are the three
+places page content becomes model context or a human-visible frame, and each
+one checks. `browser.block_private_hosts: false` or
+`LLOYD_BROWSER_BLOCK_PRIVATE=0` turns it off.
+
 **Four hand-written lists name the tabs**, and nothing made them agree until
 `tests/test_mc_tab_parity.py`. `Page` in `web/src/components/Sidebar.tsx`
 renders them; `mc_state.VALID_TABS` decides what the frontend may *report*;
