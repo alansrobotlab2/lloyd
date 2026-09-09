@@ -373,6 +373,57 @@ def vault_commits_for(round_id: str) -> list[str]:
             and (end_ts is None or (e.get("ts") or 0) < end_ts)]
 
 
+# A landing can be refused after every rung passed, and until 2026-09-09 that
+# refusal was invisible to the backlog: `backlog.implement_outcomes` read only
+# `gate` events, so a round that lost a race with `main` at landing looked
+# exactly like one that landed. It also spent the item. `land_failed` is the
+# verdict event for that case; `external` says the cause was the tree, not the
+# diff, and the item keeps its attempt.
+def _land_failed(round_id: str, why: str, *, external: bool, **extra) -> None:
+    S.append_event({"event": "land_failed", "round_id": round_id, "ok": False,
+                    "external_blocker": bool(external), "detail": why[:500], **extra})
+    raise PromoteError(why)
+
+
+# How many times one landing will chase a moving `main`. Each chase is a full
+# gate run — minutes — and the third miss means someone is committing faster
+# than the loop can retest, which is a reason to stop and say so, not to keep
+# up. The round is left rebased and gated; the reaper closes it, the branch is
+# kept, and the item comes back.
+MAX_REBASES_PER_LANDING = 2
+
+
+def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
+                       live_head: str) -> tuple[str, str, dict]:
+    """`main` moved since the gate ran. Rebase the round onto it and retest.
+
+    Not a second implementation of the rebase: `Gate.rung_preflight` already
+    does it, names conflicts, and fails closed. Running the gate with the OLD
+    base is what triggers that path, and the report that comes back carries
+    the new base and the new head. Every rung then judged the round's change
+    on top of what landed — which is the only build that was ever going to be
+    live, and the one nothing had tested until now.
+
+    Returns `(base, head, gate_report)`. Persists both records the next reader
+    depends on: `gate.json`, which `land` reads its head from, and the run
+    spec's base, which the next `run_gate` reads its diff from.
+    """
+    from scripts.selfmod import gate as G   # lazy: gate → canary → ports; not needed elsewhere here
+    report = G.Gate(round_id, Path(worktree), base, live_root=live).run()
+    rep = report.to_dict()
+    S.write_gate_report(round_id, rep)
+    if report.base != base:
+        S.update_run_spec_base(round_id, report.base)
+    if not report.ok:
+        failed = next((r for r in rep.get("rungs", []) if not r.get("ok")), {})
+        _land_failed(round_id,
+                     f"main moved to {live_head[:8]} since the gate ran; rebased and "
+                     f"retested, and the `{failed.get('name')}` rung failed: "
+                     f"{failed.get('detail', '')[:300]}",
+                     external=True, rung=failed.get("name"), moved_to=live_head)
+    return report.base, report.head, rep
+
+
 def promote(round_id: str, worktree: Path, base: str, *,
             gate_report: dict | None = None, dry_run: bool = False) -> dict:
     live = LIVE_ROOT
@@ -418,17 +469,35 @@ def promote(round_id: str, worktree: Path, base: str, *,
             + (" (matched by content, not SHA — this change was reverted before "
                "and has been re-derived)" if tree_hash and not S.is_denied(commit=head)
                else ""))
-    if not W.is_clean(live):
-        raise PromoteError("live tree is dirty — refusing to land onto uncommitted work")
-
     live_head = subprocess.run(["git", "-C", str(live), "rev-parse", "HEAD"],
                                capture_output=True, text=True).stdout.strip()
     if live_head != base:
-        raise PromoteError(f"live HEAD moved since the gate ran ({live_head[:8]} != {base[:8]})")
+        # The tree is shared. Rebase and retest rather than refuse — the
+        # gate's own preflight does the rebase; see `_regate_after_move`.
+        base, head, gate_report = _regate_after_move(round_id, Path(worktree), live,
+                                                     base, live_head)
+        changed_preview = W.changed_paths(Path(worktree), base)
+        tree_hash = S.changed_tree_hash(worktree, head, changed_preview)
 
     changed = W.changed_paths(Path(worktree), base)
+
+    # Uncommitted edits in production are tolerated when they are disjoint
+    # from this diff: `merge --ff-only` never touches a file it is not
+    # merging, so they stay exactly where they are, in the editor they are
+    # open in. Overlap is the hazard — two writers on one file — and git
+    # would refuse the merge anyway; refusing here says which files, before
+    # the pool is paused and the drain armed. Still not the round's fault.
+    live_dirty = W.dirty_paths(live)
+    overlap = sorted(set(live_dirty) & set(changed))
+    if overlap:
+        _land_failed(round_id,
+                     f"live tree has uncommitted edits in paths this round also changes: "
+                     f"{overlap} — commit or stash the live edit, then land again",
+                     external=True, overlap=overlap)
+
     result: dict = {"round_id": round_id, "commit": head, "parent": live_head,
-                    "changed_paths": changed, "dry_run": dry_run}
+                    "changed_paths": changed, "dry_run": dry_run,
+                    "live_dirty_paths": live_dirty[:20]}
     if dry_run:
         result["would_promote"] = True
         return result
@@ -451,6 +520,11 @@ def promote(round_id: str, worktree: Path, base: str, *,
         # Both are set after the restart verifies, below.
         "errors_until_ts": None,
         "changed_paths": changed,
+        # What was uncommitted in production when this landed. The guardian's
+        # observation window will blame errors on the promotion; if a human's
+        # half-finished edit was live in the same process, this is how a
+        # reader tells the two apart.
+        "live_dirty_paths": live_dirty[:20],
         "vault_commits": vault_commits_for(round_id),
         "tree_hash": tree_hash,
         "venv_swapped": False,
@@ -469,11 +543,31 @@ def promote(round_id: str, worktree: Path, base: str, *,
         S.clear_current()
         raise PromoteError(why)
     set_drain(True, DRAIN_TTL)
+    merged = False
     try:
         status, body = _get(f"{BACKEND}/health")
         turns = (body or {}).get("turns") or {}
         if turns.get("active") or turns.get("queued") or turns.get("harness_runs"):
             raise PromoteError(f"a turn started during the drain handshake: {turns}")
+
+        # The idle wait can take fifteen minutes, and the human is still
+        # committing. One more chase, inside the drain so nothing starts
+        # underneath the retest; re-arm the drain afterwards because a gate
+        # run can outlast its TTL.
+        live_now = subprocess.run(["git", "-C", str(live), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip()
+        if live_now != base:
+            base, head, gate_report = _regate_after_move(round_id, Path(worktree), live,
+                                                         base, live_now)
+            set_drain(True, DRAIN_TTL)
+            live_head = live_now
+            changed = W.changed_paths(Path(worktree), base)
+            tree_hash = S.changed_tree_hash(worktree, head, changed)
+            current.update({"commit": head, "parent": live_head, "rollback_target": live_head,
+                            "changed_paths": changed, "tree_hash": tree_hash,
+                            "gate": gate_report.get("rungs")})
+            result.update({"commit": head, "parent": live_head, "changed_paths": changed})
+            S.write_verified(S.CURRENT_PATH, current)
 
         # ── land ───────────────────────────────────────────────────────
         S.set_pause(RESTART_LEASE)   # the guardian must not read our own restart as a crash
@@ -481,7 +575,13 @@ def promote(round_id: str, worktree: Path, base: str, *,
             ["git", "-C", str(live), "merge", "--ff-only", f"selfmod/{round_id}"],
             capture_output=True, text=True)
         if merge.returncode != 0:
-            raise PromoteError(f"fast-forward failed: {merge.stderr.strip()[:300]}")
+            # Chased twice and still not a fast-forward: `main` is moving faster
+            # than the loop can retest. Say so and stop; the item comes back.
+            _land_failed(round_id,
+                         f"fast-forward failed after rebasing and retesting: "
+                         f"{merge.stderr.strip()[:300]}",
+                         external=True)
+        merged = True
 
         venv_clone = Path(worktree) / ".venvs" / "lloyd"
         if venv_clone.exists():
@@ -543,13 +643,25 @@ def promote(round_id: str, worktree: Path, base: str, *,
         return result
 
     except Exception:
-        # Any failure between the merge and the verification: revert now
-        # rather than waiting for the guardian's next tick.
         S.clear_pause()
+        if not merged:
+            # Nothing has moved. A failure before the merge — the drain
+            # handshake, a retest that failed, a refused fast-forward — used to
+            # take this same path and stop, restore and restart the services
+            # for a tree that was already exactly where it belonged. With
+            # uncommitted edits tolerated in that tree, the restore would also
+            # have stashed them out from under the human's editor.
+            S.clear_current()
+            raise
+        # Any failure between the merge and the verification: revert now
+        # rather than waiting for the guardian's next tick. Uncommitted edits
+        # in the tree survive as `broken/<stamp>/dirty.patch` — the guardian's
+        # `preserve_evidence` contract — and the event says where.
         try:
-            _rollback_inline(live, live_head)
+            evidence = _rollback_inline(live, live_head)
             S.append_event({"event": "rollback_succeeded", "trigger": "promote_failed",
-                            "commit": head, "restored": live_head})
+                            "commit": head, "restored": live_head,
+                            "stash": evidence.get("patch"), "tag": evidence.get("tag")})
         except Exception as exc:
             S.append_event({"event": "rollback_failed", "trigger": "promote_failed",
                             "commit": head, "error": str(exc)[:400]})
@@ -571,8 +683,13 @@ def _wait_health(url: str, budget: float) -> bool:
     return False
 
 
-def _rollback_inline(live: Path, target: str) -> None:
-    """Reuse the guardian's rollback rather than reimplementing it."""
+def _rollback_inline(live: Path, target: str) -> dict:
+    """Reuse the guardian's rollback rather than reimplementing it.
+
+    Returns `preserve_evidence`'s record — tag, and the patch any uncommitted
+    live edits were written to before `reset --hard` — so the caller can put
+    that path in front of whoever was editing.
+    """
     import importlib.util
     guardian_dir = live / "agent-services" / "guardian"
     spec_ = importlib.util.spec_from_file_location("_g_rollback", guardian_dir / "rollback.py")
@@ -582,7 +699,7 @@ def _rollback_inline(live: Path, target: str) -> None:
     for program in ("lloyd-backend", "lloyd-mcp"):
         stop_process(program, wait=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    mod.preserve_evidence(str(live), S.BROKEN_DIR / stamp, f"guardian-broken-{stamp}")
+    evidence = mod.preserve_evidence(str(live), S.BROKEN_DIR / stamp, f"guardian-broken-{stamp}")
     mod.restore_tree(str(live), target, ("app", "agent_mcp", "workers", "scripts",
                                          "eval", "tests"),
                      ("app", "agent_mcp", "workers", "scripts"))
@@ -590,3 +707,4 @@ def _rollback_inline(live: Path, target: str) -> None:
     for program, health in (("lloyd-mcp", MCP_HEALTH), ("lloyd-backend", f"{BACKEND}/health")):
         restart_process(program)
         _wait_health(health, 90.0)
+    return evidence or {}

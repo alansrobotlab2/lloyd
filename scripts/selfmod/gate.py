@@ -401,51 +401,94 @@ class Gate:
             return False, f"promotions halted: {S.HALTED_PATH}", {}
         if S.is_broken():
             return False, f"guardian is in a BROKEN state: {S.BROKEN_PATH}", {}
-        # Both of the next two refusals are about the state of the LIVE TREE,
-        # not about the diff under test, so they carry `external_blocker` and
-        # do not spend the item's one attempt (`backlog.implement_outcomes`).
-        # A round lives an hour; an uncommitted edit in production can outlast
-        # it, and #447 lost 587 lines waiting for one to clear. "No changes to
-        # promote", further down, is the round's own and carries no flag.
-        if not W.is_clean(self.live):
-            paths = W.dirty_paths(self.live)
-            return False, ("live tree is dirty — refusing to gate against a moving base; "
-                           f"uncommitted: {paths}"), {"external_blocker": True,
-                                                      "dirty_paths": paths}
 
         head = W.head(self.worktree)
         if not head:
             return False, "cannot read the worktree HEAD", {}
-        self.report.head = head
 
+        data: dict = {}
         live_head = _run(["git", "-C", str(self.live), "rev-parse", "HEAD"]).stdout.strip()
         if live_head != self.base:
-            return False, (f"live HEAD moved: {live_head[:8]} != base {self.base[:8]} — "
-                           "something landed underneath this round"), {"external_blocker": True}
+            # The tree is shared: a human commits to `main` while a round is
+            # open. Until 2026-09-09 this was a refusal — "something landed
+            # under you; abort and re-cut" — which threw the round's diff away
+            # to be reapplied by hand onto a base one commit newer. The rebase
+            # is that reapplication and the rest of the ladder is the retest:
+            # every rung below runs against the round's change ON TOP of what
+            # landed, which is the only thing worth testing. Only a conflict
+            # fails, and it names the files.
+            ok, why, conflicts = W.rebase_onto(self.worktree, live_head)
+            if not ok and conflicts:
+                return False, (f"live HEAD moved: {live_head[:8]} != base "
+                               f"{self.base[:8]}, and rebasing onto it conflicts in "
+                               f"{conflicts} — resolve in the worktree and gate again "
+                               f"(the rebase was aborted; the worktree is as it was)"), {
+                                   "external_blocker": True, "conflicts": conflicts,
+                                   "moved_to": live_head}
+            if not ok:
+                # The worktree itself refused: uncommitted changes. That is
+                # the round's own state, and no exemption.
+                return False, f"live HEAD moved: {live_head[:8]} != base {self.base[:8]}, but {why}", {
+                    "moved_to": live_head}
+            old_base, old_head = self.base, head
+            self.base = live_head
+            head = W.head(self.worktree) or ""
+            if not head:
+                return False, "cannot read the worktree HEAD after rebase", {}
+            data["rebased"] = {"from": old_base, "onto": live_head,
+                               "old_head": old_head, "new_head": head}
+        # `gate.json` is what `land` reads its base and head from, and after a
+        # rebase both have moved.
+        self.report.base = self.base
+        self.report.head = head
 
         anc = _run(["git", "-C", str(self.live), "merge-base", "--is-ancestor",
                     self.base, head])
         if anc.returncode != 0:
-            return False, "candidate is not a descendant of base — not a fast-forward", {}
+            return False, "candidate is not a descendant of base — not a fast-forward", data
         if W.has_merge_commits(self.live, self.base, head):
-            return False, "candidate contains merge commits", {}
+            return False, "candidate contains merge commits", data
 
         changed = W.changed_paths(self.worktree, self.base)
         self.report.changed_paths = changed
         if not changed:
-            return False, "no changes to promote", {}
+            return False, "no changes to promote", data
+
+        # Uncommitted edits in production are tolerated when they are not in
+        # the round's diff: a fast-forward of disjoint paths leaves them
+        # exactly where they are, and refusing on any dirt at all is what cost
+        # #447 its 587 lines while an unrelated file sat modified for an hour.
+        # Overlap is the real hazard — two writers on one file — and the
+        # refusal names it. Still not the round's fault, so still no attempt
+        # spent.
+        dirty = W.dirty_paths(self.live)
+        overlap = sorted(set(dirty) & set(changed))
+        if overlap:
+            return False, (f"live tree has uncommitted edits in paths this round also "
+                           f"changes: {overlap} — two writers on one file; commit or "
+                           f"stash the live edit, then gate again"), {
+                               **data, "external_blocker": True,
+                               "dirty_paths": dirty[:20], "overlap": overlap}
+        if dirty:
+            data["dirty_tolerated"] = dirty[:20]
 
         ok, reason, buckets = spec.check_scope(changed)
         if not ok:
-            return False, reason, {"buckets": buckets}
+            return False, reason, {**data, "buckets": buckets}
 
         for port in (C.cc.BACKEND_PORT, C.cc.MCP_PORT):
             if not C.port_free(port):
-                return False, f"canary port {port} is in use (stale canary?)", {}
+                return False, f"canary port {port} is in use (stale canary?)", data
 
-        return True, (f"{len(changed)} file(s) in scope"
-                      + (f"; {len(buckets['protected'])} protected → drill required"
-                         if buckets["protected"] else "")), {"buckets": buckets}
+        detail = (f"{len(changed)} file(s) in scope"
+                  + (f"; {len(buckets['protected'])} protected → drill required"
+                     if buckets["protected"] else ""))
+        if data.get("rebased"):
+            detail += (f"; rebased {data['rebased']['from'][:8]}→{live_head[:8]} — "
+                       "every rung below judges the change on top of what landed")
+        if dirty:
+            detail += f"; tolerating {len(dirty)} uncommitted live path(s) outside this diff"
+        return True, detail, {"buckets": buckets, **data}
 
     def rung_static(self):
         r = _run([str(self.python), "-m", "compileall", "-q", str(self.worktree)], timeout=300)
@@ -581,6 +624,10 @@ class Gate:
                                f"{len(node_ids)} failures are new in this round "
                                f"({new}); the rest predate it. {probe_note}\n"
                                f"{tail[-600:]}"), data
+            # Nothing reproduces at base: every failure is this round's. Say so
+            # in the same field the mixed case uses, so a reader of the report
+            # never has to infer the delta from its absence.
+            data["new_failures"] = new
             return False, f"pytest failed ({counts}): {tail[-900:]}\n{probe_note}", data
 
         # Non-negotiable under auto-landing: `pytest -q` exits 0 if the round

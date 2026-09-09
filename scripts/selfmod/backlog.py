@@ -348,15 +348,22 @@ INCOMPLETE_STOP_REASONS = {"turn_timeout", "max_turns"}
 
 
 def _last_gate_per_round(ledger: Path) -> dict[str, dict]:
-    """The gate event that ENDED each round's most recent gate run.
+    """The event that last JUDGED each round: the rung that ended its most
+    recent gate run, or a landing that failed after the gate had passed.
 
-    The ladder short-circuits, so the last event of a failed run is the failing
-    rung and the last event of a passing run is `drill`. Reading the last event
-    rather than a named rung is what lets a re-gate clear an exemption its
-    first attempt earned, in either direction.
+    The ladder short-circuits, so the last gate event of a failed run is the
+    failing rung and of a passing run is `drill`. A `land_failed` comes later
+    than either and supersedes it — a round can pass every rung and still be
+    refused at landing because `main` moved again underneath it, and that
+    refusal is what decides whether the item's attempt was spent. Ordered by
+    `ts`, because the two event types are filtered out of the ledger
+    separately and file order is lost in the merge.
     """
+    rows = (_ledger_events(ledger, "gate", require_item=False)
+            + _ledger_events(ledger, "land_failed", require_item=False))
+    rows.sort(key=lambda d: float(d.get("ts") or 0))
     last: dict[str, dict] = {}
-    for d in _ledger_events(ledger, "gate", require_item=False):
+    for d in rows:
         rid = str(d.get("round_id") or "")
         if rid:
             last[rid] = d

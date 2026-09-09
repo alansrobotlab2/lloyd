@@ -380,6 +380,40 @@ def changed_tree_hash(repo, commit: str, paths: list[str]) -> str | None:
 # Detached execution
 # ---------------------------------------------------------------------------
 
+def write_gate_report(round_id: str, report: dict) -> Path:
+    """`gate.json` is what `land` reads its base and head from. Written by
+    `run_gate` and, after a rebase-and-retest inside the promoter, by
+    `promote` — one writer for the shape, or the two drift."""
+    out = ROUNDS_DIR / round_id
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "gate.json"
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return path
+
+
+def update_run_spec_base(round_id: str, base: str) -> bool:
+    """Move the round's recorded base after a rebase.
+
+    `run_gate` reads `code.base_commit` from `run_spec.yaml`, and `changed_paths`
+    is `base...HEAD`. Leave the old base in place after a rebase and the next
+    `selfmod_gate` call computes the round's diff against a commit that is no
+    longer its parent — sweeping every file the human committed in between
+    into the round's changed paths, and from there into scope checks, the
+    tree hash and the promotion record. False if there is no spec to update.
+    """
+    path = ROUNDS_DIR / round_id / "run_spec.yaml"
+    if not path.exists():
+        return False
+    import yaml
+    spec = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    code = spec.setdefault("code", {})
+    if code.get("base_commit") == base:
+        return True
+    code["base_commit"] = base
+    path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+    return True
+
+
 def spawn_detached(argv: list[str], log_path: Path, cwd=None) -> int:
     """Run `argv` in its own session, and return its pid.
 

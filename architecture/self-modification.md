@@ -548,6 +548,67 @@ definition — autonomy delegates to it, and `/api/message/stream` takes a
 Only a caller that *enforces* a clock sends one. A chat turn has none, and
 telling a human's turn it has 900 seconds left would be a lie.
 
+### 4.2e The tree is shared: rebase and retest, tolerate dirt that is not ours
+
+`~/lloyd` is production and a human works on `main` while rounds are open.
+Until 2026-09-09 the loop treated that as an error in three places: `start`
+refused a dirty tree, `preflight` refused a dirty tree or a moved HEAD
+("something landed under you; abort and re-cut"), and `promote` refused both
+again at landing. Each refusal threw away work that was fine — the round's
+diff, to be reapplied by hand onto a base one commit newer — and on
+2026-09-09 the loop's only drain was blocked three separate times by an
+uncommitted file nobody was going to commit for an hour.
+
+**A moved `main` is rebased onto, and the ladder is the retest.**
+`rung_preflight` runs `git rebase <live HEAD>` in the worktree, records
+`rebased: {from, onto, old_head, new_head}`, and continues. Every rung below
+then judges the round's change *on top of what landed* — which is the only
+build that was ever going to be live, and the one nothing had tested. Only a
+conflict fails, it names the files, and `rebase --abort` leaves the worktree
+exactly as it was. That failure is `external_blocker`: someone else's change
+collided.
+
+The base has three homes and a rebase must move all of them: `report.base`
+(what `gate.json` carries and `land` reads), `run_spec.yaml`'s `code.base_commit`
+(what the *next* `run_gate` reads), and the promotion record's `parent` /
+`rollback_target`. Leave the spec's copy stale and the next gate computes the
+round's diff against a commit that is no longer its parent, sweeping the
+human's commits into the round's changed paths, its scope check and its
+tree hash. `run_gate` writes it back whenever `report.base` moved.
+
+**The promoter chases too, twice.** It runs detached and the human is still
+committing: once before the idle wait, and once more inside the drain after
+it, `promote` re-runs the gate with the *old* base — whose preflight does the
+rebase — and lands the retested head. Not a second implementation of the
+rebase; one. A third miss is a `fast-forward failed` and the loop stops
+chasing: `main` is moving faster than it can retest, which is a reason to
+say so, not to keep up. The round is left rebased, gated and open; the
+reaper closes it; the branch is kept.
+
+**A refusal at landing is now a verdict.** `land_failed` is the ledger event,
+and `backlog._last_gate_per_round` reads it beside `gate` — ordered by `ts`,
+because a round can pass every rung and *then* lose the race, and that later
+event is the one that decides whether the item's attempt was spent.
+
+**Uncommitted edits in production are tolerated when they are outside the
+round's diff.** `merge --ff-only` never touches a file it is not merging, so
+they stay where they are, in the editor they are open in. Overlap — two
+writers on one file — is refused by name at both the gate and the promoter,
+before the pool is paused; git would refuse the merge anyway. `start`
+records the dirt on the `round_start` event rather than refusing. What was
+uncommitted at landing is written to `current.json` as `live_dirty_paths`,
+because the guardian's window will blame errors on the promotion and a
+half-finished human edit live in the same process is the other suspect.
+
+One consequence had to be handled before any of this was safe: the
+promoter's inline rollback runs the guardian's `restore_tree`, which is
+`reset --hard` after writing uncommitted edits to `broken/<stamp>/dirty.patch`.
+It used to run for *pre-merge* failures too — a drain-handshake failure
+stopped, restored and restarted the services for a tree that had not moved.
+With dirt tolerated in that tree, that path would have stashed the human's
+edits out from under their editor for nothing. A `merged` flag gates it now;
+a post-merge failure still restores, and the event names the patch.
+
 ### 4.3 Rungs that run candidate code run it against scratch state
 
 Only the canary redirected `LLOYD_SELFMOD_STATE`. The static, tests and venv

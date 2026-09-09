@@ -174,6 +174,26 @@ error-shaped lines.
   accepts `deadline_seconds`, which `run_prompt_in_session` sets to the same
   timeout it enforces. Only a caller that enforces a clock sends one — a chat
   turn has none and must never be told it does.
+- **The tree is shared, so the gate rebases and retests rather than
+  refusing.** A human works on `main` while rounds are open. `preflight`
+  used to refuse a moved HEAD ("abort and re-cut") and any uncommitted edit
+  anywhere in production; `promote` refused both again at landing. Now
+  preflight rebases the worktree onto live HEAD and the rest of the ladder
+  judges the change *on top of what landed* — the only build that was ever
+  going to be live. Only a conflict fails, naming the files, with the rebase
+  aborted. The promoter chases the same way, twice (before the idle wait and
+  inside the drain after it) by re-running the gate with the old base; a
+  third miss is a `land_failed`, which is now a ledger verdict the backlog
+  reads so the item keeps its attempt. A rebase moves the base in three
+  places and all three must follow: `gate.json` (what `land` reads),
+  `run_spec.yaml` (what the next `run_gate` reads — stale, it sweeps the
+  human's commits into the round's diff), and the promotion record.
+  Uncommitted live edits are tolerated when disjoint from the round's diff
+  (`merge --ff-only` never touches them) and refused by name when they
+  overlap. The promoter's inline rollback is `reset --hard` after writing
+  dirt to `broken/<stamp>/dirty.patch`; it used to run for pre-merge failures
+  too, which with tolerated dirt would have stashed a human's edits out from
+  under their editor for a tree that had not moved. A `merged` flag gates it.
 - **A turn that dies at its budget is not the end of the round.** The
   budget anchor (`<budget>` at 75%/90% of `max_turns`) tells the model to
   gate-and-land or abort while it still can; the observer's ambient

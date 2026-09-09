@@ -161,14 +161,6 @@ def _gate_for(live, worktree, base, monkeypatch):
     return g
 
 
-def test_preflight_refuses_a_dirty_live_tree(live_repo, tmp_path, monkeypatch):
-    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
-    (live_repo / "app" / "dirty.py").write_text("x = 1\n", encoding="utf-8")
-    g = _gate_for(live_repo, live_repo, base, monkeypatch)
-    ok, reason, _ = g.rung_preflight()
-    assert not ok and "dirty" in reason
-
-
 def test_preflight_refuses_when_halted(live_repo, monkeypatch):
     base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     g = _gate_for(live_repo, live_repo, base, monkeypatch)
@@ -183,18 +175,6 @@ def test_preflight_refuses_when_the_guardian_is_broken(live_repo, monkeypatch):
     monkeypatch.setattr(G.S, "is_broken", lambda: True)
     ok, reason, _ = g.rung_preflight()
     assert not ok and "BROKEN" in reason
-
-
-def test_preflight_refuses_a_moved_base(live_repo, tmp_path, monkeypatch):
-    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
-    wt = tmp_path / "wt"
-    git(live_repo, "worktree", "add", "-q", "-b", "selfmod/x", str(wt), base)
-    (live_repo / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
-    git(live_repo, "add", "-A")
-    git(live_repo, "commit", "-q", "-m", "moved")
-    g = _gate_for(live_repo, wt, base, monkeypatch)
-    ok, reason, _ = g.rung_preflight()
-    assert not ok and "moved" in reason
 
 
 def test_preflight_refuses_a_no_op_diff(live_repo, tmp_path, monkeypatch):
@@ -600,39 +580,6 @@ def test_a_probe_that_could_not_run_says_so_instead_of_reporting_zero(tmp_path):
 # Preflight: the two refusals that are about the live tree, not the diff
 # ---------------------------------------------------------------------------
 
-def test_a_dirty_live_tree_names_the_paths_and_is_not_the_rounds_fault(live_repo, tmp_path, monkeypatch):
-    """#447 spent four tool calls finding the one uncommitted file behind
-    "live tree is dirty", then half an hour polling for it to clear, then
-    aborted — and the refusal counted as its item's one attempt. A round lives
-    an hour; an uncommitted edit in production can outlast it."""
-    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
-    (live_repo / "app" / "someone_elses_wip.py").write_text("x = 1\n", encoding="utf-8")
-    g = _gate_for(live_repo, live_repo, base, monkeypatch)
-    ok, detail, data = g.rung_preflight()
-
-    assert ok is False
-    assert data.get("external_blocker") is True
-    assert "app/someone_elses_wip.py" in detail, "the paths are one command away"
-    assert data["dirty_paths"] == ["app/someone_elses_wip.py"]
-
-
-def test_a_moved_live_head_is_not_the_rounds_fault_either(live_repo, tmp_path, monkeypatch):
-    """Something landed underneath the round. Its diff is still fine."""
-    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
-    wt = tmp_path / "wt"
-    git(live_repo, "worktree", "add", "-q", "-b", "cand", str(wt), base)
-    (wt / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
-    git(wt, "add", "-A"); git(wt, "commit", "-q", "-m", "candidate")
-    (live_repo / "app" / "other.py").write_text("y = 1\n", encoding="utf-8")
-    git(live_repo, "add", "-A"); git(live_repo, "commit", "-q", "-m", "landed underneath")
-
-    g = _gate_for(live_repo, wt, base, monkeypatch)
-    ok, detail, data = g.rung_preflight()
-    assert ok is False and data.get("external_blocker") is True
-    assert "landed underneath" in detail
-    git(live_repo, "worktree", "remove", "--force", str(wt))
-
-
 def test_an_empty_diff_carries_no_exemption(live_repo, tmp_path, monkeypatch):
     """The counterfactual that keeps the preflight exemption honest. "No
     changes to promote" is also a preflight failure and is entirely the
@@ -645,3 +592,166 @@ def test_an_empty_diff_carries_no_exemption(live_repo, tmp_path, monkeypatch):
     assert ok is False and "no changes to promote" in detail
     assert not data.get("external_blocker")
     git(live_repo, "worktree", "remove", "--force", str(wt))
+
+
+# ---------------------------------------------------------------------------
+# The tree is shared: rebase and retest, tolerate dirt that is not ours
+#
+# A human commits to `main` while a round is open. Until 2026-09-09 that was
+# "something landed under you; abort and re-cut" — the round's diff thrown away
+# to be reapplied by hand onto a base one commit newer — and any uncommitted
+# edit anywhere in production was a refusal, which cost #447 587 lines while
+# an unrelated file sat modified for an hour. The rebase is the reapplication,
+# done by git; the ladder below it is the retest; and dirt is a problem only
+# when it is in the round's own files.
+# ---------------------------------------------------------------------------
+
+def _round(live_repo, tmp_path, name, base, edit=("app/m.py", "V = 2\n")):
+    wt = tmp_path / f"wt_{name}"
+    git(live_repo, "worktree", "add", "-q", "-b", f"selfmod/{name}", str(wt), base)
+    rel, body = edit
+    (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+    (wt / rel).write_text(body, encoding="utf-8")
+    git(wt, "add", "-A"); git(wt, "commit", "-q", "-m", f"round {name}")
+    return wt
+
+
+def _land_on_main(live_repo, rel, body, msg="landed underneath"):
+    (live_repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (live_repo / rel).write_text(body, encoding="utf-8")
+    git(live_repo, "add", "-A"); git(live_repo, "commit", "-q", "-m", msg)
+    return git(live_repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_a_moved_main_is_rebased_onto_and_the_gate_continues(live_repo, tmp_path, monkeypatch):
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = _round(live_repo, tmp_path, "r1", base)
+    candidate = git(wt, "rev-parse", "HEAD").stdout.strip()
+    new_main = _land_on_main(live_repo, "app/other.py", "y = 1\n")
+
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, detail, data = g.rung_preflight()
+
+    assert ok is True, detail
+    assert data["rebased"]["from"] == base and data["rebased"]["onto"] == new_main
+    assert data["rebased"]["old_head"] == candidate
+    assert g.report.base == new_main, "gate.json is what land reads its base from"
+    assert g.report.head == git(wt, "rev-parse", "HEAD").stdout.strip() != candidate
+    assert git(live_repo, "merge-base", "--is-ancestor", new_main, g.report.head).returncode == 0
+    # Only the round's own change is its diff — not the commit that landed.
+    assert g.report.changed_paths == ["app/m.py"]
+    assert "rebased" in detail and "on top of what landed" in detail
+
+
+def test_a_rebase_conflict_names_the_files_and_leaves_the_worktree_as_it_was(live_repo, tmp_path, monkeypatch):
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = _round(live_repo, tmp_path, "r2", base)
+    candidate = git(wt, "rev-parse", "HEAD").stdout.strip()
+    _land_on_main(live_repo, "app/m.py", "V = 99  # the same line, from main\n")
+
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, detail, data = g.rung_preflight()
+
+    assert ok is False
+    assert data.get("external_blocker") is True, "someone else's change collided; not the round's fault"
+    assert data["conflicts"] == ["app/m.py"] and "app/m.py" in detail
+    assert git(wt, "rev-parse", "HEAD").stdout.strip() == candidate, "aborted, not half-applied"
+    assert git(wt, "status", "--porcelain").stdout.strip() == ""
+    assert not (wt / ".git" / "rebase-merge").exists() and not (wt / ".git" / "rebase-apply").exists()
+
+
+def test_a_worktree_with_uncommitted_changes_is_not_rebased_and_that_is_its_own(live_repo, tmp_path, monkeypatch):
+    """Autostashing would carry those changes across silently — and they are
+    not in the round's diff either way. The round is told to commit."""
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = _round(live_repo, tmp_path, "r3", base)
+    (wt / "app" / "half_done.py").write_text("z = 1\n", encoding="utf-8")
+    _land_on_main(live_repo, "app/other.py", "y = 1\n")
+
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, detail, data = g.rung_preflight()
+    assert ok is False and "commit" in detail
+    assert not data.get("external_blocker"), "the worktree's own state is the round's own"
+
+
+def test_uncommitted_live_edits_outside_the_diff_are_tolerated_and_recorded(live_repo, tmp_path, monkeypatch):
+    """#447. A fast-forward of disjoint paths never touches the file the
+    human is editing; refusing on any dirt at all is what cost 587 lines."""
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = _round(live_repo, tmp_path, "r4", base)
+    (live_repo / "app" / "someone_elses_wip.py").write_text("x = 1\n", encoding="utf-8")
+
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, detail, data = g.rung_preflight()
+    assert ok is True, detail
+    assert data["dirty_tolerated"] == ["app/someone_elses_wip.py"]
+    assert "tolerating 1 uncommitted live path" in detail
+
+
+def test_uncommitted_live_edits_in_the_rounds_own_files_are_refused_by_name(live_repo, tmp_path, monkeypatch):
+    """Two writers on one file. git would refuse the fast-forward anyway; the
+    gate says which file, before the pool is paused for a landing."""
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = _round(live_repo, tmp_path, "r5", base)
+    (live_repo / "app" / "m.py").write_text("V = 1  # being edited live\n", encoding="utf-8")
+
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, detail, data = g.rung_preflight()
+    assert ok is False
+    assert data.get("external_blocker") is True
+    assert data["overlap"] == ["app/m.py"] and "app/m.py" in detail
+
+
+def test_an_untracked_live_file_the_round_creates_is_an_overlap(live_repo, tmp_path, monkeypatch):
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = _round(live_repo, tmp_path, "r6", base, edit=("app/new.py", "N = 1\n"))
+    (live_repo / "app" / "new.py").write_text("N = 'theirs'\n", encoding="utf-8")
+
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, detail, data = g.rung_preflight()
+    assert ok is False and data.get("external_blocker") is True
+    assert data["overlap"] == ["app/new.py"]
+
+
+def test_the_retest_judges_the_change_on_top_of_what_landed(tmp_path, monkeypatch):
+    """The point of rebasing rather than refusing: the build that will be live
+    is the round's change PLUS what landed, and nothing had tested that. Here
+    `main` lands a test the round's change breaks. After the rebase, the tests
+    rung fails — and the base probe says that test passes at the new base, so
+    the failure is the round's own, not an exemption."""
+    live = tmp_path / "live"
+    (live / "app").mkdir(parents=True); (live / "tests").mkdir()
+    git(tmp_path, "init", "-q", "-b", "main", str(live))
+    git(live, "config", "user.email", "t@e.com"); git(live, "config", "user.name", "t")
+    (live / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (live / "app" / "m.py").write_text("V = 1\n", encoding="utf-8")
+    (live / "tests" / "test_smoke.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    git(live, "add", "-A"); git(live, "commit", "-q", "-m", "base")
+    base = git(live, "rev-parse", "HEAD").stdout.strip()
+
+    monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
+    wt = tmp_path / "work" / "SM_RT" / "home" / "lloyd"
+    wt.parent.mkdir(parents=True)
+    git(live, "worktree", "add", "-q", "-b", "selfmod/SM_RT", str(wt), base)
+    (wt / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
+    git(wt, "add", "-A"); git(wt, "commit", "-q", "-m", "round: V = 2")
+
+    # Meanwhile main lands a test that pins V == 1.
+    (live / "tests" / "test_v.py").write_text("from app.m import V\n\ndef test_v_is_one():\n    assert V == 1\n",
+                                              encoding="utf-8")
+    git(live, "add", "-A"); git(live, "commit", "-q", "-m", "pin V")
+
+    monkeypatch.setattr(G, "PYTEST_MIN_COLLECTED", 0)
+    monkeypatch.setattr(G, "PYTEST_MIN_PASSED", 0)
+    g = _gate_for(live, wt, base, monkeypatch)
+    g.python = Path(sys.executable)
+    ok, detail, data = g.rung_preflight()
+    assert ok is True, detail
+    assert (wt / "tests" / "test_v.py").exists(), "the worktree now carries what landed"
+
+    ok, detail, data = g.rung_tests()
+    assert ok is False
+    assert "tests/test_v.py::test_v_is_one" in data["failed_node_ids"]
+    assert not data.get("external_blocker"), "passes at the new base; the round broke it"
+    assert data["new_failures"] == ["tests/test_v.py::test_v_is_one"]
+    git(live, "worktree", "remove", "--force", str(wt))

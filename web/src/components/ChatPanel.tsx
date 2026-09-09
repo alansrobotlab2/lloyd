@@ -27,13 +27,14 @@ const timeStr = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
 // How long the model spent reasoning, for the collapsed thinking header.
-// Sub-minute keeps a decimal — the difference between 2s and 12s of
-// thinking is the interesting range and rounding it to whole seconds
-// flattens it; past a minute the tenths are noise.
+// Whole seconds throughout. The tenths were noise on a header that ticks
+// while it streams — a digit that changes five times a second reads as
+// motion, not as information. Rounding is applied before the minute split
+// so 59.6s renders as `1m 00s` rather than `60s`.
 const thinkDuration = (ms: number): string => {
   if (!(ms > 0)) return ''
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
   const total = Math.round(ms / 1000)
+  if (total < 60) return `${total}s`
   return `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, '0')}s`
 }
 
@@ -136,7 +137,6 @@ const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => 
 interface MessageRowProps {
   msg: ApiMessage
   showAgentDetails: boolean
-  thinkEnabled: boolean
   isMobile: boolean
   toolCallIndex: Map<string, ToolCallRef>
   forceLeftAlign?: boolean
@@ -250,7 +250,7 @@ function ThinkingRow({ msg, isMobile, compact, forceLeftAlign }: {
   const [tick, setTick] = useState(0)
   useEffect(() => {
     if (!live) return
-    const id = setInterval(() => setTick(t => t + 1), 200)
+    const id = setInterval(() => setTick(t => t + 1), 500)
     return () => clearInterval(id)
   }, [live])
 
@@ -315,7 +315,6 @@ function ThinkingRow({ msg, isMobile, compact, forceLeftAlign }: {
 const MessageRow = memo(function MessageRow({
   msg,
   showAgentDetails,
-  thinkEnabled,
   isMobile,
   toolCallIndex,
   forceLeftAlign = false,
@@ -325,8 +324,14 @@ const MessageRow = memo(function MessageRow({
   // Above the content guard on purpose: a thinking row's text lives in
   // `reasoning`, not in a content block, so it has nothing for the guard
   // below to find and would be dropped before it rendered.
+  //
+  // Visibility is the agent-details flag alone, exactly like a tool row.
+  // Not `thinkEnabled`: that toggle asks the *model* for extended thinking
+  // on the next turn, so keying display on it made a reader's view of an
+  // old turn depend on how the composer happens to be set right now, and
+  // left one transcript rendering two different ways in two panels.
   if (msg.role === 'thinking') {
-    if (!showAgentDetails && !thinkEnabled) return null
+    if (!showAgentDetails) return null
     return (
       <ThinkingRow
         msg={msg}
@@ -393,7 +398,7 @@ const MessageRow = memo(function MessageRow({
           <div className={cn('prose-chat leading-relaxed', isMobile ? 'text-[15px]' : 'text-[13px]')}>
             {isAssistant ? (
               <>
-                {msg.reasoning && (showAgentDetails || thinkEnabled) && (
+                {msg.reasoning && showAgentDetails && (
                   <Collapsible className="mb-3">
                     <CollapsibleTrigger className="group cursor-pointer flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition-colors">
                       <Brain className="w-3 h-3" />
@@ -1485,7 +1490,6 @@ export default function ChatPanel({
             key={msg.id}
             msg={msg}
             showAgentDetails={showAgentDetails}
-            thinkEnabled={thinkEnabled}
             isMobile={isMobile}
             toolCallIndex={toolCallIndex}
             compact={compact}
@@ -1512,7 +1516,7 @@ export default function ChatPanel({
                 if (m.role === 'thinking') {
                   // Carries no content blocks, so it has to clear the
                   // guard below before it reaches MessageRow.
-                  if (!showAgentDetails && !thinkEnabled) return null
+                  if (!showAgentDetails) return null
                 } else {
                   const hasContent = m.content?.some(c => c.text?.trim())
                   if (!hasContent) return null
@@ -1529,7 +1533,6 @@ export default function ChatPanel({
                         <MessageRow
                           msg={item.msg}
                           showAgentDetails={showAgentDetails}
-                          thinkEnabled={thinkEnabled}
                           isMobile={isMobile}
                           toolCallIndex={toolCallIndex}
                           forceLeftAlign

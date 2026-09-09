@@ -67,17 +67,56 @@ def is_clean(repo: Path) -> bool:
     return r.returncode == 0 and not r.stdout.strip()
 
 
-def dirty_paths(repo: Path, limit: int = 8) -> list[str]:
-    """What is actually dirty, for an error message that can be acted on.
+def dirty_paths(repo: Path, limit: int | None = None) -> list[str]:
+    """Every path `git status` reports as modified or untracked.
 
     "live tree is dirty" sent round SM_20260909_081105 hunting: four tool
     calls to find the one uncommitted file, then half an hour polling for it
-    to clear. The paths are one command away and belong in the refusal.
+    to clear. The paths are one command away and belong in the refusal — and
+    now in the decision too, because the gate and the promoter tolerate dirt
+    that is disjoint from the round's own diff. A rename reports both sides.
     """
     r = git(repo, "status", "--porcelain")
     if r.returncode != 0:
         return []
-    return [ln[3:].strip() or ln.strip() for ln in r.stdout.splitlines() if ln.strip()][:limit]
+    out: list[str] = []
+    for ln in r.stdout.splitlines():
+        if not ln.strip():
+            continue
+        entry = ln[3:].strip() if len(ln) > 3 else ln.strip()
+        for part in entry.split(" -> "):
+            part = part.strip().strip('"')
+            if part and part not in out:
+                out.append(part)
+    return out[:limit] if limit else out
+
+
+def rebase_onto(worktree: Path, onto: str) -> tuple[bool, str, list[str]]:
+    """Rebase the round's branch onto `onto`. `(ok, detail, conflicting_paths)`.
+
+    The tree is shared. A human commits to `main` while a round is open, and
+    until 2026-09-09 that turned every later gate and every landing into a
+    refusal — "something landed under you; abort and re-cut", which threw
+    away the round's diff to reapply it by hand onto a base one commit newer.
+    A rebase is that reapplication, done by git, and what follows it in the
+    ladder is the retest.
+
+    Fails closed and leaves nothing half-done: a conflict is aborted so the
+    worktree is exactly as it was, and the conflicting paths come back so the
+    round can resolve them by hand and gate again. A worktree with uncommitted
+    changes is refused rather than autostashed — those changes are not in the
+    round's diff either way, and carrying them silently across a rebase is
+    how a round comes to believe it gated work it never committed.
+    """
+    if not is_clean(worktree):
+        return False, "worktree has uncommitted changes — commit them before gating", []
+    r = git(worktree, "rebase", onto)
+    if r.returncode == 0:
+        return True, "", []
+    c = git(worktree, "diff", "--name-only", "--diff-filter=U")
+    conflicts = [ln.strip() for ln in c.stdout.splitlines() if ln.strip()]
+    git(worktree, "rebase", "--abort")
+    return False, (r.stderr or r.stdout).strip()[:400], conflicts
 
 
 def has_merge_commits(repo: Path, base: str, head_ref: str) -> bool:

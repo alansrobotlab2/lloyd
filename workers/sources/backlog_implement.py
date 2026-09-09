@@ -136,7 +136,11 @@ not tell you.
 4. Write the test that fails today. Then the smallest change that makes it \
 pass. One change per round.
 5. `selfmod_gate`. If it fails twice on the same rung for the same reason, \
-`selfmod_abort` and report — with one exception, below.
+`selfmod_abort` and report — with one exception, below. A preflight that says \
+it **rebased** is a pass, not a warning: something landed on `main` under you \
+and the gate moved your branch onto it and retested. Your base has moved; do \
+not re-cut. Only a rebase *conflict* stops you, and it names the files — \
+resolve in the worktree, commit, gate again.
 
 **An existing test that fails because it pins the behaviour you were asked to \
 change is work, not a blocker.** The gate reports whether a failure is new in \

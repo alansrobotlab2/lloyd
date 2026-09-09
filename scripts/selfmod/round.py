@@ -36,8 +36,13 @@ def start(goal: str, *, base: str | None = None, force: bool = False) -> dict:
 
     lock = S.Lock(owner="round-start").acquire()
     try:
-        if not W.is_clean(LIVE_ROOT):
-            raise RuntimeError("live tree is dirty — commit or stash before opening a round")
+        # A worktree is cut from HEAD, which is committed state; uncommitted
+        # edits in production are not in it and cannot reach it. Refusing here
+        # blocked `selfmod_start` for #448 over one orphaned file while the
+        # human was working on something else entirely. Recorded, not refused
+        # — the gate and the promoter check the paths that actually matter,
+        # which are the ones this round's diff will overlap.
+        dirty = W.dirty_paths(LIVE_ROOT)
         rid = _round_id()
         base = base or subprocess.run(
             ["git", "-C", str(LIVE_ROOT), "rev-parse", "HEAD"],
@@ -66,10 +71,16 @@ def start(goal: str, *, base: str | None = None, force: bool = False) -> dict:
             yaml.safe_dump(run_spec, sort_keys=False), encoding="utf-8")
 
         S.append_event({"event": "round_start", "round_id": rid, "base": base,
-                        "goal": goal[:500], "worktree": str(wt)})
-        return {"round_id": rid, "worktree": str(wt), "base": base,
-                "branch": f"selfmod/{rid}",
-                "run_spec": str(out / "run_spec.yaml")}
+                        "goal": goal[:500], "worktree": str(wt),
+                        **({"live_dirty_paths": dirty[:20]} if dirty else {})})
+        out_d = {"round_id": rid, "worktree": str(wt), "base": base,
+                 "branch": f"selfmod/{rid}",
+                 "run_spec": str(out / "run_spec.yaml")}
+        if dirty:
+            out_d["live_dirty_paths"] = dirty[:20]
+            out_d["note"] = ("the live tree has uncommitted edits; the gate tolerates them "
+                             "unless this round changes the same paths")
+        return out_d
     finally:
         lock.release()
 
@@ -84,9 +95,12 @@ def run_gate(round_id: str, *, skip_smoke: bool = False) -> dict:
 
     g = G.Gate(round_id, wt, base, skip_smoke=skip_smoke)
     report = g.run()
-    out = S.ROUNDS_DIR / round_id
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "gate.json").write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+    S.write_gate_report(round_id, report.to_dict())
+    # Preflight may have rebased the round onto a moved `main`. The spec is
+    # where the NEXT gate call reads its base from, and a stale base there
+    # makes `changed_paths` sweep the human's commits into the round's diff.
+    if report.base != base:
+        S.update_run_spec_base(round_id, report.base)
     return report.to_dict()
 
 
