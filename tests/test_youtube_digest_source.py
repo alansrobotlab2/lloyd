@@ -54,7 +54,7 @@ class _Script:
 
     async def __call__(self, channel, *args, timeout):
         self.calls.append((channel, *args))
-        mode = args[0]
+        mode = args[0].split("=", 1)[0]
         if mode == "--fetch":
             return self.fetch
         if mode == "--register-new":
@@ -62,7 +62,15 @@ class _Script:
         return {"ok": True}
 
     def modes(self):
-        return [c[1] for c in self.calls]
+        return [c[1].split("=", 1)[0] for c in self.calls]
+
+    def opt(self, call_index, name):
+        """The value of `--name` on one recorded call, which rides attached
+        to its option — see `_script`. Returns None when it is absent."""
+        for arg in self.calls[call_index][1:]:
+            if arg.startswith(f"{name}="):
+                return arg[len(name) + 1:]
+        return None
 
 
 def _turn(text: str, *, writes: Path | None = None, video_id: str = "abc123",
@@ -205,9 +213,8 @@ async def test_a_good_turn_is_recorded_with_a_verified_filing(tmp_path, backlog,
     assert result["artifact_path"] == str(note)
     assert "actionable (82)" in result["summary"] and "filed #523" in result["summary"]
     assert script.modes() == ["--fetch", "--complete", "--eval-report"]
-    complete = script.calls[1]
-    assert complete[2] == "abc123" and complete[4] == str(note)
-    ev = json.loads(complete[6])
+    assert script.opt(1, "--complete") == "abc123" and script.opt(1, "--note") == str(note)
+    ev = json.loads(script.opt(1, "--eval-json"))
     assert ev["filed"] == 523 and ev["verdict"] == "actionable" and ev["session_id"] == "20260908_youtubed_ab12"
     assert turn.kwargs["inner_voice"] is True, "the whole point: Inner Voice watches it"
     assert turn.kwargs["max_turns"] == 33 and turn.kwargs["source"] == Y.NAME
@@ -226,7 +233,7 @@ async def test_an_unverifiable_filing_claim_is_not_recorded_as_filed(tmp_path, b
     result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
 
     assert result["status"] == "success"
-    ev = json.loads(script.calls[1][6])
+    ev = json.loads(script.opt(1, "--eval-json"))
     assert "filed" not in ev and ev["filed_unverified"] == 523
     assert "unverified" in result["summary"]
 
@@ -244,7 +251,8 @@ async def test_no_note_on_disk_is_a_failure_reported_to_the_script(tmp_path, bac
 
     assert result["status"] == "failed"
     assert script.modes() == ["--fetch", "--fail"]
-    assert "max_turns" in script.calls[1][4] and "without a note" in script.calls[1][4]
+    reason = script.opt(1, "--reason")
+    assert "max_turns" in reason and "without a note" in reason
     assert result["meta"]["empty_response"] is False and result["meta"]["stop_reason"] == "max_turns"
 
 
@@ -274,6 +282,88 @@ async def test_a_fetch_failure_is_reported_without_a_session(tmp_path, backlog, 
     assert result["meta"]["failure_count"] == 2
 
 
+async def test_a_fetch_crash_is_counted_so_the_row_cannot_spin_forever(tmp_path, backlog, monkeypatch):
+    """An `ok: False` was already counted by the script. A *crash* was not —
+    the script exited before it marked anything — so the row stays `pending`
+    and `pending_entries` re-offers it every tick with nothing about the next
+    attempt different. Counting it puts the row behind the retry bound."""
+    calls = []
+
+    async def script(channel, *args, timeout):
+        calls.append((channel, *args))
+        if args[0].startswith("--fetch"):
+            raise Y.ScriptError("--fetch rc=2: expected one argument")
+        return {"ok": True}
+
+    ran = []
+
+    async def never(*a, **k):
+        ran.append(1)
+
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", never)
+    result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
+
+    assert result["status"] == "failed" and result["meta"]["fetch_crashed"] is True
+    assert ran == [], "no session for a video whose bundle does not exist"
+    assert [c[1].split("=", 1)[0] for c in calls] == ["--fetch", "--fail"]
+    assert "fetch crashed" in calls[1][2]
+
+
+class _Subprocess:
+    """Stand-in for the monitor script as a *process*, so the real `_script`
+    builds the argv. Records every command line it is handed."""
+
+    def __init__(self, fetch: dict):
+        self.fetch = fetch
+        self.cmds: list[list[str]] = []
+
+    async def __call__(self, *cmd, stdout=None, stderr=None):
+        self.cmds.append(list(cmd))
+        payload = self.fetch if any(a.startswith("--fetch") for a in cmd) else {"ok": True}
+
+        class _Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return (f"{Y.JSON_MARK}{json.dumps(payload)}\n".encode(), b"")
+
+        return _Proc()
+
+    def dashed(self) -> list[str]:
+        """Every argument argparse would read as a flag rather than a value."""
+        return [a for cmd in self.cmds for a in cmd
+                if a.startswith("-") and not a.startswith("--")]
+
+    def modes(self) -> list[str]:
+        return [a.split("=", 1)[0] for cmd in self.cmds for a in cmd
+                if a.startswith("--") and a not in ("--channel", "--json")
+                and not a.startswith(("--note", "--reason", "--eval-json"))]
+
+
+async def test_a_video_id_starting_with_a_dash_reaches_the_script(tmp_path, backlog, monkeypatch):
+    """YouTube ids are base64url, so roughly one in forty begins with `-`. As
+    its own argv token argparse reads it as a flag and the script exits 2 with
+    its usage text — the video is not failed, it is unattemptable. Seven such
+    ids sat at the head of the two channels' newest-first queues on
+    2026-09-09 and burned 89 runs; Discover AI stopped draining entirely.
+
+    The real `_script` builds the argv here, so this covers every option it
+    hands a value: `--fetch` on the way in and `--fail` on the way out.
+    """
+    proc = _Subprocess({"ok": True, "meta": _meta(tmp_path)})
+    monkeypatch.setattr(Y.asyncio, "create_subprocess_exec", proc)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn("", raises=TurnTimeout("1800s")))
+
+    result = await Y.execute(_item({"channel": "discover-ai", "video_id": "-f_iTetjgvE"}))
+
+    assert result["status"] == "failed" and result["meta"]["turn_timeout"] is True
+    assert proc.modes() == ["--fetch", "--fail"]
+    assert any("--fetch=-f_iTetjgvE" in cmd for cmd in proc.cmds), proc.cmds
+    assert any("--fail=-f_iTetjgvE" in cmd for cmd in proc.cmds), proc.cmds
+    assert proc.dashed() == [], f"argparse reads these as flags: {proc.dashed()}"
+
+
 async def test_a_drain_is_skipped_and_not_counted_against_the_video(tmp_path, backlog, monkeypatch):
     meta = _meta(tmp_path)
     script = _Script({"ok": True, "meta": meta})
@@ -291,7 +381,7 @@ async def test_a_turn_timeout_is_a_counted_failure(tmp_path, backlog, monkeypatc
     monkeypatch.setattr(Y, "run_prompt_in_session", _turn("", raises=TurnTimeout("1800s")))
     result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
     assert result["status"] == "failed" and result["meta"]["turn_timeout"] is True
-    assert script.modes() == ["--fetch", "--fail"] and "timeout" in script.calls[1][4]
+    assert script.modes() == ["--fetch", "--fail"] and "timeout" in script.opt(1, "--reason")
 
 
 async def test_an_infra_shaped_turn_is_not_counted_against_the_video(tmp_path, backlog, monkeypatch):
@@ -323,7 +413,7 @@ async def test_a_pre_existing_note_is_not_proof_the_turn_ran(tmp_path, backlog, 
                         _turn("I could not finish.", stop_reason="max_turns"))
     result = await Y.execute(_item({"channel": "ai-engineer", "video_id": "abc123"}))
     assert result["status"] == "failed"
-    assert script.modes() == ["--fetch", "--fail"] and "pre-existing note" in script.calls[1][4]
+    assert script.modes() == ["--fetch", "--fail"] and "pre-existing note" in script.opt(1, "--reason")
 
 
 async def test_a_kept_note_is_a_success(tmp_path, backlog, monkeypatch):
@@ -337,7 +427,7 @@ async def test_a_kept_note_is_a_success(tmp_path, backlog, monkeypatch):
     monkeypatch.setattr(Y, "run_prompt_in_session", _turn(text))
     result = await Y.execute(_item({"channel": "ai-engineer", "video_id": "abc123"}))
     assert result["status"] == "success" and "note kept" in result["summary"]
-    assert json.loads(script.calls[1][6])["note_result"] == "kept"
+    assert json.loads(script.opt(1, "--eval-json"))["note_result"] == "kept"
 
 
 # ---------------------------------------------------------------------------

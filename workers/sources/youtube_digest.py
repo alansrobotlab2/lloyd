@@ -461,6 +461,18 @@ async def _script(channel: str, *args: str, timeout: float) -> dict:
     A subprocess, not an import: the script shells out to uv/yt-dlp with
     blocking calls, and the pool runs on the backend's one event loop. It is
     stdlib-only, so the backend's interpreter runs it fine.
+
+    **Every option value must ride attached to its option** (`--fetch=<id>`),
+    never as a separate token. A YouTube id is base64url, so roughly one in
+    forty starts with `-`, and argparse reads a bare `-tviRdpmHvs` as a flag:
+    the script exits 2 with its usage text before it has done anything. That
+    is not a video that failed, it is a video that can never be attempted —
+    and because `--fail` took its id the same way, the failure could not be
+    recorded either, so the row stayed `pending` and was re-offered every
+    tick. On 2026-09-09 seven such ids sat at the head of the two channels'
+    newest-first queues and burned 89 runs; Discover AI had one at its head
+    and stopped draining. `tests/test_youtube_digest_source.py` pins the
+    shape of every argv this builds.
     """
     cmd = [sys.executable, str(SCRIPT), "--channel", channel, *args, "--json"]
     proc = await asyncio.create_subprocess_exec(
@@ -565,7 +577,7 @@ def _eval_record(parsed: Optional[dict], session_id: str) -> dict:
 
 async def _fail(channel: str, video_id: str, why: str) -> None:
     try:
-        await _script(channel, "--fail", video_id, "--reason", why[:400], timeout=60)
+        await _script(channel, f"--fail={video_id}", f"--reason={why[:400]}", timeout=60)
     except ScriptError as exc:
         logger.warning("youtube-digest: could not record failure for %s %s: %s", channel, video_id, exc)
 
@@ -582,12 +594,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     base_meta = {"channel": channel, "video_id": video_id}
 
     # 1. The bundle. A transcript that cannot be fetched is recorded by the
-    #    script itself (`--fetch` marks the attempt), so nothing to do here
-    #    but report it.
+    #    script itself (`--fetch` marks the attempt), so an `ok: False` needs
+    #    nothing here but a report.
+    #
+    #    A *crash* is the other case, and it must be counted here: the script
+    #    exited before it could mark anything, so the row is still `pending`
+    #    and `pending_entries` offers it again on the next tick — forever, at
+    #    one wasted run per tick per poisoned video, since nothing about the
+    #    next attempt differs from this one. Counting it puts the row behind
+    #    `_is_retry_eligible`'s 12 attempts at 15-minute spacing, which is
+    #    the bound that turns a permanent crash into a video that gives up
+    #    rather than a queue head that never moves.
     try:
-        fetched = await _script(channel, "--fetch", video_id,
+        fetched = await _script(channel, f"--fetch={video_id}",
                                 timeout=float(src_cfg.get("fetch_timeout_seconds", 420)))
     except ScriptError as exc:
+        await _fail(channel, video_id, f"fetch crashed: {exc}")
         return {"status": "failed", "summary": f"{channel} {video_id}: fetch crashed: {exc}"[:500],
                 "meta": {**base_meta, "fetch_crashed": True}}
     if not fetched.get("ok"):
@@ -669,8 +691,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     # 4. Record, then refresh the report note (best effort).
     try:
-        await _script(channel, "--complete", video_id, "--note", str(note_path),
-                      "--eval-json", json.dumps(eval_result), timeout=60)
+        await _script(channel, f"--complete={video_id}", f"--note={note_path}",
+                      f"--eval-json={json.dumps(eval_result)}", timeout=60)
     except ScriptError as exc:
         # The note exists and the verdict is in this run record; a second
         # attempt would redo the whole session, so this is a warning.
