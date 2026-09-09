@@ -241,14 +241,180 @@ fi
 # (673,179 queries for one 60k prompt) and sat at ~68% while real cross-request
 # reuse was zero.
 MTP_ENABLED="${MTP_ENABLED:-1}"
+# Draft depth. 3 is the measured default (see the table above). An A/B knob:
+# position-2 acceptance is 51%, so k=4 may still pay at batch 1 while k=2 may
+# win at batch 8, where the wasted verify slots cost more than the hit rate.
+MTP_TOKENS="${MTP_TOKENS:-3}"
 SPEC_ARGS=()
 if [[ "$MTP_ENABLED" != "1" ]]; then
   echo "NOTE: MTP_ENABLED=$MTP_ENABLED — starting WITHOUT speculative decode"
 elif [[ -f "$MODEL_DIR/nvfp4_experts_mtp.safetensors" ]]; then
-  SPEC_ARGS=(--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}')
+  SPEC_ARGS=(--speculative-config "{\"method\": \"mtp\", \"num_speculative_tokens\": $MTP_TOKENS}")
 else
   echo "WARNING: nvfp4_experts_mtp.safetensors missing — starting WITHOUT speculative decode"
 fi
+
+# ── one-shot A/B env ──────────────────────────────────────────────────────
+# bin/flash-next-run-arm.sh writes this file, and it is CONSUMED: sourced once
+# and deleted in the same breath, so it can change exactly one boot. That is
+# the whole design. supervisord passes a fixed `environment=` and offers no
+# per-restart override, so an A/B under supervision needs a file — and a file
+# that persisted would be a config that silently outlives the experiment,
+# which is the failure this slot can least afford. If the sweep dies between
+# the source and the delete, the next boot is production config.
+ARM_ENV="$PROJECT_DIR/logs/flash-next-arm.env"
+if [[ -f "$ARM_ENV" ]]; then
+  echo "consuming one-shot arm env: $ARM_ENV"
+  cat "$ARM_ENV"
+  # shellcheck disable=SC1090
+  source "$ARM_ENV"
+  rm -f "$ARM_ENV"
+fi
+
+# ── A/B knobs ─────────────────────────────────────────────────────────────
+# Every default below reproduces what this slot served before the 2026-09-08
+# sweep, so an unset environment is the old config exactly. They exist so an
+# arm is ONE env var rather than an edit to this file: this file is tracked,
+# and a dirty tree is what scripts/selfmod/gate.py and promote.py both refuse
+# to run against — editing it per arm would switch the self-modification loop
+# off for the length of the sweep.
+#
+#   bash bin/start-qwen38-flash-next.sh                  # today's config
+#   MOE_BACKEND=flashinfer_b12x bash bin/start-...        # one arm
+#
+# Measure with bin/bench-flash-next.py (one arm per boot, pool paused) and
+# ALWAYS read bin/flash-next-bootfacts.sh afterwards. A backend that was
+# rejected and silently fell back to the previous kernel is indistinguishable
+# from one that made no difference if you only look at throughput.
+
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9345}"
+
+# Exact KV budget in bytes, which beats tuning the fraction: the fraction is a
+# share of TOTAL card memory, so anything else resident on the card (the
+# desktop holds ~1.1 GiB when remmina and the livekit worker are up) silently
+# comes out of KV. Empty = size KV from the fraction, as before.
+# The boot log prints the two numbers worth knowing here — "Replace
+# gpu_memory_utilization config with --kv-cache-memory=N" for the current
+# budget, and a second N to fully use the card. Do not take the second one:
+# it assumes the card is otherwise empty.
+# 13.5 GiB, measured 2026-09-08. The fraction was yielding 9.53 GiB (330,159
+# KV tokens, 1.26x at 262k); this gives 466,191 tokens and 1.78x for no
+# measurable cost to decode or prefill. Derived from the profiler's own
+# accounting on this card: 94.46 GiB free at startup, 77.35 weights + 1.91
+# peak activation + 0.24 cudagraph = 79.50, so ~14.9 is physically available
+# and 13.5 leaves ~1.4 GiB for the desktop (remmina and the livekit worker
+# take ~1.1 GiB between them when they are on this card).
+# Do NOT take the boot log's larger "fully utilize gpu memory" suggestion:
+# it assumes the card is otherwise empty, and it is not.
+# NOTE: setting this SKIPS memory profiling entirely, so anything that
+# allocates later is unaccounted for. --enable-flashinfer-autotune plus this
+# put the card at 96874 of 97887 MiB.
+#
+# THE WHOLE CARD IS RESERVED FOR vLLM. Nothing else is allowed to allocate on
+# GPU 1 — confirmed 2026-09-08, the only holders are VLLM::Worker and the PLE
+# offload worker. An older comment in this tree budgeted ~1.1 GiB for remmina
+# and the livekit worker on this card; that is stale, and believing it costs
+# ~50k KV tokens. If a desktop process ever shows up in
+# `nvidia-smi -i 1 --query-compute-apps`, move it rather than shrinking this.
+#
+# 13.5 GiB is therefore the practical ceiling, not a compromise: it leaves the
+# card at 96,876 of 97,887 MiB. That 413 MiB margin is thin ONLY because
+# setting this skips memory profiling, so the CUDA context, the FlashInfer
+# workspace and allocator fragmentation go unaccounted — the engine's resident
+# total is 96,116 MiB against a weights+KV+activation+cudagraph estimate of
+# ~92,959. Do not raise it to the boot log's "fully utilize" suggestion
+# (14.83 GiB): that number is computed from the same estimate and would
+# over-commit the card by ~1.3 GiB.
+KV_CACHE_MEMORY_BYTES="${KV_CACHE_MEMORY_BYTES:-14495514624}"
+
+# Skip the vision tower entirely. Measured from the checkpoint's safetensors
+# headers: 333 model.visual.* tensors, 0.84 GiB, which at this config's 30.3
+# KiB/token is ~29k KV tokens. We serve text-only, so it is pure waste — the
+# older --limit-mm-per-prompt still LOADS the tower and merely refuses to be
+# handed images. Set 0 to go back to that.
+LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-1}"
+
+# NVFP4 MoE kernel. Empty = the oracle's own order, which lands on
+# FLASHINFER_CUTLASS here. 'flashinfer_b12x' is the SM120-native FP4 path;
+# the oracle excludes it from AUTO-selection only pending an upstream CUTLASS
+# SM121 guard, so it has to be asked for by name. The experts are essentially
+# the whole decode cost on this model, so this is the widest single lever.
+#
+# DO NOT SET THIS TO flashinfer_b12x. Tried 2026-09-08: the oracle selects it
+# ("Using 'FLASHINFER_B12X' NvFp4 MoE backend"), then the engine dies in
+# determine_available_memory with `CUDA error: an illegal memory access was
+# encountered` before it ever serves a token. That is what the oracle's own
+# "excluded from auto-selection until the upstream CUTLASS SM121 MMA op guard
+# is resolved" comment is protecting you from; asking for it by name walks
+# straight past the guard. supervisord then restarts the engine on defaults,
+# so the failure is easy to mistake for a null result — see the boot guard in
+# bin/flash-next-run-arm.sh.
+MOE_BACKEND="${MOE_BACKEND:-}"
+
+# GDN prefill kernel for the 36 linear-attention layers. Empty = auto, which
+# resolves to Triton/FLA on this card. 'flashinfer' needs the SM12x gate that
+# upstream added on 2026-09-08 (vllm f6326f53b); without that patch in the
+# venv, asking for it logs a fallback and serves Triton anyway — which is
+# precisely the silent-fallback case bootfacts.sh exists to catch.
+#
+# MEASURED 2026-09-08, and this is the single biggest win of that sweep:
+#   decode  120.2 -> 138.3 tok/s (+15%), and dead flat across runs
+#   prefill 8840 -> 9290 tok/s at 35k, 8235 -> 8569 at 107k
+#   MTP acceptance 30% -> 42%
+# The decode gain is not a paradox even though this names the PREFILL kernel:
+# with MTP k=3 every verify step is a 4-token forward, which takes the
+# multi-token path, so the prefill kernel sits squarely on the decode path
+# whenever speculative decoding is on. The acceptance jump is most of the
+# gain, and it is a numerics difference — FlashInfer's SM120 path carries the
+# recurrent state in float32.
+# REQUIRES the venv patch: bin/flash-next-gdn-sm12x-patch.py.
+GDN_PREFILL_BACKEND="${GDN_PREFILL_BACKEND:-flashinfer}"
+
+# FlashInfer autotune at warmup. Off since this slot's first boot with no
+# recorded reason; it tunes the very CUTLASS grouped-GEMM configs this model
+# runs on, and the 27B on this same card kept a populated autotune cache.
+# Costs a slower boot, caches to ~/.cache/vllm/flashinfer_autotune_cache.
+#
+# MEASURED 2026-09-08: leave it OFF, and the reason is variance rather than a
+# mean. It gives the best prefill of any arm (9481/8853) and the best batch
+# aggregate (conc-8 419 vs 380), but single-stream decode becomes a lottery:
+# 65/87/82, then 67/74/133, then 92/109/259 tok/s across three measurements,
+# where every non-autotune arm held within 0.5% (138.6/138.3/138.2). Not
+# memory pressure — it persisted with 3 GiB of card free. Autotune runs at
+# 8192 tokens and a batch-1 decode is a different shape entirely, so what it
+# picks for the big shape can be wrong for the small one. An interactive
+# agent wants a predictable 138 over a mean of maybe-140.
+FLASHINFER_AUTOTUNE="${FLASHINFER_AUTOTUNE:-0}"
+
+# Escape hatch for one-off arms. Word-split deliberately.
+EXTRA_ARGS="${EXTRA_ARGS:-}"
+
+AB_ARGS=()
+if [[ -n "$KV_CACHE_MEMORY_BYTES" ]]; then
+  AB_ARGS+=(--kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES")
+fi
+if [[ "$LANGUAGE_MODEL_ONLY" == "1" ]]; then
+  # Mutually exclusive with --limit-mm-per-prompt in practice: there is no
+  # multimodal input to limit once the tower is not loaded.
+  AB_ARGS+=(--language-model-only)
+else
+  AB_ARGS+=(--limit-mm-per-prompt '{"image": 0, "video": 0, "audio": 0}')
+fi
+[[ -n "$MOE_BACKEND" ]] && AB_ARGS+=(--moe-backend "$MOE_BACKEND")
+[[ -n "$GDN_PREFILL_BACKEND" ]] && AB_ARGS+=(--gdn-prefill-backend "$GDN_PREFILL_BACKEND")
+if [[ "$FLASHINFER_AUTOTUNE" == "1" ]]; then
+  AB_ARGS+=(--enable-flashinfer-autotune)
+else
+  AB_ARGS+=(--no-enable-flashinfer-autotune)
+fi
+# shellcheck disable=SC2206  # intentional word split
+[[ -n "$EXTRA_ARGS" ]] && AB_ARGS+=($EXTRA_ARGS)
+
+echo "A/B config: max_num_seqs=$MAX_NUM_SEQS gpu_mem_util=$GPU_MEMORY_UTILIZATION" \
+     "kv_bytes=${KV_CACHE_MEMORY_BYTES:-<fraction>} lm_only=$LANGUAGE_MODEL_ONLY" \
+     "moe=${MOE_BACKEND:-<auto>} gdn=${GDN_PREFILL_BACKEND:-<auto>}" \
+     "autotune=$FLASHINFER_AUTOTUNE mtp=$MTP_ENABLED/k=$MTP_TOKENS"
 
 export PATH="$VLLM_VENV/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
 export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -280,11 +446,10 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --tensor-parallel-size 1 \
   --distributed-executor-backend mp \
   --max-model-len "$MAX_MODEL_LEN" \
-  --max-num-seqs 8 \
-  --gpu-memory-utilization 0.9345 \
+  --max-num-seqs "$MAX_NUM_SEQS" \
+  --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
   --enable-prefix-caching \
   --enable-prompt-tokens-details \
-  --no-enable-flashinfer-autotune \
   --no-enable-log-requests \
   --scheduling-policy priority \
   --async-scheduling \
@@ -292,4 +457,4 @@ exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --tool-call-parser qwen3_xml \
   --reasoning-parser qwen3 \
   "${SPEC_ARGS[@]}" \
-  --limit-mm-per-prompt '{"image": 0, "video": 0, "audio": 0}'
+  "${AB_ARGS[@]}"

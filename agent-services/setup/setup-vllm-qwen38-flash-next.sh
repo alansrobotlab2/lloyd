@@ -172,6 +172,18 @@ PYEOF
 fi
 
 echo ""
+echo "=== 5/5 Enabling the FlashInfer GDN prefill kernel on SM12x ==="
+# Backport of upstream vllm f6326f53b (#55715, 2026-09-08), which lands after
+# BASE_SHA. `_resolve_gdn_prefill_backend` gates FlashInfer on SM90/SM10.x, so
+# sm_120 silently fell through to Triton/FLA even though the installed
+# FlashInfer already ships the SM120 kernel. Measured on this box: decode
+# 120.2 -> 138.3 tok/s and MTP acceptance 30% -> 42%, because with MTP every
+# verify step is a multi-token forward and therefore takes the prefill path.
+# Delete this step once the pinned wheel includes #55715.
+"$PROJECT_DIR/bin/flash-next-gdn-sm12x-patch.py" --venv "$VLLM_VENV" \
+  || { echo "  ERROR: GDN SM12x patch failed"; exit 1; }
+
+echo ""
 echo "=== Verifying ==="
 "$PY" - <<'PYEOF'
 import sys
@@ -231,6 +243,17 @@ if "LLOYD_PDL_SM120_PATCH" not in inspect.getsource(qsa_cache._metadata_launch_p
     fail.append("sm_120 PDL patch missing — long prompts will hang")
 else:
     print(f"sm_120 PDL:   patched (_metadata_launch_pdl() -> {qsa_cache._metadata_launch_pdl()})")
+
+# Not fatal: without it the engine serves correctly, just ~13% slower on decode.
+# Worth a loud line rather than a silent downgrade, since the launcher asks for
+# GDN_PREFILL_BACKEND=flashinfer and an unpatched venv answers that request by
+# logging a fallback and running Triton anyway.
+from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn as _gdn
+if "LLOYD_GDN_SM12X_PATCH" not in inspect.getsource(_gdn._resolve_gdn_prefill_backend):
+    print("sm_12x GDN:   *** MISSING *** — GDN_PREFILL_BACKEND=flashinfer will fall back")
+    print("              to Triton/FLA. Run bin/flash-next-gdn-sm12x-patch.py")
+else:
+    print("sm_12x GDN:   patched (FlashInfer GDN prefill available on sm_120)")
 
 from vllm.model_executor.models.registry import _MULTIMODAL_MODELS as MM
 print("qwen4_exp registered:", "Qwen4ExpForConditionalGeneration" in str(MM))

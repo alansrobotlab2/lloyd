@@ -38,6 +38,22 @@ The process group is `lloyd-mc`, not `lloyd-backend` bare. Always use `lloyd-mc:
 After editing `server.py`, restart `lloyd-mc:lloyd-backend` for changes to take effect.  
 After editing frontend files, Vite HMR usually picks up changes automatically (no restart needed).
 
+**Never restart `agent-llm-primary` twice in quick succession.** `supervisorctl
+stop` returns when the processes are signalled, not when the kernel has
+reclaimed their memory, and that engine holds a **95.37 GiB** BF16 n-gram table
+in *host* RAM. Start the next boot before the old one's pages are freed and two
+of those coexist on a 251 GiB box. On 2026-09-08 an A/B sweep did exactly that
+twice and `systemd-oomd` killed the **whole `agent-supervisord.service` unit** —
+953 processes the first time, 793 the second, i.e. every service on the machine,
+not merely the engine being restarted. Peak RSS was 230.3 GiB. Everything came
+back on its own, but the arm under test was lost and the failure looked like the
+config being tested rather than the restart cadence.
+
+Wait for `MemAvailable` to come back above ~150 GiB between boots;
+`agent-services/bin/flash-next-run-arm.sh` does this and refuses to start below
+120 GiB. Note the blast radius is the *unit*, so the guardian (a separate
+systemd unit, deliberately) survives it.
+
 ## Self-modification
 
 Lloyd can change his own code through a gated loop with automatic rollback.
