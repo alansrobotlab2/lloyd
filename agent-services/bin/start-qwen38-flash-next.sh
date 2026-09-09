@@ -341,15 +341,32 @@ LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-1}"
 # SM121 guard, so it has to be asked for by name. The experts are essentially
 # the whole decode cost on this model, so this is the widest single lever.
 #
-# DO NOT SET THIS TO flashinfer_b12x. Tried 2026-09-08: the oracle selects it
-# ("Using 'FLASHINFER_B12X' NvFp4 MoE backend"), then the engine dies in
-# determine_available_memory with `CUDA error: an illegal memory access was
-# encountered` before it ever serves a token. That is what the oracle's own
-# "excluded from auto-selection until the upstream CUTLASS SM121 MMA op guard
-# is resolved" comment is protecting you from; asking for it by name walks
-# straight past the guard. supervisord then restarts the engine on defaults,
-# so the failure is easy to mistake for a null result — see the boot guard in
-# bin/flash-next-run-arm.sh.
+# DO NOT SET THIS TO flashinfer_b12x, and the reason is not only that it
+# crashes. Tried 2026-09-08: the oracle selects it ("Using 'FLASHINFER_B12X'
+# NvFp4 MoE backend"), then the engine dies in determine_available_memory with
+# `CUDA error: an illegal memory access was encountered` before serving a
+# token. supervisord restarts on defaults, so the failure reads as a null
+# result unless you check — hence the boot guard in bin/flash-next-run-arm.sh.
+#
+# THE POINT IS THAT THERE IS NOTHING TO WIN HERE. b12x is the upgrade path for
+# NVFP4 checkpoints that resolve as **W4A16** and would otherwise fall back to
+# MARLIN. Upstream's own auto-selection proposal (vllm#47577) positions it
+# *after* FLASHINFER_CUTLASS precisely so that "W4A4 checkpoints keep their
+# current selection". This checkpoint is W4A4 — every expert carries an
+# `input_scale` (75,264 of them) and quantization_config says
+# with_input_scale: true, per-tensor — so it already selects the backend that
+# upstream would keep it on. b12x is a sidegrade at best for this model, and
+# the measured outcome is a dead engine.
+#
+# Known-broken upstream on this exact hardware, all open as of 2026-09-08:
+#   vllm#50189  Xid 31 MMU fault, illegal write, flashinfer_b12x on SM120
+#               RTX PRO 6000 TP=1 under chunked prefill — our symptom exactly
+#   vllm#49476  b12x workspace allocated lazily inside profile_run, which is
+#               the phase our boot died in
+#   vllm#47365  empty/garbage output under TP or PP on SM120
+# b12x's own README says it is "not intended to be used in production ...
+# For mission-critical use cases please use FlashInfer, CUTLASS or TRTLLM."
+# Revisit only if a checkpoint without activation scales ever lands here.
 MOE_BACKEND="${MOE_BACKEND:-}"
 
 # GDN prefill kernel for the 36 linear-attention layers. Empty = auto, which
