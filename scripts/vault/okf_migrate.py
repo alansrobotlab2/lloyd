@@ -223,13 +223,23 @@ def infer_type(path: Path, fm: dict, body: str) -> str:
     if top == "people":
         return "person"
     if top == "knowledge":
+        # Canonical values only — the 12 in scripts/vault/okf_taxonomy.py (#370).
+        # This branch used to end in the catch-all `note` and emit
+        # `source-summary` for source pages: two spellings the vault had just
+        # been renamed away from (vault 6eed1445), so every --apply minted fresh
+        # fragmentation and `validate_okf --strict` counted it as an unknown
+        # type. The two spellings live on in TYPE_ALIASES for READING old files;
+        # nothing writes them. Outside knowledge/ the catch-all is unchanged —
+        # the 12-value taxonomy is knowledge/'s, and #442 owns retiring `note`.
+        if stem == path.parent.name:
+            return "infrastructure"      # dir hub: <dir>/<dir>.md
         if "sources" in rel.parts:
-            return "source-summary"
+            return "reference"           # a source summary is reference material
         if fm.get("video_id") or fm.get("channel"):
             return "video-note"
         if fm.get("research-depth") or "research" in stem:
             return "research"
-        return "note"
+        return "notes"
     if top == "memory":
         return "note"
     # dir "hub" file: <dir>/<dir>.md

@@ -37,16 +37,18 @@ EXCLUDE_DIRS = {"templates", "images", ".git", ".obsidian", ".trash"}
 EXCLUDE_FILES = {"tags.md"}
 STRICT_FM_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
-# Known vocabulary — union of code-branching values and dominant real values.
+# The vocabulary is #370's 12 canonical values plus what already exists on disk
+# outside knowledge/, imported from one module — see scripts/vault/okf_taxonomy.py.
+# This used to be 28 literals maintained here by hand, and it drifted from the
+# vault it was checking: after #370 renamed knowledge/ onto the canonical set
+# (vault 6eed1445, c2b0962), `--dir knowledge --strict` reported 194
+# unknown-type warnings because `research-quick`, `research-deep`, `synthesis`,
+# `book-note`, `agent-pattern` and `gap-analysis` were not in this set while
+# `quick-research`, `medium-research`, `deep-research`, `knowledge-note` and
+# `hub` — the values they were renamed FROM — still were. A gate whose vocabulary
+# is a second copy of the thing it gates measures its own stale notes.
 # Out-of-set values only WARN (OKF tolerates unknown types).
-KNOWN_TYPES = {
-    "autonomy", "facts", "overview", "compiled_wiki",
-    "entity-overview", "concept-synthesis", "how-to", "comparison",
-    "source-summary", "quick-research", "medium-research", "deep-research",
-    "reference", "note", "notes", "video-note", "research", "knowledge-note",
-    "hub", "skill", "person", "daily-note", "reflection", "stack-update",
-    "knowledge-note", "talk", "project-notes", "work-notes",
-}
+from scripts.vault.okf_taxonomy import KNOWN_TYPES  # noqa: E402
 
 
 def iter_md(root: Path, only_dir: str | None):

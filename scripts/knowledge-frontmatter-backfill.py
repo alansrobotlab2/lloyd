@@ -20,13 +20,21 @@ LOG_FILE = KNOWLEDGE_DIR / "_log.md"
 # Skip these files
 SKIP_FILES = {"KNOWLEDGE_SCHEMA.md", "_log.md", "idle-worker-tasks.md", "knowledge.md"}
 
-# Type → source_type mapping
-SYNTHESIZED_TYPES = {
-    "deep-research", "medium-research", "research", "research-note",
-    "synthesis", "quick-research",
-}
-CAPTURED_TYPES = {"stack-update"}
-PRIMARY_TYPES = {"notes", "work-notes", "reference", "hub", "knowledge"}
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.vault.okf_taxonomy import (  # noqa: E402
+    CAPTURED_TYPES,
+    PRIMARY_TYPES,
+    SYNTHESIZED_TYPES,
+    normalize_type,
+)
+
+# Type → source_type mapping. Imported from scripts/vault/okf_taxonomy.py, the
+# one place the #370 vocabulary is written down; this file used to carry its own
+# copy of the pre-consolidation spellings (`deep-research`, `medium-research`,
+# `research-note`, `work-notes`, `hub`, `knowledge`), so a file that had been
+# renamed onto the canonical set stopped classifying as synthesized the moment
+# the rename landed — and a file that hadn't, still did. infer_source_type
+# normalises before matching, so both classify the same way.
 
 # URL patterns indicating captured content
 CAPTURED_URL_PATTERNS = [
@@ -99,7 +107,7 @@ def parse_frontmatter(content: str) -> tuple[dict | None, str, str]:
 
 def infer_source_type(fm: dict, body: str) -> str | None:
     """Infer source_type from existing frontmatter and content."""
-    page_type = fm.get("type", "").lower()
+    page_type = normalize_type(fm.get("type", ""))
 
     # Explicit type mappings
     if page_type in SYNTHESIZED_TYPES:

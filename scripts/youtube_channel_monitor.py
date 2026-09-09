@@ -784,7 +784,7 @@ fetched_at: {now}
 def generate_knowledge_note(video_id, title, publish_date, description, transcript, entities):
     """
     Use the LLM to generate a structured knowledge note from the transcript,
-    matching the vault's deep-research format.
+    matching the vault's `research-deep` knowledge-note format.
     """
     # Extract entities for the LLM prompt
     entity_context = ""
