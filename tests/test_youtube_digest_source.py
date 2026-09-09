@@ -290,6 +290,38 @@ async def test_a_turn_timeout_is_a_counted_failure(tmp_path, backlog, monkeypatc
     assert script.modes() == ["--fetch", "--fail"] and "timeout" in script.calls[1][4]
 
 
+async def test_an_infra_shaped_turn_is_not_counted_against_the_video(tmp_path, backlog, monkeypatch):
+    """No text and no stop reason: the engine was unreachable. The row stays
+    fetched (no --fail), and the run is recorded as an infra failure."""
+    existing = tmp_path / "vault" / "20260904-old.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("---\nsegment: knowledge\nvideo_id: abc123\n---\n# Old\n\n" + "body " * 200)
+    meta = _meta(tmp_path, existing=str(existing))
+    script = _Script({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn("", stop_reason=None))
+    result = await Y.execute(_item({"channel": "ai-engineer", "video_id": "abc123"}))
+    assert result["status"] == "failed" and result["meta"]["infra"] is True
+    assert script.modes() == ["--fetch"], "an outage must not burn the video's retries"
+
+
+async def test_a_pre_existing_note_is_not_proof_the_turn_ran(tmp_path, backlog, monkeypatch):
+    """The 2026-09-09 misrecording: the engine was down, the turn returned
+    prose with no RESULT block over an old note, and the source called it
+    completed because the file was there."""
+    existing = tmp_path / "vault" / "20260904-old.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("---\nsegment: knowledge\nvideo_id: abc123\n---\n# Old\n\n" + "body " * 200)
+    meta = _meta(tmp_path, existing=str(existing))
+    script = _Script({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session",
+                        _turn("I could not finish.", stop_reason="max_turns"))
+    result = await Y.execute(_item({"channel": "ai-engineer", "video_id": "abc123"}))
+    assert result["status"] == "failed"
+    assert script.modes() == ["--fetch", "--fail"] and "pre-existing note" in script.calls[1][4]
+
+
 async def test_a_kept_note_is_a_success(tmp_path, backlog, monkeypatch):
     existing = tmp_path / "vault" / "20260904-old.md"
     existing.parent.mkdir(parents=True)

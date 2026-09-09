@@ -617,19 +617,40 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     session_id = run.get("session_id")
     text = run.get("text") or ""
+    stop_reason = run.get("stop_reason")
     parsed = parse_result(text)
     on_disk = await asyncio.to_thread(_note_is_real, note_path, video_id)
     unexpected = await asyncio.to_thread(_unexpected_vault_writes, vault_before)
 
-    # 3. Disk decides.
-    if not on_disk:
-        why = (f"turn ended ({run.get('stop_reason')}, {run.get('num_turns')} iterations) "
-               f"without a note at {note_path.name}")
+    # 3a. An infra-shaped turn: no text and no stop reason means the harness
+    #     never got a completion (engine unreachable, aggregator restarting).
+    #     Not the video's fault, so it is not counted against its retries: the
+    #     row stays `fetched`, the bundle is kept, and the next tick re-offers
+    #     it. On 2026-09-09 the primary was down for a launcher change and
+    #     six videos went through this path in five seconds each.
+    if not text.strip() and stop_reason is None:
+        errs = [str(e)[:160] for e in (run.get("errors") or [])[:2]]
+        why = f"turn produced nothing ({'; '.join(errs) or 'no error reported'})"
+        logger.warning("youtube-digest: %s %s: %s — left fetched for retry", channel, video_id, why)
+        return {"status": "failed", "summary": f"{channel} {video_id}: {why}"[:500],
+                "meta": {**base_meta, "session_id": session_id, "infra": True,
+                         "empty_response": True, "unexpected_vault_writes": unexpected}}
+
+    # 3b. Disk decides — with one refinement. A note that did not exist before
+    #     and does now is proof the turn wrote it. A note that *pre-existed*
+    #     (AI Engineer's back catalogue) proves nothing about this turn, so
+    #     for a refresh the evidence is the RESULT block, or at least a clean
+    #     stop with text. Without that rule a failed turn over an old note was
+    #     recorded as completed "no verdict" — four of them on 2026-09-09.
+    turn_ran = parsed is not None or (stop_reason in ("stop", "end_turn") and bool(text.strip()))
+    if not on_disk or (meta.get("existing_note") and not turn_ran):
+        what = "without a note" if not on_disk else "without a RESULT block over a pre-existing note"
+        why = f"turn ended ({stop_reason}, {run.get('num_turns')} iterations) {what} at {note_path.name}"
         await _fail(channel, video_id, why)
         return {"status": "failed", "summary": f"{channel} {video_id}: {why}"[:500],
                 "response": text,
                 "meta": {**base_meta, "session_id": session_id,
-                         "stop_reason": run.get("stop_reason"),
+                         "stop_reason": stop_reason,
                          "empty_response": not text.strip(),
                          "unexpected_vault_writes": unexpected}}
 
