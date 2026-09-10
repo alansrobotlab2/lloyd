@@ -33,7 +33,7 @@ from app.paths import SESSIONS_DIR, VAULT_PENDING_RESEARCH_DIR as STAGING_ROOT
 # -S'RunState'` came back empty because no execution-state object was imported
 # anywhere a worker could reach it.
 from app.harness.run_state import (  # noqa: E402
-    RunState, RunStateResult, RunStateStepError, run_state_turn,
+    RunState, RunStateResult, run_state_turn,
 )
 
 logger = logging.getLogger("lloyd-workers.common")

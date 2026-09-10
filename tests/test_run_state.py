@@ -422,7 +422,6 @@ def test_state_turns_are_banned_from_the_automod_tools_like_any_worker_turn(
     """A stateful worker turn is still a worker turn: same tool ban."""
     q = FakeQuery([seg(structured=out(patch={}, done=True))])
     monkeypatch.setattr(app.harness, "run_query", q)
-    import workers.sources._common as C
     from workers.sources._common import WORKER_AUTOMOD_BAN
     _run_common(monkeypatch, tmp_path)
     opts = q.calls[0].options
