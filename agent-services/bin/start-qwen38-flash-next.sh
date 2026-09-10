@@ -72,14 +72,29 @@ set -euo pipefail
 #   Stock `pip install vllm` has the qwen4_exp model but NO offload, and without
 #   offload this checkpoint needs ~170 GiB of VRAM.
 #
+# TWO VENVS SERVE THIS SLOT (since 2026-09-10)
+#   worker  ~/lloyd/.venvs/vllm-qwen38-flash-next   setup-vllm-qwen38-flash-next.sh
+#           The build described above: 08-31 base + PR #53899's offload worker.
+#   uva     ~/lloyd/.venvs/vllm-flash-next-main     setup-vllm-flash-next-main.sh
+#           vLLM main as of 2026-09-10: UVA PLE offload (#54371, merged 09-09 —
+#           the GPU reads the pinned host table directly, so no worker process,
+#           no ptrace requirement, none of the three deadlocks below), the
+#           rewritten QSA kernels, and PR #55557's FP8 main KV cache overlaid.
+#   VLLM_VENV picks one. PLE_IMPL is detected from the venv's tree and decides
+#   the executor flag, the ptrace preflight and the offload spelling, so a swap
+#   cannot be half-applied. Measured on this card, same flags, 2026-09-10: main
+#   decodes 254 tok/s single-stream in BF16 against 137 on the worker build;
+#   the memory note fp8-kv-trial-2026-09-10 has the whole table.
+#
 # THREE KNOWN DEADLOCKS, AND WHY EACH FLAG BELOW EXISTS
 #   1. uniproc gap (vLLM issue #53960). vLLM picks the uniproc executor at TP=1,
 #      but spawn_ple_offload()/wait_ple_offload_ready() were only called from
 #      multiproc_executor. The offload worker was never spawned and the GPU side
 #      waited forever on a peer that did not exist. Fixed by 95dc96d1d012, which
 #      IS in the branch — but we still pass --distributed-executor-backend mp
-#      because that is the configuration everyone who got this serving actually
-#      ran. Drop it only if you want to re-test the uniproc path.
+#      on the worker build because that is the configuration everyone who got
+#      this serving actually ran. Drop it only if you want to re-test the
+#      uniproc path. The uva build has no offload worker and runs uniproc.
 #   2. async-scheduling shared-event race. PleOffloadConnector allocated ONE
 #      _input_ready_event for the whole connector, assuming one request in
 #      flight; async scheduling breaks that. Fixed by 4e8b849b8d97 (in branch).
@@ -164,16 +179,39 @@ MODEL_DIR="${MODEL_DIR:-$PROJECT_DIR/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP
 #   Concurrency is the tradeoff the boot log reports next to it; re-read that
 #   line after any change here rather than trusting this comment.
 #   Drop back with MAX_MODEL_LEN=131072 if concurrency matters more than reach.
-#   To go past 262144 you also need YaRN, which is a config override, not a flag:
-#     --hf-overrides '{"rope_parameters":{"rope_type":"yarn","factor":4.0,
-#                      "original_max_position_embeddings":262144}}'
-#     plus VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+#   To go past 262144 you need YaRN, and it must go in a config.json, NOT in
+#   --hf-overrides: vLLM forwards only *callable* overrides to the MTP draft's
+#   config (SpeculativeConfig.compose_draft_hf_overrides drops dicts), so a
+#   dict leaves the drafter on plain RoPE with a 262k horizon while the target
+#   runs past it, and nothing in the log says so. bin/flash-next-yarn-model.py
+#   writes a shadow checkpoint (weights symlinked, config.json rewritten):
+#     bin/flash-next-yarn-model.py --factor 2.0
+#     MODEL_DIR=.../Inferact-Qwen3.8-Flash-Next-NVFP4-yarn2 MAX_MODEL_LEN=524288 bash bin/start-qwen38-flash-next.sh
+#   The KV pool bounds it — vLLM refuses a length one request cannot hold:
+#   ~398k tokens in BF16, ~692k with KV_CACHE_DTYPE=fp8 at the 11.5 GiB below,
+#   so 1M is not reachable on one card and factor 2.0 (524,288) needs fp8.
+#   Static YaRN also taxes short prompts (model card), so it stays an opt-in arm.
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
+# The yarn shadow config already derives 262144*factor, so this is belt and
+# braces for a hand-edited one; vLLM refuses a longer max-model-len otherwise.
+if (( MAX_MODEL_LEN > 262144 )); then
+  export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+fi
 
 if [[ ! -x "$VLLM_VENV/bin/python" ]]; then
   echo "vLLM venv not found at $VLLM_VENV"
-  echo "Build it: bash $PROJECT_DIR/setup/setup-vllm-qwen38-flash-next.sh"
+  echo "Build it: bash $PROJECT_DIR/setup/setup-vllm-qwen38-flash-next.sh   (worker build)"
+  echo "      or: bash $PROJECT_DIR/setup/setup-vllm-flash-next-main.sh     (vLLM main, uva)"
   exit 1
+fi
+
+# Which PLE offload implementation the venv carries. Read off the tree rather
+# than a flag so the venv and the flags below cannot disagree: the worker build
+# ships vllm/v1/ple_offload/, main's UVA build does not.
+if compgen -G "$VLLM_VENV/lib/python*/site-packages/vllm/v1/ple_offload/worker.py" >/dev/null; then
+  PLE_IMPL=worker
+else
+  PLE_IMPL=uva
 fi
 
 if [[ ! -f "$MODEL_DIR/config.json" ]]; then
@@ -190,10 +228,11 @@ if ! "$VLLM_VENV/bin/python" -c "import vllm.envs as e; raise SystemExit(0 if ha
   exit 1
 fi
 
-# Hard preflight: without ptrace_scope=0 the CUDA IPC handshake below fails and
-# you lose ~4 minutes loading 170 GiB before finding out. Fail in 10ms instead.
+# Hard preflight (worker build only): without ptrace_scope=0 the CUDA IPC
+# handshake below fails and you lose ~4 minutes loading 170 GiB before finding
+# out. Fail in 10ms instead. The uva build has no second process to trace.
 PTRACE_SCOPE="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)"
-if [[ "$PTRACE_SCOPE" != "0" ]]; then
+if [[ "$PLE_IMPL" == "worker" && "$PTRACE_SCOPE" != "0" ]]; then
   echo "ERROR: kernel.yama.ptrace_scope is $PTRACE_SCOPE, must be 0."
   echo "  The PLE offload worker rebuilds a CUDA IPC tensor from its parent via"
   echo "  pidfd_getfd; Yama only allows tracing descendants, and the parent is not"
@@ -339,6 +378,39 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9345}"
 # exactly this and which is what was quietly bypassed here.
 KV_CACHE_MEMORY_BYTES="${KV_CACHE_MEMORY_BYTES:-12348030976}"
 
+# KV cache dtype. Empty = the engine default (BF16). 'fp8' stores the 12 QSA
+# layers' K/V as e4m3 with unit scales (the checkpoint ships no calibrated
+# k/v scales) and needs the uva venv, where PR #55557 is overlaid; the worker
+# venv's QSA backend hard-rejects anything but BF16, so the guard below fails
+# in 10 ms rather than after a 4-minute load.
+#
+# MEASURED 2026-09-10, uva venv, same 11.5 GiB, MTP on (memory note
+# fp8-kv-trial-2026-09-10 has the full table):
+#   pool        398,175 -> 692,263 tokens (x1.74; 1.52x -> 2.64x at 262k)
+#   quality     needle 12/12 through 239k; per-position logprob deviation on
+#               78k tokens of this repo's Python sits on BF16's own
+#               run-to-run noise (sigma 0.35 vs 0.34 nats)
+#   prefill     9.3k -> 9.6k tok/s; and a 239k prompt 128 s -> 26 s, because
+#               the >200k QSA-indexer cliff (see lloyd-f3's admission-stall
+#               work) tracks the attention page count, which fp8 halves by
+#               doubling the page to 3200 tokens
+#   per step    unchanged: 18.1-18.7 ms at batch 1 on every prompt below,
+#               both dtypes (the QSA kernel times identically standalone
+#               and is ~0.07 ms of a step; the step is MoE and dense GEMMs)
+#   MTP         the drafter reads the same e4m3 cache and mispredicts more,
+#               and THAT is the whole decode cost. BF16 -> FP8 single-stream
+#               tok/s (acceptance) on 512-token greedy completions:
+#                 code                 182 -> 176  (0.77 -> 0.72)
+#                 JSON tool-call text  211 -> 213  (0.95 -> 0.96)
+#                 prose                170 -> 141  (0.69 -> 0.52)
+#                 thinking             180 -> 153  (0.79 -> 0.62)
+#                 32k-context summary  143 -> 140  (0.55 -> 0.49)
+#               i.e. 0-17% by text type, ~7% over the suite. The A/B
+#               harness's "count upward" prompt is the pathological case
+#               (3.67 -> 1.75 tokens/step, 254 -> 112 tok/s) and must not
+#               be read as the engine's decode speed.
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
+
 # Skip the vision tower entirely. Measured from the checkpoint's safetensors
 # headers: 333 model.visual.* tensors, 0.84 GiB, which at this config's 30.3
 # KiB/token is ~29k KV tokens. We serve text-only, so it is pure waste — the
@@ -436,13 +508,29 @@ if [[ "$FLASHINFER_AUTOTUNE" == "1" ]]; then
 else
   AB_ARGS+=(--no-enable-flashinfer-autotune)
 fi
+if [[ -n "$KV_CACHE_DTYPE" ]]; then
+  if [[ "$KV_CACHE_DTYPE" == fp8* ]] && ! grep -qs "IS_FP8" "$VLLM_VENV"/lib/python*/site-packages/vllm/models/qwen4_exp/nvidia/ops/qsa.py; then
+    echo "ERROR: KV_CACHE_DTYPE=$KV_CACHE_DTYPE but this venv's QSA kernel has no fp8 path (PR #55557)."
+    echo "  Use the uva venv: VLLM_VENV=\$HOME/lloyd/.venvs/vllm-flash-next-main (setup-vllm-flash-next-main.sh)."
+    exit 1
+  fi
+  AB_ARGS+=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+fi
+if [[ "$PLE_IMPL" == "uva" ]]; then
+  # main's spelling; VLLM_PLE_CPU_OFFLOAD=1 still works there but logs "legacy".
+  AB_ARGS+=(--engram-config '{"cpu_offload": true}')
+else
+  # See deadlock 1 above: the offload worker is only spawned by the mp executor.
+  AB_ARGS+=(--distributed-executor-backend mp)
+fi
 # shellcheck disable=SC2206  # intentional word split
 [[ -n "$EXTRA_ARGS" ]] && AB_ARGS+=($EXTRA_ARGS)
 
-echo "A/B config: max_num_seqs=$MAX_NUM_SEQS gpu_mem_util=$GPU_MEMORY_UTILIZATION" \
+echo "A/B config: venv=$VLLM_VENV ple=$PLE_IMPL kv_dtype=${KV_CACHE_DTYPE:-bf16}" \
+     "max_num_seqs=$MAX_NUM_SEQS gpu_mem_util=$GPU_MEMORY_UTILIZATION" \
      "kv_bytes=${KV_CACHE_MEMORY_BYTES:-<fraction>} lm_only=$LANGUAGE_MODEL_ONLY" \
      "moe=${MOE_BACKEND:-<auto>} gdn=${GDN_PREFILL_BACKEND:-<auto>}" \
-     "autotune=$FLASHINFER_AUTOTUNE mtp=$MTP_ENABLED/k=$MTP_TOKENS"
+     "autotune=$FLASHINFER_AUTOTUNE mtp=$MTP_ENABLED/k=$MTP_TOKENS max_model_len=$MAX_MODEL_LEN"
 
 export PATH="$VLLM_VENV/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
 export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -455,34 +543,48 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=1
 
 # The flag this whole script exists for: keep the 95.37 GiB BF16 N-gram table in
-# host RAM and prefetch rows asynchronously.
-export VLLM_PLE_CPU_OFFLOAD=1
-# Bounds the startup registration rendezvous (davidtai's ACK barrier reads this
-# knob). Cold boot reads 170 GiB from disk, so give it room.
-export VLLM_PLE_OFFLOAD_READY_TIMEOUT=1800
+# host RAM and prefetch rows asynchronously. On the uva build the same request
+# travels as --engram-config (above); the env var there only earns a
+# deprecation warning.
+if [[ "$PLE_IMPL" == "worker" ]]; then
+  export VLLM_PLE_CPU_OFFLOAD=1
+  # Bounds the startup registration rendezvous (davidtai's ACK barrier reads
+  # this knob). Cold boot reads 170 GiB from disk, so give it room.
+  export VLLM_PLE_OFFLOAD_READY_TIMEOUT=1800
+fi
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_MODULE_LOADING=LAZY
 export VLLM_ENABLE_CUDAGRAPH_GC=1
 
-exec "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
-  --model "$MODEL_DIR" \
-  --served-model-name Qwen3.8-Flash-Next-nvfp4 primary \
-  --port 8096 \
-  --host 127.0.0.1 \
-  --trust-remote-code \
-  --tensor-parallel-size 1 \
-  --distributed-executor-backend mp \
-  --max-model-len "$MAX_MODEL_LEN" \
-  --max-num-seqs "$MAX_NUM_SEQS" \
-  --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
-  --enable-prefix-caching \
-  --enable-prompt-tokens-details \
-  --no-enable-log-requests \
-  --scheduling-policy priority \
-  --async-scheduling \
-  --enable-auto-tool-choice \
-  --tool-call-parser qwen3_xml \
-  --reasoning-parser qwen3 \
-  "${SPEC_ARGS[@]}" \
-  "${AB_ARGS[@]}"
+CMD=("$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server
+  --model "$MODEL_DIR"
+  --served-model-name Qwen3.8-Flash-Next-nvfp4 primary
+  --port "${PORT:-8096}"
+  --host 127.0.0.1
+  --trust-remote-code
+  --tensor-parallel-size 1
+  --max-model-len "$MAX_MODEL_LEN"
+  --max-num-seqs "$MAX_NUM_SEQS"
+  --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"
+  --enable-prefix-caching
+  --enable-prompt-tokens-details
+  --no-enable-log-requests
+  --scheduling-policy priority
+  --async-scheduling
+  --enable-auto-tool-choice
+  --tool-call-parser qwen3_xml
+  --reasoning-parser qwen3
+  "${SPEC_ARGS[@]}"
+  "${AB_ARGS[@]}")
+
+# DRY_RUN=1 prints the assembled command and the env it would run under, so
+# the venv detection and knob plumbing above can be checked without a
+# 4-minute boot. PORT is for side-by-side trials on a bare port (8097 was
+# the 2026-09-10 FP8 trial); production stays on 8096.
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  echo "DRY_RUN: PLE_IMPL=$PLE_IMPL VLLM_PLE_CPU_OFFLOAD=${VLLM_PLE_CPU_OFFLOAD:-<unset>} VLLM_ALLOW_LONG_MAX_MODEL_LEN=${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-<unset>}"
+  printf '%q ' "${CMD[@]}"; echo
+  exit 0
+fi
+exec "${CMD[@]}"

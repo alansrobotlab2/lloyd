@@ -1542,7 +1542,16 @@ occupant** or the check is inert.
 
 Current occupants: primary `:8096` = Qwen3.8-Flash-Next (vLLM, GPU 1);
 secondary `:8091` = Qwen3.6-35B-A3B UD-Q3_K_XL (llama.cpp, GPU 2, single-tenant
-at ~21.7 of 24 GiB). The secondary serialises (`--parallel 1`) because
+at ~21.7 of 24 GiB). Two venvs can serve the primary and
+`start-qwen38-flash-next.sh` adapts to whichever `VLLM_VENV` names:
+`vllm-qwen38-flash-next` (the PLE-offload-worker build, default) and
+`vllm-flash-next-main` (vLLM main, UVA offload, and `KV_CACHE_DTYPE=fp8` for a
+×1.74 KV pool that also sidesteps the >200k-token QSA prefill cliff, at 0–17%
+slower decode by text type because the drafter accepts fewer tokens through an
+e4m3 cache — the step time itself is unchanged). SETUP.md
+and the script's `KV_CACHE_DTYPE` comment carry the measurements; the pinned
+table on the main venv makes the never-two-boots-in-quick-succession rule
+above stricter, not looser. The secondary serialises (`--parallel 1`) because
 llama.cpp divides `--ctx-size` across slots and the full 256K window was the
 point — `secondary_models.py` post-session jobs and voice summaries queue
 behind agent turns there.

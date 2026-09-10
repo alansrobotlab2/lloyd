@@ -297,7 +297,8 @@ Two other model-specific venvs exist and are only needed if you run those models
 | `vllm-experimental` | 0.23.1rc1.dev1218 | Qwen3.5/3.6 family, 35B, 122B |
 | `vllm-laguna` | 0.25.1 | Laguna S 2.1 + DFlash draft |
 | `vllm-qwen3.8` | nightly | **Qwen3.8-27B-NVFP4 (live primary)** |
-| `vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 (125B MoE, PLE offload) |
+| `vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 (125B MoE, PLE offload worker) |
+| `vllm-flash-next-main` | 0.28.1rc1.dev661 + PR #55557 + PDL patch | the same checkpoint on vLLM main: UVA PLE offload, FP8 KV cache |
 
 `vllm-experimental` is built by `setup-vllm-experimental.sh`, pinned by
 `setup/vllm-experimental.versions.txt`. **`vllm-laguna` has no setup script** — it was built by hand. If you need Laguna S 2.1 back, adapt
@@ -362,12 +363,61 @@ narrower alternative, if you need scope 1 back machine-wide, is patching
 `prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)` into the GPU worker before it spawns
 the offload process.
 
-**When PR #53899 merges, most of this collapses to a normal nightly install.**
-Check before rebuilding:
+**PR #53899 is not going to merge.** On 2026-09-09 vLLM merged #54371 (UVA PLE
+offload) instead and paused #53899 in its favour, so a plain wheel of main now
+serves this checkpoint on one card — that is the next venv. This one stays
+buildable as the known-good fallback the start script boots by default.
+
+### `vllm-flash-next-main` — the same model on vLLM main, with FP8 KV
 
 ```bash
-curl -s https://api.github.com/repos/vllm-project/vllm/pulls/53899 | grep '"merged"'
+bash agent-services/setup/setup-vllm-flash-next-main.sh
 ```
+
+vLLM main from 2026-09-10 (`0.28.1rc1.dev661`, per-commit wheel keyed by full
+SHA — the `nightly` index rolls daily and would not have this build next week).
+Main carries UVA PLE offload (#54371): the GPU reads the 95.37 GiB N-gram table
+straight out of **pinned** host RAM, so there is no offload worker process, no
+CUDA-IPC handshake, no `ptrace_scope` requirement, and none of the three
+deadlocks the start script documents for the worker build. It also carries the
+rewritten QSA kernels (#54513, #54873, #54915) and the FP8 indexer cache
+(#54890). Two things are still not in the wheel and the script applies them,
+verifying both:
+
+| Step | Source | Adds |
+|---|---|---|
+| overlay | `semerandre/vllm@b7e3231a` (PR #55557, 2 files) | `--kv-cache-dtype fp8` on the QSA path; self-retires once the wheel has it |
+| patch | local | `_metadata_launch_pdl()` → False on sm_120 (still `major >= 9` on main) |
+
+The overlay is applied only after the wheel's copies of the two files prove
+byte-identical to the PR's merge-base copies; otherwise it refuses, because an
+overlay onto a moved base is a guess. Pinned by
+`agent-services/setup/vllm-flash-next-main.versions.txt`.
+
+Serving it is the same start script with the venv pointed at it, and FP8 is a
+second knob:
+
+```bash
+VLLM_VENV=~/lloyd/.venvs/vllm-flash-next-main KV_CACHE_DTYPE=fp8 bash agent-services/bin/start-qwen38-flash-next.sh
+```
+
+The script detects which offload implementation the venv carries and adapts
+(executor flag, ptrace preflight, offload spelling). For supervisord, set both
+in `agent-llm-primary.conf`'s `environment=` line. Two operational facts
+measured 2026-09-10: the **first** boot after a venv change spends ~8 silent
+minutes filling the compile/JIT cache (775 s to health; 265 s on the next
+boot), which is why that conf's `startsecs` is 900; and the pinned table
+cannot be swapped, so the never-two-boots-in-quick-succession rule in
+CLAUDE.md applies with no slack — it was released within ~30 s of SIGTERM in
+testing, but wait for `MemAvailable` all the same.
+
+What FP8 KV buys and costs on this card is in the start script's
+`KV_CACHE_DTYPE` comment and in the `fp8-kv-trial-2026-09-10` memory note:
+×1.74 KV pool (692k tokens at 11.5 GiB), a 239k-token prefill in 26 s instead
+of 128–149 s, quality on the BF16 noise floor, against a drafter that reads
+the same e4m3 cache and accepts fewer tokens per step — decode 0–17% slower by
+text type (JSON unchanged, prose and thinking the worst), ~7% over a
+workload-shaped suite, with the step time itself unchanged.
 
 ### `qwen3-tts` — TTS API server
 
