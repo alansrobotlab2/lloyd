@@ -56,6 +56,14 @@ WORKER_AUTOMOD_BAN: tuple[str, ...] = (
     "automod_vault_land", "automod_vault_revert",
 )
 
+#: Minting an authority grant is not a worker's to do either (#534). Same
+#: reasoning as the automod ban, named separately because it is enforced twice
+#: on purpose: the tool is not advertised on a worker turn, AND the policy hook
+#: denies the call if a local model emits it anyway. A turn subject to an
+#: authority gate must not be able to write its way out of it — that would be
+#: `bypassPermissions` with extra paperwork.
+WORKER_GRANT_MINT_BAN: tuple[str, ...] = ("grant_create",)
+
 
 def build_skill_prompt(skill_text: str, *, job: str, task_block: str) -> str:
     """Render a vault skill plus its concrete task into one worker prompt.
@@ -232,7 +240,23 @@ def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
         disallowed.append(tname)
         disallowed.append(f"mcp__lloyd-mcp__{tname}")
 
+    # #534: minting an authority grant is off the menu here too. See the
+    # constant — the hook below is the second, load-bearing layer.
+    for tname in WORKER_GRANT_MINT_BAN:
+        disallowed.append(tname)
+        disallowed.append(f"mcp__lloyd-mcp__{tname}")
+
     disallowed.extend(extra_disallowed)
+
+    # Every non-interactive turn is built here, and until #534 every one of
+    # them ran with `hooks=None` — no safety hook, no grant gate, so
+    # `safety.py`'s Bash-only patterns never even got a chance to run and
+    # nothing at all gated the durable-external surface. The gate takes its
+    # scope from `policy.current_scope`, which the pool binds per job.
+    from app.harness import HookRegistry
+    from app.harness.policy import install_policy_hook
+    hooks = HookRegistry()
+    install_policy_hook(hooks)
 
     model_env = _get_model_env("primary")
 
@@ -246,6 +270,7 @@ def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
         disallowed_tools=disallowed,
         env=model_env,
         priority=priority,
+        hooks=hooks,
     )
 
 

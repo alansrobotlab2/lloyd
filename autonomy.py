@@ -270,9 +270,35 @@ def _all_runnable_tasks() -> list[dict]:
         # _is_dependency_met — otherwise the dependency lookup misses it and
         # returns True, letting dependents run off a broken upstream. It is
         # excluded from dispatch by the status gate in _is_task_due.
-        if status in ("up_next", "in_progress", "failed"):
-            tasks.append(task)
+        if status not in ("up_next", "in_progress", "failed"):
+            continue
+        # #534: a `grants:` block the loader cannot read is not the same thing
+        # as a task with no grants. The block IS the human's authorization, so
+        # parsing it badly and running anyway is fail-open with a log line
+        # attached — the task runs durable-external actions under an authority
+        # nobody actually wrote. Drop it from the runnable set: it is not due,
+        # it is not enqueued, it does not drain. The fix is legible in the
+        # error and the file is one edit away.
+        _errors = _grant_block_errors(task, path)
+        if _errors:
+            continue
+        tasks.append(task)
     return tasks
+
+
+def _grant_block_errors(task: dict, path: Path) -> list[str]:
+    """Validate a task's declared `grants:` block; empty list means runnable."""
+    if "grants" not in task:
+        return []
+    from app.harness.policy import validate_task_grants
+
+    _, errors = validate_task_grants(task.get("grants"))
+    if errors:
+        logger.error(
+            "Task #%s (%s) declares an unreadable grants: block and is NOT "
+            "runnable — fix the block, the task stays stopped until then: %s",
+            task.get("id"), path.name, "; ".join(errors))
+    return errors
 
 
 def _parse_iso(s) -> Optional[datetime.datetime]:
@@ -870,6 +896,42 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         #     learns from, so the bias fed itself.
         disallowed_tools = _get_disallowed_tools()
 
+        # #534 — this is a SECOND dispatch path, not the worker one: run_task
+        # builds its own RunOptions, so gating `_worker_run_options` alone
+        # would have left every scheduled task running ungated. Re-validating
+        # here matters because the manual and HTTP entry points skip the
+        # scheduler's load-time check entirely.
+        from app.harness import HookRegistry
+        from app.harness.policy import (
+            GRANT_MINT_TOOL, GrantError, default_store, install_policy_hook,
+            sync_task_grants, validate_task_grants,
+        )
+
+        grant_scope = f"autonomy-task:{task_id}"
+        _specs, _errors = validate_task_grants(task.get("grants"))
+        if _errors:
+            return {"success": False, "task_id": task_id,
+                    "error": f"Task #{task_id} declares an unreadable grants: "
+                             f"block; refusing to run ungated: "
+                             + "; ".join(_errors)}
+        try:
+            if _specs:
+                _new = sync_task_grants(default_store(), task_id=task_id,
+                                        scope=grant_scope, grants=task["grants"])
+                if _new:
+                    logger.info("Task #%s: materialized %d declared grant(s)",
+                                task_id, _new)
+        except (GrantError, OSError) as e:
+            return {"success": False, "task_id": task_id,
+                    "error": f"Task #{task_id} could not materialize its "
+                             f"grants: {e}"}
+
+        disallowed_tools = list(disallowed_tools) + [
+            GRANT_MINT_TOOL, f"mcp__lloyd-mcp__{GRANT_MINT_TOOL}"]
+
+        task_hooks = HookRegistry()
+        install_policy_hook(task_hooks, scope=grant_scope)
+
         options = RunOptions(
             model=task_model,
             base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
@@ -880,6 +942,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             disallowed_tools=disallowed_tools,
             env=model_env,
             priority=1,
+            hooks=task_hooks,
             state_anchor=_build_deadline_anchor(timeout),
             **_get_harness_kwargs(),
         )

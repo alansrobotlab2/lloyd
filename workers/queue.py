@@ -21,6 +21,42 @@ from typing import Any, Optional
 logger = logging.getLogger("lloyd-workers.queue")
 
 
+# Authority grants (#534) live in this DB, in this file, because this file owns
+# the DB. `app/harness/policy.py` reads the DDL from here rather than keeping
+# its own copy — two definitions of a table whose NOT-NULL column is the whole
+# safety property is how one of them stops being true.
+#
+# `expires_at` is NOT NULL on purpose: a grant with no expiry is not a grant,
+# and a schema that permits one will eventually contain one.
+GRANT_DDL = """
+CREATE TABLE IF NOT EXISTS authority_grants (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope          TEXT NOT NULL,
+  tool_pattern   TEXT NOT NULL,
+  arg_predicate  TEXT NOT NULL DEFAULT '',
+  quota          INTEGER,
+  consumed       INTEGER NOT NULL DEFAULT 0,
+  issued_by      TEXT NOT NULL,
+  minted_by      TEXT NOT NULL DEFAULT 'human',
+  note           TEXT,
+  issued_at      TEXT NOT NULL,
+  expires_at     TEXT NOT NULL,
+  revoked_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_grants_scope_expiry
+  ON authority_grants(scope, expires_at) WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS grant_dispatch (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  at        TEXT NOT NULL,
+  scope     TEXT NOT NULL,
+  tool      TEXT NOT NULL,
+  grant_id  INTEGER,
+  decision  TEXT NOT NULL,
+  reason    TEXT
+);
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS queue (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,7 +99,7 @@ CREATE TABLE IF NOT EXISTS watermarks (
   updated_at  TEXT NOT NULL,
   PRIMARY KEY (source, key)
 );
-"""
+""" + GRANT_DDL
 
 
 def _now_iso() -> str:

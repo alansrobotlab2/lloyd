@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Optional
 
+from app.harness.policy import current_scope
 from workers.evidence import gaps_key, verify_bundle
 from workers.queue import WorkQueue, QueueItem, get_queue, new_run_id
 
@@ -95,6 +96,21 @@ def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
         "claims": claims,
     }
 
+
+
+def grant_scope_for(item: QueueItem) -> str:
+    """The authority scope a claimed item runs under (#534).
+
+    An autonomy task gets its own scope rather than sharing `worker:scheduled-task`
+    with every other task, because that is the difference between a human
+    granting `email_send` to the nightly mail job and granting it to whatever
+    runs on that source next. Anything else is its source.
+    """
+    if item.source == "scheduled-task":
+        task_id = item.payload.get("task_id")
+        if task_id is not None:
+            return f"autonomy-task:{task_id}"
+    return f"worker:{item.source}"
 
 def _task_id_of(item: QueueItem, result: Any = None) -> Optional[str]:
     """Task id for a run record: prefer the handler's result, fall back to the
@@ -300,6 +316,12 @@ class WorkerPool:
             logger.info("[%s] running %s/%s (id=%d) run_id=%s timeout=%ds",
                         worker_id, item.source, item.kind, item.id, run_id, max_duration)
 
+            # #534: whose authority is this turn borrowing. The grant gate
+            # reads `current_scope` when it fires, because by then it is three
+            # frames away inside a source's own call and only the pool knows
+            # what it claimed. An autonomy task is its own scope — that is what
+            # lets a human grant `email_send` to task #39 and nobody else.
+            scope_token = current_scope.set(grant_scope_for(item))
             try:
                 result = await asyncio.wait_for(source.execute(item), timeout=max_duration)
                 duration = time.monotonic() - started_perf
@@ -406,6 +428,7 @@ class WorkerPool:
                 logger.error("[%s] failed %s/%s: %s → %s",
                              worker_id, item.source, item.kind, error_msg, new_state)
             finally:
+                current_scope.reset(scope_token)
                 self._in_flight.pop(item.id, None)
 
 

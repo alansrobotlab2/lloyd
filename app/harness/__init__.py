@@ -22,9 +22,11 @@ from app.harness.events import NormalizedEvent
 from app.harness.hooks import HookRegistry, HookCallback
 from app.harness.loop import run_query
 from app.harness.options import RunOptions
+from app.harness.policy import GrantStore, install_policy_hook
 from app.harness.safety import install_default_safety_hook
 
 __all__ = [
+    "GrantStore",
     "HarnessError",
     "HookCallback",
     "HookRegistry",
@@ -34,5 +36,6 @@ __all__ = [
     "RunOptions",
     "ToolDispatchError",
     "install_default_safety_hook",
+    "install_policy_hook",
     "run_query",
 ]
