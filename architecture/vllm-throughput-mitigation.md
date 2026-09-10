@@ -222,6 +222,18 @@ first message changed:
   30 of 55 steps over 500 ms** — lloyd-be's 615 / 667 exactly. Zero
   preemptions.
 
+**Re-run after the 4096 budget was adopted** (§3.3), on the booted
+production config: the same result where it matters — 0 misses across the
+warm iterations (reuse 195,200–201,600), exactly one `prefix_miss` at
+iteration 13 (206,065 tokens), the announcement decision taken (suppressed
+for the re-run: the channel was already proven). What moved is the
+neighbour: during the cold re-prefill A's steps were p50 349 ms, p90 366,
+with **1 of 84 over 500 ms** (a single 702 ms step) against 30 of 55 at
+8192; beside the warm loop p99 316 / max 379 ms against 380 / 459. KV peaked
+at 0.53 against 0.96. The price in this shape — a re-admission carrying its
+own history — was 23.2 s of prefill against 21.3 s, **+9%**, a little more
+than the +7% the cold shape measured.
+
 ### 3.2 The KV gauge lies during a cold prefill
 
 `vllm:kv_cache_usage_perc` every 2 s through that run:
