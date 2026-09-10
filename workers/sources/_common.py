@@ -18,9 +18,23 @@ import yaml
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from app.paths import SESSIONS_DIR, VAULT_PENDING_RESEARCH_DIR as STAGING_ROOT
+
+# #529: the worker turn path is where the execution state lives, so the import
+# is here and not inside a function. A worker turn used to be one user message
+# whose transcript then only ever grew — `loop.py` appends every assistant turn
+# and every tool result for the whole life of the turn, and the only releaser,
+# pressure-triggered microcompaction, never fires below 0.8 of the truncation
+# threshold. `run_prompt_with_run_state` below runs the same job as a sequence
+# of steps on a schema-validated `Σ` instead, and the reason the name has to be
+# reachable from this module is the item's own premise check: `git log
+# -S'RunState'` came back empty because no execution-state object was imported
+# anywhere a worker could reach it.
+from app.harness.run_state import (  # noqa: E402
+    RunState, RunStateResult, RunStateStepError, run_state_turn,
+)
 
 logger = logging.getLogger("lloyd-workers.common")
 
@@ -142,6 +156,13 @@ class TurnResult:
     stop_reason: Optional[str] = None
     num_turns: Optional[int] = None
     usage: dict = field(default_factory=dict)
+    #: Set when the turn ran on an execution state (#529). The measurement the
+    #: item's acceptance is written against — cumulative prompt tokens, cached
+    #: share, estimated prefill seconds, per-step records — is on this object,
+    #: because `usage` cannot hold it honestly: there `input_tokens` is the
+    #: PEAK single prompt, and the number that matters here is the SUM across
+    #: steps. None for every transcript-shaped turn, which is still most of them.
+    run_state: Optional[RunStateResult] = None
 
     @property
     def ok(self) -> bool:
@@ -153,23 +174,20 @@ class TurnResult:
                 f"turns={self.num_turns}) — nothing written")
 
 
-async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
-    """Dispatch a prompt to the primary model at low vLLM priority.
+def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
+                        priority: int = 1):
+    """Build the `RunOptions` every in-process worker turn runs under, in one place.
 
-    **No session, therefore no Inner Voice.** `app/routers/messages.py` is the
-    only turn path that wires the observer: it needs a session id to read the
-    `inner_voice` flag from, to key observations on, and to attach a per-turn
-    observer to. A worker turn has none of that, so nothing here is watched and
-    nothing lands in the Inner Voice history.
-
-    That is why `automod_start` refuses a worker turn and why worker jobs are
-    barred from the automod tools below: a round must be observable, and this
-    path cannot be. If `autotriage` is ever enabled, its verdicts are
-    produced unobserved — acceptable for read-only triage, and the reason the
-    fix is to route worker turns through the one IV-capable path rather than to
-    copy the observer wiring into a second place.
+    Two turn shapes consume this now — the append-only `run_prompt_on_primary`
+    and the state-carried `run_prompt_with_run_state` — and the parts that make
+    a worker turn safe must not be able to drift between them: the landing-drain
+    check, the tool-override merge, the automod ban, low vLLM priority. A second
+    copy is how one of those ends up missing from one path, and the ban has
+    already been missing once (see the comment below and
+    `tests/test_automod_hardening.py`, which is the only reason it is not
+    missing now).
     """
-    from app.harness import run_query, RunOptions
+    from app.harness import RunOptions
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from prompt_builder import build_system_prompt
     from autonomy import _get_model_env
@@ -214,9 +232,11 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
         disallowed.append(tname)
         disallowed.append(f"mcp__lloyd-mcp__{tname}")
 
+    disallowed.extend(extra_disallowed)
+
     model_env = _get_model_env("primary")
 
-    options = RunOptions(
+    return RunOptions(
         model="primary",
         base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
         system_prompt=system_prompt,
@@ -225,9 +245,29 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
         mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         disallowed_tools=disallowed,
         env=model_env,
-        priority=1,
+        priority=priority,
     )
 
+
+async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
+    """Dispatch a prompt to the primary model at low vLLM priority.
+
+    **No session, therefore no Inner Voice.** `app/routers/messages.py` is the
+    only turn path that wires the observer: it needs a session id to read the
+    `inner_voice` flag from, to key observations on, and to attach a per-turn
+    observer to. A worker turn has none of that, so nothing here is watched and
+    nothing lands in the Inner Voice history.
+
+    That is why `automod_start` refuses a worker turn and why worker jobs are
+    barred from the automod tools below: a round must be observable, and this
+    path cannot be. If `autotriage` is ever enabled, its verdicts are
+    produced unobserved — acceptable for read-only triage, and the reason the
+    fix is to route worker turns through the one IV-capable path rather than to
+    copy the observer wiring into a second place.
+    """
+    from app.harness import run_query
+
+    options = _worker_run_options(max_turns)
     messages = [{"role": "user", "content": prompt}]
     out = TurnResult()
     chunks: list[str] = []
@@ -244,6 +284,74 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
                 chunks.append(str(evt["response_text"]))
     out.text = "".join(chunks)
     return out
+
+
+async def run_prompt_with_run_state(
+    prompt: str, *,
+    job: str,
+    state: RunState,
+    run_dir: Path,
+    skill_text: str = "",
+    max_steps: int = 6,
+    iterations_per_step: int = 4,
+    extra_disallowed: Sequence[str] = (),
+    priority: int = 1,
+) -> TurnResult:
+    """Run one worker job as steps on a schema-validated execution state (#529).
+
+    Same tool policy, same model, same priority as `run_prompt_on_primary` —
+    what differs is the substrate. Instead of one prompt whose transcript
+    accumulates for the life of the turn, each step gets the skill, the current
+    `Σ`, and the latest observation; the model answers with reasoning, a state
+    patch and the next action; the patch is validated against `state`'s schema,
+    merged with null-deletion, and the segment's transcript is dropped. The
+    reasoning goes to `run_dir/state-trace.ndjson` and is never replayed. See
+    `app/harness/run_state.py` for why that is a cost story and a correctness
+    story at once, and for the trade it makes.
+
+    `prompt` is the concrete task and `skill_text` the immutable specification,
+    so a caller with no skill body passes everything as `prompt` and leaves
+    `skill_text` empty — the split of `P` is the caller's, not the driver's.
+
+    Raises `RunStateStepError` when a step's patch is invalid on both attempts.
+    Deliberate: a caller that wants today's behaviour as a fallback has to catch
+    it and say so in code, rather than inherit the transcript by silence.
+    """
+    result = await run_state_turn(
+        job=job,
+        skill_text=skill_text,
+        task_block=prompt,
+        state=state,
+        run_dir=run_dir,
+        template=_worker_run_options(
+            iterations_per_step, extra_disallowed=extra_disallowed,
+            priority=priority),
+        max_steps=max_steps,
+        iterations_per_step=iterations_per_step,
+    )
+    return TurnResult(
+        text=result.text,
+        # "stop" only when the model declared the deliverable complete. A run
+        # that ran out of steps reports the sentinel the transcript path already
+        # uses for the same condition, so callers keep one vocabulary.
+        stop_reason="stop" if result.done else "max_turns",
+        num_turns=result.num_turns,
+        usage={
+            # Not `input_tokens`: there that key is the PEAK single prompt, and
+            # the number #529's acceptance is written against is the SUM across
+            # steps. Under-counting these is what "the transcript is cheap until
+            # it isn't" looked like in the dashboard.
+            "cumulative_prompt_tokens": result.prompt_tokens,
+            "cumulative_cached_tokens": result.cached_tokens,
+            "uncached_prompt_tokens": result.uncached_prompt_tokens,
+            "finalizer_prompt_tokens": result.finalizer_prompt_tokens,
+            "prefill_seconds_estimated": result.prefill_seconds,
+            "steps": len(result.steps),
+            "iterations": result.iterations,
+            "state_rejections": state.rejections,
+        },
+        run_state=result,
+    )
 
 
 # ---------------------------------------------------------------------------

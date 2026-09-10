@@ -298,6 +298,12 @@ async def run_query(
             # first token and vLLM re-prefills the whole conversation.
             last_visible_tools = loaded_set.visible_tools(
                 extra_disallowed=current_disallowed)
+            # Same reason, one caller further out: a state-patch re-ask issued
+            # after the segment ends is outside this function and cannot
+            # rebuild the array (#529, RunOptions.visible_tools_capture).
+            # Slice assignment keeps the caller's list the one it handed over.
+            if options.visible_tools_capture is not None:
+                options.visible_tools_capture[:] = last_visible_tools
 
             try:
                 async for chunk in stream_chat(
@@ -784,9 +790,23 @@ async def _maybe_finalize(
 
     # The extra completion's tokens are real tokens; fold them in so usage
     # accounting does not quietly under-report every worker verdict.
+    #
+    # `input_tokens` deliberately does NOT go into the same accumulator: for
+    # every other consumer in the tree it is the PEAK single prompt (see
+    # _accumulate_iteration_usage), and adding this request's prompt to the peak
+    # would make every number downstream mean something different depending on
+    # whether a finalizer ran. It gets its own key because until now its prompt
+    # was dropped entirely — a turn that asked for three structured verdicts
+    # reported the same prompt cost as one that asked for none, which is exactly
+    # the direction of error that makes a re-prefill look free. #529's replay
+    # needs the sum, and needs it not to lie.
     for key in ("output_tokens", "total_tokens"):
         if usage.get(key):
             total_usage[key] = total_usage.get(key, 0) + usage[key]
+    if usage.get("input_tokens"):
+        total_usage["finalizer_input_tokens"] = (
+            total_usage.get("finalizer_input_tokens", 0)
+            + int(usage["input_tokens"]))
     return parsed, error
 
 

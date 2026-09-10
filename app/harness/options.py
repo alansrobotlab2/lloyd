@@ -77,6 +77,22 @@ class RunOptions:
     # between iterations, with the harness picking it up on the next loop pass.
     chat_messages_handle: list[dict[str, Any]] | None = None
 
+    # The exact `tools` array the loop last advertised, written into this
+    # caller-owned list when one is supplied (#529).
+    #
+    # `finalizer.py` already knows the rule — send the identical tools array
+    # with `tool_choice: "none"`, or Qwen's template re-renders the prompt from
+    # token zero and vLLM re-prefills the whole conversation. What it never had
+    # was a way for a caller OUTSIDE the loop to honour it: the array is built
+    # per iteration from the MCP pool plus the live disallowed set, so nothing
+    # on the outside can reconstruct it. `app/harness/run_state.py` asks for a
+    # state patch after a segment ends and retries a rejected patch once, and a
+    # re-ask that guesses the array re-prefills the very prompt the retry
+    # exists to protect. Written by slice assignment so the caller's list
+    # object stays the one it handed over. Ignored when unset, which is every
+    # other caller, including the interactive loop.
+    visible_tools_capture: list[dict[str, Any]] | None = None
+
     # Cancellation — the consumer (messages._run_turn) sets this to
     # interrupt mid-stream. The loop checks between SSE chunks AND
     # before each tool dispatch.

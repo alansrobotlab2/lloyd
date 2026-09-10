@@ -674,13 +674,25 @@ def test_a_worker_turn_reads_the_merged_config_not_the_file():
     and — the one that bites — the `data/tool_overrides.yaml` merge, which is
     the live authority for what is switched off. A tool disabled from the
     Tools page stayed advertised to every worker turn."""
-    src = inspect.getsource(C.run_prompt_on_primary)
+    # #529 moved the merged-config read out of `run_prompt_on_primary` and into
+    # the builder that BOTH in-process worker turn shapes now call, because the
+    # state-carried turn must not be able to drift from the transcript turn on
+    # tool policy. The assertion follows the code — and gets stricter rather
+    # than looser: what actually matters is that no in-process worker turn can
+    # build its own RunOptions at all.
+    src = inspect.getsource(C._worker_run_options)
     code = "\n".join(
         line for line in src.splitlines() if not line.strip().startswith("#")
     ).split('"""')[2]  # drop the docstring too — both discuss the old way
     assert "from app.config import CONFIG" in code
     assert "yaml.safe_load" not in code, "a worker turn is re-reading config.yaml"
     assert "config.yaml" not in code
+    for fn in (C.run_prompt_on_primary, C.run_prompt_with_run_state):
+        body = inspect.getsource(fn)
+        assert "_worker_run_options(" in body, \
+            f"{fn.__name__} no longer goes through the shared builder"
+        assert "RunOptions(" not in body, \
+            f"{fn.__name__} builds its own tool policy"
 
 
 def test_the_turn_budget_sits_strictly_under_the_pool_cap(monkeypatch):
