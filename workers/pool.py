@@ -289,13 +289,28 @@ class WorkerPool:
 
     def kv_gate_status(self) -> dict[str, Any]:
         cfg = kv_gate_config()
+        window = float(cfg.get("window_seconds", DEFAULT_KV_GATE_WINDOW_S))
         return {
             "enabled": bool(cfg.get("enabled", True)),
             "max_kv_usage": float(cfg.get("max_kv_usage", DEFAULT_KV_GATE_MAX)),
-            "window_seconds": float(cfg.get("window_seconds", DEFAULT_KV_GATE_WINDOW_S)),
+            "window_seconds": window,
             **self._kv_gate,
+            # The reading now, not the one the last claim saw. The gate only
+            # evaluates when a slot tries to claim, so with every slot busy
+            # that value is as old as the longest job — on the first boot
+            # after this landed it read the idle engine's 0% beside a card
+            # showing 26%. `engaged` is still the last decision, which is
+            # what the next claim will act on.
+            "kv_usage": self._gate_reading(window),
             "held_sources": list(self._kv_gate["held_sources"]),
         }
+
+    @staticmethod
+    def _gate_reading(window: float) -> float | None:
+        """The gate's input: the median over `window`, given a fresh sample."""
+        if engine_pressure.latest() is None:
+            return None
+        return engine_pressure.kv_percentile(0.5, window=window)
 
     def _kv_gate_held(self, registry: dict[str, Any]) -> list[str]:
         """Sources this claim must skip because the primary's KV is over budget.
@@ -308,9 +323,7 @@ class WorkerPool:
         limit = float(cfg.get("max_kv_usage", DEFAULT_KV_GATE_MAX))
         window = float(cfg.get("window_seconds", DEFAULT_KV_GATE_WINDOW_S))
         # A fresh sample is the precondition; the median is the reading.
-        kv = None
-        if enabled and engine_pressure.latest() is not None:
-            kv = engine_pressure.kv_percentile(0.5, window=window)
+        kv = self._gate_reading(window) if enabled else None
         engaged = enabled and kv is not None and kv > limit
         held = long_lived_sources(registry) if engaged else []
         gate = self._kv_gate
