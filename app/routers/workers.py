@@ -105,7 +105,8 @@ async def workers_health(days: int = 7, runs: int = 10):
         return JSONResponse({
             "initialized": False, "days": days,
             "sources": [{"name": n, "enabled": bool(c.get("enabled", False)),
-                         "inner_voice": bool(c.get("inner_voice", False)),
+                         "inner_voice": (None if c.get("inner_voice") is None
+                                         else bool(c.get("inner_voice"))),
                          "interval_seconds": c.get("interval_seconds"),
                          "max_inflight": c.get("max_inflight"),
                          "priority": c.get("priority"),
@@ -146,7 +147,14 @@ async def workers_health(days: int = 7, runs: int = 10):
             # Recording is universal; observation is this switch. Surfaced
             # here because "was anyone watching?" is the first question about
             # a run that went wrong.
-            "inner_voice": bool(cfg.get("inner_voice", False)),
+            #
+            # Tri-state on purpose: `null` means the source does not set it,
+            # which for a `run_prompt_on_primary` source is not "off, and you
+            # could turn it on" — nothing there can be observed at all, since
+            # the observer is wired in the chat endpoint and nowhere else.
+            # Reporting a flat False would invite a knob that reads as broken.
+            "inner_voice": (None if cfg.get("inner_voice") is None
+                            else bool(cfg.get("inner_voice"))),
             "interval_seconds": cfg.get("interval_seconds"),
             "max_inflight": cfg.get("max_inflight"),
             "priority": cfg.get("priority"),

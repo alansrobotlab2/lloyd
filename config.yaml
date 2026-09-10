@@ -653,6 +653,14 @@ workers:
       enabled: true
       interval_seconds: 3600
       max_inflight: 1
+      # Inner Voice. Every background run is RECORDED regardless
+      # (`harness.background_recording`); this is whether the observer
+      # watches. It runs on the primary at priority 1 and spends a
+      # goal-extraction call plus a critique per turn, so it is on only
+      # where the judgement is worth a second opinion. Meaningful only
+      # for a source that runs through `run_prompt_in_session` — the
+      # observer is wired in the chat endpoint and nowhere else.
+      inner_voice: true
       # Runs as a real session through /api/message/stream, so it has Inner
       # Voice and a transcript. Budgets are measured, not guessed: the three
       # hand-driven triages took 45, 65 and 76 iterations and 8-30 minutes.
@@ -709,6 +717,8 @@ workers:
       max_inflight: 1
       max_duration_seconds: 3600
       max_turns: 100
+      # On: this source rewrites production. See `autotriage.inner_voice`.
+      inner_voice: true
     bench-mine:
       enabled: true
       interval_seconds: 7200
@@ -730,6 +740,9 @@ workers:
       enabled: true
       interval_seconds: 300
       max_inflight: 1
+      # On: it evaluates untrusted transcripts against Lloyd's own profile
+      # and files backlog items from the answer. See `autotriage.inner_voice`.
+      inner_voice: true
       # 45, not the source default of 60: scheduled-task maps autonomy
       # priorities critical/high/medium/low/background to 10/20/30/50/70
       # and may hold both slots, so at 60 a digest only ran in the gaps
@@ -748,6 +761,12 @@ workers:
       enabled: true
       interval_seconds: 3600
       max_inflight: 1
+      # Off: a research summary is read by a human before anything acts on
+      # it, and this source runs often enough that observing it would put a
+      # goal extraction plus a critique per turn in front of chat all day.
+      # It was a `inner_voice=False` literal in the source until 2026-09-10,
+      # which is to say it was not a setting at all.
+      inner_voice: false
       # The turn's own budget is this minus POOL_TIMEOUT_MARGIN_SECONDS, so it
       # cancels itself in the backend rather than being cancelled from outside.
       max_duration_seconds: 1800

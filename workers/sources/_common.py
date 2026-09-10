@@ -114,6 +114,36 @@ def turn_timeout_for(source: str, default: float = 3600.0) -> float:
     return float(max(60, cap - POOL_TIMEOUT_MARGIN_SECONDS))
 
 
+def source_inner_voice(source: str, default: bool = True) -> bool:
+    """Whether the Inner Voice observer watches this source's turns.
+
+    The second axis. Every background run is *recorded* — cheap, universal,
+    `app/run_recorder.py` — and being *observed* is a separate opt-in, because
+    the observer runs on the PRIMARY at priority 1 and spends a
+    goal-extraction call plus a critique per observed turn. Recording a
+    session-distill run costs a few file appends; watching one costs capacity
+    that a chat turn is waiting for.
+
+    One reader for it, rather than `src_cfg.get("inner_voice", ...)` at each
+    call site with each source's own default baked in — which is how
+    `deep-research` came to pass `inner_voice=False` as a literal, unreachable
+    from config, while `youtube-digest` read the key.
+
+    The fallback is True because that is what the four session-backed sources
+    do today; config.yaml is where a source turns it off. Only a source that
+    runs through `run_prompt_in_session` can be observed at all — the observer
+    is wired in `app/routers/messages.py` and nowhere else — so the key means
+    nothing on a `run_prompt_on_primary` source and is not set for one.
+    """
+    try:
+        from workers.sources import get_sources_config
+        cfg = get_sources_config().get(source, {})
+    except Exception:
+        return default
+    raw = cfg.get("inner_voice") if isinstance(cfg, dict) else None
+    return default if raw is None else bool(raw)
+
+
 def staging_dir(source: str) -> Path:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     d = STAGING_ROOT / source / today
@@ -508,7 +538,7 @@ async def _cancel_session_turn(backend: str, session_id: str) -> bool:
 
 async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                                 max_turns: int = 60, priority: int = 1,
-                                inner_voice: bool = True,
+                                inner_voice: bool | None = None,
                                 timeout_seconds: float | None = None,
                                 extra_disallowed: list[str] | None = None,
                                 final_schema: dict | None = None,
@@ -575,6 +605,11 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     backend = service_url("backend", "http://127.0.0.1:8080").rstrip("/")
     if timeout_seconds is None:
         timeout_seconds = turn_timeout_for(source)
+    # None means "ask the config", which is the answer every caller should
+    # want: a per-source switch a caller can override by passing a literal is
+    # a switch that reads as broken the one time somebody uses it.
+    if inner_voice is None:
+        inner_voice = source_inner_voice(source)
     session_id = new_worker_session(title=title, source=source, inner_voice=inner_voice)
     # #534 — whose authority this turn borrows, carried across the loopback
     # POST. `policy.current_scope` is a contextvar the pool binds around the

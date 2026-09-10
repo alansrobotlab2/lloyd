@@ -317,7 +317,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         run = await run_prompt_in_session(
             prompt, title=f"deep research #{topic_id}: {topic[:48]}",
             source=NAME, max_turns=int(payload.get("max_turns", 60)),
-            priority=1, inner_voice=False, extra_disallowed=list(DISALLOWED))
+            priority=1, extra_disallowed=list(DISALLOWED))
     except DrainActive as exc:
         await asyncio.to_thread(store.release, int(topic_id),
                                 error=f"landing in progress: {exc}", backoff_seconds=0)

@@ -631,7 +631,6 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             source=NAME,
             max_turns=int(payload.get("max_turns") or src_cfg.get("max_turns", 40)),
             priority=1,
-            inner_voice=bool(src_cfg.get("inner_voice", True)),
             extra_disallowed=list(DISALLOWED))
     except DrainActive as exc:
         # Not the video's fault: the entry stays `fetched` and is re-offered.

@@ -163,6 +163,30 @@ def _merge_tool_overrides(config: dict) -> dict:
                 "served.", want, bool(live_wk["enabled"]),
             )
         live_wk["enabled"] = want
+
+    # `workers.sources.<name>.inner_voice` — whether the Inner Voice observer
+    # watches that source's turns. UI-mutable for the same reason
+    # `workers.enabled` is: it is a thing an operator turns on to look at
+    # something and off again afterwards, and config.yaml is tracked, so a
+    # click that rewrote it would leave the live tree dirty and stop the
+    # self-modification loop. Only this one key per source is honoured — an
+    # override may not introduce a source, change its budget, or enable it.
+    for name, o in ((overrides.get("workers") or {}).get("sources") or {}).items():
+        if not isinstance(o, dict) or "inner_voice" not in o:
+            continue
+        live_src = ((config.get("workers") or {}).get("sources") or {}).get(name)
+        if not isinstance(live_src, dict):
+            continue  # overrides can't introduce sources, only adjust them
+        want_iv = bool(o["inner_voice"])
+        if "inner_voice" in live_src and bool(live_src["inner_voice"]) != want_iv:
+            logger.warning(
+                "tool_overrides.yaml sets workers.sources.%s.inner_voice: %r "
+                "where config.yaml says %r. The override wins. Reconcile the "
+                "two files, or the tracked config keeps describing a state "
+                "that is not being served.",
+                name, want_iv, bool(live_src["inner_voice"]),
+            )
+        live_src["inner_voice"] = want_iv
     return config
 
 
@@ -187,8 +211,22 @@ def save_tool_overrides() -> None:
     if isinstance(ts, dict):
         out["harness"] = {"tool_search": ts}
     workers = CONFIG.get("workers")
-    if isinstance(workers, dict) and "enabled" in workers:
-        out["workers"] = {"enabled": bool(workers["enabled"])}
+    if isinstance(workers, dict):
+        block: dict = {}
+        if "enabled" in workers:
+            block["enabled"] = bool(workers["enabled"])
+        # Only sources that actually carry the key. Writing `false` for every
+        # source would turn an absent value — "this source is not observable"
+        # — into a decision the file now asserts.
+        srcs = {
+            name: {"inner_voice": bool(cfg["inner_voice"])}
+            for name, cfg in (workers.get("sources") or {}).items()
+            if isinstance(cfg, dict) and "inner_voice" in cfg
+        }
+        if srcs:
+            block["sources"] = srcs
+        if block:
+            out["workers"] = block
     TOOL_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         TOOL_OVERRIDES_PATH,

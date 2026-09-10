@@ -216,7 +216,11 @@ async def test_a_good_turn_is_recorded_with_a_verified_filing(tmp_path, backlog,
     assert script.opt(1, "--complete") == "abc123" and script.opt(1, "--note") == str(note)
     ev = json.loads(script.opt(1, "--eval-json"))
     assert ev["filed"] == 523 and ev["verdict"] == "actionable" and ev["session_id"] == "20260908_youtubed_ab12"
-    assert turn.kwargs["inner_voice"] is True, "the whole point: Inner Voice watches it"
+    # Resolved from `workers.sources.youtube-digest.inner_voice`, not passed
+    # by the source — one reader for the switch, or the config is decoration.
+    assert "inner_voice" not in turn.kwargs
+    from workers.sources._common import source_inner_voice
+    assert source_inner_voice(Y.NAME) is True, "the whole point: Inner Voice watches it"
     assert turn.kwargs["max_turns"] == 33 and turn.kwargs["source"] == Y.NAME
     assert set(Y.DISALLOWED) <= set(turn.kwargs["extra_disallowed"])
     assert turn.kwargs["title"].startswith("Discover AI: Claude Code")

@@ -18,6 +18,7 @@ import pytest
 from app import research_store as R
 from workers.queue import QueueItem, WorkQueue
 from workers.sources import deep_research as D
+from workers.sources import _common as C
 from workers.sources._common import DrainActive, TurnTimeout, WORKER_AUTOMOD_BAN
 
 
@@ -420,7 +421,12 @@ async def test_the_turn_runs_in_a_session_without_the_observer(
     monkeypatch.setattr(D, "run_prompt_in_session", turn)
 
     await D.execute(_item(payload))
-    assert turn.seen["inner_voice"] is False
+    # The source no longer answers this itself. It passed `inner_voice=False`
+    # as a literal until 2026-09-10, which is to say it was not a setting —
+    # `workers.sources.deep-research.inner_voice` decides now, and the source
+    # deferring is what makes the config real.
+    assert "inner_voice" not in turn.seen
+    assert C.source_inner_voice(D.NAME) is False
     assert turn.seen["source"] == D.NAME
 
 

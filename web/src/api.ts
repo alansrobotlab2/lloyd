@@ -233,7 +233,9 @@ export interface WorkerSourceHealth {
   name: string
   configured: boolean
   enabled: boolean
-  inner_voice: boolean
+  // null = the source does not set it. For a source that never runs
+  // through the chat path that is not "off", it is "not observable".
+  inner_voice: boolean | null
   interval_seconds?: number | null
   max_inflight?: number | null
   priority?: number | null

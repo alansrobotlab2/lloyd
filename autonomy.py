@@ -924,6 +924,9 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     # is_error=True rather than raising, so without this they never reach the run
     # record. Defined before the try so the except path can reference it safely.
     tool_errors: list[str] = []
+    # Declared out here so the `finally` at the bottom can always close it,
+    # including when the run fails before the observer is attached.
+    iv_state = None
 
     try:
         from app.harness import run_query, RunOptions
@@ -1011,6 +1014,47 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         )
 
         messages = [{"role": "user", "content": prompt}]
+        # The Inner Voice observer, when this task asked for one. It attaches
+        # to the direct path rather than needing the HTTP one:
+        # `attach_observer_for_turn` creates a registry only if none exists,
+        # so passing this run's `task_hooks` keeps the #534 grant gate AND
+        # adds the observer. Its own gate fires for `turn_source="ambient"`
+        # when the session's `inner_voice` is on, which is what
+        # `create_session` wrote above.
+        #
+        # The ambient and clarify callbacks are None deliberately: both exist
+        # to reach a human mid-turn, and nobody is reading. The observer's
+        # remaining levers — inject, and the record it writes — are the ones
+        # that mean anything here.
+        #
+        # Importing a router helper into this module is a layering smell.
+        # Accepted rather than relocated: the alternative is a second
+        # definition of "how a turn is watched", and the codebase has paid for
+        # second definitions of "due", "healthy" and "tell the human" already.
+        iv_cancel = asyncio.Event()
+        if task_inner_voice:
+            try:
+                from app.routers._messages_inner_voice import (
+                    attach_observer_for_turn, close_observer,
+                )
+                iv_state = await attach_observer_for_turn(
+                    session_id=session_id, turn_id=run_id,
+                    turn_source="ambient", producer_source="autonomy",
+                    user_request=prompt, options=options,
+                    chat_messages_handle=messages, cancel_event=iv_cancel,
+                )
+                # The observer's `cancel` lever has to reach the loop or it is
+                # a knob nothing reads. On the chat path `_run_turn` wires the
+                # turn's own cancel event here; this path had none. It is the
+                # lever that matters most for unattended work — a run going
+                # somewhere it should not is the case this whole workstream
+                # was opened for — and it is reachable only for a task that
+                # asked to be watched.
+                if iv_state is not None:
+                    options.cancel_event = iv_cancel
+            except Exception as exc:  # noqa: BLE001 — watching is not the run
+                logger.warning("Task #%s: could not attach the observer: %s",
+                               task_id, exc)
         final_response = ""
         stop_reason = None
         usage = None
@@ -1199,6 +1243,17 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             extra={"exception": type(e).__name__, "tool_errors": len(tool_errors),
                    "session_id": session_id},
         )
+    finally:
+        # Always. A turn that ends any way other than through the `result`
+        # event leaves non-terminal judgments running against a dead turn,
+        # where they write observation rows and can append an inject to a
+        # message list nobody will read again. Synchronous by contract.
+        if iv_state is not None:
+            try:
+                from app.routers._messages_inner_voice import close_observer
+                close_observer(iv_state)
+            except Exception as ce:  # noqa: BLE001 — cleanup must not raise
+                logger.warning("close_observer failed for %s: %s", run_id, ce)
 
 
 # ── Fleet health ──────────────────────────────────────────────────────────────
