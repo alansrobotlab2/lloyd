@@ -181,7 +181,16 @@ def _config() -> dict[str, Any]:
 def enabled() -> bool:
     """Default-off: an absent key, an unreadable config, or a false flag all
     mean the deliverer is not installed. Nothing about this module is on by
-    default, including in tests that build their own rule set."""
+    default, including in tests that build their own rule set.
+
+    The two keys live in the runtime config, which the self-mod preflight
+    denies — a human sets them:
+
+        harness:
+          skill_dispatch:
+            enabled: true      # absent == false
+            skills: [youtube-transcript]   # absent/[] == every rule in the table
+    """
     return bool(_config().get("enabled", False))
 
 
