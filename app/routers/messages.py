@@ -88,6 +88,7 @@ from app.routers._messages_subliminal import (
     _detect_subliminal_sources,
     _build_subliminal_entry,
 )
+from app.harness.policy import GRANT_MINT_TOOL, install_policy_hook
 from app.routers._messages_thinking import _build_thinking_entry
 from app.transcript_entries import (
     build_assistant_text_entry,
@@ -378,6 +379,83 @@ async def _fetch_files_changed(session_id: str, turn_id: str) -> dict | None:
                    "reverted_at": f.get("reverted_at")}
                   for f in files],
     }
+
+
+def _session_identity(session_id: str) -> tuple[str, str]:
+    """`(platform, source)` from the session JSON, defaulting to the web UI.
+
+    A missing file is a brand-new chat session — the id is minted in the
+    stream endpoint and `_save_session_meta` writes the file afterwards — so
+    "unreadable" must read as a *user* session, which is what
+    `sessions_io.is_user_session` already does with a missing `platform`.
+    Gating a chat turn because its file had not been written yet would take
+    the UI down; the fail-closed half of the gate lives where it belongs,
+    inside the policy hook, which denies when the grant store is unreadable.
+    """
+    try:
+        data = json.loads((SESSIONS_DIR / f"{session_id}.json").read_text())
+    except Exception:
+        return ("mission-control", "")
+    return (str(data.get("platform") or "mission-control"),
+            str(data.get("source") or ""))
+
+
+def _authority_scope_for(session_id: str, data: dict) -> str:
+    """#534 — gate tier-2/3 tools on a live grant, for a non-user turn.
+
+    The gate is a PreToolUse hook installed by whoever builds the
+    `HookRegistry`. `autonomy.run_task` and `_common._worker_run_options`
+    both install it on their own; this endpoint did not, and every
+    session-backed worker — autocode, autotriage, deep-research,
+    youtube-digest — posts here. So the four turn paths that read untrusted
+    text and rewrite this repo were the ungated ones, while the two that
+    already had a registry of their own were covered twice.
+
+    Installing it here rather than asking each source to pass a flag is the
+    whole point: the trigger is the SESSION'S OWN PLATFORM, so a caller
+    cannot forget. A payload `grant_scope` also arms it — a caller that names
+    whose authority it is borrowing has said what it is, and
+    `policy.current_scope` is a contextvar the pool binds in a different
+    task, which does not survive the loopback POST.
+
+    Tier 1 is everything unclassified, so this denies nothing a worker does
+    today: `Bash`, `Edit`, `Write`, `backlog_write_task` and `vault_write`
+    all pass. What it starts gating is the durable-external surface — email,
+    calendar, contacts, tasks, `autonomy_delete_task` — which is the surface
+    a grant exists for. Attended chat turns are untouched.
+
+    Returns the scope to gate under, or "" when the turn is a user's. The
+    caller installs — the ban has to reach the request body before the
+    endpoint reads its disallowed list off it, and the hook goes onto a
+    registry that does not exist yet at that point.
+    """
+    platform, source = _session_identity(session_id)
+    scope = str(data.get("grant_scope") or "").strip()
+    if not scope and platform not in sessions_io.NON_USER_PLATFORMS:
+        return ""
+    return scope or f"worker:{source or platform}"
+
+
+def _ban_grant_minting(data: dict) -> list[str]:
+    """Take `grant_create` off the menu for this turn, in `data` itself.
+
+    Enforced twice on purpose, exactly as `_common.WORKER_GRANT_MINT_BAN`
+    describes it: the tool is not advertised, AND the policy hook denies the
+    call if a local model emits the name anyway. A turn subject to an
+    authority gate must not be able to write its way out of it — that would
+    be `bypassPermissions` with extra paperwork.
+
+    Written back into `data["extra_disallowed"]` rather than into a local,
+    because `_refresh_disallowed_for_session` re-reads that key on every
+    harness iteration and a ban that only made it into the initial list
+    would come off at the first refresh.
+    """
+    banned = list(data.get("extra_disallowed") or [])
+    for name in (GRANT_MINT_TOOL, f"mcp__lloyd-mcp__{GRANT_MINT_TOOL}"):
+        if name not in banned:
+            banned.append(name)
+    data["extra_disallowed"] = banned
+    return banned
 
 
 def _final_schema_for(session_id: str, data: dict) -> dict | None:
@@ -1654,6 +1732,9 @@ async def post_message_stream(request: Request):
         )
         prefetched_text = nudge + prefetched_text
 
+    grant_scope = _authority_scope_for(session_id, data)
+    if grant_scope:
+        _ban_grant_minting(data)
     extra_disallowed: list[str] = data.get("extra_disallowed", [])
     permission_mode: str = (
         data.get("permission_mode")
@@ -1666,6 +1747,8 @@ async def post_message_stream(request: Request):
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
     install_default_safety_hook(iv_hooks)
+    if grant_scope:
+        install_policy_hook(iv_hooks, scope=grant_scope)
     # #536 — dispatch-time skill delivery, default-off
     # (`harness.skill_dispatch.enabled`). Installed AFTER the safety hook: a
     # deny beats a deliver regardless of order, but the walk should read in the
@@ -1777,13 +1860,25 @@ async def build_ambient_turn(
         session_id=session_id,
     )
 
+    # An ambient injection carries no request body, so the gate can only be
+    # armed by the session's own platform — which is right, and today never
+    # fires, because `/inject` refuses a non-user session with 409. Armed here
+    # anyway: "the other endpoint is the ungated one" is the shape of the bug
+    # this workstream exists to close, and it must not be reintroduced by the
+    # next producer that learns to build a turn.
+    ambient_payload: dict = {}
+    ambient_scope = _authority_scope_for(session_id, ambient_payload)
+    ambient_banned = _ban_grant_minting(ambient_payload) if ambient_scope else []
+
     def _ambient_refresh_disallowed() -> list[str]:
         live_plan_mode = bool(_load_session_plan(session_id).get("plan_mode"))
-        return _get_disallowed_tools(plan_mode=live_plan_mode)
+        return _get_disallowed_tools(plan_mode=live_plan_mode) + ambient_banned
 
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
     install_default_safety_hook(iv_hooks)
+    if ambient_scope:
+        install_policy_hook(iv_hooks, scope=ambient_scope)
 
     options = RunOptions(
         model=model,
@@ -1792,7 +1887,7 @@ async def build_ambient_turn(
         max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
         permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
         mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active),
+        disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active) + ambient_banned,
         disallowed_tools_refresh=_ambient_refresh_disallowed,
         env=model_env,
         hooks=iv_hooks,
@@ -1894,6 +1989,9 @@ async def post_message(request: Request):
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"
 
+    sync_grant_scope = _authority_scope_for(session_id, data)
+    if sync_grant_scope:
+        _ban_grant_minting(data)
     sync_extra_disallowed: list[str] = data.get("extra_disallowed", [])
 
     def _sync_refresh_disallowed() -> list[str]:
@@ -1909,6 +2007,8 @@ async def post_message(request: Request):
     iv_enabled = _session_inner_voice_enabled(session_id)
     iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
     install_default_safety_hook(iv_hooks)
+    if sync_grant_scope:
+        install_policy_hook(iv_hooks, scope=sync_grant_scope)
 
     options = RunOptions(
         model=model,

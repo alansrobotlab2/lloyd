@@ -576,8 +576,19 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     if timeout_seconds is None:
         timeout_seconds = turn_timeout_for(source)
     session_id = new_worker_session(title=title, source=source, inner_voice=inner_voice)
+    # #534 — whose authority this turn borrows, carried across the loopback
+    # POST. `policy.current_scope` is a contextvar the pool binds around the
+    # claimed job, and it is correct HERE, in the pool's own task; the backend
+    # handles the request in a different task, so the value does not survive
+    # the hop and has to travel in the body. The endpoint arms the gate on the
+    # session's platform anyway, so a caller that omits this is still gated —
+    # what the scope buys is the *right* scope, which is the difference
+    # between a grant made to `autonomy-task:39` and one made to whatever runs
+    # on that source next.
+    from app.harness.policy import current_scope
     payload = {"session_id": session_id, "text": prompt, "model": "primary",
                "priority": int(priority), "max_turns": int(max_turns),
+               "grant_scope": current_scope.get(),
                # The same wall clock this function enforces below, announced to
                # the model. Iterations are not the budget a worker turn dies on:
                # automod round SM_20260909_054722 was killed here with 32 of its
