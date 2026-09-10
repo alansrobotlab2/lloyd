@@ -1,0 +1,187 @@
+{
+  "version": 1,
+  "owner": "human",
+  "read_only_for_extractors": true,
+  "note": "Declared entity identity for the extraction write path (#537). Ported from OaK's task kernel (arXiv 2608.22974): the schema decides what the graph is allowed to contain, the graph supplies the evidence. This file is HUMAN-EDITED and extractor-READ-ONLY — the nightly jobs that have burned this repo before must not write it. The gate that reads it lives in app/entity_naming.py (gate_entity_name / register_schema_keys) and is wired into scripts/memory/next-gen-memory/fact_extractor.py. A declared alias attaches future extractions to the canonical row; it does NOT migrate facts already filed under the variant, which is read-side work owned by #400/#512. Declare an alias only when the two names are unambiguously the same thing: a wrong alias silently redirects facts forever, so ambiguous pairs (Backlog vs Lloyd Backlog) are deliberately left undeclared and stay separate entities.",
+  "types_note": "Superset of app.entity_kind.KINDS plus the two spellings `entities.kind` already carries in kg.sqlite (`pipeline`, `subsystem`). Deliberately not a second taxonomy: a declared type is written to entities.kind.",
+  "types": [
+    "person",
+    "project",
+    "system",
+    "subsystem",
+    "pipeline",
+    "concept",
+    "skill",
+    "task",
+    "doc",
+    "entity"
+  ],
+  "entities": [
+    {
+      "canonical": "Knowledge Graph",
+      "type": "system",
+      "why": "539 active facts, and the family its siblings were minted from: The Graph 35, Knowledge Graph System 34, Entity Relationship Graph 8, Relationship Graph 4, Vault Relationship Graph 1, with 1 edge among them.",
+      "aliases": [
+        "The Graph",
+        "Relationship Graph",
+        "Entity Relationship Graph",
+        "Vault Relationship Graph",
+        "Knowledge Graph System",
+        "Knowledge Graph (KG)",
+        "Lloyd's Knowledge Graph",
+        "Lloyd Knowledge Graph",
+        "KG"
+      ]
+    },
+    {
+      "canonical": "Autonomy Data Pipeline",
+      "type": "pipeline",
+      "why": "169 active facts vs Autonomy Pipeline 18, Autonomy Backlog Pipeline 7, Autonomy Task Pipeline 3 — sibling fragmentation, zero edges between them.",
+      "aliases": [
+        "Autonomy Pipeline",
+        "Autonomy Backlog Pipeline",
+        "Autonomy Task Pipeline",
+        "Lloyd Autonomy Pipeline",
+        "Lloyd's autonomy pipeline"
+      ]
+    },
+    {
+      "canonical": "Autonomy Scheduler",
+      "type": "system",
+      "aliases": ["Lloyd's Scheduler", "Autonomy Task Scheduler"]
+    },
+    {
+      "canonical": "Mission Control",
+      "type": "system",
+      "why": "375 facts. Mission Control UI is the frontend and stays its own entity — not declared here.",
+      "aliases": ["Lloyd Mission Control"]
+    },
+    {
+      "canonical": "Nightly Reflection Pipeline",
+      "type": "pipeline",
+      "why": "The #38 -> #42 -> #39 -> #40 chain as a whole. Its stages are separate entities below.",
+      "aliases": ["Nightly Reflection", "Nightly Reflection System", "Reflection Pipeline"]
+    },
+    {
+      "canonical": "Nightly Reflection Signals",
+      "type": "pipeline",
+      "why": "Job #38.",
+      "aliases": ["Reflection Signals", "Signals Layer"]
+    },
+    {
+      "canonical": "Knowledge Analysis",
+      "type": "pipeline",
+      "why": "Job #42. Fragmented against its own skill slug.",
+      "aliases": ["Nightly Reflection Knowledge Analysis", "nightly-reflection-knowledge-analysis"]
+    },
+    {
+      "canonical": "Knowledge Write",
+      "type": "pipeline",
+      "why": "Job #39. 7 facts here against 8 under the skill slug — declared so new extractions stop splitting.",
+      "aliases": ["Knowledge Write Skill", "nightly-reflection-knowledge-write"]
+    },
+    {
+      "canonical": "Memory Capture",
+      "type": "pipeline",
+      "why": "periodic-memory-capture-lloyd and -dee are two distinct skills; the bare 'Periodic Memory Capture' spelling is ambiguous between them and is deliberately NOT declared.",
+      "aliases": ["Memory Capture Pipeline"]
+    },
+    {
+      "canonical": "Entity Resolution Sweep",
+      "type": "pipeline",
+      "aliases": ["Entity Resolution Sweep Task", "entity-resolution-sweep"]
+    },
+    {
+      "canonical": "Semantic Entity Resolution",
+      "type": "pipeline",
+      "aliases": ["Semantic Entity Resolution via Graph Embeddings", "semantic-entity-resolution"]
+    },
+    {
+      "canonical": "Next-Gen Memory Pipeline",
+      "type": "pipeline",
+      "aliases": [
+        "Next-Gen Memory",
+        "Next Gen Memory Pipeline",
+        "Next-Gen Memory System",
+        "Next-Generation Memory System"
+      ]
+    },
+    {
+      "canonical": "Nightly Retrieval Eval",
+      "type": "pipeline",
+      "why": "The instrument the acceptance check reads. The retrieval-eval skill is a separate runner and stays separate.",
+      "aliases": ["Retrieval Evaluation", "Nightly Retrieval Evaluation"]
+    },
+    {
+      "canonical": "Knowledge Graph Evaluation System",
+      "type": "subsystem",
+      "aliases": ["KG Evaluation System"]
+    },
+    {
+      "canonical": "Nightly Trajectory Extraction",
+      "type": "pipeline",
+      "why": "trajectory-extraction and trajectory-extraction-interactive are distinct skills; neither slug is declared.",
+      "aliases": ["Nightly Trajectory Mining"]
+    },
+    {
+      "canonical": "Backlog",
+      "type": "system",
+      "why": "Declared with no aliases on purpose: 'Lloyd Backlog' (24 facts) may or may not be the same system, and 'Backlog Item #NNN' minting is #743.",
+      "aliases": []
+    },
+    {
+      "canonical": "Knowledge Health Report",
+      "type": "system",
+      "aliases": ["knowledge-health-report"]
+    },
+    {
+      "canonical": "Trajectory Skill Mining",
+      "type": "pipeline",
+      "aliases": ["trajectory-skill-mining"]
+    },
+    {
+      "canonical": "Groundskeeper Loop",
+      "type": "system",
+      "aliases": []
+    },
+    {
+      "canonical": "Inner Voice",
+      "type": "system",
+      "why": "738 facts. Highest-value entity in the store — worth pinning its identity down.",
+      "aliases": []
+    },
+    {
+      "canonical": "Morning Briefing",
+      "type": "pipeline",
+      "why": "Morning Briefing System is a different thing (the staleness prober) and is not declared.",
+      "aliases": []
+    },
+    {
+      "canonical": "Hypothesis Generator",
+      "type": "system",
+      "why": "backlog #446 owns its output contract; only identity is declared here.",
+      "aliases": []
+    },
+    {
+      "canonical": "Wiki Compile Sweep",
+      "type": "pipeline",
+      "aliases": []
+    },
+    {
+      "canonical": "Intel Pipeline",
+      "type": "system",
+      "why": "Named in the #400 near-duplicate family along with Intel; the two are distinct and stay distinct.",
+      "aliases": []
+    },
+    {
+      "canonical": "Nightly Skills Management",
+      "type": "pipeline",
+      "aliases": []
+    },
+    {
+      "canonical": "Orphaned Reference Cleanup",
+      "type": "pipeline",
+      "aliases": []
+    }
+  ]
+}

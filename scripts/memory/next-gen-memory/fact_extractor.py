@@ -20,9 +20,13 @@ from typing import Any
 _LLOYD_ROOT = Path(__file__).resolve().parents[3]
 if str(_LLOYD_ROOT) not in sys.path:
     sys.path.insert(0, str(_LLOYD_ROOT))
-from app.entity_naming import normalize_and_register as _entity_normalize
 from app.entity_naming import known_entities_in_text as _known_entities
 from app.entity_naming import looks_like_junk_entity as _is_junk_entity
+from app.entity_naming import ENTITY_CANDIDATES_PATH, SCHEMA_TYPES
+# The declared-identity gate (#537). `normalize_and_register` — mint a canonical
+# on every alias miss — is what produced the sibling families the schema now
+# declares; it stays available for callers outside this write path.
+from app.entity_naming import gate_entity_name as _identity_gate
 from app.atomic_io import atomic_write_text, locked_file
 from app.fact_ids import assign_ids as _assign_fact_ids
 from app.kg_store import StoreUnavailable, store as _kg_store
@@ -120,6 +124,10 @@ Rules:
 4. Categorize each fact: preference, relationship, event, state, skill, goal, temporary
 5. Note confidence level (0.0-1.0)
 6. If a fact contradicts a known fact, flag it as an update
+7. Declare what kind of thing every entity IS, in its "entity_type": exactly one
+   of {entity_types}. This is not decoration — an entity with no declared type
+   is not created at all, it goes to a review list. Do not invent a type word
+   and do not invent a compound one ("data pipeline" is wrong, "pipeline" is right).
 
 CRITICAL GUARDRAILS:
 - NEVER extract "session" as an entity. Session metadata (duration, message count,
@@ -148,13 +156,17 @@ Known facts about relevant entities:
 
 Extract facts as structured JSON. Set the top-level "entity" to the single most
 central entity of the content; give EVERY fact its own "entity" naming the
-specific thing that fact is about (it may differ from the top-level entity):
+specific thing that fact is about (it may differ from the top-level entity), and
+give EVERY entity its own "entity_type" (leave it "" only if you genuinely
+cannot say what kind of thing it is — that means it will not be created):
 {{
   "entity": "primary_entity_name",
+  "entity_type": "system",
   "category": "category_name",
   "facts": [
     {{
       "entity": "entity this fact is about",
+      "entity_type": "one of {entity_types}",
       "fact": "Fact statement",
       "confidence": 0.95,
       "event_date": null,
@@ -227,16 +239,23 @@ class FactExtractor:
         primary_category = None
         all_facts = []
         seen_fact_text = set()
+        gated_out = 0
 
         for chunk in self._chunk_content(content):
             known = _known_entities(chunk, 60)
             known_block = "\n".join(f"- {k}" for k in known) if known else "(none recognised)"
             prompt = EXTRACTION_PROMPT.format(content=chunk, existing_facts=existing,
-                                              known_entities=known_block)
+                                              known_entities=known_block,
+                                              entity_types=" | ".join(SCHEMA_TYPES))
             parsed = self._parse_response(self._call_llm(prompt))
+            # The document's own declared type is the fallback for a fact that
+            # omits one, so a model that answers the type once per document
+            # still gets the benefit of the doubt on its facts.
+            doc_type = parsed.get("entity_type")
 
             if primary_entity is None and parsed.get("entity"):
-                primary_entity = self._sanitize_entity(parsed["entity"])
+                primary_entity, _v = self._gate_entity(parsed["entity"],
+                                                       declared_type=doc_type)
                 # A category is a vocabulary term, not an entity. Running it
                 # through _sanitize_entity registered every distinct spelling
                 # as a canonical entity in the alias table.
@@ -251,10 +270,27 @@ class FactExtractor:
                 seen_fact_text.add(text)
                 # Resolve each fact to its own entity (falls back to the doc primary
                 # at write time when absent).
+                fact_type = f.get("entity_type") or doc_type
                 if f.get("entity"):
-                    f["entity"] = self._sanitize_entity(f["entity"])
+                    entity, verdict = self._gate_entity(f["entity"],
+                                                        declared_type=fact_type)
+                    if verdict == "candidate":
+                        # The subject is not an entity this run may create, and
+                        # its name is in the sidecar. Filing the fact under the
+                        # document's primary entity would attribute it to the
+                        # wrong thing, which is the failure this gate exists to
+                        # stop making.
+                        gated_out += 1
+                        f.pop("entity_type", None)
+                        continue
+                    f["entity"] = entity
+                f.pop("entity_type", None)
                 f["category"] = normalize_category(f.get("category"))
                 all_facts.append(f)
+
+        if gated_out:
+            print(f"  ⤫ {gated_out} fact(s) held back: entity not declared and "
+                  f"carried no valid type → {ENTITY_CANDIDATES_PATH}")
 
         return {
             "entity": primary_entity or "general",
@@ -300,8 +336,12 @@ class FactExtractor:
 
     def get_existing_facts(self, entity: str, category: str) -> str:
         """Load existing facts for an entity/category."""
-        # Sanitize entity and category to prevent nested path creation
-        entity = self._sanitize_entity(entity)
+        # Sanitize entity and category to prevent nested path creation.
+        # `enforce=False`: this is a read. The gate may attach the name to its
+        # declared canonical — which is how a variant gets to see the facts it
+        # should have seen all along — but withholding them for want of a
+        # declared type would degrade the extraction, not protect the graph.
+        entity = self._sanitize_entity(entity, enforce=False)
         category = normalize_category(category)
         if not entity:
             return ""
@@ -317,17 +357,18 @@ class FactExtractor:
                 return parts[1].strip()
         return ""
     
-    def _sanitize_entity(self, entity: str, source_doc: str | None = None) -> str:
-        """Sanitize an entity name and resolve it to its canonical form.
+    def _gate_entity(self, entity: str, source_doc: str | None = None,
+                     declared_type: str | None = None, *,
+                     enforce: bool = True) -> tuple[str, str]:
+        """Sanitize, then apply the declared-identity gate. Returns (name, verdict).
 
         Sanitization strips path characters; the junk predicate runs BEFORE
         registration, so a leaked filename or a pipeline run name never
         enters the alias table. (It used to be registered first and rejected
         at write time, which is why 921 run-named canonicals existed.)
-        Returns "" for a rejected name; callers drop the fact.
         """
         if not entity:
-            return ""
+            return "", "junk"
         # Take last path component if slashes present
         entity = entity.strip().split("/")[-1].split("\\")[-1]
         # Remove any remaining path-unsafe characters
@@ -335,9 +376,23 @@ class FactExtractor:
         # Collapse whitespace
         entity = re.sub(r'\s+', ' ', entity).strip()
         if not entity or _is_junk_entity(entity, source_doc):
-            return ""
-        # Alias-resolve + self-register. Safe on unknowns (pass-through).
-        return _entity_normalize(entity)
+            return "", "junk"
+        return _identity_gate(entity, declared_type=declared_type,
+                              source_doc=source_doc, enforce=enforce)
+
+    def _sanitize_entity(self, entity: str, source_doc: str | None = None, *,
+                         enforce: bool = True,
+                         declared_type: str | None = None) -> str:
+        """Name an entity may file under, or "" when it may not.
+
+        `enforce=False` is for READS (`get_existing_facts`): the schema may
+        attach a variant to its canonical there, but refusing a name for lack
+        of a declared type would silently withhold existing facts from the
+        prompt, which degrades extraction instead of protecting the graph.
+        """
+        name, verdict = self._gate_entity(entity, source_doc, declared_type,
+                                          enforce=enforce)
+        return name if verdict not in ("junk", "candidate") else ""
 
     def write_fact_file(self, entity: str, category: str, facts_data: dict,
                         *, source_doc: str | None = None,
@@ -353,7 +408,13 @@ class FactExtractor:
 
         Returns the written path, `None` when the entity is rejected as junk.
         """
-        entity = self._sanitize_entity(entity, source_doc)
+        # `enforce=False` because this is not where a name enters: every name
+        # arriving from the model has been through `extract_from_document`,
+        # which is where the schema gate lives and where a rejected name is
+        # recorded. Re-deciding here would reject callers that have no
+        # `entity_type` to offer (fact-improvement, the classifiers) without
+        # stopping the minting this item is about.
+        entity = self._sanitize_entity(entity, source_doc, enforce=False)
         category = normalize_category(category)
 
         if not entity:

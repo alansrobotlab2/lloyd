@@ -21,9 +21,14 @@ The facts root lives at `app.paths.VAULT_FACTS_ROOT` (currently
 
 from __future__ import annotations
 
+import json
 import re
+import threading
+from pathlib import Path
 
+from app.entity_kind import KINDS as _ENTITY_KINDS
 from app.kg_store import StoreUnavailable, alias_kind as _alias_kind, store as _store
+from app.paths import VAULT_DERIVED_ROOT
 
 # ── Junk-entity guard ────────────────────────────────────────────────────────
 # The LLM extractor occasionally emits a *filename* or a code/description
@@ -407,3 +412,350 @@ def known_entities_in_text(text: str, limit: int = 60) -> list[str]:
             i += 1
     ordered = sorted(found.items(), key=lambda kv: kv[1])
     return [c for c, _ in ordered[:limit]]
+
+
+# ── Schema-gated identity (#537) ─────────────────────────────────────────────
+# The extractor mints a new entity row per surface-name variant, which is how
+# `Knowledge Graph` (539 facts) acquired `The Graph` (35), `Knowledge Graph
+# System` (34), `Entity Relationship Graph` (8), `Relationship Graph` (4) and
+# `Vault Relationship Graph` (1) with one edge among them, and `Autonomy Data
+# Pipeline` (169) acquired four more. Post-hoc name repair cannot reach those:
+# #400 ran the sweep's own `classify_pair` over 12 seed→expected pairs and got
+# `OTHER` on 11. So identity is declared instead — one hand-authored schema
+# naming each canonical, its type and the variants that mean it, and the write
+# path attaches to the declaration rather than inferring it.
+#
+# Ported from OaK's task kernel (arXiv 2608.22974), where extraction is
+# schema-constrained and cross-chunk entities merge on a declared primary key.
+# Only that identity component is ported: no OWL/HermiT, and the schema is one
+# global file rather than OaK's per-task draft.
+#
+# Two properties are load-bearing and are what the tests pin:
+#   * the match is exact against a declared key or alias — never a similarity
+#     score, because similarity is the mechanism that created the problem;
+#   * a rejected name is recorded, never silently dropped, and never merged
+#     into the nearest existing name.
+
+SCHEMA_FILENAME = "entity_identity_schema.json"
+# Types are `app.entity_kind.KINDS` plus the two spellings `entities.kind`
+# already carries in kg.sqlite. Deliberately not a second taxonomy — the
+# declared type is written to that same column, and the loader below refuses a
+# schema that diverges from it.
+SCHEMA_TYPES: tuple[str, ...] = (*_ENTITY_KINDS, "pipeline", "subsystem")
+ENTITY_CANDIDATES_PATH = VAULT_DERIVED_ROOT / "entity-candidates.jsonl"
+
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_CACHE: dict[str, dict] = {}
+_CANDIDATE_LOCK = threading.Lock()
+_KNOWN_CANDIDATES: set[str] = set()
+_KNOWN_CANDIDATES_LOADED = False
+_KEYS_REGISTERED = False
+
+
+class IdentitySchemaUnavailable(RuntimeError):
+    """The declared-identity schema cannot be read.
+
+    Raised rather than treated as "no declarations". A gate whose input is
+    missing reports success on every name that passes through it — this repo
+    has been bitten three times by exactly that shape (`graph-baseline.json`
+    rewrites itself; `_is_dependency_met` returns True for an unfindable
+    upstream; dream-consolidation gated on a lock file that never existed), so
+    the absence of this file is an error, not a permissive default.
+    """
+
+
+def _schema_path(path=None) -> Path:
+    if path is not None:
+        return Path(path)
+    return Path(__file__).resolve().parent.parent / "scripts" / "memory" / SCHEMA_FILENAME
+
+
+def _schema_key(name: str) -> str:
+    """Normalisation for DECLARED-key lookup: case, punctuation and whitespace
+    are folded; nothing else. Word order, wording and articles are significant
+    — folding those is where similarity inference would creep back in."""
+    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+
+
+def load_identity_schema(path=None) -> dict:
+    """The declared-identity schema, validated and cached on file mtime.
+
+    Raises `IdentitySchemaUnavailable` if it is missing, unparseable, or
+    declares a type outside `SCHEMA_TYPES`.
+    """
+    p = _schema_path(path)
+    key = str(p)
+    try:
+        mtime = p.stat().st_mtime
+    except OSError as e:
+        raise IdentitySchemaUnavailable(
+            f"declared-identity schema {p} is unreadable ({e}); the extraction "
+            f"write gate cannot run without it") from e
+    with _SCHEMA_LOCK:
+        cached = _SCHEMA_CACHE.get(key)
+        if cached and cached.get("_mtime") == mtime and path is None:
+            return cached
+    if not p.is_file():
+        raise IdentitySchemaUnavailable(f"declared-identity schema {p} does not exist")
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise IdentitySchemaUnavailable(f"declared-identity schema {p} is not valid JSON: {e}") from e
+    if not isinstance(data, dict) or not isinstance(data.get("entities"), list):
+        raise IdentitySchemaUnavailable(
+            f"declared-identity schema {p} needs an `entities` list")
+    declared = set(data.get("types") or ())
+    if not declared <= set(SCHEMA_TYPES):
+        raise IdentitySchemaUnavailable(
+            f"{p} declares types {sorted(declared - set(SCHEMA_TYPES))} that "
+            f"`entities.kind` does not carry")
+
+    index: dict[str, str] = {}
+    types: dict[str, str] = {}
+    for entry in data["entities"]:
+        canon = (entry.get("canonical") or "").strip()
+        if not canon:
+            raise IdentitySchemaUnavailable(f"{p}: an entity declares no canonical")
+        etype = entry.get("type")
+        if etype not in declared:
+            raise IdentitySchemaUnavailable(
+                f"{p}: {canon} declares type {etype!r}, not in the schema's types")
+        types.setdefault(canon, etype)
+        index.setdefault(_schema_key(canon), canon)
+        for alias in entry.get("aliases") or []:
+            a = (alias or "").strip()
+            if not a:
+                continue
+            prev = index.get(_schema_key(a))
+            if prev is not None and prev != canon:
+                # Two entries claiming one surface: the gate's answer would
+                # depend on file order, which is not a declaration.
+                raise IdentitySchemaUnavailable(
+                    f"{p}: {a!r} is declared as an alias of both {prev} and {canon}")
+            index[_schema_key(a)] = canon
+    data["_index"] = index
+    data["_types"] = types
+    data["_mtime"] = mtime
+    if path is None:
+        with _SCHEMA_LOCK:
+            _SCHEMA_CACHE[key] = data
+    return data
+
+
+def reset_identity_schema_cache() -> None:
+    """Forget the parsed schema, the registration flag and the candidate set."""
+    global _KNOWN_CANDIDATES_LOADED, _KEYS_REGISTERED
+    with _SCHEMA_LOCK:
+        _SCHEMA_CACHE.clear()
+    with _CANDIDATE_LOCK:
+        _KNOWN_CANDIDATES.clear()
+        _KNOWN_CANDIDATES_LOADED = False
+    _KEYS_REGISTERED = False
+
+
+def schema_identity(name: str, path=None) -> str | None:
+    """The canonical that DECLARES `name`, by key or alias; None if nothing does.
+
+    Exact after `_schema_key` only. This is the whole point: nothing here
+    guesses, so a name that merely resembles `Knowledge Graph` is not sent to
+    `Knowledge Graph`.
+    """
+    try:
+        data = load_identity_schema(path)
+    except IdentitySchemaUnavailable:
+        return None
+    return data["_index"].get(_schema_key(name))
+
+
+def schema_type_of(canonical: str, path=None) -> str | None:
+    try:
+        return load_identity_schema(path)["_types"].get(canonical)
+    except IdentitySchemaUnavailable:
+        return None
+
+
+def normalize_declared_type(raw) -> str | None:
+    """Map a model-supplied `entity_type` onto a declared type, or None.
+
+    Tight on purpose: `pipeline`/`Pipeline`/`PIPELINE` all pass, `data
+    pipeline` and `banana` do not. An unknown type is a candidate for review,
+    not a type the loader guesses at — the category vocabulary got a token
+    overlap fallback and produced 287 spellings.
+    """
+    c = _schema_key(raw)
+    if c in SCHEMA_TYPES:
+        return c
+    if c.endswith("s") and c[:-1] in SCHEMA_TYPES:
+        return c[:-1]
+    return None
+
+
+def _ensure_alias(surface: str, canonical: str, *, kind: str, origin: str) -> bool:
+    """Route `surface` to `canonical` unless it already does. True if written."""
+    if not surface or not canonical or surface == canonical:
+        return False
+    try:
+        st = _store()
+    except StoreUnavailable:
+        return False
+    # `for_canonical` is the indexed lookup; scanning every alias per call
+    # would make the gate cost O(3.8k) rows per extracted name. A surface that
+    # exists but routes elsewhere is not found here, so the write proceeds —
+    # the declaration is authoritative over what an extraction inferred.
+    for row in st.aliases.for_canonical(canonical):
+        if row["surface"] == surface and row["kind"] == kind and row["origin"] == origin:
+            return False
+    st.aliases.set(surface, canonical, kind=kind, origin=origin)
+    return True
+
+
+def _ensure_entity(name: str, type_: str | None) -> None:
+    """Register `name`; set its kind only where it has none.
+
+    A declaration must not stomp a kind another writer derived — it fills a
+    blank.
+    """
+    try:
+        st = _store()
+    except StoreUnavailable:
+        return
+    if type_ and st.entities.kinds().get(name) is None:
+        st.entities.register(name, kind=type_)
+    else:
+        st.entities.register(name)
+
+
+def register_schema_keys(path=None) -> int:
+    """Put every declared key and alias into the store; return rows written.
+
+    Idempotent — the second call writes nothing, so a nightly extractor can
+    call it every run without churning `created_at`. Declared aliases are
+    `kind='semantic'`: they are not a case or punctuation difference
+    (`Autonomy Pipeline` is not `Autonomy Data Pipeline` spelled differently),
+    they are a claim that two names are one thing, which is what the semantic
+    kind means and why the alias table carried exactly one of them before a
+    declaration existed.
+    """
+    data = load_identity_schema(path)
+    try:
+        st = _store()
+    except StoreUnavailable as e:
+        raise IdentitySchemaUnavailable(f"cannot register declared keys: {e}") from e
+    written = 0
+    for entry in data["entities"]:
+        canon = entry["canonical"]
+        _ensure_entity(canon, entry["type"])
+        for alias in entry.get("aliases") or []:
+            if _ensure_alias(alias.strip(), canon, kind="semantic", origin="schema"):
+                written += 1
+    if path is None:
+        # `PRAGMA data_version` tracks other connections; this process's own
+        # writes need an explicit drop or `entities.kinds()` answers stale.
+        st.invalidate_caches()
+    return written
+
+
+def record_entity_candidate(name: str, *, reason: str, source_doc: str | None = None,
+                            declared_type=None) -> None:
+    """Append a rejected name to the candidates sidecar.
+
+    This is the pressure valve the gate needs: refusing to mint is easy and
+    quietly stops remembering things. Each line is one entity the extractor
+    wanted to create and was not allowed to, for weekly human review — the
+    same shape as the sweep's ambiguous clusters (#338/#336).
+    """
+    global _KNOWN_CANDIDATES_LOADED
+    from datetime import datetime, timezone
+    path = ENTITY_CANDIDATES_PATH
+    with _CANDIDATE_LOCK:
+        if not _KNOWN_CANDIDATES_LOADED and path.exists():
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        try:
+                            _KNOWN_CANDIDATES.add(json.loads(line)["name"])
+                        except (ValueError, KeyError):
+                            continue
+            except OSError:
+                pass
+            _KNOWN_CANDIDATES_LOADED = True
+        if name in _KNOWN_CANDIDATES:
+            return
+        _KNOWN_CANDIDATES.add(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {"name": name, "reason": reason, "at": datetime.now(timezone.utc).isoformat()}
+        if source_doc:
+            row["source_doc"] = source_doc
+        if declared_type is not None:
+            row["declared_type"] = declared_type
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def gate_entity_name(name: str, *, declared_type=None, source_doc: str | None = None,
+                     enforce: bool = True, path=None) -> tuple[str, str]:
+    """Decide what an extracted entity name may become. Write-side only.
+
+    Returns `(entity, verdict)`; a verdict of `junk` or `candidate` comes back
+    with an empty name, meaning "do not file this".
+
+        schema      the name is a declared key or declared alias → canonical
+        alias       the store already routes it → canonical
+        typed_new   unclaimed, but carries a declared type → new typed entity
+        candidate   unclaimed and untyped → sidecar, nothing created
+        register    unclaimed, untyped, `enforce=False` → registered as before
+        junk        the existing junk predicate rejects it
+
+    In that order, and the order is the design: a declaration is asked before
+    the store, so a human saying "these two names are one thing" outranks
+    whatever a previous extraction inferred. Nothing between these answers
+    resembles a string metric, and read mode's bounded fuzzy match
+    (`resolve(mode="read")`) is untouched — #400/#512 own read-side identity.
+
+    `enforce=False` keeps `register`, the pre-#537 behaviour, for callers that
+    only need a name resolved (the extractor reading an entity's existing
+    facts back to put in the prompt): refusing a name there would withhold
+    context and degrade extraction rather than protect the graph. Writes leave
+    it at the default, because a gate you have to remember to enable is a gate
+    that gets forgotten.
+    """
+    global _KEYS_REGISTERED
+    raw = (name or "").strip()
+    if not raw:
+        return "", "junk"
+    try:
+        schema = load_identity_schema(path)
+    except IdentitySchemaUnavailable:
+        # Loud, not permissive — see IdentitySchemaUnavailable.
+        raise
+    if path is None and not _KEYS_REGISTERED:
+        # First gate in this process installs the declarations, so the alias
+        # table acquires its semantic rows from an extraction run rather than
+        # from someone remembering to run a script. Idempotent, so every
+        # nightly run can call it, and reads register too: a declaration is a
+        # fact about the store, not a write-side privilege.
+        _KEYS_REGISTERED = True
+        register_schema_keys()
+    canon = schema["_index"].get(_schema_key(raw))
+    if canon is not None:
+        if raw != canon:
+            _ensure_alias(raw, canon, kind="semantic", origin="schema")
+        _ensure_entity(canon, schema["_types"].get(canon))
+        return canon, "schema"
+    try:
+        st = _store()
+        hit = st.aliases.resolve(raw) or st.entities.lookup(raw)
+    except StoreUnavailable:
+        hit = None
+    if hit:
+        return hit, "alias"
+    type_ = normalize_declared_type(declared_type)
+    if type_ is not None:
+        _ensure_entity(raw, type_)
+        return raw, "typed_new"
+    if not enforce:
+        _ensure_entity(raw, None)
+        return raw, "register"
+    record_entity_candidate(raw, reason="no declared type", source_doc=source_doc,
+                            declared_type=declared_type)
+    return "", "candidate"
