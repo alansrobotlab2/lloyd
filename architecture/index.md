@@ -42,6 +42,7 @@ Lloyd is a voice-first AI assistant built on a **custom harness** with local vLL
 | MCP Tools Server | Python FastMCP server (port 8093). 26+ tools across vault,web,filesystem,system,backlog,and skills categories. | [[tools]] |
 | Voice Pipeline | Wake word + VAD + Whisper STT + speaker ID + Qwen3-TTS. WebSocket streaming to browser. | [[voice]] |
 | Mission Control | React dashboard at `/mc/`. Chat,token usage,API monitoring,services tab. | [[infrastructure]] |
+| Primary throughput | The 09-09 stall was cold re-prefills of long agent-loop prompts. FP8 KV fixed the cost; boot asserts, prefix-miss accounting with an alert, and a KV-budget gate on long-lived workers keep it fixed. | [[vllm-throughput-mitigation]] |
 | Obsidian Vault | Knowledge base at `~/obsidian/`. 7 segments: agents,memory,personal,work,projects,knowledge,skills. Per-segment QMD collections. | [[memory]] |
 | Memory System | 3-tier: periodic capture (15m),nightly reflection,real-time signal detection. Recall pipeline with intent classification,parallel fan-out,and local consolidation. | [[memory]] |
 | Recall Pipeline | Intent-aware search → parallel segment queries → 2B consolidation model → structured results. | [[memory]] |

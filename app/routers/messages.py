@@ -64,6 +64,7 @@ from prompt_builder import build_system_prompt
 from prefetch import prefetch_context_async, log_turn_prompt_budget
 from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
+from app import prefix_miss as _prefix_miss
 from app import sessions_io
 
 
@@ -651,6 +652,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # Persisted onto each tool-call/tool-result row so the UI can show
     # tokens-in/out/cached for every LLM-output row, not just the final one.
     current_iteration_stats: dict[str, Any] = {}
+    # Prefix-cache misses on long re-admissions (app/prefix_miss.py): folded
+    # per iteration from the same numbers the stats rows carry, logged as
+    # `brain1.prefix_miss`, and summed onto the turn's usage row.
+    miss_tracker = _prefix_miss.TurnMissTracker.for_turn(session_id, turn.turn_id)
+
+    def _miss_log(name: str, data: dict) -> None:
+        _event_log.log_event(session_id, name, data, turn_id=turn.turn_id)
 
     # Persist the user message up-front so transcripts stay coherent even
     # if the SDK crashes before emitting anything. Tag ambient-sourced
@@ -950,6 +958,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     "iteration": evt.get("iteration", 0),
                     "model": model,
                 }
+                _prefix_miss.record_iteration(
+                    miss_tracker, int(evt.get("iteration") or current_iteration),
+                    iter_usage, duration_ms=int(evt.get("duration_ms") or 0),
+                    log=_miss_log)
                 # Flush text segment to disk if tool calls follow it.
                 if evt.get("tool_calls") and full_response.strip():
                     seg_entry = build_assistant_text_entry(
@@ -1048,6 +1060,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 # whether it is working.
                 cache_read_tokens = usage.get("cache_read", 0) or 0
                 cache_create_tokens = usage.get("cache_create", 0) or 0
+                miss_summary = _prefix_miss.finish(miss_tracker, log=_miss_log)
 
                 try:
                     usage_store.record_usage(
@@ -1061,6 +1074,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         duration_ms=duration_ms,
                         duration_api_ms=None,
                         num_turns=num_turns_val,
+                        reprefill_tokens=miss_summary["reprefill_tokens"],
+                        prefix_misses=miss_summary["prefix_misses"],
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
@@ -1093,6 +1108,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     # without replaying the event log.
                     "tool_calls_total": caption_total,
                     "tool_calls_captioned": caption_done,
+                    # Prefix-cache misses (app/prefix_miss.py), on the
+                    # turn's stats for the same reason as the caption rate:
+                    # readable off disk without replaying the event log.
+                    **miss_summary,
                 })
                 # Structured verdict, when this turn was given a schema.
                 # Written onto `stream_stats` because that same dict object
@@ -1299,6 +1318,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             output_tokens=stream_stats["output_tokens"],
                             cache_create=stream_stats["cache_create"],
                             cache_read=stream_stats["cache_read"],
+                            **miss_tracker.summary(),
                         )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage (exception path): {ue}")
@@ -2052,9 +2072,21 @@ async def post_message(request: Request):
     try:
         full_response = ""
         turn_stats: dict | None = None
+        # Same miss accounting as the streaming path (app/prefix_miss.py):
+        # this endpoint is the third writer of a usage row.
+        miss_tracker = _prefix_miss.TurnMissTracker.for_turn(session_id)
+
+        def _miss_log(name: str, data: dict) -> None:
+            _event_log.log_event(session_id, name, data)
+
         async for evt in run_query(messages, options):
             if evt["type"] == "text_delta":
                 full_response += evt["text"]
+            elif evt["type"] == "assistant_message":
+                _prefix_miss.record_iteration(
+                    miss_tracker, int(evt.get("iteration") or 0),
+                    evt.get("usage") or {},
+                    duration_ms=int(evt.get("duration_ms") or 0), log=_miss_log)
             elif evt["type"] == "result":
                 usage = evt.get("usage") or {}
                 input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens", 0)
@@ -2070,6 +2102,7 @@ async def post_message(request: Request):
                     "duration_ms": evt.get("duration_ms"),
                     "num_turns": evt.get("num_turns"),
                     "model": model,
+                    **_prefix_miss.finish(miss_tracker, log=_miss_log),
                 }
                 try:
                     usage_store.record_usage(
@@ -2082,6 +2115,8 @@ async def post_message(request: Request):
                         cost_usd=0.0,
                         duration_ms=evt.get("duration_ms"),
                         num_turns=evt.get("num_turns"),
+                        reprefill_tokens=turn_stats["reprefill_tokens"],
+                        prefix_misses=turn_stats["prefix_misses"],
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")

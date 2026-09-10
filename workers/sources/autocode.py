@@ -41,6 +41,10 @@ from workers.queue import WorkQueue, QueueItem
 logger = logging.getLogger("lloyd-workers.automod")
 
 NAME = "autocode"
+#: A long-lived re-admitter: 60-100 iterations, each re-submitting a
+#: 150-200k context (the 09-09 203k round missed at iterations 44 and 76).
+#: Held by the pool's KV gate while the primary is over budget.
+LONG_LIVED = True
 # The queue dequeues `priority ASC`: a lower number runs sooner. Research and
 # distill jobs sit at 70 and arrive every few minutes, so at 80 the first
 # unattended round (job 4476, 2026-09-07) sat queued behind four of them with

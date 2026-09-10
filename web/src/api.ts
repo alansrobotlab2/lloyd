@@ -1253,7 +1253,8 @@ export const api = {
   workersStatus: (): Promise<{
     initialized: boolean
     workers_enabled?: boolean
-    pool?: { running: boolean; paused: boolean; slots: number; in_flight: Record<string, any>; in_flight_count: number }
+    pool?: { running: boolean; paused: boolean; slots: number; in_flight: Record<string, any>; in_flight_count: number
+             kv_gate?: KvGateState }
     depth?: Record<string, Record<string, number>>
     sources?: Array<{ name: string; enabled: boolean; interval_seconds?: number; max_inflight?: number; depth?: Record<string, number> }>
   }> => fetch(`${API_BASE}/workers/status`).then(r => r.json()),
@@ -1809,6 +1810,27 @@ export interface VllmEngine {
   prefix_cache_hit_rate_recent?: number | null
   spec_decode_hit_rate?: number | null
   spec_decode_hit_rate_recent?: number | null
+  /** Primary only: KV pressure from the backend's background sampler
+   *  (app/engine_pressure.py) — a p90 over the window, which one 2-second
+   *  reading cannot show. Absent on other engines and on an older backend. */
+  pressure?: EnginePressure
+}
+
+export interface EnginePressure {
+  alias: string
+  base_url: string
+  sampling: boolean
+  window_s: number
+  samples: number
+  kv_now: number | null
+  /** The middle is residents; the tail is cold prefills, which reference
+   *  ~2.5x their resident footprint while they build. */
+  kv_p50: number | null
+  kv_p90: number | null
+  kv_max: number | null
+  warn_line: number
+  stale: boolean
+  error: string | null
 }
 
 export interface GpuInfo {
@@ -1970,12 +1992,39 @@ export interface DashboardUsage {
   last_7d: Record<string, number>
   daily: UsageBucket[]
   by_model_24h: Array<{ model: string } & Record<string, number>>
+  /** Prefix-cache misses on long re-admissions (app/prefix_miss.py). Absent
+   *  on a backend that predates them. */
+  prefix_misses_1h?: PrefixMissSummary
+  prefix_misses_24h?: PrefixMissSummary
+}
+
+export interface PrefixMissSummary {
+  turns: number
+  /** Rows that carry the measurement at all. Older rows, and turns whose
+   *  cache_read never read non-zero, are NULL and not counted here. */
+  turns_measured: number
+  turns_with_misses: number
+  prefix_misses: number
+  reprefill_tokens: number
+  worst_turn_reprefill: number
+}
+
+/** The worker pool's KV budget gate (workers/pool.py). */
+export interface KvGateState {
+  enabled: boolean
+  max_kv_usage: number
+  engaged: boolean
+  engaged_since: string | null
+  engagements: number
+  kv_usage: number | null
+  held_sources: string[]
 }
 
 export interface WorkersState {
   enabled: boolean
   pool: { running: boolean; paused?: boolean; slots?: number; in_flight_count?: number
-          in_flight?: Record<string, { source: string; kind: string; started_at: string }> }
+          in_flight?: Record<string, { source: string; kind: string; started_at: string }>
+          kv_gate?: KvGateState }
   depth_by_source: Record<string, Record<string, number>>
   by_state: Record<string, number>
   open_total: number

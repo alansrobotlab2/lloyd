@@ -25,6 +25,14 @@ The probe covers both runtimes:
   * vLLM  — `/v1/models` entries carry `root` (the checkpoint directory).
   * llama.cpp — `/v1/models` carries only the `--alias`, so the real
     identity comes from `/props` (`model_path`).
+
+The right model can still be served wrongly. `expect_kv_cache_dtype` and
+`expect_kv_pool_tokens_min` check what the engine says its KV cache is
+(`vllm:cache_config_info` on /metrics): the 2026-09-10 FP8 cutover — a
+692,263-token pool where BF16 held 398,175 — is what fixed the 09-09 stall,
+and a boot that lands back on BF16 answers every request correctly while
+undoing it. `agent-services/bin/flash-next-bootfacts.sh` asserts the same two
+things against the boot log.
 """
 
 from __future__ import annotations
@@ -85,6 +93,53 @@ async def probe_served_model(base_url: str, *, timeout: float = PROBE_TIMEOUT_SE
     return " ".join(uniq)
 
 
+async def probe_kv_config(base_url: str, *, timeout: float = PROBE_TIMEOUT_SECONDS
+                          ) -> dict[str, Any] | None:
+    """The engine's own account of its KV cache — dtype, pool, page — or None.
+
+    Never raises, for the same reason `probe_served_model` does not.
+    """
+    from app.vllm_metrics import cache_config_from_text
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as cli:
+            resp = await cli.get(f"{base_url.rstrip('/')}/metrics")
+        if resp.status_code >= 400:
+            return None
+        return cache_config_from_text(resp.text)
+    except Exception as exc:
+        logger.debug("model_identity: /metrics on %s failed: %s", base_url, exc)
+        return None
+
+
+def judge_kv(cfg: dict[str, Any], kv: dict[str, Any] | None,
+             reachable: bool) -> tuple[str, str]:
+    """(status, detail) for a slot's KV cache against its config.
+
+    ok / REGRESSION / unreachable / unknown (answers, but publishes no
+    cache_config_info) / unchecked (nothing declared).
+    """
+    expect_dtype = str(cfg.get("expect_kv_cache_dtype") or "").strip().lower()
+    expect_min = int(cfg.get("expect_kv_pool_tokens_min") or 0)
+    if not expect_dtype and expect_min <= 0:
+        return "unchecked", ""
+    if kv is None:
+        if not reachable:
+            return "unreachable", "engine did not answer"
+        return "unknown", "engine publishes no vllm:cache_config_info"
+    dtype = str(kv.get("cache_dtype") or "").lower()
+    pool = kv.get("kv_cache_size_tokens")
+    pool_s = f"{pool:,}" if isinstance(pool, int) else "?"
+    problems: list[str] = []
+    if expect_dtype and not dtype.startswith(expect_dtype):
+        problems.append(f"cache_dtype={dtype or '?'} (expected {expect_dtype})")
+    if expect_min > 0 and (not isinstance(pool, int) or pool < expect_min):
+        problems.append(f"pool={pool_s} tokens (expected >= {expect_min:,})")
+    if problems:
+        return "REGRESSION", "; ".join(problems)
+    return "ok", f"cache_dtype={dtype} pool={pool_s} tokens"
+
+
 async def verify_models() -> list[dict[str, Any]]:
     """Check every configured slot against its `expect_model`.
 
@@ -110,6 +165,9 @@ async def verify_models() -> list[dict[str, Any]]:
             "expect": expect,
             "served": "",
             "status": "unchecked",
+            "kv": None,
+            "kv_status": "unchecked",
+            "kv_detail": "",
         }
         if not base_url:
             rows.append(row)
@@ -125,6 +183,9 @@ async def verify_models() -> list[dict[str, Any]]:
             row["status"] = "ok"
         else:
             row["status"] = "MISMATCH"
+        if cfg.get("expect_kv_cache_dtype") or cfg.get("expect_kv_pool_tokens_min"):
+            row["kv"] = await probe_kv_config(base_url)
+            row["kv_status"], row["kv_detail"] = judge_kv(cfg, row["kv"], bool(served))
         rows.append(row)
 
     LAST_RESULT.clear()
@@ -145,7 +206,8 @@ async def verify_models_with_retry(
     rows: list[dict[str, Any]] = []
     for attempt in range(1, attempts + 1):
         rows = await verify_models()
-        if not any(r["status"] == "unreachable" for r in rows):
+        if not any(r["status"] == "unreachable" or r.get("kv_status") == "unreachable"
+                   for r in rows):
             break
         if attempt < attempts:
             await asyncio.sleep(delay_seconds)
@@ -167,4 +229,16 @@ async def verify_models_with_retry(
             logger.info(
                 "model identity ok: alias %r serves %r", row["alias"], row["expect"]
             )
+        if row.get("kv_status") == "REGRESSION":
+            logger.error(
+                "KV cache REGRESSION: alias %r at %s serves %s — the FP8 cutover "
+                "(2026-09-10) is what fixed the 09-09 stall; check KV_CACHE_DTYPE "
+                "and VLLM_VENV in agent-services/supervisor/conf.d/"
+                "agent-llm-primary.conf, then flash-next-bootfacts.sh",
+                row["alias"], row["base_url"], row["kv_detail"],
+            )
+        elif row.get("kv_status") == "unknown":
+            logger.warning("model KV: alias %r — %s", row["alias"], row["kv_detail"])
+        elif row.get("kv_status") == "ok":
+            logger.info("model KV ok: alias %r %s", row["alias"], row["kv_detail"])
     return rows

@@ -55,6 +55,7 @@ from datetime import datetime
 from typing import Any, AsyncIterator
 
 from app import event_log as _event_log
+from app import prefix_miss as _prefix_miss
 from app.sessions_io import _append_messages
 from app.transcript_entries import (
     build_assistant_text_entry,
@@ -109,6 +110,10 @@ class _RunRecorder:
         self.persisted_pairs: set[str] = set()
         self.saw_result = False
         self.stop_reason: str | None = None
+        # Prefix-cache misses, folded exactly as the chat path folds them
+        # (app/prefix_miss.py) — one definition, two writers.
+        self.miss = _prefix_miss.TurnMissTracker.for_turn(
+            session_id, turn_id, label=source)
 
     # -- helpers ---------------------------------------------------------
     async def _append(self, entries: list[dict]) -> None:
@@ -126,6 +131,36 @@ class _RunRecorder:
                                  turn_id=self.turn_id)
         except Exception as exc:      # noqa: BLE001
             logger.warning("run_recorder: log_event failed for %s: %s",
+                           self.session_id, exc)
+
+    def _record_usage(self, stats: dict) -> None:
+        """A usage row for a direct background run, as every chat turn has.
+
+        Until prefix-miss accounting these two paths wrote no usage row at
+        all, so `usage.db` — and the dashboard's token panel — never saw an
+        autonomy task or a `run_prompt_on_primary` job, and a per-turn miss
+        count would have had nowhere to live for one of the three paths that
+        run an agent loop.
+        """
+        if not (stats.get("input_tokens") or stats.get("output_tokens")):
+            return
+        try:
+            import usage_store
+            usage_store.record_usage(
+                session_id=self.session_id,
+                model=self.model or "primary",
+                input_tokens=int(stats.get("input_tokens") or 0),
+                output_tokens=int(stats.get("output_tokens") or 0),
+                cache_create=int(stats.get("cache_create") or 0),
+                cache_read=int(stats.get("cache_read") or 0),
+                cost_usd=0.0,
+                duration_ms=stats.get("duration_ms"),
+                num_turns=stats.get("num_turns"),
+                reprefill_tokens=stats.get("reprefill_tokens"),
+                prefix_misses=stats.get("prefix_misses"),
+            )
+        except Exception as exc:      # noqa: BLE001 — accounting is not the run
+            logger.warning("run_recorder: usage row failed for %s: %s",
                            self.session_id, exc)
 
     # -- lifecycle -------------------------------------------------------
@@ -185,6 +220,9 @@ class _RunRecorder:
                 "iteration": evt.get("iteration", 0),
                 "model": self.model,
             }
+            _prefix_miss.record_iteration(
+                self.miss, int(evt.get("iteration") or self.iteration), usage,
+                duration_ms=int(evt.get("duration_ms") or 0), log=self._log)
             if evt.get("tool_calls") and self.text.strip():
                 await self._append([build_assistant_text_entry(
                     self.text, timestamp=datetime.now().isoformat(),
@@ -243,6 +281,7 @@ class _RunRecorder:
                 "duration_ms": evt.get("duration_ms", 0),
                 "num_turns": evt.get("num_turns", 0),
                 "model": self.model,
+                **_prefix_miss.finish(self.miss, log=self._log),
             }
             self._log("brain1.result_message", {
                 "usage": {k: stats[k] for k in
@@ -254,6 +293,7 @@ class _RunRecorder:
                 "response_chars": len(self.text),
                 "had_tool_calls": bool(self.tool_calls),
             })
+            self._record_usage(stats)
             tail = self._unpersisted_pairs(datetime.now().isoformat())
             final_text = self.text or str(evt.get("response_text") or "")
             if final_text.strip():

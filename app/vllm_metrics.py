@@ -479,3 +479,57 @@ def configured_engines() -> dict[str, str]:
         if base:
             engines[alias] = base
     return engines
+
+
+# ── Stateless readers ─────────────────────────────────────────────────
+
+
+def gauges_from_text(text: str) -> dict[str, Any]:
+    """The instantaneous gauges out of one /metrics body, and nothing else.
+
+    `_snapshot_from_text` is the dashboard's reader and it is stateful: every
+    call replaces the per-engine baseline its rates are measured against. A
+    second caller polling through it would halve the dashboard's rate window
+    and make both readings wrong, so `app/engine_pressure.py` — which samples
+    the primary every few seconds for the worker pool's KV gate and the
+    prefix-miss alert — reads through this instead. It touches no module
+    state.
+    """
+    parsed = parse_prometheus(text)
+    if any(k.startswith("llamacpp:") for k in parsed):
+        parsed = _translate_llamacpp(parsed)
+    running = _sum_all(parsed, "vllm:num_requests_running")
+    waiting = _sum_all(parsed, "vllm:num_requests_waiting")
+    return {
+        "kv_cache_usage": _sum_all(parsed, "vllm:kv_cache_usage_perc"),
+        "requests_running": int(running) if running is not None else None,
+        "requests_waiting": int(waiting) if waiting is not None else None,
+    }
+
+
+def cache_config_from_text(text: str) -> dict[str, Any] | None:
+    """What the engine says its KV cache *is*: dtype, pool size, page size.
+
+    vLLM publishes this as the labels of one constant gauge —
+    `vllm:cache_config_info{cache_dtype="fp8",kv_cache_size_tokens="692263",
+    block_size="3200",...} 1` — the same pool the boot log's "GPU KV cache
+    size" line reports, read from the running engine rather than from a log
+    that rotates. None when the series is absent: llama.cpp, or a vLLM too
+    old to publish it.
+    """
+    series = parse_prometheus(text).get("vllm:cache_config_info")
+    if not series:
+        return None
+    labels = series[0][0]
+
+    def _int(key: str) -> int | None:
+        try:
+            return int(float(labels.get(key, "")))
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "cache_dtype": labels.get("cache_dtype") or None,
+        "kv_cache_size_tokens": _int("kv_cache_size_tokens"),
+        "block_size": _int("block_size"),
+    }

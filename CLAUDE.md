@@ -1538,7 +1538,9 @@ what the engine reports (vLLM `/v1/models`.root, llama.cpp `/props`.model_path).
 cold 35B takes minutes to load — and logs ERROR on a mismatch.
 `GET /api/models/identity?refresh=1` re-probes on demand. A slot with no
 `expect_model` reports `unchecked`, so **update it whenever you swap a slot's
-occupant** or the check is inert.
+occupant** or the check is inert. `expect_kv_cache_dtype` /
+`expect_kv_pool_tokens_min` are the same idea one level down — the right model
+served the wrong way — see "Primary throughput" below.
 
 Current occupants: primary `:8096` = Qwen3.8-Flash-Next (vLLM, GPU 1);
 secondary `:8091` = Qwen3.6-35B-A3B UD-Q3_K_XL (llama.cpp, GPU 2, single-tenant
@@ -1563,6 +1565,68 @@ means "whatever spawned me"; the harness ships it in the MCP request `_meta`
 and has no other way to know. Pin an alias there to override. Empty
 `base_url` resolves from `models:` for the chosen model — *not* from
 `default_model_base_url()`, which always returns the primary's endpoint.
+
+## Primary throughput: prefix misses, KV pressure, the KV gate
+
+`architecture/vllm-throughput-mitigation.md` is the long version, with the
+measurements.
+
+The 09-09 "5 tok/s" chat was cold re-prefills. An agent loop re-submits its
+whole 100-200k context every iteration, and when that prefix had been
+evicted between iterations the engine prefilled it again, one 8,192-token
+chunk per step, while every other request got one token per step. The FP8 KV
+cutover (2026-09-10: a 692,263-token pool, 3200-token pages) is what fixed
+it. Four things keep it fixed, and none of them touches the engine:
+
+- **The fix is pinned and asserted.** `agent-llm-primary.conf`'s
+  `environment=` carries `VLLM_VENV` and `KV_CACHE_DTYPE=fp8` — the
+  launcher's own fallbacks are the BF16 worker build.
+  `flash-next-bootfacts.sh` exits 1 when the last boot's engine config is not
+  `kv_cache_dtype=fp8` or its pool is under 600,000 tokens (2 while the boot
+  is still loading), and `models.primary.expect_kv_cache_dtype` /
+  `expect_kv_pool_tokens_min` make the boot sweep read
+  `vllm:cache_config_info` and log ERROR on a BF16 boot.
+- **A miss is counted.** `app/prefix_miss.py`, called by all three usage
+  writers (streaming chat, sync chat, `run_recorder`): an iteration ≥ 3 whose
+  ≥100k prompt is less than half cached is a `brain1.prefix_miss` event, the
+  turn's usage row carries `reprefill_tokens` and `prefix_misses`, and the
+  dashboard's Tokens panel shows the last 24 h. Three rules, each one of the
+  investigation's traps: iterations 1–2 never count; a turn that reads zero
+  on every counted iteration is **unmeasured** (NULL), because that is
+  exactly what the unparsed field looked like before `5531f21`; and only miss
+  iterations sum into `reprefill_tokens` — a healthy iteration re-prefills
+  its appended tail (5–7k), and sixty of those must not read as 300k.
+- **It is announced, once.** A turn whose misses pass 100k while another
+  request was running fires `announce()` on the guardian fan-out — journal
+  and toast, voice off by config — once per turn and at most every 30
+  minutes. A cold prefill on an otherwise idle engine hurts nobody and says
+  nothing.
+- **Long-lived jobs wait for room.** The pool's KV gate
+  (`architecture/workers.md` §2): sources marked `LONG_LIVED` are not claimed
+  while the primary's one-minute **median** KV is over 60%. The median, not
+  the last sample, because the gauge lies during a cold prefill: a 200k prompt
+  being built drives it from 0.20 to 0.96 and it falls to 0.50 the moment
+  the prompt is in (~2.5x its resident footprint — the hybrid model's
+  prefix-cache checkpoints). It fails open.
+
+`app/engine_pressure.py` samples the primary's /metrics every 5 s for all
+three readers — through a stateless parser, so the dashboard's rate baseline
+is untouched — and the dashboard's KV meter carries its 5-minute p90 against
+a 65% line. The gauge counts blocks *referenced by running requests*; a
+paused turn's cached prefix sits in the free remainder, which is where it
+has to survive until its next iteration.
+
+Two smaller changes rode along. The compaction wall moved,
+`compaction.microcompact` 0.8/0.6 → 0.72/0.52 (≈151k → 109k of the 210k
+threshold, same band width), and the in-turn pass reads those fractions now —
+it ran on `RunOptions` defaults before. And the Inner Voice observer's calls
+take the priority of the turn they watch, so a chat's observer runs at 0
+instead of queueing at 1 behind every worker iteration.
+
+`agent-services/bin/bench-admission-stall.py` is the durable reproducer
+(`verify`: a warm loop and a cold re-admission through the production
+accounting; `cold`: the chunk-budget A/B shape). Run it with nothing else on
+:8096; it refuses a busy engine.
 
 ## Voice output
 

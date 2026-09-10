@@ -44,6 +44,10 @@ from workers.sources._common import (
 logger = logging.getLogger("lloyd-workers.deep-research")
 
 NAME = "deep-research"
+#: A long-lived re-admitter: 14-29 iterations at 120k+ (it missed at
+#: iterations 16 and 19 on 09-09). Held by the pool's KV gate while the
+#: primary is over budget.
+LONG_LIVED = True
 #: Routine research tier. The automod sources sit below it deliberately —
 #: `autocode` at 40 and `autotriage` at 55 — because the queue
 #: dequeues `priority ASC` and a round is rarer and more valuable than a note.

@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Optional
 
+from app import engine_pressure
 from app.harness.policy import current_effect_scope, current_scope
 from app.sessions_io import current_run_sessions
 from workers.evidence import gaps_key, verify_bundle
@@ -36,6 +37,55 @@ _DEFAULT_MAX_DURATION_SECONDS = 900
 # The statuses a run record may carry. `skipped` is not a failure and not a
 # success: it means the source looked and there was nothing to do.
 RUN_STATUSES = ("success", "failed", "skipped")
+
+# ── KV budget gate ────────────────────────────────────────────────────
+#
+# The 09-09 stall was long-lived agent loops evicting each other's prefixes.
+# Every iteration re-submits a 100-200k context, and between iterations a
+# turn's prefix sits only in the engine's free pool, where the next
+# allocation can take it. Three or four of those resident at once on a 398k
+# pool and one of them came back cold on almost every iteration
+# (architecture/vllm-throughput-mitigation.md). Short-lived jobs never came
+# back to miss, which is why seven youtube digests at 81.5% KV ran clean the
+# night before.
+#
+# So the gate decides *who* starts, not how many: a source that declares
+# `LONG_LIVED = True` is not claimed while the primary's KV usage is above
+# `workers.kv_gate.max_kv_usage`, and every other source claims as before. A
+# hold is not a failure — the item stays queued with its attempt intact — and
+# it reads the background sampler, never the engine, so a claim does not wait
+# on an HTTP call. No reading (sampler off, engine down, stale sample) means
+# the gate is open: a pressure signal that failed closed would turn an
+# unreachable /metrics into a stopped pool.
+#
+# It judges the MEDIAN over the last minute, not the last sample. Measured on
+# the FP8 build on 2026-09-10 (bench-admission-stall.py): a cold 200k prefill
+# drives `kv_cache_usage_perc` from 0.20 to 0.96 over its 21 s and it falls
+# to 0.50 the moment the prompt is in — while a prompt is being built this
+# hybrid model references ~2.5x its resident footprint. On the last sample
+# the gate would engage on every cold prefill and hold for its duration; on
+# a one-minute median it sees what it is for, the residents.
+
+DEFAULT_KV_GATE_MAX = 0.60
+DEFAULT_KV_GATE_WINDOW_S = 60.0
+
+
+def kv_gate_config() -> dict[str, Any]:
+    try:
+        from app.config import CONFIG
+        return dict((CONFIG.get("workers") or {}).get("kv_gate") or {})
+    except Exception:
+        return {}
+
+
+def long_lived_sources(registry: dict[str, Any]) -> list[str]:
+    """Sources that declare themselves long-lived re-admitters.
+
+    Static, by design: a module attribute is a claim a reviewer can read,
+    where a runtime measurement of context size would be one more guess.
+    """
+    return sorted(name for name, src in registry.items()
+                  if getattr(src, "LONG_LIVED", False))
 
 
 def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
@@ -158,6 +208,14 @@ class WorkerPool:
         self._workers: list[asyncio.Task] = []
         self._scheduler_task: Optional[asyncio.Task] = None
         self._in_flight: dict[int, dict[str, Any]] = {}
+        # KV gate state, reported by `status()`. See `_kv_gate_held`.
+        self._kv_gate: dict[str, Any] = {
+            "engaged": False,
+            "engaged_since": None,
+            "engagements": 0,
+            "kv_usage": None,
+            "held_sources": [],
+        }
 
     @property
     def worker_ids(self) -> list[str]:
@@ -226,7 +284,48 @@ class WorkerPool:
                 for k, v in self._in_flight.items()
             },
             "in_flight_count": len(self._in_flight),
+            "kv_gate": self.kv_gate_status(),
         }
+
+    def kv_gate_status(self) -> dict[str, Any]:
+        cfg = kv_gate_config()
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "max_kv_usage": float(cfg.get("max_kv_usage", DEFAULT_KV_GATE_MAX)),
+            "window_seconds": float(cfg.get("window_seconds", DEFAULT_KV_GATE_WINDOW_S)),
+            **self._kv_gate,
+            "held_sources": list(self._kv_gate["held_sources"]),
+        }
+
+    def _kv_gate_held(self, registry: dict[str, Any]) -> list[str]:
+        """Sources this claim must skip because the primary's KV is over budget.
+
+        Called before every claim. Logs only on a transition, so a gate that
+        stays engaged for an hour is two lines, not 1,800.
+        """
+        cfg = kv_gate_config()
+        enabled = bool(cfg.get("enabled", True))
+        limit = float(cfg.get("max_kv_usage", DEFAULT_KV_GATE_MAX))
+        window = float(cfg.get("window_seconds", DEFAULT_KV_GATE_WINDOW_S))
+        # A fresh sample is the precondition; the median is the reading.
+        kv = None
+        if enabled and engine_pressure.latest() is not None:
+            kv = engine_pressure.kv_percentile(0.5, window=window)
+        engaged = enabled and kv is not None and kv > limit
+        held = long_lived_sources(registry) if engaged else []
+        gate = self._kv_gate
+        gate["kv_usage"] = kv
+        if engaged and not gate["engaged"]:
+            gate.update(engaged=True, engagements=gate["engagements"] + 1,
+                        engaged_since=datetime.now(timezone.utc).isoformat(),
+                        held_sources=held)
+            logger.info("KV gate engaged: primary KV %.0f%% > %.0f%% — holding %s",
+                        100 * kv, 100 * limit, ", ".join(held) or "nothing")
+        elif not engaged and gate["engaged"]:
+            logger.info("KV gate released: primary KV %s",
+                        "unknown" if kv is None else f"{100 * kv:.0f}%")
+            gate.update(engaged=False, engaged_since=None, held_sources=[])
+        return held
 
     def _carry_gaps(self, item: QueueItem, task_id: Optional[str],
                     bundle: dict) -> None:
@@ -303,8 +402,9 @@ class WorkerPool:
                 if src.get("max_inflight") is not None
             }
 
+            held = self._kv_gate_held(SOURCE_REGISTRY)
             item = await asyncio.to_thread(
-                self.queue.claim_next, worker_id, max_inflight)
+                self.queue.claim_next, worker_id, max_inflight, held)
             if not item:
                 await asyncio.sleep(self.poll_idle_seconds)
                 continue

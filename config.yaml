@@ -199,6 +199,15 @@ mcp_servers:
     url: http://127.0.0.1:8500/mcp
 model:
   default: primary
+# The primary's KV usage and request count, sampled in the background
+# (app/engine_pressure.py). Read by the worker pool's KV gate, by the
+# prefix-miss alert ("was anything else running?"), and by the dashboard's KV
+# gauge: p90 over `window_seconds`, with a line at `kv_warn_line`.
+engine_pressure:
+  enabled: true
+  sample_interval_seconds: 5
+  window_seconds: 300
+  kv_warn_line: 0.65
 compaction:
   mode: summarize
   summary_model: primary
@@ -211,8 +220,18 @@ compaction:
     # under `target_fraction`, spilling each to disk first so the marker
     # can name the file. The old count-only rule cleared 93 of 97 results
     # on a review using 17% of its context window.
-    trigger_fraction: 0.8
-    target_fraction: 0.6
+    #
+    # 0.8/0.6 -> 0.72/0.52 on 2026-09-10 (architecture/vllm-throughput-
+    # mitigation.md, Layer 2): the trigger drops from ~168k to ~151k of the
+    # 210k threshold, and the target moves with it so the band — and so how
+    # often a long round compacts — stays 0.2 wide. Every compaction rewrites
+    # the middle of the prompt and forces a cold re-prefill of what follows,
+    # so narrowing the band would trade resident KV for more of exactly those.
+    # A cost knob: less resident KV per long turn, a little less history. The
+    # in-turn pass reads these too (app/mcp_discovery.py), which it did not
+    # before this change.
+    trigger_fraction: 0.72
+    target_fraction: 0.52
     # Floor on results kept inline. A code review's working set is 15-25
     # files; the old default of 5 was below the point of usefulness.
     keep_recent_tools: 15
@@ -278,6 +297,22 @@ harness:
   # capacity per turn. false restores the old silence.
   background_recording:
     enabled: true
+  # Prefix-cache misses on long re-admissions (app/prefix_miss.py). An
+  # iteration >= 3 whose prompt is >= 100k tokens and < 50% cached was
+  # re-prefilled from cold — the 09-09 stall, one 8k chunk per engine step
+  # while every other request waits. Each is logged as `brain1.prefix_miss`,
+  # summed onto the turn's usage row (`reprefill_tokens`, `prefix_misses`)
+  # and counted on the dashboard. A turn whose misses pass
+  # `announce_reprefill_tokens` while another request was running is
+  # announced once — journal and toast, news rather than an incident — and
+  # not more often than the cooldown. Voice is off: a slow iteration is not
+  # worth a sentence said aloud in the room.
+  prefix_miss:
+    enabled: true
+    announce: true
+    announce_reprefill_tokens: 100000
+    announce_cooldown_seconds: 1800
+    announce_voice: false
   # Tool-call summaries. Adds a `summary` string parameter to every
   # advertised tool — a short phrase the model writes describing what the
   # call is doing, rendered beside the tool name in the chat and Inner
@@ -411,6 +446,15 @@ models:
     # GET /api/models/identity. Update it whenever the slot's occupant
     # changes, otherwise the check just cries wolf.
     expect_model: Qwen3.8-Flash-Next
+    # KV-cache regression check, same sweep. The FP8 cutover (2026-09-10) is
+    # what fixed the 09-09 stall — a 692,263-token pool where BF16 held
+    # 398,175 — and a boot that silently lands back on BF16 (a reverted conf,
+    # a dropped KV_CACHE_DTYPE, the old venv) serves perfectly well while
+    # undoing it. Read from the engine's own vllm:cache_config_info and logged
+    # at ERROR on a miss; agent-services/bin/flash-next-bootfacts.sh asserts
+    # the same two things against the boot log.
+    expect_kv_cache_dtype: fp8
+    expect_kv_pool_tokens_min: 600000
     env:
       ANTHROPIC_API_KEY: no-key-required
       ANTHROPIC_BASE_URL: http://127.0.0.1:8096
@@ -598,6 +642,19 @@ workers:
   enabled: true
   max_attempts: 3
   slots: 2
+  # KV budget gate (workers/pool.py). A source that declares LONG_LIVED —
+  # autocode, autotriage, deep-research: tens of iterations, each
+  # re-submitting a 100-200k context — is not claimed while the primary's KV
+  # usage is above `max_kv_usage`; everything else claims as before. A held
+  # item stays queued with its attempt intact, and no reading means open.
+  # The reading is the median over `window_seconds`, because a cold 200k
+  # prefill alone drives the gauge from 0.20 to 0.96 for its ~21 s (measured
+  # 2026-09-10) and the gate is about residents, not prefills.
+  # Visible as `pool.kv_gate` on /api/workers/status and on the dashboard.
+  kv_gate:
+    enabled: true
+    max_kv_usage: 0.60
+    window_seconds: 60
   sources:
     # OFF since 2026-09-08. This source promoted generated prompt variants
     # straight over the live `lloyd/SOUL.md` / `MEMORY.md` every hour with no

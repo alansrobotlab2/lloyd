@@ -321,8 +321,15 @@ async def _post_chat_completion_with_tools(
     cannot return free-form content under this contract.
 
     `priority` is vLLM's scheduling priority, where LOWER means sooner.
-    The primary submits at 0, so the observer must submit at 1 or higher
-    to actually yield to the agent it is watching.
+    Callers pass the priority of the turn being watched (`install_observer`
+    takes it from the turn's RunOptions), so a chat's second opinion runs
+    at 0 beside the chat rather than queueing at 1 behind every worker
+    iteration on the engine, and a worker's runs at the worker's 1. The old
+    rule — always 1, "to yield to the agent it is watching" — was guarding
+    something equal priority already guarantees: vLLM orders equal-priority
+    requests by arrival, so an observer call cannot preempt the in-flight
+    request of the turn that spawned it. None falls back to
+    `inner_voice.observer.priority`.
     """
     url = f"{base_url}/v1/chat/completions"
     if priority is None:
@@ -350,6 +357,7 @@ async def extract_goal_card(
     *,
     cfg: dict[str, Any] | None = None,
     recent_exchanges: list[dict[str, str]] | None = None,
+    priority: int | None = None,
 ) -> dict[str, Any] | None:
     """Run one LLM call at turn start to extract the goal card.
 
@@ -385,6 +393,7 @@ async def extract_goal_card(
             tools=GOAL_EXTRACTION_TOOLS,
             max_tokens=max_tokens,
             timeout_seconds=timeout,
+            priority=priority,
         )
     except Exception as e:  # noqa: BLE001 — best-effort
         logger.warning("[iv.observer] goal extraction failed: %s", e)
@@ -770,6 +779,7 @@ async def _call_observer(
     user_prompt: str,
     cfg: dict[str, Any] | None = None,
     timeout_override: float | None = None,
+    priority: int | None = None,
 ) -> ObserverDecision:
     """One observer LLM call. Returns a parsed ObserverDecision.
 
@@ -809,6 +819,7 @@ async def _call_observer(
             tools=LEVER_TOOLS,
             max_tokens=max_tokens,
             timeout_seconds=timeout,
+            priority=priority,
         )
         usage = body.get("usage") or {}
         in_tok = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
@@ -907,6 +918,9 @@ class ObserverState:
     bypass_interventions_used: int = 0
     sequence: int = 0
     cfg: dict[str, Any] = field(default_factory=dict)
+    # vLLM scheduling priority for this turn's observer calls: the watched
+    # turn's own (see `_post_chat_completion_with_tools`). None = config.
+    priority: int | None = None
     closed: bool = False
     # Goal card extracted at turn start (None on extraction failure or
     # when extraction is disabled).
@@ -1828,6 +1842,7 @@ def install_observer(
     persistent_goal: dict[str, Any] | None = None,
     prior_turn_interventions: list[dict[str, Any]] | None = None,
     max_turns: int = 0,
+    priority: int | None = None,
 ) -> ObserverState:
     """Install observer hooks onto a HookRegistry for one primary turn.
 
@@ -1884,6 +1899,7 @@ def install_observer(
         persistent_goal=pg,
         observer_model=_resolve_endpoint()[1],
         prior_turn_interventions=list(prior_turn_interventions or []),
+        priority=priority,
         max_turns=int(max_turns or 0),
     )
     fast_path_enabled = bool(cfg.get("fast_path_enabled", True))
@@ -2069,7 +2085,7 @@ def install_observer(
             )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
-                user_prompt=user_prompt, cfg=state.cfg,
+                user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
                 timeout_override=_judge_timeout(async_nonterminal),
             )
             if state.closed or state.cancel_event.is_set():
@@ -2172,7 +2188,7 @@ def install_observer(
             async def _judge_assistant_message() -> None:
                 user_prompt = _build_event_user_prompt(state, summary)
                 decision = await _call_observer(
-                    user_prompt=user_prompt, cfg=state.cfg,
+                    user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
                     timeout_override=_judge_timeout(
                         async_nonterminal and not is_terminal
                     ),
@@ -2333,7 +2349,7 @@ def install_observer(
             async def _judge_tool_result() -> None:
                 user_prompt = _build_event_user_prompt(state, summary)
                 decision = await _call_observer(
-                    user_prompt=user_prompt, cfg=state.cfg,
+                    user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
                     timeout_override=_judge_timeout(async_nonterminal),
                 )
                 if state.closed or state.cancel_event.is_set():
@@ -2391,7 +2407,7 @@ def install_observer(
             )
             user_prompt = _build_event_user_prompt(state, summary)
             decision = await _call_observer(
-                user_prompt=user_prompt, cfg=state.cfg,
+                user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
             )
             if state.cancel_event.is_set():
                 decision.action = "noop_result_after_cancel"

@@ -293,7 +293,9 @@ async def attach_observer_for_turn(
     recent = _recent_exchanges_for_goal_extraction(
         session_id, current_user_text=user_request,
     )
-    goal_card = await extract_goal_card(user_request, recent_exchanges=recent)
+    goal_card = await extract_goal_card(
+        user_request, recent_exchanges=recent,
+        priority=getattr(options, "priority", None))
 
     # Show the primary the contract it is being judged against.
     #
@@ -357,6 +359,8 @@ async def attach_observer_for_turn(
         persistent_goal=persistent_goal,
         prior_turn_interventions=prior_interventions,
         max_turns=int(getattr(options, "max_turns", 0) or 0),
+        # Observer calls are scheduled like the turn they watch.
+        priority=getattr(options, "priority", None),
     )
     logger.info(
         "[iv.observer] attached session=%s turn=%s source=%s budget=%d "

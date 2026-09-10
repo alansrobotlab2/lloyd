@@ -134,6 +134,16 @@ if grep -qa -E "EngineCore failed to start|Worker failed with error" /tmp/arm-bo
 fi
 echo "boot guard: 1 engine init, no startup failures — this arm is what is serving."
 
+# SKIP_BENCH=1 stops here with the arm serving. bench-flash-next.py measures
+# decode and defeats the prefix cache, so it has nothing to say about an arm
+# whose question is admission — the Layer 3 max_num_batched_tokens sweep
+# (architecture/vllm-throughput-mitigation.md) drives its own reproducer.
+if [[ "${SKIP_BENCH:-0}" == "1" ]]; then
+  echo "SKIP_BENCH=1 — arm $LABEL is serving; not benchmarking"
+  echo "=== arm $LABEL done ==="
+  exit 0
+fi
+
 echo "--- benchmarking ---"
 "$ROOT/.venvs/lloyd/bin/python" "$ROOT/agent-services/bin/bench-flash-next.py" \
   "$LABEL" --out "$RESULTS"

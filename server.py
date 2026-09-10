@@ -144,6 +144,14 @@ app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
 app.on_event("startup")(_workers_router.start_worker_pool)
 app.on_event("shutdown")(shutdown_cleanup)
 
+# The primary's KV usage and request count, sampled in the background. The
+# pool's KV gate, the prefix-miss alert and the dashboard's KV p90 all read
+# it, and with no sample yet each treats the engine as unpressured
+# (app/engine_pressure.py), so its order against the pool does not matter.
+from app import engine_pressure as _engine_pressure  # noqa: E402
+app.on_event("startup")(_engine_pressure.start)
+app.on_event("shutdown")(_engine_pressure.stop)
+
 
 @app.on_event("startup")
 async def _start_file_watcher() -> None:

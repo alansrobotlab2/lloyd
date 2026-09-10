@@ -156,6 +156,9 @@ def _chat_entries(events: list[dict]) -> list[dict]:
                 "cache_read": 0, "cache_create": 0,
                 "duration_ms": evt["duration_ms"],
                 "num_turns": evt["num_turns"], "model": "primary",
+                # Prefix-miss accounting (app/prefix_miss.py): one
+                # iteration counts nothing, so the turn measures zero.
+                "reprefill_tokens": 0, "prefix_misses": 0,
             }
             written.append(te.build_assistant_text_entry(
                 text, timestamp="T", stats=stats, source="background"))

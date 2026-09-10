@@ -125,3 +125,18 @@ def _isolate_background_records(tmp_path_factory, monkeypatch):
     monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", root / "sessions")
     monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", root / "event_logs")
     monkeypatch.setattr("app.event_log.BLOBS_DIR", root / "event_logs" / "blobs")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_usage_store(tmp_path_factory, monkeypatch):
+    """No test writes a usage row into the live `usage.db`.
+
+    `usage_store.DB_PATH` resolves from `__file__`, so in `~/lloyd` it is the
+    production database behind the dashboard's token panel and its
+    prefix-miss counter. Until 2026-09-10 only the chat path wrote rows; the
+    background recorder writes one per run now, and several tests drive it.
+    `usage_store._conn` reopens when `DB_PATH` moves, so the per-thread
+    connection cache cannot carry a test's writes into the next one's file.
+    """
+    monkeypatch.setattr("usage_store.DB_PATH",
+                        tmp_path_factory.mktemp("usage") / "usage.db")

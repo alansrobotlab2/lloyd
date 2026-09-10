@@ -232,6 +232,7 @@ def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
     """
     from app.harness import RunOptions
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
+    from app.mcp_discovery import intra_turn_compaction_kwargs
     from prompt_builder import build_system_prompt
     from autonomy import _get_model_env
 
@@ -306,6 +307,12 @@ def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
         env=model_env,
         priority=priority,
         hooks=hooks,
+        # The compaction wall, from the config the chat path reads. This
+        # constructor takes no `_get_harness_kwargs()` at all — see
+        # architecture/vllm-throughput-mitigation.md, "Found on the way" — so
+        # the fractions are passed on their own, or the lowered cap would not
+        # reach direct worker turns.
+        **intra_turn_compaction_kwargs(),
     )
 
 

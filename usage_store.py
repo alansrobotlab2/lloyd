@@ -17,13 +17,22 @@ _local = threading.local()
 
 
 def _conn() -> sqlite3.Connection:
-    """Thread-local SQLite connection."""
-    if not hasattr(_local, "conn"):
-        _local.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        _local.conn.row_factory = sqlite3.Row
-        _local.conn.execute("PRAGMA journal_mode=WAL")
-        _init_schema(_local.conn)
-    return _local.conn
+    """Thread-local SQLite connection, reopened if `DB_PATH` has moved.
+
+    Reopening on a moved path is what lets a test point the store at a
+    scratch file: the cache is per thread, and a connection a worker thread
+    opened earlier would otherwise go on writing wherever it first pointed.
+    """
+    path = str(DB_PATH)
+    conn = getattr(_local, "conn", None)
+    if conn is None or getattr(_local, "path", None) != path:
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        _init_schema(conn)
+        _local.conn = conn
+        _local.path = path
+    return conn
 
 
 def _init_schema(conn: sqlite3.Connection):
@@ -40,7 +49,12 @@ def _init_schema(conn: sqlite3.Connection):
             cost_usd        REAL,
             duration_ms     INTEGER,
             duration_api_ms INTEGER,
-            num_turns       INTEGER
+            num_turns       INTEGER,
+            -- Prefix-cache misses (app/prefix_miss.py). NULL = not measured:
+            -- a row from before the counter, or a turn whose cache_read read
+            -- zero on every counted iteration (the unread-field signature).
+            reprefill_tokens INTEGER,
+            prefix_misses    INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_usage_ts    ON usage(ts);
         CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(model);
@@ -85,6 +99,10 @@ def _init_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN cache_read INTEGER")
     if "cache_create" not in existing_cols:
         conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN cache_create INTEGER")
+    usage_cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage)").fetchall()}
+    for col in ("reprefill_tokens", "prefix_misses"):
+        if col not in usage_cols:
+            conn.execute(f"ALTER TABLE usage ADD COLUMN {col} INTEGER")
 
 
 def record_usage(
@@ -98,18 +116,27 @@ def record_usage(
     duration_ms: Optional[int] = None,
     duration_api_ms: Optional[int] = None,
     num_turns: Optional[int] = None,
+    reprefill_tokens: Optional[int] = None,
+    prefix_misses: Optional[int] = None,
 ):
-    """Insert a single usage record."""
+    """Insert a single usage record.
+
+    `reprefill_tokens` / `prefix_misses` are the turn's prefix-cache misses
+    (`app/prefix_miss.py`). None is stored as NULL and means unmeasured, so
+    a zero can never stand in for "could not tell".
+    """
     conn = _conn()
     conn.execute(
         """INSERT INTO usage
            (session_id, model, input_tokens, output_tokens,
             cache_create, cache_read, cost_usd,
-            duration_ms, duration_api_ms, num_turns)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            duration_ms, duration_api_ms, num_turns,
+            reprefill_tokens, prefix_misses)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (session_id, model, input_tokens, output_tokens,
          cache_create, cache_read, cost_usd,
-         duration_ms, duration_api_ms, num_turns),
+         duration_ms, duration_api_ms, num_turns,
+         reprefill_tokens, prefix_misses),
     )
     conn.commit()
 
@@ -149,6 +176,30 @@ def summary(
              COALESCE(SUM(duration_api_ms), 0) AS duration_api_ms
            FROM usage{where_sql}""",
         params,
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def prefix_miss_summary(hours: float = 24) -> dict:
+    """Prefix-cache misses over a window, for the dashboard.
+
+    `turns_measured` counts the rows that carry the measurement at all. Rows
+    from before the counter and turns whose cache_read never read non-zero
+    are NULL and excluded, so "0 misses" beside "0 measured turns" cannot
+    pass for a clean bill of health.
+    """
+    conn = _conn()
+    row = conn.execute(
+        """SELECT
+             COUNT(*)                                        AS turns,
+             COUNT(reprefill_tokens)                         AS turns_measured,
+             COALESCE(SUM(CASE WHEN prefix_misses > 0 THEN 1 ELSE 0 END), 0)
+                                                             AS turns_with_misses,
+             COALESCE(SUM(prefix_misses), 0)                 AS prefix_misses,
+             COALESCE(SUM(reprefill_tokens), 0)              AS reprefill_tokens,
+             COALESCE(MAX(reprefill_tokens), 0)              AS worst_turn_reprefill
+           FROM usage WHERE ts >= ?""",
+        (_since(hours=hours),),
     ).fetchone()
     return dict(row) if row else {}
 

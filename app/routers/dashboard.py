@@ -669,7 +669,29 @@ def _usage() -> dict[str, Any]:
         "last_7d": usage_store.summary(days=7),
         "daily": usage_store.history_daily(days=7),
         "by_model_24h": usage_store.model_breakdown(hours=24),
+        # Prefix-cache misses on long re-admissions (app/prefix_miss.py) —
+        # the 09-09 stall's signature, counted from the turns' own usage rows.
+        "prefix_misses_1h": usage_store.prefix_miss_summary(hours=1),
+        "prefix_misses_24h": usage_store.prefix_miss_summary(hours=24),
     }
+
+
+async def _vllm() -> list[dict[str, Any]]:
+    """Every engine's snapshot, with the primary's KV pressure on its row.
+
+    The card's live gauge is one 2-second reading, and what the 09-09 stall
+    turned on was sustained pressure, which one reading cannot show. The p90
+    comes from `engine_pressure`'s background ring, so it is there even when
+    nobody had the page open for the last five minutes.
+    """
+    from app import engine_pressure
+
+    engines = await vllm_metrics.collect(vllm_metrics.configured_engines())
+    pressure = engine_pressure.snapshot()
+    for row in engines:
+        if row.get("alias") == pressure["alias"]:
+            row["pressure"] = pressure
+    return engines
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────
@@ -680,7 +702,7 @@ async def get_dashboard():
     """One snapshot: host, engines, primary agent, subagents, services."""
     sections = await asyncio.gather(
         _gather("host", host_metrics.collect()),
-        _gather("vllm", vllm_metrics.collect(vllm_metrics.configured_engines())),
+        _gather("vllm", _vllm()),
         _gather("primary", _primary_state()),
         _gather("recent", _to_thread(_recent_sessions)),
         _gather("agents", _agent_state()),

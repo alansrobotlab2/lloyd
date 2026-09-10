@@ -28,6 +28,9 @@ from workers.queue import WorkQueue, QueueItem
 logger = logging.getLogger("lloyd-workers.autotriage")
 
 NAME = "autotriage"
+#: A long-lived re-admitter: hand-driven triages took 45-76 iterations at
+#: 120k+. Held by the pool's KV gate while the primary is over budget.
+LONG_LIVED = True
 # `priority ASC` — lower runs sooner. Below the research/distill stream (70),
 # above the implement round (40): see autocode.DEFAULT_PRIORITY.
 DEFAULT_PRIORITY = 55

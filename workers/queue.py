@@ -255,6 +255,7 @@ class WorkQueue:
         self,
         worker_id: str,
         max_inflight_per_source: dict[str, int] | None = None,
+        exclude_sources: list[str] | None = None,
     ) -> Optional[QueueItem]:
         """Claim the highest-priority claimable item. Atomic under the queue lock.
 
@@ -270,6 +271,12 @@ class WorkQueue:
         as an empty queue and sleeps. Filtering the saturated sources out of
         the query means the ordering picks the first *claimable* row, whatever
         the depth of what it skipped, and `LIMIT 1` is then enough.
+
+        `exclude_sources` is the worker pool's KV gate
+        (`WorkerPool._kv_gate_held`): sources held back while the primary's
+        KV cache is over budget. They join the same `NOT IN` as the saturated
+        sources, for the same reason — a held source's queued rows must not
+        hide a claimable row behind them.
         """
         max_inflight_per_source = max_inflight_per_source or {}
         with self._lock, self._connect() as conn:
@@ -287,9 +294,10 @@ class WorkQueue:
             sql = ("SELECT * FROM queue WHERE state='queued' "
                    "AND (not_before IS NULL OR not_before <= ?)")
             args: list[Any] = [_now_iso()]
-            if saturated:
-                sql += f" AND source NOT IN ({','.join('?' * len(saturated))})"
-                args.extend(saturated)
+            excluded = sorted(set(saturated) | set(exclude_sources or ()))
+            if excluded:
+                sql += f" AND source NOT IN ({','.join('?' * len(excluded))})"
+                args.extend(excluded)
             sql += " ORDER BY priority ASC, enqueued_at ASC LIMIT 1"
 
             # Re-read after the UPDATE rather than trusting rowcount: the lock

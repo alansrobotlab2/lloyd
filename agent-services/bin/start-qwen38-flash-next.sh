@@ -301,7 +301,10 @@ fi
 # that persisted would be a config that silently outlives the experiment,
 # which is the failure this slot can least afford. If the sweep dies between
 # the source and the delete, the next boot is production config.
-ARM_ENV="$PROJECT_DIR/logs/flash-next-arm.env"
+# ARM_ENV overrides the path, and exists for one caller: a DRY_RUN from a test
+# must not consume an arm that flash-next-run-arm.sh has staged for the real
+# boot (tests/test_flash_next_launcher.py points it at a scratch file).
+ARM_ENV="${ARM_ENV:-$PROJECT_DIR/logs/flash-next-arm.env}"
 if [[ -f "$ARM_ENV" ]]; then
   echo "consuming one-shot arm env: $ARM_ENV"
   cat "$ARM_ENV"
@@ -487,6 +490,15 @@ GDN_PREFILL_BACKEND="${GDN_PREFILL_BACKEND:-flashinfer}"
 # agent wants a predictable 138 over a mean of maybe-140.
 FLASHINFER_AUTOTUNE="${FLASHINFER_AUTOTUNE:-0}"
 
+# Chunked-prefill budget, in tokens per engine step. Empty = vLLM's default
+# (8192 here). A cold long prompt admitted beside a decoding stream costs that
+# stream one step per chunk: 615 ms p50 at 8192 on this build (lloyd-be,
+# 2026-09-10 — a cold 207k prompt prefilled in 21.1 s while a 120k stream
+# decoded beside it). A smaller budget shortens each of those steps and
+# stretches the prefill. The measured arms are in
+# architecture/vllm-throughput-mitigation.md, Layer 3.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+
 # Escape hatch for one-off arms. Word-split deliberately.
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -502,6 +514,7 @@ else
   AB_ARGS+=(--limit-mm-per-prompt '{"image": 0, "video": 0, "audio": 0}')
 fi
 [[ -n "$MOE_BACKEND" ]] && AB_ARGS+=(--moe-backend "$MOE_BACKEND")
+[[ -n "$MAX_NUM_BATCHED_TOKENS" ]] && AB_ARGS+=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
 [[ -n "$GDN_PREFILL_BACKEND" ]] && AB_ARGS+=(--gdn-prefill-backend "$GDN_PREFILL_BACKEND")
 if [[ "$FLASHINFER_AUTOTUNE" == "1" ]]; then
   AB_ARGS+=(--enable-flashinfer-autotune)
@@ -530,7 +543,8 @@ echo "A/B config: venv=$VLLM_VENV ple=$PLE_IMPL kv_dtype=${KV_CACHE_DTYPE:-bf16}
      "max_num_seqs=$MAX_NUM_SEQS gpu_mem_util=$GPU_MEMORY_UTILIZATION" \
      "kv_bytes=${KV_CACHE_MEMORY_BYTES:-<fraction>} lm_only=$LANGUAGE_MODEL_ONLY" \
      "moe=${MOE_BACKEND:-<auto>} gdn=${GDN_PREFILL_BACKEND:-<auto>}" \
-     "autotune=$FLASHINFER_AUTOTUNE mtp=$MTP_ENABLED/k=$MTP_TOKENS max_model_len=$MAX_MODEL_LEN"
+     "autotune=$FLASHINFER_AUTOTUNE mtp=$MTP_ENABLED/k=$MTP_TOKENS max_model_len=$MAX_MODEL_LEN" \
+     "batched=${MAX_NUM_BATCHED_TOKENS:-<default>}"
 
 export PATH="$VLLM_VENV/bin:/opt/cuda/bin:/usr/bin:/usr/sbin:$PATH"
 export LD_LIBRARY_PATH="/usr/lib:/opt/cuda/targets/x86_64-linux/lib:/opt/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

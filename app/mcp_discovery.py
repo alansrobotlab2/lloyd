@@ -235,6 +235,29 @@ def _get_harness_kwargs() -> dict:
         out["finalizer_max_tokens"] = int(fin["max_tokens"])
     if "timeout_seconds" in fin:
         out["finalizer_timeout_s"] = float(fin["timeout_seconds"])
+    out.update(intra_turn_compaction_kwargs())
+    return out
+
+
+def intra_turn_compaction_kwargs() -> dict:
+    """`compaction.microcompact`'s two fractions, for the in-turn pass.
+
+    The turn-start pass (`app.compaction`) and the in-turn pass
+    (`loop._intra_turn_microcompact`) share their threshold arithmetic so they
+    cannot disagree about where the wall is — but only the first ever read the
+    config. The second ran on `RunOptions` defaults no config reached, so
+    lowering `trigger_fraction` would have moved the wall for the first
+    request of a turn and not for the sixty after it, which is where a long
+    worker round spends its context. A function of its own because
+    `workers/sources/_common._worker_run_options` needs these and nothing
+    else from here.
+    """
+    mc = ((CONFIG.get("compaction") or {}).get("microcompact") or {})
+    out: dict = {}
+    if "trigger_fraction" in mc:
+        out["intra_turn_microcompact_trigger_fraction"] = float(mc["trigger_fraction"])
+    if "target_fraction" in mc:
+        out["intra_turn_microcompact_target_fraction"] = float(mc["target_fraction"])
     return out
 
 

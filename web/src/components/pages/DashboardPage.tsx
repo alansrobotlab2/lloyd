@@ -8,7 +8,7 @@ import {
   type AutonomyState, type AutonomyTaskRow, type BacklogState,
   type BackgroundTask, type DashboardSnapshot, type GpuInfo,
   type RecentSession, type SubagentRun, type UsageBucket, type VllmEngine,
-  type WorkersState,
+  type WorkersState, type EnginePressure, type PrefixMissSummary,
 } from '../../api'
 import { useMcUi, useReportMcFocus } from '../../contexts/McUiContext'
 import { cn } from '@/lib/utils'
@@ -141,13 +141,15 @@ function Panel({ className, children }: { className?: string; children: React.Re
 /** A single ratio against a limit. Value is always shown as text, so the
  *  meter is a second reading of the number rather than its only one. */
 function Meter({
-  label, value, display, tone, sub,
+  label, value, display, tone, sub, mark,
 }: {
   label: string
   value: number | null | undefined   // 0..1
   display: string
   tone?: Tone
   sub?: string
+  /** A reference line on the bar, 0..1 — the KV meter's warning line. */
+  mark?: number
 }) {
   const t = tone ?? utilTone(value == null ? null : value * 100)
   const width = value == null ? 0 : Math.max(0, Math.min(1, value)) * 100
@@ -157,11 +159,18 @@ function Meter({
         <span className="truncate text-[11px] text-muted-foreground">{label}</span>
         <span className={cn('font-mono text-[11px] tabular-nums', TONE_TEXT[t])}>{display}</span>
       </div>
-      <div className={cn('h-1.5 w-full overflow-hidden rounded-full', TONE_TRACK[t])}>
+      <div className={cn('relative h-1.5 w-full overflow-hidden rounded-full', TONE_TRACK[t])}>
         <div
           className={cn('h-full rounded-full transition-[width] duration-500', TONE_FILL[t])}
           style={{ width: `${width}%` }}
         />
+        {mark != null && (
+          <div
+            aria-hidden
+            className="absolute inset-y-0 w-px bg-foreground/60"
+            style={{ left: `${Math.max(0, Math.min(1, mark)) * 100}%` }}
+          />
+        )}
       </div>
       {sub && <div className="text-[10px] text-muted-foreground/70">{sub}</div>}
     </div>
@@ -230,6 +239,30 @@ function ErrorPanel({ what, error }: { what: string; error: string }) {
 }
 
 // ── Engine card ────────────────────────────────────────────────────────
+
+/** The KV meter's second reading: sustained pressure, not the last poll.
+ *  What the 09-09 stall turned on was pressure held for minutes, which a
+ *  single 2-second gauge cannot show. */
+function kvPressureSub(p: EnginePressure | undefined): string | undefined {
+  if (!p) return undefined
+  if (p.stale || p.kv_p90 == null) {
+    return p.error ? `pressure: ${p.error}` : 'pressure: no samples yet'
+  }
+  const mins = Math.round(p.window_s / 60)
+  // p50 is the residents; p90 and max are mostly cold prefills, which
+  // reference ~2.5x their resident footprint while they build.
+  return `p50 ${pct(p.kv_p50)} · p90 ${pct(p.kv_p90)} · max ${pct(p.kv_max)} over ${mins} min · line ${pct(p.warn_line)}`
+}
+
+/** The live reading's own severity, raised to warn while the window's p90
+ *  sits over the line — a meter that happens to read low between two long
+ *  prefills should not look calm. */
+function kvTone(engine: VllmEngine): Tone | undefined {
+  const p = engine.pressure
+  const live = utilTone(engine.kv_cache_usage == null ? null : engine.kv_cache_usage * 100)
+  if (p?.kv_p90 != null && p.kv_p90 >= p.warn_line && live === 'accent') return 'warn'
+  return undefined
+}
 
 function EngineCard({ engine }: { engine: VllmEngine }) {
   if (!engine.reachable) {
@@ -306,6 +339,9 @@ function EngineCard({ engine }: { engine: VllmEngine }) {
           label="KV cache"
           value={engine.kv_cache_usage}
           display={pct(engine.kv_cache_usage)}
+          mark={engine.pressure?.warn_line}
+          sub={kvPressureSub(engine.pressure)}
+          tone={kvTone(engine)}
         />
         <Meter
           label="Prefix cache hits"
@@ -739,6 +775,8 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
   const poolWord = !workers.enabled ? 'disabled' : !pool.running ? 'stopped' : pool.paused ? 'paused' : 'running'
   // Only sources with something to say — 20 idle rows is not a status.
   const busy = workers.sources.filter(s => s.open > 0 || s.running > 0 || s.poisoned > 0)
+  // The KV budget gate (workers/pool.py). Absent on an older backend.
+  const gate = pool.kv_gate
 
   return (
     <Panel>
@@ -776,6 +814,29 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
           </div>
         </div>
       </div>
+
+      {gate?.enabled && (
+        <div
+          className={cn('mt-2 flex items-center gap-1.5 text-[10px]',
+            gate.engaged ? 'text-amber-400' : 'text-muted-foreground')}
+        >
+          <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full',
+            gate.engaged ? 'bg-amber-400' : 'bg-muted-foreground/50')} />
+          <span className="truncate">
+            {gate.engaged
+              ? `KV gate holding ${gate.held_sources.join(', ') || 'nothing'} — KV ${pct(gate.kv_usage)} > ${pct(gate.max_kv_usage)}`
+              : gate.kv_usage == null
+                ? 'KV gate open — no KV reading'
+                : `KV gate open — KV ${pct(gate.kv_usage)} of ${pct(gate.max_kv_usage)}`}
+          </span>
+          {gate.engagements > 0 && (
+            <span className="ml-auto flex-shrink-0 font-mono tabular-nums text-muted-foreground"
+                  title="times the gate has engaged since the backend started">
+              {gate.engagements}×
+            </span>
+          )}
+        </div>
+      )}
 
       {busy.length > 0 && (
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">
@@ -1318,10 +1379,32 @@ export default function DashboardPage() {
                 {compact(usage.last_24h?.input_tokens)} in / {compact(usage.last_24h?.output_tokens)} out (24h)
               </span>
             </div>
+            <PrefixMissLine summary={usage.prefix_misses_24h} />
             <DailyTokenBars daily={usage.daily} />
           </Panel>
         )}
       </Section>
+    </div>
+  )
+}
+
+/** The 09-09 stall's signature, counted: iterations >= 3 that re-prefilled
+ *  a 100k+ prompt from cold (app/prefix_miss.py). The measured-turn count
+ *  sits beside it so "0" on a day with nothing measured cannot pass for a
+ *  clean one. */
+function PrefixMissLine({ summary }: { summary?: PrefixMissSummary }) {
+  if (!summary) return null
+  const misses = summary.prefix_misses ?? 0
+  const measured = summary.turns_measured ?? 0
+  const tone: Tone = misses > 0 ? 'warn' : measured > 0 ? 'good' : 'idle'
+  return (
+    <div className="mb-2 flex items-center gap-1.5 text-[10px]">
+      <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full', TONE_FILL[tone])} />
+      <span className="text-muted-foreground">Prefix-cache misses (24h)</span>
+      <span className={cn('ml-auto font-mono tabular-nums', TONE_TEXT[tone])}>
+        {misses} in {measured} measured turn{measured === 1 ? '' : 's'}
+        {misses > 0 && ` · ${compact(summary.reprefill_tokens)} re-prefilled`}
+      </span>
     </div>
   )
 }

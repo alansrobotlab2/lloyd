@@ -80,6 +80,35 @@ more than fifty items queued: they fill the window, the claimable row behind
 them is never seen, and the pool reads the queue as empty and sleeps. Three
 sources sharing two slots on this box makes that an ordinary Tuesday.
 
+### The KV budget gate
+
+A source that declares `LONG_LIVED = True` — `autocode`, `autotriage`,
+`deep-research` — is not claimed while the primary's KV usage is above
+`workers.kv_gate.max_kv_usage` (0.60); every other source claims as before.
+Held sources join the same `NOT IN` as the saturated ones, for the same
+reason, and a held item keeps its place and its attempt.
+
+It exists because of what the 09-09 stall turned out to be
+(`vllm-throughput-mitigation.md`): long-lived agent loops evicting each
+other's prefixes. Each iteration re-submits a 100-200k context; between
+iterations that prefix sits only in the engine's free pool, and three or
+four long residents on the old 398k pool meant one of them came back cold on
+most iterations. Short-lived jobs never came back to miss — seven youtube
+digests at 81.5% KV ran clean. So the gate decides *who* starts, not how
+many, and the classification is a static module attribute a reviewer can
+read rather than a runtime guess at context size.
+
+It reads `app/engine_pressure.py`'s background samples, never the engine,
+so a claim does not wait on HTTP, and it judges their **median over the last
+minute** (`kv_gate.window_seconds`), not the newest one. Measured on the FP8
+build: a cold 200k prefill drives the gauge from 0.20 to 0.96 over its 21 s
+and it drops to 0.50 the moment the prompt is in — a prompt being built
+references ~2.5x its resident footprint — so a last-sample gate would hold
+every long-lived job for the length of every prefill. No reading — sampler
+off, engine down, a sample older than 30 s — means open. State is `pool.kv_gate` in
+`/api/workers/status` and a row on the dashboard's worker panel, and each
+transition logs one line.
+
 ### Dedup
 
 `dedup_key` coalesces: enqueuing a key that already exists in
@@ -333,6 +362,9 @@ workers:
   enabled: true
   slots: 2                      # concurrent workers
   max_attempts: 3               # before an item is poisoned
+  kv_gate:                      # §2, "The KV budget gate"
+    enabled: true
+    max_kv_usage: 0.60          # hold LONG_LIVED sources above this
   sources:
     <name>:
       enabled: true
