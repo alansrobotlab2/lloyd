@@ -230,6 +230,19 @@ compaction:
     buffer_tokens: 3000
 harness:
   stream_chunk_timeout_seconds: 60
+  # Dispatch-time skill delivery (#536). When on, a drafted tool call whose tool
+  # name and arguments match a rule in app/harness/skill_dispatch.py is NOT
+  # executed: the harness answers it with a non-error synthetic result carrying
+  # that skill's SKILL.md (capped at ~1.5k tokens), and the model re-issues the
+  # call having read the protocol. Turn-start prefetch is untouched — this is a
+  # second injector keyed on the call rather than on the turn text, and it yields
+  # to a skill prefetch already injected on the same turn. Default-off: every
+  # trigger costs one extra round-trip (~2.7 s TTFT), so it ships one protocol
+  # at a time via `skills:` and the spurious-trigger rate is measured, not
+  # assumed. `skills:` absent means every rule in the table.
+  skill_dispatch:
+    enabled: false
+    skills: []
   # Re-anchor session.todos this often (in agent-loop iterations) when
   # items are still open and the list has gone untouched. The system
   # prompt's <active_todos> block is frozen at turn start, so a turn that

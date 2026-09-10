@@ -15,16 +15,26 @@ PreToolUse callback contract (preserved from SDK):
             "tool_input": {"command": "..."},
         }
 
-    Output dict (deny):
+    Output dict (deliver — #536/#738, the second outcome beyond deny):
         {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": "...",
+                "skillDeliver": {
+                    "skill": "<name>", "label": "<rule>", "content": "<text>",
+                },
             }
         }
 
+        The loop answers a deliver with `content` as the tool_result and
+        `is_error=False`: the call did not run, and that is an ordinary
+        outcome, not a tool error. Deny is the only outcome that reaches
+        the model as `is_error=True`.
+
     Output dict (pass): {}
+
+Precedence: a deny beats a deliver regardless of registration order, so a
+catastrophic `Bash` is blocked rather than answered with a skill card by a
+deliverer registered ahead of the safety hook.
 
 PostToolUse / PostToolUseFailure callbacks always return `{}` —
 they're observers, not gates. They commonly spawn `asyncio.ensure_future`
@@ -93,11 +103,17 @@ class HookRegistry:
         tool_use_id: str | None = None,
         tool_summary: str = "",
     ) -> dict[str, Any]:
-        """Walk matching PreToolUse callbacks. First deny wins.
+        """Walk matching PreToolUse callbacks. First deny wins over any deliver.
 
         Returns the deny dict (with `hookSpecificOutput`) if any callback
-        denies; returns `{}` if all pass. Callback exceptions are logged
-        and treated as pass — denial must be explicit, never accidental.
+        denies; returns the first callback's `skillDeliver` dict if any
+        callback asks for a delivery and none denies; returns `{}` if all
+        pass. Callback exceptions are logged and treated as pass — denial must
+        be explicit, never accidental.
+
+        A deliver is provisional until the walk finishes: holding the first one
+        and continuing is what keeps registration order from deciding whether a
+        `rm -rf ~` gets denied or gets a protocol card.
 
         `tool_summary` is the model's own caption for this call (see
         `tool_schema.SUMMARY_ARG`). It rides in `input_dict` rather than in
@@ -113,6 +129,7 @@ class HookRegistry:
             "tool_input": tool_input,
             "tool_summary": tool_summary,
         }
+        deliver: dict[str, Any] | None = None
         for matcher, cb in self._pre:
             if matcher is not None and matcher != tool_name:
                 continue
@@ -128,7 +145,9 @@ class HookRegistry:
             hso = out.get("hookSpecificOutput") or {}
             if hso.get("permissionDecision") == "deny":
                 return out
-        return {}
+            if deliver is None and hso.get("skillDeliver"):
+                deliver = out
+        return deliver or {}
 
     async def fire_post_tool_use(
         self,

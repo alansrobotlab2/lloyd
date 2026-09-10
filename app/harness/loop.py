@@ -1522,17 +1522,30 @@ async def _pre_dispatch(
                 name, len(loaded_set.loaded),
             )
 
-    # PreToolUse — first deny wins.
+    # PreToolUse — a deny beats a deliver; either one short-circuits dispatch.
     if options.hooks is not None:
-        deny = await options.hooks.fire_pre_tool_use(
+        pre = await options.hooks.fire_pre_tool_use(
             session_id=session_id,
             tool_name=name,
             tool_input=args_dict,
             tool_use_id=call_id,
             tool_summary=tc.get("_summary", ""),
         )
-        if deny:
-            hso = deny.get("hookSpecificOutput") or {}
+        if pre:
+            hso = pre.get("hookSpecificOutput") or {}
+            deliver = hso.get("skillDeliver")
+            if deliver:
+                # Dispatch-time skill delivery (#536). The call was drafted and
+                # is being held back so the matched SKILL.md reaches the model
+                # before the action, not after it. `is_error=False` is the whole
+                # point of this second outcome: the same intercept expressed as a
+                # deny lands in `tool_errors` (autonomy.py:912/:927) and would
+                # make the fleet look sicker precisely where it is being taught
+                # something. Shape matches the synthetic ToolSearch result above.
+                return events.tool_result(
+                    call_id=call_id, name=name,
+                    content=str(deliver.get("content") or ""), is_error=False,
+                )
             reason = hso.get("permissionDecisionReason") or "denied by hook"
             return events.tool_result(
                 call_id=call_id, name=name,

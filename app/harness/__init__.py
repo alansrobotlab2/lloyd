@@ -24,6 +24,7 @@ from app.harness.loop import run_query
 from app.harness.options import RunOptions
 from app.harness.policy import GrantStore, install_policy_hook
 from app.harness.safety import install_default_safety_hook
+from app.harness.skill_dispatch import install_skill_dispatch_hook
 
 __all__ = [
     "GrantStore",
@@ -37,5 +38,6 @@ __all__ = [
     "ToolDispatchError",
     "install_default_safety_hook",
     "install_policy_hook",
+    "install_skill_dispatch_hook",
     "run_query",
 ]
