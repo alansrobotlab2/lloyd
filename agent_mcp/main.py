@@ -53,6 +53,7 @@ from agent_mcp import (
     _change_ledger,
     _subagent_registry,
     _task_registry,
+    _tool_effects,
     _tsc_runner,
     annotations as tool_annotations,
     ambient,
@@ -211,6 +212,16 @@ META_SUMMARY = "lloyd/summary"
 META_TURN_ID = "lloyd/turn_id"
 META_CALL_ID = "lloyd/call_id"
 
+# `_meta` key carrying the #544 effect scope: the queue item a worker turn is
+# running (`item:<source>:<id>`), bound by the pool and forwarded by the
+# harness. It is what makes a retry's second `email_send` recognisable as the
+# same effect rather than a new one — an item's id is stable across its attempts
+# and never reused, so the guard covers exactly the retry and nothing else.
+# Absent for an interactive turn, which leaves that turn unguarded by design
+# (see agent_mcp/_tool_effects.py). Must match
+# app.harness.mcp_pool.META_EFFECT_SCOPE.
+META_EFFECT_SCOPE = "lloyd/effect_scope"
+
 # OpenAI's spec caps tool names at 64 chars. Enforced here at registration
 # so a bad name fails loudly on the first list_tools() instead of
 # mid-conversation in the harness translator (tool_schema.py keeps its own
@@ -312,6 +323,109 @@ def _bound_session_id(arguments: dict, meta: Any = None) -> str:
     return ""
 
 
+def _result_is_error(result: Any) -> bool:
+    """Read `isError` across the mcp 1.x/2.x field-name split.
+
+    `app/harness/mcp_pool.py` documents this asymmetry at length: 2.x renamed
+    the attribute to snake_case in Python while the wire format stayed
+    camelCase, so `getattr(result, "isError", False)` returns False on a 2.x
+    `CallToolResult` rather than raising. Here that failure is not cosmetic —
+    every failed effect would be recorded `ok`, and `ok` is the state that
+    licenses unlimited replays of a half-written effect.
+    """
+    for attr in ("is_error", "isError"):
+        value = getattr(result, attr, None)
+        if value is not None:
+            return bool(value)
+    return False
+
+
+def _effect_text(result: Any) -> tuple[str, bool]:
+    """`(joined text, is_error)` from either shape a module may return.
+
+    Only the text half is stored for a replay, so a second attempt gets back
+    what the first one's caller saw. A result carrying non-text blocks (an
+    image) replays as its text plus a note naming the digest — the effect is
+    already fire-safe either way, and losing an attachment on a replay is a
+    smaller lie than firing the effect again to get it.
+    """
+    if isinstance(result, CallToolResult):
+        blocks = list(result.content or [])
+        return ("\n".join(b.text for b in blocks
+                          if getattr(b, "type", "") == "text"),
+                _result_is_error(result))
+    blocks = list(result or [])
+    return ("\n".join(b.text for b in blocks
+                      if getattr(b, "type", "") == "text"), False)
+
+
+def _effect_refused(name: str, effect: "_tool_effects.Claim") -> CallToolResult:
+    """The payload for a call the ledger will not let fire twice.
+
+    Both branches log at WARNING with the key. Over-suppression is the failure
+    that bites here — a silently dropped email is quieter and worse than the
+    duplicate this exists to prevent — so a suppression has to be findable in
+    the log with the arguments that produced it, not merely counted.
+    """
+    short = (effect.key or "")[:16]
+    if effect.unknown:
+        logger.warning(
+            "tool_effects: refused re-fire of %s (effect %s…). State unknown: "
+            "a prior attempt was cancelled with this effect in flight. Do the "
+            "status lookup before assuming it did not land.", name, short)
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps({
+                "error": (
+                    "#544 effect ledger: this call was already fired once in "
+                    "this scope and its outcome was never recorded — the "
+                    "attempt was cancelled with the effect in flight. A "
+                    "timeout means unknown, not failure, so it is not "
+                    "re-fired."
+                ),
+                "tool": name,
+                "effect_key": short,
+                "effect_state": "unknown",
+                "do_not": "re-fire this call with these arguments",
+                "next_step": (
+                    "Read the state back to find out whether the effect landed "
+                    "(backlog_tasks / email_recent / calendar_events / "
+                    "vault_read / fact_get — whatever this tool writes), then "
+                    "continue with the work that does not duplicate it."
+                ),
+            }))],
+            isError=True,
+        )
+    logger.warning("tool_effects: suppressed duplicate %s (effect %s…); "
+                   "replaying the recorded result", name, short)
+    if effect.replay_truncated or not effect.replay_text:
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps({
+                "effect_state": "already_applied",
+                "tool": name,
+                "effect_key": short,
+                "note": (
+                    "An identical call already succeeded in this scope. Its "
+                    "result body was too large to replay; digest "
+                    f"{effect.replay_digest[:16]}… . The effect did happen — "
+                    "verify by reading the state it writes rather than by "
+                    "firing it again."
+                ),
+            }))],
+            isError=False,
+        )
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=effect.replay_text),
+            TextContent(type="text", text=(
+                f"[#544] Replayed result of an identical {name} call that "
+                f"already fired in this scope (effect {short}…). Nothing ran "
+                f"again."
+            )),
+        ],
+        isError=False,
+    )
+
+
 async def call_tool(name: str, arguments: dict, meta: Any = None):
     if not _dispatch:
         await list_tools()
@@ -333,6 +447,9 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     call_summary = meta.get(META_SUMMARY, "") if isinstance(meta, dict) else ""
     turn_id = meta.get(META_TURN_ID, "") if isinstance(meta, dict) else ""
     call_id = meta.get(META_CALL_ID, "") if isinstance(meta, dict) else ""
+    effect_scope = (meta.get(META_EFFECT_SCOPE, "") if isinstance(meta, dict) else "")
+    if not isinstance(effect_scope, str):
+        effect_scope = ""
 
     token = _task_registry.current_session_id.set(sid)
     stok = _task_registry.current_call_summary.set(
@@ -351,7 +468,43 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         call_id if isinstance(call_id, str) else ""
     )
     try:
-        return await mod.call_tool(name, arguments)
+        # #544 — exactly-once EFFECT, not exactly-once scheduling. The retry
+        # that makes this necessary is the pool's: a job cancelled at
+        # `max_duration_seconds` is recorded failed, requeued, and re-runs its
+        # whole turn, so every `email_send` / `backlog_write_task` / `vault_write`
+        # the first attempt landed lands again. `effect_scope` is the queue item,
+        # stable across that item's attempts and never reused, so this covers the
+        # retry and nothing else. A read-only call returns from `claim()` on a
+        # frozenset membership test — no connect, no key, no SELECT.
+        #
+        # Ordering is deliberate: everything that can REFUSE this call runs
+        # upstream of it. The grant/authority gate is a PreToolUse hook in the
+        # harness (`app.harness.policy.install_policy_hook`), so a call that was
+        # never allowed to run never reaches this line and can never be written
+        # to the ledger as an `unknown` effect. #521's deterministic policy gate
+        # belongs on that same upstream side — or above this block, never below
+        # it, for the same reason.
+        effect = await _tool_effects.claim(name, arguments, effect_scope, sid)
+        if not effect.may_dispatch:
+            return _effect_refused(name, effect)
+        try:
+            result = await mod.call_tool(name, arguments)
+        except BaseException as exc:
+            # Leave the row `unknown`, which is the honest state: the handler may
+            # have finished the effect before it died. `finish` is not called
+            # here on purpose — recording `error` would license a retry to fire a
+            # second, possibly-duplicate effect, which is exactly the lie the
+            # pool's timeout branch tells today.
+            if effect.key:
+                logger.warning(
+                    "tool_effects: %s raised %s in scope %r; effect %s… stays "
+                    "UNKNOWN — an identical call will be refused until a status "
+                    "lookup resolves it",
+                    name, type(exc).__name__, effect_scope, effect.key[:16])
+            raise
+        if effect.key:
+            await _tool_effects.finish(effect.key, *_effect_text(result))
+        return result
     finally:
         _task_registry.current_session_id.reset(token)
         _task_registry.current_call_summary.reset(stok)

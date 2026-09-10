@@ -95,6 +95,14 @@ META_SUMMARY = "lloyd/summary"
 META_TURN_ID = "lloyd/turn_id"
 META_CALL_ID = "lloyd/call_id"
 
+# `_meta` key carrying the #544 effect scope — the queue item a worker turn is
+# running, read off `policy.current_effect_scope` by the loop. It is the
+# aggregator's only way to know that this call belongs to a retry of an item it
+# already served: a retried attempt gets a fresh session id, so without a scope
+# carried per request there is nothing stable across the retry to key an
+# idempotency ledger on. Must match agent_mcp.main.META_EFFECT_SCOPE.
+META_EFFECT_SCOPE = "lloyd/effect_scope"
+
 # Ceiling on a single tools/call round trip. Sits above the Bash tool's own
 # 600s hard cap so a legitimately long command finishes on its own terms and
 # this only fires when something is genuinely wedged. Without it a hung tool
@@ -363,6 +371,7 @@ class MCPPool:
         summary: str = "",
         turn_id: str = "",
         call_id: str = "",
+        effect_scope: str = "",
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Dispatch a tool call to the right server.
@@ -380,6 +389,12 @@ class MCPPool:
         before its handler runs, so anything injected there is validated
         as a real parameter; ``_meta`` is the field the spec reserves for
         exactly this kind of implementation metadata.
+
+        `effect_scope` (#544) rides in ``_meta`` for the same reason and is
+        the queue item a worker turn is running; the aggregator's effect
+        ledger keys on it so a retried attempt cannot fire the same side
+        effect twice. Empty means no ledger for this call — an interactive
+        turn, or any caller that is not a retryable queue item.
         """
         if not self._opened:
             await self.open()
@@ -420,6 +435,8 @@ class MCPPool:
             meta[META_TURN_ID] = turn_id
         if call_id:
             meta[META_CALL_ID] = call_id
+        if effect_scope:
+            meta[META_EFFECT_SCOPE] = effect_scope
         budget = timeout_seconds if timeout_seconds is not None else CALL_TIMEOUT_SECONDS
 
         try:

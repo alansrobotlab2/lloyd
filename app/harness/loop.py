@@ -36,6 +36,7 @@ from app.harness.tool_result_spill import (
 from app.harness.events import NormalizedEvent
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
+from app.harness.policy import current_effect_scope
 from app.harness.tool_schema import (
     add_summary_param,
     build_tool_list,
@@ -1603,6 +1604,12 @@ async def _execute_tool_call(
             # run_query caller, which is what turns the ledger off for them.
             "turn_id": getattr(options, "turn_id", "") or "",
             "call_id": tc.get("id", "") or "",
+            # #544: the queue item this turn is running, bound by the pool per
+            # job. It is the aggregator's only handle on "this call is a retry
+            # of one I already served", because a retried attempt gets a fresh
+            # session id. Empty on an interactive turn, which leaves it out of
+            # the effect ledger — see agent_mcp/_tool_effects.py.
+            "effect_scope": current_effect_scope.get(),
         }
         if cancel_event is None:
             result = await pool.call_tool(name, dispatch_args, **call_kw)

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Optional
 
-from app.harness.policy import current_scope
+from app.harness.policy import current_effect_scope, current_scope
 from workers.evidence import gaps_key, verify_bundle
 from workers.queue import WorkQueue, QueueItem, get_queue, new_run_id
 
@@ -111,6 +111,22 @@ def grant_scope_for(item: QueueItem) -> str:
         if task_id is not None:
             return f"autonomy-task:{task_id}"
     return f"worker:{item.source}"
+
+def effect_scope_for(item: QueueItem) -> str:
+    """The effect scope a claimed item runs under (#544).
+
+    The queue item id, because that is the unit a retry re-runs: `run_id` is
+    minted per attempt, so keying on it would let attempt 2 fire a fresh effect
+    — which is the bug. The source is in the string because item ids are only
+    unique within this database file, and a name makes a ledger row readable
+    without a join back to `queue`.
+
+    Deliberately NOT the grant scope: `autonomy-task:39` is stable across every
+    run that task ever has, which is right for a permission and wrong for
+    idempotency — it would suppress a legitimate second effect forever.
+    """
+    return f"item:{item.source}:{item.id}"
+
 
 def _task_id_of(item: QueueItem, result: Any = None) -> Optional[str]:
     """Task id for a run record: prefer the handler's result, fall back to the
@@ -322,6 +338,11 @@ class WorkerPool:
             # what it claimed. An autonomy task is its own scope — that is what
             # lets a human grant `email_send` to task #39 and nobody else.
             scope_token = current_scope.set(grant_scope_for(item))
+            # #544: the same job, from the other side. `current_scope` bounds
+            # whose authority this turn borrows; `current_effect_scope` bounds
+            # which run's effects must not happen twice. The item id — not the
+            # run id, which changes per attempt — is what survives a retry.
+            effect_token = current_effect_scope.set(effect_scope_for(item))
             try:
                 result = await asyncio.wait_for(source.execute(item), timeout=max_duration)
                 duration = time.monotonic() - started_perf
@@ -429,6 +450,7 @@ class WorkerPool:
                              worker_id, item.source, item.kind, error_msg, new_state)
             finally:
                 current_scope.reset(scope_token)
+                current_effect_scope.reset(effect_token)
                 self._in_flight.pop(item.id, None)
 
 

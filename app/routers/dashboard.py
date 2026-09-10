@@ -397,6 +397,7 @@ def _workers() -> dict[str, Any]:
 
     return {
         "enabled": bool((CONFIG.get("workers") or {}).get("enabled", False)),
+        "duplicate_effects_suppressed": _duplicate_effects_suppressed(),
         "pool": pool,
         "depth_by_source": depth,
         "by_state": by_state,
@@ -405,6 +406,23 @@ def _workers() -> dict[str, Any]:
         "sources": sources,
         "recent_runs": runs,
     }
+
+
+def _duplicate_effects_suppressed() -> int | None:
+    """How many duplicate side effects the #544 ledger has refused.
+
+    Read off the ledger file, not from a process counter, because the process
+    that writes the ledger is the aggregator and the process serving this
+    endpoint is the backend — an in-memory count would read zero forever.
+    None means unreadable, which is reported as such rather than as a clean
+    zero: a guard whose counter silently reads 0 is a guard that looks like it
+    never had to fire.
+    """
+    try:
+        from agent_mcp._tool_effects import suppressed_total
+        return suppressed_total()
+    except Exception:
+        return None
 
 
 def _autonomy() -> dict[str, Any]:

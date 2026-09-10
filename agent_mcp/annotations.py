@@ -115,6 +115,46 @@ IDEMPOTENT: frozenset[str] = frozenset({
 })
 
 # ---------------------------------------------------------------------------
+# Repeat-expected (#544): tools an agent legitimately calls twice with
+# byte-identical arguments inside one scope, so the effect ledger must not
+# treat the second call as a duplicate.
+#
+# The exclusion is about what a REPLAY would cost, not about whether the tool
+# writes. Suppression returns the stored result of the first call, and for
+# these tools that is strictly worse than firing: their meaning depends on
+# state outside their own arguments, so a stored answer is a stale answer
+# delivered as a fresh one. Three shapes live here:
+#
+#   * poll loops — `Bash("sleep 30 && supervisorctl status")`, an
+#     `http_request` GET of a status endpoint. Identical command, genuinely
+#     new observation each time; a worker's whole idea of waiting is repeating
+#     one command until it says something different.
+#   * mutable-external-state verbs — the automod round controls. `automod_gate`
+#     run twice with the same `round_id` is the normal fix-then-regate move,
+#     and the second call means something different because the tree changed
+#     in between.
+#   * turn-local or view state — plan mode, goal, todo list, Mission Control
+#     and IDE focus, browser page verbs. No durable effect exists to duplicate;
+#     a ledger row for these would be noise in the one metric that has to show
+#     the guard firing on real traffic.
+#
+# Adding a name here weakens #544 for every scope. It is deliberately a short
+# list of tools whose repeat is normal, not a general escape hatch.
+# ---------------------------------------------------------------------------
+REPEAT_EXPECTED: frozenset[str] = frozenset({
+    "Bash", "Task", "http_request",
+    "automod_start", "automod_gate", "automod_land", "automod_abort",
+    "automod_status", "automod_rollback",
+    "automod_vault_land", "automod_vault_revert",
+    "EnterPlanMode", "ExitPlanMode", "SetGoal", "ClearGoal", "TodoWrite",
+    "mc_navigate", "mc_close_modal",
+    "ide_open_file", "ide_open_folder", "ide_close_tab",
+    "browser_navigate", "browser_click", "browser_type", "browser_fill",
+    "browser_press", "browser_scroll", "browser_select", "browser_drag",
+    "browser_tabs", "browser_cookies", "browser_wait", "browser_evaluate",
+})
+
+# ---------------------------------------------------------------------------
 # Open world: reaches systems beyond this machine. Everything mail,
 # calendar and contacts touches an IMAP/CalDAV account; browser and http
 # reach the internet; Discord reaches a gateway; Task spawns a subagent
@@ -158,6 +198,23 @@ def annotate(tool: Tool) -> Tool:
 def read_only_tool_names() -> frozenset[str]:
     """The canonical read-only set, for consumers deriving gates from it."""
     return READ_ONLY
+
+
+def side_effecting(name: str) -> bool:
+    """Would a second call with these arguments be able to cause a second
+    durable effect? (#544, consumed by `agent_mcp.tool_effects`.)
+
+    Two named exclusions, both owned by this file rather than by the caller:
+    `READ_ONLY` because observing twice observes, and `REPEAT_EXPECTED` because
+    a repeat of those tools is normal operation whose replay would be stale.
+    Everything else — senders, creators, appenders, deleters, task writers —
+    is a candidate for the effect ledger. An unlisted tool counts as
+    side-effecting, which is the same safe default `annotations_for` gives
+    plan mode: a tool nobody classified gets guarded, not waved through.
+    """
+    if name in READ_ONLY:
+        return False
+    return name not in REPEAT_EXPECTED
 
 
 # ---------------------------------------------------------------------------

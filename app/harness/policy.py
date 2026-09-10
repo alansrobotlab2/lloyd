@@ -276,6 +276,19 @@ NON_INTERACTIVE_PREFIXES = ("worker", "autonomy-task", "scheduled-task", "backgr
 current_scope: contextvars.ContextVar[str] = contextvars.ContextVar(
     "lloyd_grant_scope", default="worker")
 
+#: Set by the worker pool around a job for #544 and forwarded to the aggregator
+#: in `_meta`. It names the thing whose effects must not happen twice — the queue
+#: item — so a retried attempt is recognised as the same run rather than a new
+#: one. It sits beside `current_scope` because the pool binds both, per job, for
+#: the same reason (only the pool knows what it claimed), but they bound
+#: different things and must never be conflated: `current_scope` bounds
+#: AUTHORITY and is deliberately coarse (`autonomy-task:39`), which is right for
+#: a grant and wrong here — keying an effect ledger on it would suppress a
+#: legitimate second effect forever, across every future run of that task. An
+#: empty scope means "no ledger", which is what an interactive turn gets.
+current_effect_scope: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "lloyd_effect_scope", default="")
+
 
 def is_interactive_scope(scope: Any) -> bool:
     text = str(scope or "").strip()
