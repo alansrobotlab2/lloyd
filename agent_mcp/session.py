@@ -47,6 +47,7 @@ _INJECTION_PATTERNS = [
 ]
 
 from app.paths import SESSIONS_DIR  # anchored to LLOYD_HOME, not $HOME/lloyd
+from app.sessions_io import is_user_session
 _SESSION_INDEX_TTL = 120       # cache session index for 2 min
 _SESSION_CORPUS_MAX = 5000     # max chars of searchable text per session
 
@@ -191,7 +192,10 @@ def _load_session_index(max_days: int = 14) -> dict:
 
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
-            if data.get("platform") == "autonomy":
+            # Recall is over what the USER said. A worker turn arrives through
+            # the chat path, so without this the model's own background jobs
+            # were being recalled back to it as the user's conversations.
+            if not is_user_session(data):
                 continue
 
             user_texts: list[str] = []

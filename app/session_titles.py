@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from app.paths import SESSIONS_DIR
-from app.sessions_io import mutate_session
+from app.sessions_io import is_user_session, mutate_session
 
 logger = logging.getLogger("lloyd-server")
 
@@ -164,7 +164,12 @@ def should_title(data: dict) -> bool:
     Titled ones qualify again only once the conversation has grown by
     `_RETITLE_GROWTH`×, which is what keeps this off the per-turn path.
     """
-    if data.get("platform") == "autonomy":
+    # Background sessions are titled at creation (`sessions_io.create_session`),
+    # so they never need this — which matters more than it sounds. The titler
+    # runs on the single-tenant secondary, where agent turns already queue, and
+    # ~180 background runs a day would put 180 model calls in front of them for
+    # labels nobody asked to have refreshed.
+    if not is_user_session(data):
         return False
     count = user_message_count(data)
     if count < 1:

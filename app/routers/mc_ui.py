@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import mc_state
 from app.paths import LLOYD_HOME, SESSIONS_DIR
+from app.sessions_io import is_background_session_name, is_user_session
 
 logger = logging.getLogger("lloyd-server")
 
@@ -274,13 +275,56 @@ def _summarize_inner_voice() -> dict:
     return {"sessions_total": total, "iv_enabled_count": iv_sessions}
 
 
+def _summarize_background() -> dict:
+    """What the Background tab is showing: unattended runs, newest first.
+
+    A tab absent from `_SUMMARIZERS` is not an error — `_summarize_tab`
+    returns `{}` and the agent is told nothing about where it just moved the
+    user, which is the quiet half of the drift `tests/test_mc_tab_parity.py`
+    exists to catch.
+
+    Counts by source rather than listing every row: the point of the tab is
+    "what has been running unattended", and at ~180 runs a day a list would be
+    a wall of near-identical titles in the model's context every time it
+    navigates here.
+    """
+    by_source: dict[str, int] = {}
+    rows: list[dict] = []
+    opened = 0
+    try:
+        paths = sorted(SESSIONS_DIR.glob("*.json"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
+    except OSError:
+        return {"sessions_total": 0, "by_source": {}, "recent": []}
+    for sf in paths:
+        if opened >= 400:
+            break
+        if not is_background_session_name(sf.name):
+            continue
+        opened += 1
+        try:
+            data = json.loads(sf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if is_user_session(data):
+            continue
+        source = str(data.get("source") or data.get("platform") or "unknown")
+        by_source[source] = by_source.get(source, 0) + 1
+        if len(rows) < 8:
+            rows.append({"id": data.get("session_id", sf.stem),
+                         "title": (data.get("title") or "")[:80],
+                         "source": source})
+    return {"sessions_total": sum(by_source.values()),
+            "by_source": by_source, "recent": rows}
+
+
 def _summarize_chat() -> dict:
     sessions = []
     for sf in sorted(SESSIONS_DIR.glob("*.json"),
                       key=lambda f: f.stat().st_mtime, reverse=True):
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
-            if data.get("platform") == "autonomy":
+            if not is_user_session(data):
                 continue
             sessions.append({
                 "id": data.get("session_id", sf.stem),
@@ -506,6 +550,7 @@ _SUMMARIZERS = {
     "dashboard": _summarize_dashboard,
     "inner_voice": _summarize_inner_voice,
     "chat": _summarize_chat,
+    "background": _summarize_background,
     "backlog": _summarize_backlog,
     "autonomy": _summarize_autonomy,
     "workers": _summarize_workers,

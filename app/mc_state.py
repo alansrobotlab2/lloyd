@@ -30,7 +30,7 @@ logger = logging.getLogger("lloyd-server")
 # confidently and wrongly. tests/test_mc_tab_parity.py pins all four.
 VALID_TABS = {
     "dashboard",
-    "inner_voice", "chat", "backlog", "autonomy", "workers",
+    "inner_voice", "chat", "background", "backlog", "autonomy", "workers",
     "memory", "architecture", "skills", "tools", "services",
     "settings", "graph", "ide", "browser",
 }

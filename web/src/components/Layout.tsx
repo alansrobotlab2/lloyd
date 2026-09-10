@@ -13,6 +13,7 @@ import InnerVoicePage from './pages/InnerVoicePage'
 import SettingsPage from './pages/SettingsPage'
 import DashboardPage from './pages/DashboardPage'
 import BrowserPage from './pages/BrowserPage'
+import BackgroundPage from './pages/BackgroundPage'
 
 // Architecture renders its own force graph, so it's the other page holding
 // three.js + react-force-graph-3d in the entry bundle. Lazy here too —
@@ -89,6 +90,7 @@ const PAGES: Record<string, React.FC> = {
   workers: WorkersPage,
   inner_voice: InnerVoicePage,  // Inner Voice (#345)
   browser: BrowserPage,         // Live browser session (#278)
+  background: BackgroundPage,   // Autonomy + worker runs, recorded
 }
 
 interface ModelMenuProps {

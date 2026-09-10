@@ -47,5 +47,12 @@ RESEARCH_DB = Path(os.environ["LLOYD_RESEARCH_DB"]) if os.environ.get("LLOYD_RES
 # target (backups, diffs) — readers and writers go through app.kg_store.
 VAULT_FACTS_ALIASES = VAULT_FACTS_ROOT / "entity-aliases.json"
 VAULT_SESSIONS_DIR = VAULT_DERIVED_ROOT / "sessions"
+# Background runs export here instead, and the split is about the qmd
+# watcher: `agent-services/scripts/qmd-watcher.sh` indexes and *embeds*
+# `sessions/` on every change. ~180 background runs a day would be an
+# embedding job per run over the machine talking to itself, drowning the
+# corpus that answers questions about what the user and Lloyd discussed.
+# Outside the watch: still exported, still greppable, not embedded.
+VAULT_BACKGROUND_SESSIONS_DIR = VAULT_DERIVED_ROOT / "sessions-background"
 VAULT_PENDING_RESEARCH_DIR = VAULT_DERIVED_ROOT / "pending-research"
 VAULT_FEEDS_DIR = VAULT_DERIVED_ROOT / "memory" / "feeds"

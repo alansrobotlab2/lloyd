@@ -31,7 +31,7 @@ LLOYD_API = os.environ.get("LLOYD_API_URL") or service_url("backend", "http://12
 # `dashboard` and `browser` were both absent while being real, rendered tabs.
 _VALID_TABS = [
     "dashboard",
-    "inner_voice", "chat", "backlog", "autonomy", "workers",
+    "inner_voice", "chat", "background", "backlog", "autonomy", "workers",
     "memory", "architecture", "skills", "tools", "services",
     "settings", "graph", "ide", "browser",
 ]

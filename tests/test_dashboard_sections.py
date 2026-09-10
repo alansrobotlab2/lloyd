@@ -515,6 +515,47 @@ def test_only_two_chats_are_shown(sessions, no_live_turns):
     assert len(dash._recent_sessions()["sessions"]) == 2
 
 
+def test_background_runs_do_not_starve_the_panel(sessions, no_live_turns,
+                                                 monkeypatch):
+    """The scan used to keep the newest 24 files by mtime and only then drop
+    non-user rows. Recording made every autonomy task and every worker job a
+    session in the same directory — ~180 a day — so the newest 24 are all
+    background and the panel rendered empty.
+
+    Background ids have four underscore-separated parts, so they are skipped
+    by NAME without being opened. That is what keeps the walk bounded: it now
+    stops at `_RECENT_KEPT` user rows or `_RECENT_CEILING` files opened,
+    neither of which is the fleet's throughput.
+    """
+    import time
+    now = time.time()
+    # 30 background runs, all newer than every chat.
+    for i in range(30):
+        _session(sessions, f"20260910_1200{i:02d}_autocode_ab{i:02d}",
+                 _local(minutes=-1), mtime=now, platform="worker",
+                 source="autocode")
+    for i in range(8):
+        _session(sessions, f"20260910_11000{i}_c{i}f2a1",
+                 _local(minutes=-10 - i), mtime=now - 3600 - i)
+
+    rows = dash._scan_recent_sessions()
+    assert len(rows) == 8, [r["session_id"] for r in rows]
+    assert all(r["platform"] == "mission-control" for r in rows)
+
+
+def test_a_background_platform_is_dropped_even_with_a_chat_shaped_name(
+        sessions, no_live_turns):
+    """The filename is a fast path, never the authority. A session named like
+    a chat but carrying a background `platform` is still not a chat — that is
+    what makes it safe for a future producer to name its sessions differently
+    without silently leaking them into the history."""
+    _session(sessions, "20260910_110000_abc123", _local(minutes=-1),
+             platform="autonomy")
+    _session(sessions, "20260910_110001_def456", _local(minutes=-2))
+    rows = dash._scan_recent_sessions()
+    assert [r["session_id"] for r in rows] == ["20260910_110001_def456"]
+
+
 # ── Recent chats ───────────────────────────────────────────────────────
 
 

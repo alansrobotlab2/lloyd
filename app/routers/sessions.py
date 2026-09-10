@@ -9,10 +9,12 @@ import psutil
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
+    is_background_session_name,
+    is_user_session,
     is_session_active,
     get_cancel_event,
     get_queue_state,
@@ -58,11 +60,24 @@ async def list_sessions():
     sessions = []
     loaded: list[tuple[float, dict, object]] = []
     for sf in SESSIONS_DIR.glob("*.json"):
+        # The filename fast path. A background run's id has four
+        # underscore-separated parts and a chat's has three, so most of this
+        # directory can be skipped without opening it — and at ~180 background
+        # runs a day most of it is background. A session JSON carries its
+        # whole transcript, so "skip it without parsing" is the difference
+        # between a bounded listing and one that grows with the fleet's
+        # throughput. `is_user_session` below stays the authority.
+        if is_background_session_name(sf.name):
+            continue
         try:
             data = json.loads(sf.read_text())
         except Exception:
             continue
-        if data.get("platform") == "autonomy":
+        # Chat history is conversations. `worker` never belonged here any
+        # more than `autonomy` did — worker turns go through the chat path, so
+        # a backlog-triage session sat in the user's history looking like
+        # something they had said. `is_user_session` is the one definition.
+        if not is_user_session(data):
             continue
         loaded.append((_last_active_ts(sf, data), data, sf))
     loaded.sort(key=lambda row: row[0], reverse=True)
@@ -102,6 +117,79 @@ async def list_sessions():
             continue
 
     return JSONResponse({"sessions": sessions[:50], "count": len(sessions)})
+
+
+#: How many session files the background listing may open. Background runs
+#: are the bulk of the directory by construction, so unlike the chat listing
+#: this one cannot skip most of what it walks — it is bounded by an explicit
+#: budget instead. The walk is mtime-ordered, so the budget spends itself on
+#: the newest files, which is what the tab shows.
+_BACKGROUND_SCAN_CEILING = 600
+
+
+@router.get("/api/background/sessions")
+async def list_background_sessions(limit: int = 100):
+    """Every run that is not a conversation: autonomy tasks and worker jobs.
+
+    The other half of the bifurcation. `/api/sessions` is conversations and
+    now excludes these; this endpoint is the only listing that shows them, and
+    the Background tab is the only page that reads it. Before recording became
+    universal there was nothing here to list — autonomy runs left no session
+    at all, and the worker sessions that did exist sat in the user's chat
+    history looking like something they had said.
+
+    Rows carry `platform` and `source` because that is how the tab groups
+    them: `autonomy-task:39` and `autocode` are different kinds of unattended
+    work and are read for different reasons.
+    """
+    if not SESSIONS_DIR.exists():
+        return JSONResponse({"sessions": [], "count": 0})
+    try:
+        paths = sorted(SESSIONS_DIR.glob("*.json"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError as e:
+        return JSONResponse({"sessions": [], "count": 0, "error": str(e)})
+
+    loaded: list[tuple[float, dict, object]] = []
+    opened = 0
+    for sf in paths:
+        if opened >= _BACKGROUND_SCAN_CEILING:
+            break
+        # Inverse of the chat listing's fast path, and deliberately only a
+        # *hint*: a three-part id is never a background run, so skipping it
+        # unread is free. A four-part one is still parsed and judged by its
+        # `platform`, because the filename is not the authority.
+        if not is_background_session_name(sf.name):
+            continue
+        opened += 1
+        try:
+            data = json.loads(sf.read_text())
+        except Exception:
+            continue
+        if is_user_session(data):
+            continue
+        loaded.append((_last_active_ts(sf, data), data, sf))
+
+    loaded.sort(key=lambda row: row[0], reverse=True)
+    out = []
+    for ts, data, sf in loaded[:limit]:
+        out.append({
+            "id": data.get("session_id", sf.stem),
+            "session_key": data.get("session_id", sf.stem),
+            # Written at creation, so unlike a chat row this is never empty
+            # and never waited on the LLM titler.
+            "title": (data.get("title") or "").strip(),
+            "preview": (data.get("preview") or "")[:120],
+            "platform": data.get("platform", ""),
+            "source": data.get("source", ""),
+            "model": data.get("model", ""),
+            "inner_voice": bool(data.get("inner_voice", False)),
+            "message_count": len(data.get("messages") or []),
+            "last_active": datetime.fromtimestamp(
+                ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+    return JSONResponse({"sessions": out, "count": len(out),
+                         "scanned": opened})
 
 
 @router.get("/api/sessions/{session_id}/todos")

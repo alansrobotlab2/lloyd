@@ -511,6 +511,47 @@ class WorkQueue:
         with self._connect() as conn:
             return [dict(r) for r in conn.execute(q, args).fetchall()]
 
+    def run_rollup_by_source(self, since_iso: str) -> dict[str, dict]:
+        """Per-source run counts and durations since `since_iso`.
+
+        The rollup `/api/workers/status` never had. That endpoint reports
+        configuration (enabled, interval, max_inflight) and queue depth, which
+        together say what a source is *allowed* to do and how much is waiting
+        — and nothing at all about whether it works. A source failing every
+        run looked exactly like a source succeeding at every run.
+
+        Aggregated in SQL rather than by walking rows in Python, because the
+        Background tab polls this beside everything else and `runs` is the
+        table that grows fastest.
+        """
+        q = """SELECT source,
+                      COUNT(*)                                   AS total,
+                      SUM(status = 'success')                     AS ok,
+                      SUM(status = 'failed')                      AS failed,
+                      SUM(status = 'skipped')                     AS skipped,
+                      SUM(COALESCE(duration_seconds, 0))          AS seconds,
+                      MAX(completed_at)                           AS last_completed
+               FROM runs WHERE completed_at >= ? GROUP BY source"""
+        with self._connect() as conn:
+            rows = [dict(r) for r in conn.execute(q, (since_iso,)).fetchall()]
+        out: dict[str, dict] = {}
+        for r in rows:
+            total = int(r["total"] or 0)
+            failed = int(r["failed"] or 0)
+            out[str(r["source"])] = {
+                "total": total,
+                "ok": int(r["ok"] or 0),
+                "failed": failed,
+                "skipped": int(r["skipped"] or 0),
+                # A rate over zero runs is not 0.0, it is unknown — and
+                # rendering "0% failing" for a source that has never run is
+                # the reading this panel exists to prevent.
+                "fail_rate": (failed / total) if total else None,
+                "gpu_hours": round(float(r["seconds"] or 0) / 3600.0, 2),
+                "last_completed": r["last_completed"],
+            }
+        return out
+
     def list_runs_joined(self, source: str, since_iso: str,
                          limit: int = 20000) -> list[dict]:
         """Runs since `since_iso`, joined to their queue row.

@@ -8,7 +8,7 @@ import type { Page } from '../components/Sidebar'
 // `dashboard` and `browser` were both in `Page` and missing from this set.
 const VALID_TABS: ReadonlySet<string> = new Set([
   'dashboard',
-  'inner_voice', 'chat', 'backlog', 'autonomy', 'workers',
+  'inner_voice', 'chat', 'background', 'backlog', 'autonomy', 'workers',
   'memory', 'architecture', 'skills', 'tools', 'services',
   'settings', 'graph', 'ide', 'browser',
 ])

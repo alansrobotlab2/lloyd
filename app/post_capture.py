@@ -20,7 +20,7 @@ from typing import Optional
 import yaml
 
 from app.paths import SESSIONS_DIR
-from app.sessions_io import mutate_session
+from app.sessions_io import is_user_session, mutate_session
 from app.secondary_models import (
     _sync_secondary_capture_call,
     _sync_secondary_fact_extraction,
@@ -30,7 +30,7 @@ from app.secondary_models import (
 
 logger = logging.getLogger("lloyd-server")
 
-from app.paths import VAULT_SESSIONS_DIR
+from app.paths import VAULT_BACKGROUND_SESSIONS_DIR, VAULT_SESSIONS_DIR
 
 
 def _build_capture_transcript(messages: list, max_chars: int = 4000) -> str:
@@ -190,6 +190,14 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
     Writes immediately (no LLM call) so QMD can index it within seconds.
     Format matches the old Hermes extract-session-log.py output for consistency.
     Returns the path written, or None on failure.
+
+    **A background run exports to a different directory**, and the reason is
+    `agent-services/scripts/qmd-watcher.sh`: it indexes and *embeds*
+    `_pipeline/vault-derived/sessions/` on every change. At ~180 background
+    runs a day that is an embedding job per run, over transcripts of the
+    machine talking to itself, drowning the corpus that exists to answer
+    questions about what the user and Lloyd discussed. `sessions-background/`
+    sits outside the watch: still exported, still greppable, not embedded.
     """
     from zoneinfo import ZoneInfo
     pst = ZoneInfo("America/Los_Angeles")
@@ -271,7 +279,9 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
     if len(lines) <= 3:
         return None
 
-    out_dir = VAULT_SESSIONS_DIR / date_str
+    root = (VAULT_SESSIONS_DIR if is_user_session(data)
+            else VAULT_BACKGROUND_SESSIONS_DIR)
+    out_dir = root / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_id = session_id.replace("/", "--")[:30]
     out_path = out_dir / f"{safe_id}.md"
@@ -296,8 +306,6 @@ async def _post_session_capture(session_id: str):
         # transcript build). We never write this dict back.
         data = json.loads(meta_path.read_text())
 
-        if data.get("platform") == "autonomy":
-            return
         if data.get("captured"):
             return
 
@@ -314,6 +322,18 @@ async def _post_session_capture(session_id: str):
                 logger.info(f"Post-session capture: {session_id} — markdown exported to {md_path}")
         except Exception as me:
             logger.warning(f"Session markdown export failed for {session_id}: {me}")
+
+        # The markdown export happens for every platform — a background run's
+        # transcript is worth having on disk, which is the whole point of
+        # recording it. Everything below is not: the summary is a secondary
+        # model call, the daily note is the user's own record of their day,
+        # and fact extraction writes into the knowledge graph as if the
+        # machine's notes to itself were things the user said. `autonomy` was
+        # excluded from all of it from the start; `worker` never was, and
+        # worker turns arrive through the chat path.
+        if not is_user_session(data):
+            await mutate_session(session_id, lambda d: d.__setitem__("captured", True))
+            return
 
         transcript = _build_capture_transcript(data.get("messages", []))
         if len(transcript.strip()) < 50:

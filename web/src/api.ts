@@ -213,6 +213,56 @@ export interface InnerVoiceSession {
   evaluate_user_turns?: boolean
 }
 
+// A run nobody was watching: an autonomy task or a worker job. `title` is
+// written when the session is created rather than by the LLM titler, so
+// unlike a chat row it is never empty and never waited on the secondary.
+export interface BackgroundSession {
+  id: string
+  session_key: string
+  title: string
+  preview: string
+  platform: string
+  source: string
+  model: string
+  inner_voice: boolean
+  message_count: number
+  last_active: string
+}
+
+export interface WorkerSourceHealth {
+  name: string
+  configured: boolean
+  enabled: boolean
+  inner_voice: boolean
+  interval_seconds?: number | null
+  max_inflight?: number | null
+  priority?: number | null
+  depth: Record<string, number>
+  // null when the source has no runs in the window. A rate over zero runs is
+  // unknown, not 0% — rendering "0% failing" for a source that has never run
+  // is the reading this panel exists to prevent.
+  health: {
+    total: number
+    ok: number
+    failed: number
+    skipped: number
+    fail_rate: number | null
+    gpu_hours: number
+    last_completed: string | null
+  } | null
+  recent: Array<{
+    run_id: string
+    source: string
+    status: string
+    started_at: string
+    completed_at: string
+    duration_seconds: number
+    summary: string
+    task_id?: string | null
+    meta_json?: string
+  }>
+}
+
 export interface InnerVoiceEventLogEntry {
   ts: string
   session_id: string
@@ -933,6 +983,17 @@ export const api = {
     return response.json()
   },
 
+  // Every run that is not a conversation: autonomy tasks and worker jobs.
+  // The other half of the history bifurcation — `listSessions` is chats and
+  // excludes these, and the Background tab is the only page that reads this.
+  listBackgroundSessions: (
+    limit = 100,
+  ): Promise<{ sessions: BackgroundSession[]; count: number; scanned?: number }> =>
+    fetch(`${API_BASE}/background/sessions?limit=${limit}`).then(r => {
+      if (!r.ok) throw new Error(`background sessions: ${r.status}`)
+      return r.json()
+    }),
+
   // Display metadata for one session, without pulling the whole list.
   // The chat header uses this to name the session it is showing.
   getSessionMeta: (sessionId: string): Promise<SessionMeta> =>
@@ -1194,6 +1255,17 @@ export const api = {
     depth?: Record<string, Record<string, number>>
     sources?: Array<{ name: string; enabled: boolean; interval_seconds?: number; max_inflight?: number; depth?: Record<string, number> }>
   }> => fetch(`${API_BASE}/workers/status`).then(r => r.json()),
+  // Per-source health: config, queue depth, outcome rollup, recent runs.
+  // `workersStatus` reports only what a source is allowed to do; this is
+  // whether it works.
+  workersHealth: (
+    days = 7, runs = 10,
+  ): Promise<{ initialized: boolean; days: number; sources: WorkerSourceHealth[] }> =>
+    fetch(`${API_BASE}/workers/health?days=${days}&runs=${runs}`).then(r => {
+      if (!r.ok) throw new Error(`workers health: ${r.status}`)
+      return r.json()
+    }),
+
   workersQueue: (opts: { state?: string; source?: string; limit?: number } = {}): Promise<{ items: any[] }> => {
     const q = new URLSearchParams()
     if (opts.state) q.set('state', opts.state)

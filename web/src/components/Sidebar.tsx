@@ -16,6 +16,7 @@ import {
   FileCode2,
   LayoutDashboard,
   Globe,
+  Moon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -27,7 +28,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 
-export type Page = 'dashboard' | 'chat' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'ide' | 'browser'
+export type Page = 'dashboard' | 'chat' | 'background' | 'services' | 'backlog' | 'memory' | 'graph' | 'skills' | 'tools' | 'settings' | 'autonomy' | 'architecture' | 'workers' | 'inner_voice' | 'ide' | 'browser'
 
 interface NavItem {
   id: Page
@@ -39,6 +40,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'inner_voice', label: 'Inner Voice', icon: BrainCircuit },
   { id: 'chat', label: 'Chat', icon: MessageCircle },
+  { id: 'background', label: 'Background', icon: Moon },
   { id: 'backlog', label: 'Backlog', icon: LayoutGrid },
   { id: 'autonomy', label: 'Autonomy', icon: Lightbulb },
   { id: 'workers', label: 'Workers', icon: Workflow },

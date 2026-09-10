@@ -62,6 +62,72 @@ async def test_sessions_list_shape(client, fixture_session):
     }
 
 
+@pytest.fixture
+def fixture_background_sessions(tmp_path, monkeypatch):
+    """One autonomy run and one worker run, named the way the recorder names
+    them — four underscore-separated parts, which is the fast path the
+    listings read before opening anything."""
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    ids = []
+    for sid, platform, source in (
+            ("20260910_120001_autonomy_ab12", "autonomy", "autonomy-task:80"),
+            ("20260910_120002_autocode_cd34", "worker", "autocode")):
+        (tmp_path / f"{sid}.json").write_text(json.dumps({
+            "session_id": sid, "title": f"{source} run", "preview": "p",
+            "model": "primary", "platform": platform, "source": source,
+            "inner_voice": False, "messages": [],
+            "last_active": "2026-09-10T12:00:00",
+        }))
+        ids.append(sid)
+    # A chat, to prove the two listings really are complements.
+    (tmp_path / "20260910_120003_ef5678.json").write_text(json.dumps({
+        "session_id": "20260910_120003_ef5678", "platform": "mission-control",
+        "messages": [], "preview": "a real conversation"}))
+    return ids
+
+
+async def test_background_sessions_shape(client, fixture_background_sessions):
+    r = await client.get("/api/background/sessions")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) >= {"sessions", "count"}
+    got = {s["id"] for s in body["sessions"]}
+    assert got == set(fixture_background_sessions)
+    entry = body["sessions"][0]
+    # api.ts BackgroundSession type.
+    assert set(entry) >= {
+        "id", "session_key", "title", "preview", "platform", "source",
+        "model", "inner_voice", "message_count", "last_active",
+    }
+
+
+async def test_the_two_listings_are_complements(client,
+                                                fixture_background_sessions):
+    """Chat history is conversations and the Background tab is everything
+    else. A session in both would be the bug this split exists to fix, in the
+    other direction."""
+    chats = {s["id"] for s in (await client.get("/api/sessions")).json()["sessions"]}
+    background = {s["id"] for s in
+                  (await client.get("/api/background/sessions")).json()["sessions"]}
+    assert chats == {"20260910_120003_ef5678"}
+    assert not (chats & background)
+
+
+async def test_workers_health_shape(client):
+    r = await client.get("/api/workers/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) >= {"initialized", "days", "sources"}
+    for src in body["sources"]:
+        # api.ts WorkerSourceHealth type.
+        assert set(src) >= {"name", "enabled", "inner_voice", "depth",
+                            "health", "recent"}
+        # `health` is None for a source with no runs in the window — a rate
+        # over zero runs is unknown, not 0%.
+        assert src["health"] is None or set(src["health"]) >= {
+            "total", "ok", "failed", "fail_rate", "gpu_hours"}
+
+
 async def test_session_todos_shape(client, fixture_session):
     r = await client.get(f"/api/sessions/{fixture_session}/todos")
     assert r.status_code == 200

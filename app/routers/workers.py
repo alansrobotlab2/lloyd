@@ -18,6 +18,7 @@ import json
 import logging
 import shutil
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -71,6 +72,89 @@ async def workers_status():
         "depth": depth,
         "sources": sources,
     })
+
+
+@router.get("/api/workers/health")
+async def workers_health(days: int = 7, runs: int = 10):
+    """Per-source health: config, queue depth, outcome rollup, recent runs.
+
+    The workers' answer to `/api/autonomy/health`, and it exists because
+    `/api/workers/status` reports only what a source is *allowed* to do —
+    enabled, interval, max_inflight — plus how much is queued. A source that
+    failed every run for a week looked identical to one that succeeded at
+    every run: nothing anywhere joined a source to its outcomes.
+
+    Degrades a section at a time rather than 503-ing the page, the same rule
+    the dashboard follows: a health view is most useful when something is
+    broken, so it must not be the second thing to break.
+    """
+    import asyncio as _asyncio
+    from datetime import timedelta, timezone
+
+    days = max(1, min(90, int(days)))
+    runs = max(0, min(50, int(runs)))
+    sources_cfg = CONFIG.get("workers", {}).get("sources", {}) or {}
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    try:
+        q = get_queue()
+    except RuntimeError:
+        # No queue yet is not an error: it is a box where the pool has never
+        # started. Report the configured sources with empty outcomes rather
+        # than an error string the page has to special-case.
+        return JSONResponse({
+            "initialized": False, "days": days,
+            "sources": [{"name": n, "enabled": bool(c.get("enabled", False)),
+                         "inner_voice": bool(c.get("inner_voice", False)),
+                         "interval_seconds": c.get("interval_seconds"),
+                         "max_inflight": c.get("max_inflight"),
+                         "priority": c.get("priority"),
+                         "depth": {}, "health": None, "recent": []}
+                        for n, c in sources_cfg.items()],
+        })
+
+    loop = _asyncio.get_event_loop()
+    try:
+        rollup = await loop.run_in_executor(None, q.run_rollup_by_source, since)
+    except Exception as e:
+        logger.warning("workers health rollup failed: %s", e)
+        rollup = {}
+    try:
+        depth = await loop.run_in_executor(None, q.depth_by_source)
+    except Exception as e:
+        logger.warning("workers health depth failed: %s", e)
+        depth = {}
+
+    # Every source the config names AND every source the runs table knows
+    # about. A source removed from config still has history worth reading,
+    # and one whose runs all predate the window still has to appear.
+    names = sorted(set(sources_cfg) | set(rollup) | set(depth))
+    out = []
+    for name in names:
+        cfg = sources_cfg.get(name) or {}
+        recent = []
+        if runs:
+            try:
+                recent = await loop.run_in_executor(
+                    None, partial(q.list_runs, source=name, limit=runs))
+            except Exception:
+                recent = []
+        out.append({
+            "name": name,
+            "configured": name in sources_cfg,
+            "enabled": bool(cfg.get("enabled", False)),
+            # Recording is universal; observation is this switch. Surfaced
+            # here because "was anyone watching?" is the first question about
+            # a run that went wrong.
+            "inner_voice": bool(cfg.get("inner_voice", False)),
+            "interval_seconds": cfg.get("interval_seconds"),
+            "max_inflight": cfg.get("max_inflight"),
+            "priority": cfg.get("priority"),
+            "depth": depth.get(name, {}),
+            "health": rollup.get(name),
+            "recent": recent,
+        })
+    return JSONResponse({"initialized": True, "days": days, "sources": out})
 
 
 @router.get("/api/workers/queue")
