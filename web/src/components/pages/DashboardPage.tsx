@@ -626,6 +626,16 @@ function TaskLine({
 }
 
 function AutonomyPanel({ autonomy }: { autonomy: AutonomyState }) {
+  // A tab left open across a backend restart polls the new build with the
+  // old snapshot shape, and a section builder can hand back a list-less
+  // form (it did, for a missing vault directory, on 2026-09-10). Read every
+  // list as possibly absent: the dashboard must not be the second thing to
+  // break.
+  const running = autonomy.running ?? []
+  const overdue = autonomy.overdue ?? []
+  const held = autonomy.held ?? []
+  const upcoming = autonomy.upcoming ?? []
+  const failing = autonomy.failing ?? []
   return (
     <Panel>
       <div className="mb-2 flex items-baseline justify-between gap-2">
@@ -636,12 +646,12 @@ function AutonomyPanel({ autonomy }: { autonomy: AutonomyState }) {
       </div>
       <StatusChips counts={autonomy.by_status} />
 
-      {autonomy.running.length > 0 && (
+      {running.length > 0 && (
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">
           <div className="text-[10px] uppercase tracking-wider text-violet-400">
-            Running now ({autonomy.running.length})
+            Running now ({running.length})
           </div>
-          {autonomy.running.map(r => (
+          {running.map(r => (
             <div key={r.job_id} className="flex items-center gap-2 text-[10px]">
               <span className="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-violet-400" />
               <span className="truncate text-foreground">{r.kind || r.job_id}</span>
@@ -653,17 +663,17 @@ function AutonomyPanel({ autonomy }: { autonomy: AutonomyState }) {
         </div>
       )}
 
-      {autonomy.overdue.length > 0 && (
+      {overdue.length > 0 && (
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">
           <div className="text-[10px] uppercase tracking-wider text-amber-400">
-            Overdue ({autonomy.overdue_count})
+            Overdue ({autonomy.overdue_count ?? overdue.length})
             {autonomy.classifier === 'naive' && (
               <span className="ml-1 normal-case tracking-normal text-muted-foreground/60">
                 unclassified
               </span>
             )}
           </div>
-          {autonomy.overdue.map(t => (
+          {overdue.map(t => (
             <TaskLine key={t.name} task={t} tone="warn" when={t.next_run} />
           ))}
         </div>
@@ -672,32 +682,32 @@ function AutonomyPanel({ autonomy }: { autonomy: AutonomyState }) {
       {/* Past due on the clock, but the scheduler is holding them on
           purpose. Kept visible — a task paused for three days is worth
           seeing — but never coloured as a miss. */}
-      {(autonomy.held?.length ?? 0) > 0 && (
+      {held.length > 0 && (
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-            Held ({autonomy.held_count})
+            Held ({autonomy.held_count ?? held.length})
           </div>
-          {autonomy.held.map(t => (
+          {held.map(t => (
             <TaskLine key={t.name} task={t} tone="idle" when={t.next_run} showReason />
           ))}
         </div>
       )}
 
-      {autonomy.upcoming.length > 0 && (
+      {upcoming.length > 0 && (
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Next up</div>
-          {autonomy.upcoming.map(t => (
+          {upcoming.map(t => (
             <TaskLine key={t.name} task={t} tone="idle" when={t.next_run} />
           ))}
         </div>
       )}
 
-      {autonomy.failing.length > 0 && (
+      {failing.length > 0 && (
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">
           <div className="text-[10px] uppercase tracking-wider text-rose-400">
-            Failed ({autonomy.failing.length})
+            Failed ({failing.length})
           </div>
-          {autonomy.failing.map(t => (
+          {failing.map(t => (
             <div key={t.name} className="flex items-center gap-2 text-[10px]">
               <XCircle className="h-3 w-3 flex-shrink-0 text-rose-400" />
               <span className="truncate text-foreground">{t.name}</span>
@@ -809,7 +819,10 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
 }
 
 function BacklogPanel({ backlog }: { backlog: BacklogState }) {
-  const maxOpen = Math.max(...backlog.by_board.map(b => b.open), 1)
+  // Same rule as AutonomyPanel: a list can be absent, and must read as empty.
+  const byBoard = backlog.by_board ?? []
+  const recentOpen = backlog.recent_open ?? []
+  const maxOpen = Math.max(...byBoard.map(b => b.open), 1)
   return (
     <Panel>
       <div className="mb-2 flex items-baseline justify-between gap-2">
@@ -820,12 +833,12 @@ function BacklogPanel({ backlog }: { backlog: BacklogState }) {
       </div>
       <StatusChips counts={backlog.by_status} />
 
-      {backlog.by_board.length > 0 && (
+      {byBoard.length > 0 && (
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Open by board
           </div>
-          {backlog.by_board.filter(b => b.open > 0).map(b => (
+          {byBoard.filter(b => b.open > 0).map(b => (
             <div key={b.board} className="flex items-center gap-2">
               <span className="w-20 flex-shrink-0 truncate text-[10px] text-muted-foreground">
                 {b.board}
@@ -844,12 +857,12 @@ function BacklogPanel({ backlog }: { backlog: BacklogState }) {
         </div>
       )}
 
-      {backlog.recent_open.length > 0 && (
+      {recentOpen.length > 0 && (
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Recently touched
           </div>
-          {backlog.recent_open.map(t => (
+          {recentOpen.map(t => (
             <div key={`${t.board}/${t.name}`} className="flex items-center gap-2 text-[10px]">
               <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full',
                 TONE_FILL[STATUS_TONE[t.status] ?? 'idle'])} />

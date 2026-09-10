@@ -14,6 +14,7 @@ a way that looks fine:
 
 from __future__ import annotations
 
+import shutil
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -121,10 +122,21 @@ def test_a_task_with_no_next_run_is_neither_overdue_nor_upcoming(vault):
 
 
 def test_missing_autonomy_directory_is_empty_not_an_error(vault, monkeypatch):
-    (vault / "obsidian" / "autonomy").rmdir()
+    # A missing directory is an empty fleet, not a different shape. The
+    # page reads `overdue`, `held` and `classifier` unguarded; on 2026-09-10
+    # the vault was gone and a four-key early return here was the
+    # `Cannot read properties of undefined` that blanked Mission Control
+    # on its landing tab.
+    _task(vault, "present", status="paused")
+    populated = dash._autonomy()
+    dash._cache.clear()
+    shutil.rmtree(vault / "obsidian" / "autonomy")
     out = dash._autonomy()
     assert out["total"] == 0
     assert out["by_status"] == {}
+    assert set(out) == set(populated)
+    assert out["overdue"] == [] and out["held"] == [] and out["upcoming"] == []
+    assert out["overdue_count"] == 0 and out["held_count"] == 0
 
 
 # ── Held is not overdue ────────────────────────────────────────────────
@@ -291,6 +303,19 @@ def test_recently_touched_lists_only_open_items(vault):
 
 
 # ── Caching ────────────────────────────────────────────────────────────
+
+
+def test_missing_backlog_directory_has_the_full_shape(vault):
+    # Same rule as the autonomy section: the early return dropped
+    # `recent_open`, which the panel maps over without a guard.
+    _backlog_item(vault, 1, "a", "up_next")
+    populated = dash._backlog()
+    dash._cache.clear()
+    shutil.rmtree(vault / "obsidian" / "backlog")
+    out = dash._backlog()
+    assert out["total"] == 0 and out["open_total"] == 0
+    assert set(out) == set(populated)
+    assert out["by_board"] == [] and out["recent_open"] == []
 
 
 def test_vault_scans_are_cached_between_polls(vault):

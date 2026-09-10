@@ -438,15 +438,20 @@ def _autonomy() -> dict[str, Any]:
     autonomy_dir = Path.home() / "obsidian" / "autonomy"
 
     def _scan() -> dict[str, Any]:
-        if not autonomy_dir.exists():
-            return {"total": 0, "by_status": {}, "upcoming": [], "failing": []}
+        # A missing directory is an empty fleet, not a different shape. This
+        # used to return a four-key dict here, and the page reads `overdue`,
+        # `held` and `classifier` unguarded — on 2026-09-10 the vault was
+        # gone and that short form was the `Cannot read properties of
+        # undefined` that blanked Mission Control on its landing tab. One
+        # return, one shape, whatever is on disk.
+        paths = list(autonomy_dir.glob("*.md")) if autonomy_dir.exists() else []
         by_status: dict[str, int] = {}
         upcoming: list[dict[str, Any]] = []
         failing: list[dict[str, Any]] = []
         scheduled: list[tuple[dict[str, Any], dict]] = []
         all_fm: list[dict] = []
         total = 0
-        for path in autonomy_dir.glob("*.md"):
+        for path in paths:
             # Only NN-name.md task files — skip _config.md, reports, notes.
             if not path.name[:1].isdigit():
                 continue
@@ -560,14 +565,15 @@ def _backlog() -> dict[str, Any]:
     backlog_dir = Path.home() / "obsidian" / "backlog"
 
     def _scan() -> dict[str, Any]:
-        if not backlog_dir.exists():
-            return {"total": 0, "by_status": {}, "by_board": [], "open_total": 0}
+        # Same rule as `_autonomy`: a missing board is empty, not shaped
+        # differently. The early return here dropped `recent_open`.
+        paths = list(backlog_dir.glob("*.md")) if backlog_dir.exists() else []
         by_status: dict[str, int] = {}
         # board -> {open, total}
         boards: dict[str, dict[str, int]] = {}
         total = 0
         recent: list[dict[str, Any]] = []
-        for path in backlog_dir.glob("*.md"):
+        for path in paths:
             if not path.name[:1].isdigit():
                 continue
             fm = _frontmatter(path)
