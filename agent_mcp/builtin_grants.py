@@ -176,24 +176,92 @@ async def list_tools():
         Tool(name="grant_create", description=_CREATE_DESC, inputSchema={
             "type": "object",
             "properties": {
-                "scope": {"type": "string"},
-                "tool": {"type": "string"},
-                "predicate": {"type": "string"},
-                "quota": {"type": "integer", "minimum": 1},
-                "expires_at": {"type": "string",
-                               "description": "ISO date (YYYY-MM-DD) or datetime. Required."},
-                "issued_by": {"type": "string"},
-                "note": {"type": "string"},
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "Whose authority this covers: 'worker:<source>' or "
+                        "'autonomy-task:<id>'. An autonomy task is its own "
+                        "scope, so a grant to one task is not a grant to the "
+                        "source it runs on."
+                    ),
+                },
+                "tool": {
+                    "type": "string",
+                    "description": (
+                        "Bare tool name the grant authorizes, e.g. "
+                        "'email_send'. May not be 'grant_create' — a grant "
+                        "cannot authorize minting a grant."
+                    ),
+                },
+                "predicate": {
+                    "type": "string",
+                    "description": (
+                        "Optional argument bound. Accepted grammar is exactly "
+                        "'len(field)<=N' or 'field<=N' (operators <= < >= > "
+                        "==); it is parsed, never evaluated. Anything else is "
+                        "refused at mint. Omit to bound the tool only, which "
+                        "is usually too broad."
+                    ),
+                },
+                "quota": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Maximum number of executions. Counted per call, and "
+                        "checked before expiry. Omitted means unbounded — "
+                        "prefer setting it, since volume is the half of 'scope' "
+                        "that an agent is most likely to push."
+                    ),
+                },
+                "expires_at": {
+                    "type": "string",
+                    "description": (
+                        "ISO date (YYYY-MM-DD, taken as end of day) or "
+                        "datetime. Mandatory: there is no default and no "
+                        "infinity, and a row cannot be written without one."
+                    ),
+                },
+                "issued_by": {
+                    "type": "string",
+                    "description": (
+                        "Who authorized this. Names a human. A worker or "
+                        "autonomy identity is refused by the store itself."
+                    ),
+                },
+                "note": {
+                    "type": "string",
+                    "description": (
+                        "Why the grant exists, in a line — read by whoever "
+                        "decides at renewal whether to mint again."
+                    ),
+                },
             },
             "required": ["scope", "tool", "expires_at", "issued_by"],
         }, annotations={"readOnlyHint": False, "destructiveHint": False}),
         Tool(name="grant_list", description=_LIST_DESC, inputSchema={
             "type": "object",
-            "properties": {"scope": {"type": "string"}},
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "Limit to one scope, e.g. 'autonomy-task:39'. Omit for "
+                        "every live grant — which is what a renewal pass wants."
+                    ),
+                }
+            },
         }, annotations={"readOnlyHint": True, "destructiveHint": False}),
         Tool(name="grant_revoke", description=_REVOKE_DESC, inputSchema={
             "type": "object",
-            "properties": {"grant_id": {"type": "integer"}},
+            "properties": {
+                "grant_id": {
+                    "type": "integer",
+                    "description": (
+                        "id of the live grant to revoke, from grant_list. "
+                        "Effective at the next dispatch, including inside a "
+                        "run that already consumed it."
+                    ),
+                }
+            },
             "required": ["grant_id"],
         }, annotations={"readOnlyHint": False, "destructiveHint": True}),
     ]
