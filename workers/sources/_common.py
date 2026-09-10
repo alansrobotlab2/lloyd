@@ -400,6 +400,14 @@ async def run_prompt_with_run_state(
     so a caller with no skill body passes everything as `prompt` and leaves
     `skill_text` empty — the split of `P` is the caller's, not the driver's.
 
+    **Not wrapped in `record_events`, and not an oversight.** This path already
+    writes its own record — `run_dir/state-trace.ndjson`, one line per step —
+    and it is the honest one here: there is no single transcript to persist,
+    because each step's transcript is deliberately dropped. Nothing in
+    production calls this yet; when something does, the question to ask is
+    whether the state trace belongs in the Background tab, not whether to
+    persist a conversation this design does not have.
+
     Raises `RunStateStepError` when a step's patch is invalid on both attempts.
     Deliberate: a caller that wants today's behaviour as a fallback has to catch
     it and say so in code, rather than inherit the transcript by silence.

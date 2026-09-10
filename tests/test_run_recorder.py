@@ -191,6 +191,51 @@ def test_the_kill_switch_stops_recording_without_stopping_the_run(store,
     assert _session(store)["messages"] == []    # and nothing was written
 
 
+# ── The other direct path ──────────────────────────────────────────────
+
+def test_run_prompt_on_primary_leaves_a_session_and_a_transcript(store,
+                                                                 monkeypatch):
+    """The second path that recorded nothing. A `gap-fill` or
+    `session-distill` run collected its text and discarded everything else."""
+    from workers.sources import _common as C
+
+    seen: dict = {}
+
+    async def _fake_run_query(messages, options):
+        seen["options"] = options
+        yield {"type": "tool_call", "call_id": "c1", "name": "Read",
+               "args_json": '{"file_path": "x"}', "summary": "Reading x"}
+        yield {"type": "tool_result", "call_id": "c1", "content": "contents"}
+        yield {"type": "text_delta", "text": "resolved"}
+        yield {"type": "result", "stop_reason": "stop", "num_turns": 2,
+               "usage": {"input_tokens": 4, "output_tokens": 2}}
+
+    import app.harness as harness
+    monkeypatch.setattr(harness, "run_query", _fake_run_query)
+    monkeypatch.setattr(C, "_worker_run_options",
+                        lambda *a, **k: type("O", (), {"session_id": "",
+                                                       "turn_id": ""})())
+
+    turn = asyncio.run(C.run_prompt_on_primary(
+        "resolve the gap", max_turns=5, source="gap-fill",
+        title="gap-fill Anthropic"))
+
+    assert turn.text == "resolved"
+    assert turn.session_id
+    data = _session(store)
+    assert data["platform"] == "worker" and data["source"] == "gap-fill"
+    # Recorded, and still not observed — the observer is wired in the chat
+    # endpoint and this path does not go through it.
+    assert data["inner_voice"] is False
+    assert data["title"] == "gap-fill Anthropic"
+    assert [m["role"] for m in data["messages"]] == [
+        "user", "assistant", "tool", "assistant"]
+    # And both ids reach the harness, which is what arms the change ledger.
+    assert seen["options"].session_id == data["session_id"]
+    assert seen["options"].turn_id
+    assert any(e["event"] == "brain1.result_message" for e in _events(store))
+
+
 # ── The autonomy path ──────────────────────────────────────────────────
 
 def _stub_autonomy(monkeypatch, tmp_path, task, stream):

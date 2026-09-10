@@ -801,10 +801,11 @@ survive an aggregator restart and be findable from a session id alone.
   was edited afterwards.
 - **`turn_id` and `call_id` ride in `_meta`**, like the session id and the
   caption, because `args` is validated against each tool's inputSchema and is
-  what the repetition guard hashes. `RunOptions.turn_id` is empty for workers
-  and direct `run_query` callers, which turns the ledger off for them — the
-  footer and the revert button are chat surfaces and a worker turn has no
-  reader.
+  what the repetition guard hashes. A caller with no `turn_id` gets no
+  ledger, which used to mean every background run: since 2026-09-10 both
+  background paths mint one, so an unattended run's writes finally leave
+  pre-images and are revertable — see "Background runs are recorded". A bare
+  `run_query` caller still has none.
 - **A subagent's writes land on the parent's turn.** `ledger.scope()` redirects
   a `task:*` session through `_subagent_registry.parent_scope`; the entry
   carries `via_session` so the row can still say it came from a Task. The
@@ -1608,6 +1609,157 @@ and never reads TTS config. It also needs the guardian **re-staged**
 for spoken alerts and `sync-voice-config.py` pushes `livekit.tts` across at
 stage time — see "The spoken channel" above. Neither restart is required for
 the voice to *work*, only for a change to reach that consumer.
+
+## Background runs are recorded; watching them is opt-in
+
+Three paths run an agent loop and until 2026-09-10 only one of them wrote
+anything down.
+
+| path | transcript | event log | Inner Voice | platform |
+|---|---|---|---|---|
+| `autonomy.run_task` | yes | yes | per-task | `autonomy` |
+| `_common.run_prompt_on_primary` | yes | yes | never | `worker` |
+| `_common.run_prompt_in_session` | yes | yes | per-source | `worker` |
+
+The first two called `run_query` directly and kept the text, so the record of
+what a scheduled task *did* was a 200-character summary in an
+`autonomy-runs/*.md` file. On 2026-09-10 an autonomy task was the prime
+suspect in a full vault wipe and could be neither confirmed nor cleared,
+because the tool calls it made had never been written down anywhere.
+
+**Two axes, and conflating them is the mistake.** Every background run is
+**recorded** — cheap, universal, a few file appends. Being **observed** by the
+Inner Voice critic is a separate opt-in, because the observer runs on the
+PRIMARY at priority 1 and spends a goal-extraction call plus a critique per
+turn, in front of whatever a human is typing.
+
+- **`app/run_recorder.py` is a passthrough**, not a new owner of the stream:
+  an async generator that persists each event and re-yields it unchanged, so
+  the caller's loop, options and hooks are untouched. Routing the direct paths
+  through `/api/message/stream` instead — a stale `lloyd-sandbox` branch tried
+  it, do not merge — drops `run_task`'s #534 grant gate, which the chat
+  endpoint does not install, and has to re-plumb `saw_tool_call`,
+  `tool_errors` and the timeout partial over the wire.
+- **Persistence is incremental and the final flush is shielded.** A run killed
+  at its deadline is how the interesting ones end; nothing is buffered until
+  the `result` event a killed run never emits.
+- **Recording may never break the run.** Every step is wrapped: a bug in there
+  costs the record, not the work.
+- **`turn_id` is the load-bearing option**, not `session_id`. It switches on
+  the per-turn change ledger, so an unattended run's file writes leave
+  pre-images and can be reverted. It was the only path with no undo.
+- **`app/transcript_entries.py` is the one shape.** `messages.py` built five
+  assistant variants and three tool-pair variants inline across its streaming,
+  cancel and error paths. Both writers call the builders now, and
+  `tests/test_transcript_entries.py` pins that the same events produce
+  identical entries.
+- **`sessions_io.create_session` is the one writer** for every non-chat
+  session. `new_worker_session` had its own copy and already disagreed — `id`
+  where the chat path writes `session_id`, and no `last_active`, so a worker
+  session sorted by file mtime while every chat sorted by its conversation.
+  **Titles are set at creation**, so a background session never queues behind
+  the single-tenant secondary for a label nobody asked to have refreshed.
+- **The pool collects the sessions a claimed job created** (`current_run_sessions`)
+  and writes them onto the run row, including on the timeout and exception
+  branches — a timed-out run is the one most worth reading. Collected rather
+  than returned by each source, because "the handler remembered to pass it
+  back" is not a property worth depending on eleven times.
+- **Retention is platform-aware**: a background transcript gzips at 30 days
+  against a conversation's 90, same never-delete rule. An unreadable
+  `platform` keeps the *longer* window — a few stale kilobytes beats losing a
+  conversation from the history two months early.
+
+Kill switch: `harness.background_recording.enabled`.
+
+### One definition of "is a human reading this session"
+
+Six readers hand-rolled `platform == "autonomy"` and none had learned about
+`worker`. Worker turns arrive through the chat path, so the sessions the
+machine ran for itself were in the user's chat history, in the recent-chats
+panel, titled by the LLM titler, written into the daily note, fact-extracted
+into the knowledge graph as things the user said, and recalled back by
+`session_recall` as the user's own conversations. `sessions_io.is_user_session`
+is the definition; `tests/test_session_platform_checks.py` greps for the
+literal, because a seventh reader written next month is how this comes back.
+
+- **The filename is a fast path, never the authority.** A background id has
+  four underscore-separated parts (`20260910_120001_autocode_9f2a`) and a
+  chat's has three, so most of the directory is skipped without being opened.
+  `_scan_recent_sessions` kept the newest 24 by mtime and *then* dropped
+  non-user rows — at ~180 background runs a day the newest 24 are all
+  background and the panel rendered empty. It now skips by name and stops at
+  `_RECENT_KEPT` user rows or `_RECENT_CEILING` files opened.
+- **Post-capture keeps the markdown export for every platform** but writes
+  background exports to `_pipeline/vault-derived/sessions-background/`, outside
+  the qmd watch: `qmd-watcher.sh` *embeds* `sessions/` on every change, and 180
+  embedding jobs a day over the machine talking to itself would drown the
+  corpus. The daily note, the secondary summary and fact extraction are for
+  user sessions only.
+- `GET /api/background/sessions` is the other listing, and the **Background**
+  tab is its only reader. A row opens in the Inner Voice reader through the
+  same `setPendingFocus` + `setCurrentTab` pair `mc_navigate` uses.
+- Its second half is `GET /api/workers/health`, the workers' answer to
+  `/api/autonomy/health`. `/api/workers/status` reports what a source is
+  *allowed* to do and how much is queued; nothing joined a source to its
+  outcomes, so one failing every run looked exactly like one succeeding at
+  every run. `fail_rate` is **null** over zero runs, never 0.0 — "0% failing"
+  for a source that has never run is the reading the panel exists to prevent.
+
+### The observer, when a job asks for one
+
+- **Worker sources**: `workers.sources.<name>.inner_voice`, read through
+  `_common.source_inner_voice`. `deep-research` passed `inner_voice=False` as
+  a literal until this landed, which is to say it was not a setting; no
+  session-backed source passes the argument now, because a per-source switch a
+  caller can override with a literal reads as broken the one time somebody
+  uses it. On: `autocode`, `autotriage`, `youtube-digest`. Off:
+  `deep-research`. The key is set only on sources that can be observed at all
+  — the observer is wired in `app/routers/messages.py` and nowhere else, so it
+  means nothing on a `run_prompt_on_primary` source, and `/api/workers/health`
+  reports it tri-state rather than inviting a knob nothing reads. UI-mutable
+  through `data/tool_overrides.yaml`, like `workers.enabled`.
+- **Autonomy**: per-task `inner_voice:` frontmatter beats `autonomy.inner_voice`
+  in config.yaml; fleet default off. The key is in `_parse_task_file`'s
+  `fallback_fields`, so a file that needed the degraded parser does not
+  silently lose its opt-in.
+- **The observer attaches to the direct path.** `attach_observer_for_turn`
+  creates a registry only when none exists, so passing `run_task`'s own
+  `task_hooks` keeps the #534 grant gate *and* adds the observer — losing the
+  gate to gain the observer would be a bad trade made silently.
+  `options.cancel_event` is wired so the one lever that matters for unattended
+  work reaches the loop; the ambient and clarify callbacks are `None` because
+  both exist to reach a human mid-turn and nobody is reading. It closes in a
+  `finally`, and a failure to attach costs the second opinion, never the work.
+- Importing a router helper into `autonomy.py` is a layering smell, accepted
+  rather than relocated: the alternative is a second definition of "how a turn
+  is watched".
+
+### The grant gate belongs to the endpoint
+
+#534's authority gate is a PreToolUse hook, so it exists only where a caller
+installed it — and the two callers that did are the two that build their own
+`HookRegistry`. Every session-backed worker posts to `/api/message/stream`,
+which installs Inner Voice, the destructive-Bash safety hook and skill
+dispatch and not that one. So the four turn paths that read untrusted text and
+rewrite this repo were the ungated ones, while the two with their own registry
+were covered twice.
+
+The trigger is the **session's own platform**, so a caller cannot forget
+because a caller is not asked. A payload `grant_scope` also arms it and wins
+when present: `policy.current_scope` is a contextvar the pool binds around the
+claimed job, correct in the pool's own task and gone across the loopback POST,
+and it is the difference between a grant made to `autonomy-task:39` and one
+made to whatever runs on that source next. `grant_create` is banned on those
+turns, written back into the request body because the disallowed list is
+re-read every harness iteration. All three registry-building sites in the
+router arm it, including the ambient builder where it cannot fire today —
+"the other endpoint is the ungated one" is the shape of the bug being closed.
+
+Nothing a worker does today is denied by it: tier 1 is everything
+unclassified, so `Bash`, `Edit`, `Write`, `backlog_write_task` and
+`vault_write` all pass. **It is therefore not vault protection** — only
+`app/harness/safety.py`'s destructive-Bash patterns stand between an
+unattended turn and `rm -rf`.
 
 ## Workers: one queue, everything unasked
 

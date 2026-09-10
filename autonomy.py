@@ -699,8 +699,14 @@ def _task_inner_voice(task: dict) -> bool:
     if isinstance(raw, bool):
         return raw
     try:
-        cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
-        return bool((cfg.get("autonomy") or {}).get("inner_voice", False))
+        # `app.config.CONFIG`, not a fresh `yaml.safe_load` of config.yaml —
+        # the same rule `_common._worker_run_options` learned the hard way.
+        # Reading the file directly skips `${VAR}` expansion, the
+        # `LLOYD_CONFIG_OVERLAY` a canary boots with, and the
+        # `data/tool_overrides.yaml` merge, so a canary run would resolve this
+        # against production's answer rather than its own.
+        from app.config import CONFIG
+        return bool((CONFIG.get("autonomy") or {}).get("inner_voice", False))
     except Exception:
         return False
 
@@ -1035,7 +1041,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         if task_inner_voice:
             try:
                 from app.routers._messages_inner_voice import (
-                    attach_observer_for_turn, close_observer,
+                    attach_observer_for_turn,
                 )
                 iv_state = await attach_observer_for_turn(
                     session_id=session_id, turn_id=run_id,

@@ -198,6 +198,18 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
     machine talking to itself, drowning the corpus that exists to answer
     questions about what the user and Lloyd discussed. `sessions-background/`
     sits outside the watch: still exported, still greppable, not embedded.
+
+    Which background runs reach here is worth stating, because it is not all
+    of them. `_post_session_capture` is fired by the chat path only, so the
+    background sessions that arrive are the session-backed workers — autocode,
+    autotriage, deep-research, youtube-digest — which are also the ones that
+    rewrite this repo. An `autonomy` run and a `run_prompt_on_primary` job
+    call `run_query` directly and never come through; their record is the
+    session JSON `app/run_recorder.py` writes, which the Background tab reads
+    and `grep` can read too. Deliberate, not an oversight: a second copy in
+    the vault would buy a marginally nicer grep target and cost a vault write
+    per run, on a path whose whole design rule is that recording must never
+    be able to break the run.
     """
     from zoneinfo import ZoneInfo
     pst = ZoneInfo("America/Los_Angeles")

@@ -1600,8 +1600,10 @@ async def _execute_tool_call(
             "base_url": options.base_url,
             "summary": tc.get("_summary", ""),
             # Which turn and which call this write belongs to, for the
-            # change ledger on the far side. Empty for a worker or a direct
-            # run_query caller, which is what turns the ledger off for them.
+            # change ledger on the far side. Set by every caller that has a
+            # turn to name — the chat path, and since 2026-09-10 the two
+            # background paths, which mint one per run. Empty for a bare
+            # `run_query` caller, which is what turns the ledger off there.
             "turn_id": getattr(options, "turn_id", "") or "",
             "call_id": tc.get("id", "") or "",
             # #544: the queue item this turn is running, bound by the pool per

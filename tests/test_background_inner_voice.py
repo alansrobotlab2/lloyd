@@ -40,27 +40,31 @@ def _session(store_dir):
 
 # ── The per-task switch ────────────────────────────────────────────────
 
-def test_frontmatter_beats_the_fleet_default(monkeypatch, tmp_path):
+@pytest.fixture
+def fleet_off(monkeypatch):
+    """`autonomy.inner_voice: false` in the live config, read through
+    `app.config.CONFIG` — the loader, not a raw file read, so a canary
+    resolves its own overlay rather than production's answer."""
+    monkeypatch.setattr("app.config.CONFIG", {"autonomy": {"inner_voice": False}})
+
+
+def test_frontmatter_beats_the_fleet_default(monkeypatch, fleet_off):
     """A single task can be watched on a fleet that is off, which is the
     whole reason the two levels exist."""
-    monkeypatch.setattr(autonomy, "LLOYD_HOME", tmp_path)
-    (tmp_path / "config.yaml").write_text("autonomy:\n  inner_voice: false\n")
     assert autonomy._task_inner_voice({}) is False
     assert autonomy._task_inner_voice({"inner_voice": True}) is True
 
-    (tmp_path / "config.yaml").write_text("autonomy:\n  inner_voice: true\n")
+    monkeypatch.setattr("app.config.CONFIG", {"autonomy": {"inner_voice": True}})
     assert autonomy._task_inner_voice({}) is True
     # And off on a fleet that is on — the switch has to work both ways or it
     # is a master switch, not a default.
     assert autonomy._task_inner_voice({"inner_voice": False}) is False
 
 
-def test_a_yaml_string_is_read_as_the_boolean_it_looks_like(monkeypatch, tmp_path):
+def test_a_yaml_string_is_read_as_the_boolean_it_looks_like(fleet_off):
     """Task files go through a graduated parser whose regex fallback yields
     strings. `inner_voice: true` recovered that way must not read as the
     truthy string `"true"` in one path and a bool in the other."""
-    monkeypatch.setattr(autonomy, "LLOYD_HOME", tmp_path)
-    (tmp_path / "config.yaml").write_text("autonomy:\n  inner_voice: false\n")
     assert autonomy._task_inner_voice({"inner_voice": "true"}) is True
     assert autonomy._task_inner_voice({"inner_voice": "false"}) is False
     # Anything else falls through to the fleet default rather than guessing.
