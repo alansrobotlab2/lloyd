@@ -693,25 +693,44 @@ async def list_tools():
 
 
 def _append_diagnostics(text: str, mut: _Mutation) -> str:
-    """Append the post-edit `<diagnostics>` block to a successful result.
+    """Append the post-edit blocks to a successful result.
+
+    Two of them, from two stores. `<diagnostics>` is pyflakes on the pre- and
+    post-image of *this file*; `<blast_radius>` is the code graph's inbound
+    callers for any module-level interface the edit changed, which is the
+    part a per-file linter structurally cannot see. Both are advisory.
 
     Appended only to a success string. `_shared.text_result` sets `isError`
     by sniffing a leading JSON object with an "error" key, so appending to an
     error payload would both break the JSON and flip the flag — a lint
     finding would start reading as a failed edit.
 
+    This runs on the event loop, not in the edit's worker thread, so both
+    halves are budget-bounded inside `_edit_diagnostics`; a graph read here
+    would stall SSE chat and voice too.
+
     Never raises: the model would rather have an edit with no diagnostics
     than an edit that failed because the linter did.
     """
     try:
         from agent_mcp import _edit_diagnostics as diag
+        from agent_mcp import code_graph
         cfg = diag.config()
-        if not cfg.get("python", True):
-            return text
-        block = diag.python_block(mut.path, mut.pre_bytes, mut.post_text,
-                                  int(cfg.get("max_lines", diag.DEFAULT_MAX_LINES)))
-        if block:
-            return f"{text}\n\n{block}"
+        if cfg.get("python", True):
+            block = diag.python_block(
+                mut.path, mut.pre_bytes, mut.post_text,
+                int(cfg.get("max_lines", diag.DEFAULT_MAX_LINES)))
+            if block:
+                text = f"{text}\n\n{block}"
+        if cfg.get("blast_radius", True):
+            # The live checkout is only a *fallback* root: an automod
+            # worktree builds its own graph with `graph_refresh`, and that is
+            # the one describing the tree actually being edited.
+            blocks = diag.callers_block(
+                mut.path, mut.pre_bytes, mut.post_text,
+                real=mut.real, fallback_root=str(code_graph.resolve_root(None)))
+            if blocks:
+                text = f"{text}\n\n{blocks}"
     except Exception:
         logger.warning("edit diagnostics failed for %s", mut.path, exc_info=True)
     return text

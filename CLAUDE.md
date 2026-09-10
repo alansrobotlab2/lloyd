@@ -898,7 +898,36 @@ failed edit. Nothing in this path may raise: `_append_diagnostics` swallows
 everything, because an edit with no diagnostics beats an edit that failed
 because the linter did.
 
-`harness.edit_diagnostics.python: false` removes it.
+**The reach of all of that is one file, because pyflakes is.** So a second
+block, `<blast_radius>`, carries what a per-file linter structurally cannot:
+when an edit changes a module-level interface — a `def`/`class`/assignment
+name, a signature, a base, an assigned value, or a `return`/`yield` expression
+— the edit result also names the inbound callers living in *other* files
+(`symbol → path.py:88`, advisory, never an error). The store is
+`agent_mcp/code_graph.py`, the one the `graph_*` tools read; the point is that
+this half is **passive**, because the graph was always available and only ever
+fired when the model remembered to ask. Three rules keep it worth reading, all
+the same shape as the three above: only an *interface* change fires (a local
+variable adds nothing), only the **pre**-image's symbols are queried — the
+graph describes the tree before the edit, which is the right source for "who
+calls this today", so a stale graph is correct here, a name that exists only
+afterwards silently does not resolve, and a rename is caught from the old side
+— and a symbol above `FANOUT_CEILING` call sites is dropped rather than listed,
+because a helper with 62 callers produces a wall of text that gets skipped.
+Measured on this tree: `kg_store.store` (62 sites) and `RunOptions` (70) are
+both suppressed, which is the rail working, not failing.
+
+`_append_diagnostics` runs on the event loop, not in the edit's worker thread,
+so the graph half runs in a daemon thread the edit joins for `RAIL_BUDGET_S`
+(90 ms) and then abandons. Abandoning is not waste: the thread finishes the
+210 ms load and fills a per-root cache, so the next edit in that tree gets its
+answer. `RAIL_MAX_SOURCE_BYTES` is 120 KB because the fingerprint pass costs
+~0.28 ms/KB and would break the latency promise on its own above that; pyflakes
+still runs on bigger files.
+
+`harness.edit_diagnostics.python: false` removes the pyflakes block and
+`.blast_radius: false` the cross-file one — separate switches, separate stores.
+Neither key is in `config.yaml` yet, and adding one is human-only.
 
 ### Tool-call summaries
 
