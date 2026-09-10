@@ -46,7 +46,9 @@ def isolated(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setattr(B, "BACKLOG_DIR", d)
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
-    monkeypatch.setattr(C, "SESSIONS_DIR", tmp_path / "sessions")
+    # `new_worker_session` writes through `sessions_io.create_session`
+    # now, and conftest's `_isolate_background_records` already points
+    # that at a scratch dir for every test.
     return d
 
 
@@ -166,15 +168,22 @@ def test_triage_runs_in_a_real_session_with_inner_voice(isolated, monkeypatch):
 
 
 def test_a_worker_session_file_is_inner_voice_enabled_and_recognisable(isolated):
+    import app.sessions_io as sio
     sid = C.new_worker_session(title="backlog triage #7", source="autotriage")
-    data = json.loads((C.SESSIONS_DIR / f"{sid}.json").read_text())
+    data = json.loads((sio.SESSIONS_DIR / f"{sid}.json").read_text())
     assert data["inner_voice"] is True
     assert data["inner_voice_evaluate_user_turns"] is True
     assert data["platform"] == "worker" and data["source"] == "autotriage"
-    # The id carries the source's first eight letters (hyphen dropped), so it is
+    # The id carries the source's name (hyphens dropped), so it is
     # recognisable in the session list next to timestamp-named chat sessions.
     assert "autotriage".replace("-", "")[:8] in sid
-    assert sid.startswith(datetime.now(timezone.utc).strftime("%Y%m%d"))
+    # Local time, like every chat session id — the id is a label a human
+    # reads, and two conventions in one directory listing is the one thing it
+    # must not be. It used to be minted in UTC here and nowhere else.
+    assert sid.startswith(datetime.now().strftime("%Y%m%d"))
+    # Four parts: what `is_background_session_name` reads without opening the
+    # file, and what keeps a listing bounded at ~180 background runs a day.
+    assert sio.is_background_session_name(sid)
 
 
 def test_a_landing_in_progress_skips_the_run_without_recording_it(isolated, monkeypatch):

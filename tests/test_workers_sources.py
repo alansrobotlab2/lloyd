@@ -739,7 +739,6 @@ async def test_an_overrunning_turn_is_cancelled_in_the_backend(monkeypatch, tmp_
     That is the orphan: the pool moves on, and a 90-iteration triage carries
     on burning the GPU with nobody waiting for it.
     """
-    monkeypatch.setattr(C, "SESSIONS_DIR", tmp_path)
     monkeypatch.setattr(C, "turn_timeout_for", lambda source: 0.05)
 
     cancelled: list[str] = []
@@ -766,9 +765,11 @@ def test_a_worker_session_is_marked_as_one(tmp_path, monkeypatch):
     """`sessions_io.NON_USER_PLATFORMS` is what keeps a worker turn from being
     mistaken for the user's session by the morning brief and by
     session-distill alike."""
-    monkeypatch.setattr(C, "SESSIONS_DIR", tmp_path)
+    # Written by `sessions_io.create_session` now — one writer for every
+    # non-chat session — and conftest points that at a scratch directory.
+    import app.sessions_io as sio
     sid = C.new_worker_session(title="t", source="autotriage")
-    data = json.loads((tmp_path / f"{sid}.json").read_text())
+    data = json.loads((sio.SESSIONS_DIR / f"{sid}.json").read_text())
 
     from app.sessions_io import is_user_session
     assert data["platform"] == "worker"

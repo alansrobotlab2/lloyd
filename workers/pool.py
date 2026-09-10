@@ -24,6 +24,7 @@ from functools import partial
 from typing import Any, Optional
 
 from app.harness.policy import current_effect_scope, current_scope
+from app.sessions_io import current_run_sessions
 from workers.evidence import gaps_key, verify_bundle
 from workers.queue import WorkQueue, QueueItem, get_queue, new_run_id
 
@@ -343,6 +344,12 @@ class WorkerPool:
             # which run's effects must not happen twice. The item id — not the
             # run id, which changes per attempt — is what survives a retry.
             effect_token = current_effect_scope.set(effect_scope_for(item))
+            # Every background run is recorded now, so every run row can name
+            # its transcript. Collected here rather than returned by each
+            # source: a source that forgets is a run nobody can review, and
+            # "the handler remembered to pass it back" is not a property worth
+            # depending on eleven times.
+            sessions_token = current_run_sessions.set([])
             try:
                 result = await asyncio.wait_for(source.execute(item), timeout=max_duration)
                 duration = time.monotonic() - started_perf
@@ -353,6 +360,8 @@ class WorkerPool:
                 # whole timed-out run up to max_attempts times before the
                 # scheduler's own cooldown is ever consulted.
                 norm = normalize_result(item, result)
+                norm["meta"] = {**norm["meta"],
+                                "session_ids": list(current_run_sessions.get() or [])}
                 run_status = norm["status"]
                 # #525 — verify the run's claims at the moment its record is
                 # written, and only for a source that emitted any (`claims`
@@ -417,8 +426,13 @@ class WorkerPool:
                         duration_seconds=duration,
                         summary=error_msg[:500],
                         task_id=_task_id_of(item),
-                        meta_json=json.dumps({"pool_timeout": True,
-                                              "max_duration_seconds": max_duration}),
+                        # A timed-out run is the one most worth reading, so
+                        # its transcript is named here too — not only on the
+                        # success path.
+                        meta_json=json.dumps({
+                            "pool_timeout": True,
+                            "max_duration_seconds": max_duration,
+                            "session_ids": list(current_run_sessions.get() or [])}),
                     )
                 )
                 new_state = await asyncio.to_thread(
@@ -441,7 +455,9 @@ class WorkerPool:
                         duration_seconds=duration,
                         summary=error_msg[:500],
                         task_id=_task_id_of(item),
-                        meta_json=json.dumps({"exception": type(e).__name__}),
+                        meta_json=json.dumps({
+                            "exception": type(e).__name__,
+                            "session_ids": list(current_run_sessions.get() or [])}),
                     )
                 )
                 new_state = await asyncio.to_thread(
@@ -451,6 +467,7 @@ class WorkerPool:
             finally:
                 current_scope.reset(scope_token)
                 current_effect_scope.reset(effect_token)
+                current_run_sessions.reset(sessions_token)
                 self._in_flight.pop(item.id, None)
 
 

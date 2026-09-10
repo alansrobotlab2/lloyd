@@ -200,4 +200,10 @@ def test_done_and_the_persisted_message_carry_the_object():
     src = Path(M.__file__).read_text()
     assert 'stream_stats["structured"] = evt.get("structured")' in src
     assert "done_payload['structured']" in src
-    assert 'msg_entry["structured"] = stats_dict["structured"]' in src
+    # The shape moved into `app/transcript_entries.py` on 2026-09-10 so the
+    # background recorder writes the same row; the property is unchanged —
+    # the object lands at the top level of the persisted assistant message,
+    # not only inside its stats blob.
+    assert 'structured=stats_dict.get("structured")' in src
+    entries = Path(M.__file__).parent.parent / "transcript_entries.py"
+    assert 'entry["structured"] = structured' in entries.read_text()

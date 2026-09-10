@@ -155,7 +155,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         f"## Sources\n- ref 1\n- ref 2\n\n"
         f"## Confidence\n<0.0-1.0>: <one-line justification>\n"
     )
-    turn = await run_prompt_on_primary(prompt, max_turns=12)
+    turn = await run_prompt_on_primary(
+        prompt, max_turns=12, source=NAME, title=f"gap-fill {entity}")
     if not turn.ok:
         # An empty turn is a failed run, not a resolved gap. See
         # `domain_research.execute` for what writing the note anyway cost.

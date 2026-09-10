@@ -38,6 +38,15 @@ CANDIDATES_DIR = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
 
 TASK_LOG_MAX_AGE_DAYS = 30
 SESSION_ARCHIVE_AGE_DAYS = 90
+# Background runs — autonomy tasks and worker jobs — are recorded now, and at
+# the fleet's measured ~180 turns a day they are the overwhelming majority of
+# the directory by count. They archive sooner than a conversation because they
+# are read for a different reason and over a different span: a chat is
+# something the user may come back to for months, a background transcript is
+# forensics for "what did the thing that ran last night actually do". Same
+# gzip-never-delete rule, so a run from six months ago is still recoverable —
+# it is only out of the listings. The Background tab therefore shows ~30 days.
+BACKGROUND_SESSION_ARCHIVE_AGE_DAYS = 30
 RUN_RECORD_MAX_AGE_DAYS = 30
 ACTIVITY_LOG_MAX_ENTRIES = 200
 CANDIDATE_MAX_AGE_DAYS = 30
@@ -93,8 +102,47 @@ def sweep_task_logs(apply: bool, now: float) -> tuple[int, int]:
     return count, freed
 
 
+_PLATFORM_RE = re.compile(r'"platform":\s*"([^"]+)"')
+
+#: Kept in step with `app.sessions_io.NON_USER_PLATFORMS`. Restated rather
+#: than imported because this script is stdlib-only and runs from cron with no
+#: venv; `tests/test_session_platform_checks.py` pins that the two agree.
+NON_USER_PLATFORMS = ("autonomy", "worker")
+
+
+def _session_platform(path: Path) -> str:
+    """`platform` from the session JSON's head, or "" if unreadable.
+
+    Same 4 KB prefix read as `_session_age_days`, for the same reason: the
+    directory is hundreds of megabytes of transcript and this script wants two
+    scalar fields out of each file.
+    """
+    try:
+        head = path.open("r", encoding="utf-8", errors="replace").read(4096)
+        m = _PLATFORM_RE.search(head)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+def _archive_age_for(path: Path) -> int:
+    """How long this session is kept in the live listings.
+
+    Falls back to the *conversation* policy when the platform cannot be read.
+    A truncated or unreadable head must never shorten a retention window:
+    keeping a background run three months too long costs a few kilobytes,
+    archiving a real conversation two months early loses it from the history
+    the user actually reads.
+    """
+    platform = _session_platform(path)
+    if platform in NON_USER_PLATFORMS:
+        return BACKGROUND_SESSION_ARCHIVE_AGE_DAYS
+    return SESSION_ARCHIVE_AGE_DAYS
+
+
 def sweep_sessions(apply: bool, now: float) -> tuple[int, int]:
-    """Gzip sessions inactive for SESSION_ARCHIVE_AGE_DAYS+.
+    """Gzip inactive sessions — SESSION_ARCHIVE_AGE_DAYS for a conversation,
+    BACKGROUND_SESSION_ARCHIVE_AGE_DAYS for a background run.
     Returns (count, bytes_saved)."""
     count = saved = 0
     if not SESSIONS_DIR.exists():
@@ -103,7 +151,7 @@ def sweep_sessions(apply: bool, now: float) -> tuple[int, int]:
         try:
             if path.is_symlink():
                 continue
-            if _session_age_days(path, now) < SESSION_ARCHIVE_AGE_DAYS:
+            if _session_age_days(path, now) < _archive_age_for(path):
                 continue
             gz_path = path.with_suffix(".json.gz")
             orig = path.stat().st_size
@@ -280,7 +328,8 @@ def main() -> int:
     print(f"[retention-sweep] {mode}")
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
-    print(f"  sessions >{SESSION_ARCHIVE_AGE_DAYS}d inactive: "
+    print(f"  sessions >{SESSION_ARCHIVE_AGE_DAYS}d inactive "
+          f"(background >{BACKGROUND_SESSION_ARCHIVE_AGE_DAYS}d): "
           f"{sess_n} gzipped, {sess_b / 1024 / 1024:.1f} MiB "
           f"{'saved' if args.apply else 'candidate'}")
     print(f"  autonomy runs >{RUN_RECORD_MAX_AGE_DAYS}d: "

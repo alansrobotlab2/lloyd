@@ -104,3 +104,24 @@ def _isolate_research_store(tmp_path_factory):
     yield
     research_store.reset()
     research_store._default_path = original
+
+
+@pytest.fixture(autouse=True)
+def _isolate_background_records(tmp_path_factory, monkeypatch):
+    """No test writes a session or an event log into the live tree.
+
+    Recording became universal on 2026-09-10: every autonomy run and every
+    `run_prompt_on_primary` worker turn now writes a session JSON and an event
+    log. A test that drives one of those paths — and several do, for reasons
+    that have nothing to do with recording — would otherwise leave a real
+    transcript in `~/lloyd/sessions/`, where it shows up in the history list,
+    in session recall and in the retention sweep.
+
+    Same shape as the two isolators above: the *default* never resolves to the
+    production directory. A test that patches these itself still wins, because
+    its `monkeypatch` runs after this fixture's.
+    """
+    root = tmp_path_factory.mktemp("lloyd-records")
+    monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", root / "sessions")
+    monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", root / "event_logs")
+    monkeypatch.setattr("app.event_log.BLOBS_DIR", root / "event_logs" / "blobs")

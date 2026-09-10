@@ -48,6 +48,7 @@ separate in-flight mechanism it has always been.
 from __future__ import annotations
 
 from app.sessions_io import SessionTurn
+from app.transcript_entries import build_thinking_entry
 
 
 def _build_thinking_entry(
@@ -58,24 +59,11 @@ def _build_thinking_entry(
     iteration: int,
     timestamp: str,
 ) -> dict:
-    """Shape one reasoning phase as a message entry. Pure, for testability.
+    """Adapter from the router's `SessionTurn` to the shared builder.
 
-    `seq` orders phases within a turn and keeps ids unique; `iteration` is
-    the agent-loop iteration the phase belongs to, which is what a reader
-    correlating a thought with the tool call it produced actually wants.
+    The shape itself lives in `app/transcript_entries.py`, because the
+    background recorder writes the same row for a run that has no
+    `SessionTurn` — only a turn id.
     """
-    return {
-        "id": f"think_{turn.turn_id}_{seq}",
-        "role": "thinking",
-        # Deliberately empty — see the module docstring. The reasoning text
-        # lives in `reasoning`, which no transcript producer reads.
-        "content": [],
-        "timestamp": timestamp,
-        "reasoning": text,
-        "reasoning_ms": duration_ms,
-        "thinking": {
-            "chars":     len(text),
-            "iteration": iteration,
-            "turn_id":   turn.turn_id,
-        },
-    }
+    return build_thinking_entry(
+        turn.turn_id, text, duration_ms, seq, iteration, timestamp)

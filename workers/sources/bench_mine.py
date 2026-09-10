@@ -659,7 +659,9 @@ async def _mine_run_failure(item: QueueItem) -> dict[str, Any]:
     if not run["run_path"]:
         return {"status": "failed", "summary": "bench-mine: run item carries no run_path"}
 
-    turn = await run_prompt_on_primary(_run_failure_prompt(run), max_turns=8)
+    turn = await run_prompt_on_primary(
+        _run_failure_prompt(run), max_turns=8, source=NAME,
+        title=f"mine failed run {run['run_id']}")
     if not turn.ok:
         return await _mine_failure(item, turn, run["run_id"])
 
@@ -678,7 +680,9 @@ async def _mine_ledger_loser(item: QueueItem) -> dict[str, Any]:
     loser = payload.get("loser_task_id", "unknown")
     score = payload.get("composite_score")
 
-    turn = await run_prompt_on_primary(_ledger_loser_prompt(loser, score), max_turns=8)
+    turn = await run_prompt_on_primary(
+        _ledger_loser_prompt(loser, score), max_turns=8, source=NAME,
+        title=f"mine ledger loser {loser}")
     if not turn.ok:
         return await _mine_failure(item, turn, str(loser))
 

@@ -201,7 +201,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         f"## Struggles\n- ...\n\n## Gaps\n- ...\n\n## Skill Candidates\n- ...\n\n"
         f"## Durable Facts\n- ...\n\n## Confidence\n<0.0-1.0>: <justification>\n"
     )
-    turn = await run_prompt_on_primary(prompt, max_turns=15)
+    turn = await run_prompt_on_primary(
+        prompt, max_turns=15, source=NAME,
+        title=f"distill {session_name}")
     if not turn.ok:
         # 135 of this source's 356 notes have the body "(no response)". An
         # empty turn is a failed run, and the retry is this source's own: the

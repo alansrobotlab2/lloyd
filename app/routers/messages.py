@@ -89,6 +89,13 @@ from app.routers._messages_subliminal import (
     _build_subliminal_entry,
 )
 from app.routers._messages_thinking import _build_thinking_entry
+from app.transcript_entries import (
+    build_assistant_text_entry,
+    build_tool_call,
+    build_tool_call_entry,
+    build_tool_result_entry,
+    truncate_tool_result,
+)
 from app.routers._messages_inner_voice import (
     _session_inner_voice_enabled,
     _session_iv_evaluate_user_turns_enabled,
@@ -867,18 +874,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 }
                 # Flush text segment to disk if tool calls follow it.
                 if evt.get("tool_calls") and full_response.strip():
-                    seg_ts = datetime.now().isoformat()
-                    seg_entry: dict = {
-                        "id": uuid.uuid4().hex[:8],
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": full_response}],
-                        "timestamp": seg_ts,
-                        "stats": dict(current_iteration_stats),
-                    }
-                    if accumulated_thinking:
-                        seg_entry["reasoning"] = accumulated_thinking
-                        if accumulated_thinking_ms:
-                            seg_entry["reasoning_ms"] = accumulated_thinking_ms
+                    seg_entry = build_assistant_text_entry(
+                        full_response,
+                        timestamp=datetime.now().isoformat(),
+                        stats=dict(current_iteration_stats),
+                        reasoning=accumulated_thinking,
+                        reasoning_ms=accumulated_thinking_ms,
+                    )
                     await _append_messages(session_id, [seg_entry])
                     full_response = ""
                     accumulated_thinking = ""
@@ -896,12 +898,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 # when empty rather than stored as "" — every historical
                 # session predates the field and reads the same way.
                 summary = evt.get("summary") or ""
-                tc = {
-                    "id": call_id, "call_id": call_id, "type": "function",
-                    "function": {"name": name, "arguments": args_json},
-                }
-                if summary:
-                    tc["summary"] = summary
+                tc = build_tool_call(call_id, name, args_json, summary)
                 tool_calls_log.append(tc)
                 # The model's own caption beats the one derived from the
                 # arguments, and it also settles an ambiguity: `summary`
@@ -928,9 +925,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
             elif etype == "tool_result":
                 call_id = evt["call_id"]
-                result_str = evt.get("content", "")
-                if len(result_str) > 2000:
-                    result_str = result_str[:2000] + "...(truncated)"
+                result_str = truncate_tool_result(evt.get("content", ""))
                 tool_results_log.append({"call_id": call_id, "result": result_str})
                 set_turn_activity(session_id, "working")
                 await _emit(turn, "tool_complete", {
@@ -949,26 +944,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 if tc and call_id not in persisted_tool_ids:
                     persisted_tool_ids.add(call_id)
                     pair_ts = datetime.now().isoformat()
-                    tc_msg: dict = {
-                        "id": f"msg_{call_id}_tc",
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": ""}],
-                        "tool_calls": [tc],
-                        "timestamp": pair_ts,
-                    }
-                    if current_iteration_stats:
-                        tc_msg["stats"] = dict(current_iteration_stats)
-                    result_msg: dict = {
-                        "id": f"msg_{call_id}_result",
-                        "role": "tool",
-                        "content": [{"type": "text", "text": result_str}],
-                        "tool_call_id": call_id,
-                        "timestamp": pair_ts,
-                        "stats": {
-                            "result_chars": len(result_str),
-                            "is_error": bool(evt.get("is_error", False)),
-                        },
-                    }
+                    tc_msg = build_tool_call_entry(
+                        tc, timestamp=pair_ts, stats=current_iteration_stats)
+                    result_msg = build_tool_result_entry(
+                        call_id, result_str, timestamp=pair_ts,
+                        is_error=bool(evt.get("is_error", False)))
                     await _append_messages(session_id, [tc_msg, result_msg])
 
             elif etype == "result":
@@ -1066,17 +1046,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     cid = tc["call_id"]
                     if cid not in persisted_tool_ids:
                         persisted_tool_ids.add(cid)
-                        fallback_tc: dict = {"id": f"msg_{cid}_tc", "role": "assistant",
-                                     "content": [{"type": "text", "text": ""}],
-                                     "tool_calls": [tc], "timestamp": end_ts}
-                        if current_iteration_stats:
-                            fallback_tc["stats"] = dict(current_iteration_stats)
                         result_text_str = results_by_id.get(cid, "")
-                        tail.append(fallback_tc)
-                        tail.append({"id": f"msg_{cid}_result", "role": "tool",
-                                     "content": [{"type": "text", "text": result_text_str}],
-                                     "tool_call_id": cid, "timestamp": end_ts,
-                                     "stats": {"result_chars": len(result_text_str)}})
+                        tail.append(build_tool_call_entry(
+                            tc, timestamp=end_ts, stats=current_iteration_stats))
+                        tail.append(build_tool_result_entry(
+                            cid, result_text_str, timestamp=end_ts))
 
                 # Ambient turns only: if the agent called `ambient_decide`
                 # to opt out of surfacing, write a muted breadcrumb instead
@@ -1122,16 +1096,12 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 if cancelled_mid_stream:
                     stream_stats["peak_input_tokens"] = last_turn_input
                     if full_response.strip():
-                        cancel_msg: dict = {
-                            "id": uuid.uuid4().hex[:8], "role": "assistant",
-                            "content": [{"type": "text", "text": full_response}],
-                            "timestamp": end_ts, "stats": stream_stats, "cancelled": True,
-                        }
-                        if accumulated_thinking:
-                            cancel_msg["reasoning"] = accumulated_thinking
-                            if accumulated_thinking_ms:
-                                cancel_msg["reasoning_ms"] = accumulated_thinking_ms
-                        tail.append(cancel_msg)
+                        tail.append(build_assistant_text_entry(
+                            full_response, timestamp=end_ts, stats=stream_stats,
+                            reasoning=accumulated_thinking,
+                            reasoning_ms=accumulated_thinking_ms,
+                            cancelled=True,
+                        ))
                     if tail:
                         await _append_messages(session_id, tail)
                     final_persisted = True
@@ -1144,22 +1114,17 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     continue
 
                 if result_text.strip():
-                    msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
-                                 "content": [{"type": "text", "text": result_text}],
-                                 "timestamp": end_ts, "stats": stats_dict}
-                    if stats_dict.get("structured"):
+                    tail.append(build_assistant_text_entry(
+                        result_text, timestamp=end_ts, stats=stats_dict,
                         # Top level as well as in stats: this is the machine
                         # answer for the turn, and a consumer reading the
                         # session JSON should not have to know it rides in a
                         # stats blob.
-                        msg_entry["structured"] = stats_dict["structured"]
-                    if accumulated_thinking:
-                        msg_entry["reasoning"] = accumulated_thinking
-                        if accumulated_thinking_ms:
-                            msg_entry["reasoning_ms"] = accumulated_thinking_ms
-                    if turn.source != "user":
-                        msg_entry["source"] = turn.source
-                    tail.append(msg_entry)
+                        structured=stats_dict.get("structured"),
+                        reasoning=accumulated_thinking,
+                        reasoning_ms=accumulated_thinking_ms,
+                        source=turn.source,
+                    ))
                 elif tool_calls_log and turn.source == "user" and not cancelled_mid_stream:
                     # Empty terminal iteration after tool calls. The
                     # model called tools, got results, and stopped
@@ -1173,17 +1138,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         "*(Lloyd completed its tool calls but did not produce a summary. "
                         "Ask again if you'd like an answer.)*"
                     )
-                    placeholder = {
-                        "id": uuid.uuid4().hex[:8],
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": placeholder_text}],
-                        "timestamp": end_ts,
-                        "stats": stats_dict,
-                        "synthetic_empty_terminal": True,
-                    }
-                    if turn.source != "user":
-                        placeholder["source"] = turn.source
-                    tail.append(placeholder)
+                    tail.append(build_assistant_text_entry(
+                        placeholder_text, timestamp=end_ts, stats=stats_dict,
+                        source=turn.source, synthetic_empty_terminal=True,
+                    ))
                     done_text = placeholder_text
                     logger.warning(
                         "[empty_terminal] session=%s turn=%s — "
@@ -1240,27 +1198,18 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 for tc in tool_calls_log:
                     cid = tc["call_id"]
                     if cid not in persisted_tool_ids:
-                        err_tc: dict = {"id": f"msg_{cid}_tc", "role": "assistant",
-                                     "content": [{"type": "text", "text": ""}],
-                                     "tool_calls": [tc], "timestamp": err_ts}
-                        if current_iteration_stats:
-                            err_tc["stats"] = dict(current_iteration_stats)
                         result_text_str = results_by_id.get(cid, "")
-                        tail.append(err_tc)
-                        tail.append({"id": f"msg_{cid}_result", "role": "tool",
-                                     "content": [{"type": "text", "text": result_text_str}],
-                                     "tool_call_id": cid, "timestamp": err_ts,
-                                     "stats": {"result_chars": len(result_text_str)}})
+                        tail.append(build_tool_call_entry(
+                            tc, timestamp=err_ts, stats=current_iteration_stats))
+                        tail.append(build_tool_result_entry(
+                            cid, result_text_str, timestamp=err_ts))
                 stream_stats["peak_input_tokens"] = last_turn_input
                 if full_response.strip():
-                    err_msg_entry: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant",
-                                 "content": [{"type": "text", "text": full_response}],
-                                 "timestamp": err_ts, "stats": stream_stats}
-                    if accumulated_thinking:
-                        err_msg_entry["reasoning"] = accumulated_thinking
-                        if accumulated_thinking_ms:
-                            err_msg_entry["reasoning_ms"] = accumulated_thinking_ms
-                    tail.append(err_msg_entry)
+                    tail.append(build_assistant_text_entry(
+                        full_response, timestamp=err_ts, stats=stream_stats,
+                        reasoning=accumulated_thinking,
+                        reasoning_ms=accumulated_thinking_ms,
+                    ))
                 if tail:
                     await _append_messages(session_id, tail)
                 try:

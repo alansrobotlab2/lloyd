@@ -15,6 +15,7 @@ Concurrency model (task #296):
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 from collections import deque
@@ -96,6 +97,113 @@ NON_USER_PLATFORMS = frozenset({"autonomy", "worker"})
 def is_user_session(data: dict) -> bool:
     """True if a human reads this session. Missing platform means the web UI."""
     return (data.get("platform") or "mission-control") not in NON_USER_PLATFORMS
+
+
+#: A background session's id has four underscore-separated parts
+#: (`20260910_120001_autocode_9f2a`); a chat session's has three
+#: (`20260910_120001_9f2a1c`). That is a cheap discriminator, and it has to
+#: exist because the alternative is parsing every session JSON in the
+#: directory to answer "is this one a chat?" — at ~180 background runs a day
+#: that is the difference between a bounded listing and one that grows with
+#: the fleet's throughput.
+#:
+#: The filename is a *fast path*, never the authority. The JSON's `platform`
+#: is the authority, because it is what every consumer already reads and
+#: because a session created by some future producer with a different naming
+#: habit must not be silently reclassified by its name.
+def is_background_session_name(name: str) -> bool:
+    """True if this session *filename* looks like a background run's.
+
+    Conservative in the direction that matters: an id this rule does not
+    recognise reads as a chat session, is parsed, and is then classified by
+    its `platform` — one wasted read. The opposite error would hide a real
+    conversation from the history list.
+    """
+    stem = str(name or "")
+    if stem.endswith(".json"):
+        stem = stem[:-5]
+    parts = stem.split("_")
+    if len(parts) < 4:
+        return False
+    return (len(parts[0]) == 8 and parts[0].isdigit()
+            and len(parts[1]) == 6 and parts[1].isdigit())
+
+
+def new_background_session_id(slug: str) -> str:
+    """Mint a four-part background session id from a producer slug."""
+    import uuid as _uuid
+    clean = "".join(ch for ch in str(slug or "bg") if ch.isalnum())[:12] or "bg"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{ts}_{clean}_{_uuid.uuid4().hex[:4]}"
+
+
+#: Sessions created while a worker-pool job is claimed. The pool binds an
+#: empty list around each job and reads it back when it writes the run row, so
+#: every background run's record names the transcript(s) it produced —
+#: whatever path made them, and without each source having to remember to
+#: return the id. Two records of the same run with nothing joining them is
+#: exactly what made a suspect autonomy run unreviewable on 2026-09-10.
+#:
+#: Default `None` means "nobody is collecting", which is what an interactive
+#: turn and a bare script get; `create_session` then does nothing extra.
+current_run_sessions: contextvars.ContextVar[Optional[list[str]]] = \
+    contextvars.ContextVar("lloyd_run_sessions", default=None)
+
+
+def note_run_session(session_id: str) -> None:
+    """Attribute a session to the job currently claimed, if any."""
+    bucket = current_run_sessions.get()
+    if bucket is None or not session_id or session_id in bucket:
+        return
+    bucket.append(session_id)
+
+
+def create_session(session_id: str, *, platform: str, model: str = "",
+                   title: str = "", source: str = "",
+                   inner_voice: bool = False, preview: str = "") -> str:
+    """Create a session file for a run that is about to start.
+
+    One writer for every non-chat session — the background recorder and
+    `workers.sources._common.new_worker_session` both come through here. The
+    chat path keeps `_save_session_meta`, which has to merge into an existing
+    file on every turn; this one is a create, and a create is the only thing a
+    background run needs.
+
+    **The title is set here, at creation.** A background session therefore
+    never needs the LLM titler, which matters more than it sounds: the titler
+    runs on the single-tenant secondary, and ~180 background runs a day would
+    put 180 model calls in front of the queue every chat turn already waits
+    behind, to label rows nobody asked to have relabelled.
+
+    Both `session_id` and `id` are written. `/api/sessions` reads
+    `session_id` and falls back to the filename; the worker sessions that
+    predate this helper wrote only `id`, and something may yet read it.
+    Existing files are left alone — a multi-call job lands in one transcript.
+    """
+    note_run_session(session_id)
+    path = SESSIONS_DIR / f"{session_id}.json"
+    if path.exists():
+        return session_id
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    now = datetime.now().isoformat()
+    data = {
+        "session_id": session_id,
+        "id": session_id,
+        "title": (title or "").strip()[:80],
+        "model": model,
+        "platform": platform,
+        "source": source,
+        "created_at": now,
+        "last_active": now,
+        "preview": preview[:60],
+        "message_count": 0,
+        "messages": [],
+        "experiment_id": None,
+        "inner_voice": bool(inner_voice),
+        "inner_voice_evaluate_user_turns": bool(inner_voice),
+    }
+    atomic_write_text(path, json.dumps(data, indent=2))
+    return session_id
 
 
 def set_last_user_session(session_id: str) -> None:

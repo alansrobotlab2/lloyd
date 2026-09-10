@@ -124,7 +124,7 @@ def _parse_task_file(path: Path) -> Optional[dict]:
                 "skill_name", "timeout_seconds", "preemptible", "auto_advance",
                 "depends_on", "max_retries", "failure_count", "runs_per_day",
                 "preferred_hours", "model", "stale_bypass_hours",
-                "expected_error_patterns",
+                "expected_error_patterns", "inner_voice",
             ),
             log_label=f"scheduler:{path.name}",
         )
@@ -675,6 +675,36 @@ def _evidence_claims(final_response: str) -> list[dict]:
 from app.deadline_anchor import build_deadline_anchor
 
 
+def _task_inner_voice(task: dict) -> bool:
+    """Whether the Inner Voice observer watches this task's run.
+
+    Frontmatter beats config, and the fleet default is **off**. Recording is
+    cheap and universal; observing is not — the observer runs on the PRIMARY
+    at priority 1 and spends a goal-extraction call plus a critique per
+    observed turn. At ~180 autonomy turns a day, defaulting it on would put
+    that load behind every chat turn for runs nobody asked to have watched.
+
+    An unset value on the task means "ask the fleet default", which is what
+    makes `autonomy.inner_voice: true` in config.yaml a working master switch
+    while a single task can still opt in on a fleet that is off.
+    """
+    raw = task.get("inner_voice")
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in ("true", "yes", "on", "1"):
+            return True
+        if text in ("false", "no", "off", "0"):
+            return False
+        raw = None
+    if isinstance(raw, bool):
+        return raw
+    try:
+        cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
+        return bool((cfg.get("autonomy") or {}).get("inner_voice", False))
+    except Exception:
+        return False
+
+
 def _build_deadline_anchor(timeout_s: int):
     """The task-flavoured wall-clock anchor. One definition, in
     `app.deadline_anchor` — a second caller (the autocode worker turn) needs
@@ -805,6 +835,18 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     now = datetime.datetime.now(datetime.timezone.utc)
     now_iso = now.isoformat()
     run_id = f"run_{task_id}_{now.strftime('%Y%m%d_%H%M%S')}"
+    # Every background run is recorded. This path used to leave nothing at
+    # all — no transcript, no event log, no session — so the record of what a
+    # scheduled task did was a 200-character summary, and on 2026-09-10 a task
+    # could be neither confirmed nor cleared as the cause of a vault wipe
+    # because its tool calls had never been written down.
+    #
+    # Recording is not observation: the session is created with Inner Voice
+    # OFF unless the task asks for it, because the observer runs on the
+    # primary and costs a goal-extraction call per turn, while the transcript
+    # costs a few file appends.
+    from app.sessions_io import create_session, new_background_session_id
+    session_id = new_background_session_id("autonomy")
 
     # Refuse to start a second copy of a run that is already going. `_is_task_due`
     # never checked status and the manual/MCP entry points skip due-checks
@@ -864,6 +906,18 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
 
     logger.info("Running task #%s: %s (model=%s, timeout=%ds)",
                 task_id, task.get("name"), task_model, timeout)
+    task_inner_voice = _task_inner_voice(task)
+    try:
+        create_session(
+            session_id, platform="autonomy", model=task_model,
+            title=f"#{task_id} {str(task.get('name') or '').strip()}"[:80],
+            source=f"autonomy-task:{task_id}",
+            inner_voice=task_inner_voice,
+            preview=str(task.get("description") or task.get("name") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 — a record is not the run
+        logger.warning("Task #%s: could not create its session %s: %s",
+                       task_id, session_id, exc)
     started_at = now_iso
     # Capture tool/script failures that happen INSIDE the run (e.g. a Bash command
     # exiting non-zero). The harness returns these to the model as tool_results with
@@ -944,6 +998,15 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             priority=1,
             hooks=task_hooks,
             state_anchor=_build_deadline_anchor(timeout),
+            # Both, and both for a concrete reason. `session_id` routes this
+            # run's tool-result spills under its own session instead of the
+            # process-wide default; `turn_id` is what switches on the per-turn
+            # change ledger (`agent_mcp/_change_ledger.py`), so a scheduled
+            # task's file writes now leave pre-images and are revertable. An
+            # unattended run is the one that most needs an undo, and it was
+            # the only path that had none.
+            session_id=session_id,
+            turn_id=run_id,
             **_get_harness_kwargs(),
         )
 
@@ -955,8 +1018,14 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         saw_tool_call = False
 
         try:
+            from app.run_recorder import record_events
+            recorded = record_events(
+                run_query(messages, options),
+                session_id=session_id, turn_id=run_id, prompt=prompt,
+                model=task_model, source="autonomy",
+            )
             async with asyncio.timeout(timeout):
-                async for evt in run_query(messages, options):
+                async for evt in recorded:
                     if evt["type"] == "text_delta":
                         final_response += evt["text"]
                     elif evt["type"] == "tool_call":
@@ -987,7 +1056,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 kind="task",
                 extra={"timeout": True, "timeout_seconds": timeout,
                        "stop_reason": stop_reason, "usage": usage,
-                       "num_turns": num_turns, "tool_errors": len(tool_errors)},
+                       "num_turns": num_turns, "tool_errors": len(tool_errors),
+                       "session_id": session_id},
             )
         except asyncio.CancelledError:
             # The worker pool cancels via asyncio.wait_for. CancelledError is a
@@ -1006,7 +1076,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 kind="task", alert=False,
                 extra={"cancelled": True, "stop_reason": stop_reason,
                        "usage": usage, "num_turns": num_turns,
-                       "tool_errors": len(tool_errors)},
+                       "tool_errors": len(tool_errors),
+                       "session_id": session_id},
             )
             raise
 
@@ -1033,7 +1104,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 kind=kind,
                 extra={"empty": True, "stop_reason": stop_reason, "usage": usage,
                        "num_turns": num_turns, "tool_errors": len(tool_errors),
-                       "saw_tool_call": saw_tool_call},
+                       "saw_tool_call": saw_tool_call,
+                       "session_id": session_id},
             )
 
         completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -1055,7 +1127,10 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         is_silent = final_response.strip() == "[SILENT]"
         meta = {"stop_reason": stop_reason, "usage": usage, "num_turns": num_turns,
                 "tool_errors": len(tool_errors), "silent": is_silent,
-                "silent_failure_indicators": len(silent_failures)}
+                "silent_failure_indicators": len(silent_failures),
+                # The join from a run record to the transcript of that run.
+                # Without it the two records exist and nothing connects them.
+                "session_id": session_id}
 
         _write_run_record(
             task_id=task_id, run_id=run_id, status="success",
@@ -1121,7 +1196,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             summary=error_msg,
             body=f"## Error\n\n```\n{error_msg}\n\n{traceback.format_exc()}\n```{tool_errs_md}",
             kind=kind,
-            extra={"exception": type(e).__name__, "tool_errors": len(tool_errors)},
+            extra={"exception": type(e).__name__, "tool_errors": len(tool_errors),
+                   "session_id": session_id},
         )
 
 

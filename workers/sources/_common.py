@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-from app.paths import SESSIONS_DIR, VAULT_PENDING_RESEARCH_DIR as STAGING_ROOT
+from app.paths import VAULT_PENDING_RESEARCH_DIR as STAGING_ROOT
 
 # #529: the worker turn path is where the execution state lives, so the import
 # is here and not inside a function. A worker turn used to be one user message
@@ -171,6 +171,11 @@ class TurnResult:
     #: PEAK single prompt, and the number that matters here is the SUM across
     #: steps. None for every transcript-shaped turn, which is still most of them.
     run_state: Optional[RunStateResult] = None
+    #: The transcript this turn wrote, when it wrote one. A caller records it
+    #: on its run row so a run record and the session that produced it can be
+    #: joined — two records of the same run with nothing connecting them is
+    #: what the autonomy path had, and what made a suspect run unreviewable.
+    session_id: str = ""
 
     @property
     def ok(self) -> bool:
@@ -274,29 +279,56 @@ def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
     )
 
 
-async def run_prompt_on_primary(prompt: str, max_turns: int = 20) -> TurnResult:
+async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
+                                source: str = "worker",
+                                title: str = "") -> TurnResult:
     """Dispatch a prompt to the primary model at low vLLM priority.
 
-    **No session, therefore no Inner Voice.** `app/routers/messages.py` is the
-    only turn path that wires the observer: it needs a session id to read the
-    `inner_voice` flag from, to key observations on, and to attach a per-turn
-    observer to. A worker turn has none of that, so nothing here is watched and
-    nothing lands in the Inner Voice history.
+    **Recorded, not observed.** This path calls `run_query` directly, so it
+    has no chat endpoint behind it and therefore no Inner Voice — the observer
+    is wired in `app/routers/messages.py` and nowhere else, deliberately, so
+    that "how a turn is watched" has one definition. What it *does* now have
+    is a session and a transcript: `app/run_recorder.py` persists every event
+    as it goes and re-yields it unchanged, so a `gap-fill` or `session-distill`
+    run leaves the same readable record an autocode round does.
 
-    That is why `automod_start` refuses a worker turn and why worker jobs are
-    barred from the automod tools below: a round must be observable, and this
-    path cannot be. If `autotriage` is ever enabled, its verdicts are
-    produced unobserved — acceptable for read-only triage, and the reason the
-    fix is to route worker turns through the one IV-capable path rather than to
-    copy the observer wiring into a second place.
+    That distinction is the whole two-axis model. Recording is cheap and
+    universal; observation costs primary capacity per turn and is opt-in per
+    source. A source that wants to be watched asks for
+    `run_prompt_in_session`, which goes through the chat path.
+
+    `automod_start` still refuses a worker turn and the automod tools are
+    still barred below: a round must be *observable*, and a transcript is not
+    an observer.
     """
     from app.harness import run_query
+    from app.run_recorder import record_events
+    from app.sessions_io import create_session, new_background_session_id
 
     options = _worker_run_options(max_turns)
+    session_id = new_background_session_id(source)
+    run_id = uuid.uuid4().hex[:12]
+    try:
+        create_session(session_id, platform="worker", model="primary",
+                       title=(title or f"{source} run")[:80], source=source,
+                       inner_voice=False, preview=prompt[:60])
+        # Same reason as the autonomy path: `turn_id` is what switches on the
+        # per-turn change ledger, so what an unattended turn writes to disk is
+        # recorded with pre-images and can be reverted.
+        options.session_id = session_id
+        options.turn_id = run_id
+    except Exception as exc:  # noqa: BLE001 — a record is not the run
+        logger.warning("could not create session %s for %s: %s",
+                       session_id, source, exc)
+
     messages = [{"role": "user", "content": prompt}]
     out = TurnResult()
+    out.session_id = session_id
     chunks: list[str] = []
-    async for evt in run_query(messages, options):
+    async for evt in record_events(run_query(messages, options),
+                                   session_id=session_id, turn_id=run_id,
+                                   prompt=prompt, model="primary",
+                                   source=source):
         if evt["type"] == "text_delta":
             chunks.append(evt.get("text", ""))
         elif evt["type"] == "result":
@@ -444,22 +476,18 @@ def new_worker_session(*, title: str, source: str, model: str = "primary",
     Named after the source so it is recognisable in the session list and the
     Inner Voice picker, which is the point: a session-backed turn is the only
     kind that leaves a transcript anyone can page back through.
+
+    The file itself is written by `sessions_io.create_session`, which the
+    background recorder also uses. This function had its own private copy of
+    the session shape, and it already disagreed with the chat path's — it
+    wrote `id` where `_save_session_meta` writes `session_id`, and neither
+    `last_active` nor `message_count`, so a worker session sorted by its file
+    mtime while every chat session sorted by its conversation.
     """
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    session_id = f"{ts}_{source.replace('-', '')[:8]}_{uuid.uuid4().hex[:4]}"
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    (SESSIONS_DIR / f"{session_id}.json").write_text(json.dumps({
-        "id": session_id,
-        "title": title,
-        "model": model,
-        "platform": "worker",
-        "source": source,
-        "inner_voice": bool(inner_voice),
-        "inner_voice_evaluate_user_turns": bool(inner_voice),
-        "messages": [],
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }, indent=2), encoding="utf-8")
-    return session_id
+    from app.sessions_io import create_session, new_background_session_id
+    return create_session(
+        new_background_session_id(source), platform="worker", model=model,
+        title=title, source=source, inner_voice=inner_voice)
 
 
 async def _cancel_session_turn(backend: str, session_id: str) -> bool:

@@ -991,4 +991,9 @@ def test_the_two_unobserved_paths_are_deliberate_and_say_so():
     assert "not an automod job" in smoke.lower() or "gate rung, not an automod job" in smoke
 
     common = (ROOT / "workers" / "sources" / "_common.py").read_text()
-    assert "No session, therefore no Inner Voice" in common
+    # The phrasing moved on 2026-09-10, when `run_prompt_on_primary` gained a
+    # session and a transcript: it is now *recorded* and still not *observed*,
+    # which is a sharper claim than "no session" and the one worth pinning.
+    # Observation stays wired in `app/routers/messages.py` and nowhere else.
+    assert "Recorded, not observed" in common
+    assert "no Inner Voice" in common

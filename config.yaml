@@ -107,6 +107,14 @@ autonomy:
   enabled: true
   task_dir: ~/obsidian/autonomy
   tick_interval: 60
+  # Fleet default for the Inner Voice observer on scheduled-task runs. A task
+  # file's own `inner_voice:` frontmatter beats this, so a single task can be
+  # watched on a fleet that is off. Off by default because the observer runs
+  # on the PRIMARY at priority 1 and spends a goal-extraction call plus a
+  # critique per observed turn — at ~180 autonomy turns a day that would sit
+  # in front of every chat turn, for runs nobody asked to have watched.
+  # Recording (`harness.background_recording`) is unconditional and separate.
+  inner_voice: false
 autoresearch:
   bench_dir: ~/obsidian/lloyd/bench
   default_budget_minutes: 120
@@ -257,6 +265,18 @@ harness:
   # drops them and they never re-enter the prompt. false restores the old
   # behaviour.
   thinking_trace:
+    enabled: true
+  # Background recording. Every run that is not a chat turn — every autonomy
+  # task, every `run_prompt_on_primary` worker job — writes a session, a
+  # transcript and an event log through `app/run_recorder.py`. Before this
+  # those two paths left nothing at all: on 2026-09-10 an autonomy task was
+  # the prime suspect in a vault wipe and could be neither confirmed nor
+  # cleared, because the tool calls it made had never been written down.
+  # Recording is cheap and universal; being *watched* by the Inner Voice
+  # observer is a separate, per-job opt-in (`autonomy.inner_voice`,
+  # `workers.sources.<name>.inner_voice`) because that one costs primary
+  # capacity per turn. false restores the old silence.
+  background_recording:
     enabled: true
   # Tool-call summaries. Adds a `summary` string parameter to every
   # advertised tool — a short phrase the model writes describing what the

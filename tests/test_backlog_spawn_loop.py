@@ -65,7 +65,9 @@ def isolated(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setattr(B, "BACKLOG_DIR", d)
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
-    monkeypatch.setattr(C, "SESSIONS_DIR", tmp_path / "sessions")
+    # `new_worker_session` writes through `sessions_io.create_session`
+    # now, and conftest's `_isolate_background_records` already points
+    # that at a scratch dir for every test.
     return d
 
 
