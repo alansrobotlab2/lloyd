@@ -773,20 +773,119 @@ def generate_title(pattern: dict) -> str:
         return f"Pattern: {tool_name} usage"
 
 
-def write_candidate_file(pattern: dict, output_dir: Path) -> str | None:
+# ── Verdict ledger gate (#530) ───────────────────────────────────────────────
+#
+# Placed here rather than at the head of the file, and the ledger module imported
+# lazily inside a function, for two separate reasons. Function-local because
+# `skill_verdicts.py` is a sibling script, not a package member: it resolves when the
+# miner runs as `python3 scripts/mine-trajectories.py` and also when a test loads this
+# file with importlib, where `scripts/` is not on sys.path. If the import fails the
+# error propagates — a silently-absent gate would report "no verdicts" and re-mint
+# every rejected pattern, which is the exact defect this closes.
+#
+# The pre-existing `normalize_tool_name` redefinition above is a pyflakes finding whose
+# message embeds its own line number, and the gate's normaliser strips only the
+# `path:line:col:` prefix — so anything inserted higher in this file reports that
+# finding as new and fails the static rung on a change that introduced nothing. Filed
+# separately; nothing here is above it.
+
+def _verdicts_module():
+    """The sibling `skill_verdicts` module, importable from either call style."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import skill_verdicts
+    return skill_verdicts
+
+
+def candidate_pattern_key(pattern: dict) -> str:
+    """The key a mined pattern is adjudicated under.
+
+    It must equal the `pattern:` frontmatter field written below, because that is what
+    `skill_verdicts.py` reads back out of a candidate when the runbook asks "has this
+    already been decided?". The ledger and the corpus join on this string and nothing
+    else, so it is derived in exactly one place. Error patterns key on
+    `(tool, error_type)` — `Bash/timeout`, `Edit/not_found` — which is the shape the
+    seven rejected 09-06 candidates actually carry.
+    """
+    if pattern["type"] == "error":
+        return f"{pattern['tool_name']}/{pattern['error_type']}"
+    if pattern["type"] == "sequence":
+        return f"seq-{pattern['ngram_size']}-{slugify(pattern['sequence_str'])}"
+    return f"{pattern['tool_name']}/{pattern['params_signature']}"
+
+
+def verdict_for(pattern: dict, store: str | Path | None = None) -> dict | None:
+    """The binding terminal verdict blocking this pattern, or None if it is free.
+
+    An absent ledger file returns None for every key: that is the honest empty state,
+    and the runbook has to print `skipped_by_verdict: 0` out loud rather than have the
+    gate pretend it saw something.
+    """
+    return _verdicts_module().terminal_verdict(
+        candidate_pattern_key(pattern),
+        store=store,
+        occurrences=int(pattern.get("total_calls") or 0),
+    )
+
+
+def status_block(pattern: dict, store: str | Path | None = None) -> tuple[str, str, dict | None]:
+    """(`status` value, extra frontmatter, verdict) for one candidate.
+
+    A pattern carrying a terminal verdict is still written — its evidence is telemetry
+    and the corpus is the audit trail — but never as `pending_review`. It arrives as
+    `superseded_by_verdict`, so a re-mined snapshot cannot present already-rejected
+    content as a fresh decision, and the reason that rejected it travels with the file
+    instead of being re-derived by hand the next night.
+    """
+    verdict = verdict_for(pattern, store=store)
+    if not verdict:
+        return "pending_review", "", None
+    reason = " ".join(str(verdict.get("reason", "")).split())
+    front = (
+        f"\nverdict: {verdict.get('verdict', '')}"
+        f"\nverdict_decided_at: {verdict.get('decided_at', '')}"
+        f"\nverdict_source: {verdict.get('source_candidate', '')}"
+        f"\nverdict_evidence_cmd: {verdict.get('evidence_cmd', '')}"
+        f"\nverdict_reason: {reason}"
+    )
+    return "superseded_by_verdict", front, verdict
+
+
+def superseded_pattern_keys(patterns: list[dict], store: str | Path | None = None) -> list[str]:
+    """Keys the ledger blocks, for the run summary.
+
+    Same lookup `write_candidate_file` performs, exposed so the nightly report can state
+    a number and a reason per key. #391 records that consolidation "returns zero every
+    night" with no stated reason; an unexplained zero reads as a broken job, and a
+    reported one reads as a decision.
+    """
+    keys = []
+    for pattern in patterns:
+        if verdict_for(pattern, store=store):
+            keys.append(candidate_pattern_key(pattern))
+    return keys
+
+
+def write_candidate_file(pattern: dict, output_dir: Path, verdict_store: str | Path | None = None) -> str | None:
     """Write a single candidate markdown file. Returns the file path, or None
     if the pattern is not a skill candidate at all (`is_emittable`). The check
-    is here as well as in `emit_candidates` so no caller can re-open the hole."""
+    is here as well as in `emit_candidates` so no caller can re-open the hole.
+
+    `verdict_store` additionally decides the `status` line, not whether the file is
+    written: a pattern whose key carries a terminal verdict is emitted as
+    `superseded_by_verdict` rather than `pending_review` (#530).
+    """
     if not is_emittable(pattern):
         return None
 
+    # The one caller creates the dir; creating it here too means a caller that forgets
+    # gets a candidate file, not a FileNotFoundError halfway through a nightly run.
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     # Generate filename
-    if pattern["type"] == "error":
-        pattern_slug = f"{pattern['tool_name']}/{pattern['error_type']}"
-    elif pattern["type"] == "sequence":
-        pattern_slug = f"seq-{pattern['ngram_size']}-{slugify(pattern['sequence_str'])}"
-    else:
-        pattern_slug = f"{pattern['tool_name']}/{pattern['params_signature']}"
+    pattern_slug = candidate_pattern_key(pattern)
+    status_value, verdict_fm, _verdict = status_block(pattern, store=verdict_store)
 
     slug = slugify(pattern_slug)
     today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
@@ -807,7 +906,7 @@ sessions: {len(pattern["sessions"])}
 first_seen: {pattern["first_seen"]}
 last_seen: {pattern["last_seen"]}
 error_rate: 1.0
-status: pending_review
+status: {status_value}{verdict_fm}
 ---
 
 # Skill Candidate: {title}
@@ -849,7 +948,7 @@ sessions: {len(pattern["sessions"])}
 first_seen: {pattern["first_seen"]}
 last_seen: {pattern["last_seen"]}
 has_error_recovery: {recovery_flag}
-status: pending_review
+status: {status_value}{verdict_fm}
 ---
 
 # Skill Candidate: {title}
@@ -901,7 +1000,7 @@ sessions: {len(pattern["sessions"])}
 first_seen: {pattern["first_seen"]}
 last_seen: {pattern["last_seen"]}
 error_rate: {pattern["error_rate"]:.2f}
-status: pending_review
+status: {status_value}{verdict_fm}
 ---
 
 # Skill Candidate: {title}
@@ -1142,9 +1241,17 @@ def main() -> None:
     candidate_files = [os.path.basename(p) for p in written]
     suppressed = len(all_patterns) - len(written)
 
+    # Keys the verdict ledger blocked. Reported, never silent: the number plus one
+    # reason line per key is what turns "zero proposed" from an unexplained gap into a
+    # decision a reader can check (#530; #391 recorded the silent-zero symptom).
+    blocked = superseded_pattern_keys(all_patterns)
+
     for filepath in written:
         print(f"  Written: {filepath}", file=sys.stderr)
     print(f"  Suppressed as non-skill candidates: {suppressed}", file=sys.stderr)
+    print(f"  Superseded by verdict: {len(blocked)}", file=sys.stderr)
+    for key in blocked:
+        print(f"    superseded: {key}", file=sys.stderr)
 
     # Write index
     write_index(candidate_files, output_dir)
@@ -1161,6 +1268,7 @@ def main() -> None:
     print(f"  Sequence patterns:    {len(sequence_patterns)}")
     print(f"  Candidates written:   {len(candidate_files)}")
     print(f"  Suppressed (non-skill): {suppressed}")
+    print(f"  Superseded by verdict: {len(blocked)}")
     print(f"  Output directory:     {output_dir}")
     print("=" * 60)
 
