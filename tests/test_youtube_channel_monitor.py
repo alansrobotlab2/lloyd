@@ -70,6 +70,74 @@ def _state(**seen):
 
 
 # ---------------------------------------------------------------------------
+# Note filenames Obsidian Sync will store
+# ---------------------------------------------------------------------------
+#
+# On 2026-09-10 twenty AI Engineer notes never reached the synced vault: every
+# one had a no-break space in its name (titles like "Composer\u00a0– Lee
+# Robinson"), and not one of the 4,570 files that did sync had one. Obsidian
+# Sync refuses the name and reports nothing, so the note exists only on the
+# machine that wrote it.
+
+_SPACES = ["\u00a0", "\u202f", "\u2009", "\u3000", "\t", "\n"]
+
+
+@pytest.mark.parametrize("space", _SPACES)
+def test_every_kind_of_space_becomes_a_dash(space):
+    title = f"Building Cursor Composer{space}– Lee Robinson,{space}Cursor"
+    assert M.slugify(title) == "building-cursor-composer-lee-robinson-cursor"
+
+
+def test_the_cut_never_leaves_whitespace_or_a_trailing_dash():
+    """The old cut came before the collapse, so an 80-character limit landing
+    on a no-break space left the name ending in one — the note that ended
+    `...voice-response-\\u00a0.md`."""
+    slug = M.slugify("a" * 79 + "\u00a0" + "b" * 10)
+    assert slug == "a" * 79
+    for title in ("x" * 78 + " \u00a0 y", "Title — with — dashes —\u00a0", "  lead and trail  "):
+        s = M.slugify(title)
+        assert not any(ch.isspace() for ch in s)
+        assert not s.startswith("-") and not s.endswith("-")
+
+
+def test_slugify_is_idempotent():
+    for title in ("Building Cursor Composer\u00a0– Lee Robinson, Cursor",
+                  "AI Didn’t Kill the Web, It Moved in! — Olivier Leplus (AWS)",
+                  "Café Déjà Vu"):
+        once = M.slugify(title)
+        assert M.slugify(once) == once
+
+
+def test_accents_are_kept_and_composed():
+    """They sync (measured), and composing them means macOS and Linux write
+    the same bytes for the same name."""
+    assert M.slugify("Café Déjà Vu") == "café-déjà-vu"
+
+
+def test_reserved_and_zero_width_characters_are_dropped():
+    assert M.slugify('a:b*c?"d<e>f|g\\h/i\u200bj k') == "abcdefghij-k"
+
+
+def test_an_unsluggable_title_falls_back_to_the_video_id():
+    assert M.target_note_path("🔥🔥🔥", "20260910", video_id="abc123").endswith(
+        "20260910-video-abc123.md")
+    assert M.target_note_path("OpenRAG: An open-source stack", "20260408").endswith(
+        "20260408-openrag-an-open-source-stack.md")
+
+
+@pytest.mark.parametrize("bad, fixed", [
+    ("building-cursor-composer-\u00a0lee-robinson-cursor",
+     "building-cursor-composer-lee-robinson-cursor"),
+    ("voicevision-rag-integrating-visual-document-intelligence-with-voice-response-\u00a0",
+     "voicevision-rag-integrating-visual-document-intelligence-with-voice-response"),
+])
+def test_the_real_unsyncable_names_come_out_clean(bad, fixed):
+    """Two of the twenty, as they were written. Renaming them applies this
+    same function to the part after the date."""
+    assert M.slugify(bad, max_len=len(bad)) == fixed
+
+
+# ---------------------------------------------------------------------------
 # The registry and the shim
 # ---------------------------------------------------------------------------
 

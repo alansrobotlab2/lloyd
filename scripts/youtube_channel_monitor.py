@@ -56,6 +56,7 @@ import os
 import re
 import tempfile
 import subprocess
+import unicodedata
 from datetime import datetime, timezone
 from urllib import request
 from xml.etree import ElementTree as ET
@@ -895,8 +896,26 @@ published: {publish_date}
 # ── Video processing ──────────────────────────────────────────────────
 
 def slugify(text, max_len=80):
-    slug = re.sub(r"[^\w\s-]", "", text).lower().replace(" ", "-")[:max_len]
-    return re.sub(r"-+", "-", slug).strip("-")
+    """A lowercase, dash-separated name every Obsidian Sync client will store.
+
+    Obsidian Sync refuses a filename containing a no-break space. Measured on
+    2026-09-10: it was the one trait all 20 of this channel's unsyncable notes
+    shared and none of the 4,570 synced files had (accented letters sync
+    fine). YouTube titles are full of them — "Composer\\u00a0– Lee Robinson" —
+    and the old version kept every whitespace character, then replaced only an
+    ASCII space with "-", so the no-break space survived into the name; where
+    the 80-character cut landed on one, the name ended in whitespace too.
+
+    NFKC first: no-break and other odd spaces become plain ones, full-width
+    characters become ASCII, and accents are composed, so macOS and Linux
+    agree on the bytes. Then every run of any whitespace or dashes becomes one
+    "-", and the cut happens after that collapse and before the edges are
+    stripped, so no name can end in a separator.
+    """
+    text = unicodedata.normalize("NFKC", str(text or ""))
+    slug = re.sub(r"[^\w\s-]", "", text).lower()
+    slug = re.sub(r"[\s-]+", "-", slug)
+    return slug[:max_len].strip("-")
 
 
 def validate_note(text, video_id):
@@ -1021,7 +1040,9 @@ Processing failed — transcript below.
         return False
 
     # Write note
-    video_slug = slugify(title)
+    # A title with nothing sluggable left (all emoji, say) would otherwise
+    # write "<date>-.md" and every such video on a day would share it.
+    video_slug = slugify(title) or f"video-{video_id}"
     date_str = publish_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     note_filename = f"{date_str}-{video_slug}.md"
     note_path = os.path.join(VAULT_YT_DIR, note_filename)
@@ -1289,9 +1310,12 @@ def existing_note_for(video_id, entry=None):
     return note_index().get(video_id)
 
 
-def target_note_path(title, publish_date):
+def target_note_path(title, publish_date, video_id=""):
     date_str = publish_date if _is_yyyymmdd(publish_date) else datetime.now(timezone.utc).strftime("%Y%m%d")
-    return os.path.join(VAULT_YT_DIR, f"{date_str}-{slugify(title)}.md")
+    # Same fallback as process_video: an unsluggable title must not collapse
+    # every such video on a day onto one "<date>-.md".
+    slug = slugify(title) or (f"video-{video_id}" if video_id else "untitled")
+    return os.path.join(VAULT_YT_DIR, f"{date_str}-{slug}.md")
 
 
 def build_bundle(video_id, title="", published="", entry=None):
@@ -1376,7 +1400,7 @@ def build_bundle(video_id, title="", published="", entry=None):
         "entities": {k: entities.get(k, []) for k in ("github_urls", "paper_arxiv", "paper_urls", "other_urls")},
         "enrichment": enrichment,
         "existing_note": existing,
-        "target_note": existing or target_note_path(title, published),
+        "target_note": existing or target_note_path(title, published, video_id),
         "measurements_path": measurements_path,
         "measurements_summary": measurements_summary(measurements),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
