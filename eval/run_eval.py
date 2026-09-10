@@ -36,6 +36,13 @@ from agent_mcp.vault import (
 from agent_mcp.facts import _extract_entities_from_query
 from app.kg_store import StoreUnavailable, store
 from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
+# This file runs both as `python eval/run_eval.py` (script dir on sys.path) and
+# as `import eval.run_eval` from the tests; the second form needs the package
+# spelling.
+try:
+    from eval import counterfactual as cf
+except ImportError:  # pragma: no cover - script-dir invocation
+    import counterfactual as cf
 
 
 def _corpus_provenance() -> dict:
@@ -177,8 +184,19 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
 def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
              graph_rerank: bool = False, rerank_alpha: float = 0.5,
              demote_factor: float | None = None,
-             graph_top_k: int = 5, graph_hops: int = 1) -> list[dict]:
+             graph_top_k: int = 5, graph_hops: int = 1,
+             counterfactual: bool = True) -> list[dict]:
     records = []
+    # Frozen perturbation records, loaded once. Absent or short is surfaced per
+    # query below as an unscored counterfactual block rather than crashing the
+    # run: the existing metrics are still worth having, and the compare step
+    # already refuses to compare a baseline whose shape it cannot trust.
+    perturbations = {}
+    if counterfactual:
+        try:
+            perturbations = cf.load_records()
+        except (FileNotFoundError, KeyError, yaml.YAMLError) as e:
+            print(f"  [counterfactual] records unusable ({type(e).__name__}: {e})")
     for spec in queries:
         qid = spec.get("id")
         query = spec.get("query", "")
@@ -207,7 +225,7 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
         seeds = [e for e, _ in (_extract_entities_from_query(query) or [])[:5]]
         scoring = _score(spec, result, seeds=seeds)
 
-        records.append({
+        rec = {
             "id": qid,
             "query": query,
             "category": spec.get("category"),
@@ -231,8 +249,53 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
             "scoring": scoring,
             "latency_ms": round(latency_ms, 1),
             "error": err,
-        })
+        }
+        if counterfactual:
+            _attach_counterfactual(rec, spec, result, seeds, recall_params,
+                                   perturbations.get(qid))
+            # Float where scoreable, None where not — summarize averages over
+            # the non-None values, which is how a query that cannot be pinned
+            # stays out of pinned_rate's denominator instead of inflating it.
+            cfx = rec.get("counterfactual") or {}
+            if cfx:
+                scoring["counterfactual_moved_rate"] = (
+                    1.0 if cfx["counterfactual_moved"] else 0.0)
+                pinned = cfx["counterfactual_pinned"]
+                scoring["counterfactual_pinned_rate"] = (
+                    None if pinned is None else (1.0 if pinned else 0.0))
+            else:
+                scoring["counterfactual_moved_rate"] = None
+                scoring["counterfactual_pinned_rate"] = None
+        records.append(rec)
     return records
+
+
+def _attach_counterfactual(rec: dict, spec: dict, result: dict, seeds: list[str],
+                           recall_params: dict, perturbation: dict | None) -> None:
+    """Run this query's perturbed twin through the SAME path and score both
+    directions onto the record.
+
+    Reusing `recall_params` with only `query` swapped is the whole point: the
+    two arms must differ in the one constraint and nothing else, so any
+    difference in the entity-level output is attributable to that constraint.
+    """
+    if not perturbation:
+        rec["counterfactual"] = None
+        rec["counterfactual_error"] = "no perturbation record for this query id"
+        return
+    variant_query = perturbation.get("perturbed_query") or ""
+    try:
+        variant = _vault_recall({**recall_params, "query": variant_query})
+        variant_seeds = [e for e, _ in
+                         (_extract_entities_from_query(variant_query) or [])[:5]]
+        rec["counterfactual"] = cf.score_pair(perturbation, result, seeds,
+                                              variant, variant_seeds)
+        rec["counterfactual"]["seeds_variant"] = variant_seeds
+    except Exception as e:
+        # A variant that errored is not a retrieval failure; scoring it would
+        # put a retriever bug report on a harness bug.
+        rec["counterfactual"] = None
+        rec["counterfactual_error"] = f"{type(e).__name__}: {e}"
 
 
 def summarize(records: list[dict]) -> dict:
@@ -243,6 +306,18 @@ def summarize(records: list[dict]) -> dict:
     def avg(xs):
         xs = [x for x in xs if x is not None]
         return round(sum(xs) / len(xs), 3) if xs else None
+
+    def _cf(rec, key):
+        # .get, not []: baselines written before #541 and the automod baseline
+        # arm carry no perturbation block, and summarize runs over both.
+        return rec["scoring"].get(key)
+
+    # Each rate averages only the queries that were scoreable for that half, so
+    # the denominators travel with the numbers: a pinned_rate over 4 of 20
+    # queries is not comparable to one over 18, and the whole point of #541 is
+    # that a low number here is a finding rather than a malfunction.
+    moved_vals = [_cf(r, "counterfactual_moved_rate") for r in records]
+    pinned_vals = [_cf(r, "counterfactual_pinned_rate") for r in records]
 
     overall = {
         "n_queries": len(records),
@@ -255,6 +330,10 @@ def summarize(records: list[dict]) -> dict:
         "fact_entity_recall_avg": avg([r["scoring"]["fact_entity_recall"] for r in records]),
         "latency_ms_avg": avg([r["latency_ms"] for r in records]),
         "errors": sum(1 for r in records if r.get("error")),
+        "counterfactual_moved_rate": avg([v for v in moved_vals]),
+        "counterfactual_pinned_rate": avg([v for v in pinned_vals]),
+        "counterfactual_n_moved": len([v for v in moved_vals if v is not None]),
+        "counterfactual_n_pinned": len([v for v in pinned_vals if v is not None]),
     }
 
     per_cat = {}
@@ -267,13 +346,40 @@ def summarize(records: list[dict]) -> dict:
             "mrr_doc": avg([r["scoring"]["rr_doc"] for r in rs]),
             "ndcg10": avg([r["scoring"]["ndcg10"] for r in rs]),
             "fact_entity_recall_avg": avg([r["scoring"]["fact_entity_recall"] for r in rs]),
+            "counterfactual_moved_rate": avg([_cf(r, "counterfactual_moved_rate") for r in rs]),
+            "counterfactual_pinned_rate": avg([_cf(r, "counterfactual_pinned_rate") for r in rs]),
         }
     return {"overall": overall, "by_category": per_cat}
 
 
+def _fmt_rate(value) -> str:
+    """null and 0.0 are different facts and must not print the same. A run with
+    no perturbation block reads 'null'; a run where nothing moved reads '0.00',
+    and only one of those is a finding about retrieval."""
+    return "null" if value is None else f"{value:.2f}"
+
+
+def print_failures(failures: list[dict]) -> None:
+    """The labelled defect list #541 asks for. Printed, not just filed in the
+    JSON, because the nightly report is read by a person in chat."""
+    bad = [f for f in failures if f.get("label")]
+    if not bad:
+        print("\nCounterfactual failures: none")
+        return
+    print("\nCounterfactual failures:")
+    for f in bad:
+        extra = f" ({'; '.join(f['pinned_failures'])})" if f.get("pinned_failures") else ""
+        print(f"  {f['id']:<26} {f['axis_changed'] or '?':<10} {f['label']}"
+              f"{' -> ' + str(f.get('new_value')) if f.get('new_value') else ''}{extra}")
+    keying = cf.identity_keying_evidence(failures)
+    if keying:
+        print(f"  entity-name swaps the seed extractor did not notice "
+              f"(evidence for/against #537): {', '.join(keying)}")
+
+
 def print_table(records: list[dict], summary: dict) -> None:
-    print(f"\n{'id':<26} {'cat':<10} {'eH':<4} {'dH':<4} {'eR':<6} {'dR':<6} {'rank':<5} {'NDCG':<6} {'fER':<6} {'latms':<7}")
-    print("-" * 100)
+    print(f"\n{'id':<26} {'cat':<10} {'eH':<4} {'dH':<4} {'eR':<6} {'dR':<6} {'rank':<5} {'NDCG':<6} {'fER':<6} {'mv':<4} {'pn':<4} {'axis':<10} {'latms':<7}")
+    print("-" * 118)
     for r in records:
         s = r["scoring"]
         eh = "✓" if s["entity_hit"] else "✗"
@@ -283,7 +389,13 @@ def print_table(records: list[dict], summary: dict) -> None:
         rk = str(s["first_doc_rank"]) if s["first_doc_rank"] else "—"
         ndcg = f"{s['ndcg10']:.2f}"
         fer = f"{s['fact_entity_recall']:.2f}" if s["fact_entity_recall"] is not None else "—"
-        print(f"{r['id']:<26} {(r['category'] or ''):<10} {eh:<4} {dh:<4} {er:<6} {dr:<6} {rk:<5} {ndcg:<6} {fer:<6} {r['latency_ms']:<7.0f}")
+        cfx = r.get("counterfactual") or {}
+        mv = ("✓" if cfx.get("counterfactual_moved") else "✗") if cfx else "—"
+        pn = ("—" if not cfx else
+              ("·" if cfx.get("counterfactual_pinned") is None else
+               ("✓" if cfx.get("counterfactual_pinned") else "✗")))
+        axis = cfx.get("axis_changed") or ""
+        print(f"{r['id']:<26} {(r['category'] or ''):<10} {eh:<4} {dh:<4} {er:<6} {dr:<6} {rk:<5} {ndcg:<6} {fer:<6} {mv:<4} {pn:<4} {axis:<10} {r['latency_ms']:<7.0f}")
     print()
     o = summary["overall"]
     # fact_entity_recall sits next to MRR because it is the metric the fact
@@ -294,6 +406,12 @@ def print_table(records: list[dict], summary: dict) -> None:
     print(f"         entity_hit={o['entity_hit_rate']:.2f}  doc_hit={o['doc_hit_rate']:.2f}  "
           f"ent_recall={o['entity_recall_avg']:.2f}  doc_recall={o['doc_recall_avg']:.2f}  "
           f"avg_lat={o['latency_ms_avg']:.0f}ms  errors={o['errors']}")
+    # Printed beside entity_hit/doc_hit because that gap is what #541 exists to
+    # explain: retrieval finds a relevant document far more reliably than it
+    # finds the right entity row.
+    mv, pn = o.get("counterfactual_moved_rate"), o.get("counterfactual_pinned_rate")
+    print(f"         counterfactual: moved={_fmt_rate(mv)} (n={o.get('counterfactual_n_moved', 0)})  "
+          f"pinned={_fmt_rate(pn)} (n={o.get('counterfactual_n_pinned', 0)})")
     print("\nBy category:")
     for cat, s in summary["by_category"].items():
         print(f"  {cat:<10} n={s['n']:<3} entity_hit={s['entity_hit_rate']:.2f}  "
@@ -328,6 +446,10 @@ def main() -> int:
     ap.add_argument("--allow-empty-corpus", action="store_true",
                     help="Score even when the fact tree / graph store is empty "
                          "(records corpus_ok: false)")
+    ap.add_argument("--no-counterfactual", dest="counterfactual", action="store_false",
+                    default=True,
+                    help="Skip the perturbed twin of every query (halves the "
+                         "run; summary then carries null counterfactual rates)")
     args = ap.parse_args()
 
     spec_file = Path(args.queries)
@@ -377,8 +499,13 @@ def main() -> int:
         demote_factor=args.demote_factor,
         graph_top_k=args.graph_top_k,
         graph_hops=args.graph_hops,
+        counterfactual=args.counterfactual,
     )
     summary = summarize(records)
+    # The labelled defect list is a deliverable of #541, not a debug aid: the
+    # item's own step 5 is "decide which fix the taxonomy argues for", and that
+    # decision needs the labels where the numbers are.
+    failures = cf.label_failures(records)
 
     out = {
         "label": args.label,
@@ -400,6 +527,13 @@ def main() -> int:
         ),
         "corpus": corpus,
         "corpus_ok": corpus_ok,
+        # Which frozen record set produced the variants. A selfmod round diffs
+        # these two files against each other; recording the path (not just the
+        # numbers) is what tells a reader whether two baselines are comparable.
+        "counterfactual_records": str(cf.RECORD_PATH),
+        "counterfactual_ran": bool(args.counterfactual),
+        "counterfactual_failures": failures,
+        "identity_keying_evidence": cf.identity_keying_evidence(failures),
         "summary": summary,
         "records": records,
     }
@@ -410,6 +544,7 @@ def main() -> int:
     print(_corpus_line(corpus))
 
     print_table(records, summary)
+    print_failures(failures)
     return 0
 
 

@@ -1,0 +1,177 @@
+_comment: Deterministic counterfactual perturbations for the retrieval eval (#541).
+  Regenerate with `python eval/counterfactual.py --write`; never re-derived from live
+  graph data at eval time. The pinned corpus and vault_recall_queries.yaml ground
+  truth are not read by the generator.
+perturbations:
+- id: autonomy-pipeline
+  axis_changed: entity
+  old_value: autonomy pipeline
+  new_value: Data Pipeline
+  perturbed_query: describe the Data Pipeline end to end
+  expected_to_move:
+  - Data Pipeline
+  expected_pinned:
+  - autonomy
+  sibling_source: kg_alias_table
+- id: backlog-363
+  axis_changed: entity
+  old_value: backlog item 363
+  new_value: 'Backlog Item #313'
+  perturbed_query: 'tell me about Backlog Item #313'
+  expected_to_move:
+  - 'Backlog Item #313'
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: backlog-overview
+  axis_changed: qualifier
+  old_value: interesting
+  new_value: stale
+  perturbed_query: anything stale in the backlog we should tackle?
+  expected_to_move: []
+  expected_pinned:
+  - Backlog
+- id: classifier-v4
+  axis_changed: qualifier
+  old_value: upgrade
+  new_value: keep
+  perturbed_query: how does the v4 mention classifier decide what to keep?
+  expected_to_move: []
+  expected_pinned:
+  - mention classifier
+- id: entity-resolution-sweep
+  axis_changed: entity
+  old_value: entity resolution sweep
+  new_value: Semantic Entity Resolution
+  perturbed_query: what does the Semantic Entity Resolution skill do?
+  expected_to_move:
+  - Semantic Entity Resolution
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: godnode-threshold
+  axis_changed: qualifier
+  old_value: why does it exist
+  new_value: what does it cost
+  perturbed_query: what's the FACT_GODNODE_THRESHOLD and what does it cost?
+  expected_to_move: []
+  expected_pinned:
+  - FACT_GODNODE_THRESHOLD
+- id: graph-quality
+  axis_changed: qualifier
+  old_value: noise
+  new_value: precision
+  perturbed_query: what's the precision floor in our relationship graph?
+  expected_to_move: []
+  expected_pinned:
+  - graph
+- id: harness-tools
+  axis_changed: artifact
+  old_value: tool calls
+  new_value: tool results
+  perturbed_query: how does the agent harness dispatch tool results?
+  expected_to_move: []
+  expected_pinned:
+  - agent harness
+- id: inner-voice
+  axis_changed: entity
+  old_value: inner voice
+  new_value: Voice Mode
+  perturbed_query: explain the Voice Mode architecture
+  expected_to_move:
+  - Voice Mode
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: kg-maintenance-tasks
+  axis_changed: entity
+  old_value: knowledge graph
+  new_value: Entity Graph
+  perturbed_query: which autonomy tasks maintain the Entity Graph?
+  expected_to_move:
+  - Entity Graph
+  expected_pinned:
+  - autonomy
+  sibling_source: kg_alias_table
+- id: lloyd-vllm-rel
+  axis_changed: entity
+  old_value: vLLM
+  new_value: TensorRT-LLM
+  perturbed_query: how does Lloyd use TensorRT-LLM?
+  expected_to_move:
+  - TensorRT-LLM
+  expected_pinned:
+  - lloyd
+  sibling_source: kg_alias_table
+- id: memory-persistence
+  axis_changed: qualifier
+  old_value: across sessions
+  new_value: within one session
+  perturbed_query: how does Lloyd remember things within one session?
+  expected_to_move: []
+  expected_pinned:
+  - Lloyd
+- id: nightly-reflection
+  axis_changed: artifact
+  old_value: skills
+  new_value: autonomy tasks
+  perturbed_query: what autonomy tasks are involved in nightly reflection?
+  expected_to_move: []
+  expected_pinned:
+  - nightly reflection
+- id: qmd
+  axis_changed: entity
+  old_value: QMD
+  new_value: QMD Search
+  perturbed_query: what is QMD Search?
+  expected_to_move:
+  - QMD Search
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: qwen38-local-serving
+  axis_changed: qualifier
+  old_value: 24GB
+  new_value: 48GB
+  perturbed_query: how do we serve a hybrid linear-attention model on a single 48GB
+    GPU?
+  expected_to_move: []
+  expected_pinned:
+  - Qwen3.8
+- id: relationships-location
+  axis_changed: artifact
+  old_value: index
+  new_value: backup
+  perturbed_query: where is the relationships backup stored?
+  expected_to_move: []
+  expected_pinned:
+  - relationships
+- id: robotics-projects
+  axis_changed: artifact
+  old_value: projects
+  new_value: research notes
+  perturbed_query: what robotics research notes have I worked on?
+  expected_to_move: []
+  expected_pinned:
+  - robotics
+- id: tgs-rag-state
+  axis_changed: qualifier
+  old_value: current
+  new_value: original
+  perturbed_query: what's the original state of TGS-RAG research?
+  expected_to_move: []
+  expected_pinned:
+  - TGS-RAG
+- id: this-week-autonomy
+  axis_changed: date
+  old_value: this week
+  new_value: last quarter
+  perturbed_query: what changed in the autonomy system last quarter?
+  expected_to_move: []
+  expected_pinned:
+  - autonomy
+- id: vault-recall
+  axis_changed: entity
+  old_value: vault_recall
+  new_value: Vault Index
+  perturbed_query: what is Vault Index and how does it work?
+  expected_to_move:
+  - Vault Index
+  expected_pinned: []
+  sibling_source: kg_alias_table
