@@ -88,9 +88,30 @@ def main() -> int:
     native = int(text.get("max_position_embeddings", NATIVE))
     if native != NATIVE:
         print(f"note: text_config.max_position_embeddings is {native}, not {NATIVE}", file=sys.stderr)
+    native_block = dict(text.get("rope_parameters") or {})
     text["rope_parameters"] = yarn_block(args.factor)
     # vLLM derives the allowed max_model_len for yarn as
     # original_max_position_embeddings * factor, so this field can stay native.
+    #
+    # The OUTER config must keep the native block. vLLM's Qwen4ExpConfig sets
+    # self.rope_parameters = (explicit kwarg) or text_config.rope_parameters
+    # BEFORE calling the transformers constructor, whose dataclass
+    # __post_init__ then runs standardize_rope_params on the outer object; for
+    # rope_type "yarn" that does
+    #   rope_parameters.setdefault("original_max_position_embeddings",
+    #                              self.max_position_embeddings)
+    # evaluating self.max_position_embeddings eagerly even though the key is
+    # present — and the outer config has no such attribute, nor can a
+    # top-level config.json key become one before that hook runs:
+    #   AttributeError: 'Qwen4ExpConfig' object has no attribute 'max_position_embeddings'
+    # Found by booting the first shadow on 2026-09-10. So the shadow pins the
+    # outer mirror to what it is today (the native block) via the explicit
+    # kwarg, and only text_config carries yarn. Nothing in the text path reads
+    # the outer block: the QSA attention and the MTP draft build their rope
+    # from Qwen4ExpTextConfig, and max_model_len is derived from hf_text_config.
+    if native_block.get("rope_type", "default") != "default":
+        sys.exit(f"source config already has rope_type {native_block.get('rope_type')!r}; refusing to stack scalings")
+    cfg["rope_parameters"] = native_block or {"rope_type": "default", "rope_theta": text.get("rope_theta", 10000000)}
 
     for entry in sorted(src.iterdir()):
         if entry.name == "config.json":
