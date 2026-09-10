@@ -392,6 +392,18 @@ async def arm_drift_probe(*, run_dir: Path, steps: int,
 
 
 def resolve_session(name: str) -> Path:
+    """A stem in the sessions dir, or an absolute path.
+
+    The absolute form exists because `app.paths` anchors `LLOYD_HOME` to the
+    tree it was imported from, so a replay run out of a worktree sees the
+    worktree's (empty) sessions dir while the transcripts it is meant to replay
+    live under the live checkout.
+    """
+    direct = Path(name)
+    if direct.is_absolute():
+        if direct.exists():
+            return direct
+        raise SystemExit(f"no session file at {direct}")
     for p in sorted(SESSIONS_DIR.glob(f"{name}*.json")):
         return p
     raise SystemExit(f"no session file matching {name!r} in {SESSIONS_DIR}")
