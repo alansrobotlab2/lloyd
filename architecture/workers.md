@@ -174,16 +174,23 @@ reason.
 | | `run_prompt_on_primary` | `run_prompt_in_session` |
 |---|---|---|
 | calls | `run_query` directly | `POST /api/message/stream` |
-| session | none | a real one, `platform: worker` |
-| Inner Voice | no | yes |
-| transcript | discarded | persisted, reviewable |
+| session | yes, `platform: worker` | yes, `platform: worker` |
+| transcript | recorded by `app/run_recorder.py` | persisted by the chat path |
+| Inner Voice | never | per source, `workers.sources.<name>.inner_voice` |
+| #534 grant gate | its own `HookRegistry` | installed by the endpoint, keyed on the session's platform |
+| change ledger | yes — a `turn_id` is minted per run | yes |
 | used by | research and mining | anything judging or changing Lloyd's code |
 
-`app/routers/messages.py` is the **only** turn path that attaches the
-observer, so work a human must be able to audit goes through it rather than
-having the observer wiring copied into a second place. `automod_start` refuses
-a turn with no Inner Voice, which is what makes that structural rather than a
-convention.
+Until 2026-09-10 the left column read *none* and *discarded*: once a
+`gap-fill` or `session-distill` run's text had been collected, what it did
+existed nowhere. Both paths are **recorded** now, and the difference between
+them is **observation** — which is the axis worth choosing on.
+`app/routers/messages.py` is still the only turn path that attaches the
+observer, so work a human must be able to audit as it happens goes through it
+rather than having the observer wiring copied into a second place.
+`automod_start` refuses a turn with no Inner Voice, which is what makes that
+structural rather than a convention; a transcript is not an observer.
+`architecture/background-runs.md` is the long version of both axes.
 
 ### An empty turn is a failed turn
 
@@ -226,9 +233,9 @@ bounds nothing on a stream that keeps producing.
 
 | source | what it does | turn path |
 |---|---|---|
-| `scheduled-task` | runs `~/obsidian/autonomy/*.md` via `autonomy.run_task` | its own |
-| `autotriage` | triages one backlog item — read-only, reaches a verdict | session |
-| `autocode` | one gated automod round per confirmed item | session |
+| `scheduled-task` | runs `~/obsidian/autonomy/*.md` via `autonomy.run_task` | its own, recorded; IV per task |
+| `autotriage` | triages one backlog item — read-only, reaches a verdict | session, IV on |
+| `autocode` | one gated automod round per confirmed item | session, IV on |
 | `automod-regression` | paired A/B eval after a promotion | none (subprocess) |
 | `autoresearch` | one prompt-optimisation round | its own |
 | `deep-research` | one registry topic, through the deep-dive-research skill | session, IV off |
@@ -236,6 +243,13 @@ bounds nothing on a stream that keeps producing.
 | `session-distill` | mines finished chats for gaps and patterns | direct |
 | `gap-fill` | resolves `label: gap` facts | direct |
 | `bench-mine` | new bench tasks from failed autonomy runs, and from baseline losses when the ledger has any it can read | direct |
+
+The IV column is `workers.sources.<name>.inner_voice`, read through
+`_common.source_inner_voice`, and it is set only on the four session rows: a
+direct-path turn cannot be observed at all, so the key would be a knob nothing
+reads. A `scheduled-task` run is watched when its task file says
+`inner_voice: true`, which beats the fleet default `autonomy.inner_voice`
+(off).
 
 **`deep-research` owns its own retries, and that is not a preference.** The
 pool records an in-band `{"status": "failed"}` and then calls `mark_completed`
@@ -326,6 +340,7 @@ workers:
       max_inflight: 1           # concurrent items from this source
       max_duration_seconds: 3600  # the pool's wait_for cap
       priority: 55              # optional; defaults to the source's own
+      inner_voice: true         # session-backed sources only; see §4
 ```
 
 `get_sources_config()` re-reads `CONFIG` on every call, so a toggle takes
@@ -343,13 +358,21 @@ silently stopped the self-modification loop. That is the same defect the Tools
 page was moved off config.yaml to avoid, and this endpoint had kept it only
 because nothing in the frontend calls it yet.
 
+**`workers.sources.<name>.inner_voice` is UI-mutable the same way.** The
+override merge honours that one key per source and nothing else: an override
+may not add a source, enable one, or change its budget. A disagreement with
+config.yaml is logged, like the other overridden keys, because a fresh clone
+boots into whatever the tracked file says.
+
 ---
 
 ## 7. Operating it
 
 ```bash
 curl -s localhost:8080/api/workers/status | jq       # pool + depth by source
+curl -s localhost:8080/api/workers/health | jq       # per-source outcomes + recent runs
 curl -s 'localhost:8080/api/workers/runs?limit=20' | jq
+curl -s 'localhost:8080/api/background/sessions?limit=20' | jq   # the transcripts
 curl -sX POST localhost:8080/api/workers/pause -d '{"paused":true}'
 sqlite3 ~/lloyd/workers.db \
   "SELECT source,state,COUNT(*) FROM queue GROUP BY source,state;"
@@ -366,6 +389,17 @@ start a turn while a landing is draining.
 The dashboard reads the pool through `app/routers/dashboard.py::_workers`,
 off the loop via `asyncio.to_thread`; `completed` is excluded from the "open"
 counts because it dominates the depth table.
+
+**A run row names its transcripts.** `meta.session_ids` lists every session
+the claimed job created. The pool collects them itself
+(`sessions_io.current_run_sessions`, bound around the job like
+`current_scope`), not by asking the source to return them, and writes them on
+the timeout and exception branches too — a timed-out run is the one most
+worth opening. Mission Control's **Background** tab is where both are read:
+runs grouped by producer, and a Sources view over `/api/workers/health`.
+That endpoint exists because `/api/workers/status` reports what a source is
+*allowed* to do and how much is queued, and nothing joined a source to its
+outcomes. Its `fail_rate` is `null` over zero runs rather than 0.0.
 
 ---
 
@@ -394,4 +428,6 @@ counts because it dominates the depth table.
   fact). Correct and idle, not broken, but nothing has exercised its `execute`
   path against real input, so treat it as untested in production.
 - **Run history grows without bound.** 4,894 runs and 4,544 queue rows today,
-  6.3 MB. Fine for now; there is no retention job.
+  6.3 MB. Fine for now; there is no retention job. The session files these
+  runs now write *are* archived — at 30 days against a conversation's 90, by
+  `scripts/groundskeeper/retention-sweep.py` — but `workers.db` itself is not.

@@ -284,7 +284,7 @@ def _summarize_background() -> dict:
     exists to catch.
 
     Counts by source rather than listing every row: the point of the tab is
-    "what has been running unattended", and at ~180 runs a day a list would be
+    "what has been running unattended", and at ~240 a day a list would be
     a wall of near-identical titles in the model's context every time it
     navigates here.
     """

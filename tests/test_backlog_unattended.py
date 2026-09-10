@@ -182,7 +182,7 @@ def test_a_worker_session_file_is_inner_voice_enabled_and_recognisable(isolated)
     # must not be. It used to be minted in UTC here and nowhere else.
     assert sid.startswith(datetime.now().strftime("%Y%m%d"))
     # Four parts: what `is_background_session_name` reads without opening the
-    # file, and what keeps a listing bounded at ~180 background runs a day.
+    # file, and what keeps a listing bounded at ~240 background sessions a day.
     assert sio.is_background_session_name(sid)
 
 

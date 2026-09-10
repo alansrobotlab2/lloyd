@@ -174,8 +174,14 @@ Both run **in a real session through `POST /api/message/stream`**, not through
 observer, and it is what leaves a transcript in the Inner Voice tab — the same
 way the three hand-driven rounds ran. `run_prompt_in_session` in
 `workers/sources/_common.py` is that path; `run_prompt_on_primary` is the
-session-less one, and it must not be used for anything that judges or changes
-this code.
+unobserved one, and it must not be used for anything that judges or changes
+this code. (It stopped being session-less on 2026-09-10 — every background run
+records a transcript now — but a transcript is not an observer.) Whether the
+observer watches is `workers.sources.<name>.inner_voice`, `true` for both of
+these sources, and since the same date the chat endpoint installs the #534
+grant gate on their sessions by platform. Before that, the two sources that
+rewrite this repo were among the four session-backed workers that ran
+ungated. `architecture/background-runs.md` is the long version.
 
 Three things were measured to be in the way before this was safe to leave
 alone, each now pinned by a test:

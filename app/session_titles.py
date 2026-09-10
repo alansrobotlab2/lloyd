@@ -165,9 +165,10 @@ def should_title(data: dict) -> bool:
     `_RETITLE_GROWTH`×, which is what keeps this off the per-turn path.
     """
     # Background sessions are titled at creation (`sessions_io.create_session`),
-    # so they never need this — which matters more than it sounds. The titler
-    # runs on the single-tenant secondary, where agent turns already queue, and
-    # ~180 background runs a day would put 180 model calls in front of them for
+    # so they never need this. Only chat-path turns reach this function, which
+    # means the non-user sessions it sees are the session-backed workers — ~70
+    # a day in the week to 2026-09-10 — and titling them would put ~70 calls a
+    # day on the single-tenant secondary, where agent turns already queue, for
     # labels nobody asked to have refreshed.
     if not is_user_session(data):
         return False

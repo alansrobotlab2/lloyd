@@ -195,8 +195,9 @@ _RECENT_SHOWN = 2
 _RECENT_KEPT = 8
 #: How many files the walk may open before giving up. This replaced a flat
 #: `[:24]` slice of the newest files by mtime, which was the whole budget when
-#: every file in the directory was a chat. At ~180 background runs a day the
-#: newest 24 are all background and the panel rendered empty. The walk now
+#: every file in the directory was a chat. On 2026-09-10, before autonomy runs
+#: were recorded at all, 22 of the newest 24 were already background, and
+#: recording adds ~170 a day more against ~14 chats. The walk now
 #: skips background ids by NAME without opening them and stops at
 #: `_RECENT_KEPT` user rows or this ceiling — bounded either way, and no
 #: longer bounded by the fleet's throughput.
@@ -247,10 +248,12 @@ def _scan_recent_sessions() -> list[dict[str, Any]]:
     for path in paths:
         # The filename fast path. A background run's id has four parts and a
         # chat's has three, so most of the directory can be skipped without
-        # opening it — which is what keeps this scan bounded now that ~180
-        # background sessions a day land in the same directory. The JSON's
-        # `platform` below remains the authority; this only decides what is
-        # worth reading.
+        # opening it — which is what keeps this scan bounded now that ~240
+        # background sessions a day land in the same directory. For a
+        # four-part id the shape is the whole decision here: it is skipped
+        # unread. That is safe only while nothing that creates a user session
+        # mints one, which `tests/test_session_platform_checks.py` pins at the
+        # creators. A three-part id is still judged by its `platform` below.
         if is_background_session_name(path.name):
             continue
         if len(rows) >= _RECENT_KEPT or opened >= _RECENT_CEILING:
@@ -263,8 +266,8 @@ def _scan_recent_sessions() -> list[dict[str, Any]]:
         # Scheduled tasks have their own panel, and so do worker jobs. They
         # are not chats. One definition (`sessions_io.is_user_session`) rather
         # than a literal per reader — this one had never learned about
-        # `worker`, which at ~180 background runs a day is most of the
-        # directory.
+        # `worker`, which was already 479 of the directory's 643 files on
+        # 2026-09-10.
         if not is_user_session(data):
             continue
         goal = data.get("goal") if isinstance(data.get("goal"), dict) else {}

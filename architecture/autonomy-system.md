@@ -17,7 +17,56 @@ timestamp: '2026-07-06T14:36:37'
 
 The autonomy system enables multi-agent collaboration through a shared backlog with GPU-aware task dispatch. Four specialized agent types pull from a single backlog,with LLM dispatch gated by GPU utilization to avoid interfering with foreground tasks.
 
-**Storage:** Vault markdown files (migrated from SQLite 2026-03-29). Task files at `~/obsidian/autonomy/{id}-{slug}.md`,run files at `~/obsidian/autonomy-runs/{task-id}/{run-id}.md`,config at `~/obsidian/autonomy/_config.md`. Three consumers (MCP tools,MC extension,idler daemon) read/write markdown directly. QMD indexes both `autonomy` and `autonomy-runs` collections for searchability.
+**Storage:** Vault markdown files (migrated from SQLite 2026-03-29). Task files at `~/obsidian/autonomy/{id}-{slug}.md`,run files at `~/lloyd/autonomy-runs/{task-id}/{run-id}.md` (`app.paths.AUTONOMY_RUNS_DIR`, anchored to the repo rather than the vault),config at `~/obsidian/autonomy/_config.md`. Three consumers (MCP tools,MC extension,idler daemon) read/write markdown directly. QMD indexes both `autonomy` and `autonomy-runs` collections for searchability.
+
+## Every run is recorded (2026-09-10)
+
+> The agent-type sections below predate the worker pool. Today every task runs
+> through the `scheduled-task` worker source into `autonomy.run_task`; see
+> `architecture/workers.md`. This section is current.
+
+Until 2026-09-10 `run_task` called `run_query` directly and kept only the
+text, so the record of what a task *did* was a 200-character summary in its
+run file. That day an autonomy task was the prime suspect in a full vault
+wipe and could be neither confirmed nor cleared: its tool calls had never
+been written down. At 851 runs in the week to 2026-09-10 (122 a day), it was
+the largest single share of what this machine did unattended — 851 of 2,115
+background runs that week.
+
+Each run now leaves four records, all joined:
+
+| record | where | keyed by |
+|---|---|---|
+| session + transcript | `sessions/<ts>_autonomy_<4hex>.json`, `platform: autonomy`, `source: autonomy-task:<id>`, titled `#<id> <name>` at creation | session id |
+| event log | `event_logs/<session>.events.jsonl` — the same `brain1.*` trail a chat turn writes | session id + `turn_id` |
+| run file | `autonomy-runs/<id>/<run_id>.md`, whose frontmatter now carries `session_id` on **every** outcome — success, timeout, cancellation, empty response, exception | `run_id` |
+| change ledger | `sessions/<session>.changes/<run_id>/` — pre-images of every file the run wrote, revertable | `turn_id = run_id` |
+
+- **It is a passthrough.** `app/run_recorder.py` wraps the existing
+  `run_query` loop, persists each event and re-yields it unchanged, so the
+  #534 grant hook, the deadline anchor, `saw_tool_call`, `tool_errors` and the
+  timeout partial are all untouched. Routing the run through the chat
+  endpoint instead — a stale sandbox branch tried it — drops the grant gate,
+  which that endpoint does not install on its own registry's behalf.
+- **A run killed at its deadline keeps what it had.** Persistence is
+  incremental and the final flush is shielded from the cancellation that
+  ended the run, which is how the interesting ones end.
+- **`turn_id` is the load-bearing option.** It is what switches on the
+  per-turn change ledger, so a scheduled task's file writes can be undone. It
+  was the only turn path with no undo.
+
+**Observation is a separate opt-in.** A task file's `inner_voice: true` makes
+the Inner Voice observer watch the run; `autonomy.inner_voice` in config.yaml
+is the fleet default and ships **off**, because the observer runs on the
+primary at priority 1 and spends a goal extraction plus a critique per turn.
+Frontmatter beats config in both directions, and the key survives the
+degraded parser (`fallback_fields`). The observer attaches to this direct
+path by passing `run_task`'s own `HookRegistry` — `attach_observer_for_turn`
+creates one only when none exists — so an observed task keeps its grant gate.
+Its `cancel` lever is wired to the loop; its ambient and clarify callbacks
+are not, because both exist to reach a human mid-turn and nobody is reading.
+
+`architecture/background-runs.md` is the long version.
 
 ## Design Principles
 

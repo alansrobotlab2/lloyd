@@ -518,9 +518,9 @@ def test_only_two_chats_are_shown(sessions, no_live_turns):
 def test_background_runs_do_not_starve_the_panel(sessions, no_live_turns,
                                                  monkeypatch):
     """The scan used to keep the newest 24 files by mtime and only then drop
-    non-user rows. Recording made every autonomy task and every worker job a
-    session in the same directory — ~180 a day — so the newest 24 are all
-    background and the panel rendered empty.
+    non-user rows. On 2026-09-10, before autonomy runs were recorded at all,
+    22 of the newest 24 files were already background; recording adds ~170 a
+    day more against ~14 chats, and the panel renders empty.
 
     Background ids have four underscore-separated parts, so they are skipped
     by NAME without being opened. That is what keeps the walk bounded: it now

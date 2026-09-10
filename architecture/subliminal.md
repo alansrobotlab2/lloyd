@@ -467,9 +467,18 @@ Background tasks fired via `asyncio.ensure_future` after a turn completes
 
 ### `_post_session_capture`
 
-1. Skips autonomy sessions and already-`captured` sessions.
-2. Exports the session as searchable markdown into the vault sessions collection
-   (which is why `sessions` is a QMD collection the vault worker searches).
+1. Skips already-`captured` sessions.
+2. Exports the session as searchable markdown. A user session goes to
+   `vault-derived/sessions/` — which is why `sessions` is a QMD collection the
+   vault worker searches — and a background one to
+   `vault-derived/sessions-background/`, which qmd does not watch. The watcher
+   *embeds* on every change, and the background sessions that reach this task
+   are ~70 a day (479 in the week to 2026-09-10, against 99 chats). A
+   background session then stops here, marked `captured`, without steps 3–5:
+   the summary, the daily note and fact extraction are about the user's day.
+   Only chat-path turns fire this task, so what arrives is the session-backed
+   workers; an autonomy or `run_prompt_on_primary` run's record is its session
+   JSON. See [[background-runs]].
 3. Builds a ≤4000-char transcript and asks the secondary model for a summary. A
    `TRIVIAL` verdict marks the session captured and stops.
 4. Appends the summary to the daily note.

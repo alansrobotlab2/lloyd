@@ -681,7 +681,7 @@ def _task_inner_voice(task: dict) -> bool:
     Frontmatter beats config, and the fleet default is **off**. Recording is
     cheap and universal; observing is not — the observer runs on the PRIMARY
     at priority 1 and spends a goal-extraction call plus a critique per
-    observed turn. At ~180 autonomy turns a day, defaulting it on would put
+    observed turn. At ~120 autonomy runs a day, defaulting it on would put
     that load behind every chat turn for runs nobody asked to have watched.
 
     An unset value on the task means "ask the fleet default", which is what

@@ -39,13 +39,15 @@ CANDIDATES_DIR = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
 TASK_LOG_MAX_AGE_DAYS = 30
 SESSION_ARCHIVE_AGE_DAYS = 90
 # Background runs — autonomy tasks and worker jobs — are recorded now, and at
-# the fleet's measured ~180 turns a day they are the overwhelming majority of
-# the directory by count. They archive sooner than a conversation because they
+# ~240 background sessions a day against ~14 chats (measured over the week to
+# 2026-09-10) they are the overwhelming majority of the directory by count. They archive sooner than a conversation because they
 # are read for a different reason and over a different span: a chat is
 # something the user may come back to for months, a background transcript is
 # forensics for "what did the thing that ran last night actually do". Same
 # gzip-never-delete rule, so a run from six months ago is still recoverable —
-# it is only out of the listings. The Background tab therefore shows ~30 days.
+# it is only out of the listings. That is how long a transcript stays
+# openable by id; the Background tab itself is a recent view — the newest 150
+# runs out of at most 600 files scanned, about the last 15 hours on screen.
 BACKGROUND_SESSION_ARCHIVE_AGE_DAYS = 30
 RUN_RECORD_MAX_AGE_DAYS = 30
 ACTIVITY_LOG_MAX_ENTRIES = 200

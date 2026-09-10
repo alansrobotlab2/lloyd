@@ -62,11 +62,15 @@ async def list_sessions():
     for sf in SESSIONS_DIR.glob("*.json"):
         # The filename fast path. A background run's id has four
         # underscore-separated parts and a chat's has three, so most of this
-        # directory can be skipped without opening it — and at ~180 background
-        # runs a day most of it is background. A session JSON carries its
-        # whole transcript, so "skip it without parsing" is the difference
-        # between a bounded listing and one that grows with the fleet's
-        # throughput. `is_user_session` below stays the authority.
+        # directory can be skipped without opening it — 479 of its 643 files
+        # were background on 2026-09-10, before autonomy was even recorded. A
+        # session JSON carries its whole transcript, so "skip it without
+        # parsing" is the difference between a bounded listing and one that
+        # grows with the fleet's throughput. For a four-part id the shape is
+        # the whole decision: it is skipped unread, which is safe only while
+        # no user-session creator mints one (pinned in
+        # tests/test_session_platform_checks.py). `is_user_session` below
+        # judges everything else.
         if is_background_session_name(sf.name):
             continue
         try:

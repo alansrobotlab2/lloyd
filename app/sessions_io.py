@@ -103,21 +103,27 @@ def is_user_session(data: dict) -> bool:
 #: (`20260910_120001_autocode_9f2a`); a chat session's has three
 #: (`20260910_120001_9f2a1c`). That is a cheap discriminator, and it has to
 #: exist because the alternative is parsing every session JSON in the
-#: directory to answer "is this one a chat?" — at ~180 background runs a day
-#: that is the difference between a bounded listing and one that grows with
-#: the fleet's throughput.
+#: directory to answer "is this one a chat?" — at ~240 background sessions a
+#: day against ~14 chats (measured over the week to 2026-09-10), that is the
+#: difference between a bounded listing and one that grows with the fleet's
+#: throughput.
 #:
-#: The filename is a *fast path*, never the authority. The JSON's `platform`
-#: is the authority, because it is what every consumer already reads and
-#: because a session created by some future producer with a different naming
-#: habit must not be silently reclassified by its name.
+#: Where the file is opened, its `platform` is the authority. But the chat
+#: listings do not open a four-part file at all, so for that shape the NAME
+#: decides — and that is safe only while nothing that creates a user session
+#: mints a four-part id. Three mints exist: the chat path (`<ts>_<6hex>`),
+#: `POST /api/sessions/create` (`<ts>_iv<4hex>`), and `new_background_session_id`
+#: below, the only four-part one. `tests/test_session_platform_checks.py`
+#: pins all three, because a future producer that named a user session in four
+#: parts would vanish from the history without a word.
 def is_background_session_name(name: str) -> bool:
     """True if this session *filename* looks like a background run's.
 
-    Conservative in the direction that matters: an id this rule does not
-    recognise reads as a chat session, is parsed, and is then classified by
-    its `platform` — one wasted read. The opposite error would hide a real
-    conversation from the history list.
+    Conservative in one direction only: an id this rule does not recognise
+    reads as a chat session, is parsed, and is then classified by its
+    `platform` — one wasted read. The other direction is not conservative — a
+    four-part user session would be hidden from the history unread — and is
+    closed at the creators instead of here.
     """
     stem = str(name or "")
     if stem.endswith(".json"):
@@ -169,11 +175,15 @@ def create_session(session_id: str, *, platform: str, model: str = "",
     file on every turn; this one is a create, and a create is the only thing a
     background run needs.
 
-    **The title is set here, at creation.** A background session therefore
-    never needs the LLM titler, which matters more than it sounds: the titler
-    runs on the single-tenant secondary, and ~180 background runs a day would
-    put 180 model calls in front of the queue every chat turn already waits
-    behind, to label rows nobody asked to have relabelled.
+    **The title is set here, at creation**, for two reasons that apply to
+    different sessions. A direct-path run (autonomy, `run_prompt_on_primary`)
+    never goes near the LLM titler — it is fired from the chat path only — so
+    the title set here is the only one it will ever have. A session-backed
+    worker does go through the chat path, ~70 a day in the week to
+    2026-09-10, and `session_titles.should_title` now refuses it: the titler
+    runs on the single-tenant secondary, where every chat turn already queues,
+    and those would be ~70 model calls a day to relabel rows nobody asked
+    about.
 
     Both `session_id` and `id` are written. `/api/sessions` reads
     `session_id` and falls back to the filename; the worker sessions that

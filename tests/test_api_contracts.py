@@ -128,6 +128,24 @@ async def test_workers_health_shape(client):
             "total", "ok", "failed", "fail_rate", "gpu_hours"}
 
 
+async def test_created_sessions_are_never_background_shaped(client, tmp_path,
+                                                          monkeypatch):
+    """`POST /api/sessions/create` is how the Inner Voice "+ new chat" button and the
+    right-hand chat sidebar create a user session. `/api/sessions` skips a
+    four-part id without opening it, so a session minted here in that shape
+    would never appear in the history — and nothing would say so."""
+    from app.sessions_io import is_background_session_name
+
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    r = await client.post("/api/sessions/create", json={
+        "inner_voice": True, "inner_voice_evaluate_user_turns": True})
+    assert r.status_code == 200, r.text
+    sid = r.json()["session_id"]
+    assert not is_background_session_name(sid)
+    listed = {s["id"] for s in (await client.get("/api/sessions")).json()["sessions"]}
+    assert sid in listed
+
+
 async def test_session_todos_shape(client, fixture_session):
     r = await client.get(f"/api/sessions/{fixture_session}/todos")
     assert r.status_code == 200

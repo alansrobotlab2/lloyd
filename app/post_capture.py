@@ -193,10 +193,11 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
 
     **A background run exports to a different directory**, and the reason is
     `agent-services/scripts/qmd-watcher.sh`: it indexes and *embeds*
-    `_pipeline/vault-derived/sessions/` on every change. At ~180 background
-    runs a day that is an embedding job per run, over transcripts of the
-    machine talking to itself, drowning the corpus that exists to answer
-    questions about what the user and Lloyd discussed. `sessions-background/`
+    `_pipeline/vault-derived/sessions/` on every change. The ~70
+    session-backed worker transcripts a day that reach this function (479 in
+    the week to 2026-09-10, against 99 chats) would each be an embedding job
+    over the machine talking to itself, drowning the corpus that exists to
+    answer questions about what the user and Lloyd discussed. `sessions-background/`
     sits outside the watch: still exported, still greppable, not embedded.
 
     Which background runs reach here is worth stating, because it is not all

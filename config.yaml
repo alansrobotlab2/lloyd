@@ -111,7 +111,7 @@ autonomy:
   # file's own `inner_voice:` frontmatter beats this, so a single task can be
   # watched on a fleet that is off. Off by default because the observer runs
   # on the PRIMARY at priority 1 and spends a goal-extraction call plus a
-  # critique per observed turn — at ~180 autonomy turns a day that would sit
+  # critique per observed turn — at ~120 autonomy runs a day that would sit
   # in front of every chat turn, for runs nobody asked to have watched.
   # Recording (`harness.background_recording`) is unconditional and separate.
   inner_voice: false

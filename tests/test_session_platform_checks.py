@@ -111,3 +111,47 @@ def test_a_background_id_is_recognisable_without_opening_the_file():
     # hide a real conversation from the history list.
     assert not is_background_session_name("notes")
     assert not is_background_session_name("bench_baseline_1788_x_y")
+
+
+def test_no_user_session_creator_mints_a_background_shaped_id():
+    """The chat listing and the recent-chats panel skip a four-part id WITHOUT
+    opening it, so for that shape the name is the whole decision, not a hint.
+    That is safe only while nothing that creates a user session mints one, so
+    the creators are pinned here rather than trusted. A future producer that
+    named a user session in four parts would vanish from the history, and
+    nothing would say so.
+    """
+    import uuid
+    from datetime import datetime
+    from app.sessions_io import (is_background_session_name,
+                                 new_background_session_id)
+
+    # Every `session_id = f"..."` mint in the packages this file sweeps. Three
+    # today: two in the chat router, one in POST /api/sessions/create. A fourth is a
+    # new creator, and it has to be looked at before it is allowed.
+    mints = []
+    for path in _sources():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for i, line in enumerate(text.splitlines(), 1):
+            if re.search(r'session_id\s*=\s*f["\']', line):
+                mints.append(f"{path.relative_to(ROOT)}:{i}")
+    assert len(mints) == 3, mints
+
+    # The chat path: `<ts>_<6 hex>`, three parts.
+    router = (ROOT / "app" / "routers" / "messages.py").read_text()
+    chat_mint = ('session_id = f"{datetime.now():%Y%m%d_%H%M%S}_'
+                 '{uuid.uuid4().hex[:6]}"')
+    assert router.count(chat_mint) == 2
+    assert not is_background_session_name(
+        f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}")
+
+    # POST /api/sessions/create — the Inner Voice "+ new chat" button and the
+    # right-hand chat sidebar: `<ts>_iv<4 hex>`, three parts. Pinned end to
+    # end in tests/test_api_contracts.py.
+    create = (ROOT / "app" / "routers" / "sessions.py").read_text()
+    assert 'suffix = "iv" + secrets.token_hex(2)' in create
+    assert 'session_id = f"{ts}_{suffix}"' in create
+
+    # And the one mint that is supposed to be four parts, is.
+    assert is_background_session_name(new_background_session_id("autocode"))
+    assert is_background_session_name(new_background_session_id("autonomy"))

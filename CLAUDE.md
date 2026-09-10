@@ -1612,6 +1612,8 @@ the voice to *work*, only for a change to reach that consumer.
 
 ## Background runs are recorded; watching them is opt-in
 
+`architecture/background-runs.md` is the long version, with the measurements.
+
 Three paths run an agent loop and until 2026-09-10 only one of them wrote
 anything down.
 
@@ -1659,7 +1661,8 @@ turn, in front of whatever a human is typing.
   session sorted by file mtime while every chat sorted by its conversation.
   **Titles are set at creation**, so a background session never queues behind
   the single-tenant secondary for a label nobody asked to have refreshed.
-- **The pool collects the sessions a claimed job created** (`current_run_sessions`)
+- **The pool collects the sessions a claimed job created**
+  (`current_run_sessions`)
   and writes them onto the run row, including on the timeout and exception
   branches — a timed-out run is the one most worth reading. Collected rather
   than returned by each source, because "the handler remembered to pass it
@@ -1682,19 +1685,29 @@ into the knowledge graph as things the user said, and recalled back by
 is the definition; `tests/test_session_platform_checks.py` greps for the
 literal, because a seventh reader written next month is how this comes back.
 
-- **The filename is a fast path, never the authority.** A background id has
-  four underscore-separated parts (`20260910_120001_autocode_9f2a`) and a
-  chat's has three, so most of the directory is skipped without being opened.
-  `_scan_recent_sessions` kept the newest 24 by mtime and *then* dropped
-  non-user rows — at ~180 background runs a day the newest 24 are all
-  background and the panel rendered empty. It now skips by name and stops at
-  `_RECENT_KEPT` user rows or `_RECENT_CEILING` files opened.
+- **The id shape is a fast path, and in the chat listings it decides.** A
+  background id has four underscore-separated parts
+  (`20260910_120001_autocode_9f2a`) and a chat's has three, so most of the
+  directory is skipped without being opened — ~240 background sessions a day
+  against ~14 chats, measured over the week to 2026-09-10. `/api/sessions` and
+  `_scan_recent_sessions` skip a four-part id *unread*, which is safe only
+  while nothing that creates a user session mints one;
+  `tests/test_session_platform_checks.py` pins the three mints. The Background
+  listing parses every four-part file and judges it by `platform`. Eight
+  `…_autonomy_…` sessions from the sandbox experiment at 2026-09-09 15:38 are
+  four-part and labelled `mission-control`, so they appear in neither.
+  `_scan_recent_sessions` used to keep the newest 24 by mtime and *then* drop
+  non-user rows; on 2026-09-10, before autonomy was recorded at all, 22 of the
+  newest 24 were already background. It now stops at `_RECENT_KEPT` user rows
+  or `_RECENT_CEILING` files opened.
 - **Post-capture keeps the markdown export for every platform** but writes
   background exports to `_pipeline/vault-derived/sessions-background/`, outside
-  the qmd watch: `qmd-watcher.sh` *embeds* `sessions/` on every change, and 180
-  embedding jobs a day over the machine talking to itself would drown the
-  corpus. The daily note, the secondary summary and fact extraction are for
-  user sessions only.
+  the qmd watch: `qmd-watcher.sh` *embeds* `sessions/` on every change, and the
+  ~70 session-backed worker transcripts a day that reach post-capture would
+  each be an embedding job over the machine talking to itself, against ~14
+  chats — drowning the corpus. The daily note, the secondary summary and fact
+  extraction are for user sessions only. Only chat-path turns fire
+  post-capture at all, so a direct-path run's record is its session JSON.
 - `GET /api/background/sessions` is the other listing, and the **Background**
   tab is its only reader. A row opens in the Inner Voice reader through the
   same `setPendingFocus` + `setCurrentTab` pair `mc_navigate` uses.

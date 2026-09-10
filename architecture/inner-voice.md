@@ -1040,6 +1040,23 @@ Two flags in the session JSON:
   fires on user-typed turns. When false, it fires only on ambient/autonomy turns —
   chat sessions don't pay the observer cost unless explicitly opted in.
 
+**Who sets the flags on a background session.** Since 2026-09-10 every
+autonomy task and worker job has a session (`architecture/background-runs.md`),
+and `sessions_io.create_session` writes both flags at creation, equal to each
+other, from the job's own switch: a task file's `inner_voice:` frontmatter
+(falling back to `autonomy.inner_voice`, off) for an autonomy run, and
+`workers.sources.<name>.inner_voice` for a session-backed worker. They move
+together because the two kinds of turn arrive differently. A worker's prompt
+is posted to the chat endpoint as a *user* turn, so without
+`inner_voice_evaluate_user_turns` the observer would never fire on it. An
+autonomy run attaches on its own direct path — `autonomy.run_task` is the
+second call site of `attach_observer_for_turn`, beside `_run_turn` — with
+`turn_source="ambient"`, where the master flag alone decides. It passes
+`run_task`'s own `HookRegistry`, so the #534 grant hook stays on it, wires the
+observer's cancel event into the loop, and leaves the ambient and clarify
+callbacks `None` because nobody is reading. A `run_prompt_on_primary` job is
+always created with both flags off: that path never reaches the observer.
+
 **Discretionary IV-produced ambient turns are not observed.**
 `_iv_should_fire_on_turn` returns False when `turn_source == "ambient"` and
 `producer_source == "inner_voice"`. Earlier code allowed self-observation,

@@ -49,7 +49,8 @@ Lloyd is a voice-first AI assistant built on a **custom harness** with local vLL
 | Skill System | 34 skills in `~/obsidian/skills/`. Loaded on-demand via SKILL.md. ClawhHub catalog integration. | [[skills]] |
 | Usage Tracking | Token and cost tracking across agents and models. | [[usage-tracking]] |
 | Research Pipeline | Topic registry at `~/lloyd/research.db`,proposed into nightly by task #65 and drained by the `deep-research` worker. Replaced a 3,690-line markdown checklist. | [[research-pipeline]] |
-| Work Queue + Worker Pool | Everything Lloyd does unasked: one SQLite queue (`~/lloyd/workers.db`) drained by N asyncio workers in the backend. Nine sources — autonomy tasks,backlog triage and implementation,research,session mining. | [[workers]] |
+| Work Queue + Worker Pool | Everything Lloyd does unasked: one SQLite queue (`~/lloyd/workers.db`) drained by N asyncio workers in the backend. Ten sources — autonomy tasks,backlog triage and implementation,research,session mining. | [[workers]] |
+| Background Runs | Every autonomy task and worker job records a session,transcript and event log; Inner Voice observation is a separate per-job opt-in. Mission Control's Background tab lists them apart from chat history,and the #534 grant gate is installed on their turns by platform. | [[background-runs]] |
 | Groundskeeper | Vault health scanner + enrichment. 11 scan categories,fix loop (every 15min),research loop (hourly). | [[groundskeeper]] |
 
 ## GPU Allocation
