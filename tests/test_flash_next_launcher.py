@@ -109,6 +109,9 @@ def test_the_supervisord_environment_pins_the_fix():
     env = _conf_env()
     assert env.get("KV_CACHE_DTYPE") == "fp8"
     assert env.get("VLLM_VENV", "").endswith("/.venvs/vllm-flash-next-main")
+    # The chunk budget adopted from the Layer 3 arms (the conf's comment and
+    # architecture/vllm-throughput-mitigation.md §3.3).
+    assert env.get("MAX_NUM_BATCHED_TOKENS") == "4096"
 
 
 def _dry_run(tmp_path, **extra) -> str:
@@ -134,11 +137,16 @@ def test_the_supervisord_environment_launches_fp8_on_the_main_venv(tmp_path):
     out = _dry_run(tmp_path)
     assert "--kv-cache-dtype fp8" in out
     assert "vllm-flash-next-main/bin/python -m vllm.entrypoints.openai.api_server" in out
-    # Production takes vLLM's default chunk budget unless the knob says so.
-    assert "--max-num-batched-tokens" not in out
+    assert "--max-num-batched-tokens 4096" in out
 
 
 def test_the_chunk_budget_is_a_knob(tmp_path):
-    out = _dry_run(tmp_path, MAX_NUM_BATCHED_TOKENS="4096")
-    assert "--max-num-batched-tokens 4096" in out
-    assert "batched=4096" in out
+    out = _dry_run(tmp_path, MAX_NUM_BATCHED_TOKENS="2048")
+    assert "--max-num-batched-tokens 2048" in out
+    assert "batched=2048" in out
+
+
+def test_an_empty_chunk_budget_means_vllms_default(tmp_path):
+    out = _dry_run(tmp_path, MAX_NUM_BATCHED_TOKENS="")
+    assert "--max-num-batched-tokens" not in out
+    assert "batched=<default>" in out

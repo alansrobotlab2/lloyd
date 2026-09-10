@@ -1548,7 +1548,8 @@ at ~21.7 of 24 GiB). Two venvs can serve the primary and
 `start-qwen38-flash-next.sh` adapts to whichever `VLLM_VENV` names:
 `vllm-qwen38-flash-next` (the PLE-offload-worker build, the script's own
 fallback default) and `vllm-flash-next-main` (vLLM main, UVA offload — what
-`agent-llm-primary.conf` serves since 2026-09-10, with `KV_CACHE_DTYPE=fp8` for a
+`agent-llm-primary.conf` serves since 2026-09-10, with `MAX_NUM_BATCHED_TOKENS=4096`
+(see "Primary throughput") and `KV_CACHE_DTYPE=fp8` for a
 ×1.74 KV pool that also sidesteps the >200k-token QSA prefill cliff, at 0–17%
 slower decode by text type because the drafter accepts fewer tokens through an
 e4m3 cache — the step time itself is unchanged). SETUP.md
@@ -1615,6 +1616,12 @@ is untouched — and the dashboard's KV meter carries its 5-minute p90 against
 a 65% line. The gauge counts blocks *referenced by running requests*; a
 paused turn's cached prefix sits in the free remainder, which is where it
 has to survive until its next iteration.
+
+The chunk budget is 4096, not vLLM's 8192 (`MAX_NUM_BATCHED_TOKENS` in the
+program's `environment=`). A cold 200k prefill beside a chat costs it 333 ms
+a step instead of 608, and no longer transiently references ~2.5x its KV —
+the overshoot that evicted neighbours' prefixes — for 7% more prefill time.
+2048 halved the step again for +27% and was not taken.
 
 Two smaller changes rode along. The compaction wall moved,
 `compaction.microcompact` 0.8/0.6 → 0.72/0.52 (≈151k → 109k of the 210k

@@ -491,12 +491,14 @@ GDN_PREFILL_BACKEND="${GDN_PREFILL_BACKEND:-flashinfer}"
 FLASHINFER_AUTOTUNE="${FLASHINFER_AUTOTUNE:-0}"
 
 # Chunked-prefill budget, in tokens per engine step. Empty = vLLM's default
-# (8192 here). A cold long prompt admitted beside a decoding stream costs that
-# stream one step per chunk: 615 ms p50 at 8192 on this build (lloyd-be,
-# 2026-09-10 — a cold 207k prompt prefilled in 21.1 s while a 120k stream
-# decoded beside it). A smaller budget shortens each of those steps and
-# stretches the prefill. The measured arms are in
-# architecture/vllm-throughput-mitigation.md, Layer 3.
+# (8192 here); production sets 4096 in agent-llm-primary.conf. A cold long
+# prompt admitted beside a decoding stream costs that stream one step per
+# chunk. Measured 2026-09-10, a cold 200k prompt beside a 119k decode
+# (bench-admission-stall.py cold), neighbour step p50 / prefill time:
+#   8192  608 ms / 20.2 s    and the prefill references ~2.5x its KV
+#   4096  333 ms / 21.6 s    no overshoot
+#   2048  195 ms / 25.7 s
+# architecture/vllm-throughput-mitigation.md §3.3 has the rest.
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 
 # Escape hatch for one-off arms. Word-split deliberately.
