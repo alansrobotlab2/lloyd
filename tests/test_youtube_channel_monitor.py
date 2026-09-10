@@ -73,11 +73,13 @@ def _state(**seen):
 # Note filenames Obsidian Sync will store
 # ---------------------------------------------------------------------------
 #
-# On 2026-09-10 twenty AI Engineer notes never reached the synced vault: every
-# one had a no-break space in its name (titles like "Composer\u00a0– Lee
-# Robinson"), and not one of the 4,570 files that did sync had one. Obsidian
-# Sync refuses the name and reports nothing, so the note exists only on the
-# machine that wrote it.
+# On 2026-09-10 twenty AI Engineer notes had a no-break space in their names
+# (titles like "Composer\u00a0– Lee Robinson"). Obsidian Sync uploads such a
+# file under the name with an ordinary space, so the local file never matches
+# its own remote copy: the client re-detected them as new on every start, and
+# every other device got a differently named file. A first reading of the
+# upload log called them refused; that was a matching artifact — the log
+# prints the ordinary space too.
 
 _SPACES = ["\u00a0", "\u202f", "\u2009", "\u3000", "\t", "\n"]
 
@@ -131,7 +133,7 @@ def test_an_unsluggable_title_falls_back_to_the_video_id():
     ("voicevision-rag-integrating-visual-document-intelligence-with-voice-response-\u00a0",
      "voicevision-rag-integrating-visual-document-intelligence-with-voice-response"),
 ])
-def test_the_real_unsyncable_names_come_out_clean(bad, fixed):
+def test_the_twenty_real_names_come_out_clean(bad, fixed):
     """Two of the twenty, as they were written. Renaming them applies this
     same function to the part after the date."""
     assert M.slugify(bad, max_len=len(bad)) == fixed

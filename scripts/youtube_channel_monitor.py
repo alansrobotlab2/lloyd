@@ -896,15 +896,18 @@ published: {publish_date}
 # ── Video processing ──────────────────────────────────────────────────
 
 def slugify(text, max_len=80):
-    """A lowercase, dash-separated name every Obsidian Sync client will store.
+    """A lowercase, dash-separated name that syncs under the same name.
 
-    Obsidian Sync refuses a filename containing a no-break space. Measured on
-    2026-09-10: it was the one trait all 20 of this channel's unsyncable notes
-    shared and none of the 4,570 synced files had (accented letters sync
-    fine). YouTube titles are full of them — "Composer\\u00a0– Lee Robinson" —
-    and the old version kept every whitespace character, then replaced only an
-    ASCII space with "-", so the no-break space survived into the name; where
-    the 80-character cut landed on one, the name ended in whitespace too.
+    Obsidian Sync stores a filename containing a no-break space under the name
+    with an ordinary space instead. Measured on 2026-09-10: all 20 of this
+    channel's notes with a U+00A0 in the name were uploaded that way, so each
+    local file never matched its own remote copy — the client re-detected them
+    as new on every start, and every other device got a differently named file
+    (accented letters keep their names). YouTube titles are full of no-break
+    spaces — "Composer\\u00a0– Lee Robinson" — and the old version kept every
+    whitespace character, then replaced only an ASCII space with "-", so the
+    no-break space survived into the name; where the 80-character cut landed
+    on one, the name ended in whitespace too.
 
     NFKC first: no-break and other odd spaces become plain ones, full-width
     characters become ASCII, and accents are composed, so macOS and Linux
