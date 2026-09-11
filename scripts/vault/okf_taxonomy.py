@@ -25,12 +25,23 @@ Three rules this module exists to keep:
   * ``TYPE_ALIASES`` maps a value that once existed to the canonical it became.
     It exists for *reading* old files and for ``--strict`` tolerance. Nothing
     writes an alias: a writer emits canonical, or emits nothing.
+  * Reading and writing are different rules, and both live here.
+    ``normalize_type`` tolerates anything, because a 2,500-file tree predates
+    the map. ``canonical_for_write`` / ``normalize_document_type`` refuse: an
+    alias is normalised onto its canonical value and an invented value never
+    lands. That half (#872) exists because the tree was consolidated onto this
+    vocabulary while every writer — four research skills and the schema
+    document — went untouched, and ``vault_write`` checked nothing, which is how
+    a single invented ``type: note`` blocked every automod promotion on the box
+    (#780).
   * Everything else lives here once. A ``type:`` literal spelled out in
     ``validate_okf.py``, ``okf_migrate.py`` or ``knowledge-frontmatter-backfill.py``
     is precisely the defect this module was written to prevent —
     ``tests/test_okf_type_taxonomy.py`` fails on it.
 """
 from __future__ import annotations
+
+import re
 
 # ── the canonical 12 (#370) ──────────────────────────────────────────────────
 CANONICAL_TYPES = frozenset({
@@ -122,6 +133,21 @@ CAPTURED_TYPES = frozenset({"stack-update"})
 PRIMARY_TYPES = frozenset({"notes", "reference", "infrastructure"})
 
 
+def _lookup_form(value: object) -> str:
+    """Separator/casing-normalised form of a value, *before* alias mapping.
+
+    Split out of ``normalize_type`` so a caller can ask which set a spelling
+    fell into (canonical? alias? legal-only-outside?) instead of only getting
+    the answer. Returns ``""`` for nothing to look up.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip().strip("\"'").lower()
+    for sep in ("_", " ", "\t"):
+        text = text.replace(sep, "-")
+    return text
+
+
 def normalize_type(value: object) -> str:
     """Canonical spelling of a ``type`` value, or the value as-is if unknown.
 
@@ -129,14 +155,109 @@ def normalize_type(value: object) -> str:
     the first place (``Research_Note``, ``research note``); maps an alias to its
     canonical. Idempotent: feeding it a canonical value returns that value, so
     the result is always safe to write back.
+
+    This is the *reading* rule — it never refuses anything, which is what makes
+    it safe for a 2,500-file tree whose spellings predate the map. For writing,
+    use ``canonical_for_write``: reading tolerates, writing does not.
     """
-    if value is None:
-        return ""
-    text = str(value).strip().strip("\"'").lower()
+    text = _lookup_form(value)
     if not text:
         return ""
-    for sep in ("_", " ", "\t"):
-        text = text.replace(sep, "-")
     if text in CANONICAL_TYPES:
         return text
     return TYPE_ALIASES.get(text, text)
+
+
+# ── the writer-side rule (#872) ──────────────────────────────────────────────
+class KnowledgeTypeError(ValueError):
+    """A ``type`` value that may not be written into ``knowledge/``.
+
+    ``.value`` carries the offending spelling and the message names it, because
+    the failure this exists for — backlog #780 — was a knowledge note whose
+    ``type`` its writer invented, which surfaced seven hours later as a red
+    promotion gate and could not be traced to the value that caused it.
+    """
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+        target = TYPE_ALIASES.get(value)
+        if value in OUTSIDE_KNOWLEDGE_TYPES:
+            why = (f"`{value}` is a vault-wide value that is legal only *outside* "
+                   f"knowledge/" + (f"; inside knowledge/ it means `{target}`" if target else ""))
+        else:
+            why = "no such type exists"
+        super().__init__(
+            f"type {value!r} may not be written into knowledge/: {why}. The "
+            f"vocabulary is okf_taxonomy.CANONICAL_TYPES: "
+            f"{', '.join(sorted(CANONICAL_TYPES))}."
+        )
+
+
+def canonical_for_write(value: object) -> str:
+    """The ``type`` a ``knowledge/`` file may carry, or ``KnowledgeTypeError``.
+
+    Three outcomes, and the gap between the last two is the point:
+
+      * a canonical value, or a retired spelling in ``TYPE_ALIASES`` — returns
+        the canonical value, so a writer that still says ``deep-research`` lands
+        ``research-deep`` rather than re-fragmenting the tree (#649's four skill
+        templates);
+      * a value legitimate only *outside* ``knowledge/`` — refused, even where
+        an alias happens to exist (``note`` → ``notes``). Such a value means the
+        writer is guessing at the vocabulary instead of carrying an old spelling,
+        and silently rewriting a guess is what let #39's invention into the tree;
+      * anything else — refused. An invented value cannot reach the tree.
+
+    Retiring ``note`` itself is #442 and this does not decide it; it only
+    declines to manufacture a new file that carries it.
+    """
+    form = _lookup_form(value)
+    if not form:
+        raise KnowledgeTypeError("")
+    if form in CANONICAL_TYPES:
+        return form
+    if form in OUTSIDE_KNOWLEDGE_TYPES:
+        raise KnowledgeTypeError(form)
+    canonical = TYPE_ALIASES.get(form)
+    if canonical is None:
+        raise KnowledgeTypeError(form)
+    return canonical
+
+
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(\r?\n|\Z)", re.S)
+# Top-level only (^, no indent): an indented ``type:`` is inside some nested
+# mapping — e.g. one entry of a ``sources:`` list — and is not the page's type.
+_TOP_LEVEL_TYPE_RE = re.compile(r"^type:[ \t]*([^#\r\n]*)", re.M)
+
+
+def normalize_document_type(text: str) -> tuple[str, str | None]:
+    """Rewrite a knowledge note's frontmatter ``type`` onto its canonical value.
+
+    Returns ``(text_to_write, value_that_was_replaced)`` — the second is
+    ``None`` whenever the text comes back untouched, so a caller can tell a
+    writer what it was quietly corrected away from.
+
+    Hands the text back unchanged when there is no frontmatter, no top-level
+    ``type`` key, or an empty one: an *absent* type is OKF's other complaint and
+    belongs to #478's 221 orphan-frontmatter files, not to a vocabulary guard.
+    Raises ``KnowledgeTypeError`` when a type is present but may not land in
+    ``knowledge/`` — the caller must then write nothing.
+    """
+    fm = _FRONTMATTER_RE.match(text)
+    if fm is None:
+        return text, None
+    block = fm.group(1)
+    found = _TOP_LEVEL_TYPE_RE.search(block)
+    if found is None:
+        return text, None
+    raw = found.group(1).strip().strip("\"'")
+    if not raw:
+        return text, None
+    canonical = canonical_for_write(raw)
+    if canonical == raw:
+        return text, None
+    line_end = block.find("\n", found.start())
+    if line_end == -1:
+        line_end = len(block)
+    new_block = block[:found.start()] + f"type: {canonical}" + block[line_end:]
+    return text[:fm.start(1)] + new_block + text[fm.end(1):], raw

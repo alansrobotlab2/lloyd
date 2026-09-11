@@ -825,12 +825,56 @@ def _vault_read(params: dict) -> dict:
         return _err(str(exc), ErrorCode.INTERNAL)
 
 
+def _guard_knowledge_type(path: str, content: str) -> tuple[str, dict | None, str | None]:
+    """Normalise a ``knowledge/`` note's ``type`` on write, or say why not.
+
+    Returns ``(content_to_write, error_result, rewritten_from)``. Only one of
+    the last two is ever non-``None``: an error means the write must not happen,
+    a ``rewritten_from`` names the retired spelling the content carried before
+    it was replaced by its canonical value. Runs BEFORE the mkdir/write, so the
+    refused path creates no file and no directory.
+
+    This is the writer-side half of the #370 vocabulary (#872). The tree was
+    consolidated onto ``okf_taxonomy.CANONICAL_TYPES`` while every writer stayed
+    on the pre-consolidation literals and no write path looked at ``type:`` at
+    all — so a nightly job invented ``type: note``, the file landed, and every
+    automod promotion on this box was blocked until someone found the word
+    (#780). ``vault_write`` is the path the research skills are told to use, so
+    it is where the vocabulary is enforced: an alias is rewritten to its
+    canonical value, an invented value is refused by name.
+    """
+    if not path.startswith("knowledge/") or not path.endswith(".md"):
+        return content, None, None
+    try:
+        from scripts.vault import okf_taxonomy
+    except Exception as exc:  # noqa: BLE001
+        # A guard whose input cannot be read reports a verdict it cannot
+        # justify — four confirmed instances in lloyd/MEMORY.md. Failing open
+        # here would mean an unimportable vocabulary silently re-admits any
+        # value, which is the exact state this function exists to end.
+        return content, _err(
+            f"cannot validate knowledge/ `type`: scripts.vault.okf_taxonomy is "
+            f"unimportable ({exc})", ErrorCode.INTERNAL), None
+    try:
+        rewritten, replaced = okf_taxonomy.normalize_document_type(content)
+    except okf_taxonomy.KnowledgeTypeError as exc:
+        return content, _err(str(exc), ErrorCode.INVALID_PARAM,
+                             invalid_type=exc.value, path=path), None
+    except Exception as exc:  # noqa: BLE001
+        return content, _err(f"cannot validate knowledge/ `type`: {exc}",
+                             ErrorCode.INTERNAL), None
+    return rewritten, None, replaced
+
+
 def _vault_write(params: dict) -> dict:
     path, norm_err = _normalize_vault_path(params.get("path", ""))
     if norm_err:
         return _err(norm_err, ErrorCode.MISSING_PARAM if "required" in norm_err else ErrorCode.PATH_ESCAPE)
     content = params.get("content", "")
     try:
+        content, type_err, replaced = _guard_knowledge_type(path, content)
+        if type_err is not None:
+            return type_err
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
             return _err("path escapes vault root", ErrorCode.PATH_ESCAPE)
@@ -838,7 +882,16 @@ def _vault_write(params: dict) -> dict:
         target.write_text(content, encoding="utf-8")
         byte_count = len(content.encode("utf-8"))
         _audit_write(path, byte_count)
-        return {"success": True, "path": path, "bytes": byte_count}
+        result = {"success": True, "path": path, "bytes": byte_count}
+        if replaced:
+            # Say so: a writer that asked for one spelling and got another needs
+            # to see it, or it keeps asking for the retired one.
+            from scripts.vault import okf_taxonomy
+            result["type_normalized"] = {
+                "from": replaced,
+                "to": okf_taxonomy.normalize_type(replaced),
+            }
+        return result
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
 
