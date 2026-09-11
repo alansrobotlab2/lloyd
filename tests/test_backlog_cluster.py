@@ -327,3 +327,13 @@ def test_the_source_is_registered_with_the_pool_interface():
     import workers.sources as sources_pkg
     mod = sources_pkg.SOURCE_REGISTRY["backlog-cluster"]
     assert mod.NAME == "backlog-cluster" and not getattr(mod, "LONG_LIVED", False)
+
+
+def test_the_round_cli_passes_cluster_flags_through(monkeypatch):
+    """`round cluster --write` used to die with 'unrecognized arguments':
+    REMAINDER on a subparser does not swallow flags."""
+    from scripts.automod import round as R, cluster as CL
+    seen = {}
+    monkeypatch.setattr(CL, "main", lambda argv: (seen.__setitem__("argv", argv), 0)[1])
+    assert R.main(["cluster", "--write", "--no-judge", "--threshold", "0.8"]) == 0
+    assert seen["argv"] == ["--write", "--no-judge", "--threshold", "0.8"]

@@ -314,9 +314,15 @@ def main(argv=None) -> int:
     sc.add_argument("--since", default="7d")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--record", action="store_true", help="append the row to scorecard.jsonl")
-    cl = sub.add_parser("cluster", help="group the open backlog by what it is about (scripts/automod/cluster.py)")
-    cl.add_argument("rest", nargs=argparse.REMAINDER, help="passed through: --write --threshold --no-judge --json …")
-    args = ap.parse_args(argv)
+    sub.add_parser("cluster", help="group the open backlog by what it is about "
+                                   "(scripts/automod/cluster.py; its own flags pass through: "
+                                   "--write --threshold --no-judge --json …)")
+    # `cluster` hands everything after it to cluster.py's parser. REMAINDER
+    # on a subparser does not swallow `--flags`, so the unknowns are collected
+    # here instead of refused.
+    args, extra = ap.parse_known_args(argv)
+    if args.cmd != "cluster" and extra:
+        ap.error(f"unrecognized arguments: {' '.join(extra)}")
 
     if args.cmd == "start":
         print(json.dumps(start(args.goal, force=args.force, item_id=args.item_id,
@@ -348,7 +354,7 @@ def main(argv=None) -> int:
             print(f"\nrecorded → {SC.record(row)}")
     elif args.cmd == "cluster":
         from scripts.automod import cluster as CL
-        return CL.main(args.rest)
+        return CL.main(extra)
     return 0
 
 
