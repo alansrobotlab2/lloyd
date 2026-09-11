@@ -1616,8 +1616,12 @@ async def _execute_tool_call(
             # job. It is the aggregator's only handle on "this call is a retry
             # of one I already served", because a retried attempt gets a fresh
             # session id. Empty on an interactive turn, which leaves it out of
-            # the effect ledger — see agent_mcp/_tool_effects.py.
-            "effect_scope": current_effect_scope.get(),
+            # the effect ledger — see agent_mcp/_tool_effects.py. The option
+            # wins over the contextvar: a session-backed worker turn runs in
+            # the backend after a loopback POST, where the pool's contextvar
+            # is empty and the router has set the option from the payload.
+            "effect_scope": (getattr(options, "effect_scope", "")
+                             or current_effect_scope.get()),
         }
         if cancel_event is None:
             result = await pool.call_tool(name, dispatch_args, **call_kw)

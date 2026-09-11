@@ -109,6 +109,16 @@ class RunOptions:
     # button are chat surfaces, and a worker turn has no reader.
     turn_id: str = ""
 
+    # #544: the queue item this turn is running for (`item:<source>:<id>`),
+    # carried to the aggregator in `_meta` so its effect ledger can tell a
+    # retry's second `email_send` from a new one. The pool binds
+    # `policy.current_effect_scope` in its own task; a session-backed worker
+    # turn runs in the backend's task after a loopback POST, where that
+    # contextvar is empty, so the router sets this from the payload instead
+    # and the loop prefers it over the contextvar. Empty for a chat turn,
+    # which keeps it out of the ledger by design.
+    effect_scope: str = ""
+
     # Background-task notification drain. When set, the loop calls this
     # at the top of each iteration; the callable returns a list of
     # OpenAI-format messages (typically role: "user" with a

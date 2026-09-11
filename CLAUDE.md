@@ -844,6 +844,53 @@ survive an aggregator restart and be findable from a session id alone.
 `/state.changes` for the dashboard. `harness.change_ledger.enabled: false`
 turns it off.
 
+### The effect ledger (#544): exactly-once effect, not exactly-once scheduling
+
+A worker item cancelled at `max_duration_seconds` is requeued and re-runs its
+whole turn, so every side-effecting call the first attempt landed lands again.
+`agent_mcp/_tool_effects.py` keeps one row per (tool, canonical arguments,
+**queue item**) in `workers.db`, written `unknown` **before** dispatch —
+the only record that survives a cancel — and settled `ok`/`error` after. A
+second identical call in scope replays the stored result; an `unknown` one is
+refused with instructions to read the state back; the ledger fails **open**
+if the database is unusable. `harness.effect_ledger.enabled` is the switch.
+The scope is `item:<source>:<id>` (`workers/pool.py::effect_scope_for`) and
+never the grant scope, which is stable across every future run of a task and
+would suppress a legitimate second effect forever.
+
+The first cut landed 2026-09-10 through the unattended loop with every gate
+rung green, and a review the same day found four things the tests had not:
+
+- **The scope has to cross two process seams, and it crossed neither.** The
+  pool binds `policy.current_effect_scope` in its own task; every
+  session-backed source (autocode, autotriage, youtube-digest, deep-research)
+  POSTs to `/api/message/stream` and the backend runs the turn in another
+  task, so the contextvar read empty — 25 items, 0 rows, in the first sixteen
+  hours. It travels in the payload now (`_common.run_prompt_in_session` →
+  `messages._effect_scope_for` → `RunOptions.effect_scope`, honoured only for
+  `NON_USER_PLATFORMS`), and `loop.py` prefers the option over the
+  contextvar. A `Task` subagent re-enters `main.py::call_tool` over loopback
+  `/mcp` from a fresh ASGI task; `call_tool` binds the incoming scope around
+  the dispatch so the nested loop stamps it on. `e3ff863` had fixed exactly
+  this hop for `grant_scope` eight hours after the ledger landed.
+- **Classification must honour `IDEMPOTENT`.** `annotations.side_effecting`
+  consulted only `READ_ONLY` and `REPEAT_EXPECTED`, leaving 20 idempotent
+  tools ledgered for no protective value — `Write` among them. A setter or a
+  delete repeated adds nothing, so a replay can only be staler than the call.
+- **`Edit` is never replayed.** Probed A→B, B→A, A→B in one scope: the third
+  call was answered "Edited (1 replacement)" and the file stayed at A — the
+  silent revert the read-before-edit gate exists to prevent, delivered by the
+  guard meant to stop duplicates. `Edit` is `REPEAT_EXPECTED`; its own
+  `old_string` match is the idempotency check the model can see.
+- **A test that asserts `x == [] or True` pins nothing**, and the round that
+  wrote it declared its acceptance `deferred` to an empty list. Both are why
+  the automod gate is growing a review rung.
+
+`unknown` rows are pruned on a longer clock than settled ones
+(`unknown_retention_days`): they are the only record an effect may have
+landed, and pruning them re-arms the duplicate. `tests/test_tool_effects.py`
+pins all of it, including the probe.
+
 ### Read-before-edit and stale-file gates
 
 `Edit` used to be exact-match against whatever is on disk right now, with no

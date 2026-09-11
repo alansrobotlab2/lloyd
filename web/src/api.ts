@@ -2022,6 +2022,9 @@ export interface KvGateState {
 
 export interface WorkersState {
   enabled: boolean
+  // #544: duplicate side effects the effect ledger has refused, read off the
+  // ledger file. null = unreadable (distinct from 0); absent on an older backend.
+  duplicate_effects_suppressed?: number | null
   pool: { running: boolean; paused?: boolean; slots?: number; in_flight_count?: number
           in_flight?: Record<string, { source: string; kind: string; started_at: string }>
           kv_gate?: KvGateState }

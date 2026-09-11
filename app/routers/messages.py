@@ -486,6 +486,30 @@ def _final_schema_for(session_id: str, data: dict) -> dict | None:
     return schema
 
 
+def _effect_scope_for(session_id: str, data: dict) -> str:
+    """#544 — the queue item this turn runs for, from the payload.
+
+    `policy.current_effect_scope` is bound by the worker pool in its own task
+    and does not survive the loopback POST, exactly like `grant_scope`; so
+    `run_prompt_in_session` sends it in the body and it is set on
+    `RunOptions.effect_scope`, which the loop prefers over the contextvar.
+    Honoured only for a session whose platform is in `NON_USER_PLATFORMS`: a
+    chat turn handed a scope would have its identical re-asks replayed from a
+    ledger, which is the over-suppression the ledger's own docstring names as
+    the failure that bites. Returns "" when the turn is a user's.
+    """
+    scope = str(data.get("effect_scope") or "").strip()
+    if not scope:
+        return ""
+    platform, _source = _session_identity(session_id)
+    if platform not in sessions_io.NON_USER_PLATFORMS:
+        logger.warning(
+            "effect_scope ignored for session %s: platform %r is user-facing",
+            session_id, platform or "mission-control")
+        return ""
+    return scope
+
+
 def _build_notification_drain(session_id: str, turn_id: str):
     """Build the closure handed to ``RunOptions.notification_drain``.
 
@@ -1804,6 +1828,7 @@ async def post_message_stream(request: Request):
     if final_schema is not None:
         options.final_schema = final_schema
         options.final_schema_prompt = str(data.get("final_schema_prompt") or "")
+    options.effect_scope = _effect_scope_for(session_id, data)
 
     await _save_session_meta(session_id, model, preview=text)
 
@@ -2051,6 +2076,7 @@ async def post_message(request: Request):
         # This path calls run_query directly rather than going through
         # _run_turn, so it wires its own anchor.
         state_anchor=_build_state_anchor(session_id),
+        effect_scope=_effect_scope_for(session_id, data),
         **_get_harness_kwargs(),
     )
 

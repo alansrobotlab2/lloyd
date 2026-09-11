@@ -115,6 +115,36 @@ CREATE INDEX IF NOT EXISTS tool_effects_scope_tool_idx
 _init_lock = threading.Lock()
 _init_done: set[str] = set()
 
+# Kill switch and retention, `harness.effect_ledger` in config.yaml. Read at
+# call time through the same shape `_change_ledger.config()` uses, so a test
+# can `monkeypatch.setitem` the config and so the aggregator — a separate
+# process from the backend — reads the file for itself.
+_DEFAULTS = {"enabled": True, "retention_days": 14, "unknown_retention_days": 30}
+
+# Prune at most this often per process. A WAL DELETE on every settle would be
+# the hot-path cost the module docstring promises not to add.
+PRUNE_INTERVAL_S = 3600.0
+_last_prune = 0.0
+
+
+def config() -> dict:
+    try:
+        from app.config import CONFIG
+        raw = (CONFIG.get("harness") or {}).get("effect_ledger") or {}
+    except Exception:
+        raw = {}
+    out = dict(_DEFAULTS)
+    if isinstance(raw, dict):
+        out.update({k: v for k, v in raw.items() if v is not None})
+    return out
+
+
+def enabled() -> bool:
+    try:
+        return bool(config()["enabled"])
+    except Exception:
+        return True
+
 
 def db_path() -> Path:
     """The file the ledger lives in: the work queue's own database.
@@ -307,7 +337,7 @@ async def claim(name: str, arguments: Any, scope: str, session_id: str = "") -> 
     serves every HTTP request and streams every turn, so a WAL write here has
     to hop threads like the queue's writes do.
     """
-    if not scope or not ledgered(name):
+    if not scope or not ledgered(name) or not enabled():
         return _UNLEDGERED
     try:
         return await asyncio.to_thread(_claim, name, arguments, scope, session_id)
@@ -316,6 +346,57 @@ async def claim(name: str, arguments: Any, scope: str, session_id: str = "") -> 
         logger.error("tool_effects: ledger unavailable for %s (%s); dispatching"
                      " unguarded", name, exc)
         return _UNLEDGERED
+
+
+def _cutoff(days: float) -> str:
+    from datetime import timedelta
+    return (datetime.now(timezone.utc) - timedelta(days=float(days))).isoformat(
+        timespec="seconds")
+
+
+def prune(conn: sqlite3.Connection | None = None, *, now: float | None = None) -> dict:
+    """Drop settled rows past `retention_days` and `unknown` rows past
+    `unknown_retention_days`. The two clocks are deliberately different: an
+    `ok`/`error` row is a convenience (a replayable result, a retriable
+    failure), while an `unknown` row is the only record that an effect may
+    have landed — pruning it on the short clock silently re-arms the duplicate
+    this module exists to prevent. Returns the two counts."""
+    cfg = config()
+    own = conn is None
+    if own:
+        conn = _connect(create=False)
+        if conn is None:
+            return {"settled": 0, "unknown": 0}
+    try:
+        _ensure(conn)
+        settled = conn.execute(
+            "DELETE FROM tool_effects WHERE status IN ('ok','error') AND updated_at < ?",
+            (_cutoff(cfg["retention_days"]),)).rowcount
+        unknown = conn.execute(
+            "DELETE FROM tool_effects WHERE status='unknown' AND updated_at < ?",
+            (_cutoff(cfg["unknown_retention_days"]),)).rowcount
+        return {"settled": int(settled), "unknown": int(unknown)}
+    finally:
+        if own:
+            conn.close()
+
+
+def _maybe_prune(conn: sqlite3.Connection) -> None:
+    """At most hourly, from the settle path, failures swallowed — the
+    `_change_ledger._maybe_prune` shape."""
+    global _last_prune
+    import time
+    now = time.monotonic()
+    if now - _last_prune < PRUNE_INTERVAL_S:
+        return
+    _last_prune = now
+    try:
+        out = prune(conn)
+        if out["settled"] or out["unknown"]:
+            logger.info("tool_effects: pruned %d settled, %d unknown rows",
+                        out["settled"], out["unknown"])
+    except Exception as exc:
+        logger.warning("tool_effects: prune failed (%s)", exc)
 
 
 def _finish(key: str, text: str, is_error: bool) -> None:
@@ -329,6 +410,7 @@ def _finish(key: str, text: str, is_error: bool) -> None:
             " result_truncated=?, updated_at=? WHERE effect_key=? AND status='unknown'",
             ("error" if is_error else "ok", digest, stored,
              int(len(text) > RESULT_MAX_CHARS), _now(), key))
+        _maybe_prune(conn)
     finally:
         conn.close()
 

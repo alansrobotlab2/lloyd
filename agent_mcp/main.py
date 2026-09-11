@@ -83,6 +83,9 @@ from agent_mcp import (
     thunderbird,
     vault,
 )
+# #544: the effect-scope contextvar the harness loop reads at dispatch. Bound
+# here around each dispatch so a `Task` subagent's nested loop inherits it.
+from app.harness import policy as harness_policy
 
 logger = logging.getLogger("lloyd-mcp")
 
@@ -359,20 +362,25 @@ def _effect_text(result: Any) -> tuple[str, bool]:
                       if getattr(b, "type", "") == "text"), False)
 
 
-def _effect_refused(name: str, effect: "_tool_effects.Claim") -> CallToolResult:
+def _effect_refused(name: str, effect: "_tool_effects.Claim",
+                    arguments: Any = None) -> CallToolResult:
     """The payload for a call the ledger will not let fire twice.
 
-    Both branches log at WARNING with the key. Over-suppression is the failure
-    that bites here — a silently dropped email is quieter and worse than the
-    duplicate this exists to prevent — so a suppression has to be findable in
-    the log with the arguments that produced it, not merely counted.
+    Both branches log at WARNING with the key AND the canonical arguments.
+    Over-suppression is the failure that bites here — a silently dropped email
+    is quieter and worse than the duplicate this exists to prevent — so a
+    suppression has to be findable in the log with the arguments that produced
+    it, not merely counted. The first cut logged a key prefix only, which
+    names nothing a human can grep for.
     """
     short = (effect.key or "")[:16]
+    args_text = _tool_effects.canonical_arguments(arguments)[:300]
     if effect.unknown:
         logger.warning(
-            "tool_effects: refused re-fire of %s (effect %s…). State unknown: "
-            "a prior attempt was cancelled with this effect in flight. Do the "
-            "status lookup before assuming it did not land.", name, short)
+            "tool_effects: refused re-fire of %s (effect %s…) args=%s. State "
+            "unknown: a prior attempt was cancelled with this effect in flight. "
+            "Do the status lookup before assuming it did not land.",
+            name, short, args_text)
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps({
                 "error": (
@@ -395,8 +403,8 @@ def _effect_refused(name: str, effect: "_tool_effects.Claim") -> CallToolResult:
             }))],
             isError=True,
         )
-    logger.warning("tool_effects: suppressed duplicate %s (effect %s…); "
-                   "replaying the recorded result", name, short)
+    logger.warning("tool_effects: suppressed duplicate %s (effect %s…) args=%s; "
+                   "replaying the recorded result", name, short, args_text)
     if effect.replay_truncated or not effect.replay_text:
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps({
@@ -467,6 +475,15 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     ctok = _task_registry.current_call_id.set(
         call_id if isinstance(call_id, str) else ""
     )
+    # #544: a `Task` subagent re-enters this function over loopback `/mcp`
+    # from a fresh ASGI task, so only `_meta` crosses — and its own loop
+    # stamps `_meta` from `policy.current_effect_scope` (loop.py). Binding the
+    # incoming scope here, around the dispatch that runs the subagent, is
+    # what lets a subagent's writes inside a worker item be ledgered under
+    # that item. Inherited verbatim, not suffixed by task id: a retry mints a
+    # new task id, and an identical write from parent and child is the same
+    # effect.
+    etok = harness_policy.current_effect_scope.set(effect_scope)
     try:
         # #544 — exactly-once EFFECT, not exactly-once scheduling. The retry
         # that makes this necessary is the pool's: a job cancelled at
@@ -486,7 +503,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         # it, for the same reason.
         effect = await _tool_effects.claim(name, arguments, effect_scope, sid)
         if not effect.may_dispatch:
-            return _effect_refused(name, effect)
+            return _effect_refused(name, effect, arguments)
         try:
             result = await mod.call_tool(name, arguments)
         except BaseException as exc:
@@ -512,6 +529,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         _task_registry.current_call_id.reset(ctok)
         builtin_task.current_parent_model.reset(mtok)
         builtin_task.current_parent_base_url.reset(btok)
+        harness_policy.current_effect_scope.reset(etok)
 
 
 async def on_call_tool(ctx, params) -> CallToolResult:

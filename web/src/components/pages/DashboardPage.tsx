@@ -790,7 +790,7 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
         </span>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <div>
           <div className="text-[10px] text-muted-foreground">In flight</div>
           <div className={cn('font-mono text-lg leading-none',
@@ -811,6 +811,13 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
           <div className={cn('font-mono text-lg leading-none',
             workers.poisoned_total > 0 ? 'text-rose-400' : 'text-muted-foreground')}>
             {workers.poisoned_total}
+          </div>
+        </div>
+        <div title="duplicate side effects the #544 effect ledger refused on retried worker items — null means the ledger file was unreadable">
+          <div className="text-[10px] text-muted-foreground">Dup. effects</div>
+          <div className={cn('font-mono text-lg leading-none',
+            (workers.duplicate_effects_suppressed ?? 0) > 0 ? 'text-sky-400' : 'text-muted-foreground')}>
+            {workers.duplicate_effects_suppressed === null ? '—' : (workers.duplicate_effects_suppressed ?? '—')}
           </div>
         </div>
       </div>

@@ -23,6 +23,7 @@ test a system that does not exist.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -147,6 +148,101 @@ def test_the_classification_comes_from_annotations_not_a_second_list():
     assert A.side_effecting("some_tool_nobody_classified")
     # A tool may not be in both lists; REPEAT_EXPECTED would silently win.
     assert not (A.READ_ONLY & A.REPEAT_EXPECTED)
+    # Acceptance clause (d): IDEMPOTENT is the classification source too. A
+    # setter or a delete repeated adds no further change, so there is nothing
+    # for the ledger to prevent and a replay can only be staler than the call.
+    for name in ("Write", "vault_write", "graph_refresh", "email_delete",
+                 "calendar_update_event", "memory_replace"):
+        assert name in A.IDEMPOTENT and not A.side_effecting(name), name
+    # And `Edit` is repeat-expected: its own `old_string` match is the check.
+    assert "Edit" in A.REPEAT_EXPECTED and not A.side_effecting("Edit")
+
+
+async def test_an_edit_that_flips_a_file_back_and_forth_is_never_replayed(
+        monkeypatch, ledger, tmp_path):
+    """The A→B→A→B probe that found the first cut's worst defect.
+
+    Run against the live aggregator with a scratch ledger, the third call — an
+    exact repeat of the first — was answered "Edited … (1 replacement)" while
+    the file stayed at A. A replayed success is a silent revert the model
+    cannot see; the handler's own "old_string not found" it can. So `Edit`
+    dispatches every time and the ledger never has a row for it.
+    """
+    target = tmp_path / "probe.txt"
+    target.write_text("colour = A\n")
+
+    class EditLike:
+        async def call_tool(self, name, arguments):
+            text = target.read_text()
+            if arguments["old_string"] not in text:
+                return M.CallToolResult(content=[M.TextContent(
+                    type="text", text=json.dumps({"error": "old_string not found"}))],
+                    isError=True)
+            target.write_text(text.replace(arguments["old_string"],
+                                           arguments["new_string"], 1))
+            return [M.TextContent(type="text", text=f"Edited {target} (1 replacement)")]
+
+    base = dict(getattr(M, "_dispatch", None) or {})
+    base["Edit"] = EditLike()
+    monkeypatch.setattr(M, "_dispatch", base)
+    meta = {M.META_EFFECT_SCOPE: SCOPE}
+    for old, new in (("A", "B"), ("B", "A"), ("A", "B")):
+        await M.call_tool("Edit", {"file_path": str(target), "old_string": f"colour = {old}",
+                                   "new_string": f"colour = {new}"}, meta)
+    assert target.read_text() == "colour = B\n", "the third edit was replayed, not applied"
+    assert not ledger.exists() or _rows(ledger) == []
+
+
+async def test_the_kill_switch_turns_the_ledger_off_without_breaking_a_call(
+        monkeypatch, ledger):
+    """`harness.effect_ledger.enabled: false` is the lever for the day a
+    legitimate second call is refused. Off means no row and no replay — the
+    call dispatches like a pre-#544 call did."""
+    from app.config import CONFIG
+    effects: list = []
+    _register(monkeypatch, FakeWriter(effects))
+    harness = dict(CONFIG.get("harness") or {})
+    harness["effect_ledger"] = {"enabled": False}
+    monkeypatch.setitem(CONFIG, "harness", harness)
+    assert not TE.enabled()
+    for _ in range(2):
+        await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+    assert len(effects) == 2
+    assert not ledger.exists()
+    assert TE.config()["retention_days"] == 14, "defaults survive a partial block"
+
+
+def test_prune_keeps_unknown_rows_on_the_longer_clock(ledger, monkeypatch):
+    """An `unknown` row is the only record that an effect may have landed.
+    Pruning it on the settled rows' clock silently re-arms the duplicate."""
+    from datetime import datetime, timedelta, timezone
+    TE._ensure(TE._connect())
+    old = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat(timespec="seconds")
+    ancient = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(timespec="seconds")
+    conn = TE._connect()
+    for key, status, ts in (("k_ok_old", "ok", old), ("k_unknown_old", "unknown", old),
+                            ("k_unknown_ancient", "unknown", ancient),
+                            ("k_ok_fresh", "ok", TE._now())):
+        conn.execute("INSERT INTO tool_effects (effect_key, tool, scope, status, created_at,"
+                     " updated_at) VALUES (?,?,?,?,?,?)", (key, "t", SCOPE, status, ts, ts))
+    conn.close()
+    out = TE.prune()
+    assert out == {"settled": 1, "unknown": 1}
+    left = {r[0] for r in sqlite3.connect(str(ledger)).execute(
+        "SELECT effect_key FROM tool_effects")}
+    assert left == {"k_unknown_old", "k_ok_fresh"}
+
+
+async def test_a_suppression_is_logged_with_the_arguments_that_produced_it(
+        monkeypatch, ledger, caplog):
+    """A key prefix names nothing a human can grep for. The docstring promised
+    the arguments; the first cut logged the prefix only."""
+    effects: list = []
+    _register(monkeypatch, FakeWriter(effects))
+    for _ in range(2):
+        await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+    lines = [r.getMessage() for r in caplog.records if "suppressed duplicate" in r.getMessage()]
+    assert lines and "someone@example.com" in lines[-1]
 
 
 async def test_no_scope_means_no_ledger(ledger):
@@ -346,41 +442,93 @@ async def test_a_timed_out_retry_fires_the_effect_once(q, tmp_path, monkeypatch)
     assert TE.suppressed_total() == 2, "attempts 2 and 3 were both refused"
 
 
-async def test_a_worker_without_a_scope_gets_no_ledger(q, monkeypatch):
-    """A source that runs outside the pool (or an old aggregator) must not
-    find its writes silently swallowed by an empty-scope key collision."""
-    import workers.sources as sources
+async def test_a_caller_without_a_scope_gets_no_ledger(monkeypatch, ledger):
+    """A caller outside the pool — a bare `run_query`, an old harness that
+    sends no `_meta` scope — must not find its writes swallowed by an
+    empty-scope key collision. Two identical calls with **no** scope both
+    fire and leave no row.
 
+    (The first cut of this test ran the call through a real pool — which
+    binds a scope, so it tested the opposite path — and then asserted
+    `_rows(...) == [] or True`.)
+    """
     effects: list = []
     _register(monkeypatch, FakeWriter(effects))
-
-    async def execute(item):
-        await M.call_tool("fake_writer", dict(ARGS),
-                          {M.META_EFFECT_SCOPE: policy.current_effect_scope.get()})
-        return {"summary": "one effect, no scope"}
-
-    monkeypatch.setattr(sources, "SOURCE_REGISTRY",
-                        {"s": SimpleNamespace(NAME="s", execute=execute)},
-                        raising=False)
-    monkeypatch.setattr(sources, "get_sources_config",
-                        lambda: {"s": {"max_duration_seconds": 30}}, raising=False)
-    q.enqueue("s", "k")
-    pool = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
-    await pool.start()
-    try:
-        for _ in range(300):
-            if q.list_runs(limit=5):
-                break
-            await asyncio.sleep(0.02)
-    finally:
-        await pool.stop()
-
-    assert len(effects) == 1
-    assert not (q.db_path.parent / "tool_effects").exists()
-    # No row, because no scope: the pool binds one, so this is the path a
-    # non-pool caller takes.
-    assert _rows(q.db_path) == [] or True
+    for _ in range(2):
+        await M.call_tool("fake_writer", dict(ARGS), {})
+        await M.call_tool("fake_writer", dict(ARGS), None)
+    assert len(effects) == 4
+    assert not ledger.exists()
     assert TE.suppressed_total() == 0
+
+
+async def test_a_task_subagents_writes_inherit_the_items_scope(monkeypatch, ledger):
+    """A `Task` re-enters `call_tool` over loopback `/mcp` from a fresh ASGI
+    task, so only `_meta` crosses — and the subagent's own loop stamps `_meta`
+    from `policy.current_effect_scope`. The aggregator therefore binds the
+    incoming scope around the dispatch. Modelled here by a `Task` handler that
+    does what the nested loop does: read the contextvar and hand it on."""
+    effects: list = []
+    writer = FakeWriter(effects)
+
+    class TaskLike:
+        async def call_tool(self, name, arguments):
+            inner_meta = {M.META_EFFECT_SCOPE: policy.current_effect_scope.get()}
+            await M.call_tool("fake_writer", dict(ARGS), inner_meta)
+            return [M.TextContent(type="text", text="subagent done")]
+
+    base = dict(getattr(M, "_dispatch", None) or {})
+    base["fake_writer"] = writer
+    base["Task"] = TaskLike()
+    monkeypatch.setattr(M, "_dispatch", base)
+
+    await M.call_tool("Task", {"prompt": "go"}, {M.META_EFFECT_SCOPE: SCOPE})
+    await M.call_tool("Task", {"prompt": "go"}, {M.META_EFFECT_SCOPE: SCOPE})
+    assert len(effects) == 1, "the subagent's second identical write fired"
+    rows = _rows(ledger)
+    assert [(r["tool"], r["scope"]) for r in rows] == [("fake_writer", SCOPE)]
+    # And the bind is scoped to the dispatch: nothing leaks to the caller.
+    assert policy.current_effect_scope.get() == ""
+
+
+def test_the_router_hands_a_scope_only_to_a_non_user_session(tmp_path, monkeypatch):
+    """The loopback half of the seam. `_effect_scope_for` is the one reader
+    of the payload key, and it refuses a chat session: a user re-asking for
+    the same email in a new turn is a legitimate second effect, and a scope
+    on that turn would have it replayed from the ledger instead."""
+    from pathlib import Path
+    from app.routers import messages as R
+
+    monkeypatch.setattr(R, "SESSIONS_DIR", tmp_path)
+    (tmp_path / "worker.json").write_text(json.dumps({"platform": "worker"}))
+    (tmp_path / "auto.json").write_text(json.dumps({"platform": "autonomy"}))
+    (tmp_path / "chat.json").write_text(json.dumps({"platform": "mission-control"}))
+    (tmp_path / "bare.json").write_text(json.dumps({}))
+
+    assert R._effect_scope_for("worker", {"effect_scope": SCOPE}) == SCOPE
+    assert R._effect_scope_for("auto", {"effect_scope": SCOPE}) == SCOPE
+    assert R._effect_scope_for("chat", {"effect_scope": SCOPE}) == ""
+    assert R._effect_scope_for("bare", {"effect_scope": SCOPE}) == ""
+    assert R._effect_scope_for("missing", {"effect_scope": SCOPE}) == ""
+    assert R._effect_scope_for("worker", {}) == ""
+    assert "NON_USER_PLATFORMS" in inspect.getsource(R._effect_scope_for)
+
+    # Both RunOptions builders that serve a payload set it; the loop prefers
+    # the option over the contextvar. Read the file, not the live attribute
+    # (see test_structured_verdict for why).
+    src = Path(R.__file__).read_text()
+    assert src.count("_effect_scope_for(session_id, data)") == 2
+    loop_src = Path(policy.__file__).with_name("loop.py").read_text()
+    assert 'getattr(options, "effect_scope", "")' in loop_src
+
+
+def test_the_session_backed_worker_payload_carries_the_effect_scope():
+    """Same hop as `grant_scope`, same reason, same guard: the pool binds the
+    contextvar in its own task and the backend handles the POST in another.
+    Without this line every session-backed source ran unledgered."""
+    src = (policy.__file__.rsplit("/app/", 1)[0] + "/workers/sources/_common.py")
+    text = open(src).read()
+    assert '"effect_scope": current_effect_scope.get()' in text
 
 
 # ── the counter someone has to be able to see ──────────────────────────────
