@@ -643,6 +643,31 @@ automod:
     liveness_window_s: 120
     errors_window_s: 900
 
+# Write-time dedupe for backlog_write_task (agent_mcp/backlog_similar.py).
+# Every create is checked against the board: the qmd daemon's reranked vector
+# search over the `backlog` collection it already embeds, plus a lexical
+# Jaccard over the item heads on disk. A create tagged `spawned-by-*` whose
+# finding an open item already covers is appended to that item instead of
+# filed beside it; a human's write is only ever advised. Every decision is
+# logged to ~/.local/state/lloyd-automod/dedupe.jsonl so the threshold can
+# be tuned from data. `merge: false` is the observation mode.
+backlog:
+  dedupe:
+    enabled: true
+    merge: true
+    # Reranker score floor. Measured 2026-09-11: a verbatim title scores its
+    # own item 1.0, the nearest distinct neighbour 0.55-0.60, and an
+    # unrelated query still put 0.75 on its top hit — which is why the
+    # lexical leg must agree (rule A) and the score alone never merges.
+    threshold: 0.78
+    lexical_min: 0.4
+    shared_min: 4
+    # Rule B: a strong lexical match on an item created inside this window
+    # is the same session filing the same finding twice, before the qmd
+    # watcher (2 s debounce plus embed time) has seen the first copy.
+    recent_lexical_min: 0.6
+    recent_window_seconds: 600
+
 server:
   host: 0.0.0.0
   port: 8080
@@ -804,6 +829,13 @@ workers:
       max_turns: 150
       # On: this source rewrites production. See `autotriage.inner_voice`.
       inner_voice: true
+      # The hard bound on the board. A self-filed draft that nothing —
+      # clustering, group triage, a human — picked up in 30 days is closed,
+      # tagged `expired`, and reopens by setting its status back to draft.
+      # Runs in this source's housekeeping beside close_on_settle. Off: held
+      # items only accumulate, visible in the triage skip summary and the
+      # scorecard's over-bound gauge, never lost.
+      expire_spawns: true
     bench-mine:
       enabled: true
       interval_seconds: 7200

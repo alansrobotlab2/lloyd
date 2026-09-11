@@ -7,6 +7,7 @@ the same rule holds here: a loop that has not run is unmeasured, not perfect.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import subprocess
 import time
 from pathlib import Path
@@ -64,6 +65,8 @@ def test_an_empty_ledger_is_unmeasured_not_perfect(tmp_path, repo):
     assert row["acceptance"]["hit_rate"] is None
     assert row["review"]["refusal_rate"] is None
     assert row["spawn"]["triage_ratio"] is None and row["spawn"]["implement_ratio"] is None
+    assert row["spawn"]["self_spawned_open"] == {"count": 0, "oldest_days": 0, "bound_days": 30,
+                                                 "over_bound": 0}
     assert row["human_touch"]["rate"] is None
     assert row["verdict_plumbing"]["regex_rate"] is None
     assert row["throughput"]["items_closed_per_day"] == 0.0
@@ -200,3 +203,38 @@ def test_the_round_cli_has_the_subcommand():
     import inspect
     src = inspect.getsource(R.main)
     assert 'sub.add_parser("scorecard"' in src and "SC.render" in src
+
+
+def test_merges_appends_expiries_and_the_open_self_spawned_gauge(tmp_path, repo):
+    """The inflow controls report beside the ratio they exist to lower, and
+    the gauge says whether expiry is holding the bound: `over_bound` is the
+    number of untriaged self-filed drafts older than 30 d, and should be 0."""
+    ledger = _ledger(tmp_path, [
+        _ev("backlog_triage", 6, item_id=1, verdict="stale", closed=True, spawned=[10], merged=[3]),
+        _ev("backlog_implement", 4, item_id=2, phase="finished", round_id="SM_A", num_turns=50,
+            spawned=[], merged=[10, 11], findings_appended=3),
+        _ev("backlog_expired", 2, item_id=40, age_days=31),
+        # An old triage outside the window still counts as judged for the gauge.
+        _ev("backlog_triage", 40, item_id=52, verdict="unverifiable"),
+    ])
+    board = tmp_path / "backlog"; board.mkdir()
+    def item(iid, *, days, status="draft", tags=("spawned-by-triage",)):
+        created = datetime.fromtimestamp(NOW - days * DAY, tz=timezone.utc).isoformat()
+        (board / f"{iid}-x.md").write_text(
+            "---\n" + yaml.dump({"status": status, "created": created, "tags": list(tags),
+                                  "board": "lloyd"}) + "---\n\n# x\n")
+    item(50, days=2)                                   # fresh, held
+    item(51, days=40)                                  # over the bound and unjudged: the defect
+    item(52, days=40)                                  # over the bound but triaged
+    item(53, days=40, tags=("spawned-by-autocode", "grouped"))   # exempt
+    item(54, days=40, status="done", tags=("spawned-by-triage", "expired"))  # closed
+    item(55, days=40, tags=("backlog",))               # a human's draft: not self-spawned
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=board, repo=repo, now=NOW)
+    s = row["spawn"]
+    assert s["triage_merged"] == 1 and s["implement_merged"] == 2
+    assert s["findings_appended"] == 3 and s["expired"] == 1
+    assert s["self_spawned_open"]["count"] == 4
+    assert s["self_spawned_open"]["over_bound"] == 1
+    assert s["self_spawned_open"]["oldest_days"] == 40.0
+    text = SC.render(row)
+    assert "merged 1+2, appended 3, expired 1" in text and "over bound 1" in text

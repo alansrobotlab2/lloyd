@@ -54,13 +54,15 @@ LONG_LIVED = True
 DEFAULT_PRIORITY = 40
 DEDUP_KEY = "autocode:round"
 
-# One, not triage's three. Triage's job is to split an item into claims, so
-# filing is its output; an implement round's output is a landing. Over the
-# loop's first four days implement rounds filed 102 items against 7 closed,
-# hit the cap of 3 in 21 of 43 rounds (it was binding, not a ceiling), and
-# the three that aborted at the gate on 2026-09-08 filed 3, 6 and 5 while
-# landing nothing. The overflow item still exists, so nothing is dropped —
-# it arrives as one handoff instead of three.
+# Blockers, not findings. Over the loop's first four days implement rounds
+# filed 102 items against 7 closed, hit the then-cap of 3 in 21 of 43 rounds,
+# and the three that aborted at the gate on 2026-09-08 filed 3, 6 and 5 while
+# landing nothing. By 2026-09-11 it was 120 filed against 7 closed, and the
+# re-runs of one item filed the same finding three times. A finding the
+# round turns up now goes ONTO the item it came from (`## Findings`, counted
+# off the file into `findings_appended`); the one thing that still becomes an
+# item is a blocker — a finding that stops a clause of this round's contract
+# from becoming true — and one of those per round is the shape.
 SPAWN_CAP = 1
 # 150, not 100. Round SM_20260908_165950 called `automod_land` at iteration 91
 # of 100 — nine left for a landing that must be followed by an immediate turn
@@ -111,25 +113,31 @@ supervisord restart — and name the test that crosses each one. The code graph 
 is blind across these seams and a grep is not a test. The review rung asks the \
 same question of your diff cold, and an unverified seam sends the round back.
 
-**Scope you discover is not scope you take.** The work will show you things \
-the acceptance check does not cover — a second bug beside the first, a \
-refactor the fix wants, a test the area is missing, a premise in the item that \
-turned out wider than its check. Each one becomes **its own backlog item, filed \
-by you** with `backlog_write_task` (board `lloyd`, no `task_id`, tag \
-`spawned-by-autocode`, first line "Found while implementing #{item_id}"), \
-written as a handoff a fresh session can execute alone: what is wrong, where \
-(file paths and line numbers), and how to verify. Then keep this round to the \
-contract. One change per round is what makes a rollback mean something. Do not \
-fold the discovery into this change, and do not leave it in your report — the \
-report is read once; the backlog is read until the item is done.
+**Scope you discover is not scope you take — and it is not a new item \
+either.** The work will show you things the acceptance check does not cover — \
+a second bug beside the first, a refactor the fix wants, a test the area is \
+missing, a premise in the item that turned out wider than its check. Each one \
+goes **onto this item**, once, as a section: \
+`backlog_write_task(task_id={item_id}, description_mode="append", \
+description="## Findings (round <round id>)\\n\\n- <what is wrong, where \
+(file:line), how to verify>", activity="findings appended by round <round id>")`. \
+One bullet per finding; call it again later in the round if you find more. \
+Findings stay with the item they came from, where the next round of this item \
+— or the human who closes it — reads them. Do not fold them into this change, \
+and do not leave them only in your report: the report is read once; the item \
+is read until it is done. One change per round is what makes a rollback mean \
+something.
 
-**File at most {spawn_cap}.** If the round turned up more than that, file the \
-{spawn_cap} that block or change the next piece of work, and put the rest in \
-**one** item titled "Further findings from implementing #{item_id}" with the \
-same per-finding detail. Nothing is dropped; the fan-out is. If you are about \
-to file more than {spawn_cap} while *not* landing a change, that is the signal \
-to stop and report instead — a round that aborts and files six items has \
-converted one problem into six and solved none.
+**The one thing that becomes a new item is a blocker**: a finding that stops \
+one of this round's clauses from becoming true. File it with \
+`backlog_write_task` (board `lloyd`, no `task_id`, tags `spawned-by-autocode` \
+and `blocker`, first line "Blocks #{item_id}"), written as a handoff a fresh \
+session can execute alone, and name its id as what the deferred clause waits \
+on. The tool checks the board first: if it answers `merged_into: N`, an open \
+item already covers it — cite N instead. **File at most {spawn_cap}.** A second \
+blocker means the item needs a human: stop and report. Nothing else becomes an \
+item — not a refactor, not a test gap, not a doc that went stale; those are \
+findings, and they go on this item.
 
 {reoffer}**The triage evidence above was measured today, on this tree.** File sizes,
 line counts, git shas and grep results in it are current: read them, do not
@@ -244,24 +252,50 @@ landing; say so in the summary. A closed item is never re-triaged, so `met` (or 
 cannot recover from.
 
 Report what you did, quoting the gate line rather than saying "it passed", \
-and end with one line `SPAWNED: <ids of the items you filed, or the word none>`. \
-Work autonomously; do not ask for confirmation.
+and end with one line `SPAWNED: <ids of blocker items you filed or were merged \
+into, or the word none>`. Work autonomously; do not ask for confirmation.
 """
 
 
 ABANDON_GRACE_SECONDS = 20 * 60
 
 
-def _reoffer_block(reason: str) -> str:
+def _reoffer_block(reason: str, *, prior: tuple[int, ...] | list[int] = (),
+                   findings_appended: int = 0) -> str:
     """The banner an item gets when it is being offered again.
 
     Worded per verdict. "Never reached a verdict" was true of every re-offer
     until the review rung existed; a review refusal IS a verdict on the
     change, and the next round's first move is to read the findings and
     resume the branch, not to start over.
+
+    `prior` is what earlier rounds of this item filed or merged into. A
+    re-offered round told nothing re-derives the same peripheral findings and
+    files them again — #549 ran four times in 110 minutes and filed ten
+    children, three of them one finding — so the ids are put in front of it
+    with the one instruction that stops that: append, do not re-file.
     """
     if not reason:
         return ""
+    return _reoffer_verdict(reason) + _reoffer_memory(prior, findings_appended)
+
+
+def _reoffer_memory(prior, findings_appended: int) -> str:
+    if not prior and not findings_appended:
+        return ""
+    parts = []
+    if prior:
+        ids = " ".join(f"#{i}" for i in prior)
+        parts.append(f"**Already filed by earlier rounds of this item: {ids} — do not "
+                     f"file these again.** If you have more on one of them, "
+                     f"`backlog_write_task(task_id=<id>, description_mode=\"append\")`.")
+    if findings_appended:
+        parts.append(f"Earlier rounds also appended {findings_appended} finding(s) under "
+                     f"`## Findings` on this item; read them before you re-derive anything.")
+    return " ".join(parts) + "\n\n"
+
+
+def _reoffer_verdict(reason: str) -> str:
     verdict = reason.split(":", 1)[0].strip()
     if verdict == "review_retry":
         m = re.search(r"`automod/(SM_[0-9_]+)`", reason)
@@ -417,6 +451,16 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
             logger.info("backlog #%s: %s → %s", r["item_id"], r["from"], r["to"])
     except Exception as exc:
         logger.warning("reconcile_statuses failed: %s", exc)
+    try:
+        # The hard bound: a self-filed draft nothing picked up in a month is
+        # closed, tagged, reopenable. Same rule as the two above — never takes
+        # the scheduler down. Off: held items only accumulate, visible in the
+        # triage skip summary and the scorecard gauge, never lost.
+        for r in B.expire_stale_spawns(S.LEDGER_PATH,
+                                       enabled=bool(src_cfg.get("expire_spawns", True))):
+            logger.info("backlog #%s expired after %s d untouched", r["item_id"], r["age_days"])
+    except Exception as exc:
+        logger.warning("expire_stale_spawns failed: %s", exc)
     free, why = _loop_is_free()
     if not free:
         logger.info("autocode: not queueing — %s", why)
@@ -501,10 +545,19 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
         round_label=f"item{candidate.id}",
         # A re-offer is not a fresh start. The previous round's branch may
         # still hold the work, or a landing may have been reverted, and a
-        # round told nothing re-derives it — or redoes it.
-        reoffer=_reoffer_block(B.reoffer_reason(S.LEDGER_PATH, candidate.id)),
+        # round told nothing re-derives it — or redoes it. Nor re-files it:
+        # the ids earlier rounds filed ride along.
+        reoffer=_reoffer_block(
+            B.reoffer_reason(S.LEDGER_PATH, candidate.id),
+            prior=B.prior_spawned(S.LEDGER_PATH, candidate.id),
+            findings_appended=sum(r["findings_appended"]
+                                  for r in B.prior_rounds(S.LEDGER_PATH, candidate.id))),
     )
     want_outcome = bool((item.payload or {}).get("structured_outcome", True))
+    # Taken BEFORE the turn: an id the turn claims that is at or below this
+    # already existed, so it is a merge (or a citation), not a spawn.
+    id_floor = B.max_item_id()
+    body_before = candidate.body
     try:
         run = await run_prompt_in_session(
             prompt, title=f"autocode #{candidate.id}: {candidate.name[:48]}",
@@ -602,13 +655,16 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
         except Exception as exc:  # noqa: BLE001 — an announcement never fails a round
             logger.warning("announce failed: %s", exc)
     claimed = B.parse_spawned_line(run.get("text") or "")
-    spawned = B.existing_ids(claimed)
+    spawned, merged = B.split_claimed(claimed, id_floor=id_floor, self_id=candidate.id)
+    # Findings are counted off the item file, not the report.
+    after = B.load_item(candidate.path)
+    findings_appended = B.count_findings(body_before, after.body if after else body_before)
     # Recorded, not enforced — the items are on disk before this line runs.
     # Worth a warning of its own when the round landed nothing: that is the
     # shape that converts one problem into six and solves none.
-    over_cap = max(0, len(spawned) - (SPAWN_CAP + 1))
+    over_cap = max(0, len(spawned) - SPAWN_CAP)
     if over_cap:
-        logger.warning("backlog #%s filed %d item(s) over the cap of %d(+1)%s",
+        logger.warning("backlog #%s filed %d item(s) over the cap of %d%s",
                        candidate.id, over_cap, SPAWN_CAP,
                        " while landing nothing" if not (round_id or vault_commits) else "")
     S.append_event({"event": "backlog_implement", "item_id": candidate.id,
@@ -618,8 +674,10 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
                     "surface": triage.get("surface") or "code",
                     "stop_reason": run.get("stop_reason"),
                     "num_turns": run.get("num_turns"),
-                    "spawned": spawned,
-                    "spawned_unverified": [i for i in claimed if i not in spawned],
+                    "spawned": spawned, "merged": merged, "id_floor": id_floor,
+                    "findings_appended": findings_appended,
+                    "spawned_unverified": [i for i in claimed if i not in spawned
+                                           and i not in merged and i != candidate.id],
                     # The finalizer's verdict on the acceptance check, and why
                     # there is none when there is none — a finalizer that
                     # quietly stopped working must not look like one working.

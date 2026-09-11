@@ -517,6 +517,34 @@ def existing_ids(ids) -> list[int]:
     return out
 
 
+def max_item_id() -> int:
+    """The highest id on disk right now. Taken BEFORE a worker turn so the
+    ids it claims afterwards can be split into what it created and what it
+    merged into (see `split_claimed`)."""
+    top = 0
+    for path in BACKLOG_DIR.glob("*.md"):
+        m = re.match(r"^(\d+)[-_]", path.name)
+        if m:
+            top = max(top, int(m.group(1)))
+    return top
+
+
+def split_claimed(claimed, *, id_floor: int, self_id: int) -> tuple[list[int], list[int]]:
+    """`(spawned, merged)` from the ids a turn claims under SPAWNED.
+
+    Mechanical, not self-reported: an id above the floor recorded before the
+    turn is an item this turn created; an id at or below it is an item that
+    already existed — a write-time merge (`backlog_write_task` answered
+    `merged_into`), or the model citing an item it found. Both are filed
+    findings, neither is a spawn. #370's finished row listed itself and a
+    pre-existing #221 as spawns, which is what this separates.
+    """
+    present = existing_ids(claimed)
+    spawned = [i for i in present if i > int(id_floor)]
+    merged = [i for i in present if i <= int(id_floor) and i != int(self_id)]
+    return spawned, merged
+
+
 def triaged_ids(ledger: Path) -> dict[int, str]:
     """{item_id: verdict} for items with a TERMINAL verdict.
 
@@ -829,6 +857,62 @@ def reoffer_reason(ledger: Path, item_id: int) -> str:
     """
     verdict, detail = implement_outcomes(ledger).get(int(item_id), ("", ""))
     return "" if verdict in ("", "spent") else f"{verdict}: {detail}"
+
+
+def prior_rounds(ledger: Path, item_id: int) -> list[dict]:
+    """Every finished implement turn for the item: what it filed, what it
+    merged into, how many findings it appended. Old rows lack the newer keys."""
+    out: list[dict] = []
+    for d in _ledger_events(ledger, "backlog_implement"):
+        if int(d["item_id"]) != int(item_id) or d.get("phase") != "finished":
+            continue
+        out.append({"round_id": str(d.get("round_id") or ""),
+                    "spawned": _ints(d.get("spawned")),
+                    "merged": _ints(d.get("merged")),
+                    "findings_appended": int(d.get("findings_appended") or 0),
+                    "ts": d.get("ts")})
+    return out
+
+
+def prior_spawned(ledger: Path, item_id: int) -> list[int]:
+    """Ids earlier rounds of this item filed or merged into, in ledger order.
+
+    A re-offered round told nothing re-derives the same peripheral findings
+    and files them again: #549 ran four times in 110 minutes and filed ten
+    children, three of them one finding. This is what the next round is
+    shown so it appends instead.
+    """
+    seen: list[int] = []
+    for r in prior_rounds(ledger, item_id):
+        for i in r["spawned"] + r["merged"]:
+            if i not in seen:
+                seen.append(i)
+    return seen
+
+
+_FINDINGS_HEADING = re.compile(r"^##\s+Findings\b", re.M)
+_BULLET = re.compile(r"^\s*[-*]\s+\S")
+
+
+def _findings_bullets(body: str) -> int:
+    """Bullets under every `## Findings…` heading, up to the next `## `."""
+    count = 0
+    lines = (body or "").splitlines()
+    inside = False
+    for line in lines:
+        if line.startswith("## "):
+            inside = bool(_FINDINGS_HEADING.match(line))
+            continue
+        if inside and _BULLET.match(line):
+            count += 1
+    return count
+
+
+def count_findings(body_before: str, body_after: str) -> int:
+    """How many findings a round appended to its item — counted off the file,
+    not the report, so a round that says it appended three and appended none
+    reads as none."""
+    return max(0, _findings_bullets(body_after) - _findings_bullets(body_before))
 
 
 # Every landed item stayed open. Nine promotions settled in the loop's first
@@ -1186,6 +1270,10 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
     # First, anything the pass below is structurally unable to see. `current`
     # is read after it so the rescued items are judged in this same pass.
     moved: list[dict] = rescue_off_vocabulary(ledger, boards)
+    # A hand reopen of an expired item is a status move the loop did not
+    # make; the tag comes off here the way `needs-human` rides its move.
+    for iid in clear_expired_on_reopen(ledger, boards):
+        moved.append({"item_id": iid, "from": "done", "to": TRIAGE_POOL_STATUS})
     current = {i.id: i.status for i in open_items(boards)}
     for iid, want in desired_statuses(ledger, boards, open_round_items=open_round_items).items():
         status, why = want[0], want[1]
@@ -1245,14 +1333,50 @@ def is_self_spawned(item: Item) -> bool:
     return any(t in SPAWN_TAGS for t in item.tags)
 
 
-def is_quarantined(item: Item) -> bool:
-    """A freshly self-filed item is not a triage candidate.
+# A self-filed item that nothing picked up. Closed, not deleted: the file
+# stays on disk with the tag, and a human setting its status back to `draft`
+# reopens it (the reconciler strips the tag and releases it into the pool).
+EXPIRED_TAG = "expired"
+# Never expired: a member's fate is its umbrella's, an umbrella is confirmed
+# work, a `needs-human` item is waiting on a decision, and an expired item
+# has already been judged once.
+EXPIRY_EXEMPT_TAGS = frozenset({"grouped", "umbrella", NEEDS_HUMAN_TAG, EXPIRED_TAG})
+
+
+def expired_ids(ledger: Path) -> set[int]:
+    return {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_expired")}
+
+
+def group_kept_ids(ledger: Path) -> set[int]:
+    """Items a group triage judged `keep` — distinct work, back in the single
+    pool. Written by the cluster half of the loop; read here so a kept item
+    is released from quarantine the moment it is judged."""
+    out: set[int] = set()
+    for d in _ledger_events(ledger, "backlog_group_triage", require_item=False):
+        judged = d.get("judged") or {}
+        if isinstance(judged, dict):
+            for k, v in judged.items():
+                if str(v) == "keep":
+                    try:
+                        out.add(int(k))
+                    except (TypeError, ValueError):
+                        continue
+    return out
+
+
+def released_ids(ledger: Path) -> set[int]:
+    """Self-filed items the pass may triage after all."""
+    return expired_ids(ledger) | group_kept_ids(ledger)
+
+
+def is_quarantined(item: Item, *, released: frozenset[int] | set[int] = frozenset()) -> bool:
+    """A self-filed item is not a single-item triage candidate.
 
     Triage asks one question: does this old claim still describe the system?
-    An item this loop filed minutes ago, from a check it just ran against
-    live code with file paths and line numbers, cannot answer it — it is not
-    stale, by construction. Re-asking costs a 90-turn session to re-confirm
-    what the previous session proved.
+    An item this loop filed, from a check it ran against live code with file
+    paths and line numbers, cannot answer it — it is not stale, by
+    construction. Re-asking costs a 90-turn session to re-confirm what the
+    previous session proved.
 
     That waste is not the reason for this gate, though. The reason is that
     `select_candidate` reads open items and `OPEN_STATUSES` includes `draft`,
@@ -1265,12 +1389,16 @@ def is_quarantined(item: Item) -> bool:
     of those 122 were the loop's own output. No cap on spawns per run fixes
     that shape; only cutting the edge does.
 
-    Quarantine, not exclusion: a spawned item that nobody implements really
-    can go stale, so it becomes a candidate again once it is old enough for
-    that to be a real question. Until then the pass has nothing to tell us
-    about it.
+    Age does NOT release an item any more. The first cut let a spawned item
+    back into the pool at 30 days, and by 2026-09-11 that was 291 items due
+    to re-enter triage in October, each spawning ~2 more. The exits now are
+    the ones that do not re-enter the queue they came out of: the nightly
+    clustering pass (which ignores quarantine — its question is consolidation,
+    not staleness), a group triage that judges the item `keep`, expiry
+    (`expire_stale_spawns`), and a human reopening an expired item. Those are
+    `released`.
     """
-    return is_self_spawned(item) and item.age_days < SPAWN_TRIAGE_MIN_AGE_DAYS
+    return is_self_spawned(item) and int(item.id) not in released
 
 
 def triage_pool(ledger: Path,
@@ -1285,13 +1413,71 @@ def triage_pool(ledger: Path,
     stop noticing that the board is growing.
     """
     seen = triaged_ids(ledger)
+    released = released_ids(ledger)
     # `draft` only: that is where an item waits to be judged. `up_next` is the
     # implement pool and `in_progress` is a round in flight; an untriaged item
     # in either is a dead state the reconciler moves back here.
     untriaged = [i for i in open_items(boards)
                  if i.id not in seen and i.status == TRIAGE_POOL_STATUS]
-    fresh = [i for i in untriaged if not is_quarantined(i)]
+    fresh = [i for i in untriaged if not is_quarantined(i, released=released)]
     return fresh, len(untriaged) - len(fresh)
+
+
+def expire_stale_spawns(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                        enabled: bool = True,
+                        max_age_days: int = SPAWN_TRIAGE_MIN_AGE_DAYS) -> list[dict]:
+    """Close self-filed drafts that nothing picked up in `max_age_days`.
+
+    The hard bound on the board. Everything that could have taken the item
+    has had a month: clustering, group triage, a human. Closing it is the
+    honest record that nothing did — the text stays, tagged, and a hand
+    reopen brings it back (see `clear_expired_on_reopen`). Human-authored
+    items are never touched: the tag test is `is_self_spawned`, not `draft`.
+    """
+    if not enabled:
+        return []
+    from scripts.automod import state as S
+    seen = triaged_ids(ledger)
+    judged = set(seen) | expired_ids(ledger) | group_kept_ids(ledger)
+    judged |= {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
+    out: list[dict] = []
+    for item in open_items(boards):
+        if not is_self_spawned(item) or item.status != TRIAGE_POOL_STATUS:
+            continue
+        if item.id in judged or (set(item.tags) & EXPIRY_EXEMPT_TAGS):
+            continue
+        if item.age_days < int(max_age_days):
+            continue
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        if fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS):
+            continue
+        why = (f"expired: self-filed {item.age_days} d ago and never triaged, clustered "
+               f"or picked up; reopen by setting status back to draft")
+        if not _apply_status(item.path, "done", why, add_tags=(EXPIRED_TAG,)):
+            continue
+        spawned_by = next((t for t in item.tags if t in SPAWN_TAGS), "")
+        S.append_event({"event": "backlog_expired", "item_id": item.id,
+                        "age_days": item.age_days, "name": item.name[:200],
+                        "spawned_by": spawned_by}, path=ledger)
+        out.append({"item_id": item.id, "age_days": item.age_days})
+    return out
+
+
+def clear_expired_on_reopen(ledger: Path,
+                            boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[int]:
+    """An OPEN item still carrying `expired` was reopened by hand. Strip the
+    tag and say so; `expired_ids` keeps it released, so it is now a triage
+    candidate and is never expired twice — a reopen is a decision."""
+    from scripts.automod import state as S
+    out: list[int] = []
+    for item in open_items(boards):
+        if EXPIRED_TAG not in item.tags:
+            continue
+        if tag_item(item.id, remove=(EXPIRED_TAG,)):
+            note_item(item.id, "reopened by hand after expiry; back in the triage pool")
+            S.append_event({"event": "backlog_unexpired", "item_id": item.id}, path=ledger)
+            out.append(item.id)
+    return out
 
 
 def select_candidate(ledger: Path,
@@ -1373,6 +1559,7 @@ def tag_item(item_id: int, *, add: tuple[str, ...] = (), remove: tuple[str, ...]
 def record_verdict(item: Item, verdict: str, evidence: str, *,
                    check: str = "", close: bool = False,
                    spawned: list[int] | tuple[int, ...] = (),
+                   merged: list[int] | tuple[int, ...] = (),
                    acceptance: str = "",
                    acceptance_clauses: list[str] | tuple[str, ...] = ()) -> Path:
     """Append the verdict to the item's activity log, optionally closing it.
@@ -1393,6 +1580,8 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         entry += f" Check: `{check}`"
     if spawned:
         entry += " Filed as new items: " + ", ".join(f"#{i}" for i in spawned) + "."
+    if merged:
+        entry += " Merged findings into: " + ", ".join(f"#{i}" for i in merged) + "."
     log = list(fm.get("activity_log") or [])
     log.append(entry)
     fm["activity_log"] = log
@@ -1418,6 +1607,8 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         section += f"\n**Premise check:**\n```\n{check.strip()}\n```\n"
     if spawned:
         section += "\n**Filed as new items:** " + ", ".join(f"#{i}" for i in spawned) + "\n"
+    if merged:
+        section += "\n**Merged findings into:** " + ", ".join(f"#{i}" for i in merged) + "\n"
     if acceptance.strip():
         # The item is the handoff. A contract that lives only in the ledger
         # and a transcript is one the next reader of the item never sees.

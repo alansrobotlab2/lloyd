@@ -410,8 +410,13 @@ def test_parse_spawned(value, ids):
 
 def test_spawned_ids_are_verified_on_disk_then_recorded_on_ledger_and_item(isolated, monkeypatch):
     write_item(isolated, 7)
-    write_item(isolated, 401, status="draft", days_old=0, name="Survivor")
-    monkeypatch.setattr(C, "run_prompt_in_session", _fake_turn(VERDICT_SPAWNING))
+
+    async def turn(prompt, **kw):
+        # Filed DURING the turn: an id that existed before it is a merge.
+        write_item(isolated, 401, status="draft", days_old=0, name="Survivor")
+        return {"text": VERDICT_SPAWNING, "session_id": "s", "stop_reason": "stop",
+                "num_turns": 12, "errors": []}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
     out = asyncio.run(M.execute(_Item()))
     assert out["verdict"] == "stale"
     ev = S.read_events(path=S.LEDGER_PATH)[-1]
@@ -422,6 +427,19 @@ def test_spawned_ids_are_verified_on_disk_then_recorded_on_ledger_and_item(isola
     assert "#999" not in text
 
 
+def test_a_pre_existing_id_under_spawned_is_recorded_as_a_merge(isolated, monkeypatch):
+    """`backlog_write_task` answers `merged_into: N` when an open item already
+    covers the finding, and the prompt says to list N under SPAWNED. The
+    ledger tells the two apart by the id floor taken before the turn."""
+    write_item(isolated, 7)
+    write_item(isolated, 401, status="draft", days_old=0, name="Survivor")
+    monkeypatch.setattr(C, "run_prompt_in_session", _fake_turn(VERDICT_SPAWNING))
+    asyncio.run(M.execute(_Item()))
+    ev = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert ev["spawned"] == [] and ev["merged"] == [401] and ev["id_floor"] == 401
+    assert "Merged findings into: #401" in next(isolated.glob("7-*.md")).read_text()
+
+
 def test_parse_verdict_carries_spawned():
     assert M.parse_verdict(VERDICT_SPAWNING)["spawned"] == [401, 999]
     assert M.parse_verdict(VERDICT_OK)["spawned"] == []
@@ -429,16 +447,20 @@ def test_parse_verdict_carries_spawned():
 
 def test_implementer_records_what_it_filed(isolated, monkeypatch):
     write_item(isolated, 2)
-    write_item(isolated, 410, status="draft", days_old=0, name="Found on the way")
     _confirm(2)
     monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
-    monkeypatch.setattr(C, "run_prompt_in_session",
-                        _fake_turn("gate: 7/7 ok\nlanded.\n\nSPAWNED: #410 #411\n"))
+
+    async def turn(prompt, **kw):
+        write_item(isolated, 410, status="draft", days_old=0, name="Found on the way")
+        return {"text": "gate: 7/7 ok\nlanded.\n\nSPAWNED: #410 #411\n", "session_id": "s",
+                "stop_reason": "stop", "num_turns": 12, "errors": []}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
     out = asyncio.run(I.execute(_Item()))
     assert out["status"] == "success"
     ev = [e for e in S.read_events(path=S.LEDGER_PATH)
           if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
     assert ev["spawned"] == [410] and ev["spawned_unverified"] == [411]
+    assert ev["merged"] == [] and ev["findings_appended"] == 0
     assert B.parse_spawned_line("no line here") == []
 
 
@@ -890,6 +912,32 @@ def test_the_re_offer_reason_reaches_the_next_round(isolated):
     block = _reoffer_block(reason)
     assert "offered again" in block and "automod/SM_398" in block
     assert _reoffer_block("") == "", "a first attempt gets no banner"
+
+
+def test_the_re_offer_block_lists_what_earlier_rounds_filed(isolated):
+    """#549 ran four times in 110 minutes and filed ten children, three of
+    them one finding. A re-offered round is shown the ids and told to append."""
+    from workers.sources.autocode import _reoffer_block
+    write_item(isolated, 398)
+    _confirm(398)
+    S.append_event({"event": "backlog_implement", "item_id": 398, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 398, "phase": "finished",
+                    "round_id": "SM_A", "stop_reason": "turn_timeout", "num_turns": 40,
+                    "spawned": [601, 602], "merged": [77], "findings_appended": 2},
+                   path=S.LEDGER_PATH)
+    prior = B.prior_spawned(S.LEDGER_PATH, 398)
+    assert prior == [601, 602, 77]
+    n = sum(r["findings_appended"] for r in B.prior_rounds(S.LEDGER_PATH, 398))
+    block = _reoffer_block(B.reoffer_reason(S.LEDGER_PATH, 398), prior=prior, findings_appended=n)
+    assert "#601 #602 #77" in block and "do not file these again" in block
+    assert "appended 2 finding(s)" in block
+    assert _reoffer_block("", prior=prior) == "", "no banner without a re-offer verdict"
+    # An old row without the newer keys reads as nothing filed.
+    S.append_event({"event": "backlog_implement", "item_id": 398, "phase": "finished",
+                    "round_id": "SM_B", "stop_reason": "stop", "num_turns": 40},
+                   path=S.LEDGER_PATH)
+    assert B.prior_spawned(S.LEDGER_PATH, 398) == [601, 602, 77]
 
 
 def test_the_prompt_and_the_skill_both_cover_a_test_that_pins_old_behaviour(isolated):

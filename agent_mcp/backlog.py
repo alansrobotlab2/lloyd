@@ -16,6 +16,7 @@ import yaml
 from mcp.types import Tool
 
 from agent_mcp._shared import parse_frontmatter_text, text_result
+from agent_mcp import backlog_similar as SIM
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import normalize_tags
 
@@ -119,7 +120,14 @@ async def list_tools():
             "For new tasks, name/description/board are required. On update, any omitted "
             "field is left unchanged. By default, a new description passed on update is "
             "APPENDED to the existing body — pass description_mode='replace' to overwrite "
-            "or 'prepend' to push the new text above the existing body."
+            "or 'prepend' to push the new text above the existing body. "
+            "New tasks are checked against the board before they are written: every "
+            "create returns `similar` (existing items that look like this one, best "
+            "first). A create tagged `spawned-by-*` whose finding an open item already "
+            "covers is MERGED into that item instead — the description is appended "
+            "under a 'Merged finding' heading, the activity log names the session — "
+            "and the result carries `merged_into` with that item's id; cite that id "
+            "as what you filed. Pass `force: true` to create regardless."
         ), inputSchema={
             "type": "object",
             "properties": {
@@ -134,6 +142,7 @@ async def list_tools():
                 "blocked": {"type": "boolean", "description": "Mark the task as blocked on something external"},
                 "assigned": {"type": "boolean", "description": "Mark the task as claimed by an agent or person"},
                 "activity": {"type": "string", "description": "Activity log message"},
+                "force": {"type": "boolean", "description": "Create even when an open item looks like a duplicate (skips the merge; `similar` is still returned)"},
             },
             # NOT unconditionally required: these three are needed only when
             # CREATING (no task_id), which _handle_write enforces with a clear
@@ -248,6 +257,8 @@ def _handle_get(args: dict) -> str:
 def _handle_write(args: dict) -> str:
     task_id = args.get("task_id")
     now = datetime.now().isoformat()
+    creating = task_id is None
+    similar: list[dict] = []
 
     # Validate required fields for new tasks
     if task_id is None:
@@ -263,6 +274,13 @@ def _handle_write(args: dict) -> str:
         if not task:
             return json.dumps({"success": False, "error": f"Task {task_id} not found"})
     else:
+        # Is this finding already on the board? Advisory for a human's write;
+        # for the loop's own (`spawned-by-*`) writes a strong match is merged
+        # into the existing item rather than filed beside it. Never blocks a
+        # write: any failure in here costs the `similar` list and nothing else.
+        similar, merged = _dedupe(args)
+        if merged is not None:
+            return merged
         max_id = 0
         pattern = re.compile(r"^(\d+)[-_].*\.md$")
         if BACKLOG_DIR.exists():
@@ -364,5 +382,84 @@ def _handle_write(args: dict) -> str:
             "fallback could not read)."})
     if not save_task(task):
         return json.dumps({"success": False, "error": "Failed to save task"})
-    return json.dumps({"success": True, "task_id": task_id, "message": "Task updated"})
+    if creating:
+        return json.dumps({"success": True, "task_id": task_id, "created": True,
+                           "similar": similar, "message": "Task created"})
+    return json.dumps({"success": True, "task_id": task_id, "created": False,
+                       "message": "Task updated"})
+
+
+# Tags that mark a write as the loop's own. `backlog_write_task` puts one on
+# every item triage or an implement round files; a human's write carries none
+# and is only ever advised, never merged.
+_SPAWN_TAG_PREFIX = "spawned-by-"
+# Writes that must never be folded into an existing item however similar they
+# read: an umbrella's description names the members it consolidates (so it
+# matches every one of them), and a blocker is the one item an implement
+# round is still allowed to file.
+_NEVER_MERGE_TAGS = frozenset({"umbrella", "blocker"})
+
+
+def _dedupe(args: dict) -> tuple[list[dict], str | None]:
+    """`(similar, merged_result)` for a create. `merged_result` is the JSON
+    string to return when the write was folded into an existing item."""
+    try:
+        cfg = SIM.dedupe_config()
+        if not cfg.get("enabled", True):
+            return [], None
+        tags = normalize_tags(args.get("tags")) if args.get("tags") is not None else []
+        similar = SIM.similar_items(str(args.get("name") or ""),
+                                    str(args.get("description") or ""),
+                                    args.get("board"), backlog_dir=BACKLOG_DIR, cfg=cfg)
+        spawn_write = any(str(t).startswith(_SPAWN_TAG_PREFIX) for t in tags)
+        mergeable = (spawn_write and not bool(args.get("force")) and cfg.get("merge", True)
+                     and not (_NEVER_MERGE_TAGS & set(tags)))
+        target = SIM.merge_target(similar, cfg=cfg) if mergeable else None
+        if target is None:
+            SIM.log_decision({"action": "created" if similar or spawn_write else "created_quiet",
+                              "name": str(args.get("name") or "")[:120],
+                              "spawn_write": spawn_write, "forced": bool(args.get("force")),
+                              "top": similar[:3]})
+            return similar, None
+        out = _merge_into(target, args, similar)
+        if out is None:
+            return similar, None
+        return similar, out
+    except Exception:  # noqa: BLE001 — a dedupe failure never blocks a write
+        return [], None
+
+
+def _merge_into(target: dict, args: dict, similar: list[dict]) -> str | None:
+    """Append the would-be item onto `target`. None when the target cannot be
+    written (missing, or YAML the writer refuses to round-trip) — the caller
+    then creates, because the finding must land somewhere."""
+    task = load_task(int(target["id"]))
+    if not task or task.get("_yaml_broken"):
+        return None
+    try:
+        from agent_mcp._task_registry import current_session_id
+        sid = current_session_id.get("") or ""
+    except Exception:  # noqa: BLE001
+        sid = ""
+    name = str(args.get("name") or "").strip()
+    description = str(args.get("description") or "").strip()
+    who = f"session {sid}" if sid else "an automod session"
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    section = (f"\n\n## Merged finding — {stamp}\n\n"
+               f"_Filed as \"{name}\" by {who}; merged here by write-time dedupe "
+               f"(rule {target.get('rule')}, score {target.get('score')}, lexical "
+               f"{target.get('lexical')}). Re-file with `force: true` if this is a distinct "
+               f"finding._\n\n{description}")
+    task["body"] = (task.get("body") or "").rstrip() + section
+    task = add_activity(task, f"merged finding '{name[:80]}' from {who} (write-time dedupe)")
+    if not save_task(task):
+        return None
+    SIM.log_decision({"action": "merged", "into": int(target["id"]), "rule": target.get("rule"),
+                      "score": target.get("score"), "lexical": target.get("lexical"),
+                      "name": name[:120], "session": sid, "top": similar[:3]})
+    return json.dumps({"success": True, "task_id": int(target["id"]), "created": False,
+                       "merged_into": int(target["id"]), "similar": similar,
+                       "message": (f"Merged into existing task #{target['id']} — an open item "
+                                   f"already covers this finding; cite that id as what you "
+                                   f"filed (pass force: true to create a separate item)")})
 

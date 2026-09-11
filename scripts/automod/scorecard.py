@@ -19,7 +19,9 @@ The metrics, each defined where it is computed:
   1  acceptance_hit_rate     met / landed rounds with an outcome
   2  audit_delta             grader-met clauses / author-met clauses (review rung)
   3  review                  refusals, in-turn fixes, re-offers, escalations
-  4  spawn_ratio             filed / closed, triage and implement separately
+  4  spawn_ratio             filed / closed, triage and implement separately;
+                             merges, appended findings, expiries, and the
+                             open self-spawned gauge against its bound
   5  human_touch             landed rounds a human commit touched within 7 d
   6  test_honesty            findings per gated round, grader + deterministic
   7  bookkeeping             nameless deferrals, stranded landings, bare aborts
@@ -61,6 +63,58 @@ def _events(ledger: Path) -> list[dict]:
     except OSError:
         pass
     return out
+
+
+def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -> dict:
+    """How much of the board is the loop's own unjudged output, and whether
+    any of it is older than the bound expiry maintains. `over_bound` should
+    read 0; anything else means the expiry sweep is off or not running.
+    All-time events, not the window: an item triaged last month is judged.
+    """
+    # Stdlib-only modules, imported lazily so the CLI stays light: the tag
+    # set and the bound live in one place and are not restated here.
+    from scripts.automod.backlog import (EXPIRY_EXEMPT_TAGS, SPAWN_TAGS,
+                                         SPAWN_TRIAGE_MIN_AGE_DAYS)
+    judged: set[int] = set()
+    for e in all_events:
+        if e.get("item_id") is None:
+            continue
+        if e.get("event") in ("backlog_triage", "backlog_implement", "backlog_expired"):
+            try:
+                judged.add(int(e["item_id"]))
+            except (TypeError, ValueError):
+                continue
+    count = over = 0
+    oldest = 0.0
+    if backlog_dir.exists():
+        for path in backlog_dir.glob("*.md"):
+            m = re.match(r"^(\d+)[-_]", path.name)
+            if not m:
+                continue
+            fm = _frontmatter(path)
+            tags = fm.get("tags") or []
+            if isinstance(tags, str):
+                tags = [tags]
+            tags = {str(t) for t in tags}
+            if not (tags & SPAWN_TAGS):
+                continue
+            if fm.get("status") not in ("draft", "up_next", "in_progress"):
+                continue
+            count += 1
+            age = 0.0
+            try:
+                created = datetime.fromisoformat(str(fm.get("created") or "").replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                age = (now - created.timestamp()) / 86400
+            except ValueError:
+                pass
+            oldest = max(oldest, age)
+            if (fm.get("status") == "draft" and int(m.group(1)) not in judged
+                    and not (tags & EXPIRY_EXEMPT_TAGS) and age >= SPAWN_TRIAGE_MIN_AGE_DAYS):
+                over += 1
+    return {"count": count, "oldest_days": round(oldest, 1),
+            "bound_days": SPAWN_TRIAGE_MIN_AGE_DAYS, "over_bound": over}
 
 
 def _frontmatter(path: Path) -> dict:
@@ -204,10 +258,19 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     i_filed = sum(len(e.get("spawned") or []) for e in finished)
     i_closed = (sum(1 for e in by("item_landed") if e.get("closed"))
                 + sum(1 for e in by("item_closed")))
+    # Merges and appends are findings that did NOT become items — the two
+    # exits the write-time dedupe and the findings-to-parent rule opened.
+    t_merged = sum(len(e.get("merged") or []) for e in triage)
+    i_merged = sum(len(e.get("merged") or []) for e in finished)
+    appended = sum(int(e.get("findings_appended") or 0) for e in finished)
+    expired = len(by("backlog_expired"))
     spawn = {"triage_filed": t_filed, "triage_closed": t_closed,
              "triage_ratio": _rate(t_filed, t_closed),
              "implement_filed": i_filed, "implement_closed": i_closed,
-             "implement_ratio": _rate(i_filed, i_closed)}
+             "implement_ratio": _rate(i_filed, i_closed),
+             "triage_merged": t_merged, "implement_merged": i_merged,
+             "findings_appended": appended, "expired": expired,
+             "self_spawned_open": _self_spawned_gauge(_events(ledger), backlog_dir, now)}
 
     # ── 5 human touch ───────────────────────────────────────────────────
     commits = _git_log(repo, since - HUMAN_TOUCH_DAYS * 86400)
@@ -311,7 +374,7 @@ def render(row: dict) -> str:
         f"| 1 | acceptance hit rate | {_pct(a['hit_rate'])} | {a['met']} met of {a['with_outcome']} landed with an outcome ({a['landed']} landed) |",
         f"| 2 | audit delta | {_pct(au['delta'])} | grader {au['grader_met']} / author {au['author_met']} met clauses over {au['rounds_compared']} rounds |",
         f"| 3 | review refusal rate | {_pct(r['refusal_rate'])} | {r['rounds_refused']} of {r['rounds_graded']} graded rounds; {r['fixed_in_turn']} fixed in turn, {r['premise_unsound']} unsound, {r['escalated']} escalated, {r['grader_unavailable']} grader-unavailable |",
-        f"| 4 | spawn ratio | triage {s['triage_ratio'] if s['triage_ratio'] is not None else '—'} · implement {s['implement_ratio'] if s['implement_ratio'] is not None else '—'} | filed/closed: triage {s['triage_filed']}/{s['triage_closed']}, implement {s['implement_filed']}/{s['implement_closed']} |",
+        f"| 4 | spawn ratio | triage {s['triage_ratio'] if s['triage_ratio'] is not None else '—'} · implement {s['implement_ratio'] if s['implement_ratio'] is not None else '—'} | filed/closed: triage {s['triage_filed']}/{s['triage_closed']}, implement {s['implement_filed']}/{s['implement_closed']}; merged {s.get('triage_merged', 0)}+{s.get('implement_merged', 0)}, appended {s.get('findings_appended', 0)}, expired {s.get('expired', 0)}; open self-spawned {s.get('self_spawned_open', {}).get('count', 0)} (oldest {s.get('self_spawned_open', {}).get('oldest_days', 0)} d, bound {s.get('self_spawned_open', {}).get('bound_days', 0)}, over bound {s.get('self_spawned_open', {}).get('over_bound', 0)}) |",
         f"| 5 | human-touch cost | {_pct(h['rate'])} | {h['touched_within_7d']} of {h['landed']} landed rounds touched by a human commit within {HUMAN_TOUCH_DAYS} d |",
         f"| 6 | test honesty | {t['grader_findings']} findings | {t['per_gated_round'] if t['per_gated_round'] is not None else '—'} per graded round; {t['landed_with_or_true']} landed commits add `or True`/`assert True` |",
         f"| 7 | bookkeeping defects | {b['nameless_deferrals'] + b['stranded_landings'] + b['bare_aborts']} | {b['nameless_deferrals']} nameless deferrals, {b['stranded_landings']} stranded landings, {b['bare_aborts']} bare aborts |",

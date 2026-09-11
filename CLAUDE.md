@@ -389,12 +389,23 @@ drains, however good the verdicts are. Oldest-first ordering hid it, because
 self-filed items sort to the back and the pass reads as healthy right up to
 the moment the real backlog runs out — which was 6 items away when this
 landed. `backlog.is_quarantined` holds a self-filed item (tagged
-`spawned-by-triage` or `spawned-by-autocode`) out of the candidate pool until
-it is `SPAWN_TRIAGE_MIN_AGE_DAYS` old. Quarantine, not exclusion: an item
-nobody implements really can go stale, and then the question is real again.
-The gate keys on those tags and **not** on `draft`, which is the status of
-most of a stale backlog — a rule that skipped drafts would switch the pass
-off rather than bound it.
+`spawned-by-triage` or `spawned-by-autocode`) out of the single-item
+candidate pool. **Age no longer releases it.** The first cut let a spawned
+item back in at 30 days, and by 2026-09-11 that was 291 items due to re-enter
+triage in October, each spawning ~2 more. The exits now are the ones that do
+not re-enter the queue they came out of: the nightly clustering pass and a
+group triage `keep` (the cluster half of the loop), **expiry**, and a human
+reopen. `backlog.expire_stale_spawns` runs in autocode's housekeeping and
+closes a self-filed `draft` that nothing triaged, implemented, clustered or
+tagged in `SPAWN_TRIAGE_MIN_AGE_DAYS` — `done`, tagged `expired`, text kept —
+and a human setting its status back to `draft` reopens it: the reconciler
+strips the tag and `expired_ids` keeps it released, so it is never expired
+twice. Never `grouped`, `umbrella` or `needs-human` items, and never a
+human's draft: the gate keys on the spawn tags and **not** on `draft`, which
+is the status of most of a stale backlog — a rule that skipped drafts would
+switch the pass off rather than bound it. Kill switch
+`workers.sources.autocode.expire_spawns`; the scorecard's row 4 carries the
+open self-spawned count and `over_bound`, which should read 0.
 
 An exhausted queue therefore has two meanings, and `triage_pool` returns the
 held count so the skip summary can say which one it is. "Every open backlog
@@ -469,13 +480,49 @@ traffic or a nightly run (#520 → #618). Kill switches:
 `workers.sources.autocode.close_on_settle` and `structured_outcome`
 (carried in the queue payload like the budgets).
 
-`SPAWN_CAP` (3, both sources) bounds fan-out per run; overflow goes into one
-"Further findings from…" item rather than being dropped, since #229's lesson
-still holds. It is **recorded, not enforced** — the items exist on disk before
-`SPAWNED:` is parsed, so unfiling them would destroy real findings — and the
-ledger carries `spawn_cap`/`spawned_over_cap` on both event types.
-`tests/test_backlog_spawn_loop.py` pins all of it, including the
-counterfactual: with the window set to zero the same run grows the queue.
+`SPAWN_CAP` bounds fan-out per run (3 for triage, 1 for autocode); triage's
+overflow goes into one "Further findings from…" item rather than being
+dropped, since #229's lesson still holds. It is **recorded, not enforced** —
+the items exist on disk before `SPAWNED:` is parsed, so unfiling them would
+destroy real findings — and the ledger carries `spawn_cap`/`spawned_over_cap`
+on both event types. `tests/test_backlog_spawn_loop.py` pins all of it,
+including the counterfactual: with the spawn tags unrecognised the same run
+grows the queue.
+
+**Inflow is cut at the source, three ways** (2026-09-11; over the four days
+before, 453 items were created against 49 closed, and the implement source
+filed 17 per item it closed):
+
+- **`backlog_write_task` checks the board before it writes.** The triage
+  prompt used to say "run `backlog_tasks` to be sure no item already covers
+  it" — a tool with no text search, returning ~800 titles — and re-runs of
+  one item filed the same finding three times (#788/#795/#799). Now
+  `agent_mcp/backlog_similar.py` runs the qmd daemon's reranked vector search
+  over the `backlog` collection it already embeds, plus a lexical Jaccard
+  over the item heads on disk. A create tagged `spawned-by-*` whose finding
+  an open item already covers is **appended** to that item under a "Merged
+  finding" heading (the activity log names the session) and the result
+  carries `merged_into`; a human's write is only ever advised (`similar`).
+  The reranker score alone never merges — an unrelated query still scored
+  0.75 on its top hit — so rule A needs the lexical leg to agree, and rule B
+  (a strong lexical match on an item created in the last ten minutes) covers
+  the watcher's debounce, when the daemon cannot yet have seen the first
+  copy. `umbrella` and `blocker` writes are never merged; `force: true`
+  bypasses; every decision is logged to `dedupe.jsonl` in the automod state
+  dir. It fails open: a daemon that is down costs the advisory list, never
+  the write. Config `backlog.dedupe`; `merge: false` is observation mode.
+- **A finding an implement round turns up goes onto the item it came from**
+  (`## Findings (round …)`, appended with `backlog_write_task`), counted off
+  the file into `findings_appended` on the ledger; the one thing that still
+  becomes an item is a **blocker** (tag `blocker`, "Blocks #N"), one per
+  round. The "Further findings from implementing" overflow item is gone.
+- **A re-offered round is told what earlier rounds filed** (`prior_spawned`
+  in `_reoffer_block`) and told to append rather than re-file.
+
+Spawn accounting is mechanical: `max_item_id()` is taken before the turn and
+`split_claimed` reads an id at or below it as a **merge**, above it as a
+spawn — #370's finished row had listed itself and a pre-existing #221 as
+spawns. The ledger carries `merged` and `id_floor` on both event types.
 
 The verdict's `SURFACE:` picks the implementer's route. `code` and `frontend`
 run a worktree round through the gate — `web/src/**` is in scope since the

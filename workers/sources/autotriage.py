@@ -83,13 +83,17 @@ an automod round. The backlog is the one thing you write to — step 6 requires 
 usually leaves survivors: a narrower claim that still holds, a bug you noticed \
 on the way, a newer premise the old one has become. Each one becomes **its own \
 backlog item, filed by you, now** — with `backlog_write_task` (board `lloyd`, no \
-`task_id`, tag `spawned-by-triage`), before you write the verdict block. First \
-run `backlog_tasks` to be sure no item already covers it; if one does, cite its \
-number in EVIDENCE instead. Write the description as a handoff a fresh session \
-can execute alone: the claim, the current state with file paths and line \
-numbers, the check that shows it, and the first line \
-"Split from #{item_id} during automod triage on <date>". The tool returns the \
-new id; list every one under SPAWNED. **A finding that lives only in EVIDENCE \
+`task_id`, tag `spawned-by-triage`), before you write the verdict block. The \
+tool checks the board for you: when it answers `merged_into: N`, an open item \
+already covered the finding and your text was appended to it — list N under \
+SPAWNED as you would a new id (the ledger tells the two apart). Every create \
+also returns `similar`; if one of those clearly covers your finding better, \
+append to it (`task_id=N, description_mode="append"`) instead of leaving two. \
+If a merge is wrong, re-file with `force: true` and say why in EVIDENCE. Write \
+the description as a handoff a fresh session can execute alone: the claim, the \
+current state with file paths and line numbers, the check that shows it, and \
+the first line "Split from #{item_id} during automod triage on <date>". The \
+tool returns the id; list every one under SPAWNED. **A finding that lives only in EVIDENCE \
 is lost**: nobody reads this transcript for to-dos, and the item you are \
 triaging is about to be closed. Filing nothing is fine when there is nothing — \
 say `none` — but "those belong in two new items" with no items filed is the \
@@ -156,7 +160,7 @@ ACCEPTANCE: <if confirmed: what must become true for this to be done; otherwise 
 ACCEPTANCE_CLAUSES: <if confirmed: the same contract as separately checkable clauses, \
 one per line, each numbered "1." "2." … and each one thing a single test can pin; otherwise \
 the word none>
-SPAWNED: <ids of the new items you filed in step 6, e.g. #401 #402; otherwise the word none>
+SPAWNED: <ids of the items you filed or were merged into in step 6, e.g. #401 #402; otherwise the word none>
 
 The clauses are graded one by one at the gate by a reviewer who sees only the \
 item, the clauses and the diff — so a clause has to name the observable \
@@ -337,8 +341,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         # only one of them means the pass is finished.
         summary = "every open backlog item has been triaged"
         if held:
-            summary = (f"{summary}; {held} self-filed item(s) held until they are "
-                       f"{B.SPAWN_TRIAGE_MIN_AGE_DAYS} days old")
+            summary = (f"{summary}; {held} self-filed item(s) held — they are never "
+                       f"triaged one by one, and expire unclustered at "
+                       f"{B.SPAWN_TRIAGE_MIN_AGE_DAYS} days")
         return {"status": "skipped", "summary": summary}
     if held:
         logger.info("triage pool: %d candidate(s), %d self-filed item(s) quarantined",
@@ -360,6 +365,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         name=candidate.name, body=candidate.body[:body_chars], age=candidate.age_days,
         spawn_cap=SPAWN_CAP,
     )
+    # Taken BEFORE the turn: an id the turn claims that is at or below this
+    # already existed, so it is a merge (or a citation), not a spawn.
+    id_floor = B.max_item_id()
     try:
         run = await run_prompt_in_session(
             prompt, title=f"backlog triage #{candidate.id}: {candidate.name[:48]}",
@@ -431,13 +439,15 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     # What the model says it filed is a claim; the file on disk is the fact.
     # An id with no file behind it is recorded as unverified, never as a link.
-    spawned = B.existing_ids(parsed["spawned"])
-    unverified = [i for i in parsed["spawned"] if i not in spawned]
+    spawned, merged = B.split_claimed(parsed["spawned"], id_floor=id_floor,
+                                      self_id=candidate.id)
+    unverified = [i for i in parsed["spawned"]
+                  if i not in spawned and i not in merged and i != candidate.id]
     if unverified:
         logger.warning("backlog #%s: SPAWNED names %s but no such item exists",
                        candidate.id, unverified)
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
-                     check=parsed["check"], close=close, spawned=spawned,
+                     check=parsed["check"], close=close, spawned=spawned, merged=merged,
                      acceptance=parsed["acceptance"],
                      acceptance_clauses=parsed.get("acceptance_clauses") or ())
 
@@ -459,7 +469,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "acceptance": parsed["acceptance"],
                     "acceptance_clauses": parsed.get("acceptance_clauses") or [],
                     "closed": close,
-                    "spawned": spawned, "spawned_unverified": unverified,
+                    "spawned": spawned, "merged": merged, "id_floor": id_floor,
+                    "spawned_unverified": unverified,
                     # Which parser produced this verdict, and why the
                     # structured one did not when it did not. Without both,
                     # a finalizer that silently stopped working looks exactly
