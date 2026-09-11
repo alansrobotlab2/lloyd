@@ -95,6 +95,8 @@ python -m scripts.automod.round land  SM_<id>       # idle-gated, verified
 python -m scripts.automod.round bless               # HEAD becomes last-known-good
 python -m scripts.automod.round recover             # clear BROKEN, restart the stack
 python -m scripts.automod.round scorecard           # the loop's report card, last 7 d
+python -m scripts.automod.review_tools calibrate    # the review grader against known verdicts
+python -m scripts.automod.review_tools backfill     # grade past landings → review_backfill.jsonl
 python -m scripts.automod.rehearse --yes-i-mean-it  # prove rollback still works
 ```
 

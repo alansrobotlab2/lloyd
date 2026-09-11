@@ -595,6 +595,25 @@ skipped`). The first refusal leaves the edit in place for the model to fix;
 the second, or an unsound premise, reverts it — so the nightly vault sweep
 cannot land unreviewed text under someone else's commit.
 
+**Calibrating the grader.** A rung that blocks from day one has to be
+checked against diffs whose verdict is already known.
+`scripts/automod/review_tools.py` runs the grader exactly as the rung does —
+same prompt, schema and live backend — over a detached worktree of an
+already-landed commit, so nothing it does can touch a round or the ledger.
+`eval/review_calibration/*.json` are the cases: #544's own landing
+(`0f019f9`; expected `retry`, clause 4 not met, a test-honesty finding — the
+human review's verdict), the same commit with its test file stripped
+(`strip_tests`; expected `retry` on clauses alone), and two small landings
+whose authors said `met`, marked `provisional` until a human confirms.
+`calibrate` exits 1 on any disagreement and must pass before `backfill` —
+which grades every settled landing with an item into
+`review_backfill.jsonl` beside the author's verdict — means anything. That
+file is the scorecard's audit-delta baseline, and it is a separate file on
+purpose: a backfilled verdict measures the grader, and `implement_outcomes`
+must never read it as a verdict on the round. Items confirmed before clauses
+existed mostly wrote `(a) … (b) …` inline; `acceptance_clauses_of` splits
+those, so #544's prose reads as the five clauses its reviewer graded.
+
 ### 4.1 pyflakes is a diff, not a bar
 
 The tree carries 69 pre-existing findings. An absolute rule would be switched

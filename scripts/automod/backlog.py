@@ -318,7 +318,35 @@ def acceptance_clauses_of(event: dict | None, frontmatter: dict | None = None) -
             if cleaned:
                 return cleaned
     prose = acceptance_text(ev.get("acceptance"))
-    return [prose] if prose and not is_human_only(prose) else ([prose] if prose else [])
+    if not prose:
+        return []
+    if is_human_only(prose):
+        return [prose]
+    return split_inline_lettered(prose) or [prose]
+
+
+_LETTERED = re.compile(r"\(([a-h]|\d{1,2})\)\s+")
+
+
+def split_inline_lettered(text: str) -> list[str]:
+    """`(a) … ; (b) … ; (c) …` written as one paragraph, into clauses.
+
+    Eleven of the first forty confirmed acceptances enumerated sub-clauses
+    inline this way — #544's `(a)`–`(e)` among them — before a clauses field
+    existed. Fewer than two markers is prose, not a list, and comes back
+    empty so the caller keeps the whole text as one clause.
+    """
+    marks = list(_LETTERED.finditer(str(text or "")))
+    if len(marks) < 2:
+        return []
+    parts: list[str] = []
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        seg = text[m.end():end].strip().rstrip(";,").strip()
+        seg = re.sub(r"\s+(and|plus)$", "", seg)
+        if seg:
+            parts.append(seg)
+    return clean_clauses(parts)
 
 
 @dataclass
