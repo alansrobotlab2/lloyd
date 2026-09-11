@@ -757,7 +757,13 @@ workers:
     # claiming the board is clear.
     autotriage:
       enabled: true
-      interval_seconds: 3600
+      # 3600 -> 900 on 2026-09-11, back to autocode's cadence. The hour was
+      # the second half of the quarantine fix above, for a pass that filed
+      # ~2 items per item it read. Filing now merges into an existing item
+      # (backlog.dedupe) and a group run closes several at once, so the
+      # cadence is bounded by the work, not by its own output. Two pool
+      # slots and the KV gate arbitrate against an in-flight autocode round.
+      interval_seconds: 900
       max_inflight: 1
       # Group mode: when clusters.json (the nightly backlog-cluster source)
       # holds a cluster with >= group_min_items untriaged members, this run
