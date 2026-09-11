@@ -225,7 +225,7 @@ async def test_autonomy_blocked_agrees_with_dispatch_at_one_instant(
     from app.routers import autonomy as autonomy_router
 
     when = dt.datetime(2026, 9, 11, 12, 0, 0, tzinfo=dt.timezone.utc)
-    monkeypatch.setattr(autonomy, "_utcnow", lambda: when, raising=False)
+    monkeypatch.setattr(autonomy, "_utcnow", lambda: when)
     monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tmp_path)
     monkeypatch.setattr(autonomy_router, "_AUTONOMY_DIR", tmp_path)
 
@@ -281,6 +281,64 @@ async def test_autonomy_blocked_agrees_with_dispatch_at_one_instant(
     # on one side: a dependency-held dependent AND a dispatched dependent.
     assert listed[2]["blocked"] == "waiting on #1" and 2 not in due
     assert listed[4]["blocked"] is None and 4 in due
+
+
+async def test_autonomy_board_gates_against_the_directory_it_lists(
+        client, tmp_path, monkeypatch):
+    """#870, the deployment seam: one request, one autonomy directory.
+
+    The endpoint lists tasks from `app/routers/autonomy._AUTONOMY_DIR` and asks
+    the scheduler why each is held. `dependency_resolution_set()` defaults to
+    `autonomy.AUTONOMY_DIR` — a SECOND global, same default path, different
+    variable — so calling it with no argument meant a request could enumerate one
+    tree and gate it against another, and nothing would notice until a deployment
+    moved one of the two. The test moves exactly one of them and puts the opposite
+    verdict in the other: the listed board holds `#2` on its own paused `#1`, the
+    scheduler's own directory has no `#1` at all (and an unresolvable id still
+    reads as met — #558's open question, left as it is). Pre-fix the endpoint
+    resolved against the second tree and reported `blocked = None` for a task its
+    own listing says is waiting.
+    """
+    import datetime as dt
+
+    import autonomy
+    from app.routers import autonomy as autonomy_router
+
+    when = dt.datetime(2026, 9, 11, 12, 0, 0, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(autonomy, "_utcnow", lambda: when)
+
+    def write(directory, tid, **over):
+        fm = {"id": tid, "name": f"task{tid}", "status": "up_next",
+              "frequency": "daily", "priority": "medium", "skill_name": "some-skill",
+              "timeout_seconds": 600, "max_retries": 3, "failure_count": 0}
+        fm.update(over)
+        fm = {k: v for k, v in fm.items() if v is not None}
+        head = "\n".join(f"{k}: {v}" for k, v in fm.items())
+        (directory / f"{tid}-task{tid}.md").write_text(
+            f"---\n{head}\n---\n\nb\n")
+
+    listed_dir = tmp_path / "board"          # what the endpoint lists
+    other_dir = tmp_path / "elsewhere"       # what autonomy.AUTONOMY_DIR points at
+    listed_dir.mkdir()
+    other_dir.mkdir()
+    stale = (when - dt.timedelta(days=3)).isoformat()
+    write(listed_dir, 1, status="paused",
+          last_run=(when - dt.timedelta(days=2)).isoformat())
+    write(listed_dir, 2, depends_on=1, last_run=stale)
+    write(other_dir, 2, depends_on=1, last_run=stale)   # its #1 does not exist
+
+    monkeypatch.setattr(autonomy_router, "_AUTONOMY_DIR", listed_dir)
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", other_dir)
+
+    r = await client.get("/api/autonomy/tasks")
+    assert r.status_code == 200
+    got = {t["id"]: t for t in r.json()["tasks"]}
+    assert set(got) == {1, 2}, (
+        "the endpoint listed a tree other than the one it was pointed at, so "
+        "whatever verdict follows is not about this fixture")
+    assert got[2]["blocked"] == "waiting on #1", (
+        f"the board gated tasks from {listed_dir.name} against "
+        f"{other_dir.name}: {got[2]['blocked']!r}")
 
 
 # ── Memory page: entities, entity detail, entity graph ───────────────────────

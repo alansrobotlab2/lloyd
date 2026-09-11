@@ -212,7 +212,14 @@ async def autonomy_tasks(status: str = "", tag: str = ""):
         # `waiting on #N` in the same second the scheduler dispatched the
         # dependent. The whole-board reasoning now lives in
         # `autonomy.dependency_resolution_set()`, which the dispatcher reads too.
-        resolution = _a.dependency_resolution_set()
+        #
+        # It is passed `_AUTONOMY_DIR`, not left to default to `autonomy.AUTONOMY_DIR`,
+        # because this handler lists the tasks from `_AUTONOMY_DIR`: taking the
+        # default would make one request read TWO directory globals and report a
+        # board that lists one tree while gating it against another — silent until
+        # someone relocates one of them. One request, one directory, so the set the
+        # rows came from is by construction the set they were resolved against.
+        resolution = _a.dependency_resolution_set(_AUTONOMY_DIR)
         for task in tasks:
             try:
                 task["blocked"] = _a.hold_reason(task, resolution)

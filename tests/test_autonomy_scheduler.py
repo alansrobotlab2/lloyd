@@ -515,8 +515,7 @@ def test_secondary_routes_to_primary_when_disabled(monkeypatch):
 # instant T?") and the two surfaces could print opposite answers for one task in
 # one second. Every test below pins the instant through the ONE module-level
 # clock helper, `autonomy._utcnow`, and never touches a stdlib datetime
-# attribute — which is why `_pin` passes `raising=False`: the helper is new, and
-# the patch must not be the thing that fails.
+# attribute.
 #
 # Red-for-the-right-reason, measured by checking out the base commit's source and
 # re-running this section: most of these tests exercise API that did not exist
@@ -527,12 +526,28 @@ def test_secondary_routes_to_primary_when_disabled(monkeypatch):
 # it before #870 — so pre-fix it fails on the disagreement assertion itself.
 
 PIN = dt.datetime(2026, 9, 11, 12, 0, 0, tzinfo=dt.timezone.utc)
+# Six hours after the upstream of `_stale_pair` last ran, i.e. inside that
+# dependent's 12 h half-interval bound, where `PIN` is two days outside it. Used
+# only to give one test two instants that the gate must answer differently.
+AUX = PIN - dt.timedelta(days=2) + dt.timedelta(hours=6)
 
 
 def _pin(aut, monkeypatch, when=PIN):
     """Replace the single module-level clock helper. Clause 2: one helper, and
-    no patching of a stdlib `datetime` attribute anywhere in this section."""
-    monkeypatch.setattr(aut, "_utcnow", lambda: when, raising=False)
+    no patching of a stdlib `datetime` attribute anywhere in this section.
+
+    The patch is STRICT on purpose. It used to pass `raising=False` so that a
+    missing helper could not be the thing that failed a behavioural test — which
+    also meant renaming `_utcnow` would have silently turned every pin in this
+    section into a no-op, leaving one AST call-check as the only witness. A pin
+    that pins nothing is worse than a failure, so the helper's existence is
+    asserted here and a rename fails loudly, in every test in the section,
+    naming the helper.
+    """
+    assert callable(getattr(aut, "_utcnow", None)), (
+        "autonomy._utcnow is gone or not callable: the dependency gate's clock "
+        "has no single indirection to pin, so no instant can be pinned")
+    monkeypatch.setattr(aut, "_utcnow", lambda: when)
     return when
 
 
@@ -548,15 +563,29 @@ def _stale_pair(aut, up_status="paused", up_age_days=2, dep_age_days=3):
 async def test_gate_is_a_function_of_its_inputs(aut, monkeypatch):
     """Clause 1. Two calls, the same two task dicts, the same pinned instant →
     the same value. Before #813 the gate built its own `now` twice, so this
-    question could not even be asked, let alone answered twice the same way."""
-    _pin(aut, monkeypatch)
+    question could not even be asked, let alone answered twice the same way.
+
+    The fixture straddles the freshness bound on purpose, because the first
+    version of this test did not: all three of its calls landed on `False`, so a
+    gate that ignored `now=` and read the module clock regardless would have
+    passed it. Same two dicts, two instants, two answers here — `PIN` puts the
+    upstream 2 days behind a 12 h half-interval bound (not met), while `AUX`, 42 h
+    earlier, sits 6 h behind that same bound and after the dependent's own run
+    (met). So the parameter is doing the work, and the helper is the only thing
+    that supplies it when it is absent."""
+    _pin(aut, monkeypatch, when=AUX)
     _stale_pair(aut)
     tasks = [read_task(aut, 1), read_task(aut, 2)]
     first = aut._is_dependency_met(tasks[1], tasks, now=PIN)
     second = aut._is_dependency_met(tasks[1], tasks, now=PIN)
     assert first is False and second is False
-    # And with no explicit instant, the pinned helper is still the only clock,
-    # so the answer is the same one — reproducible across runs, not just calls.
+    # Same dicts, the module clock's instant: a DIFFERENT answer, which is what
+    # shows `now=` is honoured rather than decorative — and that when it is
+    # absent the pinned helper, not the wall clock, is what the gate reads.
+    assert aut._is_dependency_met(tasks[1], tasks) is True
+    # Re-pin to the instant the explicit calls used and the helper reproduces
+    # them exactly: reproducible across runs, not merely across calls.
+    _pin(aut, monkeypatch, when=PIN)
     assert aut._is_dependency_met(tasks[1], tasks) is first
     # The two in-body wall-clock reads are gone; one indirection replaced them.
     # Read the CALLS, not the text: `_utcnow`'s own docstring quotes the literal,
@@ -641,6 +670,21 @@ async def test_paused_upstream_never_both_holds_and_dispatches(aut, monkeypatch)
     assert not (held == "waiting on #1" and 2 in due), (
         f"board and scheduler disagreed at one instant: board={held!r}, "
         f"get_due_tasks={due}")
+    # Positive control, in the same test, because the assertion above is
+    # negative and would equally pass on a fixture where nothing is EVER due —
+    # the shape that makes a green reproduction test prove nothing. Repair the
+    # upstream (back to `up_next`, and 1 h old, inside the 12 h bound) and the
+    # same two calls must now agree the other way: dispatched, and held by
+    # nothing. The dependent is daily and last ran 3 days ago, so its own
+    # interval is long past and the interval is not what is being tested here.
+    write_task(aut, 1, last_run=(PIN - dt.timedelta(hours=1)).isoformat())
+    board = [t for t in (aut._parse_task_file(p)
+                         for p in sorted(aut.AUTONOMY_DIR.glob("*.md"))) if t]
+    due = [int(t["id"]) for t in aut.get_due_tasks()]
+    dep = next(t for t in board if int(t["id"]) == 2)
+    held = aut.hold_reason(dep, board)
+    assert 2 in due, f"repaired upstream, still not dispatched: held={held!r}, due={due}"
+    assert held is None, f"dispatched while the board still holds it: {held!r}"
 
 
 async def test_the_stall_alarm_shares_the_one_verdict(aut, monkeypatch, tmp_path):
@@ -718,3 +762,63 @@ async def test_both_gate_branches_under_one_pinned_instant(aut, monkeypatch):
     # Ran 30 h ago against the same 36 h window: inside it. Not met. This is the
     # half that only holds if the evaluation used the pinned instant.
     assert met[8] is False
+
+
+async def test_one_pool_tick_enqueues_exactly_what_the_board_calls_unheld(
+        aut, monkeypatch, tmp_path):
+    """#870 across the process seam: the worker's real tick, not a copy of it.
+
+    Dispatch has three surfaces. `get_due_tasks` and the board endpoint are
+    asserted against each other above; the third is the worker pool, whose
+    `enqueue_if_due` imports `autonomy` inside the worker module, runs
+    `get_due_tasks()` on an executor thread (scheduled_task.py:235) and writes
+    the queue rows. Asserting the shared verdict only of an in-process function
+    leaves the production claim — the pool enqueues what the board calls unheld —
+    untested, so this drives the REAL coroutine against a real WorkQueue at one
+    pinned instant. Only its out-of-process probes are stubbed: the vLLM health
+    socket, the startup file scan and the Discord alert. `_state` is module-global
+    and is reset so the tick cannot inherit an earlier test's stall streak and
+    alert its way into a false failure.
+
+    Every task here is past its OWN interval on purpose: `hold_reason` answers "is
+    anything holding this" and has no "not due yet" branch, so `blocked is None`
+    and "due" coincide only once nothing is sitting inside its window (#3 is
+    every-15min and 20 min old, past its 900 s interval and still inside #4's
+    hourly half-interval bound of 1800 s; #4 is hourly and 3 days old).
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    _pin(aut, monkeypatch)
+    _stale_pair(aut)                              # #1 paused 2 d, #2 waits on it
+    write_task(aut, 3, frequency="every-15min",
+               last_run=(PIN - dt.timedelta(minutes=20)).isoformat())
+    write_task(aut, 4, depends_on=3,
+               last_run=(PIN - dt.timedelta(days=3)).isoformat())
+
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+                                       "stall_streak": 0, "stall_alerted_at": None})
+
+    async def _no_alert(msg):
+        raise AssertionError(f"a clean tick alerted: {msg}")
+
+    monkeypatch.setattr(st, "_alert", _no_alert)
+
+    q = WorkQueue(tmp_path / "tick.db")
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+
+    enqueued = {str(i.payload.get("task_id")) for i in
+                q.list_items(source="scheduled-task", limit=500)
+                if i.state == "queued" and i.payload.get("task_id") is not None}
+    board = list(aut.dependency_resolution_set())
+    held = {str(t["id"]): aut.hold_reason(t, board, now=PIN) for t in board}
+    unheld = {tid for tid, why in held.items() if why is None}
+    assert enqueued == unheld, (
+        f"one tick enqueued {sorted(enqueued)} while the board at the same "
+        f"instant calls unheld {sorted(unheld)} (hold reasons: {held})")
+    # Non-vacuous in both directions: the reproduction sits on the held side and
+    # a satisfied dependent really reached the queue, so neither an empty queue
+    # nor an always-enqueueing one can pass this.
+    assert held["2"] == "waiting on #1" and "2" not in enqueued
+    assert held["4"] is None and "4" in enqueued
