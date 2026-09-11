@@ -476,7 +476,6 @@ def _autonomy() -> dict[str, Any]:
         upcoming: list[dict[str, Any]] = []
         failing: list[dict[str, Any]] = []
         scheduled: list[tuple[dict[str, Any], dict]] = []
-        all_fm: list[dict] = []
         total = 0
         for path in paths:
             # Only NN-name.md task files — skip _config.md, reports, notes.
@@ -486,7 +485,6 @@ def _autonomy() -> dict[str, Any]:
             if not fm:
                 continue
             total += 1
-            all_fm.append(fm)
             status = str(fm.get("status") or "draft")
             by_status[status] = by_status.get(status, 0) + 1
             row = {
@@ -511,9 +509,18 @@ def _autonomy() -> dict[str, Any]:
         try:
             import autonomy
 
+            # The one shared `depends_on` resolution set (#870), read from THIS
+            # caller's directory — which is why `dependency_resolution_set`
+            # takes one. This used to be `all_fm`, a list this endpoint built
+            # with its own `_frontmatter` parse, so the landing strip resolved
+            # dependencies with a third input while dispatch and the autonomy
+            # board used a second one; a `paused` upstream was visible here and
+            # invisible there. Membership rule and parse are now the scheduler's.
+            resolution = autonomy.dependency_resolution_set(autonomy_dir)
+
             for row, fm in scheduled:
                 try:
-                    row["blocked"] = autonomy.hold_reason(fm, all_fm)
+                    row["blocked"] = autonomy.hold_reason(fm, resolution)
                 except Exception:
                     row["blocked"] = None
             classifier = "autonomy"

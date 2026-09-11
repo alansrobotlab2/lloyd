@@ -234,6 +234,7 @@ async def test_autonomy_blocked_agrees_with_dispatch_at_one_instant(
               "frequency": "daily", "priority": "medium", "skill_name": "some-skill",
               "timeout_seconds": 600, "max_retries": 3, "failure_count": 0}
         fm.update(over)
+        fm = {k: v for k, v in fm.items() if v is not None}
         head = "\n".join(f"{k}: {v}" for k, v in fm.items())
         (tmp_path / f"{tid}-task{tid}.md").write_text(f"---\n{head}\n---\n\nb\n")
 
@@ -243,13 +244,19 @@ async def test_autonomy_blocked_agrees_with_dispatch_at_one_instant(
     # hold reason and does not dispatch either. Asking one instant to settle both
     # questions is fine; asking `blocked is None` to mean "dispatching now" is
     # only sound once no task is sitting in its window.
+    #
+    # Task 3 is `runs_per_day: 3` (a real interval — `_frequency_interval_seconds`
+    # maps hourly/daily/weekly/every-15min and divides by runs_per_day; there is
+    # no "every_6_hours" key, and a frequency it cannot map is held `no
+    # frequency`, which would have made this fixture's premise quietly false) and
+    # last ran 10 h ago: elapsed 36000 s past its own 28800 s interval, so due on
+    # its own clock, and inside task 4's 43200 s half-interval bound, so it
+    # satisfies 4.
     stale = (when - dt.timedelta(days=3)).isoformat()
     write(1, status="paused", last_run=(when - dt.timedelta(days=2)).isoformat())
     write(2, depends_on=1, last_run=stale)          # held by #870's fix
-    # 3 runs every 6 h and last ran 8 h ago: due on its own clock, and fresh
-    # enough (under task 4's 12 h half-interval bound) to satisfy 4.
-    write(3, frequency="every_6_hours",
-          last_run=(when - dt.timedelta(hours=8)).isoformat())
+    write(3, frequency=None, runs_per_day=3,
+          last_run=(when - dt.timedelta(hours=10)).isoformat())
     write(4, depends_on=3, last_run=stale)          # upstream met → dispatches
     write(5, depends_on=99, last_run=stale)         # id with no file → unresolved
 

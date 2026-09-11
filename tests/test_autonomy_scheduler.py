@@ -4,6 +4,7 @@ Pins the fixes from the 2026-09-03 fleet audit, which found ~73 GPU-hours a
 week burned on failed runs. Each test names the failure mode it prevents.
 """
 import asyncio
+import ast
 import datetime as dt
 import inspect
 import json
@@ -558,9 +559,13 @@ async def test_gate_is_a_function_of_its_inputs(aut, monkeypatch):
     # so the answer is the same one — reproducible across runs, not just calls.
     assert aut._is_dependency_met(tasks[1], tasks) is first
     # The two in-body wall-clock reads are gone; one indirection replaced them.
-    src = inspect.getsource(aut._is_dependency_met)
-    assert "datetime.datetime.now" not in src
-    assert "_utcnow()" in src
+    # Read the CALLS, not the text: `_utcnow`'s own docstring quotes the literal,
+    # and a source-text assertion would fail on someone rewording a comment.
+    tree = ast.parse(inspect.getsource(aut._is_dependency_met))
+    calls = [ast.unparse(node.func) for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and node.func is not None]
+    assert "datetime.datetime.now" not in calls, calls
+    assert "_utcnow" in calls, calls
 
 
 async def test_freshness_bound_asserted_from_both_sides(aut, monkeypatch):
@@ -656,9 +661,24 @@ async def test_the_stall_alarm_shares_the_one_verdict(aut, monkeypatch, tmp_path
                last_run=(PIN - dt.timedelta(days=10)).isoformat())
     q = WorkQueue(tmp_path / "w.db")
 
+    # A bound pair, either side of `_STALL_INTERVAL_MULT * interval` (2.5 x 3600
+    # = 9000 s) by one second. Both tasks are due; only the magnitude differs.
+    # This is what pins the POOL's clock rather than assuming it: the alarm used
+    # to read `_dt.datetime.now` locally for this comparison, and the real clock
+    # is hours past PIN here, so both tasks would report overdue and the
+    # one-second-outside case could only pass if the instant is the pinned one.
+    bound = 9000
+    write_task(aut, 4, frequency="hourly",
+               last_run=(PIN - dt.timedelta(seconds=bound + 1)).isoformat())
+    write_task(aut, 5, frequency="hourly",
+               last_run=(PIN - dt.timedelta(seconds=bound - 1)).isoformat())
+
     alarm = _grossly_overdue(q)
     due = [int(t["id"]) for t in aut.get_due_tasks()]
     assert 3 in alarm, "the alarm stopped reporting a genuinely stalled task"
+    assert 4 in alarm and 5 not in alarm, (
+        f"the alarm is not answering at the pinned instant: "
+        f"9001 s past reports={4 in alarm}, 8999 s past reports={5 in alarm}")
     assert 2 not in due and 2 not in alarm, (
         f"dispatch says due={2 in due} while the stall alarm says "
         f"{2 in alarm} — one gate, two answers")

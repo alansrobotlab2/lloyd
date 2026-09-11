@@ -255,7 +255,7 @@ def _write_run_record(task_id: int, run_id: str, status: str,
 
 # ── Scheduling logic (used by scheduled-task source) ──────────────────────────
 
-def _all_board_tasks() -> list[dict]:
+def _all_board_tasks(directory=None) -> list[dict]:
     """Every parseable task file, whatever its status or grants block.
 
     This is the BOARD — the set `depends_on` gets resolved against (#870). An
@@ -264,10 +264,15 @@ def _all_board_tasks() -> list[dict]:
     separate question that `_all_runnable_tasks` answers for the dispatch
     candidate only.
     """
-    if not AUTONOMY_DIR.exists():
+    # `directory` exists because one caller — `app/routers/dashboard.py`, the
+    # Mission Control landing strip — reads a vault-derived autonomy dir rather
+    # than `AUTONOMY_DIR`. Without a parameter it had no way to ask for the
+    # shared set, which is why it still had its own.
+    root = AUTONOMY_DIR if directory is None else Path(directory)
+    if not root.exists():
         return []
     tasks = []
-    for path in sorted(AUTONOMY_DIR.glob("*.md")):
+    for path in sorted(root.glob("*.md")):
         if not re.match(r"\d+-", path.name):
             continue  # only NN-name.md task files; skip _config.md, reports, notes
         task = _parse_task_file(path)
@@ -277,7 +282,7 @@ def _all_board_tasks() -> list[dict]:
     return tasks
 
 
-def dependency_resolution_set() -> list[dict]:
+def dependency_resolution_set(directory=None) -> list[dict]:
     """THE input `depends_on` is resolved against — scheduler and board alike.
 
     Both surfaces used to hand `_is_dependency_met` their own list: dispatch
@@ -292,8 +297,12 @@ def dependency_resolution_set() -> list[dict]:
     Deliberately NOT a decision about what an *absent* upstream means: an id
     with no file still resolves to nothing and is still treated as met. That
     boundary is #558's to move, not this function's.
+
+    `directory` is for the one caller whose board lives somewhere else (see
+    `_all_board_tasks`); it is still the same function, the same membership rule,
+    and the same parse.
     """
-    return _all_board_tasks()
+    return _all_board_tasks(directory)
 
 
 def _all_runnable_tasks(board: Optional[list[dict]] = None) -> list[dict]:

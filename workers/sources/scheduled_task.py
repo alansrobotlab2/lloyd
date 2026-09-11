@@ -113,7 +113,6 @@ def _grossly_overdue(queue: WorkQueue) -> list:
     it forever is what turned this alarm into noise. A task that is due, this
     stale, and NOT in the queue means the dispatch path itself is broken (the
     2026-05-28 silent stall this was built for)."""
-    import datetime as _dt
     import autonomy
     # One resolution set and one instant, the same pair `get_due_tasks` uses
     # (#870): this used to hand `_is_task_due` the runnable set to resolve
@@ -121,7 +120,7 @@ def _grossly_overdue(queue: WorkQueue) -> list:
     # alarm's idea of "due" was not dispatch's idea of due.
     resolution = autonomy.dependency_resolution_set()
     active = _active_task_ids(queue)
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now = autonomy._utcnow()
     overdue = []
     for t in autonomy._all_runnable_tasks(resolution):
         if not autonomy._is_task_due(t, resolution, now=now):
