@@ -132,6 +132,41 @@ const mergeMessages = (prev: ApiMessage[], next: ApiMessage[]): ApiMessage[] => 
   return different ? merged : prev
 }
 
+/** A tool call the transcript has asked for but not answered, or null.
+ *
+ *  Read off the transcript rather than off an event stream, because the
+ *  transcript is the one record that exists for a turn this browser did not
+ *  start: a call is open when an assistant row carries it and no `role:
+ *  'tool'` row answers it (or the answer is still the `⏳ Running...`
+ *  placeholder the stream path writes — see onToolStart). The newest open
+ *  call wins; a model that fans out three tools is working on the last.
+ *
+ *  Do NOT read a null here as "not running a tool". The harness persists a
+ *  call's row only when its result arrives, so while a tool executes the
+ *  polling reader sees nothing open — measured on a live session at 4s, 25s
+ *  and 45s into one 50s call, zero unanswered `tool_calls` each time. This
+ *  finds calls the log left unanswered; it does not watch the harness work. */
+const pendingToolName = (msgs: ApiMessage[]): string | null => {
+  const settled = new Set<string>()
+  for (const m of msgs) {
+    if (m.role !== 'tool' || !m.tool_call_id) continue
+    const text = m.content?.[0]?.text ?? ''
+    if (!text.startsWith('\u23F3 Running')) settled.add(m.tool_call_id)
+  }
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const calls = msgs[i].tool_calls
+    if (!calls?.length) continue
+    for (let j = calls.length - 1; j >= 0; j--) {
+      const c = calls[j]
+      if (!settled.has(c.id) && !settled.has(c.call_id)) return c.function?.name ?? null
+    }
+    // Everything on the newest tool-carrying row is answered: the turn is
+    // past that call, so an older row cannot hold the live one.
+    return null
+  }
+  return null
+}
+
 // ── memoized message row ───────────────────────────────────────────────
 
 interface MessageRowProps {
@@ -691,16 +726,44 @@ export default function ChatPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [thinking, activeToolName])
 
-  // Idle polling — refresh messages while not actively streaming.
+  // Idle polling — refresh messages while not actively streaming, and adopt
+  // a turn this component did not start.
+  //
+  // `thinking` / `sending` / `activeToolName` / `queueState` all ride the SSE
+  // stream that *this* component opened. When the turn comes from somewhere
+  // else — the Chrome side panel's service worker fires its own kickoff POST
+  // and abandons the response, an ambient injection, a second tab — those
+  // events are never seen here. Before this, the only thing that could have
+  // told us the harness was mid-turn was the single getSessionStatus call at
+  // the end of loadMessages, which races the POST and usually loses, and the
+  // poll that does re-probe status is gated on `thinking` already being true.
+  // Closed loop: the side panel rendered a transcript appearing out of
+  // nowhere with a live input and a Send button, which read as three missing
+  // features. Asking /status on every tick is what breaks it.
   useEffect(() => {
     if (!sessionKey || sending || thinking) return
     if (visible === false) return
     const load = async () => {
       try {
-        const result = await api.loadMessages(sessionKey)
+        // A failed status probe must not cost us the message refresh, and a
+        // dead backend must not clear a busy state we have no news about.
+        const [result, status] = await Promise.all([
+          api.loadMessages(sessionKey),
+          api.getSessionStatus(sessionKey).catch(() => null),
+        ])
+        let next: ApiMessage[] | null = null
         if (result.messages) {
-          const next = result.messages as ApiMessage[]
-          setMessages(prev => mergeMessages(prev, next))
+          next = result.messages as ApiMessage[]
+          setMessages(prev => mergeMessages(prev, next!))
+        }
+        if (status?.streaming) {
+          if (next) {
+            const tool = pendingToolName(next)
+            if (tool) setActiveToolName(tool)
+          }
+          setThinking(true)
+          setSending(true)
+          api.getSessionQueue(sessionKey).then(setQueueState).catch(() => { /* ignore */ })
         }
       } catch (err) {
         console.error('Failed to load messages:', err)
@@ -713,25 +776,39 @@ export default function ChatPanel({
 
   // Restored-stream polling — when we attached to an in-flight backend turn
   // without a local AbortController, watch /status until it settles.
+  //
+  // On such a turn the indicator says "Thinking..." and not "Working: <tool>",
+  // and that is the backend's doing, not a gap here: a call's `tool_calls`
+  // row is persisted only when its result arrives. Snapshots of a live
+  // session taken 4s, 25s and 45s into one 50s tool call all read zero
+  // unanswered `tool_calls` — while the tool runs, the transcript tail is the
+  // previous result plus a provisional `thinking` row. Nothing pollable names
+  // the running tool, so the adopted path only ever reports the generic
+  // state. Only the component that opened the SSE stream gets the name, from
+  // `tool_start`, and it skips this effect.
+  //
+  // `pendingToolName` is therefore write-only-if-found here: it can surface a
+  // call the log left unanswered, and must never erase a name the stream put
+  // there. Clearing happens when the turn actually ends.
   useEffect(() => {
     if (!sessionKey || !thinking || abortControllerRef.current) return
     const poll = async () => {
       try {
         const status = await api.getSessionStatus(sessionKey)
+        const result = await api.loadMessages(sessionKey)
+        if (result.messages) {
+          const next = result.messages as ApiMessage[]
+          setMessages(prev => mergeMessages(prev, next))
+          if (status.streaming) {
+            const tool = pendingToolName(next)
+            if (tool) setActiveToolName(tool)
+          }
+        }
         if (!status.streaming) {
           setThinking(false)
           setSending(false)
-          const result = await api.loadMessages(sessionKey)
-          if (result.messages) {
-            const next = result.messages as ApiMessage[]
-            setMessages(prev => mergeMessages(prev, next))
-          }
-        } else {
-          const result = await api.loadMessages(sessionKey)
-          if (result.messages) {
-            const next = result.messages as ApiMessage[]
-            setMessages(prev => mergeMessages(prev, next))
-          }
+          setActiveToolName(null)
+          setQueueState(null)
         }
       } catch { /* ignore */ }
     }

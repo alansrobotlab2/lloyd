@@ -54,8 +54,18 @@ export async function fireKickoff(
       client_id: clientId,
     }),
   })
+  if (!res.ok) {
+    // A rejected POST enqueues nothing, so there is no turn and the panel
+    // would sit on a session with nothing ever arriving. Throw rather than
+    // resolve quietly: the caller logs it, and a 503 from the self-mod drain
+    // window is at least findable in the service worker console.
+    throw new Error(`fireKickoff: ${res.status} ${await res.text()}`)
+  }
   // Close the body without reading it. The backend's generator is
-  // cancelled on disconnect but the underlying turn continues.
+  // cancelled on disconnect but the underlying turn continues. Resolving
+  // here is also the caller's barrier — the turn is enqueued by the time
+  // the response headers arrive, so awaiting this call before showing the
+  // panel the session is what lets the in-progress indicator appear.
   try {
     await res.body?.cancel()
   } catch {

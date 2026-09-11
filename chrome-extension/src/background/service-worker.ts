@@ -228,9 +228,19 @@ async function spawnSession(
   patchBrowserMetadata(sessionKey, { url, title }).catch(() => undefined)
 
   if (kickoff) {
-    fireKickoff(sessionKey, buildKickoffMessage(url), `ext_tab_${tabId}`).catch(
-      (err) => console.error("[lloyd-sw] fireKickoff failed:", err),
-    )
+    // Awaited, deliberately, and before the panel is told which session to
+    // show. `/api/message/stream` enqueues the turn before it hands back the
+    // StreamingResponse (app/routers/messages.py:1827, then :1837), so once
+    // this POST has answered the backend already counts the session as
+    // active — which means ChatPanel's first GET /status, fired the moment it
+    // mounts, lands inside the turn instead of racing it and losing. Fired
+    // fire-and-forget, the panel reached a session whose turn did not exist
+    // yet and then showed no in-progress state for the entire kickoff.
+    await fireKickoff(
+      sessionKey,
+      buildKickoffMessage(url),
+      `ext_tab_${tabId}`,
+    ).catch((err) => console.error("[lloyd-sw] fireKickoff failed:", err))
   }
 
   // Notify the panel (if open in the tab's window).

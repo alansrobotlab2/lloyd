@@ -128,7 +128,17 @@ export default function SidePanelApp() {
         <>
           <PageHeader url={state.url} title={state.title} />
           <div className="min-h-0 flex-1">
-            <ChatPanel requestedSessionKey={state.sessionKey} compact />
+            {/* Keyed by session, the way RightChatSidebar keys it: switching
+                browser tabs swaps the session, and ChatPanel's busy state
+                (thinking / sending / the running tool) is per-session local
+                state. Reusing the instance would carry a previous tab's
+                in-progress flag onto a fresh session and leave the input
+                disabled with nothing running. */}
+            <ChatPanel
+              key={state.sessionKey}
+              requestedSessionKey={state.sessionKey}
+              compact
+            />
           </div>
         </>
       ) : (
