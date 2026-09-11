@@ -38,6 +38,9 @@ __pycache__/
 !web/tsconfig.json
 !web/tsconfig.node.json
 !web/components.json
+# …and the review-rung calibration cases, which are fixtures, not state.
+# `git add -A` silently skipped them on the branch that introduced them.
+!eval/review_calibration/*.json
 
 # ─── Secrets ────────────────────────────────────────
 .env

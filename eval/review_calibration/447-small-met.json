@@ -1,0 +1,29 @@
+{
+  "name": "447-small-met",
+  "item_id": 447,
+  "round_id": "SM_20260909_204528",
+  "parent": "fe40af3816782ca09180598509c6c7a752e12d65",
+  "commit": "01219641584c35c2b0c2cfb7f117c76f851672d1",
+  "changed_paths": [
+    "scripts/verify_cited_identifier.py",
+    "tests/test_cited_identifier_verification.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "note": "A two-file landing whose author reported met; a human has not yet confirmed the expectation.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "summary": "Round SM_20260909_204528 landed: the code half of #447 (scripts/verify_cited_identifier.py + tests/test_cited_identifier_verification.py) was cherry-picked cleanly onto base fe40af38 as bd033a1+0e22de0-derived commits bd033a1/0121964, gate-passed (tests rung: '3050 passed, 2 xfailed, 11 skipped'), and autoimplement_land was invoked (detached promoter pid 2072090). The acceptance check is met and v",
+    "spawned": [
+      691,
+      692
+    ]
+  }
+}

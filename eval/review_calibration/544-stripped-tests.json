@@ -1,0 +1,27 @@
+{
+  "name": "544-stripped-tests",
+  "item_id": 544,
+  "round_id": "SM_20260910_070638",
+  "parent": "af1e8c1ae802bc57cc681977885af2ff1a9d8e10",
+  "commit": "0f019f902d045806afde30fffc336cdec32ef775",
+  "changed_paths": [
+    "agent_mcp/_tool_effects.py",
+    "agent_mcp/annotations.py",
+    "agent_mcp/main.py",
+    "app/harness/loop.py",
+    "app/harness/mcp_pool.py",
+    "app/harness/policy.py",
+    "app/routers/dashboard.py",
+    "tests/test_tool_effects.py",
+    "workers/pool.py"
+  ],
+  "strip_tests": true,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "note": "The same commit with tests/test_tool_effects.py removed before grading. Every clause is at most `partial` (no changed test can pin it), so the grader must not pass it; the deterministic prechecks see no test file and the diff has none to flag, so no honesty finding is expected — the refusal comes from the clauses.",
+  "author_outcome": null
+}

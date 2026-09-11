@@ -1,0 +1,28 @@
+{
+  "name": "392-small-met",
+  "item_id": 392,
+  "round_id": "SM_20260909_185311",
+  "parent": "ad64d31282279f93f91be895bf62c6a31fd85bf4",
+  "commit": "ce713bf39cf81d2d00b5ab1cbb0404209df4349e",
+  "changed_paths": [
+    "tests/test_trajectory_extraction.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "note": "A one-file landing whose author reported met; a human has not yet confirmed the expectation.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "summary": "Round SM_20260909_185311 (head ce713bf) \u2014 gate ok:true, \"2967 passed, 2 xfailed, 11 skipped\", canary \"real turn in 11.2s; Bash dispatched, sentinel round-tripped\"; autoimplement_land dispatched (pid 1986338), now landing -> observing. The acceptance's code half was already promoted in 75ce62d (#389's vehicle, whose acceptance absorbed #392) along with its unit pins, so this round landed the missin",
+    "spawned": [
+      665,
+      666
+    ]
+  }
+}
