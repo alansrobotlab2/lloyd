@@ -41,13 +41,6 @@ __pycache__/
 # …and the review-rung calibration cases, which are fixtures, not state.
 # `git add -A` silently skipped them on the branch that introduced them.
 !eval/review_calibration/*.json
-# …and the #552 uptake evidence: the hand-labeled dispute corpus and the table
-# built from it. These are evidence a consolidator cites, not scratch output —
-# under the blanket `*.json` above, `git add` would silently drop them and the
-# reproduction for the item (`ls eval/uptake/`) would pass locally while the
-# committed tree stayed empty.
-!eval/uptake/*.json
-!eval/uptake/labels/*.json
 
 # ─── Secrets ────────────────────────────────────────
 .env

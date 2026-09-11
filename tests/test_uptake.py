@@ -6,10 +6,12 @@ followed, or disputed afterward. So these tests are all about the measurement
 existing, being computed from real logged evidence rather than assertion, and
 being honest about the half it cannot compute.
 
-Marks: `live_engine` needs the secondary LLM answering on its port, and
-`live_vault` reads `~/obsidian` — neither is under a round's control, so the
-automod gate's hard rung skips both (`-m "not live_vault"` plus
-`-m "not live_engine"`).
+One test here needs the secondary LLM to be answering and one reads the live
+`~/obsidian` vault; neither is under a round's control. The vault reader carries
+the tree's existing `live_vault` mark, which the automod gate excludes. The
+engine reader carries no mark — it is the acceptance measurement for #552, so it
+should run on the gate — and it skips itself at runtime when the endpoint does
+not answer, so a stopped engine reports a skip and never a pass.
 """
 
 from __future__ import annotations
@@ -454,13 +456,16 @@ def test_hand_labeled_corpus_covers_the_item_s_minimum():
         assert re.match(r"^.+#\d+$", l["turn_id"]), l
 
 
-@pytest.mark.live_engine
 def test_live_holdout_precision_clears_the_stopping_threshold():
     """Step 2's stop condition, run against the real secondary engine: if
     precision < 0.70 the pipeline is not supposed to go further, and an uptake
     table built on a noisier classifier would be a machine for attributing
     blame at random."""
     import scripts.uptake_probe as probe
+
+    if uptake.classify_dispute("Built it, works now.", "it 404s on me") is None:
+        pytest.skip("secondary engine is not answering; this clause is unmeasured, "
+                    "not passed")
     result = probe.run_classifier_eval()
     assert result["metrics"]["n_positives"] >= 20, result["metrics"]
     assert result["metrics"]["precision"] is not None, result["metrics"]
