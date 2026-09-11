@@ -677,3 +677,49 @@ def test_evidence_paths_with_symbols_anchors_or_a_dead_absolute_prefix_still_res
         worktree=tmp_path, changed_tests=["tests/test_x.py"], n_clauses=1)
     assert parsed["clauses"][0]["verdict"] == "partial"
     assert "grader wrote 'nowhere/y.py'" in parsed["clauses"][0]["downgraded"][0]
+
+
+def test_only_a_seam_a_test_could_cross_before_landing_refuses(tmp_path):
+    """#870: eight clauses met, every honesty entry advisory, refused on two
+    seams the grader raised fresh on the last attempt — one of which it
+    called a post-landing check itself. A seam only production can cross is
+    recorded, never a refusal; a bare-string seam keeps the old reading."""
+    met = {"clause": 1, "verdict": "met", "evidence_path": "app/x.py", "evidence_line": 1,
+           "test_node_id": "tests/test_x.py::test_it", "how_verified": "ran", "note": "ok"}
+    (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("1\n")
+    def parsed(seams):
+        return RV.parse_review({"premise": "sound", "summary": "s", "clauses": [met],
+                                "test_honesty": [], "seams_unverified": seams,
+                                "amendments_ok": True, "amendments_note": ""},
+                               worktree=tmp_path, changed_tests=["tests/test_x.py"], n_clauses=1)
+    p = parsed([{"seam": "a real pool tick", "testable_before_landing": False},
+                {"seam": "loopback POST to the test server", "testable_before_landing": True}])
+    assert [s["testable_before_landing"] for s in p["seams_unverified"]] == [False, True]
+    kind, findings = RV.decide(p, [])
+    assert kind == "retry" and findings.startswith("seam unverified: loopback POST")
+    assert "post-landing seam (not refusing): a real pool tick" in findings
+    p = parsed([{"seam": "a real pool tick", "testable_before_landing": False}])
+    kind, findings = RV.decide(p, [])
+    assert kind == "pass" and "post-landing seam" in findings
+    legacy = parsed(["_meta over MCP"])
+    assert legacy["seams_unverified"] == [{"seam": "_meta over MCP", "testable_before_landing": True}]
+    assert RV.decide(legacy, [])[0] == "retry"
+    items = RV.REVIEW_SCHEMA["properties"]["seams_unverified"]["items"]
+    assert "testable_before_landing" in items["required"]
+    text = RV.build_prompt(contract={"id": 1, "title": "t", "body": "b", "clauses": ["c"], "path": ""},
+                           diff="", diff_truncated=False, changed_tests=[], test_counts={},
+                           worktree=tmp_path, run_tests=tmp_path / "rt")
+    assert "Only a testable seam refuses the round" in text
+
+
+def test_the_review_event_records_seams_as_text_and_names_the_untestable_ones(monkeypatch, tmp_path):
+    obj = dict(UNMET, clauses=[], seams_unverified=[
+        {"seam": "live pool tick", "testable_before_landing": False},
+        {"seam": "loopback POST", "testable_before_landing": True}])
+    contract = {"id": 7, "title": "t", "body": "b", "clauses": [], "path": "",
+                "amendments": [], "human_clauses": []}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), head="", contract={**contract, "clauses": ["c"]})
+    _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    ev = events[-1]
+    assert ev["seams_unverified"] == ["live pool tick", "loopback POST"]
+    assert ev["seams_untestable"] == ["live pool tick"]

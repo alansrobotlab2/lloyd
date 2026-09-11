@@ -149,10 +149,26 @@ REVIEW_SCHEMA: dict = {
             "additionalProperties": False,
         }, "description": ("Defects in the tests this diff changed. Empty when none. Never a "
                            "positive observation — those go in summary.")},
-        "seams_unverified": {"type": "array", "items": {"type": "string"},
-                             "description": ("Process boundaries the change crosses (a loopback "
-                                             "POST, `_meta` over MCP, a Task subagent, a restart) "
-                                             "for which no test crosses the seam. Empty when none.")},
+        "seams_unverified": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "seam": {"type": "string",
+                         "description": "The process boundary, and where the change crosses it."},
+                "testable_before_landing": {"type": "boolean",
+                                            "description": ("true if a test in this repo could "
+                                                            "cross it before landing (a loopback "
+                                                            "POST to a test server, an in-process "
+                                                            "aggregator, a subprocess). false if "
+                                                            "only production can — a live pool "
+                                                            "tick, real traffic, a deployment "
+                                                            "shape.")},
+            },
+            "required": ["seam", "testable_before_landing"],
+            "additionalProperties": False,
+        }, "description": ("Process boundaries the change crosses (a loopback POST, `_meta` "
+                           "over MCP, a Task subagent, a restart) for which no test crosses the "
+                           "seam. Empty when none. Only a testable seam refuses the round; the "
+                           "rest are recorded for the item.")},
         "amendments_ok": {"type": "boolean",
                           "description": ("true unless an <amendments> block was given and "
                                           "an amended clause weakens what the item asked "
@@ -419,7 +435,12 @@ not test honesty.
 POST to `/api/message/stream`, `_meta` carried over MCP, a `Task` subagent, a \
 contextvar read in another task, a supervisord restart — and for each, name \
 the test that crosses it. Any seam with no such test goes in \
-`seams_unverified`. The code graph is blind across these; a grep is not a test.
+`seams_unverified`, with `testable_before_landing`: true when a test in this \
+repo could cross it now (a test server on loopback, the in-process aggregator, \
+a subprocess), false when only production can — a real pool tick, live \
+traffic, a deployment shape. Only a testable seam refuses the round; an \
+untestable one is recorded for the item as a post-landing check. The code \
+graph is blind across these; a grep is not a test.
 
 Finally judge the PREMISE: is the item describing a real problem, and is this \
 the kind of change that can fix it? `unsound` is for a false premise or a fix \
@@ -775,7 +796,20 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                             "line": int(raw.get("line") or 0) if str(raw.get("line") or "0").isdigit() else 0,
                             "severity": sev,
                             "problem": " ".join(str(raw["problem"]).split())[:300]})
-    seams = [" ".join(str(s).split())[:300] for s in (obj.get("seams_unverified") or []) if str(s).strip()]
+    seams: list[dict] = []
+    for raw_seam in (obj.get("seams_unverified") or []):
+        # Both shapes: the object the schema asks for, and the bare string
+        # every review before 2026-09-11 wrote (read as testable, the old
+        # reading, so calibration cases and the backfill are unchanged).
+        if isinstance(raw_seam, dict):
+            text = " ".join(str(raw_seam.get("seam") or "").split())[:300]
+            testable = raw_seam.get("testable_before_landing")
+            testable = True if not isinstance(testable, bool) else testable
+        else:
+            text = " ".join(str(raw_seam).split())[:300]
+            testable = True
+        if text:
+            seams.append({"seam": text, "testable_before_landing": testable})
     amend_ok = obj.get("amendments_ok")
     return {"premise": premise, "clauses": clauses, "test_honesty": honesty,
             "seams_unverified": seams[:10],
@@ -823,7 +857,11 @@ def decide(parsed: dict, prechecks: list[dict],
             continue
         lines.append(f"test honesty {h['file']}:{h['line']}: {h['problem']}")
     for s in parsed["seams_unverified"]:
-        lines.append(f"seam unverified: {s}")
+        text = s["seam"] if isinstance(s, dict) else str(s)
+        if isinstance(s, dict) and not s.get("testable_before_landing", True):
+            advisory.append(f"post-landing seam (not refusing): {text}")
+            continue
+        lines.append(f"seam unverified: {text}")
     if not lines:
         summary = parsed["summary"]
         if advisory:

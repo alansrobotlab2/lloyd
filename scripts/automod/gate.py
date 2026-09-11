@@ -825,7 +825,11 @@ class Gate:
         kind, findings = RV.decide(parsed, pre, amendments=amendments)
         S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
                         "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
-                        "seams_unverified": parsed["seams_unverified"],
+                        "seams_unverified": [s["seam"] if isinstance(s, dict) else s
+                                             for s in parsed["seams_unverified"]],
+                        "seams_untestable": [s["seam"] for s in parsed["seams_unverified"]
+                                             if isinstance(s, dict)
+                                             and not s.get("testable_before_landing", True)],
                         "downgraded": parsed["downgraded"], "summary": parsed["summary"],
                         "amendments_ok": parsed.get("amendments_ok", True),
                         "amendments_note": parsed.get("amendments_note", ""),
